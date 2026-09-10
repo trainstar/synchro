@@ -290,6 +290,7 @@ func TestRealIssue49ResetLifecycleAndFenceCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run verified replacement reset: %v; %s", err, harness.FailureDiagnostics())
 	}
+	waitForIssue49CanonicalHealth(t, ctx, openIssue49Admin(t, ctx, harness), true)
 	observation, err := harness.Operator().ObserveStreamReset(ctx, reset.ResetID, "cf_items", baselineID)
 	if err != nil {
 		t.Fatalf("observe reset baseline coverage: %v", err)
@@ -367,7 +368,7 @@ func TestRealIssue49RegistryIdentityAndKeyDrift(t *testing.T) {
 	recordID := "00000000-0000-4000-8d04-000000000001"
 	if err := harness.Source().ExecContext(
 		ctx,
-		"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
 		recordID,
 		"diagnostic-user",
 		"issue49-qualified-identity",
@@ -377,7 +378,7 @@ func TestRealIssue49RegistryIdentityAndKeyDrift(t *testing.T) {
 	waitForRealWALRecords(t, ctx, harness, "cf_items", recordID)
 	beforePKUpdate := observeIssue49WALStages(t, ctx, admin, []string{recordID})
 	changedID := "00000000-0000-4000-8d04-000000000002"
-	if err := harness.Source().ExecContext(ctx, "UPDATE public.cf_items SET id = $2 WHERE id = $1", recordID, changedID); err == nil {
+	if err := harness.Source().ExecContext(ctx, "UPDATE cf_items SET id = $2 WHERE id = $1", recordID, changedID); err == nil {
 		t.Fatal("registered primary-key update succeeded")
 	}
 	afterPKUpdate := observeIssue49WALStages(t, ctx, admin, []string{recordID})
@@ -483,6 +484,7 @@ func TestRealIssue49HealthUsesFiniteCanonicalObservations(t *testing.T) {
 	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_reload_conf()"); err != nil {
 		t.Fatalf("reload invalid finite-lag limit: %v", err)
 	}
+	waitForIssue49CanonicalHealth(t, ctx, admin, false)
 	waitForIssue49PublicReady(t, ctx, harness.AdapterURL(), false)
 	invalid := loadIssue49Health(t, ctx, admin)
 	invalidStatus, invalidBody := getIssue49Readiness(t, ctx, harness.AdapterURL())
@@ -619,8 +621,12 @@ func TestRealIssue49DatabaseAuthorityAndInstallation(t *testing.T) {
 			UNION ALL
 			SELECT 1 FROM pg_catalog.pg_type type
 			JOIN pg_catalog.pg_namespace namespace ON namespace.oid = type.typnamespace
+			LEFT JOIN pg_catalog.pg_class composite ON composite.oid = type.typrelid
 			CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(type.typacl, pg_catalog.acldefault('T', type.typowner))) acl
-			WHERE namespace.nspname = 'synchro' AND acl.grantee = 0
+			WHERE namespace.nspname = 'synchro'
+			  AND (type.typrelid = 0 OR composite.relkind = 'c')
+			  AND NOT (type.typelem <> 0 AND type.typlen = -1)
+			  AND acl.grantee = 0
 		)`).Scan(&publicAuthority); err != nil {
 		t.Fatalf("observe PUBLIC extension authority: %v", err)
 	}
@@ -946,10 +952,14 @@ func TestRealIssue49FenceCorrelationAndCapturePending(t *testing.T) {
 
 	t.Run("assertion", func(t *testing.T) {
 		if correlation.Fences != 4 || correlation.Events != 4 || correlation.UniqueFenceIDs != 4 ||
-			correlation.Mismatches != 0 || correlation.KeyMismatches != 0 || correlation.VersionMismatches != 0 ||
+			correlation.Mismatches != 0 ||
 			correlation.Operations != "insert,update,update,delete" ||
 			correlation.DMLOrdinals != "1,1,2,3" {
 			t.Fatalf("actual row operations did not correlate one-to-one: %#v", correlation)
+		}
+		if correlation.CollapsedEffects != 1 || correlation.EffectMismatches != 0 ||
+			correlation.KeyMismatches != 0 || correlation.VersionMismatches != 0 {
+			t.Fatalf("same-row changelog did not retain the greatest causal delete: %#v", correlation)
 		}
 		if !captureDistinct {
 			t.Fatal("capture-dependency fence reused synced-table identity")
@@ -1109,6 +1119,8 @@ type issue49FenceCorrelation struct {
 	Events            int64
 	UniqueFenceIDs    int64
 	Mismatches        int64
+	CollapsedEffects  int64
+	EffectMismatches  int64
 	KeyMismatches     int64
 	VersionMismatches int64
 	Operations        string
@@ -1683,6 +1695,33 @@ func waitForIssue49FenceCorrelation(t *testing.T, ctx context.Context, database 
 				       event.operation AS event_operation
 				FROM selected fence
 				LEFT JOIN synchro.sync_wal_events event ON event.fence_id = fence.fence_id
+			), final_event AS (
+				SELECT event_stream_generation,
+				       event_commit_lsn,
+				       wal_event_ordinal,
+				       event_relation_id,
+				       event_operation,
+				       COALESCE(new_record_id, old_record_id) AS record_id,
+				       row_version
+				FROM correlated
+				WHERE event_fence_id IS NOT NULL
+				ORDER BY event_commit_lsn DESC, wal_event_ordinal DESC
+				LIMIT 1
+			), collapsed_effects AS (
+				SELECT change.*,
+				       final.wal_event_ordinal AS final_event_ordinal,
+				       final.event_relation_id AS final_relation_id,
+				       final.event_operation AS final_operation,
+				       final.record_id AS final_record_id,
+				       final.row_version AS final_row_version
+				FROM synchro.sync_changelog change
+				JOIN correlated source
+				  ON source.event_stream_generation = change.stream_generation
+				 AND source.event_commit_lsn = change.commit_lsn
+				 AND source.wal_event_ordinal = change.event_ordinal
+				JOIN final_event final
+				  ON final.event_stream_generation = source.event_stream_generation
+				 AND final.event_commit_lsn = source.event_commit_lsn
 			)
 			SELECT count(*),
 			       count(event_fence_id),
@@ -1691,22 +1730,16 @@ func waitForIssue49FenceCorrelation(t *testing.T, ctx context.Context, database 
 		          OR event_kind <> registration_kind OR event_relation_id <> relation_id
 		          OR event_schema <> physical_schema OR event_relation <> physical_relation
 		          OR event_oid <> physical_relation_oid OR event_operation <> operation),
-		       count(*) FILTER (WHERE NOT EXISTS (
-		          SELECT 1 FROM synchro.sync_changelog change
-		          WHERE change.stream_generation = event_stream_generation
-		            AND change.commit_lsn = event_commit_lsn
-		            AND change.event_ordinal = correlated.wal_event_ordinal
-		            AND change.relation_id = correlated.relation_id
-		            AND change.record_id = COALESCE(correlated.new_record_id, correlated.old_record_id)
-		       )),
-		       count(*) FILTER (WHERE NOT EXISTS (
-		          SELECT 1 FROM synchro.sync_changelog change
-		          WHERE change.stream_generation = event_stream_generation
-		            AND change.commit_lsn = event_commit_lsn
-		            AND change.event_ordinal = correlated.wal_event_ordinal
-		            AND change.relation_id = correlated.relation_id
-		            AND change.row_version = correlated.row_version
-		       )),
+			       (SELECT count(*) FROM collapsed_effects),
+			       (SELECT count(*) FROM collapsed_effects effect
+			        WHERE effect.event_ordinal IS DISTINCT FROM effect.final_event_ordinal
+			           OR effect.relation_id IS DISTINCT FROM effect.final_relation_id
+			           OR effect.operation <> 3
+			           OR effect.final_operation <> 'delete'),
+			       (SELECT count(*) FROM collapsed_effects effect
+			        WHERE effect.record_id IS DISTINCT FROM effect.final_record_id),
+			       (SELECT count(*) FROM collapsed_effects effect
+			        WHERE effect.row_version IS DISTINCT FROM effect.final_row_version),
 		       string_agg(operation, ',' ORDER BY transaction_xid::text::bigint, dml_ordinal),
 			       string_agg(dml_ordinal::text, ',' ORDER BY transaction_xid::text::bigint, dml_ordinal)
 			FROM correlated`, recordID).Scan(
@@ -1714,6 +1747,8 @@ func waitForIssue49FenceCorrelation(t *testing.T, ctx context.Context, database 
 			&result.Events,
 			&result.UniqueFenceIDs,
 			&result.Mismatches,
+			&result.CollapsedEffects,
+			&result.EffectMismatches,
 			&result.KeyMismatches,
 			&result.VersionMismatches,
 			&result.Operations,
@@ -1723,6 +1758,16 @@ func waitForIssue49FenceCorrelation(t *testing.T, ctx context.Context, database 
 			return result
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if result.Events < want {
+		var poisonClass, poisonDetail string
+		poisonErr := database.QueryRowContext(ctx, `
+			SELECT failure_class, left(failure_detail, 256)
+			FROM synchro.sync_wal_poison
+			WHERE lifecycle = 'active'
+			ORDER BY poisoned_at DESC, id DESC
+			LIMIT 1`).Scan(&poisonClass, &poisonDetail)
+		t.Fatalf("fence correlation did not materialize: observation=%#v err=%v active_poison_class=%q active_poison_detail=%q poison_err=%v", result, err, poisonClass, poisonDetail, poisonErr)
 	}
 	t.Fatalf("fence correlation did not materialize: observation=%#v err=%v", result, err)
 	return issue49FenceCorrelation{}

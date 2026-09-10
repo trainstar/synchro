@@ -634,6 +634,7 @@ func TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss(t *tes
 	activationBarrier = nil
 	waitForIssue49MembershipStage(t, ctx, admin, registryGeneration)
 	activated := observeIssue49ActivatedMembershipContinuation(t, ctx, admin, registryGeneration, priorRegistry, sharedScope, rebuildID)
+	client.Schema = loadRealSchemaTableReference(t, ctx, harness, "cf_items").Schema
 	staleStatus, staleResponse := requestRealRebuildPage(
 		t, ctx, harness, token, client, "user:diagnostic-user", rebuildID, thirdCursor, 1,
 	)
@@ -758,7 +759,7 @@ func waitForIssue49CompleteWALRepresentation(
 			       COALESCE((SELECT sum(event_count) FROM transactions), 0),
 			       COALESCE((SELECT sum(effect_count) FROM transactions), 0),
 			       COALESCE((SELECT progress.acknowledged_end_lsn >= (SELECT max(end_lsn) FROM transactions) FROM synchro.sync_wal_progress progress WHERE progress.singleton), false),
-			       (SELECT count(DISTINCT source_xid) = 1 FROM transactions),
+			       (SELECT count(DISTINCT source_xid::text) = 1 FROM transactions),
 			       NOT EXISTS (
 					SELECT 1 FROM synchro.sync_wal_events event
 					JOIN fences fence USING (fence_id)

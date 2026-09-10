@@ -362,7 +362,7 @@ func issue49RemainingAtomicPush(t *testing.T) {
 	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-atomicity")
 	table := requireRealTable(t, client, "cf_items")
 	ownerField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id")
-	const mutationCount = 10
+	const mutationCount = 17
 	const requestLimit = 1 << 20
 	recordIDs := make([]string, 0, mutationCount)
 	mutations := make([]map[string]any, 0, mutationCount)
@@ -664,6 +664,21 @@ func issue49RemainingTypedDeduplication(t *testing.T) {
 	if err := harness.Operator().ConfigureTypedKeyCollisionTables(ctx); err != nil {
 		t.Fatalf("configure typed deduplication tables: %v", err)
 	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		_, stringErr := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), "cf_string_keys")
+		_, integerErr := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), "cf_int_keys")
+		if stringErr == nil && integerErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), "cf_string_keys"); err != nil {
+		t.Fatalf("typed string-key table was not published: %v", err)
+	}
+	if _, err := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), "cf_int_keys"); err != nil {
+		t.Fatalf("typed integer-key table was not published: %v", err)
+	}
 	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-typed-dedup")
 	rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8e16-000000000001")
 	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8e16-000000000002")
@@ -753,7 +768,7 @@ func issue49RemainingTypedRows(t *testing.T) {
 		t.Fatalf("alternate primary-key representation was applied: %#v", accepted)
 	}
 	rejected := requireOutcomeList(t, response, "rejected")
-	if len(rejected) != 1 || rejected[0]["mutation_id"] != mutationID || rejected[0]["status"] != "rejected_terminal" || rejected[0]["code"] != "validation" {
+	if len(rejected) != 1 || rejected[0]["mutation_id"] != mutationID || rejected[0]["status"] != "rejected_terminal" || rejected[0]["code"] != "validation_failed" {
 		t.Fatalf("alternate primary-key representation was not rejected canonically: %#v", response)
 	}
 	observation, err := harness.Operator().ObserveDiagnosticPush(ctx, client.ID, []string{strings.ToLower(recordID)})
@@ -1006,6 +1021,9 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 	atFloorScopes := issue49CloneObject(t, client.Scopes)
 	atFloorUserCursor := atFloorScopes["user:diagnostic-user"].(map[string]any)["cursor"].(string)
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
+	if err := harness.Operator().ExpireRetentionClient(ctx, "diagnostic-user", client.ID); err != nil {
+		t.Fatalf("expire retention-floor client: %v", err)
+	}
 	compaction, err := harness.Operator().RunDiagnosticRetentionCompaction(ctx)
 	if err != nil {
 		t.Fatalf("compact retention-floor effect: %v", err)
@@ -1069,6 +1087,21 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 	if afterEmptyCompaction := readFloor(); afterEmptyCompaction != retainedFloor {
 		t.Fatalf("empty effect log changed the durable retention floor: before=%#v after=%#v", retainedFloor, afterEmptyCompaction)
 	}
+	reconnectStatus, reconnected := postConnect(t, ctx, harness.AdapterURL(), token, map[string]any{
+		"client_id":         client.ID,
+		"client_generation": client.Generation,
+		"platform":          "conformance",
+		"app_version":       "0.3.0",
+		"protocol_version":  3,
+		"schema":            client.Schema,
+		"scope_set_version": client.ScopeSetVersion,
+		"known_scopes":      client.Scopes,
+	})
+	reconnectedGeneration, generationOK := reconnected["client_generation"].(float64)
+	if reconnectStatus != http.StatusOK || !generationOK || int64(reconnectedGeneration) != client.Generation+1 {
+		t.Fatalf("retention-floor reconnect did not renew the client: status=%d response=%#v", reconnectStatus, reconnected)
+	}
+	client.Generation = int64(reconnectedGeneration)
 	oldScopes["user:diagnostic-user"] = map[string]any{"cursor": oldUserCursor}
 	oldStatus, oldResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, oldScopes, 100))
 	if oldStatus != http.StatusOK || !issue49RemainingContainsString(oldResponse["rebuild"], "user:diagnostic-user") {
@@ -1164,16 +1197,12 @@ func issue49RemainingOutcomeSchema(t *testing.T) {
 }
 
 func issue49RemainingEffectProgress(t *testing.T) {
-	ctx, harness, token := issue49RemainingHarness(t, 5*time.Minute)
-	database, err := sql.Open("pgx", harness.DatabaseURL())
+	ctx, harness, _ := issue49RemainingHarness(t, 5*time.Minute)
+	token, err := harness.NativeBearerToken(ctx, "issue49-owner-after", time.Now())
 	if err != nil {
-		t.Fatalf("open effect-progress database: %v", err)
+		t.Fatalf("sign effect-progress owner token: %v", err)
 	}
-	defer database.Close()
 	const targetScope = "user:issue49-owner-after"
-	if _, err := database.ExecContext(ctx, "SELECT synchro.synchro_grant_user_scope('diagnostic-user', $1)", targetScope); err != nil {
-		t.Fatalf("grant effect-progress scope: %v", err)
-	}
 	documentID := "00000000-0000-4000-8e26-000000000001"
 	memberIDs := []string{
 		"00000000-0000-4000-8e26-000000000002",
@@ -1189,9 +1218,8 @@ func issue49RemainingEffectProgress(t *testing.T) {
 	}
 	waitForMembershipBuckets(t, ctx, harness, memberIDs[0], []string{"user:issue49-member-1", "user:issue49-owner-before"})
 	waitForMembershipBuckets(t, ctx, harness, memberIDs[1], []string{"user:issue49-member-2", "user:issue49-owner-before"})
-	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-effect-progress", "cf:global", targetScope, "user:diagnostic-user")
+	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-effect-progress", "cf:global", targetScope)
 	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8e26-000000000011")
-	rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8e26-000000000012")
 	rebuildRealScope(t, ctx, harness, token, client, targetScope, "00000000-0000-4000-8e26-000000000013")
 	if err := harness.Source().ExecContext(ctx, "UPDATE cf_documents SET owner_id = $2, updated_at = clock_timestamp() WHERE id = $1", documentID, "issue49-owner-after"); err != nil {
 		t.Fatalf("update effect-progress document: %v", err)
@@ -1357,7 +1385,22 @@ func issue49RemainingSchemaCursorContinuity(t *testing.T) {
 	_, oldGlobalCursor := rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8e28-000000000002")
 	oldSchema := issue49CloneObject(t, client.Schema)
 	knownScopes := issue49CloneObject(t, client.Scopes)
-	_, currentTable := transitionRealSchemaQueue(t, ctx, harness)
+	if err := harness.Operator().TransitionSyncedTableField(ctx, "cf_schema_queue", "", "compatible_value", "", ""); err != nil {
+		t.Fatalf("commit compatible schema transition: %v", err)
+	}
+	var currentTable realSchemaTableReference
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), "cf_schema_queue")
+		if err == nil && !sameRealSchemaReference(current.Schema, oldSchema) {
+			currentTable = current
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if currentTable.TableID == "" {
+		t.Fatalf("compatible schema transition did not activate: %s", harness.FailureDiagnostics())
+	}
 	status, response := postConnect(t, ctx, harness.AdapterURL(), token, map[string]any{
 		"client_id":         client.ID,
 		"client_generation": client.Generation,
@@ -1373,15 +1416,20 @@ func issue49RemainingSchemaCursorContinuity(t *testing.T) {
 	}
 	updates, ok := response["scope_cursor_updates"].(map[string]any)
 	newGlobalCursor, globalOK := updates["cf:global"].(string)
-	userCursor, userPresent := updates["user:diagnostic-user"]
-	if !ok || !globalOK || newGlobalCursor == "" || !userPresent || userCursor != nil {
+	newUserCursor, userOK := updates["user:diagnostic-user"].(string)
+	schema, schemaOK := response["schema"].(map[string]any)
+	if !ok || !globalOK || newGlobalCursor == "" || !userOK || newUserCursor == "" || !schemaOK || schema["action"] != "replace" {
 		t.Fatalf("schema-cursor replacements are invalid: %#v", response)
 	}
 	oldGlobal := issue49DecodeOpaqueToken(t, oldGlobalCursor, "ic1")
 	newGlobal := issue49DecodeOpaqueToken(t, newGlobalCursor, "ic1")
+	oldUser := issue49DecodeOpaqueToken(t, oldUserCursor, "ic1")
+	newUser := issue49DecodeOpaqueToken(t, newUserCursor, "ic1")
 	if !reflect.DeepEqual(oldGlobal["position"], newGlobal["position"]) || oldGlobal["schema_hash"] != oldSchema["hash"] ||
-		newGlobal["schema_hash"] != currentTable.Schema["hash"] || newGlobalCursor == oldGlobalCursor || oldUserCursor == "" {
-		t.Fatalf("schema-cursor continuity changed position or reused an old token: old=%#v new=%#v", oldGlobal, newGlobal)
+		newGlobal["schema_hash"] != currentTable.Schema["hash"] || newGlobalCursor == oldGlobalCursor ||
+		!reflect.DeepEqual(oldUser["position"], newUser["position"]) || oldUser["schema_hash"] != oldSchema["hash"] ||
+		newUser["schema_hash"] != currentTable.Schema["hash"] || newUserCursor == oldUserCursor {
+		t.Fatalf("schema-cursor continuity changed position or reused an old token: global=%#v/%#v user=%#v/%#v", oldGlobal, newGlobal, oldUser, newUser)
 	}
 }
 

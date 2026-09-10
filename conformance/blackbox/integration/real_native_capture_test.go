@@ -73,7 +73,7 @@ func TestRealNativeCaptureServerObservationSignals(t *testing.T) {
 		"scope_set_version":           1,
 		"accepted_write_epoch":        0,
 		"last_cursor_acknowledged_at": nil,
-		"assigned_scope_ids":          []any{"scope-a", "scope-b"},
+		"assigned_scope_ids":          []any{"scope-a"},
 		"local_schema": map[string]any{
 			"version": 1,
 			"hash":    "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44",

@@ -364,7 +364,7 @@ func (executor *OperatorExecutor) ObserveClientScopeAssignment(ctx context.Conte
 
 func validPullRebuildObservationTable(tableName string) bool {
 	switch tableName {
-	case "cf_global_items", "cf_items", "cf_schema_queue", "cf_string_keys", "cf_int_keys":
+	case "cf_global_items", "cf_items", "cf_documents", "cf_schema_queue", "cf_string_keys", "cf_int_keys":
 		return true
 	default:
 		return false

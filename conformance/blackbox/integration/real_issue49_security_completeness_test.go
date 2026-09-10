@@ -105,10 +105,17 @@ func TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary(t *testing.T) {
 		if _, err := admin.ExecContext(ctx, grant); err != nil {
 			t.Fatalf("restore canonical %s function: %v", endpoint.name, err)
 		}
-		status, _ = postSync(t, ctx, harness.AdapterURL(), token, endpoint.path, endpoint.request)
+		status, restored := postSync(t, ctx, harness.AdapterURL(), token, endpoint.path, endpoint.request)
 		restoredStatuses[endpoint.name] = status
 		if endpoint.name == "push" && status == http.StatusOK {
 			waitForRealWALRecords(t, ctx, harness, "cf_items", "00000000-0000-4000-8a01-000000000003")
+		}
+		if endpoint.name == "rebuild" && status == http.StatusOK {
+			cursor, ok := restored["final_scope_cursor"].(string)
+			if !ok || cursor == "" {
+				t.Fatalf("restored rebuild did not return a final scope cursor: %#v", restored)
+			}
+			client.Scopes["user:diagnostic-user"] = map[string]any{"cursor": cursor}
 		}
 	}
 
@@ -846,8 +853,11 @@ func TestRealIssue49SecurityInstallationAuthority(t *testing.T) {
 				updatePaths,
 			)
 		}
-		if !bytes.Equal(trackedSQL, packagedSQL) || !bytes.Equal(trackedControl, packagedControl) {
-			t.Fatal("packaged extension metadata differs from its tracked pgrx output")
+		if !bytes.Equal(trackedSQL, packagedSQL) {
+			t.Fatal("packaged extension SQL differs from its tracked pgrx output")
+		}
+		if !bytes.Equal(trackedControl, packagedControl) {
+			t.Fatal("packaged extension control metadata differs from its tracked pgrx output")
 		}
 		for _, clause := range []string{
 			"default_version = '0.3.0'",
@@ -922,7 +932,8 @@ func security49ObservePublicHealth(
 		result.status, result.body = getIssue49Readiness(t, ctx, adapterURL)
 		result.detail = loadIssue49Health(t, ctx, database)
 		checks := issue49HealthChecks(t, result.detail)
-		if checks[wantCheck] != "ok" {
+		if checks[wantCheck] == "failed" && result.detail["ready"] == false &&
+			result.status == http.StatusServiceUnavailable && bytes.Equal(result.body, []byte(`{"ready":false}`)) {
 			return result
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -1137,6 +1148,7 @@ const security49PublicAuthoritySQL = `
 		) acl
 		WHERE namespace.nspname = 'synchro'
 		  AND (type.typrelid = 0 OR composite.relkind = 'c')
+		  AND NOT (type.typelem <> 0 AND type.typlen = -1)
 		  AND acl.grantee = 0
 	) exposed`
 

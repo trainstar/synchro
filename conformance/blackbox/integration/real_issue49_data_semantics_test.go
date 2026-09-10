@@ -719,7 +719,7 @@ func TestRealIssue49PortableSeedScopeContinuationAndTokenBindings(t *testing.T) 
 			ordinal int64
 			limit   int
 		}{
-			{name: "scope", scopeID: "user:diagnostic-user", token: pageToken, ordinal: 0, limit: 1},
+			{name: "scope", scopeID: "cf:not-portable", token: pageToken, ordinal: 0, limit: 1},
 			{name: "token", scopeID: "cf:global", token: issue49CorruptToken(pageToken), ordinal: 0, limit: 1},
 			{name: "ordinal", scopeID: "cf:global", token: pageToken, ordinal: 1, limit: 1},
 			{name: "limit", scopeID: "cf:global", token: pageToken, ordinal: 0, limit: 2},
@@ -944,7 +944,7 @@ func TestRealIssue49FirstPushResponseFailureRollsBackEveryDurableEffect(t *testi
 	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-atomicity-client")
 	table := requireRealTable(t, client, "cf_items")
 	ownerField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id")
-	const mutationCount = 10
+	const mutationCount = 17
 	const requestLimit = 1 << 20
 	recordIDs := make([]string, 0, mutationCount)
 	mutations := make([]map[string]any, 0, mutationCount)
@@ -1058,7 +1058,7 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 	if err := transaction.Commit(); err != nil {
 		t.Fatalf("commit post-boundary transaction: %v", err)
 	}
-	waitForRealWALRecords(t, ctx, harness, "cf_items", postBoundaryInsertID, postBoundaryDeleteID, postBoundaryMembershipID)
+	waitForRealWALEffects(t, ctx, harness, "cf_items", 6, postBoundaryInsertID, postBoundaryDeleteID, postBoundaryMembershipID)
 
 	second, secondBody := requestPage(firstCursor)
 	secondReplay, _ := requestPage(firstCursor)
