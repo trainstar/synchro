@@ -116,6 +116,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
             }
             Triple(change, schema, recordId)
         }
+        validateDistinctPullEffects(validatedChanges)
 
         database.writeSyncLockedTransaction { db ->
             for ((change, schema, recordId) in validatedChanges) {
@@ -228,6 +229,20 @@ internal class PullProcessor(private val database: SynchroDatabase) {
             resolvedRequestJSON?.let { requestJSON ->
                 DurableBackoffStore.clearMatching(db, RetryOperation.PULLING, requestJSON)
             }
+        }
+    }
+
+    private fun validateDistinctPullEffects(
+        changes: List<Triple<ChangeRecord, LocalSchemaTable, String>>,
+    ) {
+        val effects = mutableMapOf<PullEffectTarget, ChangeRecord>()
+        for ((change, schema, recordId) in changes) {
+            val target = PullEffectTarget(change.scope, schema.tableName, recordId)
+            val previous = effects.putIfAbsent(target, change) ?: continue
+            if (previous == change) {
+                throw SynchroError.InvalidResponse("duplicate pull effect")
+            }
+            throw SynchroError.InvalidResponse("conflicting pull effects")
         }
     }
 
@@ -1176,6 +1191,12 @@ internal class PullProcessor(private val database: SynchroDatabase) {
     }
 
 }
+
+private data class PullEffectTarget(
+    val scope: String,
+    val table: String,
+    val recordId: String,
+)
 
 private const val BASE64_URL_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 

@@ -545,6 +545,107 @@ class PullProcessorTests {
     }
 
     @Test
+    fun pullRejectsRepeatedExactEffectWithoutRowsOrCursorProgress() {
+        val (db, processor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        db.writeTransaction { SynchroMeta.upsertScope(it, scopeID, "10", null) }
+        val change = makeChangeRecord(
+            scope = scopeID,
+            schema = localTestTable,
+            op = Operation.UPSERT,
+            pk = buildJsonObject { put("id", "duplicate") },
+            row = orderRow("duplicate", "server"),
+            serverVersion = "server-version",
+        )
+
+        assertThrows(SynchroError.InvalidResponse::class.java) {
+            processor.applyScopeChanges(
+                changes = listOf(change, change),
+                syncedTables = listOf(localTestTable),
+                scopeCursors = mapOf(scopeID to "11"),
+                checksums = null,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+            )
+        }
+
+        assertTrue(db.query("SELECT id FROM orders").isEmpty())
+        assertTrue(db.query("SELECT record_id FROM _synchro_scope_rows").isEmpty())
+        assertEquals("10", db.readTransaction { SynchroMeta.getScope(it, scopeID)?.cursor })
+    }
+
+    @Test
+    fun pullRejectsConflictingEffectsWithoutRowsOrCursorProgress() {
+        val (db, processor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        db.writeTransaction { SynchroMeta.upsertScope(it, scopeID, "10", null) }
+        val first = makeChangeRecord(
+            scope = scopeID,
+            schema = localTestTable,
+            op = Operation.UPSERT,
+            pk = buildJsonObject { put("id", "conflict") },
+            row = orderRow("conflict", "first"),
+            serverVersion = "server-v1",
+        )
+        val second = makeChangeRecord(
+            scope = scopeID,
+            schema = localTestTable,
+            op = Operation.UPSERT,
+            pk = buildJsonObject { put("id", "conflict") },
+            row = orderRow("conflict", "second"),
+            serverVersion = "server-v2",
+        )
+
+        assertThrows(SynchroError.InvalidResponse::class.java) {
+            processor.applyScopeChanges(
+                changes = listOf(first, second),
+                syncedTables = listOf(localTestTable),
+                scopeCursors = mapOf(scopeID to "11"),
+                checksums = null,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+            )
+        }
+
+        assertTrue(db.query("SELECT id FROM orders").isEmpty())
+        assertTrue(db.query("SELECT record_id FROM _synchro_scope_rows").isEmpty())
+        assertEquals("10", db.readTransaction { SynchroMeta.getScope(it, scopeID)?.cursor })
+    }
+
+    @Test
+    fun pullAppliesSameRowInDifferentScopes() {
+        val (db, processor) = makeTestEnv()
+        val firstScope = "orders:first"
+        val secondScope = "orders:second"
+        db.writeTransaction {
+            SynchroMeta.upsertScope(it, firstScope, "10", null)
+            SynchroMeta.upsertScope(it, secondScope, "20", null)
+        }
+        val first = makeChangeRecord(
+            scope = firstScope,
+            schema = localTestTable,
+            op = Operation.UPSERT,
+            pk = buildJsonObject { put("id", "shared") },
+            row = orderRow("shared", "server"),
+            serverVersion = "server-version",
+        )
+        val second = first.copy(scope = secondScope)
+
+        processor.applyScopeChanges(
+            changes = listOf(first, second),
+            syncedTables = listOf(localTestTable),
+            scopeCursors = mapOf(firstScope to "11", secondScope to "21"),
+            checksums = null,
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+        )
+
+        assertEquals(1, db.query("SELECT id FROM orders WHERE id = ?", arrayOf("shared")).size)
+        assertEquals(2, db.query("SELECT record_id FROM _synchro_scope_rows WHERE record_id = ?", arrayOf("shared")).size)
+        db.readTransaction {
+            assertEquals("11", SynchroMeta.getScope(it, firstScope)?.cursor)
+            assertEquals("21", SynchroMeta.getScope(it, secondScope)?.cursor)
+        }
+    }
+
+    @Test
     fun testPullRejectsRowPrimaryKeyDifferentFromResponsePrimaryKey() {
         val (db, processor) = makeTestEnv()
         val row = buildJsonObject {
