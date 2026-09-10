@@ -1122,6 +1122,17 @@ func (c *SchemaCheckCoordinator) validateCallEvidence(call schemaCheckCall, capt
 		if err := json.Unmarshal(capture.Status, &status); err != nil || status.State != "error" || !isJSONNull(status.RetryAt) || !hasJSONValue(status.Failure) {
 			return fmt.Errorf("React Native schema-check step %s capture error status=%s decode_error=%v", call.step.ID, boundedRaw(capture.Status), err)
 		}
+		if wire.Action == "unsupported" {
+			var failure struct {
+				Operation      string `json:"operation"`
+				Code           string `json:"code"`
+				Retryable      bool   `json:"retryable"`
+				RecoveryAction string `json:"recovery_action"`
+			}
+			if err := json.Unmarshal(status.Failure, &failure); err != nil || failure.Operation != "schema" || failure.Code != "unsupported_schema" || failure.Retryable || failure.RecoveryAction != "schema_reset" {
+				return fmt.Errorf("React Native schema-check step %s did not persist unsupported_schema with schema_reset", call.step.ID)
+			}
+		}
 	}
 	trace, err := captureTraceFromRaw(capture.Trace)
 	if err != nil || trace.Overflowed || len(trace.Observations) == 0 || validateTraceSequence(trace.Observations) != nil {

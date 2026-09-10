@@ -5,29 +5,58 @@
   "title": "Deterministic schema class dispatch performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-SCHEMA-004"
+    "SYNC-SCHEMA-004",
+    "SYNC-SCHEMA-005",
+    "SYNC-SCHEMA-006",
+    "SYNC-SCHEMA-007",
+    "SYNC-OUTCOME-002"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#deterministic-schema-class-dispatch"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#causally-bound-class-3-projection-bootstrap"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#crash-safe-client-schema-migration"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#schema-cursor-continuity"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#mutation-outcome-schema-binding"
     }
   ],
   "proof_types": [
     "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-RM-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-005",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -48,11 +77,17 @@
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-005",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
+        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+        "ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -76,11 +111,17 @@
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -190,12 +231,18 @@
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
         "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -220,12 +267,18 @@
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
         "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -252,12 +305,18 @@
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
         "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -309,7 +368,13 @@
       ],
       "fault_plan_id": "FPL-PERF-SCHEMA-CHECK-001",
       "control_id": "CTRL-SCHEMA-004"
-    }
+    },
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-FAULT-001","requirement_ids":["SYNC-SCHEMA-005"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-PROJECTION-001","control_id":"CTRL-SCHEMA-005"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-FAULT-001","requirement_ids":["SYNC-SCHEMA-006"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-MIGRATION-001","control_id":"CTRL-SCHEMA-006"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-CONTROL-001","requirement_ids":["SYNC-SCHEMA-005"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-PROJECTION-001","control_id":"CTRL-SCHEMA-005"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-CONTROL-001","requirement_ids":["SYNC-SCHEMA-006"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-MIGRATION-001","control_id":"CTRL-SCHEMA-006"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-CURSOR-CONTROL-001","requirement_ids":["SYNC-SCHEMA-007"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-CURSOR-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-CURSOR-001","control_id":"CTRL-SCHEMA-007"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-OUTCOME-CONTROL-001","requirement_ids":["SYNC-OUTCOME-002"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-OUTCOME-001","control_id":"CTRL-OUTCOME-002"}
   ],
   "ownership": [
     {
@@ -463,7 +528,32 @@
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-FAULT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-FAULT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-CURSOR-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-OUTCOME-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -1357,7 +1447,11 @@
           "defect": "emit fetch, omit replace or rebuild, destroy queue, continue partial work, or accept a non-current manifest"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-SCHEMA-CHECK-PROJECTION-001","requirement_id":"SYNC-SCHEMA-005","fault_id":"FAULT-SCHEMA-005","control_id":"CTRL-SCHEMA-005","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"],"injection":{"mechanism":"process-fault","target":"Class 3 candidate-slot projection bootstrap","operator":"reroute","parameters":{"scenario":"bootstrap absent source, dependency, membership, version, and integrity projections while writes continue","defect":"use independent live snapshot, temporary or mismatched slot, omit catch-up, expose manifest early, or partially activate after crash"}}},
+    {"id":"FPL-PERF-SCHEMA-CHECK-MIGRATION-001","requirement_id":"SYNC-SCHEMA-006","fault_id":"FAULT-SCHEMA-006","control_id":"CTRL-SCHEMA-006","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"],"injection":{"mechanism":"process-fault","target":"client schema migration journal and DDL phases","operator":"crash","parameters":{"scenario":"kill before and after each target DDL phase, then alter target manifest, plan, physical schema, or phase marker","defect":"repeat committed DDL, fetch schema on restart, use raw unverified SQL, lose queues, or claim mixed state complete"}}},
+    {"id":"FPL-PERF-SCHEMA-CHECK-CURSOR-001","requirement_id":"SYNC-SCHEMA-007","fault_id":"FAULT-SCHEMA-007","control_id":"CTRL-SCHEMA-007","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-CURSOR-001"],"injection":{"mechanism":"source-mutant","target":"connect historical cursor schema-continuity dispatch","operator":"replace","parameters":{"scenario":"connect with a valid historical cursor under a compatible schema lineage, separating an unaffected scope from affected or stale scopes","defect":"relabel the old token, carry the old cursor into an affected scope, or request needless rebuild instead of issuing a same-position current-schema replacement only for the valid unaffected scope"}}},
+    {"id":"FPL-PERF-SCHEMA-CHECK-OUTCOME-001","requirement_id":"SYNC-OUTCOME-002","fault_id":"FAULT-OUTCOME-002","control_id":"CTRL-OUTCOME-002","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"],"injection":{"mechanism":"wire-fault","target":"historical mutation outcome manifest binding","operator":"misbind","parameters":{"scenario":"replay an outcome created under an older manifest after current local schema changes","defect":"verify or project with current manifest, discard unsafe outcome, or lose later local intent"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -1380,7 +1474,11 @@
       "detected_by": [
         "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-SCHEMA-005","requirement_id":"SYNC-SCHEMA-005","fault_id":"FAULT-SCHEMA-005","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"]},
+    {"control_id":"CTRL-SCHEMA-006","requirement_id":"SYNC-SCHEMA-006","fault_id":"FAULT-SCHEMA-006","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"]},
+    {"control_id":"CTRL-SCHEMA-007","requirement_id":"SYNC-SCHEMA-007","fault_id":"FAULT-SCHEMA-007","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-CURSOR-001"]},
+    {"control_id":"CTRL-OUTCOME-002","requirement_id":"SYNC-OUTCOME-002","fault_id":"FAULT-OUTCOME-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"]}
   ],
   "steps": [
     {
@@ -3872,6 +3970,10 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","requirement_ids":["SYNC-SCHEMA-005"],"description":"Class 3 projection bootstrap remains causally bound and atomically activated.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-005"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","requirement_ids":["SYNC-SCHEMA-006"],"description":"Each native client retains a verified schema migration state across interruption.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-006"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","requirement_ids":["SYNC-SCHEMA-007"],"description":"Compatible schema transitions retain only server-issued same-position cursors.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-007"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","requirement_ids":["SYNC-OUTCOME-002"],"description":"Schema transitions preserve immutable historical mutation outcome bindings.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-OUTCOME-002"]}
   ]
 }

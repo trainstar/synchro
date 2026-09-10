@@ -390,6 +390,15 @@ func validateSchemaCheckPublicCall(ctx context.Context, platform *Platform, clie
 			step.ID, call.Completion, wantCompletion, outcomes, dispositions,
 		)
 	}
+	if wire.Action == "unsupported" {
+		snapshot, captureErr := platform.captureSnapshot(ctx, client)
+		if captureErr != nil {
+			return fmt.Errorf("inspect Swift unsupported schema step %s: %w", step.ID, captureErr)
+		}
+		if snapshot.Failure == nil || snapshot.Failure.Operation != "schema" || snapshot.Failure.Code != "unsupported_schema" || snapshot.Failure.Retryable || snapshot.Failure.RecoveryAction != "schema_reset" {
+			return fmt.Errorf("Swift schema-check step %s did not persist the unsupported_schema recovery state", step.ID)
+		}
+	}
 	// An authored step names a protocol operation, not one request. A client
 	// with no usable cursor bootstraps by connecting, rebuilding, and pulling,
 	// and a client that observes a schema or membership transition re-syncs

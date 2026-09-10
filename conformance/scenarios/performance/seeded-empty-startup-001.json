@@ -6,7 +6,11 @@
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
     "SYNC-SEED-001",
-    "SYNC-SEED-002"
+    "SYNC-SEED-002",
+    "SYNC-SEED-003",
+    "SYNC-SEED-004",
+    "SYNC-SEED-005",
+    "SYNC-SEED-006"
   ],
   "normative_references": [
     {
@@ -16,11 +20,28 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#portable-seed-authority"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#seed-resume-correctness"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#snapshot-consistent-portable-seeds"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#bound-portable-seed-continuation"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#verified-portable-seed-artifacts"
     }
   ],
   "proof_types": [
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
@@ -28,12 +49,20 @@
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-SEED-001",
-        "SYNC-SEED-002"
+        "SYNC-SEED-002",
+        "SYNC-SEED-003",
+        "SYNC-SEED-004",
+        "SYNC-SEED-005",
+        "SYNC-SEED-006"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -60,11 +89,19 @@
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-SEED-001",
-        "SYNC-SEED-002"
+        "SYNC-SEED-002",
+        "SYNC-SEED-003",
+        "SYNC-SEED-004",
+        "SYNC-SEED-005",
+        "SYNC-SEED-006"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -183,12 +220,20 @@
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-SEED-001",
-        "SYNC-SEED-002"
+        "SYNC-SEED-002",
+        "SYNC-SEED-003",
+        "SYNC-SEED-004",
+        "SYNC-SEED-005",
+        "SYNC-SEED-006"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -216,12 +261,20 @@
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-SEED-001",
-        "SYNC-SEED-002"
+        "SYNC-SEED-002",
+        "SYNC-SEED-003",
+        "SYNC-SEED-004",
+        "SYNC-SEED-005",
+        "SYNC-SEED-006"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -251,12 +304,20 @@
       "obligation_id": "OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-SEED-001",
-        "SYNC-SEED-002"
+        "SYNC-SEED-002",
+        "SYNC-SEED-003",
+        "SYNC-SEED-004",
+        "SYNC-SEED-005",
+        "SYNC-SEED-006"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-PERFORMANCE-001",
-        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001",
+        "ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -337,7 +398,15 @@
       ],
       "fault_plan_id": "FPL-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
       "control_id": "CTRL-SEED-002"
-    }
+    },
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-FAULT-001","requirement_ids":["SYNC-SEED-003"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","control_id":"CTRL-SEED-003"},
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-FAULT-001","requirement_ids":["SYNC-SEED-004"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","control_id":"CTRL-SEED-004"},
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-FAULT-001","requirement_ids":["SYNC-SEED-005"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","control_id":"CTRL-SEED-005"},
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-FAULT-001","requirement_ids":["SYNC-SEED-006"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","control_id":"CTRL-SEED-006"},
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-CONTROL-001","requirement_ids":["SYNC-SEED-003"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","control_id":"CTRL-SEED-003"},
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-CONTROL-001","requirement_ids":["SYNC-SEED-004"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","control_id":"CTRL-SEED-004"},
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-CONTROL-001","requirement_ids":["SYNC-SEED-005"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","control_id":"CTRL-SEED-005"},
+    {"obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-CONTROL-001","requirement_ids":["SYNC-SEED-006"],"assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","control_id":"CTRL-SEED-006"}
   ],
   "ownership": [
     {
@@ -491,7 +560,35 @@
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
-    }
+    },
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-003","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-004","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-005","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-006","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-003","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-004","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-005","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-006","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-003","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-004","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-005","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-006","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-003","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-004","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-005","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-006","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-003","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-004","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-005","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-006","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-003","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-FAULT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-004","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-FAULT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-005","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-FAULT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-006","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-FAULT-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-003","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-CONTROL-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-004","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-CONTROL-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-005","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-CONTROL-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SEEDED-EMPTY-STARTUP-001","requirement_id":"SYNC-SEED-006","proof_obligation_id":"OBL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-CONTROL-001","assertion_id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -857,7 +954,11 @@
           "defect": "infer portability from row presence instead of server-declared portable scope authority"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","requirement_id":"SYNC-SEED-003","fault_id":"FAULT-SEED-003","control_id":"CTRL-SEED-003","barrier_id":"BAR-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001"],"injection":{"mechanism":"artifact-tamper","target":"portable seed continuation receipt","operator":"omit","parameters":{"scenario":"install a seed row set with matching rows but no verified boundary, generation, cardinality, or digest metadata","defect":"treat the rows as incrementally resumable without continuation receipt verification"}}},
+    {"id":"FPL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","requirement_id":"SYNC-SEED-004","fault_id":"FAULT-SEED-004","control_id":"CTRL-SEED-004","barrier_id":"BAR-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001"],"injection":{"mechanism":"process-fault","target":"portable seed export transaction and connection","operator":"reroute","parameters":{"scenario":"commit a source change while an export reads manifest, scope, rows, digest, boundary, retention, and receipt","defect":"mix physical connections or transactions or read live post-snapshot state outside SERIALIZABLE READ ONLY DEFERRABLE"}}},
+    {"id":"FPL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","requirement_id":"SYNC-SEED-005","fault_id":"FAULT-SEED-005","control_id":"CTRL-SEED-005","barrier_id":"BAR-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001"],"injection":{"mechanism":"wire-fault","target":"seed page token and receipt conversion verifier","operator":"misbind","parameters":{"scenario":"reuse a page token across exports, transactions, scopes, generations, boundaries, ordinals, or limits and pass a receipt directly as cursor","defect":"accept cross-context continuation or bypass authenticated connect and current assignment validation"}}},
+    {"id":"FPL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","requirement_id":"SYNC-SEED-006","fault_id":"FAULT-SEED-006","control_id":"CTRL-SEED-006","barrier_id":"BAR-PERF-SEEDED-EMPTY-STARTUP-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"],"injection":{"mechanism":"artifact-tamper","target":"portable seed publication gate","operator":"omit","parameters":{"scenario":"remove a row, alter a digest, skip a page or receipt, corrupt SQLite, add queue data, or change final hash","defect":"publish the artifact despite a failed or skipped required verification"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -893,7 +994,11 @@
       "detected_by": [
         "ASSERT-PERF-SEEDED-EMPTY-STARTUP-AUTHORITY-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-SEED-003","requirement_id":"SYNC-SEED-003","fault_id":"FAULT-SEED-003","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"detected_by":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001"]},
+    {"control_id":"CTRL-SEED-004","requirement_id":"SYNC-SEED-004","fault_id":"FAULT-SEED-004","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"detected_by":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001"]},
+    {"control_id":"CTRL-SEED-005","requirement_id":"SYNC-SEED-005","fault_id":"FAULT-SEED-005","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"detected_by":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001"]},
+    {"control_id":"CTRL-SEED-006","requirement_id":"SYNC-SEED-006","fault_id":"FAULT-SEED-006","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SEED-TOOL-001","ARTDEF-PORTABLE-SEED-001"],"detected_by":["ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001"]}
   ],
   "steps": [
     {
@@ -1557,6 +1662,10 @@
       "detects_control_ids": [
         "CTRL-SEED-002"
       ]
-    }
+    },
+    {"id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-001","requirement_ids":["SYNC-SEED-003"],"description":"The staged portable seed resumes only with verified continuation metadata.","expectation_ids":["EXPECT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SEED-003"]},
+    {"id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-001","requirement_ids":["SYNC-SEED-004"],"description":"The portable seed retains one snapshot-consistent export boundary.","expectation_ids":["EXPECT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SEED-004"]},
+    {"id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-TOKEN-001","requirement_ids":["SYNC-SEED-005"],"description":"Portable seed continuation stays bound to the authenticated export context.","expectation_ids":["EXPECT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SEED-005"]},
+    {"id":"ASSERT-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-001","requirement_ids":["SYNC-SEED-006"],"description":"Only verified portable seed artifacts install and synchronize.","expectation_ids":["EXPECT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SEED-006"]}
   ]
 }

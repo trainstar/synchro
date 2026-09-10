@@ -54,12 +54,12 @@
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "path": "conformance/scenarios/performance/schema-check-001.json",
-      "sha256": "303408b0e7f49a5a7e32d86a55cf4366fb5a850cb7b3cfa7efbf85a754ac6ca4"
+      "sha256": "c3ae32b01a221733e3a89441beadcfb01bb33cee3f14b999943eacbac1529b26"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "path": "conformance/scenarios/performance/seeded-empty-startup-001.json",
-      "sha256": "ea8d7c081fd0c59bfe818daa21582740a198ee70cc3e5273dc6ccc1c0a0c1669"
+      "sha256": "c173c46d6a8b22dc2b26a7a1135f4a2c1969e7009cfd5ed94f85cabf475f3c8d"
     },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
