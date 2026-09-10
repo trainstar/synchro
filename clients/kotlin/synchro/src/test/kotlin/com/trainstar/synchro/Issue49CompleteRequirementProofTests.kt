@@ -289,11 +289,13 @@ class Issue49CompleteRequirementProofTests {
 
     @Test
     fun sqliteApplyFailureCannotAdvanceTheScopeCursorOrLeavePartialRows() {
-        val scopeID = "orders:atomic-failure"
+        val firstScopeID = "orders:atomic-first"
+        val failingScopeID = "orders:atomic-failure"
         val environment = environment("cursor-atomicity")
         val database = environment.database
         database.writeTransaction { db ->
-            SynchroMeta.upsertScope(db, scopeID, "cursor-before", null)
+            SynchroMeta.upsertScope(db, firstScopeID, "cursor-first-before", null)
+            SynchroMeta.upsertScope(db, failingScopeID, "cursor-failing-before", null)
             db.execSQL(
                 """
                 CREATE TRIGGER reject_issue_49_apply
@@ -305,36 +307,54 @@ class Issue49CompleteRequirementProofTests {
                 """.trimIndent(),
             )
         }
-        val change = canonicalChange(scopeID, "fault-row", "server", "atomic-version")
-        val checksum = scopeChecksum(scopeID, listOf(change))
+        val firstChange = canonicalChange(firstScopeID, "first-row", "first-server", "first-version")
+        val failingChange = canonicalChange(failingScopeID, "fault-row", "failing-server", "failing-version")
+        val firstChecksum = scopeChecksum(firstScopeID, listOf(firstChange))
+        val failingChecksum = scopeChecksum(failingScopeID, listOf(failingChange))
+        val scopeCursors = mapOf(
+            firstScopeID to "cursor-first-after",
+            failingScopeID to "cursor-failing-after",
+        )
+        val checksums = mapOf(
+            firstScopeID to firstChecksum,
+            failingScopeID to failingChecksum,
+        )
         val beforeFault = durableSnapshot(database)
         assertThrows(Exception::class.java) {
             PullProcessor(database).applyScopeChanges(
-                changes = listOf(change),
+                changes = listOf(firstChange, failingChange),
                 syncedTables = listOf(ordersTable),
-                scopeCursors = mapOf(scopeID to "cursor-after"),
-                checksums = mapOf(scopeID to checksum),
+                scopeCursors = scopeCursors,
+                checksums = checksums,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
             )
         }
         assertNoDurableProgress(beforeFault, database)
+        assertNull(database.queryOne("SELECT id FROM orders WHERE id = 'first-row'"))
         assertNull(database.queryOne("SELECT id FROM orders WHERE id = 'fault-row'"))
-        assertEquals("cursor-before", database.readTransaction { SynchroMeta.getScope(it, scopeID)?.cursor })
+        assertEquals("cursor-first-before", database.readTransaction { SynchroMeta.getScope(it, firstScopeID)?.cursor })
+        assertEquals("cursor-failing-before", database.readTransaction { SynchroMeta.getScope(it, failingScopeID)?.cursor })
 
-        database.writeTransaction { it.execSQL("DROP TRIGGER reject_issue_49_apply") }
-        PullProcessor(database).applyScopeChanges(
-            changes = listOf(change),
+        database.close()
+        val restarted = databases.open(context, environment.databaseName)
+        assertNoDurableProgress(beforeFault, restarted)
+        restarted.writeTransaction { it.execSQL("DROP TRIGGER reject_issue_49_apply") }
+        PullProcessor(restarted).applyScopeChanges(
+            changes = listOf(firstChange, failingChange),
             syncedTables = listOf(ordersTable),
-            scopeCursors = mapOf(scopeID to "cursor-after"),
-            checksums = mapOf(scopeID to checksum),
+            scopeCursors = scopeCursors,
+            checksums = checksums,
             schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
         )
-        database.close()
+        restarted.close()
 
         val reopened = databases.open(context, environment.databaseName)
+        assertNotNull(reopened.queryOne("SELECT id FROM orders WHERE id = 'first-row'"))
         assertNotNull(reopened.queryOne("SELECT id FROM orders WHERE id = 'fault-row'"))
-        assertEquals("cursor-after", reopened.readTransaction { SynchroMeta.getScope(it, scopeID)?.cursor })
-        assertEquals("atomic-version", reopened.readTransaction { SynchroMeta.getRowVersion(it, "orders", "fault-row") })
+        assertEquals("cursor-first-after", reopened.readTransaction { SynchroMeta.getScope(it, firstScopeID)?.cursor })
+        assertEquals("cursor-failing-after", reopened.readTransaction { SynchroMeta.getScope(it, failingScopeID)?.cursor })
+        assertEquals("first-version", reopened.readTransaction { SynchroMeta.getRowVersion(it, "orders", "first-row") })
+        assertEquals("failing-version", reopened.readTransaction { SynchroMeta.getRowVersion(it, "orders", "fault-row") })
     }
 
     @Test

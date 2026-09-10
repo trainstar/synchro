@@ -293,11 +293,13 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
     }
 
     func testSQLiteApplyFailureCannotAdvanceCursorOrLeavePartialRows() throws {
-        let scopeID = "orders:atomic-failure"
+        let firstScopeID = "orders:atomic-first"
+        let failingScopeID = "orders:atomic-failure"
         let environment = try makeEnvironment("cursor-atomicity")
         let database = environment.database
         try database.writeTransaction { connection in
-            try SynchroMeta.upsertScope(connection, scopeID: scopeID, cursor: "cursor-before", checksum: nil)
+            try SynchroMeta.upsertScope(connection, scopeID: firstScopeID, cursor: "cursor-first-before", checksum: nil)
+            try SynchroMeta.upsertScope(connection, scopeID: failingScopeID, cursor: "cursor-failing-before", checksum: nil)
             try connection.execute(sql: """
                 CREATE TRIGGER reject_issue_49_apply
                 BEFORE INSERT ON orders
@@ -307,50 +309,93 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                 END
                 """)
         }
-        let change = try canonicalChange(
-            scopeID: scopeID,
-            recordID: "fault-row",
-            address: "server",
-            serverVersion: "atomic-version",
+        let firstChange = try canonicalChange(
+            scopeID: firstScopeID,
+            recordID: "first-row",
+            address: "first-server",
+            serverVersion: "first-version",
             table: environment.table
         )
-        let checksum = try scopeChecksum(scopeID: scopeID, changes: [change], table: environment.table)
+        let failingChange = try canonicalChange(
+            scopeID: failingScopeID,
+            recordID: "fault-row",
+            address: "failing-server",
+            serverVersion: "failing-version",
+            table: environment.table
+        )
+        let firstChecksum = try scopeChecksum(
+            scopeID: firstScopeID,
+            changes: [firstChange],
+            table: environment.table
+        )
+        let failingChecksum = try scopeChecksum(
+            scopeID: failingScopeID,
+            changes: [failingChange],
+            table: environment.table
+        )
+        let scopeCursors = [
+            firstScopeID: "cursor-first-after",
+            failingScopeID: "cursor-failing-after",
+        ]
+        let checksums = [
+            firstScopeID: firstChecksum,
+            failingScopeID: failingChecksum,
+        ]
         let beforeFault = try durableSnapshot(database)
         XCTAssertThrowsError(try PullProcessor(database: database).applyScopeChanges(
-            changes: [change],
+            changes: [firstChange, failingChange],
             syncedTables: [environment.table],
-            scopeCursors: [scopeID: "cursor-after"],
-            checksums: [scopeID: checksum],
+            scopeCursors: scopeCursors,
+            checksums: checksums,
             schemaHash: protocolTestSchemaHash
         ))
         try assertNoDurableProgress(beforeFault, database)
+        XCTAssertNil(try database.queryOne("SELECT id FROM orders WHERE id = 'first-row'", params: nil))
         XCTAssertNil(try database.queryOne("SELECT id FROM orders WHERE id = 'fault-row'", params: nil))
         XCTAssertEqual(
-            try database.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor },
-            "cursor-before"
+            try database.readTransaction { try SynchroMeta.getScope($0, scopeID: firstScopeID)?.cursor },
+            "cursor-first-before"
+        )
+        XCTAssertEqual(
+            try database.readTransaction { try SynchroMeta.getScope($0, scopeID: failingScopeID)?.cursor },
+            "cursor-failing-before"
         )
 
-        try database.writeTransaction { try $0.execute(sql: "DROP TRIGGER reject_issue_49_apply") }
-        try PullProcessor(database: database).applyScopeChanges(
-            changes: [change],
+        try database.close()
+        let restarted = try SynchroDatabase(path: environment.path)
+        try assertNoDurableProgress(beforeFault, restarted)
+        try restarted.writeTransaction { try $0.execute(sql: "DROP TRIGGER reject_issue_49_apply") }
+        try PullProcessor(database: restarted).applyScopeChanges(
+            changes: [firstChange, failingChange],
             syncedTables: [environment.table],
-            scopeCursors: [scopeID: "cursor-after"],
-            checksums: [scopeID: checksum],
+            scopeCursors: scopeCursors,
+            checksums: checksums,
             schemaHash: protocolTestSchemaHash
         )
-        try database.close()
+        try restarted.close()
 
         let reopened = try SynchroDatabase(path: environment.path)
+        XCTAssertNotNil(try reopened.queryOne("SELECT id FROM orders WHERE id = 'first-row'", params: nil))
         XCTAssertNotNil(try reopened.queryOne("SELECT id FROM orders WHERE id = 'fault-row'", params: nil))
         XCTAssertEqual(
-            try reopened.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor },
-            "cursor-after"
+            try reopened.readTransaction { try SynchroMeta.getScope($0, scopeID: firstScopeID)?.cursor },
+            "cursor-first-after"
+        )
+        XCTAssertEqual(
+            try reopened.readTransaction { try SynchroMeta.getScope($0, scopeID: failingScopeID)?.cursor },
+            "cursor-failing-after"
+        )
+        XCTAssertEqual(
+            try reopened.readTransaction {
+                try SynchroMeta.getRowVersion($0, tableName: "orders", recordID: "first-row")
+            },
+            "first-version"
         )
         XCTAssertEqual(
             try reopened.readTransaction {
                 try SynchroMeta.getRowVersion($0, tableName: "orders", recordID: "fault-row")
             },
-            "atomic-version"
+            "failing-version"
         )
         try reopened.close()
     }
