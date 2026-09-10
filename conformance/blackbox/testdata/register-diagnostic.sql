@@ -326,6 +326,12 @@ BEGIN
 END
 $capture_dependency$;
 
+INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
+SELECT 'user:diagnostic-bootstrap', stream_generation
+FROM synchro.sync_runtime_state
+WHERE singleton
+ON CONFLICT (scope_id) DO NOTHING;
+
 CREATE OR REPLACE FUNCTION public.cf_document_members_membership_v2(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
