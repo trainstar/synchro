@@ -237,7 +237,7 @@ func PendingCycleUnprotectedRowTarget(operation Operation, aliases []NativeIdent
 			After     *struct {
 				Identity struct {
 					SyncedRow *struct {
-						CanonicalWireJSON json.RawMessage `json:"canonical_wire_json"`
+						CanonicalWireJSON string `json:"canonical_wire_json"`
 					} `json:"synced_row"`
 				} `json:"identity"`
 				Fields []struct {
@@ -251,7 +251,7 @@ func PendingCycleUnprotectedRowTarget(operation Operation, aliases []NativeIdent
 		return "", "", errors.New("pending-cycle unprotected source row is invalid")
 	}
 	var authoredRecordID string
-	if json.Unmarshal(payload.Events[0].After.Identity.SyncedRow.CanonicalWireJSON, &authoredRecordID) != nil || authoredRecordID == "" {
+	if json.Unmarshal([]byte(payload.Events[0].After.Identity.SyncedRow.CanonicalWireJSON), &authoredRecordID) != nil || authoredRecordID == "" {
 		return "", "", errors.New("pending-cycle unprotected source identity is invalid")
 	}
 	alias, err := PendingCycleUnprotectedIdentityAlias(aliases)

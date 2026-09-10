@@ -50,6 +50,23 @@ func TestPushResponseLossTerminalStateRejectsRetryableContinuation(t *testing.T)
 	}
 }
 
+func TestPushResponseLossRetryStageBindsPushAfterColdStartConnect(t *testing.T) {
+	call := SynchronizationResult{
+		Completion: "blocked",
+		transportObservations: []transportObservation{
+			{OperationClass: "connect", StatusCode: 200},
+			{OperationClass: "push", StatusCode: 429, ErrorCode: pointerString("retry_later"), Retryable: true},
+		},
+	}
+	if err := validatePushResponseLossRetryStage(call, 429, "retry_later"); err != nil {
+		t.Fatalf("validate cold-start retry stage: %v", err)
+	}
+	call.transportObservations = append(call.transportObservations, transportObservation{OperationClass: "pull", StatusCode: 200})
+	if err := validatePushResponseLossRetryStage(call, 429, "retry_later"); err == nil {
+		t.Fatal("retry stage accepted an extra transport operation")
+	}
+}
+
 func TestPushResponseLossDurableComparisonDetectsDrift(t *testing.T) {
 	count := 1
 	status := "backoff"

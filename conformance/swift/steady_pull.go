@@ -163,7 +163,7 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 		if index == 0 {
 			method = "sync-now"
 		}
-		failed, callErr := platform.Synchronize(ctx, client, method, RequestOperations{measuredPull})
+		failed, callErr := swiftSteadyPullRequest(ctx, platform, client, method, measuredPull)
 		if callErr != nil {
 			return SteadyPullResult{}, fmt.Errorf("run Swift steady-pull %s fault: %w", fault, callErr)
 		}
@@ -183,11 +183,15 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 		faultCalls = append(faultCalls, failed)
 	}
 
-	measured, err := platform.Synchronize(ctx, client, "retry-after-error", RequestOperations{measuredPull})
+	measured, err := swiftSteadyPullRequest(ctx, platform, client, "retry-after-error", measuredPull)
 	if err != nil {
 		return SteadyPullResult{}, fmt.Errorf("retry Swift measured pull: %w", err)
 	}
-	if measured.Completion != "idle" || len(measured.Steps) != 1 || len(measured.transportObservations) != 1 || measured.transportObservations[0].StatusCode != 200 {
+	measuredPullObservation, err := steadyPullTransportPull(measured.transportObservations)
+	if err != nil {
+		return SteadyPullResult{}, err
+	}
+	if measured.Completion != "idle" || len(measured.Steps) != 1 || measuredPullObservation.StatusCode != http.StatusOK {
 		return SteadyPullResult{}, errors.New("Swift measured pull did not complete successfully")
 	}
 	if err := validateSwiftWireExpectation(scenario, "STEP-PERF-STEADY-PULL-001", "pull", measured); err != nil {
@@ -257,6 +261,47 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 		ServerFacts:        serverCaptures[0].StateFacts,
 		IdentityResolution: identityEvidence.resolutions,
 	}, nil
+}
+
+// swiftSteadyPullRequest binds the sole authored pull to its pull observation.
+// A retry can cold-start the transport and add a connect observation first.
+func swiftSteadyPullRequest(ctx context.Context, platform *Platform, client Client, method string, operation scenarios.Operation) (SynchronizationResult, error) {
+	before, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return SynchronizationResult{}, fmt.Errorf("capture Swift steady-pull request state: %w", err)
+	}
+	result, err := swiftScenarioCall(ctx, platform, client, method)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	pull, err := steadyPullTransportPull(result.transportObservations)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	steps, err := mapTransportOperations(RequestOperations{operation}, []transportObservation{pull}, before)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	result.Steps = steps
+	return result, nil
+}
+
+func steadyPullTransportPull(observations []transportObservation) (transportObservation, error) {
+	switch len(observations) {
+	case 1:
+		if observations[0].OperationClass == "pull" {
+			return observations[0], nil
+		}
+	case 2:
+		if observations[0].OperationClass == "connect" && observations[1].OperationClass == "pull" {
+			return observations[1], nil
+		}
+	}
+	classes := make([]string, len(observations))
+	for index, observation := range observations {
+		classes[index] = observation.OperationClass
+	}
+	return transportObservation{}, fmt.Errorf("Swift steady-pull request observations %v do not contain one covered pull", classes)
 }
 
 func validateSwiftSteadyPullFaultPlans(scenario scenarios.Scenario) error {
@@ -528,7 +573,8 @@ func mutateSwiftSteadyPullPrimaryKey(change map[string]json.RawMessage) error {
 }
 
 func validateSwiftSteadyPullFaultResult(fault steadyPullFault, result SynchronizationResult, snapshot runnerResult) error {
-	if result.Completion != "error" || len(result.Steps) != 1 || len(result.transportObservations) != 1 || result.transportObservations[0].OperationClass != "pull" || result.transportObservations[0].StatusCode != http.StatusOK {
+	pull, err := steadyPullTransportPull(result.transportObservations)
+	if err != nil || result.Completion != "error" || len(result.Steps) != 1 || pull.StatusCode != http.StatusOK {
 		return fmt.Errorf("Swift steady-pull %s fault did not produce one failed pull call", fault)
 	}
 	failure := snapshot.Failure
@@ -615,13 +661,14 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 	if err != nil {
 		return steadyPullIdentityEvidence{}, err
 	}
-	if len(baseline.transportObservations) < 3 || len(measured.transportObservations) != 1 || baseline.transportObservations[1].RequestFacts == nil || baseline.transportObservations[1].RequestFacts.ClientGeneration == nil || measured.transportObservations[0].RequestFacts == nil || measured.transportObservations[0].RequestFacts.ScopeSetVersion == nil {
+	measuredPull, measuredPullErr := steadyPullTransportPull(measured.transportObservations)
+	if len(baseline.transportObservations) < 3 || measuredPullErr != nil || baseline.transportObservations[1].RequestFacts == nil || baseline.transportObservations[1].RequestFacts.ClientGeneration == nil || measuredPull.RequestFacts == nil || measuredPull.RequestFacts.ScopeSetVersion == nil {
 		return steadyPullIdentityEvidence{}, errors.New("Swift steady-pull transport identity evidence is incomplete")
 	}
 	generated := map[string]any{
 		"client-generation-one": *baseline.transportObservations[1].RequestFacts.ClientGeneration,
 		"baseline-rebuild":      rebuildID,
-		"scope-set-version-one": *measured.transportObservations[0].RequestFacts.ScopeSetVersion,
+		"scope-set-version-one": *measuredPull.RequestFacts.ScopeSetVersion,
 		"row-version-one":       metadata.ServerVersion,
 		"row-a-checksum":        *rowChecksum,
 		"scope-a-checksum":      *scopeChecksum,
@@ -649,7 +696,8 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 }
 
 func validateSteadyPullTransportIdentities(runtime map[string]json.RawMessage, baseline, measured []transportObservation, snapshot runnerResult) error {
-	if len(baseline) < 3 || len(measured) != 1 || len(snapshot.ScopeStates) != 1 || len(snapshot.RebuildReceipts) != 1 {
+	measuredPull, measuredPullErr := steadyPullTransportPull(measured)
+	if len(baseline) < 3 || measuredPullErr != nil || len(snapshot.ScopeStates) != 1 || len(snapshot.RebuildReceipts) != 1 {
 		return errors.New("Swift steady-pull transport identity evidence is incomplete")
 	}
 	var generation, scopeSetVersion int64
@@ -680,7 +728,6 @@ func validateSteadyPullTransportIdentities(runtime map[string]json.RawMessage, b
 		return errors.New("Swift steady-pull completed rebuild evidence is invalid")
 	}
 	baselinePull := baseline[len(baseline)-1]
-	measuredPull := measured[0]
 	for _, observation := range []transportObservation{baselinePull, measuredPull} {
 		facts := observation.RequestFacts
 		if observation.OperationClass != "pull" || facts == nil || facts.ClientGeneration == nil || *facts.ClientGeneration != generation || facts.SchemaVersion != schema.Version || facts.SchemaHash != schema.Hash || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion != scopeSetVersion || facts.ScopeCount == nil || *facts.ScopeCount != 1 {

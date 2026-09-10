@@ -116,10 +116,29 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		return PushResponseLossResult{}, fmt.Errorf("capture Swift response-loss state after restart: %w", err)
 	}
 
-	replay, err := swiftScenarioCall(ctx, platform, client, "start")
+	retryLater, err := swiftScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return PushResponseLossResult{}, fmt.Errorf("replay Swift response-loss push: %w", err)
 	}
+	if err := validatePushResponseLossRetryStage(retryLater, http.StatusTooManyRequests, "retry_later"); err != nil {
+		return PushResponseLossResult{}, err
+	}
+	temporaryUnavailable, err := swiftScenarioCall(ctx, platform, client, "retry-after-error")
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("retry Swift response-loss push after 429: %w", err)
+	}
+	if err := validatePushResponseLossRetryStage(temporaryUnavailable, http.StatusServiceUnavailable, "temporary_unavailable"); err != nil {
+		return PushResponseLossResult{}, err
+	}
+	terminalReplay, err := swiftScenarioCall(ctx, platform, client, "retry-after-error")
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("retry Swift response-loss push after 503: %w", err)
+	}
+	replay := terminalReplay
+	replay.transportObservations = append(
+		append(cloneTransportObservations(retryLater.transportObservations), temporaryUnavailable.transportObservations...),
+		terminalReplay.transportObservations...,
+	)
 	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replayPush, replay); err != nil {
 		return PushResponseLossResult{}, err
 	}
@@ -191,6 +210,31 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		ServerFacts:        serverCaptures[0].StateFacts,
 		IdentityResolution: identities,
 	}, nil
+}
+
+func validatePushResponseLossRetryStage(call SynchronizationResult, status int, code string) error {
+	push, err := pushResponseLossRetryPush(call.transportObservations)
+	if err != nil || call.Completion != "blocked" {
+		return fmt.Errorf("Swift push-response-loss retry stage did not block after one push")
+	}
+	if push.OperationClass != "push" || push.StatusCode != status || !push.Retryable || optionalStringOrNone(push.ErrorCode) != code {
+		return fmt.Errorf("Swift push-response-loss retry stage = %s/%d/%t, want push/%d/true", optionalStringOrNone(push.ErrorCode), push.StatusCode, push.Retryable, status)
+	}
+	return nil
+}
+
+func pushResponseLossRetryPush(observations []transportObservation) (transportObservation, error) {
+	switch len(observations) {
+	case 1:
+		if observations[0].OperationClass == "push" {
+			return observations[0], nil
+		}
+	case 2:
+		if observations[0].OperationClass == "connect" && observations[1].OperationClass == "push" {
+			return observations[1], nil
+		}
+	}
+	return transportObservation{}, errors.New("Swift push-response-loss retry stage did not produce one push")
 }
 
 func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, client Client) error {

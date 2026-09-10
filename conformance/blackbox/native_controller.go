@@ -3077,7 +3077,10 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	var resolveErr error
 	for {
 		resolveErr = c.resolveRuntimeTransaction(deadline, transaction)
-		if resolveErr == nil && (!transaction.ApplicationPush || c.resolveApplicationPushRecords(deadline, transaction) == nil) {
+		if resolveErr == nil && transaction.ApplicationPush {
+			resolveErr = c.resolveApplicationPushRecords(deadline, transaction)
+		}
+		if resolveErr == nil {
 			break
 		}
 		if err := waitNativePoll(deadline); err != nil {
