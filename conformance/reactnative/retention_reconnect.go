@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,10 +127,12 @@ type RetentionReconnectCoordinator struct {
 	nextSeq   uint64
 	process   *actionProcessIdentity
 
-	finalCapture  *finalCapture
-	initialTrace  *traceSnapshot
-	traceEvidence *retentionReconnectTraceEvidence
-	result        RetentionReconnectCoordinatorResult
+	finalCapture   *finalCapture
+	restartCapture *finalCapture
+	resumeCapture  *finalCapture
+	initialTrace   *traceSnapshot
+	traceEvidence  *retentionReconnectTraceEvidence
+	result         RetentionReconnectCoordinatorResult
 }
 
 type retentionReconnectStage uint8
@@ -145,6 +148,10 @@ const (
 	retentionReconnectStageInitialCaptured
 	retentionReconnectStageRenewed
 	retentionReconnectStageFinalCaptured
+	retentionReconnectStageRestarted
+	retentionReconnectStageRestartCaptured
+	retentionReconnectStageResumed
+	retentionReconnectStageResumeCaptured
 	retentionReconnectStageComplete
 )
 
@@ -842,6 +849,32 @@ func (c *RetentionReconnectCoordinator) acceptResultLocked(raw json.RawMessage) 
 			return captureErr
 		}
 		c.finalCapture = &capture
+	case retentionReconnectStageRestarted:
+		process, processErr := c.validateRestarted(envelope.Result)
+		if processErr != nil {
+			return processErr
+		}
+		c.process = &process
+	case retentionReconnectStageRestartCaptured:
+		capture, captureErr := decodeCapture(envelope.Result, retentionReconnectCaptureResultKeys())
+		if captureErr != nil {
+			return captureErr
+		}
+		if captureErr = c.validateRestartCapture(capture); captureErr != nil {
+			return captureErr
+		}
+		c.restartCapture = &capture
+	case retentionReconnectStageResumed:
+		return c.validateSynchronized(envelope.Result, "idle")
+	case retentionReconnectStageResumeCaptured:
+		capture, captureErr := decodeCapture(envelope.Result, retentionReconnectCaptureResultKeys())
+		if captureErr != nil {
+			return captureErr
+		}
+		if captureErr = c.validateFloorResumeCapture(capture); captureErr != nil {
+			return captureErr
+		}
+		c.resumeCapture = &capture
 	default:
 		return fmt.Errorf("React Native retention-reconnect accepted result at stage %d", c.stage)
 	}
@@ -925,6 +958,29 @@ func (c *RetentionReconnectCoordinator) advanceLocked(ctx context.Context, seque
 		}, nil)
 		c.stage = retentionReconnectStageFinalCaptured
 	case retentionReconnectStageFinalCaptured:
+		if err := c.prepareFloorResumeLocked(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("client", "open", map[string]any{
+			"client_key": c.main.clientID, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil,
+		}, nil)
+		c.stage = retentionReconnectStageRestarted
+	case retentionReconnectStageRestarted:
+		response.Command = c.command("observer", "capture", map[string]any{
+			"client_keys": []string{c.main.clientID}, "sources": retentionReconnectCaptureSources(),
+		}, nil)
+		c.stage = retentionReconnectStageRestartCaptured
+	case retentionReconnectStageRestartCaptured:
+		response.Command = c.command("client", "synchronize-step", map[string]any{
+			"client_key": c.main.clientID, "method": "start", "completion": "idle",
+		}, nil)
+		c.stage = retentionReconnectStageResumed
+	case retentionReconnectStageResumed:
+		response.Command = c.command("observer", "capture", map[string]any{
+			"client_keys": []string{c.main.clientID}, "sources": retentionReconnectCaptureSources(),
+		}, nil)
+		c.stage = retentionReconnectStageResumeCaptured
+	case retentionReconnectStageResumeCaptured:
 		if err := c.finishLocked(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -1054,6 +1110,23 @@ func (c *RetentionReconnectCoordinator) validateRenewedCall(raw json.RawMessage)
 	return c.validateProcess(members["process"], "renewed call")
 }
 
+func (c *RetentionReconnectCoordinator) validateRestarted(raw json.RawMessage) (actionProcessIdentity, error) {
+	process, err := validateOpenedResult(raw)
+	if err != nil {
+		return actionProcessIdentity{}, err
+	}
+	if c.process == nil {
+		return actionProcessIdentity{}, errors.New("React Native retention-reconnect prior process identity is unavailable")
+	}
+	if process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return actionProcessIdentity{}, errors.New("React Native retention-reconnect restart changed the database identity")
+	}
+	if process.ProcessID == c.process.ProcessID {
+		return actionProcessIdentity{}, errors.New("React Native retention-reconnect restart retained the process identity")
+	}
+	return process, nil
+}
+
 func (c *RetentionReconnectCoordinator) validateProcess(raw json.RawMessage, stage string) error {
 	actual, err := decodeActionProcessIdentity(raw)
 	if err != nil || c.process == nil || actual != *c.process {
@@ -1104,6 +1177,95 @@ func (c *RetentionReconnectCoordinator) validateFinalCapture(capture finalCaptur
 		return err
 	}
 	c.traceEvidence = &evidence
+	return nil
+}
+
+func retentionReconnectFloorCursor(capture finalCapture) (clientScopeState, error) {
+	state, err := decodeClientState(capture.ClientState)
+	if err != nil {
+		return clientScopeState{}, err
+	}
+	if state.ScopeStateCount != 1 || len(state.ScopeStates) != 1 {
+		return clientScopeState{}, fmt.Errorf("React Native retention-reconnect floor cursor count = %d with %d details, want 1", state.ScopeStateCount, len(state.ScopeStates))
+	}
+	floor := state.ScopeStates[0]
+	if floor.ScopeID == "" || floor.Cursor == nil || *floor.Cursor == "" {
+		return clientScopeState{}, errors.New("React Native retention-reconnect compacted floor cursor is absent")
+	}
+	return floor, nil
+}
+
+func (c *RetentionReconnectCoordinator) validateRestartCapture(capture finalCapture) error {
+	if c.finalCapture == nil {
+		return errors.New("React Native retention-reconnect pre-restart capture is unavailable")
+	}
+	before, err := retentionReconnectFloorCursor(*c.finalCapture)
+	if err != nil {
+		return err
+	}
+	after, err := retentionReconnectFloorCursor(capture)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(before, after) {
+		return errors.New("React Native retention-reconnect restart changed the durable floor cursor")
+	}
+	if err := validateReadyStatus(capture.Status); err != nil {
+		return fmt.Errorf("React Native retention-reconnect restart status is invalid: %w", err)
+	}
+	return nil
+}
+
+func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture finalCapture) error {
+	if c.restartCapture == nil {
+		return errors.New("React Native retention-reconnect restart capture is unavailable")
+	}
+	floor, err := retentionReconnectFloorCursor(*c.restartCapture)
+	if err != nil {
+		return err
+	}
+	resumed, err := retentionReconnectFloorCursor(capture)
+	if err != nil {
+		return err
+	}
+	if floor.ScopeID != resumed.ScopeID {
+		return errors.New("React Native retention-reconnect resumed cursor scope changed")
+	}
+	if err := validateReadyStatus(capture.Status); err != nil {
+		return fmt.Errorf("React Native retention-reconnect floor resume status is invalid: %w", err)
+	}
+	trace, err := retentionReconnectTrace(capture.Trace)
+	if err != nil {
+		return err
+	}
+	floorFingerprint := hashFingerprint(*floor.Cursor)
+	connects := 0
+	pulls := 0
+	for _, observed := range trace.Observations {
+		switch observed.OperationClass {
+		case "connect":
+			if err := validateTraceOperation(observed, "connect"); err != nil {
+				return fmt.Errorf("React Native retention-reconnect floor resume connect is invalid: %w", err)
+			}
+			connects++
+		case "rebuild":
+			return errors.New("React Native retention-reconnect floor-equal cursor entered rebuild")
+		case "pull":
+			if err := validateTraceOperation(observed, "pull"); err != nil {
+				return fmt.Errorf("React Native retention-reconnect floor resume pull is invalid: %w", err)
+			}
+			response, responseErr := decodePullResponseFacts(observed.PullResponseFacts)
+			if responseErr != nil || !reflect.DeepEqual(observed.CursorFingerprints, []string{floorFingerprint}) ||
+				*response.ChangeCount != 0 || *response.HasMore || *response.RebuildScopeCount != 0 ||
+				!reflect.DeepEqual(response.ScopeCursorFingerprints, []string{hashFingerprint(*resumed.Cursor)}) {
+				return errors.New("React Native retention-reconnect floor-equal pull is invalid")
+			}
+			pulls++
+		}
+	}
+	if connects != 1 || pulls != 1 {
+		return fmt.Errorf("React Native retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
+	}
 	return nil
 }
 
@@ -1386,7 +1548,7 @@ func (c *RetentionReconnectCoordinator) captureServer(ctx context.Context) (scen
 	return captures[0].StateFacts, nil
 }
 
-func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error {
+func (c *RetentionReconnectCoordinator) prepareFloorResumeLocked(ctx context.Context) error {
 	if c.finalCapture == nil || c.traceEvidence == nil {
 		return errors.New("React Native retention-reconnect final evidence is unavailable")
 	}
@@ -1407,6 +1569,24 @@ func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error 
 	}
 	if err := validateRetentionReconnectCompaction(server, pin); err != nil {
 		return fmt.Errorf("validate React Native retention-reconnect compaction: %w", err)
+	}
+	return nil
+}
+
+func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error {
+	if c.resumeCapture == nil || c.traceEvidence == nil {
+		return errors.New("React Native retention-reconnect floor-resume evidence is unavailable")
+	}
+	server, err := c.captureServer(ctx)
+	if err != nil {
+		return err
+	}
+	pin, err := retentionReconnectStepOperation(c.steps, retentionReconnectStepOrder[4], "rebuild/request-page")
+	if err != nil {
+		return err
+	}
+	if err := validateRetentionReconnectCompaction(server, pin); err != nil {
+		return fmt.Errorf("validate React Native retention-reconnect compacted floor: %w", err)
 	}
 	identities, err := c.resolveIdentities(server)
 	if err != nil {

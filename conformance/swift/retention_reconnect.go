@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -17,6 +18,7 @@ const retentionReconnectScenarioID = "SCN-RETENTION-RECONNECT-001"
 type RetentionReconnectResult struct {
 	InitialCall        RetentionReconnectCall
 	RenewalCall        RetentionReconnectCall
+	FloorResumeCall    RetentionReconnectCall
 	ClientFacts        []CaptureFacts
 	ServerFacts        scenarios.StateFacts
 	IdentityResolution []blackbox.NativeIdentityResolution
@@ -207,6 +209,10 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if observed, applyErr := controller.ApplyStep(ctx, compact); applyErr != nil || observed.Disposition != "success" {
 		return RetentionReconnectResult{}, fmt.Errorf("compact Swift retention-reconnect scope: %w", resultError(applyErr, observed.Disposition))
 	}
+	floorResumeCall, err := resumeRetentionReconnectAtFloor(ctx, platform, client)
+	if err != nil {
+		return RetentionReconnectResult{}, err
+	}
 
 	clientFacts, err := platform.Capture(ctx, []Client{client}, []string{"pending-mutations", "rejected-mutations", "rebuild-state"})
 	if err != nil {
@@ -227,10 +233,111 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	return RetentionReconnectResult{
 		InitialCall:        initialCall,
 		RenewalCall:        renewalCall,
+		FloorResumeCall:    floorResumeCall,
 		ClientFacts:        clientFacts,
 		ServerFacts:        serverCaptures[0].StateFacts,
 		IdentityResolution: identities,
 	}, nil
+}
+
+// resumeRetentionReconnectAtFloor proves that a compacted floor remains usable
+// after the native process restarts. The post-restart pull must reuse the
+// durable cursor and must not enter rebuild.
+func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, client Client) (RetentionReconnectCall, error) {
+	before, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect floor cursor: %w", err)
+	}
+	if _, err := retentionReconnectFloorCursor(before); err != nil {
+		return RetentionReconnectCall{}, err
+	}
+	restartPayload, err := json.Marshal(map[string]string{"user_id": client.UserID, "client_id": client.ClientID})
+	if err != nil {
+		return RetentionReconnectCall{}, errors.New("encode Swift retention-reconnect restart payload failed")
+	}
+	restart := scenarios.Operation{ContractOperation: "process", Name: "restart-client", Payload: restartPayload}
+	if observed, processErr := platform.ProcessStep(ctx, client, restart); processErr != nil || observed.Disposition != "success" {
+		return RetentionReconnectCall{}, fmt.Errorf("restart Swift retention-reconnect client: %w", resultError(processErr, observed.Disposition))
+	}
+	restarted, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect restarted cursor: %w", err)
+	}
+	resumed, err := swiftScenarioCall(ctx, platform, client, "start")
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("resume Swift retention-reconnect client at compacted floor: %w", err)
+	}
+	after, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect resumed cursor: %w", err)
+	}
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, resumed); err != nil {
+		return RetentionReconnectCall{}, err
+	}
+	return RetentionReconnectCall{Completion: resumed.Completion, Transport: resumed.transportObservations}, nil
+}
+
+func retentionReconnectFloorCursor(snapshot runnerResult) (scopeStateRecord, error) {
+	if len(snapshot.ScopeStates) != 1 {
+		return scopeStateRecord{}, fmt.Errorf("Swift retention-reconnect floor cursor count = %d, want 1", len(snapshot.ScopeStates))
+	}
+	state := snapshot.ScopeStates[0]
+	if state.ScopeID == "" || state.Cursor == nil || *state.Cursor == "" {
+		return scopeStateRecord{}, errors.New("Swift retention-reconnect compacted floor cursor is absent")
+	}
+	return state, nil
+}
+
+func validateRetentionReconnectFloorResume(before, restarted, after runnerResult, call SynchronizationResult) error {
+	floor, err := retentionReconnectFloorCursor(before)
+	if err != nil {
+		return err
+	}
+	restartedFloor, err := retentionReconnectFloorCursor(restarted)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(floor, restartedFloor) {
+		return errors.New("Swift retention-reconnect restart changed the durable floor cursor")
+	}
+	resumedFloor, err := retentionReconnectFloorCursor(after)
+	if err != nil {
+		return err
+	}
+	if resumedFloor.ScopeID != floor.ScopeID {
+		return errors.New("Swift retention-reconnect resumed cursor scope changed")
+	}
+	if call.Completion != "idle" {
+		return fmt.Errorf("Swift retention-reconnect floor resume completion = %q, want idle", call.Completion)
+	}
+
+	floorFingerprint := cursorFingerprint(*floor.Cursor)
+	connects := 0
+	pulls := 0
+	for _, observed := range call.transportObservations {
+		switch observed.OperationClass {
+		case "connect":
+			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable {
+				return errors.New("Swift retention-reconnect floor resume connect is invalid")
+			}
+			connects++
+		case "rebuild":
+			return errors.New("Swift retention-reconnect floor-equal cursor entered rebuild")
+		case "pull":
+			response := observed.PullResponseFacts
+			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable || observed.CursorFingerprintsComplete == nil ||
+				!*observed.CursorFingerprintsComplete || !equalStrings(observed.CursorFingerprints, []string{floorFingerprint}) || response == nil ||
+				response.ChangeCount != 0 || response.HasMore || response.RebuildScopeCount != 0 || !response.ScopeCursorFingerprintsComplete ||
+				!equalStrings(response.ScopeCursorFingerprints, []string{cursorFingerprint(*resumedFloor.Cursor)}) {
+				return errors.New("Swift retention-reconnect floor-equal pull is invalid")
+			}
+			pulls++
+		}
+	}
+	if connects != 1 || pulls != 1 {
+		return fmt.Errorf("Swift retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
+	}
+	return nil
 }
 
 func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client, sealedPush scenarios.Operation) (RetentionReconnectCall, error) {

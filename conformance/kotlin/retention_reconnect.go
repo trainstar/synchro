@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -17,6 +18,7 @@ const retentionReconnectScenarioID = "SCN-RETENTION-RECONNECT-001"
 type RetentionReconnectResult struct {
 	InitialCall        RetentionReconnectCall
 	RenewalCall        RetentionReconnectCall
+	FloorResumeCall    RetentionReconnectCall
 	ClientFacts        []CaptureFacts
 	ServerFacts        scenarios.StateFacts
 	IdentityResolution []blackbox.NativeIdentityResolution
@@ -192,6 +194,10 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if observed, applyErr := controller.ApplyStep(ctx, compact); applyErr != nil || observed.Disposition != "success" {
 		return RetentionReconnectResult{}, fmt.Errorf("compact Kotlin Android retention-reconnect scope: %w", kotlinResultError(applyErr, observed.Disposition))
 	}
+	floorResumeCall, err := resumeRetentionReconnectAtFloor(ctx, platform, client)
+	if err != nil {
+		return RetentionReconnectResult{}, err
+	}
 
 	clientFacts, err := platform.Capture(ctx, []Client{client}, []string{"pending-mutations", "rejected-mutations", "rebuild-state"})
 	if err != nil {
@@ -212,10 +218,115 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	return RetentionReconnectResult{
 		InitialCall:        initialCall,
 		RenewalCall:        renewalCall,
+		FloorResumeCall:    floorResumeCall,
 		ClientFacts:        clientFacts,
 		ServerFacts:        serverCaptures[0].StateFacts,
 		IdentityResolution: identities,
 	}, nil
+}
+
+// resumeRetentionReconnectAtFloor proves that a compacted floor remains usable
+// after Android restarts. The resumed pull must reuse its durable cursor and
+// must not start a rebuild.
+func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, client Client) (RetentionReconnectCall, error) {
+	before, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("capture Kotlin Android retention-reconnect floor cursor: %w", err)
+	}
+	if _, err := retentionReconnectFloorCursor(before); err != nil {
+		return RetentionReconnectCall{}, err
+	}
+	restartPayload, err := json.Marshal(map[string]string{"user_id": client.UserID, "client_id": client.ClientID})
+	if err != nil {
+		return RetentionReconnectCall{}, errors.New("encode Kotlin Android retention-reconnect restart payload failed")
+	}
+	restart := scenarios.Operation{ContractOperation: "process", Name: "restart-client", Payload: restartPayload}
+	if observed, processErr := platform.ProcessStep(ctx, client, restart); processErr != nil || observed.Disposition != "success" {
+		return RetentionReconnectCall{}, fmt.Errorf("restart Kotlin Android retention-reconnect client: %w", kotlinResultError(processErr, observed.Disposition))
+	}
+	restarted, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("capture Kotlin Android retention-reconnect restarted cursor: %w", err)
+	}
+	resumed, err := kotlinScenarioCall(ctx, platform, client, "start")
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("resume Kotlin Android retention-reconnect client at compacted floor: %w", err)
+	}
+	after, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return RetentionReconnectCall{}, fmt.Errorf("capture Kotlin Android retention-reconnect resumed cursor: %w", err)
+	}
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, resumed); err != nil {
+		return RetentionReconnectCall{}, err
+	}
+	return RetentionReconnectCall{Completion: resumed.Completion, Transport: resumed.transportObservations}, nil
+}
+
+func retentionReconnectFloorCursor(snapshot Result) (scopeStateRecord, error) {
+	states, err := androidCursorScopeStates(snapshot.ScopeStates)
+	if err != nil {
+		return scopeStateRecord{}, err
+	}
+	if len(states) != 1 {
+		return scopeStateRecord{}, fmt.Errorf("Kotlin Android retention-reconnect floor cursor count = %d, want 1", len(states))
+	}
+	state := states[0]
+	if state.Cursor == nil || *state.Cursor == "" {
+		return scopeStateRecord{}, errors.New("Kotlin Android retention-reconnect compacted floor cursor is absent")
+	}
+	return state, nil
+}
+
+func validateRetentionReconnectFloorResume(before, restarted, after Result, call SynchronizationResult) error {
+	floor, err := retentionReconnectFloorCursor(before)
+	if err != nil {
+		return err
+	}
+	restartedFloor, err := retentionReconnectFloorCursor(restarted)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(floor, restartedFloor) {
+		return errors.New("Kotlin Android retention-reconnect restart changed the durable floor cursor")
+	}
+	resumedFloor, err := retentionReconnectFloorCursor(after)
+	if err != nil {
+		return err
+	}
+	if resumedFloor.ScopeID != floor.ScopeID {
+		return errors.New("Kotlin Android retention-reconnect resumed cursor scope changed")
+	}
+	if call.Completion != "idle" {
+		return fmt.Errorf("Kotlin Android retention-reconnect floor resume completion = %q, want idle", call.Completion)
+	}
+
+	floorFingerprint := cursorFingerprint(*floor.Cursor)
+	connects := 0
+	pulls := 0
+	for _, observed := range call.transportObservations {
+		switch observed.OperationClass {
+		case "connect":
+			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable == nil || *observed.Retryable {
+				return errors.New("Kotlin Android retention-reconnect floor resume connect is invalid")
+			}
+			connects++
+		case "rebuild":
+			return errors.New("Kotlin Android retention-reconnect floor-equal cursor entered rebuild")
+		case "pull":
+			response := observed.PullResponseFacts
+			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable == nil || *observed.Retryable || observed.CursorFingerprintsComplete == nil ||
+				!*observed.CursorFingerprintsComplete || !reflect.DeepEqual(observed.CursorFingerprints, []string{floorFingerprint}) || response == nil ||
+				response.ChangeCount != 0 || response.HasMore || response.RebuildScopeCount != 0 || !response.ScopeCursorFingerprintsComplete ||
+				!reflect.DeepEqual(response.ScopeCursorFingerprints, []string{cursorFingerprint(*resumedFloor.Cursor)}) {
+				return errors.New("Kotlin Android retention-reconnect floor-equal pull is invalid")
+			}
+			pulls++
+		}
+	}
+	if connects != 1 || pulls != 1 {
+		return fmt.Errorf("Kotlin Android retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
+	}
+	return nil
 }
 
 func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client) (RetentionReconnectCall, error) {

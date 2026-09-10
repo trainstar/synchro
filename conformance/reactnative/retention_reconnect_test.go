@@ -96,8 +96,8 @@ func TestNewRetentionReconnectCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	if coordinator.upstream != upstream.URL {
 		t.Fatalf("upstream URL = %q, want %q", coordinator.upstream, upstream.URL)
 	}
-	if coordinator.ExchangeCount() != 10 {
-		t.Fatalf("exchange count = %d, want 10", coordinator.ExchangeCount())
+	if coordinator.ExchangeCount() != 14 {
+		t.Fatalf("exchange count = %d, want 14", coordinator.ExchangeCount())
 	}
 	command := coordinator.command("client", "open", map[string]any{"client_key": coordinator.main.clientID}, nil)
 	if command.Action.Steps == nil || len(command.Action.Steps) != 0 {
@@ -322,6 +322,56 @@ func TestValidateRetentionReconnectCompactionRequiresActivePin(t *testing.T) {
 	server.Rebuilds[0].HasContinuation = false
 	if err := validateRetentionReconnectCompaction(server, pin); err == nil {
 		t.Fatal("compaction accepted a released rebuild pin")
+	}
+}
+
+func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
+	floorCursor := "floor-cursor"
+	resumedCursor := "resumed-cursor"
+	before := retentionReconnectFloorCapture(t, floorCursor, nil)
+	coordinator := &RetentionReconnectCoordinator{finalCapture: &before, restartCapture: &before}
+	if err := coordinator.validateRestartCapture(retentionReconnectFloorCapture(t, floorCursor, nil)); err != nil {
+		t.Fatalf("validate durable restart floor cursor: %v", err)
+	}
+	complete := true
+	trace := traceSnapshot{Observations: []transportObservation{
+		{Sequence: 1, OperationClass: "connect", StatusCode: http.StatusOK, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":2}`)},
+		{
+			Sequence: 2, OperationClass: "pull", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: []string{hashFingerprint(floorCursor)}, CursorFingerprintsComplete: &complete,
+			RequestFacts: json.RawMessage(`{"scope_count":1}`), PullResponseFacts: json.RawMessage(`{"change_count":0,"has_more":false,"rebuild_scope_count":0,"checksum_count":1,"scope_cursor_fingerprints":["` + hashFingerprint(resumedCursor) + `"],"scope_cursor_fingerprints_complete":true}`),
+		},
+	}, SequenceCheckpoint: 2}
+	if err := coordinator.validateFloorResumeCapture(retentionReconnectFloorCapture(t, resumedCursor, &trace)); err != nil {
+		t.Fatalf("validate floor-equal retention resume: %v", err)
+	}
+	changed := retentionReconnectFloorCapture(t, "changed-cursor", nil)
+	if err := coordinator.validateRestartCapture(changed); err == nil {
+		t.Fatal("durable restart accepted a changed floor cursor")
+	}
+}
+
+func retentionReconnectFloorCapture(t *testing.T, cursor string, trace *traceSnapshot) finalCapture {
+	t.Helper()
+	state, err := json.Marshal(inspectedClientState{
+		Schema:                          &clientSchema{Version: 1, Hash: strings.Repeat("a", 64)},
+		ScopeStates:                     []clientScopeState{{ScopeID: "runtime-scope", Cursor: &cursor, Generation: 1}},
+		ScopeStateCount:                 1,
+		ProvenanceMaintenanceWorkCursor: "cursor",
+	})
+	if err != nil {
+		t.Fatalf("encode retention-reconnect floor capture: %v", err)
+	}
+	traceRaw := json.RawMessage(`{"observations":[],"overflowed":false,"sequenceCheckpoint":0}`)
+	if trace != nil {
+		traceRaw, err = json.Marshal(trace)
+		if err != nil {
+			t.Fatalf("encode retention-reconnect floor trace: %v", err)
+		}
+	}
+	return finalCapture{
+		ClientState: state,
+		Status:      json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`),
+		Trace:       traceRaw,
 	}
 }
 

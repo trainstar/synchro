@@ -36,7 +36,7 @@ function coordinatorConfiguration(): { endpoint: string; token: string; stageCou
   const configuredURL = process.env.SYNCHRO_RN_COORDINATOR_URL;
   const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
   const stageCount = Number(process.env.SYNCHRO_RN_COORDINATOR_STAGE_COUNT);
-  if (!configuredURL || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || stageCount !== 10) {
+  if (!configuredURL || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || stageCount !== 14) {
     throw new Error('React Native retention-reconnect coordinator configuration is invalid');
   }
 
@@ -132,6 +132,11 @@ async function exchange(endpoint: string, token: string, sequence: number, rawRe
 }
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
+  if (requiresProcessRelaunch(command)) {
+    await device.terminateApp();
+    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    await expect(element(by.id('conformance-harness'))).toBeVisible();
+  }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
   const input = await element(by.id('conformance-command-input')).getAttributes();
@@ -156,6 +161,15 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('React Native retention-reconnect command did not finish');
+}
+
+function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
+  const action = command.action;
+  if (!isJSONObject(action)) return false;
+  const nested = action.action;
+  if (!isJSONObject(nested) || nested.actor !== 'client' || nested.command !== 'open') return false;
+  const parameters = nested.parameters;
+  return isJSONObject(parameters) && parameters.database_mode === 'reuse';
 }
 
 it('executes the retention-reconnect coordinator sequence', async () => {

@@ -147,6 +147,30 @@ func TestRetentionReconnectQueueRejectsChangedSealedMutationIdentity(t *testing.
 	}
 }
 
+func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
+	floorCursor := "floor-cursor"
+	resumedCursor := "resumed-cursor"
+	complete := true
+	retryable := false
+	snapshot := func(cursor string) Result {
+		return Result{ScopeStates: json.RawMessage(`[{"scope_id":"runtime-scope","cursor":"` + cursor + `","checksum":null,"generation":1,"local_checksum":""}]`)}
+	}
+	call := SynchronizationResult{Completion: "idle", transportObservations: []TransportObservation{
+		{OperationClass: "connect", StatusCode: 200, Retryable: &retryable},
+		{
+			OperationClass: "pull", StatusCode: 200, Retryable: &retryable, CursorFingerprints: []string{cursorFingerprint(floorCursor)}, CursorFingerprintsComplete: &complete,
+			PullResponseFacts: &TransportPullResponseFacts{ChangeCount: 0, HasMore: false, RebuildScopeCount: 0, ChecksumCount: 1, ScopeCursorFingerprints: []string{cursorFingerprint(resumedCursor)}, ScopeCursorFingerprintsComplete: true},
+		},
+	}}
+	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor), snapshot(floorCursor), snapshot(resumedCursor), call); err != nil {
+		t.Fatalf("validate floor-equal retention resume: %v", err)
+	}
+	call.transportObservations[1].PullResponseFacts.RebuildScopeCount = 1
+	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor), snapshot(floorCursor), snapshot(resumedCursor), call); err == nil {
+		t.Fatal("floor-equal retention resume accepted a rebuild")
+	}
+}
+
 func findRetentionReconnectStep(t *testing.T, scenario scenarios.Scenario, name string) scenarios.Step {
 	t.Helper()
 	for _, step := range scenario.Steps {

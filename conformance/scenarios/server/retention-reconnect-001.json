@@ -1188,7 +1188,7 @@
         "CTRL-RETENTION-003"
       ]
     },
-    {"id":"ASSERT-RETENTION-RECONNECT-FLOOR-SEMANTIC-001","requirement_ids":["SYNC-RETENTION-001"],"description":"Compaction keeps each inclusive scope floor durable after it removes the corresponding effect prefix.","expectation_ids":["EXPECT-RETENTION-RECONNECT-COMPACTION-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-RETENTION-001"]}
+    {"id":"ASSERT-RETENTION-RECONNECT-FLOOR-SEMANTIC-001","requirement_ids":["SYNC-RETENTION-001"],"description":"After compaction removes every scope effect, the durable floor retains complete scope lineage, rejects below-floor cursors, and accepts otherwise valid floor-equal cursors.","expectation_ids":["EXPECT-RETENTION-RECONNECT-COMPACTION-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-RETENTION-001"]}
   ],
   "native_identity_aliases": [
     {
