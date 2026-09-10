@@ -1,7 +1,7 @@
 diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
 --- a/extensions/synchro-pg/src/pull.rs
 +++ b/extensions/synchro-pg/src/pull.rs
-@@ -500,7 +500,7 @@ fn acknowledge_scope_positions(
+@@ -500,6 +500,6 @@ fn acknowledge_scope_positions(
          } else {
              StreamPosition::GenerationStart
          };
