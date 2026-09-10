@@ -369,6 +369,9 @@ SELECT synchro.synchro_register_table(
     p_affected_scopes => ARRAY['user:diagnostic-bootstrap']::text[]
 );
 
+DELETE FROM synchro.sync_scope_state
+WHERE scope_id = 'user:diagnostic-bootstrap';
+
 CREATE OR REPLACE FUNCTION public.cf_document_notes_membership_v2(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro

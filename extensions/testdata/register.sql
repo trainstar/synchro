@@ -426,3 +426,6 @@ BEGIN
     END LOOP;
 END
 $dependencies$;
+
+DELETE FROM synchro.sync_scope_state
+WHERE scope_id = 'bootstrap';
