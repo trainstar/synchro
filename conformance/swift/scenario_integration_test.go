@@ -187,9 +187,12 @@ func runSwiftForgedCursor(t *testing.T) {
 func runSwiftPendingCycle(t *testing.T) {
 	t.Helper()
 	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "pending-cycle-001.json"), 0)
-	_, err := RunPendingCycleScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "pending-cycle-client-a"})
+	result, err := RunPendingCycleScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "pending-cycle-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift pending-cycle scenario: %v", err)
+	}
+	if err := scenarios.ValidatePendingCycleNativeEvidence(result.Evidence); err != nil {
+		t.Fatalf("validate direct Swift pending-cycle evidence: %v", err)
 	}
 }
 

@@ -1457,6 +1457,7 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 				PK             map[string]json.RawMessage `json:"pk"`
 				AuthoredSchema nativeSchemaReference      `json:"authored_schema"`
 				Op             string                     `json:"op"`
+				BaseVersion    *string                    `json:"base_version"`
 				ClientVersion  string                     `json:"client_version"`
 				Columns        map[string]json.RawMessage `json:"columns"`
 			} `json:"mutations"`
@@ -1499,11 +1500,13 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 		}
 		transaction.AuthoredMutationIDs = append(transaction.AuthoredMutationIDs, mutation.MutationID)
 		table, found := c.installation.tables[mutation.Table]
-		// The binding below is operation agnostic. It records the authored
-		// operation and builds the after image from the primary key and the
-		// authored columns, which serves an insert and an update alike.
-		if !found || (mutation.Op != "insert" && mutation.Op != "update") || len(mutation.PK) != 1 {
+		if !found || (mutation.Op != "insert" && mutation.Op != "update" && mutation.Op != "delete") || len(mutation.PK) != 1 {
 			return errors.New("native application push mutation is unsupported")
+		}
+		if (mutation.Op == "insert" && mutation.BaseVersion != nil) ||
+			(mutation.Op != "insert" && (mutation.BaseVersion == nil || *mutation.BaseVersion == "")) ||
+			(mutation.Op == "delete" && mutation.Columns != nil) {
+			return errors.New("native application push mutation shape is invalid")
 		}
 		canonical, found := mutation.PK[table.AuthoredPrimary]
 		if !found || !json.Valid(canonical) {
@@ -1537,6 +1540,50 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 			}
 			fields[authoredField] = append(json.RawMessage(nil), value...)
 		}
+		var before, after *nativeAuthoredImage
+		scopes := nativeScopesForRecord(c.installation, table.AuthoredRelation, table.AuthoredID, string(canonical))
+		if mutation.Op == "insert" {
+			after = &nativeAuthoredImage{
+				TableID:           table.AuthoredID,
+				PrimaryFieldID:    table.AuthoredPrimary,
+				CanonicalWireJSON: string(canonical),
+				Fields:            fields,
+			}
+		} else {
+			record, exists := c.records[recordKey]
+			if !exists {
+				if mutation.Op == "delete" {
+					return errors.New("native application push delete has no prior record binding")
+				}
+				after = &nativeAuthoredImage{
+					TableID:           table.AuthoredID,
+					PrimaryFieldID:    table.AuthoredPrimary,
+					CanonicalWireJSON: string(canonical),
+					Fields:            fields,
+				}
+			} else {
+				prior := record.Image
+				prior.Fields = make(map[string]json.RawMessage, len(record.Image.Fields))
+				for field, value := range record.Image.Fields {
+					prior.Fields[field] = append(json.RawMessage(nil), value...)
+				}
+				before = &prior
+				scopes = append([]string(nil), record.AuthoredScopes...)
+				if mutation.Op == "update" {
+					updated := prior
+					updated.Fields = make(map[string]json.RawMessage, len(prior.Fields)+len(fields))
+					for field, value := range prior.Fields {
+						updated.Fields[field] = append(json.RawMessage(nil), value...)
+					}
+					for field, value := range fields {
+						updated.Fields[field] = append(json.RawMessage(nil), value...)
+					}
+					updated.Version = ""
+					updated.Checksum = ""
+					after = &updated
+				}
+			}
+		}
 		transaction.Events = append(transaction.Events, nativeEventBinding{
 			AuthoredOrdinal: uint64(ordinal),
 			Operation:       mutation.Op,
@@ -1544,13 +1591,9 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 			Table:           table,
 			RecordID:        recordID,
 			RuntimeRecordID: runtimeRecordID,
-			After: &nativeAuthoredImage{
-				TableID:           table.AuthoredID,
-				PrimaryFieldID:    table.AuthoredPrimary,
-				CanonicalWireJSON: string(canonical),
-				Fields:            fields,
-			},
-			AuthoredScopes: nativeScopesForRecord(c.installation, table.AuthoredRelation, table.AuthoredID, string(canonical)),
+			Before:          before,
+			After:           after,
+			AuthoredScopes:  scopes,
 		})
 	}
 	key := nativeTransactionKey(transaction.AuthoredStream, transaction.AuthoredCommitLSN)
@@ -3048,10 +3091,14 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	transaction.Materialized = true
 	if transaction.ApplicationPush {
 		for _, event := range transaction.Events {
-			if event.Dependency != nil || event.After == nil {
+			if event.Dependency != nil {
 				continue
 			}
-			recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
+			recordKey := nativeRecordKey(event.Table.AuthoredID, nativeCanonicalRecordKeyValue(event))
+			if event.After == nil || event.After.Deleted {
+				delete(c.records, recordKey)
+				continue
+			}
 			c.records[recordKey] = &nativeRecordBinding{
 				Table:           event.Table,
 				RecordID:        event.RecordID,
@@ -3077,6 +3124,7 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		ordinal    int
 		tableID    string
 		primaryKey json.RawMessage
+		operation  string
 		accepted   bool
 	}
 	// The server records a rejected mutation with its identity and its
@@ -3084,7 +3132,7 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	// the identities first and validate materialization for accepted
 	// mutations alone.
 	rows, err := database.QueryContext(ctx, `
-		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value,
+		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value, operation,
 		       rejection_code IS NULL
 		FROM synchro.sync_push_mutations
 		WHERE user_id = $1 AND client_id = $2
@@ -3096,7 +3144,7 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	byBatch := make(map[string][]pushIdentity)
 	for rows.Next() {
 		var value pushIdentity
-		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey, &value.accepted); err != nil {
+		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey, &value.operation, &value.accepted); err != nil {
 			return errors.New("scan native application push identity failed")
 		}
 		byBatch[value.batchID] = append(byBatch[value.batchID], value)
@@ -3117,7 +3165,7 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		for index, value := range values {
 			event := transaction.Events[index]
 			runtimePrimary, marshalErr := json.Marshal(event.RuntimeRecordID)
-			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
+			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || value.operation != event.Operation || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
 				matches = false
 				break
 			}
@@ -3154,8 +3202,18 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 			  ON registry.registry_generation = captured.registry_generation
 			 AND registry.relation_id = captured.relation_id
 			WHERE registry.table_name = $1 AND captured.record_id = $2`, event.Table.RuntimeName, event.RuntimeRecordID).Scan(&rowData, &version, &checksum, &deleted)
-		if err != nil || deleted || !diagnosticUUIDPattern.MatchString(version) || len(checksum) != 64 {
+		if err != nil || deleted != (event.Operation == "delete") || !diagnosticUUIDPattern.MatchString(version) || len(checksum) != 64 {
 			return errors.New("native application push row is not materialized")
+		}
+		if event.Operation == "delete" {
+			if event.Before == nil || event.After != nil {
+				return errors.New("native application push delete binding is invalid")
+			}
+			record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.Before}
+			if err := validateNativeRuntimeRow(record, rowData); err != nil {
+				return err
+			}
+			continue
 		}
 		record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.After}
 		if err := validateNativeRuntimeRow(record, rowData); err != nil {
@@ -3938,6 +3996,9 @@ func nativeTransactionKey(stream, commit string) string {
 func nativeCanonicalRecordKeyValue(event nativeEventBinding) string {
 	if event.After != nil && event.After.CanonicalWireJSON != "" {
 		return event.After.CanonicalWireJSON
+	}
+	if event.Before != nil && event.Before.CanonicalWireJSON != "" {
+		return event.Before.CanonicalWireJSON
 	}
 	encoded, err := json.Marshal(event.RecordID)
 	if err != nil {

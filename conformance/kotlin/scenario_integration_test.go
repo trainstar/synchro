@@ -53,8 +53,12 @@ func runKotlinSteadyPull(t *testing.T) {
 func runKotlinPendingCycle(t *testing.T) {
 	t.Helper()
 	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/pending-cycle-001.json", 0)
-	if _, err := RunPendingCycleScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "pending-cycle-client-a"}); err != nil {
+	result, err := RunPendingCycleScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "pending-cycle-client-a"})
+	if err != nil {
 		t.Fatalf("run direct Kotlin Android pending-cycle scenario: %v", err)
+	}
+	if err := scenarios.ValidatePendingCycleNativeEvidence(result.Evidence); err != nil {
+		t.Fatalf("validate direct Kotlin Android pending-cycle evidence: %v", err)
 	}
 	resetKotlinPerformanceServer(t, ctx, harness)
 }

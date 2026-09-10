@@ -530,6 +530,149 @@ func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T)
 	}
 }
 
+func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.T) {
+	controller := nativeApplicationPushChangeController()
+	operation := scenarios.Operation{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload: json.RawMessage(`{
+			"authenticated_user_id":"user-a",
+			"request":{
+				"client_id":"client-a",
+				"client_generation":1,
+				"batch_id":"00000000-0000-4000-8000-000000004102",
+				"schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},
+				"mutations":[{
+					"mutation_id":"00000000-0000-4000-8000-000000004101",
+					"table":"items",
+					"pk":{"id":"pending-row"},
+					"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},
+					"op":"update",
+					"base_version":"server-version",
+					"client_version":"2026-08-11T00:00:01.000000Z",
+					"columns":{"value":"pending-updated"}
+				}]
+			},
+			"delivery":"apply",
+			"commit_lsn":"22",
+			"end_lsn":"23"
+		}`),
+	}
+
+	if err := controller.BindApplicationPush(operation); err != nil {
+		t.Fatalf("bind native application update: %v", err)
+	}
+	transaction := controller.transactions[nativeTransactionKey("stream-1", "22")]
+	if transaction == nil || !transaction.ApplicationPush || len(transaction.Events) != 1 {
+		t.Fatalf("application update transaction = %#v, want one bound event", transaction)
+	}
+	event := transaction.Events[0]
+	if event.Operation != "update" || event.Before == nil || event.After == nil {
+		t.Fatalf("application update event = %#v, want before and after images", event)
+	}
+	if event.Before.Version != "server-version" || string(event.Before.Fields["value"]) != `"pending"` {
+		t.Fatalf("application update before image = %#v, want materialized prior image", event.Before)
+	}
+	if string(event.After.Fields["value"]) != `"pending-updated"` || string(event.After.Fields["owner"]) != `"user-a"` || event.After.Version != "" || event.After.Checksum != "" {
+		t.Fatalf("application update after image = %#v, want merged unmaterialized image", event.After)
+	}
+	if len(event.AuthoredScopes) != 1 || event.AuthoredScopes[0] != "scope-a" {
+		t.Fatalf("application update scopes = %v, want prior authored scope", event.AuthoredScopes)
+	}
+	record := controller.records[nativeRecordKey("items", `"pending-row"`)]
+	if record == nil || string(record.Image.Fields["value"]) != `"pending"` {
+		t.Fatalf("application update changed the materialized prior record: %#v", record)
+	}
+}
+
+func TestNativeControllerBindsAcceptedApplicationDeleteToWALIdentity(t *testing.T) {
+	controller := nativeApplicationPushChangeController()
+	operation := scenarios.Operation{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload: json.RawMessage(`{
+			"authenticated_user_id":"user-a",
+			"request":{
+				"client_id":"client-a",
+				"client_generation":1,
+				"batch_id":"00000000-0000-4000-8000-000000004202",
+				"schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},
+				"mutations":[{
+					"mutation_id":"00000000-0000-4000-8000-000000004201",
+					"table":"items",
+					"pk":{"id":"pending-row"},
+					"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},
+					"op":"delete",
+					"base_version":"server-version",
+					"client_version":"2026-08-11T00:00:02.000000Z"
+				}]
+			},
+			"delivery":"apply",
+			"commit_lsn":"24",
+			"end_lsn":"25"
+		}`),
+	}
+
+	if err := controller.BindApplicationPush(operation); err != nil {
+		t.Fatalf("bind native application delete: %v", err)
+	}
+	transaction := controller.transactions[nativeTransactionKey("stream-1", "24")]
+	if transaction == nil || !transaction.ApplicationPush || len(transaction.Events) != 1 {
+		t.Fatalf("application delete transaction = %#v, want one bound event", transaction)
+	}
+	event := transaction.Events[0]
+	if event.Operation != "delete" || event.Before == nil || event.After != nil {
+		t.Fatalf("application delete event = %#v, want prior image and no after image", event)
+	}
+	if event.Before.Version != "server-version" || string(event.Before.Fields["value"]) != `"pending"` {
+		t.Fatalf("application delete before image = %#v, want materialized prior image", event.Before)
+	}
+	if len(event.AuthoredScopes) != 1 || event.AuthoredScopes[0] != "scope-a" {
+		t.Fatalf("application delete scopes = %v, want prior authored scope", event.AuthoredScopes)
+	}
+}
+
+func nativeApplicationPushChangeController() *NativeController {
+	table := nativeTableBinding{
+		AuthoredID:       "items",
+		AuthoredRelation: "public.items",
+		RuntimeName:      "cf_items",
+		AuthoredPrimary:  "id",
+		RuntimePrimary:   "runtime-id",
+		Fields:           map[string]string{"id": "runtime-id", "owner": "runtime-owner", "value": "runtime-value"},
+	}
+	canonical := `"pending-row"`
+	recordKey := nativeRecordKey("items", canonical)
+	return &NativeController{
+		installation: &nativeInstallationBinding{
+			authoredStream: "stream-1",
+			tables:         map[string]nativeTableBinding{"items": table},
+			relations:      map[string]string{"public.items": "items"},
+		},
+		records: map[string]*nativeRecordBinding{
+			recordKey: {
+				Table:           table,
+				RecordID:        "pending-row",
+				RuntimeRecordID: nativeRuntimeUUID("items", canonical),
+				Image: nativeAuthoredImage{
+					TableID:           "items",
+					PrimaryFieldID:    "id",
+					CanonicalWireJSON: canonical,
+					Fields: map[string]json.RawMessage{
+						"id":    json.RawMessage(canonical),
+						"owner": json.RawMessage(`"user-a"`),
+						"value": json.RawMessage(`"pending"`),
+					},
+					Version:  "server-version",
+					Checksum: strings.Repeat("a", 64),
+				},
+				AuthoredScopes: []string{"scope-a"},
+			},
+		},
+		transactions: make(map[string]*nativeTransactionBinding),
+	}
+}
+
 func TestNativeArtifactStageRejectsUnsupportedOperationKey(t *testing.T) {
 	artifact := &NativeArtifact{harness: &Harness{}}
 	_, err := artifact.StageStep(context.Background(), scenarios.Operation{
