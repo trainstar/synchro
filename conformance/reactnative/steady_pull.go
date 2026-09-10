@@ -1,6 +1,7 @@
 package reactnative
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"reflect"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +71,18 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 		scenarios.OperationKey(scenario.Model.Setup[0]) != "model/install-current-contract" {
 		return errors.New("React Native steady-pull scenario contract is invalid")
 	}
+	if !orderedIdentifiersEqual(scenario.RequirementIDs, []string{
+		"SYNC-CURSOR-002",
+		"SYNC-INTEGRITY-001",
+		"SYNC-INTEGRITY-003",
+		"SYNC-INTEGRITY-004",
+		"SYNC-INTEGRITY-005",
+		"SYNC-INTEGRITY-006",
+		"SYNC-PULL-005",
+		"SYNC-INTEGRITY-002",
+	}) {
+		return errors.New("React Native steady-pull requirement set changed")
+	}
 	if len(scenario.Steps) != len(steadyPullStepOrder) {
 		return errors.New("React Native steady-pull step set changed")
 	}
@@ -94,7 +112,7 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 			return fmt.Errorf("React Native steady-pull identity alias %q is absent", name)
 		}
 	}
-	semantic, wire, performance := false, false, false
+	semantic, wire, performance, pullProgress := false, false, false, false
 	for _, assertion := range scenario.Assertions {
 		switch assertion.ID {
 		case "ASSERT-PERF-STEADY-PULL-SEMANTIC-001":
@@ -103,9 +121,11 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 			wire = assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.ExpectedSource == "authored-model"
 		case "ASSERT-PERF-STEADY-PULL-PERFORMANCE-001":
 			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
+		case "ASSERT-PERF-STEADY-PULL-PULL-005":
+			pullProgress = assertion.Predicate.ContractPredicate == "state-equality" && assertion.Oracle.ExpectedSource == "authored-model"
 		}
 	}
-	if !semantic || !wire || !performance || steadyPullExpectedState(scenario) == nil {
+	if !semantic || !wire || !performance || !pullProgress || steadyPullExpectedState(scenario) == nil {
 		return errors.New("React Native steady-pull assertion or expected state changed")
 	}
 	obligations := map[string]int{}
@@ -150,11 +170,13 @@ type SteadyPullCoordinatorConfig struct {
 type SteadyPullCoordinator struct {
 	config SteadyPullCoordinatorConfig
 
-	listener net.Listener
-	server   *http.Server
-	token    string
-	adapter  string
-	database string
+	listener  net.Listener
+	server    *http.Server
+	token     string
+	adapter   string
+	database  string
+	proxy     *httputil.ReverseProxy
+	transport *http.Transport
 
 	steps      map[scenarios.StepID]scenarios.Step
 	expected   *scenarios.StateFacts
@@ -163,17 +185,25 @@ type SteadyPullCoordinator struct {
 	tableName  string
 	primaryKey string
 
-	mu          sync.Mutex
-	prepared    bool
-	closed      bool
-	completed   bool
-	failed      error
-	stage       steadyPullExchangeStage
-	nextSeq     uint64
-	bootstrap   *traceSnapshot
-	finalResult *finalCapture
-	process     *actionProcessIdentity
-	result      SteadyPullCoordinatorResult
+	mu            sync.Mutex
+	prepared      bool
+	closed        bool
+	completed     bool
+	failed        error
+	stage         steadyPullExchangeStage
+	nextSeq       uint64
+	bootstrap     *traceSnapshot
+	pristine      *finalCapture
+	finalResult   *finalCapture
+	restartResult *finalCapture
+	process       *actionProcessIdentity
+	faultIndex    int
+	beforeClose   *finalCapture
+	faultMu       sync.Mutex
+	armedFault    steadyPullFault
+	appliedFault  steadyPullFault
+	faultFailure  error
+	result        SteadyPullCoordinatorResult
 }
 
 // SteadyPullCoordinatorResult contains validated server and native identity evidence.
@@ -189,10 +219,36 @@ const (
 	steadyPullStageBaselineSynchronize
 	steadyPullStageBaselineCapture
 	steadyPullStageMeasuredSynchronize
+	steadyPullStageFaultSynchronize
+	steadyPullStageFaultCapture
 	steadyPullStageFinalCapture
 	steadyPullStageApplicationRows
+	steadyPullStageRestart
+	steadyPullStageRestartCapture
+	steadyPullStageRestartRows
 	steadyPullStageComplete
 )
+
+type steadyPullFault string
+
+const (
+	steadyPullMalformedTypedRow steadyPullFault = "malformed-typed-row"
+	steadyPullRowDigest         steadyPullFault = "row-digest"
+	steadyPullScopeDigest       steadyPullFault = "scope-digest"
+	steadyPullTerminalMap       steadyPullFault = "terminal-map"
+	steadyPullDuplicateEffect   steadyPullFault = "duplicate-effect"
+	steadyPullCursorBeforeApply steadyPullFault = "cursor-before-apply"
+	steadyPullResponseLimit                     = 16 << 20
+)
+
+var steadyPullFaults = []steadyPullFault{
+	steadyPullMalformedTypedRow,
+	steadyPullRowDigest,
+	steadyPullScopeDigest,
+	steadyPullTerminalMap,
+	steadyPullDuplicateEffect,
+	steadyPullCursorBeforeApply,
+}
 
 // NewSteadyPullCoordinator creates an authenticated loopback listener for one supported platform.
 func NewSteadyPullCoordinator(config SteadyPullCoordinatorConfig) (*SteadyPullCoordinator, error) {
@@ -212,8 +268,14 @@ func NewSteadyPullCoordinator(config SteadyPullCoordinatorConfig) (*SteadyPullCo
 	if serverURL == "" && config.Harness != nil {
 		serverURL = config.Harness.AdapterURL()
 	}
-	adapterURL, err := nativeAdapterURL(serverURL, config.Platform)
-	if err != nil {
+	upstream, err := url.Parse(serverURL)
+	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
+		return nil, errors.New("React Native steady-pull adapter URL is invalid")
+	}
+	if _, err := nativeAdapterURL(serverURL, config.Platform); err != nil {
+		return nil, err
+	}
+	if err := validateReactNativeSteadyPullFaultPlans(config.Scenario); err != nil {
 		return nil, err
 	}
 	token, err := randomToken(32)
@@ -234,6 +296,14 @@ func NewSteadyPullCoordinator(config SteadyPullCoordinatorConfig) (*SteadyPullCo
 	if err != nil {
 		return nil, errors.New("listen for React Native steady-pull coordinator")
 	}
+	adapterURL, err := nativeAdapterURL("http://"+listener.Addr().String(), config.Platform)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	proxy.Transport = transport
 	steps := make(map[scenarios.StepID]scenarios.Step, len(config.Scenario.Steps))
 	for _, step := range config.Scenario.Steps {
 		steps[step.ID] = step
@@ -244,12 +314,15 @@ func NewSteadyPullCoordinator(config SteadyPullCoordinatorConfig) (*SteadyPullCo
 		token:      token,
 		adapter:    adapterURL,
 		database:   database,
+		proxy:      proxy,
+		transport:  transport,
 		steps:      steps,
 		expected:   steadyPullExpectedState(config.Scenario),
 		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage),
 		nextSeq:    1,
 	}
+	proxy.ModifyResponse = coordinator.modifyAdapterResponse
 	coordinator.server = &http.Server{
 		Handler:           coordinator,
 		MaxHeaderBytes:    16 * 1024,
@@ -394,6 +467,9 @@ func (c *SteadyPullCoordinator) Close(ctx context.Context) error {
 	c.mu.Unlock()
 	shutdownErr := c.server.Shutdown(ctx)
 	listenErr := c.listener.Close()
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
 	if shutdownErr != nil {
 		return shutdownErr
 	}
@@ -405,7 +481,7 @@ func (c *SteadyPullCoordinator) Close(ctx context.Context) error {
 
 func (c *SteadyPullCoordinator) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != "/exchange" {
-		writeExchangeError(writer, http.StatusNotFound)
+		c.proxy.ServeHTTP(writer, request)
 		return
 	}
 	if request.Method != http.MethodPost {
@@ -494,7 +570,7 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		}
 		return nil
 	case steadyPullStageMeasuredSynchronize:
-		capture, err := c.validateCaptureResult(envelope.Result, []string{"request_trace", "durable_proof"})
+		capture, err := c.validateCaptureResult(envelope.Result, steadyPullDurableCaptureKeys(true))
 		if err != nil {
 			return err
 		}
@@ -512,6 +588,35 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 		c.bootstrap = &trace
+		c.pristine = &capture
+		return nil
+	case steadyPullStageFaultSynchronize:
+		if c.faultIndex >= len(steadyPullFaults) {
+			return errors.New("React Native steady-pull fault index is invalid")
+		}
+		if err := c.validateFailedSynchronizedResult(envelope.Result, steadyPullFaults[c.faultIndex]); err != nil {
+			return err
+		}
+		return c.verifyFault(steadyPullFaults[c.faultIndex])
+	case steadyPullStageFaultCapture:
+		capture, err := c.validateCaptureResult(envelope.Result, append(steadyPullDurableCaptureKeys(false), "request_trace"))
+		if err != nil {
+			return err
+		}
+		if err := validateSteadyPullFailureCapture(capture); err != nil {
+			return err
+		}
+		trace, err := captureTraceFromRaw(capture.Trace)
+		if err != nil {
+			return err
+		}
+		if err := validateSteadyPullFaultTrace(trace, c.bootstrap, c.faultIndex); err != nil {
+			return err
+		}
+		if c.pristine == nil || !equalReactNativeSteadyPullDurableState(*c.pristine, capture) {
+			return fmt.Errorf("React Native steady-pull %s fault changed durable rows or cursor state", steadyPullFaults[c.faultIndex])
+		}
+		c.faultIndex++
 		return nil
 	case steadyPullStageFinalCapture:
 		if err := c.validateSynchronizedResult(envelope.Result); err != nil {
@@ -530,7 +635,7 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		}
 		c.finalResult = &capture
 		return nil
-	case steadyPullStageComplete:
+	case steadyPullStageRestart:
 		if c.finalResult == nil {
 			return errors.New("React Native steady-pull final capture is unavailable")
 		}
@@ -539,6 +644,41 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 		c.finalResult.Rows = rows
+		beforeClose := *c.finalResult
+		c.beforeClose = &beforeClose
+		return nil
+	case steadyPullStageRestartCapture:
+		process, err := validateOpenedResult(envelope.Result)
+		if err != nil {
+			return err
+		}
+		if c.process == nil || process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+			return errors.New("React Native steady-pull database identity changed after restart")
+		}
+		c.process = &process
+		return nil
+	case steadyPullStageRestartRows:
+		capture, err := c.validateCaptureResult(envelope.Result, steadyPullDurableCaptureKeys(true))
+		if err != nil {
+			return err
+		}
+		if c.beforeClose == nil || !equalReactNativeSteadyPullDurableState(*c.beforeClose, capture) {
+			return errors.New("React Native steady-pull restart changed durable rows or cursor state")
+		}
+		c.restartResult = &capture
+		return nil
+	case steadyPullStageComplete:
+		if c.finalResult == nil || c.restartResult == nil || c.beforeClose == nil {
+			return errors.New("React Native steady-pull restart evidence is unavailable")
+		}
+		rows, err := captureRows(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.restartResult.Rows = rows
+		if !jsonValuesEqual(c.beforeClose.Rows, c.restartResult.Rows) {
+			return errors.New("React Native steady-pull application rows changed after restart")
+		}
 		return nil
 	default:
 		return errInvalidExchange
@@ -552,6 +692,7 @@ func (c *SteadyPullCoordinator) advanceLocked(ctx context.Context, sequence uint
 		response.Command = c.command("client", "open", map[string]any{
 			"client_key": clientKey, "database_mode": "create", "initialization": "empty", "seed_step_id": nil,
 		}, nil)
+		c.stage = steadyPullStageBaselineSynchronize
 	case steadyPullStageBaselineSynchronize:
 		response.Command = c.command("client", "synchronize-step", map[string]any{
 			"client_key": clientKey, "method": "start", "completion": "idle",
@@ -561,13 +702,10 @@ func (c *SteadyPullCoordinator) advanceLocked(ctx context.Context, sequence uint
 			"STEP-PERF-STEADY-PULL-BASELINE-APPLY-001",
 			"STEP-PERF-STEADY-PULL-BASELINE-FINALIZE-001",
 		})
+		c.stage = steadyPullStageBaselineCapture
 	case steadyPullStageBaselineCapture:
-		response.Command = c.command("observer", "capture", map[string]any{
-			"client_keys": []string{clientKey}, "sources": []string{"request-trace", "durable-proof"},
-			"durable_proof_identity": map[string]any{
-				"table_name": c.tableName, "record_id": "bootstrap-absent-row",
-			},
-		}, nil)
+		response.Command = c.steadyPullCaptureCommand(true, true)
+		c.stage = steadyPullStageMeasuredSynchronize
 	case steadyPullStageMeasuredSynchronize:
 		if c.config.Controller == nil {
 			return exchangeResponse{}, errors.New("React Native steady-pull coordinator controller is unavailable")
@@ -583,14 +721,37 @@ func (c *SteadyPullCoordinator) advanceLocked(ctx context.Context, sequence uint
 		if err := c.bindRuntimeIdentities(ctx, true); err != nil {
 			return exchangeResponse{}, err
 		}
+		if err := c.armFault(steadyPullFaults[0]); err != nil {
+			return exchangeResponse{}, err
+		}
 		response.Command = c.command("client", "synchronize-step", map[string]any{
 			"client_key": clientKey, "method": "sync-now", "completion": "idle",
 		}, []scenarios.StepID{"STEP-PERF-STEADY-PULL-001", "STEP-PERF-STEADY-PULL-002"})
+		c.stage = steadyPullStageFaultSynchronize
+	case steadyPullStageFaultSynchronize:
+		response.Command = c.steadyPullFaultCaptureCommand()
+		c.stage = steadyPullStageFaultCapture
+	case steadyPullStageFaultCapture:
+		if c.faultIndex < len(steadyPullFaults) {
+			if err := c.armFault(steadyPullFaults[c.faultIndex]); err != nil {
+				return exchangeResponse{}, err
+			}
+			response.Command = c.command("client", "synchronize-step", map[string]any{
+				"client_key": clientKey, "method": "retry-after-error", "completion": "idle",
+			}, []scenarios.StepID{"STEP-PERF-STEADY-PULL-001", "STEP-PERF-STEADY-PULL-002"})
+			c.stage = steadyPullStageFaultSynchronize
+		} else {
+			response.Command = c.command("client", "synchronize-step", map[string]any{
+				"client_key": clientKey, "method": "retry-after-error", "completion": "idle",
+			}, []scenarios.StepID{"STEP-PERF-STEADY-PULL-001", "STEP-PERF-STEADY-PULL-002"})
+			c.stage = steadyPullStageFinalCapture
+		}
 	case steadyPullStageFinalCapture:
 		response.Command = c.command("observer", "capture", map[string]any{
 			"client_keys": []string{clientKey},
 			"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof"},
 		}, nil)
+		c.stage = steadyPullStageApplicationRows
 	case steadyPullStageApplicationRows:
 		if c.finalResult == nil {
 			return exchangeResponse{}, errors.New("React Native steady-pull final capture is unavailable")
@@ -606,6 +767,31 @@ func (c *SteadyPullCoordinator) advanceLocked(ctx context.Context, sequence uint
 				"table_name": c.tableName, "primary_key_field": c.primaryKey, "primary_key": metadata.RecordID,
 			}},
 		}, nil)
+		c.stage = steadyPullStageRestart
+	case steadyPullStageRestart:
+		response.Command = c.command("client", "open", map[string]any{
+			"client_key": clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil,
+		}, nil)
+		c.stage = steadyPullStageRestartCapture
+	case steadyPullStageRestartCapture:
+		response.Command = c.steadyPullCaptureCommand(true, false)
+		c.stage = steadyPullStageRestartRows
+	case steadyPullStageRestartRows:
+		if c.restartResult == nil {
+			return exchangeResponse{}, errors.New("React Native steady-pull restart capture is unavailable")
+		}
+		metadata, err := durableRowMetadata(c.restartResult.DurableProof)
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("observer", "capture", map[string]any{
+			"client_keys": []string{clientKey},
+			"sources":     []string{"application-rows"},
+			"row_selectors": []map[string]any{{
+				"table_name": c.tableName, "primary_key_field": c.primaryKey, "primary_key": metadata.RecordID,
+			}},
+		}, nil)
+		c.stage = steadyPullStageComplete
 	case steadyPullStageComplete:
 		if err := c.validateCompletionLocked(ctx); err != nil {
 			return exchangeResponse{}, err
@@ -614,10 +800,375 @@ func (c *SteadyPullCoordinator) advanceLocked(ctx context.Context, sequence uint
 		response.Command = nil
 		c.completed = true
 	}
-	if c.stage != steadyPullStageComplete {
-		c.stage++
-	}
 	return response, nil
+}
+
+func validateReactNativeSteadyPullFaultPlans(scenario scenarios.Scenario) error {
+	required := map[string]bool{
+		"FPL-PERF-STEADY-PULL-CURSOR-002":    false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-003": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-004": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-005": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-006": false,
+		"FPL-PERF-STEADY-PULL-PULL-005":      false,
+	}
+	for _, plan := range scenario.FaultPlans {
+		if _, found := required[string(plan.ID)]; found {
+			required[string(plan.ID)] = true
+		}
+	}
+	for id, found := range required {
+		if !found {
+			return fmt.Errorf("React Native steady-pull fault plan %s is absent", id)
+		}
+	}
+	return nil
+}
+
+func steadyPullDurableCaptureKeys(includeTrace bool) []string {
+	keys := []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "provenance", "durable_proof"}
+	if includeTrace {
+		keys = append(keys, "sync_events", "request_trace")
+	}
+	return keys
+}
+
+func (c *SteadyPullCoordinator) steadyPullCaptureCommand(includeTrace, absentRow bool) *conformanceCommand {
+	sources := []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "provenance", "durable-proof"}
+	if includeTrace {
+		sources = append(sources, "sync-events", "request-trace")
+	}
+	parameters := map[string]any{"client_keys": []string{clientKey}, "sources": sources}
+	if absentRow {
+		parameters["durable_proof_identity"] = map[string]any{"table_name": c.tableName, "record_id": "bootstrap-absent-row"}
+	}
+	return c.command("observer", "capture", parameters, nil)
+}
+
+func (c *SteadyPullCoordinator) steadyPullFaultCaptureCommand() *conformanceCommand {
+	parameters := map[string]any{
+		"client_keys": []string{clientKey},
+		"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "provenance", "durable-proof", "request-trace"},
+		"durable_proof_identity": map[string]any{
+			"table_name": c.tableName, "record_id": "bootstrap-absent-row",
+		},
+	}
+	return c.command("observer", "capture", parameters, nil)
+}
+
+func validateSteadyPullFaultTrace(trace traceSnapshot, bootstrap *traceSnapshot, faultIndex int) error {
+	if bootstrap == nil || faultIndex < 0 || faultIndex >= len(steadyPullFaults) {
+		return errors.New("React Native steady-pull fault trace context is invalid")
+	}
+	expectedCount := len(bootstrap.Observations) + faultIndex + 1
+	if trace.Overflowed || len(trace.Observations) != expectedCount || trace.SequenceCheckpoint != uint64(expectedCount) {
+		return fmt.Errorf("React Native steady-pull %s fault trace is incomplete", steadyPullFaults[faultIndex])
+	}
+	if err := validateTraceSequence(trace.Observations); err != nil {
+		return err
+	}
+	for index, observation := range bootstrap.Observations {
+		if !transportObservationsEqual(trace.Observations[index], observation) {
+			return errors.New("React Native steady-pull bootstrap trace changed during a fault")
+		}
+	}
+	for _, observation := range trace.Observations[len(bootstrap.Observations):] {
+		if err := validateTraceOperation(observation, "pull"); err != nil || observation.StatusCode != http.StatusOK {
+			return fmt.Errorf("React Native steady-pull %s fault trace is invalid", steadyPullFaults[faultIndex])
+		}
+	}
+	return nil
+}
+
+func (c *SteadyPullCoordinator) validateFailedSynchronizedResult(raw json.RawMessage, fault steadyPullFault) error {
+	if err := validateActionResult(raw, "synchronized"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 4, "failed synchronized result"); err != nil {
+		return err
+	}
+	var completion string
+	if json.Unmarshal(members["completion"], &completion) != nil || completion != "error" {
+		return fmt.Errorf("React Native steady-pull %s fault did not fail synchronization", fault)
+	}
+	if err := validateSteadyPullFailureStatus(members["status"]); err != nil {
+		return fmt.Errorf("React Native steady-pull %s fault status is invalid: %w", fault, err)
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || c.process == nil || process != *c.process {
+		return errors.New("React Native steady-pull process identity changed during a fault")
+	}
+	return nil
+}
+
+func validateSteadyPullFailureCapture(capture finalCapture) error {
+	return validateSteadyPullFailureStatus(capture.Status)
+}
+
+func validateSteadyPullFailureStatus(raw json.RawMessage) error {
+	var status syncStatus
+	if err := jsonstrict.Decode(raw, &status); err != nil {
+		return errors.New("failure status is invalid")
+	}
+	if status.State != "error" || !isJSONNull(status.RetryAt) || !isJSONNull(status.Operation) {
+		return errors.New("failure status state is invalid")
+	}
+	var failure map[string]json.RawMessage
+	if err := decodeStrictMembers(status.Failure, &failure, 4, "failure evidence"); err != nil {
+		return err
+	}
+	var operation, code, recovery string
+	var retryable bool
+	if json.Unmarshal(failure["operation"], &operation) != nil || operation != "pulling" ||
+		json.Unmarshal(failure["code"], &code) != nil || code != "invalid_response" ||
+		json.Unmarshal(failure["retryable"], &retryable) != nil || retryable ||
+		json.Unmarshal(failure["recovery_action"], &recovery) != nil || recovery != "retry" {
+		return errors.New("failure evidence is invalid")
+	}
+	return nil
+}
+
+func equalReactNativeSteadyPullDurableState(left, right finalCapture) bool {
+	return jsonValuesEqual(left.ClientState, right.ClientState) &&
+		jsonValuesEqual(left.Pending, right.Pending) &&
+		jsonValuesEqual(left.Rejected, right.Rejected) &&
+		jsonValuesEqual(left.Provenance, right.Provenance) &&
+		jsonValuesEqual(left.DurableProof, right.DurableProof)
+}
+
+func jsonValuesEqual(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
+}
+
+func (c *SteadyPullCoordinator) armFault(fault steadyPullFault) error {
+	c.faultMu.Lock()
+	defer c.faultMu.Unlock()
+	if c.armedFault != "" || c.appliedFault != "" || c.faultFailure != nil {
+		return errors.New("React Native steady-pull response fault is already active")
+	}
+	c.armedFault = fault
+	return nil
+}
+
+func (c *SteadyPullCoordinator) verifyFault(fault steadyPullFault) error {
+	c.faultMu.Lock()
+	defer c.faultMu.Unlock()
+	defer func() {
+		c.appliedFault = ""
+		c.faultFailure = nil
+	}()
+	if c.faultFailure != nil {
+		return c.faultFailure
+	}
+	if c.armedFault != "" || c.appliedFault != fault {
+		return fmt.Errorf("React Native steady-pull %s fault did not mutate one pull response", fault)
+	}
+	return nil
+}
+
+func (c *SteadyPullCoordinator) modifyAdapterResponse(response *http.Response) error {
+	if response.StatusCode != http.StatusOK || response.Request == nil || !strings.HasSuffix(response.Request.URL.Path, "/sync/pull") {
+		return nil
+	}
+	c.faultMu.Lock()
+	fault := c.armedFault
+	if fault == "" {
+		c.faultMu.Unlock()
+		return nil
+	}
+	c.armedFault = ""
+	c.faultMu.Unlock()
+	body, err := io.ReadAll(io.LimitReader(response.Body, steadyPullResponseLimit+1))
+	_ = response.Body.Close()
+	if err != nil || len(body) > steadyPullResponseLimit {
+		err = errors.New("React Native steady-pull pull response exceeds the fault bound")
+	} else {
+		body, err = mutateReactNativeSteadyPullResponse(body, fault)
+	}
+	if err != nil {
+		c.faultMu.Lock()
+		c.faultFailure = err
+		c.faultMu.Unlock()
+		return err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	c.faultMu.Lock()
+	c.appliedFault = fault
+	c.faultMu.Unlock()
+	return nil
+}
+
+func mutateReactNativeSteadyPullResponse(body []byte, fault steadyPullFault) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, errors.New("decode React Native steady-pull pull response failed")
+	}
+	var changes []map[string]json.RawMessage
+	if err := json.Unmarshal(response["changes"], &changes); err != nil || len(changes) != 1 {
+		return nil, errors.New("React Native steady-pull fault requires one canonical change")
+	}
+	switch fault {
+	case steadyPullMalformedTypedRow:
+		if err := mutateReactNativeSteadyPullTypedRow(changes[0]); err != nil {
+			return nil, err
+		}
+	case steadyPullRowDigest:
+		if err := mutateReactNativeSteadyPullChecksum(changes[0]); err != nil {
+			return nil, err
+		}
+	case steadyPullScopeDigest:
+		if err := mutateReactNativeSteadyPullScopeDigest(response); err != nil {
+			return nil, err
+		}
+	case steadyPullTerminalMap:
+		if err := mutateReactNativeSteadyPullTerminalMap(response); err != nil {
+			return nil, err
+		}
+	case steadyPullDuplicateEffect:
+		duplicate, err := cloneReactNativeSteadyPullChange(changes[0])
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, duplicate)
+	case steadyPullCursorBeforeApply:
+		later, err := cloneReactNativeSteadyPullChange(changes[0])
+		if err != nil {
+			return nil, err
+		}
+		if err := mutateReactNativeSteadyPullPrimaryKey(later); err != nil {
+			return nil, err
+		}
+		changes = append(changes, later)
+	default:
+		return nil, errors.New("React Native steady-pull fault is unsupported")
+	}
+	if fault != steadyPullScopeDigest && fault != steadyPullTerminalMap {
+		encoded, err := json.Marshal(changes)
+		if err != nil {
+			return nil, errors.New("encode React Native steady-pull changes failed")
+		}
+		response["changes"] = encoded
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return nil, errors.New("encode React Native steady-pull pull response failed")
+	}
+	return encoded, nil
+}
+
+func mutateReactNativeSteadyPullTypedRow(change map[string]json.RawMessage) error {
+	var row map[string]json.RawMessage
+	var primary map[string]json.RawMessage
+	if json.Unmarshal(change["row"], &row) != nil || len(row) == 0 || json.Unmarshal(change["pk"], &primary) != nil {
+		return errors.New("React Native steady-pull typed-row fault target is invalid")
+	}
+	fields := make([]string, 0, len(row))
+	for field := range row {
+		if _, isPrimary := primary[field]; !isPrimary {
+			fields = append(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		return errors.New("React Native steady-pull typed-row fault has no writable field")
+	}
+	sort.Strings(fields)
+	row[fields[0]] = json.RawMessage("1")
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		return errors.New("encode React Native steady-pull typed-row fault failed")
+	}
+	change["row"] = encoded
+	return nil
+}
+
+func mutateReactNativeSteadyPullChecksum(change map[string]json.RawMessage) error {
+	var checksum map[string]json.RawMessage
+	if json.Unmarshal(change["row_checksum"], &checksum) != nil || len(checksum) == 0 {
+		return errors.New("React Native steady-pull row-digest fault target is invalid")
+	}
+	checksum["digest"] = json.RawMessage(`"0000000000000000000000000000000000000000000000000000000000000000"`)
+	encoded, err := json.Marshal(checksum)
+	if err != nil {
+		return errors.New("encode React Native steady-pull row-digest fault failed")
+	}
+	change["row_checksum"] = encoded
+	return nil
+}
+
+func mutateReactNativeSteadyPullScopeDigest(response map[string]json.RawMessage) error {
+	var checksums map[string]json.RawMessage
+	if json.Unmarshal(response["checksums"], &checksums) != nil || len(checksums) != 1 {
+		return errors.New("React Native steady-pull scope-digest fault target is invalid")
+	}
+	for scope, raw := range checksums {
+		var checksum map[string]json.RawMessage
+		if json.Unmarshal(raw, &checksum) != nil {
+			return errors.New("React Native steady-pull scope digest is invalid")
+		}
+		checksum["algorithm"] = json.RawMessage(`"sha1"`)
+		encoded, err := json.Marshal(checksum)
+		if err != nil {
+			return errors.New("encode React Native steady-pull scope-digest fault failed")
+		}
+		checksums[scope] = encoded
+	}
+	encoded, err := json.Marshal(checksums)
+	if err != nil {
+		return errors.New("encode React Native steady-pull scope checksum map failed")
+	}
+	response["checksums"] = encoded
+	return nil
+}
+
+func mutateReactNativeSteadyPullTerminalMap(response map[string]json.RawMessage) error {
+	var checksums map[string]json.RawMessage
+	if json.Unmarshal(response["checksums"], &checksums) != nil || len(checksums) != 1 {
+		return errors.New("React Native steady-pull terminal-map fault target is invalid")
+	}
+	for _, checksum := range checksums {
+		checksums["native-extra-scope"] = append(json.RawMessage(nil), checksum...)
+		break
+	}
+	encoded, err := json.Marshal(checksums)
+	if err != nil {
+		return errors.New("encode React Native steady-pull terminal-map fault failed")
+	}
+	response["checksums"] = encoded
+	return nil
+}
+
+func cloneReactNativeSteadyPullChange(change map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	encoded, err := json.Marshal(change)
+	if err != nil {
+		return nil, errors.New("encode React Native steady-pull effect failed")
+	}
+	var clone map[string]json.RawMessage
+	if json.Unmarshal(encoded, &clone) != nil {
+		return nil, errors.New("clone React Native steady-pull effect failed")
+	}
+	return clone, nil
+}
+
+func mutateReactNativeSteadyPullPrimaryKey(change map[string]json.RawMessage) error {
+	var primary map[string]json.RawMessage
+	var row map[string]json.RawMessage
+	if json.Unmarshal(change["pk"], &primary) != nil || len(primary) != 1 || json.Unmarshal(change["row"], &row) != nil {
+		return errors.New("React Native steady-pull cursor-before-apply fault target is invalid")
+	}
+	value, _ := json.Marshal("native-cursor-before-apply")
+	for field := range primary {
+		primary[field] = value
+		if _, found := row[field]; found {
+			row[field] = value
+		}
+	}
+	change["pk"], _ = json.Marshal(primary)
+	change["row"], _ = json.Marshal(row)
+	return nil
 }
 
 func (c *SteadyPullCoordinator) validateSynchronizedResult(raw json.RawMessage) error {
@@ -861,7 +1412,14 @@ func validateSteadyPullWireObservation(scenario scenarios.Scenario, stepID strin
 }
 
 func steadyPullTrace(final traceSnapshot, bootstrap *traceSnapshot) ([]transportObservation, error) {
-	if bootstrap == nil || bootstrap.Overflowed || len(bootstrap.Observations) != 3 || final.Overflowed || len(final.Observations) != 4 || final.SequenceCheckpoint != 4 {
+	if bootstrap == nil {
+		return nil, errors.New("React Native steady-pull bootstrap trace is unavailable")
+	}
+	expectedCount := len(bootstrap.Observations) + len(steadyPullFaults) + 1
+	legacyCount := len(bootstrap.Observations) + 1
+	if bootstrap.Overflowed || len(bootstrap.Observations) != 3 || final.Overflowed ||
+		len(final.Observations) != expectedCount && len(final.Observations) != legacyCount ||
+		final.SequenceCheckpoint != uint64(len(final.Observations)) {
 		return nil, errors.New("React Native steady-pull trace is incomplete")
 	}
 	if err := validateTraceSequence(final.Observations); err != nil {
@@ -872,10 +1430,12 @@ func steadyPullTrace(final traceSnapshot, bootstrap *traceSnapshot) ([]transport
 			return nil, errors.New("React Native steady-pull bootstrap trace changed after its checkpoint")
 		}
 	}
-	if err := validateTraceOperation(final.Observations[3], "pull"); err != nil {
-		return nil, fmt.Errorf("React Native steady-pull measured trace is invalid: %w", err)
+	for _, observation := range final.Observations[len(bootstrap.Observations):] {
+		if err := validateTraceOperation(observation, "pull"); err != nil {
+			return nil, fmt.Errorf("React Native steady-pull measured trace is invalid: %w", err)
+		}
 	}
-	return final.Observations[3:], nil
+	return final.Observations[len(final.Observations)-1:], nil
 }
 
 func validateSteadyPullFinalCapture(scenario scenarios.Scenario, capture finalCapture, bootstrap *traceSnapshot) error {

@@ -1,11 +1,21 @@
 package kotlin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -30,7 +40,9 @@ var steadyPullAliasNames = []string{
 // SteadyPullResult records direct Kotlin Android evidence for steady-pull.
 type SteadyPullResult struct {
 	BaselineCall       SynchronizationResult
+	FaultCalls         []SynchronizationResult
 	MeasuredCall       SynchronizationResult
+	Restart            StepObservation
 	ClientFacts        []CaptureFacts
 	ServerFacts        scenarios.StateFacts
 	IdentityResolution []blackbox.NativeIdentityResolution
@@ -42,6 +54,34 @@ type steadyPullIdentityEvidence struct {
 	primaryKeyName string
 }
 
+type steadyPullFault string
+
+const (
+	steadyPullMalformedTypedRow steadyPullFault = "malformed-typed-row"
+	steadyPullRowDigest         steadyPullFault = "row-digest"
+	steadyPullScopeDigest       steadyPullFault = "scope-digest"
+	steadyPullTerminalMap       steadyPullFault = "terminal-map"
+	steadyPullDuplicateEffect   steadyPullFault = "duplicate-effect"
+	steadyPullCursorBeforeApply steadyPullFault = "cursor-before-apply"
+	steadyPullResponseLimit                     = 16 << 20
+)
+
+var steadyPullFaults = []steadyPullFault{
+	steadyPullMalformedTypedRow,
+	steadyPullRowDigest,
+	steadyPullScopeDigest,
+	steadyPullTerminalMap,
+	steadyPullDuplicateEffect,
+	steadyPullCursorBeforeApply,
+}
+
+type steadyPullFaultProxy struct {
+	mu      sync.Mutex
+	armed   steadyPullFault
+	applied steadyPullFault
+	failure error
+}
+
 // RunSteadyPullScenario executes the authored steady-pull flow through Kotlin Android.
 func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (SteadyPullResult, error) {
 	steps, err := kotlinScenarioStepMap(scenario, steadyPullScenarioID, 8)
@@ -51,6 +91,9 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if controller == nil || platform == nil {
 		return SteadyPullResult{}, errors.New("Kotlin Android steady-pull dependencies are unavailable")
 	}
+	if err := validateKotlinSteadyPullFaultPlans(scenario); err != nil {
+		return SteadyPullResult{}, err
+	}
 	for _, id := range []string{"STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001", "STEP-PERF-STEADY-PULL-001"} {
 		if err := kotlinScenarioClient(steps[scenarios.StepID(id)], client); err != nil {
 			return SteadyPullResult{}, err
@@ -59,6 +102,11 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return SteadyPullResult{}, fmt.Errorf("install Kotlin Android steady-pull contract: %w", err)
 	}
+	faultProxy, closeFaultProxy, err := startKotlinSteadyPullFaultProxy(platform)
+	if err != nil {
+		return SteadyPullResult{}, err
+	}
+	defer closeFaultProxy()
 	if err := platform.Install(ctx, InstallRequest{Client: client, Initialization: "empty"}); err != nil {
 		return SteadyPullResult{}, fmt.Errorf("install Kotlin Android steady-pull client: %w", err)
 	}
@@ -97,6 +145,10 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err := validateKotlinSteadyPullBaselineWires(scenario, baseline); err != nil {
 		return SteadyPullResult{}, err
 	}
+	pristine, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return SteadyPullResult{}, fmt.Errorf("capture Kotlin Android steady-pull pristine state: %w", err)
+	}
 
 	commit, err := kotlinScenarioOperation(steps, "STEP-PERF-STEADY-PULL-COMMIT-001", "model/commit-source-transaction")
 	if err != nil {
@@ -112,9 +164,38 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if result, err := controller.ProcessStep(ctx, nil, materialize); err != nil || result.Disposition != "success" {
 		return SteadyPullResult{}, fmt.Errorf("materialize Kotlin Android steady-pull source transaction: %w", kotlinResultError(err, result.Disposition))
 	}
-	measured, err := platform.Synchronize(ctx, SynchronizeRequest{Client: client, Method: "sync-now", Operations: []scenarios.Operation{measuredPull}})
+	faultCalls := make([]SynchronizationResult, 0, len(steadyPullFaults))
+	for index, fault := range steadyPullFaults {
+		if err := faultProxy.arm(fault); err != nil {
+			return SteadyPullResult{}, err
+		}
+		method := "retry-after-error"
+		if index == 0 {
+			method = "sync-now"
+		}
+		failed, callErr := platform.Synchronize(ctx, SynchronizeRequest{Client: client, Method: method, Operations: []scenarios.Operation{measuredPull}})
+		if callErr != nil {
+			return SteadyPullResult{}, fmt.Errorf("run Kotlin Android steady-pull %s fault: %w", fault, callErr)
+		}
+		if err := faultProxy.verify(fault); err != nil {
+			return SteadyPullResult{}, err
+		}
+		afterFault, captureErr := platform.scenarioSnapshot(ctx, client)
+		if captureErr != nil {
+			return SteadyPullResult{}, fmt.Errorf("capture Kotlin Android steady-pull %s fault state: %w", fault, captureErr)
+		}
+		if err := validateKotlinSteadyPullFaultResult(fault, failed, afterFault); err != nil {
+			return SteadyPullResult{}, err
+		}
+		if !equalKotlinSteadyPullDurableState(pristine, afterFault) {
+			return SteadyPullResult{}, fmt.Errorf("Kotlin Android steady-pull %s fault changed durable rows or cursor state", fault)
+		}
+		faultCalls = append(faultCalls, failed)
+	}
+
+	measured, err := platform.Synchronize(ctx, SynchronizeRequest{Client: client, Method: "retry-after-error", Operations: []scenarios.Operation{measuredPull}})
 	if err != nil {
-		return SteadyPullResult{}, fmt.Errorf("run Kotlin Android measured pull: %w", err)
+		return SteadyPullResult{}, fmt.Errorf("retry Kotlin Android measured pull: %w", err)
 	}
 	if measured.Completion != "idle" || len(measured.Steps) != 1 || len(measured.transportObservations) != 1 || measured.transportObservations[0].StatusCode != 200 {
 		return SteadyPullResult{}, errors.New("Kotlin Android measured pull did not complete successfully")
@@ -122,16 +203,32 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err := validateKotlinWireExpectation(scenario, "STEP-PERF-STEADY-PULL-001", "pull", measured); err != nil {
 		return SteadyPullResult{}, err
 	}
+	beforeRestart, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return SteadyPullResult{}, fmt.Errorf("capture Kotlin Android steady-pull state before restart: %w", err)
+	}
+	restartOperation := scenarios.Operation{
+		ContractOperation: "process",
+		Name:              "restart-client",
+		Payload:           queueJSON(map[string]any{"user_id": client.UserID, "client_id": client.ClientID}),
+	}
+	restart, err := platform.ProcessStep(ctx, client, restartOperation)
+	if err != nil || restart.Disposition != "success" {
+		return SteadyPullResult{}, fmt.Errorf("restart Kotlin Android steady-pull client: %w", kotlinResultError(err, restart.Disposition))
+	}
+	afterRestart, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return SteadyPullResult{}, fmt.Errorf("capture Kotlin Android steady-pull state after restart: %w", err)
+	}
+	if !equalKotlinSteadyPullDurableState(beforeRestart, afterRestart) {
+		return SteadyPullResult{}, errors.New("Kotlin Android steady-pull restart changed durable rows or cursor state")
+	}
 
 	clientFacts, err := platform.Capture(ctx, []Client{client}, []string{"application-rows", "pending-mutations", "rejected-mutations", "checkpoints", "provenance", "rebuild-state"})
 	if err != nil {
 		return SteadyPullResult{}, fmt.Errorf("capture Kotlin Android steady-pull client state: %w", err)
 	}
-	rawSnapshot, err := platform.scenarioSnapshot(ctx, client)
-	if err != nil {
-		return SteadyPullResult{}, fmt.Errorf("capture Kotlin Android steady-pull identity state: %w", err)
-	}
-	snapshot, err := decodeWarmConnectSnapshot(rawSnapshot)
+	snapshot, err := decodeWarmConnectSnapshot(afterRestart)
 	if err != nil {
 		return SteadyPullResult{}, err
 	}
@@ -158,7 +255,317 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err := validateSteadyPullState(expected, serverCaptures[0].StateFacts, actualClient, snapshot, evidence, applicationRow); err != nil {
 		return SteadyPullResult{}, err
 	}
-	return SteadyPullResult{BaselineCall: baseline, MeasuredCall: measured, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, IdentityResolution: evidence.resolutions}, nil
+	return SteadyPullResult{BaselineCall: baseline, FaultCalls: faultCalls, MeasuredCall: measured, Restart: restart, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, IdentityResolution: evidence.resolutions}, nil
+}
+
+func validateKotlinSteadyPullFaultPlans(scenario scenarios.Scenario) error {
+	required := map[string]bool{
+		"FPL-PERF-STEADY-PULL-CURSOR-002":    false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-003": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-004": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-005": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-006": false,
+		"FPL-PERF-STEADY-PULL-PULL-005":      false,
+	}
+	for _, plan := range scenario.FaultPlans {
+		if _, found := required[string(plan.ID)]; found {
+			required[string(plan.ID)] = true
+		}
+	}
+	for id, found := range required {
+		if !found {
+			return fmt.Errorf("Kotlin Android steady-pull fault plan %s is absent", id)
+		}
+	}
+	return nil
+}
+
+func startKotlinSteadyPullFaultProxy(platform *Platform) (*steadyPullFaultProxy, func(), error) {
+	platform.mu.Lock()
+	if platform.closed {
+		platform.mu.Unlock()
+		return nil, nil, errors.New("Kotlin Android steady-pull platform is closed")
+	}
+	originalURL := platform.config.ServerURL
+	upstream, err := url.Parse(originalURL)
+	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
+		platform.mu.Unlock()
+		return nil, nil, errors.New("Kotlin Android steady-pull proxy upstream is invalid")
+	}
+	fault := &steadyPullFaultProxy{}
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	proxy.ModifyResponse = fault.modifyResponse
+	server := httptest.NewServer(proxy)
+	platform.config.ServerURL = server.URL
+	platform.mu.Unlock()
+	return fault, func() {
+		platform.mu.Lock()
+		if platform.config.ServerURL == server.URL {
+			platform.config.ServerURL = originalURL
+		}
+		platform.mu.Unlock()
+		server.Close()
+	}, nil
+}
+
+func (p *steadyPullFaultProxy) arm(fault steadyPullFault) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.armed != "" || p.applied != "" || p.failure != nil {
+		return errors.New("Kotlin Android steady-pull response fault is already active")
+	}
+	p.armed = fault
+	return nil
+}
+
+func (p *steadyPullFaultProxy) verify(fault steadyPullFault) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	defer func() {
+		p.applied = ""
+		p.failure = nil
+	}()
+	if p.failure != nil {
+		return p.failure
+	}
+	if p.armed != "" || p.applied != fault {
+		return fmt.Errorf("Kotlin Android steady-pull %s fault did not mutate one pull response", fault)
+	}
+	return nil
+}
+
+func (p *steadyPullFaultProxy) modifyResponse(response *http.Response) error {
+	if response.StatusCode != http.StatusOK || response.Request == nil || !strings.HasSuffix(response.Request.URL.Path, "/sync/pull") {
+		return nil
+	}
+	p.mu.Lock()
+	fault := p.armed
+	if fault == "" {
+		p.mu.Unlock()
+		return nil
+	}
+	p.armed = ""
+	p.mu.Unlock()
+	body, err := io.ReadAll(io.LimitReader(response.Body, steadyPullResponseLimit+1))
+	_ = response.Body.Close()
+	if err != nil || len(body) > steadyPullResponseLimit {
+		err = errors.New("Kotlin Android steady-pull pull response exceeds the fault bound")
+	} else {
+		body, err = mutateKotlinSteadyPullResponse(body, fault)
+	}
+	if err != nil {
+		p.mu.Lock()
+		p.failure = err
+		p.mu.Unlock()
+		return err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	p.mu.Lock()
+	p.applied = fault
+	p.mu.Unlock()
+	return nil
+}
+
+func mutateKotlinSteadyPullResponse(body []byte, fault steadyPullFault) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, errors.New("decode Kotlin Android steady-pull pull response failed")
+	}
+	var changes []map[string]json.RawMessage
+	if err := json.Unmarshal(response["changes"], &changes); err != nil || len(changes) != 1 {
+		return nil, errors.New("Kotlin Android steady-pull fault requires one canonical change")
+	}
+	switch fault {
+	case steadyPullMalformedTypedRow:
+		if err := mutateKotlinSteadyPullTypedRow(changes[0]); err != nil {
+			return nil, err
+		}
+	case steadyPullRowDigest:
+		if err := mutateKotlinSteadyPullChecksum(changes[0], "row_checksum"); err != nil {
+			return nil, err
+		}
+	case steadyPullScopeDigest:
+		if err := mutateKotlinSteadyPullScopeDigest(response); err != nil {
+			return nil, err
+		}
+	case steadyPullTerminalMap:
+		if err := mutateKotlinSteadyPullTerminalMap(response); err != nil {
+			return nil, err
+		}
+	case steadyPullDuplicateEffect:
+		duplicate, err := cloneKotlinSteadyPullChange(changes[0])
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, duplicate)
+	case steadyPullCursorBeforeApply:
+		later, err := cloneKotlinSteadyPullChange(changes[0])
+		if err != nil {
+			return nil, err
+		}
+		if err := mutateKotlinSteadyPullPrimaryKey(later); err != nil {
+			return nil, err
+		}
+		changes = append(changes, later)
+	default:
+		return nil, errors.New("Kotlin Android steady-pull fault is unsupported")
+	}
+	if fault != steadyPullScopeDigest && fault != steadyPullTerminalMap {
+		encoded, err := json.Marshal(changes)
+		if err != nil {
+			return nil, errors.New("encode Kotlin Android steady-pull changes failed")
+		}
+		response["changes"] = encoded
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return nil, errors.New("encode Kotlin Android steady-pull pull response failed")
+	}
+	return encoded, nil
+}
+
+func mutateKotlinSteadyPullTypedRow(change map[string]json.RawMessage) error {
+	var row map[string]json.RawMessage
+	var primary map[string]json.RawMessage
+	if json.Unmarshal(change["row"], &row) != nil || len(row) == 0 || json.Unmarshal(change["pk"], &primary) != nil {
+		return errors.New("Kotlin Android steady-pull typed-row fault target is invalid")
+	}
+	fields := make([]string, 0, len(row))
+	for field := range row {
+		if _, isPrimary := primary[field]; !isPrimary {
+			fields = append(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		return errors.New("Kotlin Android steady-pull typed-row fault has no writable field")
+	}
+	sort.Strings(fields)
+	row[fields[0]] = json.RawMessage("1")
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		return errors.New("encode Kotlin Android steady-pull typed-row fault failed")
+	}
+	change["row"] = encoded
+	return nil
+}
+
+func mutateKotlinSteadyPullChecksum(object map[string]json.RawMessage, member string) error {
+	var checksum map[string]json.RawMessage
+	if json.Unmarshal(object[member], &checksum) != nil || len(checksum) == 0 {
+		return errors.New("Kotlin Android steady-pull row-digest fault target is invalid")
+	}
+	checksum["digest"] = json.RawMessage(`"0000000000000000000000000000000000000000000000000000000000000000"`)
+	encoded, err := json.Marshal(checksum)
+	if err != nil {
+		return errors.New("encode Kotlin Android steady-pull row-digest fault failed")
+	}
+	object[member] = encoded
+	return nil
+}
+
+func mutateKotlinSteadyPullScopeDigest(response map[string]json.RawMessage) error {
+	var checksums map[string]json.RawMessage
+	if json.Unmarshal(response["checksums"], &checksums) != nil || len(checksums) != 1 {
+		return errors.New("Kotlin Android steady-pull scope-digest fault target is invalid")
+	}
+	for scope, raw := range checksums {
+		var checksum map[string]json.RawMessage
+		if json.Unmarshal(raw, &checksum) != nil {
+			return errors.New("Kotlin Android steady-pull scope digest is invalid")
+		}
+		checksum["algorithm"] = json.RawMessage(`"sha1"`)
+		encoded, err := json.Marshal(checksum)
+		if err != nil {
+			return errors.New("encode Kotlin Android steady-pull scope-digest fault failed")
+		}
+		checksums[scope] = encoded
+	}
+	encoded, err := json.Marshal(checksums)
+	if err != nil {
+		return errors.New("encode Kotlin Android steady-pull scope checksum map failed")
+	}
+	response["checksums"] = encoded
+	return nil
+}
+
+func mutateKotlinSteadyPullTerminalMap(response map[string]json.RawMessage) error {
+	var checksums map[string]json.RawMessage
+	if json.Unmarshal(response["checksums"], &checksums) != nil || len(checksums) != 1 {
+		return errors.New("Kotlin Android steady-pull terminal-map fault target is invalid")
+	}
+	for _, checksum := range checksums {
+		checksums["native-extra-scope"] = append(json.RawMessage(nil), checksum...)
+		break
+	}
+	encoded, err := json.Marshal(checksums)
+	if err != nil {
+		return errors.New("encode Kotlin Android steady-pull terminal-map fault failed")
+	}
+	response["checksums"] = encoded
+	return nil
+}
+
+func cloneKotlinSteadyPullChange(change map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	encoded, err := json.Marshal(change)
+	if err != nil {
+		return nil, errors.New("encode Kotlin Android steady-pull effect failed")
+	}
+	var clone map[string]json.RawMessage
+	if json.Unmarshal(encoded, &clone) != nil {
+		return nil, errors.New("clone Kotlin Android steady-pull effect failed")
+	}
+	return clone, nil
+}
+
+func mutateKotlinSteadyPullPrimaryKey(change map[string]json.RawMessage) error {
+	var primary map[string]json.RawMessage
+	var row map[string]json.RawMessage
+	if json.Unmarshal(change["pk"], &primary) != nil || len(primary) != 1 || json.Unmarshal(change["row"], &row) != nil {
+		return errors.New("Kotlin Android steady-pull cursor-before-apply fault target is invalid")
+	}
+	value, _ := json.Marshal("native-cursor-before-apply")
+	for field := range primary {
+		primary[field] = value
+		if _, found := row[field]; found {
+			row[field] = value
+		}
+	}
+	change["pk"], _ = json.Marshal(primary)
+	change["row"], _ = json.Marshal(row)
+	return nil
+}
+
+func validateKotlinSteadyPullFaultResult(fault steadyPullFault, result SynchronizationResult, snapshot Result) error {
+	if result.Completion != "error" || len(result.Steps) != 1 || len(result.transportObservations) != 1 || result.transportObservations[0].OperationClass != "pull" || result.transportObservations[0].StatusCode != http.StatusOK {
+		return fmt.Errorf("Kotlin Android steady-pull %s fault did not produce one failed pull call", fault)
+	}
+	failure := snapshot.Failure
+	if failure == nil || failure.Operation != "pulling" || failure.Code != "invalid_response" || failure.Retryable || failure.RecoveryAction != "retry" {
+		return fmt.Errorf("Kotlin Android steady-pull %s fault did not expose retry recovery evidence", fault)
+	}
+	return nil
+}
+
+func equalKotlinSteadyPullDurableState(left, right Result) bool {
+	normalize := func(value Result) Result {
+		value.Status = nil
+		value.RowsAffected = nil
+		value.Events = nil
+		value.EventsOverflowed = false
+		value.Failure = nil
+		value.TransportMilestone = nil
+		value.TransportObservations = nil
+		value.CallID = nil
+		value.State = nil
+		value.Completion = nil
+		value.CallErrorCategory = nil
+		value.ProcessID = ""
+		value.ProvenanceMaintenanceWorkCursor = nil
+		return value
+	}
+	return reflect.DeepEqual(normalize(left), normalize(right))
 }
 
 func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, measured SynchronizationResult, snapshot warmConnectSnapshot) (steadyPullIdentityEvidence, error) {

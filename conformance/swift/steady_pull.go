@@ -1,11 +1,21 @@
 package swift
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -30,7 +40,9 @@ var steadyPullAliasNames = []string{
 // SteadyPullResult records direct Swift evidence for the steady-pull scenario.
 type SteadyPullResult struct {
 	BaselineCall       SynchronizationResult
+	FaultCalls         []SynchronizationResult
 	MeasuredCall       SynchronizationResult
+	Restart            StepObservation
 	ClientFacts        []CaptureFacts
 	ServerFacts        scenarios.StateFacts
 	IdentityResolution []blackbox.NativeIdentityResolution
@@ -41,6 +53,34 @@ type steadyPullIdentityEvidence struct {
 	tableName   string
 }
 
+type steadyPullFault string
+
+const (
+	steadyPullMalformedTypedRow steadyPullFault = "malformed-typed-row"
+	steadyPullRowDigest         steadyPullFault = "row-digest"
+	steadyPullScopeDigest       steadyPullFault = "scope-digest"
+	steadyPullTerminalMap       steadyPullFault = "terminal-map"
+	steadyPullDuplicateEffect   steadyPullFault = "duplicate-effect"
+	steadyPullCursorBeforeApply steadyPullFault = "cursor-before-apply"
+	steadyPullResponseLimit                     = 16 << 20
+)
+
+var steadyPullFaults = []steadyPullFault{
+	steadyPullMalformedTypedRow,
+	steadyPullRowDigest,
+	steadyPullScopeDigest,
+	steadyPullTerminalMap,
+	steadyPullDuplicateEffect,
+	steadyPullCursorBeforeApply,
+}
+
+type steadyPullFaultProxy struct {
+	mu      sync.Mutex
+	armed   steadyPullFault
+	applied steadyPullFault
+	failure error
+}
+
 // RunSteadyPullScenario executes the authored steady-pull flow through Swift.
 func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (SteadyPullResult, error) {
 	steps, err := swiftScenarioStepMap(scenario, steadyPullScenarioID, 8)
@@ -49,6 +89,9 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	}
 	if controller == nil || platform == nil {
 		return SteadyPullResult{}, errors.New("Swift steady-pull dependencies are unavailable")
+	}
+	if err := validateSwiftSteadyPullFaultPlans(scenario); err != nil {
+		return SteadyPullResult{}, err
 	}
 	for _, id := range []string{
 		"STEP-PERF-STEADY-PULL-BASELINE-REQUEST-001",
@@ -61,6 +104,11 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return SteadyPullResult{}, fmt.Errorf("install Swift steady-pull contract: %w", err)
 	}
+	faultProxy, closeFaultProxy, err := startSwiftSteadyPullFaultProxy(platform)
+	if err != nil {
+		return SteadyPullResult{}, err
+	}
+	defer closeFaultProxy()
 	if err := platform.Install(ctx, client, "empty", ""); err != nil {
 		return SteadyPullResult{}, fmt.Errorf("install Swift steady-pull client: %w", err)
 	}
@@ -86,6 +134,10 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err := validateSwiftSteadyPullBaselineWires(scenario, baseline); err != nil {
 		return SteadyPullResult{}, err
 	}
+	pristine, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return SteadyPullResult{}, fmt.Errorf("capture Swift steady-pull pristine state: %w", err)
+	}
 
 	commit, err := swiftScenarioOperation(steps, "STEP-PERF-STEADY-PULL-COMMIT-001", "model/commit-source-transaction")
 	if err != nil {
@@ -102,15 +154,67 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 		return SteadyPullResult{}, fmt.Errorf("materialize Swift steady-pull source transaction: %w", err)
 	}
 
-	measured, err := platform.Synchronize(ctx, client, "sync-now", RequestOperations{measuredPull})
+	faultCalls := make([]SynchronizationResult, 0, len(steadyPullFaults))
+	for index, fault := range steadyPullFaults {
+		if err := faultProxy.arm(fault); err != nil {
+			return SteadyPullResult{}, err
+		}
+		method := "retry-after-error"
+		if index == 0 {
+			method = "sync-now"
+		}
+		failed, callErr := platform.Synchronize(ctx, client, method, RequestOperations{measuredPull})
+		if callErr != nil {
+			return SteadyPullResult{}, fmt.Errorf("run Swift steady-pull %s fault: %w", fault, callErr)
+		}
+		if err := faultProxy.verify(fault); err != nil {
+			return SteadyPullResult{}, err
+		}
+		afterFault, captureErr := platform.captureSnapshot(ctx, client)
+		if captureErr != nil {
+			return SteadyPullResult{}, fmt.Errorf("capture Swift steady-pull %s fault state: %w", fault, captureErr)
+		}
+		if err := validateSwiftSteadyPullFaultResult(fault, failed, afterFault); err != nil {
+			return SteadyPullResult{}, err
+		}
+		if !equalSwiftSteadyPullDurableState(pristine, afterFault) {
+			return SteadyPullResult{}, fmt.Errorf("Swift steady-pull %s fault changed durable rows or cursor state", fault)
+		}
+		faultCalls = append(faultCalls, failed)
+	}
+
+	measured, err := platform.Synchronize(ctx, client, "retry-after-error", RequestOperations{measuredPull})
 	if err != nil {
-		return SteadyPullResult{}, fmt.Errorf("run Swift measured pull: %w", err)
+		return SteadyPullResult{}, fmt.Errorf("retry Swift measured pull: %w", err)
 	}
 	if measured.Completion != "idle" || len(measured.Steps) != 1 || len(measured.transportObservations) != 1 || measured.transportObservations[0].StatusCode != 200 {
 		return SteadyPullResult{}, errors.New("Swift measured pull did not complete successfully")
 	}
 	if err := validateSwiftWireExpectation(scenario, "STEP-PERF-STEADY-PULL-001", "pull", measured); err != nil {
 		return SteadyPullResult{}, err
+	}
+	beforeRestart, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return SteadyPullResult{}, fmt.Errorf("capture Swift steady-pull state before restart: %w", err)
+	}
+	restartOperation := scenarios.Operation{
+		ContractOperation: "process",
+		Name:              "restart-client",
+		Payload:           queueJSON(map[string]any{"user_id": client.UserID, "client_id": client.ClientID}),
+	}
+	restart, err := platform.ProcessStep(ctx, client, restartOperation)
+	if err != nil {
+		return SteadyPullResult{}, fmt.Errorf("restart Swift steady-pull client: %w", err)
+	}
+	if restart.Disposition != "success" {
+		return SteadyPullResult{}, fmt.Errorf("restart Swift steady-pull client returned disposition %q", restart.Disposition)
+	}
+	afterRestart, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return SteadyPullResult{}, fmt.Errorf("capture Swift steady-pull state after restart: %w", err)
+	}
+	if !equalSwiftSteadyPullDurableState(beforeRestart, afterRestart) {
+		return SteadyPullResult{}, errors.New("Swift steady-pull restart changed durable rows or cursor state")
 	}
 
 	clientFacts, err := platform.Capture(ctx, []Client{client}, []string{
@@ -124,10 +228,7 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err != nil {
 		return SteadyPullResult{}, fmt.Errorf("capture Swift steady-pull client state: %w", err)
 	}
-	snapshot, err := platform.captureSnapshot(ctx, client)
-	if err != nil {
-		return SteadyPullResult{}, fmt.Errorf("capture Swift steady-pull identity state: %w", err)
-	}
+	snapshot := afterRestart
 	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
 	if err != nil || len(serverCaptures) != 1 {
 		return SteadyPullResult{}, fmt.Errorf("capture Swift steady-pull server state: %w", err)
@@ -149,11 +250,309 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	}
 	return SteadyPullResult{
 		BaselineCall:       baseline,
+		FaultCalls:         faultCalls,
 		MeasuredCall:       measured,
+		Restart:            restart,
 		ClientFacts:        clientFacts,
 		ServerFacts:        serverCaptures[0].StateFacts,
 		IdentityResolution: identityEvidence.resolutions,
 	}, nil
+}
+
+func validateSwiftSteadyPullFaultPlans(scenario scenarios.Scenario) error {
+	required := map[string]bool{
+		"FPL-PERF-STEADY-PULL-CURSOR-002":    false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-003": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-004": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-005": false,
+		"FPL-PERF-STEADY-PULL-INTEGRITY-006": false,
+		"FPL-PERF-STEADY-PULL-PULL-005":      false,
+	}
+	for _, plan := range scenario.FaultPlans {
+		if _, found := required[string(plan.ID)]; found {
+			required[string(plan.ID)] = true
+		}
+	}
+	for id, found := range required {
+		if !found {
+			return fmt.Errorf("Swift steady-pull fault plan %s is absent", id)
+		}
+	}
+	return nil
+}
+
+func startSwiftSteadyPullFaultProxy(platform *Platform) (*steadyPullFaultProxy, func(), error) {
+	platform.mu.Lock()
+	if platform.closed {
+		platform.mu.Unlock()
+		return nil, nil, errors.New("Swift steady-pull platform is closed")
+	}
+	originalURL := platform.config.ServerURL
+	upstream, err := url.Parse(originalURL)
+	if err != nil || upstream.Scheme == "" || upstream.Host == "" {
+		platform.mu.Unlock()
+		return nil, nil, errors.New("Swift steady-pull proxy upstream is invalid")
+	}
+	fault := &steadyPullFaultProxy{}
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	proxy.ModifyResponse = fault.modifyResponse
+	server := httptest.NewServer(proxy)
+	platform.config.ServerURL = server.URL
+	platform.mu.Unlock()
+	return fault, func() {
+		platform.mu.Lock()
+		if platform.config.ServerURL == server.URL {
+			platform.config.ServerURL = originalURL
+		}
+		platform.mu.Unlock()
+		server.Close()
+	}, nil
+}
+
+func (p *steadyPullFaultProxy) arm(fault steadyPullFault) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.armed != "" || p.applied != "" || p.failure != nil {
+		return errors.New("Swift steady-pull response fault is already active")
+	}
+	p.armed = fault
+	return nil
+}
+
+func (p *steadyPullFaultProxy) verify(fault steadyPullFault) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	defer func() {
+		p.applied = ""
+		p.failure = nil
+	}()
+	if p.failure != nil {
+		return p.failure
+	}
+	if p.armed != "" || p.applied != fault {
+		return fmt.Errorf("Swift steady-pull %s fault did not mutate one pull response", fault)
+	}
+	return nil
+}
+
+func (p *steadyPullFaultProxy) modifyResponse(response *http.Response) error {
+	if response.StatusCode != http.StatusOK || response.Request == nil || !strings.HasSuffix(response.Request.URL.Path, "/sync/pull") {
+		return nil
+	}
+	p.mu.Lock()
+	fault := p.armed
+	if fault == "" {
+		p.mu.Unlock()
+		return nil
+	}
+	p.armed = ""
+	p.mu.Unlock()
+	body, err := io.ReadAll(io.LimitReader(response.Body, steadyPullResponseLimit+1))
+	_ = response.Body.Close()
+	if err != nil || len(body) > steadyPullResponseLimit {
+		err = errors.New("Swift steady-pull pull response exceeds the fault bound")
+	} else {
+		body, err = mutateSwiftSteadyPullResponse(body, fault)
+	}
+	if err != nil {
+		p.mu.Lock()
+		p.failure = err
+		p.mu.Unlock()
+		return err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	p.mu.Lock()
+	p.applied = fault
+	p.mu.Unlock()
+	return nil
+}
+
+func mutateSwiftSteadyPullResponse(body []byte, fault steadyPullFault) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, errors.New("decode Swift steady-pull pull response failed")
+	}
+	var changes []map[string]json.RawMessage
+	if err := json.Unmarshal(response["changes"], &changes); err != nil || len(changes) != 1 {
+		return nil, errors.New("Swift steady-pull fault requires one canonical change")
+	}
+	switch fault {
+	case steadyPullMalformedTypedRow:
+		if err := mutateSwiftSteadyPullTypedRow(changes[0]); err != nil {
+			return nil, err
+		}
+	case steadyPullRowDigest:
+		if err := mutateSwiftSteadyPullChecksum(changes[0], "row_checksum"); err != nil {
+			return nil, err
+		}
+	case steadyPullScopeDigest:
+		if err := mutateSwiftSteadyPullScopeDigest(response); err != nil {
+			return nil, err
+		}
+	case steadyPullTerminalMap:
+		if err := mutateSwiftSteadyPullTerminalMap(response); err != nil {
+			return nil, err
+		}
+	case steadyPullDuplicateEffect:
+		duplicate, err := cloneSwiftSteadyPullChange(changes[0])
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, duplicate)
+	case steadyPullCursorBeforeApply:
+		later, err := cloneSwiftSteadyPullChange(changes[0])
+		if err != nil {
+			return nil, err
+		}
+		if err := mutateSwiftSteadyPullPrimaryKey(later); err != nil {
+			return nil, err
+		}
+		changes = append(changes, later)
+	default:
+		return nil, errors.New("Swift steady-pull fault is unsupported")
+	}
+	if fault != steadyPullScopeDigest && fault != steadyPullTerminalMap {
+		encoded, err := json.Marshal(changes)
+		if err != nil {
+			return nil, errors.New("encode Swift steady-pull changes failed")
+		}
+		response["changes"] = encoded
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return nil, errors.New("encode Swift steady-pull pull response failed")
+	}
+	return encoded, nil
+}
+
+func mutateSwiftSteadyPullTypedRow(change map[string]json.RawMessage) error {
+	var row map[string]json.RawMessage
+	var primary map[string]json.RawMessage
+	if json.Unmarshal(change["row"], &row) != nil || len(row) == 0 || json.Unmarshal(change["pk"], &primary) != nil {
+		return errors.New("Swift steady-pull typed-row fault target is invalid")
+	}
+	fields := make([]string, 0, len(row))
+	for field := range row {
+		if _, isPrimary := primary[field]; !isPrimary {
+			fields = append(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		return errors.New("Swift steady-pull typed-row fault has no writable field")
+	}
+	sort.Strings(fields)
+	row[fields[0]] = json.RawMessage("1")
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		return errors.New("encode Swift steady-pull typed-row fault failed")
+	}
+	change["row"] = encoded
+	return nil
+}
+
+func mutateSwiftSteadyPullChecksum(object map[string]json.RawMessage, member string) error {
+	var checksum map[string]json.RawMessage
+	if json.Unmarshal(object[member], &checksum) != nil || len(checksum) == 0 {
+		return errors.New("Swift steady-pull row-digest fault target is invalid")
+	}
+	checksum["digest"] = json.RawMessage(`"0000000000000000000000000000000000000000000000000000000000000000"`)
+	encoded, err := json.Marshal(checksum)
+	if err != nil {
+		return errors.New("encode Swift steady-pull row-digest fault failed")
+	}
+	object[member] = encoded
+	return nil
+}
+
+func mutateSwiftSteadyPullScopeDigest(response map[string]json.RawMessage) error {
+	var checksums map[string]json.RawMessage
+	if json.Unmarshal(response["checksums"], &checksums) != nil || len(checksums) != 1 {
+		return errors.New("Swift steady-pull scope-digest fault target is invalid")
+	}
+	for scope, raw := range checksums {
+		var checksum map[string]json.RawMessage
+		if json.Unmarshal(raw, &checksum) != nil {
+			return errors.New("Swift steady-pull scope digest is invalid")
+		}
+		checksum["algorithm"] = json.RawMessage(`"sha1"`)
+		checksums[scope], _ = json.Marshal(checksum)
+	}
+	response["checksums"], _ = json.Marshal(checksums)
+	return nil
+}
+
+func mutateSwiftSteadyPullTerminalMap(response map[string]json.RawMessage) error {
+	var checksums map[string]json.RawMessage
+	if json.Unmarshal(response["checksums"], &checksums) != nil || len(checksums) != 1 {
+		return errors.New("Swift steady-pull terminal-map fault target is invalid")
+	}
+	for _, checksum := range checksums {
+		checksums["native-extra-scope"] = append(json.RawMessage(nil), checksum...)
+		break
+	}
+	response["checksums"], _ = json.Marshal(checksums)
+	return nil
+}
+
+func cloneSwiftSteadyPullChange(change map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	encoded, err := json.Marshal(change)
+	if err != nil {
+		return nil, errors.New("encode Swift steady-pull effect failed")
+	}
+	var clone map[string]json.RawMessage
+	if json.Unmarshal(encoded, &clone) != nil {
+		return nil, errors.New("clone Swift steady-pull effect failed")
+	}
+	return clone, nil
+}
+
+func mutateSwiftSteadyPullPrimaryKey(change map[string]json.RawMessage) error {
+	var primary map[string]json.RawMessage
+	var row map[string]json.RawMessage
+	if json.Unmarshal(change["pk"], &primary) != nil || len(primary) != 1 || json.Unmarshal(change["row"], &row) != nil {
+		return errors.New("Swift steady-pull cursor-before-apply fault target is invalid")
+	}
+	value, _ := json.Marshal("native-cursor-before-apply")
+	for field := range primary {
+		primary[field] = value
+		if _, found := row[field]; found {
+			row[field] = value
+		}
+	}
+	change["pk"], _ = json.Marshal(primary)
+	change["row"], _ = json.Marshal(row)
+	return nil
+}
+
+func validateSwiftSteadyPullFaultResult(fault steadyPullFault, result SynchronizationResult, snapshot runnerResult) error {
+	if result.Completion != "error" || len(result.Steps) != 1 || len(result.transportObservations) != 1 || result.transportObservations[0].OperationClass != "pull" || result.transportObservations[0].StatusCode != http.StatusOK {
+		return fmt.Errorf("Swift steady-pull %s fault did not produce one failed pull call", fault)
+	}
+	failure := snapshot.Failure
+	if failure == nil || failure.Operation != "pulling" || failure.Code != "invalid_response" || failure.Retryable || failure.RecoveryAction != "retry" {
+		return fmt.Errorf("Swift steady-pull %s fault did not expose retry recovery evidence", fault)
+	}
+	return nil
+}
+
+func equalSwiftSteadyPullDurableState(left, right runnerResult) bool {
+	normalize := func(value runnerResult) runnerResult {
+		value.Status = nil
+		value.RowsAffected = nil
+		value.Events = nil
+		value.Failure = nil
+		value.TransportObservations = nil
+		value.CallID = nil
+		value.State = nil
+		value.Completion = nil
+		value.CallErrorCategory = nil
+		value.ProcessID = ""
+		value.ProvenanceMaintenanceWorkCursor = nil
+		return value
+	}
+	return reflect.DeepEqual(normalize(left), normalize(right))
 }
 
 func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, measured SynchronizationResult, snapshot runnerResult) (steadyPullIdentityEvidence, error) {

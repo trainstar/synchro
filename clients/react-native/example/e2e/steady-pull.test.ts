@@ -31,6 +31,19 @@ function isJSONObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isRestartCommand(command: Record<string, unknown>): boolean {
+  if (!isJSONObject(command.action) || !isJSONObject(command.action.action)) {
+    return false;
+  }
+  const action = command.action.action;
+  return (
+    action.actor === 'client' &&
+    action.command === 'open' &&
+    isJSONObject(action.parameters) &&
+    action.parameters.database_mode === 'reuse'
+  );
+}
+
 function coordinatorConfiguration(): { endpoint: string; token: string } {
   const configuredURL = process.env.SYNCHRO_RN_COORDINATOR_URL;
   const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
@@ -175,19 +188,28 @@ it('executes the steady-pull coordinator sequence', async () => {
 
   let rawResult = 'null';
   let commandCount = 0;
-  for (let sequence = 1; sequence <= 7; sequence += 1) {
+	for (let sequence = 1; sequence <= 22; sequence += 1) {
     const response = await exchange(endpoint, token, sequence, rawResult);
     if (response.state === 'complete') {
-      if (sequence !== 7 || commandCount !== 6) {
+		if (sequence !== 22 || commandCount !== 21) {
         throw new Error('React Native steady-pull coordinator completed at an invalid sequence');
       }
       return;
     }
     commandCount += 1;
-    if (commandCount > 6) {
+		if (commandCount > 21) {
       throw new Error('React Native steady-pull coordinator returned too many commands');
     }
     try {
+      if (isRestartCommand(response.command)) {
+        await device.terminateApp();
+        await device.launchApp({
+          newInstance: true,
+          delete: false,
+          launchArgs: { synchroConformance: '1' },
+        });
+        await expect(element(by.id('conformance-harness'))).toBeVisible();
+      }
       rawResult = await executeCommand(response.command);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
