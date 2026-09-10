@@ -14,6 +14,19 @@ private struct SeedReceiptForConnect {
     let checksum: ChecksumObject?
 }
 
+private struct PullEffectKey: Hashable {
+    let scopeID: String
+    let tableID: String
+    let primaryKeyIdentity: Data
+}
+
+private struct ValidatedPullChange {
+    let change: ChangeRecord
+    let schema: LocalSchemaTable
+    let recordID: String
+    let effectKey: PullEffectKey
+}
+
 final class PullProcessor: @unchecked Sendable {
     private static let protectionLookupChunkSize = 400
 
@@ -82,11 +95,7 @@ final class PullProcessor: @unchecked Sendable {
         }
         let tablesByID = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
         let tablesByName = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableName, $0) })
-        let validatedChanges = try changes.map { change -> (
-            change: ChangeRecord,
-            schema: LocalSchemaTable,
-            recordID: String
-        ) in
+        let validatedChanges = try changes.map { change -> ValidatedPullChange in
             guard let schema = tablesByID[change.table] else {
                 throw SynchroError.invalidResponse(message: "unknown logical table \(change.table)")
             }
@@ -105,8 +114,18 @@ final class PullProcessor: @unchecked Sendable {
                     throw SynchroError.invalidResponse(message: "rowless delete has a row checksum")
                 }
             }
-            return (change, schema, recordID)
+            return ValidatedPullChange(
+                change: change,
+                schema: schema,
+                recordID: recordID,
+                effectKey: PullEffectKey(
+                    scopeID: change.scope,
+                    tableID: change.table,
+                    primaryKeyIdentity: try typedPrimaryKeyIdentity(pk: change.pk, schema: schema)
+                )
+            )
         }
+        try validateUniquePullEffects(validatedChanges)
 
         try database.writeSyncLockedTransaction { db in
             for validated in validatedChanges {
@@ -664,6 +683,26 @@ final class PullProcessor: @unchecked Sendable {
         return checksum.digest
     }
 
+    private func validateUniquePullEffects(_ changes: [ValidatedPullChange]) throws {
+        var effectIdentities: [PullEffectKey: Data] = [:]
+        for validated in changes {
+            let effectIdentity: Data
+            do {
+                effectIdentity = try JSONEncoder.synchroEncoder().encode(validated.change)
+            } catch {
+                throw SynchroError.invalidResponse(message: "pull effect identity is invalid")
+            }
+            guard let priorIdentity = effectIdentities[validated.effectKey] else {
+                effectIdentities[validated.effectKey] = effectIdentity
+                continue
+            }
+            if priorIdentity == effectIdentity {
+                throw SynchroError.invalidResponse(message: "duplicate pull effect identity")
+            }
+            throw SynchroError.invalidResponse(message: "conflicting pull effect identity")
+        }
+    }
+
     private func loadSeedReceiptsForConnect(_ db: GRDB.Database) throws -> [SeedReceiptForConnect] {
         let rows = try Row.fetchAll(
             db,
@@ -1043,17 +1082,24 @@ final class PullProcessor: @unchecked Sendable {
     }
 
     private func scopeRecordID(pk: [String: AnyCodable], schema: LocalSchemaTable) throws -> String {
-        do {
-            _ = try Integrity.rowIdentity(table: schema, pk: pk)
-        } catch {
-            throw SynchroError.invalidResponse(message: "invalid primary key for \(schema.tableName)")
-        }
+        _ = try typedPrimaryKeyIdentity(pk: pk, schema: schema)
         guard let value = pk[schema.primaryKeyFieldID]?.value else {
             throw SynchroError.invalidResponse(
                 message: "missing primary key \(schema.primaryKeyFieldID) for \(schema.tableName)"
             )
         }
         return String(describing: value)
+    }
+
+    private func typedPrimaryKeyIdentity(
+        pk: [String: AnyCodable],
+        schema: LocalSchemaTable
+    ) throws -> Data {
+        do {
+            return try Integrity.rowIdentity(table: schema, pk: pk)
+        } catch {
+            throw SynchroError.invalidResponse(message: "invalid primary key for \(schema.tableName)")
+        }
     }
 
     private func applyScopeDeleteChange(

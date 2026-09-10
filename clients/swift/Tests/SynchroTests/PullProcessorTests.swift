@@ -471,6 +471,149 @@ final class PullProcessorTests: XCTestCase {
         XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["w1"]))
     }
 
+    func testPullRejectsRepeatedExactEffectWithoutRowsOrCursorProgress() throws {
+        let (db, processor) = try makeTestEnv()
+        let scopeID = "orders:duplicate"
+        try db.writeTransaction {
+            try SynchroMeta.upsertScope($0, scopeID: scopeID, cursor: "cursor-before", checksum: nil)
+        }
+        let row = orderRow(
+            recordID: "duplicate-row",
+            shipAddress: "server",
+            updatedAt: "2026-01-02T00:00:00.000000Z"
+        )
+        let change = try makeChangeRecord(
+            scope: scopeID,
+            schema: testTable.localSchema,
+            op: .upsert,
+            pk: ["id": AnyCodable("duplicate-row")],
+            row: row,
+            serverVersion: "2026-01-02T00:00:00.000000Z"
+        )
+
+        XCTAssertThrowsError(try processor.applyScopeChanges(
+            changes: [change, change],
+            syncedTables: [testTable.localSchema],
+            scopeCursors: [scopeID: "cursor-after"],
+            checksums: nil,
+            schemaHash: protocolTestSchemaHash
+        )) { error in
+            guard case SynchroError.invalidResponse(let message) = error else {
+                return XCTFail("expected invalid pull response")
+            }
+            XCTAssertEqual(message, "duplicate pull effect identity")
+        }
+        XCTAssertEqual(try db.query("SELECT id FROM orders", params: nil).count, 0)
+        XCTAssertEqual(try db.query("SELECT record_id FROM _synchro_scope_rows", params: nil).count, 0)
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor },
+            "cursor-before"
+        )
+    }
+
+    func testPullRejectsConflictingEffectsWithoutRowsOrCursorProgress() throws {
+        let (db, processor) = try makeTestEnv()
+        let scopeID = "orders:conflicting"
+        let recordID = "conflicting-row"
+        try db.writeTransaction {
+            try SynchroMeta.upsertScope($0, scopeID: scopeID, cursor: "cursor-before", checksum: nil)
+        }
+        let first = try makeChangeRecord(
+            scope: scopeID,
+            schema: testTable.localSchema,
+            op: .upsert,
+            pk: ["id": AnyCodable(recordID)],
+            row: orderRow(
+                recordID: recordID,
+                shipAddress: "first",
+                updatedAt: "2026-01-02T00:00:00.000000Z"
+            ),
+            serverVersion: "2026-01-02T00:00:00.000000Z"
+        )
+        let second = try makeChangeRecord(
+            scope: scopeID,
+            schema: testTable.localSchema,
+            op: .upsert,
+            pk: ["id": AnyCodable(recordID)],
+            row: orderRow(
+                recordID: recordID,
+                shipAddress: "second",
+                updatedAt: "2026-01-03T00:00:00.000000Z"
+            ),
+            serverVersion: "2026-01-03T00:00:00.000000Z"
+        )
+
+        XCTAssertThrowsError(try processor.applyScopeChanges(
+            changes: [first, second],
+            syncedTables: [testTable.localSchema],
+            scopeCursors: [scopeID: "cursor-after"],
+            checksums: nil,
+            schemaHash: protocolTestSchemaHash
+        )) { error in
+            guard case SynchroError.invalidResponse(let message) = error else {
+                return XCTFail("expected invalid pull response")
+            }
+            XCTAssertEqual(message, "conflicting pull effect identity")
+        }
+        XCTAssertEqual(try db.query("SELECT id FROM orders", params: nil).count, 0)
+        XCTAssertEqual(try db.query("SELECT record_id FROM _synchro_scope_rows", params: nil).count, 0)
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor },
+            "cursor-before"
+        )
+    }
+
+    func testPullAppliesSameTypedRowInDifferentScopes() throws {
+        let (db, processor) = try makeTestEnv()
+        let recordID = "shared-row"
+        let firstScopeID = "orders:user"
+        let secondScopeID = "orders:team"
+        try db.writeTransaction {
+            try SynchroMeta.upsertScope($0, scopeID: firstScopeID, cursor: "first-before", checksum: nil)
+            try SynchroMeta.upsertScope($0, scopeID: secondScopeID, cursor: "second-before", checksum: nil)
+        }
+        let row = orderRow(
+            recordID: recordID,
+            shipAddress: "server",
+            updatedAt: "2026-01-02T00:00:00.000000Z"
+        )
+        let changes = try [firstScopeID, secondScopeID].map {
+            try makeChangeRecord(
+                scope: $0,
+                schema: testTable.localSchema,
+                op: .upsert,
+                pk: ["id": AnyCodable(recordID)],
+                row: row,
+                serverVersion: "2026-01-02T00:00:00.000000Z"
+            )
+        }
+
+        try processor.applyScopeChanges(
+            changes: changes,
+            syncedTables: [testTable.localSchema],
+            scopeCursors: [firstScopeID: "first-after", secondScopeID: "second-after"],
+            checksums: nil,
+            schemaHash: protocolTestSchemaHash
+        )
+
+        XCTAssertEqual(try db.query("SELECT id FROM orders", params: nil).count, 1)
+        XCTAssertEqual(
+            try db.query(
+                "SELECT scope_id FROM _synchro_scope_rows WHERE table_name = ? AND record_id = ?",
+                params: [testTable.tableName, recordID]
+            ).count,
+            2
+        )
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getScope($0, scopeID: firstScopeID)?.cursor },
+            "first-after"
+        )
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getScope($0, scopeID: secondScopeID)?.cursor },
+            "second-after"
+        )
+    }
+
     func testPullRejectsRowPrimaryKeyDifferentFromResponsePrimaryKey() throws {
         let (db, processor) = try makeTestEnv()
         let schema = testTable.localSchema
