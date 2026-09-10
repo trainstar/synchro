@@ -6,6 +6,7 @@
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
     "SYNC-REBUILD-003",
+    "SYNC-REBUILD-004",
     "SYNC-REBUILD-005",
     "SYNC-REBUILD-008"
   ],
@@ -13,6 +14,10 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#first-sync-uses-rebuild-semantics"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#durable-rebuild-state-invariant"
     },
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
@@ -27,6 +32,7 @@
     "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
@@ -92,11 +98,13 @@
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
         "SYNC-REBUILD-005",
         "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
         "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
@@ -221,12 +229,14 @@
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
         "SYNC-REBUILD-005",
         "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
         "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
@@ -258,12 +268,14 @@
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
       "requirement_ids": [
         "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
         "SYNC-REBUILD-005",
         "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
         "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
@@ -297,12 +309,14 @@
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
         "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
         "SYNC-REBUILD-005",
         "SYNC-REBUILD-008"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
         "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
       ],
@@ -413,9 +427,112 @@
       ],
       "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
       "control_id": "CTRL-REBUILD-005"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-FAULT-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "control_id": "CTRL-REBUILD-004"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001",
+        "ARTDEF-KOTLIN-MAVEN-001",
+        "ARTDEF-RN-NPM-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "control_id": "CTRL-REBUILD-004"
     }
   ],
   "ownership": [
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-FAULT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "requirement_id": "SYNC-REBUILD-003",
@@ -1007,6 +1124,25 @@
           "defect": "wait indefinitely for application approval or app-owned orchestration"
         }
       }
+    },
+    {
+      "id": "FPL-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "fault_id": "FAULT-REBUILD-004",
+      "control_id": "CTRL-REBUILD-004",
+      "barrier_id": "BAR-PERF-REBUILD-REQUESTS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
+      ],
+      "injection": {
+        "mechanism": "process-fault",
+        "target": "rebuild page apply and verification journal",
+        "operator": "crash",
+        "parameters": {
+          "scenario": "kill the client between page apply and checksum or cursor commit",
+          "defect": "resume as completed without durable evidence for the partial state"
+        }
+      }
     }
   ],
   "replay": {
@@ -1054,6 +1190,20 @@
       ],
       "detected_by": [
         "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-004",
+      "requirement_id": "SYNC-REBUILD-004",
+      "fault_id": "FAULT-REBUILD-004",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001",
+        "ARTDEF-KOTLIN-MAVEN-001",
+        "ARTDEF-RN-NPM-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
       ]
     }
   ],
@@ -1603,6 +1753,29 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-004"
+      ],
+      "description": "A restarted client preserves durable partial rebuild state, replays the terminal page, and avoids a false final state.",
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-004"
+      ]
     },
     {
       "id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",

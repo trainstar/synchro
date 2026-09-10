@@ -1374,9 +1374,12 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 	case "process/restart-client":
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		if err := state.available("restart"); err != nil {
-			return StepObservation{}, err
+		if state.terminated || state.session == nil || state.pendingLoss != nil || state.activeCall != nil && !state.activeCall.paused {
+			return StepObservation{}, errors.New("Kotlin Android client is unavailable for restart")
 		}
+		// A staged call is paused before its next local transition. Killing it here
+		// models process loss at that durable boundary, not a completed call restart.
+		state.activeCall = nil
 		started := time.Now()
 		opened, err := p.restartClient(ctx, state)
 		if err != nil {

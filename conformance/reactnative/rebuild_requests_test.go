@@ -66,7 +66,7 @@ func TestNewRebuildRequestsCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testi
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android rebuild-requests adapter URL = %q", coordinator.adapter)
 	}
-	if got, want := coordinator.ExchangeCount(), 9; got != want {
+	if got, want := coordinator.ExchangeCount(), 12; got != want {
 		t.Fatalf("rebuild-requests exchange count = %d, want %d", got, want)
 	}
 }
@@ -89,6 +89,7 @@ func TestRebuildRequestsStagesOnePublicStepPerCommand(t *testing.T) {
 		{rebuildRequestsStageBegin, "client", "begin-call", rebuildRequestsStepOrder[3]},
 		{rebuildRequestsStageFirstPage, "observer", "await-step", rebuildRequestsStepOrder[5]},
 		{rebuildRequestsStageFinalPage, "observer", "await-step", rebuildRequestsStepOrder[9]},
+		{rebuildRequestsStageRecoveryFinalPage, "observer", "await-step", rebuildRequestsStepOrder[9]},
 		{rebuildRequestsStagePull, "observer", "await-step", rebuildRequestsStepOrder[12]},
 	}
 	for _, test := range tests {
@@ -141,14 +142,17 @@ func TestRebuildRequestsAuthoredFlowMatchesExchangeCount(t *testing.T) {
 	}
 
 	expectedCommands := map[rebuildRequestsStage][2]string{
-		rebuildRequestsStageOpen:            {"client", "open"},
-		rebuildRequestsStageBegin:           {"client", "begin-call"},
-		rebuildRequestsStageFirstPage:       {"observer", "await-step"},
-		rebuildRequestsStageFinalPage:       {"observer", "await-step"},
-		rebuildRequestsStagePull:            {"observer", "await-step"},
-		rebuildRequestsStageAwaitCall:       {"client", "await-call"},
-		rebuildRequestsStageFinalCapture:    {"observer", "capture"},
-		rebuildRequestsStageApplicationRows: {"observer", "capture"},
+		rebuildRequestsStageOpen:              {"client", "open"},
+		rebuildRequestsStageBegin:             {"client", "begin-call"},
+		rebuildRequestsStageFirstPage:         {"observer", "await-step"},
+		rebuildRequestsStageFinalPage:         {"observer", "await-step"},
+		rebuildRequestsStageRestart:           {"client", "open"},
+		rebuildRequestsStageRecoveryBegin:     {"client", "begin-call"},
+		rebuildRequestsStageRecoveryFinalPage: {"observer", "await-step"},
+		rebuildRequestsStagePull:              {"observer", "await-step"},
+		rebuildRequestsStageAwaitCall:         {"client", "await-call"},
+		rebuildRequestsStageFinalCapture:      {"observer", "capture"},
+		rebuildRequestsStageApplicationRows:   {"observer", "capture"},
 	}
 	commands := 0
 	for coordinator.stage != rebuildRequestsStageComplete {
@@ -177,7 +181,7 @@ func TestRebuildRequestsAuthoredFlowMatchesExchangeCount(t *testing.T) {
 	if got, want := coordinator.ExchangeCount(), commands+1; got != want {
 		t.Fatalf("rebuild-requests full-flow exchange count = %d, want command walk plus terminal exchange %d", got, want)
 	}
-	if got, want := coordinator.ExchangeCount(), 9; got != want {
+	if got, want := coordinator.ExchangeCount(), 12; got != want {
 		t.Fatalf("rebuild-requests ExchangeCount = %d, want authored e2e stage count %d", got, want)
 	}
 	if got, want := coordinator.nextSeq-1, uint64(commands); got != want {
@@ -188,7 +192,7 @@ func TestRebuildRequestsAuthoredFlowMatchesExchangeCount(t *testing.T) {
 		t.Fatalf("rebuild-requests terminal exchange status = %d, want %d", terminal.Code, http.StatusUnprocessableEntity)
 	}
 	_, terminalErr := coordinator.Result()
-	if terminalErr == nil || !strings.Contains(terminalErr.Error(), "current stage=complete") || !strings.Contains(terminalErr.Error(), "exchanges served=8") || !strings.Contains(terminalErr.Error(), "ExchangeCount=9") {
+	if terminalErr == nil || !strings.Contains(terminalErr.Error(), "current stage=complete") || !strings.Contains(terminalErr.Error(), "exchanges served=11") || !strings.Contains(terminalErr.Error(), "ExchangeCount=12") {
 		t.Fatalf("rebuild-requests terminal error = %v, want current stage, served exchanges, and ExchangeCount", terminalErr)
 	}
 }
@@ -202,10 +206,10 @@ func TestRebuildRequestsIncompleteResultNamesServedAndExpectedExchanges(t *testi
 	}
 	defer func() { _ = coordinator.Close(context.Background()) }()
 	coordinator.stage = rebuildRequestsStageComplete
-	coordinator.nextSeq = 9
+	coordinator.nextSeq = 12
 
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=8") || !strings.Contains(err.Error(), "ExchangeCount=9") {
+	if err == nil || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=11") || !strings.Contains(err.Error(), "ExchangeCount=12") {
 		t.Fatalf("incomplete rebuild-requests error = %v, want current stage, served exchanges, and ExchangeCount", err)
 	}
 }
@@ -220,10 +224,10 @@ func TestRebuildRequestsFailedResultNamesServedAndExpectedExchanges(t *testing.T
 	defer func() { _ = coordinator.Close(context.Background()) }()
 	coordinator.failed = fmt.Errorf("terminal validation failed")
 	coordinator.stage = rebuildRequestsStageComplete
-	coordinator.nextSeq = 9
+	coordinator.nextSeq = 12
 
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=8") || !strings.Contains(err.Error(), "ExchangeCount=9") {
+	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=11") || !strings.Contains(err.Error(), "ExchangeCount=12") {
 		t.Fatalf("failed rebuild-requests error = %v, want cause, current stage, served exchanges, and ExchangeCount", err)
 	}
 }
@@ -294,6 +298,8 @@ func TestRebuildRequestsStageResultKindsMatchRunner(t *testing.T) {
 	}{
 		{rebuildRequestsStageFirstPage, callBegun, "call-begun", false},
 		{rebuildRequestsStageFinalPage, awaited, "awaited", false},
+		{rebuildRequestsStageRecoveryBegin, callBegun, "call-begun", false},
+		{rebuildRequestsStageRecoveryFinalPage, awaited, "awaited", false},
 		{rebuildRequestsStagePull, awaited, "awaited", false},
 		{rebuildRequestsStageAwaitCall, awaited, "awaited", false},
 		{rebuildRequestsStageAwaitCall, callBegun, "call-begun", true},
@@ -497,6 +503,9 @@ func rebuildRequestsExchangeBodyForTest(sequence uint64, result json.RawMessage)
 
 func rebuildRequestsResultForStageForTest(coordinator *RebuildRequestsCoordinator) json.RawMessage {
 	process := json.RawMessage(`{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	if coordinator.stage >= rebuildRequestsStageRecoveryBegin {
+		process = json.RawMessage(`{"process_id":"process-b","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	}
 	status := json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`)
 	switch coordinator.stage {
 	case rebuildRequestsStageOpen:
@@ -509,9 +518,17 @@ func rebuildRequestsResultForStageForTest(coordinator *RebuildRequestsCoordinato
 		return resultEnvelopeForTest(map[string]any{
 			"kind": "call-begun", "call_id": coordinator.callID, "state": "in_flight", "process": process,
 		})
-	case rebuildRequestsStageFinalPage, rebuildRequestsStagePull:
+	case rebuildRequestsStageFinalPage, rebuildRequestsStageRecoveryFinalPage, rebuildRequestsStagePull:
 		return resultEnvelopeForTest(map[string]any{
 			"kind": "awaited", "status": status, "process": process,
+		})
+	case rebuildRequestsStageRestart:
+		return resultEnvelopeForTest(map[string]any{
+			"kind": "opened", "status": status, "process": json.RawMessage(`{"process_id":"process-b","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`),
+		})
+	case rebuildRequestsStageRecoveryBegin:
+		return resultEnvelopeForTest(map[string]any{
+			"kind": "call-begun", "call_id": coordinator.callID, "state": "in_flight", "process": process,
 		})
 	case rebuildRequestsStageAwaitCall:
 		return resultEnvelopeForTest(map[string]any{

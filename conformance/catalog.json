@@ -49,7 +49,7 @@
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "path": "conformance/scenarios/performance/rebuild-requests-001.json",
-      "sha256": "7ec3b1bc638c9a967cca34d302c4e6047916896f06b3ff1cb23f69e803816720"
+      "sha256": "2300ca2dad87d92a9a54554731ea07faf2c504b669954af7928f670bafc8cdeb"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",

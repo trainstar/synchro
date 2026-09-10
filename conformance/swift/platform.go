@@ -1636,9 +1636,12 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 	defer state.mu.Unlock()
 	switch scenarios.OperationKey(operation) {
 	case "process/restart-client":
-		if state.terminated || state.session == nil || state.pendingLoss != nil || state.activeCall != nil {
+		if state.terminated || state.session == nil || state.pendingLoss != nil || state.activeCall != nil && !state.activeCall.paused {
 			return StepObservation{}, errors.New("Swift client restart is unavailable")
 		}
+		// A staged call is paused before its next local transition. Killing it here
+		// models process loss at that durable boundary, not a completed call restart.
+		state.activeCall = nil
 		priorProcessID := state.processID
 		priorFingerprint := state.databaseIdentityFingerprint
 		started := time.Now()

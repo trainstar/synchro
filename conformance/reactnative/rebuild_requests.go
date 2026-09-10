@@ -83,6 +83,9 @@ const (
 	rebuildRequestsStageBegin
 	rebuildRequestsStageFirstPage
 	rebuildRequestsStageFinalPage
+	rebuildRequestsStageRestart
+	rebuildRequestsStageRecoveryBegin
+	rebuildRequestsStageRecoveryFinalPage
 	rebuildRequestsStagePull
 	rebuildRequestsStageAwaitCall
 	rebuildRequestsStageFinalCapture
@@ -189,7 +192,6 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 		{rebuildRequestsStepOrder[11], "local/finalize-rebuild", "public-call", "await-step", "", ""},
 		{rebuildRequestsStepOrder[12], "pull/request-page", "public-call", "await-call", "", "idle"},
 	}
-	var callID string
 	for index, wanted := range expected {
 		step := scenario.Steps[index]
 		if scenarios.OperationKey(step.Operation) != wanted.operation {
@@ -202,13 +204,8 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 		if wanted.kind != "public-call" {
 			continue
 		}
-		if binding.UserID != userID || binding.ClientID != clientID || binding.CallID == nil || *binding.CallID == "" {
+		if binding.UserID != userID || binding.ClientID != clientID || binding.CallID == nil || *binding.CallID != "rebuild_cycle" {
 			return fmt.Errorf("React Native rebuild-requests step %s client binding is invalid", step.ID)
-		}
-		if callID == "" {
-			callID = string(*binding.CallID)
-		} else if callID != string(*binding.CallID) {
-			return errors.New("React Native rebuild-requests steps do not share one call identity")
 		}
 	}
 
@@ -228,16 +225,18 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 		}
 	}
 
-	semantic, performance := false, false
+	semantic, performance, durable := false, false, false
 	for _, assertion := range scenario.Assertions {
 		switch string(assertion.ID) {
 		case "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001":
 			semantic = assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.ExpectedSource == "authored-model"
 		case "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001":
 			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
+		case "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001":
+			durable = assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.ExpectedSource == "authored-model" && len(assertion.DetectsControlIDs) == 1 && assertion.DetectsControlIDs[0] == "CTRL-REBUILD-004"
 		}
 	}
-	if !semantic || !performance {
+	if !semantic || !performance || !durable {
 		return errors.New("React Native rebuild-requests assertions are invalid")
 	}
 	obligations := map[string]int{}
@@ -255,11 +254,16 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-REBUILD-REQUESTS-001", "CTRL-REBUILD-003") {
 				obligations[string(obligation.ObligationID)]++
 			}
+		case "OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-REBUILD-REQUESTS-DURABLE-001", "CTRL-REBUILD-004") {
+				obligations[string(obligation.ObligationID)]++
+			}
 		}
 	}
 	if obligations["OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001"] != 1 ||
 		obligations["OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001"] != 1 ||
-		obligations["OBL-PERF-REBUILD-REQUESTS-CONTROL-001"] != 1 {
+		obligations["OBL-PERF-REBUILD-REQUESTS-CONTROL-001"] != 1 ||
+		obligations["OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001"] != 1 {
 		return errors.New("React Native rebuild-requests proof obligations are invalid")
 	}
 	return nil
@@ -479,6 +483,12 @@ func (stage rebuildRequestsStage) String() string {
 		return "first-page"
 	case rebuildRequestsStageFinalPage:
 		return "final-page"
+	case rebuildRequestsStageRestart:
+		return "restart"
+	case rebuildRequestsStageRecoveryBegin:
+		return "recovery-begin"
+	case rebuildRequestsStageRecoveryFinalPage:
+		return "recovery-final-page"
 	case rebuildRequestsStagePull:
 		return "pull"
 	case rebuildRequestsStageAwaitCall:
@@ -620,8 +630,16 @@ func (c *RebuildRequestsCoordinator) acceptResultLocked(raw json.RawMessage) err
 		c.process = &process
 	case rebuildRequestsStageFirstPage:
 		return c.validateCallBegun(envelope.Result)
-	case rebuildRequestsStageFinalPage, rebuildRequestsStagePull, rebuildRequestsStageAwaitCall:
+	case rebuildRequestsStageFinalPage, rebuildRequestsStageRecoveryFinalPage, rebuildRequestsStagePull, rebuildRequestsStageAwaitCall:
 		return c.validateAwaited(envelope.Result)
+	case rebuildRequestsStageRestart:
+		process, err := c.validateRestarted(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.process = &process
+	case rebuildRequestsStageRecoveryBegin:
+		return c.validateCallBegun(envelope.Result)
 	case rebuildRequestsStageFinalCapture:
 		return c.validateCallCompleted(envelope.Result)
 	case rebuildRequestsStageApplicationRows:
@@ -666,6 +684,22 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 		}, []scenarios.StepID{rebuildRequestsStepOrder[5]})
 		c.stage = rebuildRequestsStageFinalPage
 	case rebuildRequestsStageFinalPage:
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": clientKey, "call_id": c.callID,
+		}, []scenarios.StepID{rebuildRequestsStepOrder[9]})
+		c.stage = rebuildRequestsStageRestart
+	case rebuildRequestsStageRestart:
+		response.Command = c.command("client", "open", map[string]any{
+			"client_key": clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil,
+		}, nil)
+		c.callID = "rebuild_recovery"
+		c.stage = rebuildRequestsStageRecoveryBegin
+	case rebuildRequestsStageRecoveryBegin:
+		response.Command = c.command("client", "begin-call", map[string]any{
+			"client_key": clientKey, "call_id": c.callID, "method": "start",
+		}, nil)
+		c.stage = rebuildRequestsStageRecoveryFinalPage
+	case rebuildRequestsStageRecoveryFinalPage:
 		response.Command = c.command("observer", "await-step", map[string]any{
 			"client_key": clientKey, "call_id": c.callID,
 		}, []scenarios.StepID{rebuildRequestsStepOrder[9]})
@@ -770,6 +804,23 @@ func (c *RebuildRequestsCoordinator) validateCallBegun(raw json.RawMessage) erro
 		return fmt.Errorf("React Native rebuild-requests begun call process identity changed: got=%#v want=%#v decode_error=%v", process, c.process, err)
 	}
 	return nil
+}
+
+func (c *RebuildRequestsCoordinator) validateRestarted(raw json.RawMessage) (actionProcessIdentity, error) {
+	process, err := validateOpenedResult(raw)
+	if err != nil {
+		return actionProcessIdentity{}, err
+	}
+	if c.process == nil {
+		return actionProcessIdentity{}, errors.New("React Native rebuild-requests prior process identity is unavailable")
+	}
+	if process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return actionProcessIdentity{}, errors.New("React Native rebuild-requests restart changed the database identity")
+	}
+	if process.ProcessID == c.process.ProcessID {
+		return actionProcessIdentity{}, errors.New("React Native rebuild-requests restart retained the process identity")
+	}
+	return process, nil
 }
 
 func (c *RebuildRequestsCoordinator) validateAwaited(raw json.RawMessage) error {

@@ -42,6 +42,7 @@ type integrationMutantManifest struct {
 var requiredServerProofs = map[string][]string{
 	"SCN-PERF-CONFIGURED-BOUNDS-001": {"OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001"},
 	"SCN-PERF-WARM-CONNECT-001":      {"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001"},
+	"SCN-PERF-REBUILD-REQUESTS-001":  {"OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001"},
 	"SCN-PERF-SCHEMA-CHECK-001": {
 		"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
 		"OBL-PERF-SCHEMA-CHECK-PROJECTION-FAULT-001",
@@ -109,6 +110,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", []string{"TestRealWALPipeline"}},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", []string{"TestRealConfiguredBoundsMeasurement"}},
 	{"SCN-PERF-WARM-CONNECT-001", "OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001", []string{"TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues", "TestRealIssue49SemanticVersionPrecedence", "TestRealIssue49PortableIntegerBoundariesAndCounterOverflow"}},
+	{"SCN-PERF-REBUILD-REQUESTS-001", "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-PERF-SCHEMA-CHECK-001", "OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001", []string{"TestRealClass3ProjectionBootstrap", "TestRealIssue49RemainingSemantics"}},
 	{"SCN-PERF-SCHEMA-CHECK-001", "OBL-PERF-SCHEMA-CHECK-PROJECTION-FAULT-001", []string{"TestRealClass3ProjectionBootstrapRecoversAfterProcessTermination"}},
 	{"SCN-PERF-SEEDED-EMPTY-STARTUP-001", "OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001", []string{"TestRealIssue49PortableSeedScopeContinuationAndTokenBindings", "TestRealIssue49RemainingSemantics"}},
