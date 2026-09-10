@@ -662,4 +662,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-rn-e2e-android-run && make test-consumer-kotlin-device && make test-consumer-rn-android
+          script: |
+            bash scripts/ci/run-rn-android-e2e.sh
+            make test-consumer-kotlin-device
+            make test-consumer-rn-android
