@@ -316,6 +316,12 @@ SELECT synchro.synchro_register_table(
     'id', 'updated_at', 'deleted_at', 'enabled'
 );
 
+INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
+SELECT 'bootstrap', stream_generation
+FROM synchro.sync_runtime_state
+WHERE singleton
+ON CONFLICT (scope_id) DO NOTHING;
+
 DO $dependencies$
 DECLARE
     dependency record;

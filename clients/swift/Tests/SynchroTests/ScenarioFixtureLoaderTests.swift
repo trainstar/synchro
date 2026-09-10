@@ -6,7 +6,7 @@ final class ScenarioFixtureLoaderTests: XCTestCase {
 
         XCTAssertEqual(scenario["id"] as? String, "SCN-SCHEMA-QUEUED-MUTATION-001")
         XCTAssertEqual(scenario["schema_version"] as? Int, 2)
-        XCTAssertEqual(scenario["proof_types"] as? [String], ["server-black-box", "native-e2e", "fault-injection", "negative-control"])
+        XCTAssertEqual(scenario["proof_types"] as? [String], ["reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"])
     }
 
     func testRejectsUnknownScenarioID() {

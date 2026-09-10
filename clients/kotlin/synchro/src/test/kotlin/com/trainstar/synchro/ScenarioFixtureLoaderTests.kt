@@ -14,7 +14,7 @@ class ScenarioFixtureLoaderTests {
         assertEquals("SCN-SCHEMA-QUEUED-MUTATION-001", scenario.getValue("id").jsonPrimitive.content)
         assertEquals(2, scenario.getValue("schema_version").jsonPrimitive.content.toInt())
         assertEquals(
-            listOf("server-black-box", "native-e2e", "fault-injection", "negative-control"),
+            listOf("reference-model", "server-black-box", "native-e2e", "fault-injection", "negative-control"),
             scenario.getValue("proof_types").jsonArray.map { it.jsonPrimitive.content }
         )
     }
