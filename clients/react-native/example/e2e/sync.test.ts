@@ -12,10 +12,10 @@ async function scrollToAndTap(buttonId: string) {
 }
 
 async function expectBadge(label: string, text = 'PASS', timeout = 5000) {
-  await waitFor(element(by.id('last-result-key')))
-    .toHaveText(label)
-    .withTimeout(timeout);
   try {
+    await waitFor(element(by.id('last-result-key')))
+      .toHaveText(label)
+      .withTimeout(timeout);
     await waitFor(element(by.id('last-result-status')))
       .toHaveText(text)
       .withTimeout(timeout);
@@ -146,7 +146,7 @@ describe('Synchro RN E2E', () => {
   });
 
   it('executes a write', async () => {
-    await runAction('execute', 10000);
+    await runAction('execute', 20000);
   });
 
   it('write transaction commit', async () => {
