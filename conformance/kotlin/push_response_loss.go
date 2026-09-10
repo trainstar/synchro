@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"reflect"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -69,6 +71,22 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 	if err != nil {
 		return PushResponseLossResult{}, err
 	}
+	replayPush, err := kotlinScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-004", "push/submit")
+	if err != nil {
+		return PushResponseLossResult{}, err
+	}
+	initialPayload, err := decodePushResponseLossPayload(initialPush)
+	if err != nil {
+		return PushResponseLossResult{}, err
+	}
+	releaseRetry, armed, err := platform.armSealedRetryPush(replayPush)
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("arm Kotlin Android sealed-retry push: %w", err)
+	}
+	if !armed {
+		return PushResponseLossResult{}, errors.New("arm Kotlin Android sealed-retry push: fault is absent")
+	}
+	defer releaseRetry()
 	initial, err := platform.Synchronize(ctx, SynchronizeRequest{Client: client, Method: "start", Operations: []scenarios.Operation{initialPush}})
 	if err != nil {
 		return PushResponseLossResult{}, fmt.Errorf("run Kotlin Android response-loss push: %w", err)
@@ -85,25 +103,38 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		return PushResponseLossResult{}, fmt.Errorf("bind Kotlin Android response-loss committed push: %w", err)
 	}
 
-	recordedLoss, err := kotlinScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-003", "process/response-loss")
+	recordedLoss, err := kotlinScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-003", "process/restart-client")
 	if err != nil {
 		return PushResponseLossResult{}, err
 	}
 	loss, err := platform.ProcessStep(ctx, client, recordedLoss)
 	if err != nil || loss.Disposition != "success" {
-		return PushResponseLossResult{}, fmt.Errorf("record Kotlin Android response loss: %w", kotlinResultError(err, loss.Disposition))
+		return PushResponseLossResult{}, fmt.Errorf("restart Kotlin Android client after response loss: %w", kotlinResultError(err, loss.Disposition))
+	}
+	postRestart, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("capture Kotlin Android response-loss state after restart: %w", err)
 	}
 
-	replayPush, err := kotlinScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-004", "push/submit")
-	if err != nil {
-		return PushResponseLossResult{}, err
-	}
 	replay, err := kotlinScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return PushResponseLossResult{}, fmt.Errorf("replay Kotlin Android response-loss push: %w", err)
 	}
-	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replay); err != nil {
+	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replayPush, replay); err != nil {
 		return PushResponseLossResult{}, err
+	}
+	if err := platform.validateSealedRetryPush(len(initialPayload.Request.Mutations)); err != nil {
+		return PushResponseLossResult{}, err
+	}
+	terminal, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("capture Kotlin Android terminal response-loss state: %w", err)
+	}
+	if err := validatePushResponseLossTerminalState(terminal); err != nil {
+		return PushResponseLossResult{}, err
+	}
+	if !reflect.DeepEqual(durableClientState(postRestart), durableClientState(terminal)) {
+		return PushResponseLossResult{}, errors.New("Kotlin Android response-loss retries changed durable client state")
 	}
 
 	equalPush, err := kotlinScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-005", "push/submit")
@@ -130,10 +161,6 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		return PushResponseLossResult{}, err
 	}
 
-	initialPayload, err := decodePushResponseLossPayload(initialPush)
-	if err != nil {
-		return PushResponseLossResult{}, err
-	}
 	batchCount, err := pushResponseLossBatchCount(initialPush, replayPush, equalPush, changedPush)
 	if err != nil {
 		return PushResponseLossResult{}, err
@@ -181,13 +208,13 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 		id, key, kind, stage, method string
 	}{
 		{"STEP-PUSH-RESPONSE-LOSS-001", "local/write", "local-write", "", ""},
-		{"STEP-PUSH-RESPONSE-LOSS-002", "push/submit", "public-call", "begin", "start"},
-		{"STEP-PUSH-RESPONSE-LOSS-003", "process/response-loss", "public-call", "await-step", ""},
-		{"STEP-PUSH-RESPONSE-LOSS-004", "push/submit", "public-call", "await-call", ""},
+		{"STEP-PUSH-RESPONSE-LOSS-002", "push/submit", "public-call", "synchronous", "start"},
+		{"STEP-PUSH-RESPONSE-LOSS-003", "process/restart-client", "process", "", ""},
+		{"STEP-PUSH-RESPONSE-LOSS-004", "push/submit", "public-call", "synchronous", "start"},
 		{"STEP-PUSH-RESPONSE-LOSS-005", "push/submit", "controller", "", ""},
 		{"STEP-PUSH-RESPONSE-LOSS-006", "push/submit", "controller", "", ""},
 	}
-	var callID scenarios.NativeCallID
+	callIDs := make(map[scenarios.StepID]scenarios.NativeCallID)
 	for _, wanted := range expected {
 		step := steps[scenarios.StepID(wanted.id)]
 		if _, err := kotlinScenarioOperation(steps, wanted.id, wanted.key); err != nil {
@@ -200,7 +227,7 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 		if binding.Kind != wanted.kind || binding.Stage != wanted.stage || binding.Method != wanted.method || step.ExpectedOutcome.Disposition != "success" {
 			return fmt.Errorf("Kotlin Android push-response-loss binding %s = %s/%s/%s/%s, want %s/%s/%s/success", wanted.id, binding.Kind, binding.Stage, binding.Method, step.ExpectedOutcome.Disposition, wanted.kind, wanted.stage, wanted.method)
 		}
-		if wanted.kind == "local-write" || wanted.kind == "public-call" {
+		if wanted.kind == "local-write" || wanted.kind == "process" || wanted.kind == "public-call" {
 			if err := kotlinScenarioClient(step, client); err != nil {
 				return err
 			}
@@ -211,11 +238,10 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 		if binding.CallID == nil || *binding.CallID == "" {
 			return fmt.Errorf("Kotlin Android push-response-loss binding %s call identity is absent, want a nonempty identity", wanted.id)
 		}
-		if callID == "" {
-			callID = *binding.CallID
-		} else if callID != *binding.CallID {
-			return fmt.Errorf("Kotlin Android push-response-loss binding %s call identity = %q, want %q", wanted.id, *binding.CallID, callID)
-		}
+		callIDs[step.ID] = *binding.CallID
+	}
+	if callIDs["STEP-PUSH-RESPONSE-LOSS-002"] == "" || callIDs["STEP-PUSH-RESPONSE-LOSS-004"] == "" || callIDs["STEP-PUSH-RESPONSE-LOSS-002"] == callIDs["STEP-PUSH-RESPONSE-LOSS-004"] {
+		return errors.New("Kotlin Android push-response-loss calls do not straddle one process restart")
 	}
 	wireSteps := []scenarios.StepID{
 		"STEP-PUSH-RESPONSE-LOSS-002",
@@ -244,6 +270,9 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 	replayPush, err := kotlinScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-004", "push/submit")
 	if err != nil {
 		return err
+	}
+	if _, enabled, err := scenarios.SealedRetryPushTarget(replayPush); err != nil || !enabled {
+		return errors.New("Kotlin Android push-response-loss replay has no sealed-retry wire fault")
 	}
 	equalPush, err := kotlinScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-005", "push/submit")
 	if err != nil {
@@ -401,7 +430,7 @@ func validatePushResponseLossInitialCall(scenario scenarios.Scenario, stepID str
 	return nil
 }
 
-func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID string, call SynchronizationResult) error {
+func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID string, operation scenarios.Operation, call SynchronizationResult) error {
 	wire, err := pushResponseLossWireExpectation(scenario, scenarios.StepID(stepID))
 	if err != nil {
 		return err
@@ -410,21 +439,43 @@ func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID stri
 	if call.Completion != wantCompletion {
 		return fmt.Errorf("Kotlin Android push-response-loss replay completion = %q, want %q", call.Completion, wantCompletion)
 	}
-	pushes := 0
+	if _, enabled, err := scenarios.SealedRetryPushTarget(operation); err != nil || !enabled {
+		return errors.New("Kotlin Android push-response-loss replay did not select the sealed-retry fault")
+	}
+	pushes := make([]TransportObservation, 0, 3)
 	for _, observation := range call.transportObservations {
 		if observation.OperationClass == "push" {
-			pushes++
+			pushes = append(pushes, observation)
 		}
 	}
-	if pushes != 1 {
-		return fmt.Errorf("Kotlin Android push-response-loss replay push request count = %d, want 1", pushes)
+	if len(pushes) != 3 {
+		return fmt.Errorf("Kotlin Android push-response-loss replay push request count = %d, want 3", len(pushes))
 	}
-	observed, err := kotlinScenarioWire(call, "push")
-	if err != nil {
-		return err
+	want := []struct {
+		status    int
+		code      string
+		retryable bool
+	}{
+		{http.StatusTooManyRequests, "retry_later", true},
+		{http.StatusServiceUnavailable, "temporary_unavailable", true},
+		{wire.HTTPStatus, pushResponseLossOptionalString(wire.ErrorCode), wire.Retryable},
 	}
-	if observed.StatusCode != wire.HTTPStatus || observed.Retryable == nil || *observed.Retryable != wire.Retryable || !equalKotlinOptionalStrings(observed.ErrorCode, wire.ErrorCode) {
-		return fmt.Errorf("Kotlin Android push-response-loss wire result %s = %d/%s/%s, want %d/%t/%s", stepID, observed.StatusCode, pushResponseLossOptionalBool(observed.Retryable), pushResponseLossOptionalString(observed.ErrorCode), wire.HTTPStatus, wire.Retryable, pushResponseLossOptionalString(wire.ErrorCode))
+	for index, expected := range want {
+		code := pushResponseLossOptionalString(pushes[index].ErrorCode)
+		wantCode := expected.code
+		if wantCode == "" {
+			wantCode = "none"
+		}
+		if pushes[index].StatusCode != expected.status || pushes[index].Retryable == nil || *pushes[index].Retryable != expected.retryable || code != wantCode {
+			return fmt.Errorf("Kotlin Android sealed-retry push %d = %d/%s/%s, want %d/%t/%s", index+1, pushes[index].StatusCode, pushResponseLossOptionalBool(pushes[index].Retryable), code, expected.status, expected.retryable, wantCode)
+		}
+	}
+	return nil
+}
+
+func validatePushResponseLossTerminalState(state Result) error {
+	if state.Status == nil || *state.Status != "error" || state.Failure == nil || state.Failure.Operation != "pushing" || state.Failure.Code != "idempotency_conflict" || state.Failure.Retryable || state.Failure.RecoveryAction != "none" {
+		return fmt.Errorf("Kotlin Android push-response-loss terminal state = status:%s failure:%+v, want error/pushing/idempotency_conflict/non-retryable/none", pushResponseLossOptionalString(state.Status), state.Failure)
 	}
 	return nil
 }
@@ -528,6 +579,7 @@ func resolvePushResponseLossIdentities(controller *blackbox.NativeController, al
 
 	var generation int64
 	generationObserved := false
+	expectedPushes := []int{1, 3}
 	for callIndex, call := range []SynchronizationResult{initial, replay} {
 		pushes := 0
 		for _, observation := range call.transportObservations {
@@ -545,8 +597,8 @@ func resolvePushResponseLossIdentities(controller *blackbox.NativeController, al
 			generation = observed
 			generationObserved = true
 		}
-		if pushes != 1 {
-			return nil, fmt.Errorf("Kotlin Android push-response-loss call %d push request count = %d, want 1", callIndex+1, pushes)
+		if pushes != expectedPushes[callIndex] {
+			return nil, fmt.Errorf("Kotlin Android push-response-loss call %d push request count = %d, want %d", callIndex+1, pushes, expectedPushes[callIndex])
 		}
 	}
 	if !generationObserved || generation <= 0 {

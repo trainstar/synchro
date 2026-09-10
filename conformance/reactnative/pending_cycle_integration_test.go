@@ -111,6 +111,7 @@ func runRealReactNativePendingCycle(t *testing.T, platform string) {
 		command.Env = append(command.Env,
 			"SYNCHRO_RN_COORDINATOR_URL="+coordinator.URL(),
 			"SYNCHRO_RN_COORDINATOR_TOKEN="+coordinator.Token(),
+			fmt.Sprintf("SYNCHRO_RN_COORDINATOR_EXCHANGE_COUNT=%d", coordinator.ExchangeCount()),
 		)
 		output, err := command.CombinedOutput()
 		if err != nil {

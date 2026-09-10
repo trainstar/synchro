@@ -205,6 +205,65 @@ func TestPlatformTemporaryUnavailablePushFaultIsTargetedAndHeldUntilRelease(t *t
 	}
 }
 
+func TestPlatformSealedRetryPushInjects429Then503AndRejectsChangedBytes(t *testing.T) {
+	operation := scenarios.Operation{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload: json.RawMessage(`{
+			"authenticated_user_id":"user-a",
+			"request":{"client_id":"client-a","client_generation":1,"batch_id":"authored-batch","schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"mutations":[{"mutation_id":"authored-mutation","table":"items","pk":{"id":"row"},"authored_schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"op":"insert","client_version":"2032-01-02T03:04:05.000000Z","columns":{"value":"value"}}]},
+			"delivery":"apply","commit_lsn":"1","end_lsn":"2"
+		}`),
+		WireFault: &scenarios.WireFaultControl{Mode: "sealed_retry"},
+	}
+	requestBody := `{"client_id":"client-a","client_generation":7,"batch_id":"runtime-batch","schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"mutations":[{"mutation_id":"runtime-mutation"}]}`
+
+	t.Run("canonical sequence", func(t *testing.T) {
+		platform := &Platform{}
+		release, armed, err := platform.armSealedRetryPush(operation)
+		if err != nil || !armed {
+			t.Fatalf("arm sealed retry: %t, %v", armed, err)
+		}
+		defer release()
+		for index, status := range []int{0, http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusConflict} {
+			request := httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody))
+			response := httptest.NewRecorder()
+			intercepted := platform.serveSealedRetryPush(response, request)
+			if status == 0 && intercepted {
+				t.Fatalf("attempt %d was intercepted, want upstream forwarding", index+1)
+			}
+			wantRetryAfter := "5"
+			if status == http.StatusConflict {
+				wantRetryAfter = ""
+			}
+			if status != 0 && (!intercepted || response.Code != status || response.Header().Get("Retry-After") != wantRetryAfter) {
+				t.Fatalf("attempt %d = intercepted %t, status %d, retry-after %q", index+1, intercepted, response.Code, response.Header().Get("Retry-After"))
+			}
+		}
+		if err := platform.validateSealedRetryPush(1); err != nil {
+			t.Fatalf("validate sealed retry sequence: %v", err)
+		}
+	})
+
+	t.Run("changed canonical bytes", func(t *testing.T) {
+		platform := &Platform{}
+		release, armed, err := platform.armSealedRetryPush(operation)
+		if err != nil || !armed {
+			t.Fatalf("arm sealed retry: %t, %v", armed, err)
+		}
+		defer release()
+		platform.serveSealedRetryPush(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody)))
+		changed := strings.Replace(requestBody, `"runtime-mutation"`, `"changed-mutation"`, 1)
+		response := httptest.NewRecorder()
+		if !platform.serveSealedRetryPush(response, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(changed))) || response.Code != http.StatusBadGateway {
+			t.Fatalf("changed retry = intercepted status %d, want 502", response.Code)
+		}
+		if err := platform.validateSealedRetryPush(1); err == nil {
+			t.Fatal("changed sealed request bytes passed validation")
+		}
+	})
+}
+
 func TestPlatformRecordsProxiedRebuildContinuationFingerprint(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		body, err := io.ReadAll(request.Body)

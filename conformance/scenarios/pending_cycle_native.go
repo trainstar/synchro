@@ -9,11 +9,14 @@ import (
 
 // PendingCycleNativeTarget identifies the authored row after runtime binding.
 type PendingCycleNativeTarget struct {
-	TableName       string
-	PrimaryKeyField string
-	RecordID        string
-	ValueField      string
-	Value           string
+	TableName                   string
+	PrimaryKeyField             string
+	RecordID                    string
+	ValueField                  string
+	Value                       string
+	UnprotectedAuthoredRecordID string
+	UnprotectedRecordID         string
+	UnprotectedValue            string
 }
 
 // PendingCycleNativeMutation records one inspectable local mutation.
@@ -46,6 +49,10 @@ type PendingCycleNativeState struct {
 	LocalScopeChecksum          string
 	TargetScopeRowPresent       bool
 	TargetScopeRowChecksum      string
+	UnprotectedRowPresent       bool
+	UnprotectedRowValue         string
+	UnprotectedScopeRowPresent  bool
+	UnprotectedScopeRowChecksum string
 }
 
 // PendingCycleNativeEvidence binds each client transition to direct inspection.
@@ -66,10 +73,12 @@ type PendingCycleNativeEvidence struct {
 }
 
 // ValidatePendingCycleNativeEvidence checks the native pending-cycle transitions.
-// Swift and Kotlin provide the two direct consumers of this semantic check.
+// Swift, Kotlin, and React Native provide direct consumers of this semantic check.
 func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) error {
 	target := evidence.Target
-	if target.TableName == "" || target.PrimaryKeyField == "" || target.RecordID == "" || target.ValueField == "" || target.Value == "" || evidence.UpdatedValue == "" || evidence.UpdatedValue == target.Value {
+	if target.TableName == "" || target.PrimaryKeyField == "" || target.RecordID == "" || target.ValueField == "" || target.Value == "" ||
+		target.UnprotectedAuthoredRecordID == "" || target.UnprotectedRecordID == "" || target.UnprotectedRecordID == target.RecordID ||
+		target.UnprotectedValue == "" || evidence.UpdatedValue == "" || evidence.UpdatedValue == target.Value {
 		return errors.New("pending-cycle runtime target is incomplete")
 	}
 	initialProcessStates := []PendingCycleNativeState{
@@ -91,12 +100,12 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 	}
 
 	before := evidence.BeforeWrite
-	if before.ApplicationRowCount != 0 || before.PendingChangeCount != 0 || before.MutationLedgerCount != 0 || before.MutationOutcomeCount != 0 || before.RejectedMutationCount != 0 || before.ScopeStateCount != 1 || before.ScopeRowCount != 0 || before.RowMetadataCount != 0 || before.TargetRowPresent || len(before.TargetMutations) != 0 {
+	if before.ApplicationRowCount != 0 || before.PendingChangeCount != 0 || before.MutationLedgerCount != 0 || before.MutationOutcomeCount != 0 || before.RejectedMutationCount != 0 || before.ScopeStateCount != 1 || before.ScopeRowCount != 0 || before.RowMetadataCount != 0 || before.TargetRowPresent || len(before.TargetMutations) != 0 || !pendingCycleUnprotectedStateAbsent(before) {
 		return errors.New("pending-cycle pre-write state is not empty")
 	}
 
 	written := evidence.AfterWrite
-	if written.ApplicationRowCount != 1 || written.PendingChangeCount != 1 || written.MutationLedgerCount != 1 || written.MutationOutcomeCount != 0 || written.RejectedMutationCount != 0 || written.ScopeStateCount != 1 || written.ScopeRowCount != 0 || written.RowMetadataCount != 0 || !written.TargetRowPresent || written.TargetRowValue != target.Value || len(written.TargetMutations) != 1 {
+	if written.ApplicationRowCount != 1 || written.PendingChangeCount != 1 || written.MutationLedgerCount != 1 || written.MutationOutcomeCount != 0 || written.RejectedMutationCount != 0 || written.ScopeStateCount != 1 || written.ScopeRowCount != 0 || written.RowMetadataCount != 0 || !written.TargetRowPresent || written.TargetRowValue != target.Value || len(written.TargetMutations) != 1 || !pendingCycleUnprotectedStateAbsent(written) {
 		return errors.New("pending-cycle local SQLite write is not durable and queued")
 	}
 	if written.TargetMutations[0].Operation != "insert" || written.TargetMutations[0].Status != "pending" || written.TargetMutations[0].ClientVersion == "" {
@@ -104,7 +113,7 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 	}
 
 	pushed := evidence.AfterPush
-	if pushed.ApplicationRowCount != 1 || pushed.PendingChangeCount != 0 || pushed.MutationLedgerCount != 1 || pushed.MutationOutcomeCount != 1 || pushed.RejectedMutationCount != 0 || pushed.ScopeStateCount != 1 || pushed.ScopeRowCount != 0 || pushed.RowMetadataCount != 1 || !pushed.TargetRowPresent || pushed.TargetRowValue != target.Value || len(pushed.TargetMutations) != 0 || pushed.TargetServerVersion == "" || pushed.TargetRowChecksum == "" {
+	if pushed.ApplicationRowCount != 1 || pushed.PendingChangeCount != 0 || pushed.MutationLedgerCount != 1 || pushed.MutationOutcomeCount != 1 || pushed.RejectedMutationCount != 0 || pushed.ScopeStateCount != 1 || pushed.ScopeRowCount != 0 || pushed.RowMetadataCount != 1 || !pushed.TargetRowPresent || pushed.TargetRowValue != target.Value || len(pushed.TargetMutations) != 0 || pushed.TargetServerVersion == "" || pushed.TargetRowChecksum == "" || !pendingCycleUnprotectedStateAbsent(pushed) {
 		return errors.New("pending-cycle accepted push state is incomplete")
 	}
 	if pushed.TargetServerVersion == written.TargetMutations[0].ClientVersion {
@@ -115,10 +124,10 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 	}
 
 	pulled := evidence.AfterPull
-	if pulled.ApplicationRowCount != 1 || pulled.PendingChangeCount != 0 || pulled.MutationLedgerCount != 1 || pulled.MutationOutcomeCount != 1 || pulled.RejectedMutationCount != 0 || pulled.ScopeStateCount != 1 || pulled.ScopeRowCount != 1 || pulled.RowMetadataCount != 1 || !pulled.TargetRowPresent || pulled.TargetRowValue != target.Value || len(pulled.TargetMutations) != 0 {
+	if pulled.ApplicationRowCount != 2 || pulled.PendingChangeCount != 0 || pulled.MutationLedgerCount != 1 || pulled.MutationOutcomeCount != 1 || pulled.RejectedMutationCount != 0 || pulled.ScopeStateCount != 1 || pulled.ScopeRowCount != 2 || pulled.RowMetadataCount != 2 || !pulled.TargetRowPresent || pulled.TargetRowValue != target.Value || !pulled.UnprotectedRowPresent || pulled.UnprotectedRowValue != target.UnprotectedValue || len(pulled.TargetMutations) != 0 {
 		return errors.New("pending-cycle pull state contains an echo mutation or partial row")
 	}
-	if pulled.TargetServerVersion != pushed.TargetServerVersion || pulled.TargetRowChecksum != pushed.TargetRowChecksum || pulled.ScopeID == "" || pulled.ScopeCursor == "" || pulled.ScopeCursor == evidence.BeforePull.ScopeCursor || pulled.ScopeChecksum == "" || pulled.ScopeChecksum != pulled.LocalScopeChecksum || !pulled.TargetScopeRowPresent || pulled.TargetScopeRowChecksum != pulled.TargetRowChecksum {
+	if pulled.TargetServerVersion != pushed.TargetServerVersion || pulled.TargetRowChecksum != pushed.TargetRowChecksum || pulled.ScopeID == "" || pulled.ScopeCursor == "" || pulled.ScopeCursor == evidence.BeforePull.ScopeCursor || pulled.ScopeChecksum == "" || pulled.ScopeChecksum != pulled.LocalScopeChecksum || !pulled.TargetScopeRowPresent || pulled.TargetScopeRowChecksum != pulled.TargetRowChecksum || !pulled.UnprotectedScopeRowPresent || pulled.UnprotectedScopeRowChecksum == "" {
 		return errors.New("pending-cycle row, cursor, version, and checksum did not advance atomically")
 	}
 
@@ -133,11 +142,10 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 	}
 
 	pendingUpdate := evidence.BeforeCleanup
-	if pendingUpdate.ApplicationRowCount != 1 || pendingUpdate.PendingChangeCount != 1 || pendingUpdate.MutationLedgerCount != restarted.MutationLedgerCount+1 || pendingUpdate.MutationOutcomeCount != restarted.MutationOutcomeCount || pendingUpdate.RejectedMutationCount != 0 || pendingUpdate.TargetRowValue != evidence.UpdatedValue || !pendingUpdate.TargetRowPresent || len(pendingUpdate.TargetMutations) != 1 || pendingUpdate.TargetMutations[0].Operation != "update" || pendingUpdate.TargetMutations[0].Status != "pending" || pendingUpdate.TargetMutations[0].ClientVersion == "" {
+	if pendingUpdate.ApplicationRowCount != 2 || pendingUpdate.PendingChangeCount != 1 || pendingUpdate.MutationLedgerCount != restarted.MutationLedgerCount+1 || pendingUpdate.MutationOutcomeCount != restarted.MutationOutcomeCount || pendingUpdate.RejectedMutationCount != 0 || pendingUpdate.TargetRowValue != evidence.UpdatedValue || !pendingUpdate.TargetRowPresent || !pendingUpdate.UnprotectedRowPresent || pendingUpdate.UnprotectedRowValue != target.UnprotectedValue || len(pendingUpdate.TargetMutations) != 1 || pendingUpdate.TargetMutations[0].Operation != "update" || pendingUpdate.TargetMutations[0].Status != "pending" || pendingUpdate.TargetMutations[0].ClientVersion == "" {
 		return errors.New("pending-cycle update intent is not pending before cleanup")
 	}
 	expectedPendingUpdate := restarted
-	expectedPendingUpdate.ApplicationRowCount = 1
 	expectedPendingUpdate.PendingChangeCount = 1
 	expectedPendingUpdate.MutationLedgerCount++
 	expectedPendingUpdate.TargetRowValue = evidence.UpdatedValue
@@ -147,11 +155,22 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 	}
 
 	cleaned := evidence.AfterCleanup
-	if cleaned.ApplicationRowCount != pendingUpdate.ApplicationRowCount || cleaned.PendingChangeCount != pendingUpdate.PendingChangeCount || cleaned.MutationLedgerCount != pendingUpdate.MutationLedgerCount || cleaned.MutationOutcomeCount != pendingUpdate.MutationOutcomeCount || cleaned.RejectedMutationCount != 0 || cleaned.RowMetadataCount != pendingUpdate.RowMetadataCount || !cleaned.TargetRowPresent || cleaned.TargetRowValue != evidence.UpdatedValue || !reflect.DeepEqual(cleaned.TargetMutations, pendingUpdate.TargetMutations) || cleaned.TargetServerVersion != pendingUpdate.TargetServerVersion || cleaned.TargetRowChecksum != pendingUpdate.TargetRowChecksum {
-		return errors.New("pending-cycle scope cleanup changed pending authored intent")
-	}
-	if cleaned.ScopeStateCount != 1 || cleaned.ScopeRowCount != 0 || cleaned.ScopeID == "" || cleaned.ScopeID == pendingUpdate.ScopeID || cleaned.ScopeCursor != "" || cleaned.ScopeChecksum != "" || cleaned.LocalScopeChecksum != "" || cleaned.TargetScopeRowPresent || cleaned.TargetScopeRowChecksum != "" {
-		return errors.New("pending-cycle scope cleanup retained removed scope provenance")
+	expectedCleaned := pendingUpdate
+	expectedCleaned.ApplicationRowCount--
+	expectedCleaned.RowMetadataCount--
+	expectedCleaned.ScopeRowCount = 0
+	expectedCleaned.ScopeID = cleaned.ScopeID
+	expectedCleaned.ScopeCursor = ""
+	expectedCleaned.ScopeChecksum = ""
+	expectedCleaned.LocalScopeChecksum = ""
+	expectedCleaned.TargetScopeRowPresent = false
+	expectedCleaned.TargetScopeRowChecksum = ""
+	expectedCleaned.UnprotectedRowPresent = false
+	expectedCleaned.UnprotectedRowValue = ""
+	expectedCleaned.UnprotectedScopeRowPresent = false
+	expectedCleaned.UnprotectedScopeRowChecksum = ""
+	if cleaned.ScopeStateCount != 1 || cleaned.ScopeID == "" || cleaned.ScopeID == pendingUpdate.ScopeID || !reflect.DeepEqual(expectedCleaned, cleaned) {
+		return errors.New("pending-cycle scope cleanup did not retain pending intent and remove unprotected cache state")
 	}
 
 	updated := evidence.AfterUpdate
@@ -199,6 +218,93 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 	expectedDeleted.ScopeCursor = deleted.ScopeCursor
 	if !reflect.DeepEqual(expectedDeleted, deleted) {
 		return errors.New("pending-cycle synchronized delete changed unrelated durable state")
+	}
+	return nil
+}
+
+func pendingCycleUnprotectedStateAbsent(state PendingCycleNativeState) bool {
+	return !state.UnprotectedRowPresent && state.UnprotectedRowValue == "" && !state.UnprotectedScopeRowPresent && state.UnprotectedScopeRowChecksum == ""
+}
+
+// PendingCycleUnprotectedRowTarget binds the authored cache row to its runtime identity.
+func PendingCycleUnprotectedRowTarget(operation Operation, aliases []NativeIdentityAlias, runtimeRecordID string) (string, string, error) {
+	if OperationKey(operation) != "model/commit-source-transaction" || ValidateOperation(operation) != nil || runtimeRecordID == "" {
+		return "", "", errors.New("pending-cycle unprotected source row is invalid")
+	}
+	var payload struct {
+		Events []struct {
+			Operation string `json:"operation"`
+			After     *struct {
+				Identity struct {
+					SyncedRow *struct {
+						CanonicalWireJSON json.RawMessage `json:"canonical_wire_json"`
+					} `json:"synced_row"`
+				} `json:"identity"`
+				Fields []struct {
+					Field    string          `json:"field"`
+					WireJSON json.RawMessage `json:"wire_json"`
+				} `json:"fields"`
+			} `json:"after"`
+		} `json:"events"`
+	}
+	if json.Unmarshal(operation.Payload, &payload) != nil || len(payload.Events) != 1 || payload.Events[0].Operation != "insert" || payload.Events[0].After == nil || payload.Events[0].After.Identity.SyncedRow == nil {
+		return "", "", errors.New("pending-cycle unprotected source row is invalid")
+	}
+	var authoredRecordID string
+	if json.Unmarshal(payload.Events[0].After.Identity.SyncedRow.CanonicalWireJSON, &authoredRecordID) != nil || authoredRecordID == "" {
+		return "", "", errors.New("pending-cycle unprotected source identity is invalid")
+	}
+	alias, err := PendingCycleUnprotectedIdentityAlias(aliases)
+	if err != nil {
+		return "", "", err
+	}
+	var aliasValue string
+	if json.Unmarshal(alias.Value, &aliasValue) != nil || aliasValue != authoredRecordID {
+		return "", "", errors.New("pending-cycle unprotected alias differs from its source row")
+	}
+	value := ""
+	for _, field := range payload.Events[0].After.Fields {
+		var text string
+		if json.Unmarshal(field.WireJSON, &text) != nil || text == authoredRecordID {
+			continue
+		}
+		if value != "" || text == "" {
+			return "", "", errors.New("pending-cycle unprotected source value is ambiguous")
+		}
+		value = text
+	}
+	if value == "" {
+		return "", "", errors.New("pending-cycle unprotected source value is absent")
+	}
+	return authoredRecordID, value, nil
+}
+
+// PendingCycleUnprotectedIdentityAlias returns the single authored cache-row alias.
+func PendingCycleUnprotectedIdentityAlias(aliases []NativeIdentityAlias) (NativeIdentityAlias, error) {
+	var result NativeIdentityAlias
+	for _, alias := range aliases {
+		if alias.Alias != "unprotected-row-primary-key" || alias.Kind != "primary-key" {
+			continue
+		}
+		if result.Alias != "" {
+			return NativeIdentityAlias{}, errors.New("pending-cycle unprotected source alias is duplicated")
+		}
+		result = alias
+	}
+	if result.Alias == "" {
+		return NativeIdentityAlias{}, errors.New("pending-cycle unprotected source alias is unavailable")
+	}
+	return result, nil
+}
+
+// ValidatePendingCycleServerFacts proves that only the unprotected source row remains authoritative.
+func ValidatePendingCycleServerFacts(facts StateFacts, target PendingCycleNativeTarget) error {
+	if facts.RowCount == nil || *facts.RowCount != 1 || len(facts.Rows) != 1 || target.UnprotectedAuthoredRecordID == "" {
+		return errors.New("pending-cycle final server row count is invalid")
+	}
+	row := facts.Rows[0]
+	if row.CanonicalWireJSON != strconv.Quote(target.UnprotectedAuthoredRecordID) || row.Version == "" || row.Checksum == "" {
+		return errors.New("pending-cycle unprotected server row is absent")
 	}
 	return nil
 }

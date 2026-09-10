@@ -23,7 +23,7 @@ type PendingCycleResult struct {
 
 // RunPendingCycleScenario executes the authored pending-cycle flow through Swift.
 func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (PendingCycleResult, error) {
-	steps, err := swiftScenarioStepMap(scenario, pendingCycleScenarioID, 4)
+	steps, err := swiftScenarioStepMap(scenario, pendingCycleScenarioID, 6)
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
@@ -41,6 +41,29 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("install Swift pending-cycle contract: %w", err)
+	}
+	unprotectedCommit, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-UNPROTECTED-COMMIT-001", "model/commit-source-transaction")
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	if observation, applyErr := controller.ApplyStep(ctx, unprotectedCommit); applyErr != nil || observation.Disposition != "success" {
+		return PendingCycleResult{}, fmt.Errorf("commit Swift pending-cycle unprotected row: %w", resultError(applyErr, observation.Disposition))
+	}
+	unprotectedAlias, err := scenarios.PendingCycleUnprotectedIdentityAlias(scenario.NativeIdentityAliases)
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	unprotectedValues, err := controller.IdentityValues([]scenarios.NativeIdentityAlias{unprotectedAlias})
+	if err != nil || len(unprotectedValues) != 1 {
+		return PendingCycleResult{}, errors.New("Swift pending-cycle unprotected row has no runtime identity")
+	}
+	var unprotectedRuntimeID string
+	if json.Unmarshal(unprotectedValues[0].RuntimeValue, &unprotectedRuntimeID) != nil || unprotectedRuntimeID == "" {
+		return PendingCycleResult{}, errors.New("Swift pending-cycle unprotected runtime identity is invalid")
+	}
+	unprotectedAuthoredID, unprotectedValue, err := scenarios.PendingCycleUnprotectedRowTarget(unprotectedCommit, []scenarios.NativeIdentityAlias{unprotectedAlias}, unprotectedRuntimeID)
+	if err != nil {
+		return PendingCycleResult{}, err
 	}
 	if err := platform.Install(ctx, client, "current", ""); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("install Swift pending-cycle client: %w", err)
@@ -79,6 +102,9 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if target.ValueField == "" {
 		return PendingCycleResult{}, errors.New("Swift pending-cycle runtime value field is absent")
 	}
+	target.UnprotectedAuthoredRecordID = unprotectedAuthoredID
+	target.UnprotectedRecordID = unprotectedRuntimeID
+	target.UnprotectedValue = unprotectedValue
 	local, err := platform.ApplyStep(ctx, client, write)
 	if err != nil || local.Disposition != "success" {
 		return PendingCycleResult{}, fmt.Errorf("apply Swift pending mutation: %w", resultError(err, local.Disposition))
@@ -123,6 +149,13 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 		return PendingCycleResult{}, fmt.Errorf("capture Swift pending-cycle accepted push: %w", err)
 	}
 
+	unprotectedMaterialize, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-UNPROTECTED-MATERIALIZE-001", "process/materialize-source-transaction")
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	if result, processErr := controller.ProcessStep(ctx, nil, unprotectedMaterialize); processErr != nil || result.Disposition != "success" {
+		return PendingCycleResult{}, fmt.Errorf("materialize Swift pending-cycle unprotected row: %w", resultError(processErr, result.Disposition))
+	}
 	materialize, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-MATERIALIZE-001", "process/materialize-source-transaction")
 	if err != nil {
 		return PendingCycleResult{}, err
@@ -303,6 +336,9 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err := scenarios.ValidatePendingCycleNativeEvidence(evidence); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("validate Swift pending-cycle native evidence: %w", err)
 	}
+	if err := scenarios.ValidatePendingCycleServerFacts(serverCaptures[0].StateFacts, target); err != nil {
+		return PendingCycleResult{}, fmt.Errorf("validate Swift pending-cycle server evidence: %w", err)
+	}
 	return PendingCycleResult{PushCall: push, PullCall: pullCall, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, Evidence: evidence}, nil
 }
 
@@ -391,13 +427,23 @@ func swiftPendingCycleEvidence(target scenarios.PendingCycleNativeTarget, update
 		}
 		for _, row := range snapshot.ApplicationRows {
 			var recordID string
-			if json.Unmarshal(row[target.PrimaryKeyField], &recordID) != nil || recordID != target.RecordID {
-				continue
+			if json.Unmarshal(row[target.PrimaryKeyField], &recordID) != nil {
+				return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle application row identity is invalid")
 			}
-			if state.TargetRowPresent || json.Unmarshal(row[target.ValueField], &state.TargetRowValue) != nil {
-				return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle application row is invalid")
+			switch recordID {
+			case target.RecordID:
+				if state.TargetRowPresent || json.Unmarshal(row[target.ValueField], &state.TargetRowValue) != nil {
+					return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle target application row is invalid")
+				}
+				state.TargetRowPresent = true
+			case target.UnprotectedRecordID:
+				if state.UnprotectedRowPresent || json.Unmarshal(row[target.ValueField], &state.UnprotectedRowValue) != nil {
+					return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle unprotected application row is invalid")
+				}
+				state.UnprotectedRowPresent = true
+			default:
+				return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle application row differs from its targets")
 			}
-			state.TargetRowPresent = true
 		}
 		for _, mutation := range snapshot.RetainedMutations {
 			if mutation.TableName != target.TableName || mutation.RecordID != target.RecordID {
@@ -445,14 +491,25 @@ func swiftPendingCycleEvidence(target scenarios.PendingCycleNativeTarget, update
 			}
 		}
 		for _, row := range snapshot.ScopeRows {
-			if row.TableName != target.TableName || row.RecordID != target.RecordID {
-				continue
+			if row.TableName != target.TableName {
+				return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle scope row differs from its table")
 			}
-			if state.TargetScopeRowPresent {
-				return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle scope row is duplicated")
+			switch row.RecordID {
+			case target.RecordID:
+				if state.TargetScopeRowPresent {
+					return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle target scope row is duplicated")
+				}
+				state.TargetScopeRowPresent = true
+				state.TargetScopeRowChecksum = row.Checksum
+			case target.UnprotectedRecordID:
+				if state.UnprotectedScopeRowPresent {
+					return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle unprotected scope row is duplicated")
+				}
+				state.UnprotectedScopeRowPresent = true
+				state.UnprotectedScopeRowChecksum = row.Checksum
+			default:
+				return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle scope row differs from its targets")
 			}
-			state.TargetScopeRowPresent = true
-			state.TargetScopeRowChecksum = row.Checksum
 			if state.ScopeID == "" {
 				state.ScopeID = row.ScopeID
 			}

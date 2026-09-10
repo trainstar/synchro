@@ -172,6 +172,38 @@ func TestTemporaryUnavailableWireFaultReturnsCanonicalResponseWithoutUpstreamDis
 	}
 }
 
+func TestRetryLaterResponseIsCanonical(t *testing.T) {
+	request := testRequest(t, "retry-later-request")
+	response := NewRetryLaterResponse(request)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != RetryLaterRetryAfter || response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("retry later response = status %d, retry-after %q, content-type %q", response.StatusCode, response.Header.Get("Retry-After"), response.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read retry later response: %v", err)
+	}
+	if string(body) != retryLaterBody {
+		t.Fatalf("retry later body = %q", body)
+	}
+}
+
+func TestIdempotencyConflictResponseIsCanonicalAndNonRetryable(t *testing.T) {
+	request := testRequest(t, "idempotency-conflict-request")
+	response := NewIdempotencyConflictResponse(request)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict || response.Header.Get("Retry-After") != "" || response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("idempotency conflict response = status %d, retry-after %q, content-type %q", response.StatusCode, response.Header.Get("Retry-After"), response.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read idempotency conflict response: %v", err)
+	}
+	if string(body) != idempotencyConflictBody {
+		t.Fatalf("idempotency conflict body = %q", body)
+	}
+}
+
 func TestTruncationAndWireCancellationCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	owner, err := NewController(ctx)

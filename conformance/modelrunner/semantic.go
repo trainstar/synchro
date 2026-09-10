@@ -697,13 +697,21 @@ func clientCheckpoint(client reference.ClientState, scope reference.ScopeID) (re
 }
 
 func pendingCycleSatisfied(result Result) bool {
-	steps, ok := exactSemanticSteps(result, "local/write", "push/submit", "process/materialize-source-transaction", "pull/request-page")
+	steps, ok := exactSemanticSteps(
+		result,
+		"model/commit-source-transaction",
+		"local/write",
+		"push/submit",
+		"process/materialize-source-transaction",
+		"process/materialize-source-transaction",
+		"pull/request-page",
+	)
 	if !ok {
 		return false
 	}
-	localWrite, push, materialize, pull := steps[0], steps[1], steps[2], steps[3]
+	commit, localWrite, push, unprotectedMaterialize, materialize, pull := steps[0], steps[1], steps[2], steps[3], steps[4], steps[5]
 	client, mutation, ok := pendingTraceIdentity(localWrite, push)
-	if !ok || !pendingLocalWriteSatisfied(localWrite, client, mutation) || !pendingPushSatisfied(push, client, mutation) || !pendingMaterializationSatisfied(materialize, push, client, mutation) {
+	if !ok || !pendingLocalWriteSatisfied(localWrite, client, mutation) || !pendingPushSatisfied(push, client, mutation) || !sourceMaterializationSatisfied(commit, unprotectedMaterialize, "scope-a", 1) || !pendingMaterializationSatisfied(materialize, push, client, mutation) {
 		return false
 	}
 	return terminalPullExecutionSatisfied(pull) && reflect.DeepEqual(materialize.After, pull.Before) && reflect.DeepEqual(pull.After, result.FinalSnapshot)

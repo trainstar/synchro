@@ -1,22 +1,32 @@
 package reactnative
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/faults"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 const (
-	pendingCycleScenarioPath = "conformance/scenarios/performance/pending-cycle-001.json"
-	pendingCycleScenarioID   = "SCN-PERF-PENDING-CYCLE-001"
+	pendingCycleScenarioPath                                  = "conformance/scenarios/performance/pending-cycle-001.json"
+	pendingCycleScenarioID                                    = "SCN-PERF-PENDING-CYCLE-001"
+	pendingCycleUnprotectedCommitStepID      scenarios.StepID = "STEP-PERF-PENDING-CYCLE-UNPROTECTED-COMMIT-001"
+	pendingCycleLocalWriteStepID             scenarios.StepID = "STEP-PERF-PENDING-CYCLE-001"
+	pendingCyclePushStepID                   scenarios.StepID = "STEP-PERF-PENDING-CYCLE-002"
+	pendingCycleUnprotectedMaterializeStepID scenarios.StepID = "STEP-PERF-PENDING-CYCLE-UNPROTECTED-MATERIALIZE-001"
+	pendingCycleMaterializeStepID            scenarios.StepID = "STEP-PERF-PENDING-CYCLE-MATERIALIZE-001"
+	pendingCyclePullStepID                   scenarios.StepID = "STEP-PERF-PENDING-CYCLE-003"
 
 	// Installing the current schema performs connect, rebuild, and pull.
 	pendingCycleBootstrapRequests = 3
@@ -26,10 +36,12 @@ const (
 )
 
 var pendingCycleStepOrder = []scenarios.StepID{
-	"STEP-PERF-PENDING-CYCLE-001",
-	"STEP-PERF-PENDING-CYCLE-002",
-	"STEP-PERF-PENDING-CYCLE-MATERIALIZE-001",
-	"STEP-PERF-PENDING-CYCLE-003",
+	pendingCycleUnprotectedCommitStepID,
+	pendingCycleLocalWriteStepID,
+	pendingCyclePushStepID,
+	pendingCycleUnprotectedMaterializeStepID,
+	pendingCycleMaterializeStepID,
+	pendingCyclePullStepID,
 }
 
 var pendingCycleAliasNames = []string{
@@ -39,6 +51,7 @@ var pendingCycleAliasNames = []string{
 	"current-schema",
 	"items-table",
 	"pending-row-primary-key",
+	"unprotected-row-primary-key",
 	"scope-a",
 	"scope-set-version-one",
 }
@@ -87,14 +100,17 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 			return fmt.Errorf("React Native pending-cycle identity alias %q is absent", name)
 		}
 	}
-	if scenario.Steps[0].NativeBinding.Kind != "local-write" || scenario.Steps[1].NativeBinding.Kind != "public-call" ||
-		scenario.Steps[2].NativeBinding.Kind != "controller" || scenario.Steps[3].NativeBinding.Kind != "public-call" {
+	if scenario.Steps[0].NativeBinding.Kind != "controller" || scenario.Steps[1].NativeBinding.Kind != "local-write" ||
+		scenario.Steps[2].NativeBinding.Kind != "public-call" || scenario.Steps[3].NativeBinding.Kind != "controller" ||
+		scenario.Steps[4].NativeBinding.Kind != "controller" || scenario.Steps[5].NativeBinding.Kind != "public-call" {
 		return errors.New("React Native pending-cycle native binding kinds changed")
 	}
-	if scenarios.OperationKey(scenario.Steps[0].Operation) != "local/write" ||
-		scenarios.OperationKey(scenario.Steps[1].Operation) != "push/submit" ||
-		scenarios.OperationKey(scenario.Steps[2].Operation) != "process/materialize-source-transaction" ||
-		scenarios.OperationKey(scenario.Steps[3].Operation) != "pull/request-page" {
+	if scenarios.OperationKey(scenario.Steps[0].Operation) != "model/commit-source-transaction" ||
+		scenarios.OperationKey(scenario.Steps[1].Operation) != "local/write" ||
+		scenarios.OperationKey(scenario.Steps[2].Operation) != "push/submit" ||
+		scenarios.OperationKey(scenario.Steps[3].Operation) != "process/materialize-source-transaction" ||
+		scenarios.OperationKey(scenario.Steps[4].Operation) != "process/materialize-source-transaction" ||
+		scenarios.OperationKey(scenario.Steps[5].Operation) != "pull/request-page" {
 		return errors.New("React Native pending-cycle operation set changed")
 	}
 	for _, step := range scenario.Steps {
@@ -108,6 +124,7 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 		"ASSERT-PERF-PENDING-CYCLE-CRUD-001":     {"SYNC-CRUD-001", "CTRL-CRUD-001"},
 		"ASSERT-PERF-PENDING-CYCLE-APPLY-001":    {"SYNC-APPLY-001", "CTRL-APPLY-001"},
 		"ASSERT-PERF-PENDING-CYCLE-VERSION-002":  {"SYNC-VERSION-002", "CTRL-VERSION-002"},
+		"ASSERT-PERF-PENDING-CYCLE-SCOPE-006":    {"SYNC-SCOPE-006", "CTRL-SCOPE-006"},
 		"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001":  {"SYNC-CLEANUP-001", "CTRL-CLEANUP-001"},
 		"ASSERT-PERF-PENDING-CYCLE-CURSOR-003":   {"SYNC-CURSOR-003", "CTRL-CURSOR-003"},
 		"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003": {"SYNC-BOUNDARY-003", "CTRL-BOUNDARY-003"},
@@ -155,11 +172,21 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-PENDING-CYCLE-001", "CTRL-MUTATION-002") {
 				obligations[id]++
 			}
+		case "OBL-PERF-PENDING-CYCLE-SCOPE-006-FAULT-001":
+			if proofTargetMatches(obligation, "fault-injection", "SUP-MACOS-CURRENT-001", "test-swift", "FPL-PERF-PENDING-CYCLE-SCOPE-006", "CTRL-SCOPE-006") {
+				obligations[id]++
+			}
+		case "OBL-PERF-PENDING-CYCLE-SCOPE-006-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-PENDING-CYCLE-SCOPE-006", "CTRL-SCOPE-006") {
+				obligations[id]++
+			}
 		}
 	}
 	if obligations["OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001"] != 1 ||
-		obligations["OBL-PERF-PENDING-CYCLE-CONTROL-001"] != 1 {
+		obligations["OBL-PERF-PENDING-CYCLE-CONTROL-001"] != 1 ||
+		obligations["OBL-PERF-PENDING-CYCLE-SCOPE-006-FAULT-001"] != 1 ||
+		obligations["OBL-PERF-PENDING-CYCLE-SCOPE-006-CONTROL-001"] != 1 {
 		return errors.New("React Native pending-cycle proof obligations are invalid")
 	}
 	return nil
@@ -168,12 +195,12 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 func pendingCycleNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
 	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
 		"SYNC-MUTATION-002", "SYNC-LOCALSQL-001", "SYNC-CRUD-001", "SYNC-APPLY-001", "SYNC-VERSION-002",
-		"SYNC-CLEANUP-001", "SYNC-CURSOR-003", "SYNC-BOUNDARY-003", "SYNC-CRUD-002",
+		"SYNC-SCOPE-006", "SYNC-CLEANUP-001", "SYNC-CURSOR-003", "SYNC-BOUNDARY-003", "SYNC-CRUD-002",
 	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
 		"ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001", "ASSERT-PERF-PENDING-CYCLE-PERFORMANCE-001",
 		"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001", "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
 		"ASSERT-PERF-PENDING-CYCLE-APPLY-001", "ASSERT-PERF-PENDING-CYCLE-VERSION-002",
-		"ASSERT-PERF-PENDING-CYCLE-CLEANUP-001", "ASSERT-PERF-PENDING-CYCLE-CURSOR-003",
+		"ASSERT-PERF-PENDING-CYCLE-SCOPE-006", "ASSERT-PERF-PENDING-CYCLE-CLEANUP-001", "ASSERT-PERF-PENDING-CYCLE-CURSOR-003",
 		"ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003", "ASSERT-PERF-PENDING-CYCLE-CRUD-002",
 	})
 }
@@ -192,12 +219,14 @@ type PendingCycleCoordinatorConfig struct {
 
 // PendingCycleCoordinator is the command sidecar for one RN pending-cycle run.
 type PendingCycleCoordinator struct {
-	config   PendingCycleCoordinatorConfig
-	listener net.Listener
-	server   *http.Server
-	token    string
-	adapter  string
-	database string
+	config    PendingCycleCoordinatorConfig
+	listener  net.Listener
+	server    *http.Server
+	token     string
+	adapter   string
+	upstream  string
+	database  string
+	transport *http.Client
 
 	steps      map[scenarios.StepID]scenarios.Step
 	identities []scenarios.NativeIdentityAlias
@@ -207,36 +236,60 @@ type PendingCycleCoordinator struct {
 	clientKey  string
 	tableName  string
 	primaryKey string
+	target     scenarios.PendingCycleNativeTarget
+	updated    string
+	updateStep scenarios.PendingCycleNativeCRUDStep
+	deleteStep scenarios.PendingCycleNativeCRUDStep
 
-	mu          sync.Mutex
-	prepared    bool
-	closed      bool
-	completed   bool
-	failed      error
-	stage       pendingCycleStage
-	nextSeq     uint64
-	process     *actionProcessIdentity
-	finalResult *finalCapture
-	result      PendingCycleCoordinatorResult
+	proxyMu           sync.Mutex
+	faultArmed        bool
+	faultPushes       int
+	proxyFailureCause error
+
+	mu        sync.Mutex
+	prepared  bool
+	closed    bool
+	completed bool
+	failed    error
+	stage     pendingCycleStage
+	nextSeq   uint64
+	process   *actionProcessIdentity
+	captures  map[pendingCycleStage]finalCapture
+	states    map[pendingCycleStage]scenarios.PendingCycleNativeState
+	result    PendingCycleCoordinatorResult
 }
 
 type pendingCycleStage uint8
 
 const (
 	pendingCycleStageOpen pendingCycleStage = iota
-	// The authored write targets the current application schema, so the client
-	// installs that schema before it writes. The Swift consumer performs the
-	// same start call through its current initialization path.
-	pendingCycleStageInstallCurrent
-	// The engine rejects a second start, so the install call stops the client
-	// before the authored push starts it again. initializeCurrent in
-	// conformance/swift/platform.go performs the same stop.
-	pendingCycleStageInstallStop
-	pendingCycleStageLocalWrite
-	pendingCycleStagePush
-	pendingCycleStagePull
-	pendingCycleStageFinalCapture
-	pendingCycleStageApplicationRows
+	pendingCycleStageOpened
+	pendingCycleStageBootstrapped
+	pendingCycleStageBeforeWrite
+	pendingCycleStageStoppedForInitialWrite
+	pendingCycleStageInitialLocalWrite
+	pendingCycleStageAfterInitialWrite
+	pendingCycleStageInitialPush
+	pendingCycleStageAfterInitialPush
+	pendingCycleStageBeforePull
+	pendingCycleStageInitialPull
+	pendingCycleStageAfterInitialPull
+	pendingCycleStageDeviceRestarted
+	pendingCycleStageRestartOpened
+	pendingCycleStageAfterRestart
+	pendingCycleStageStoppedForUpdate
+	pendingCycleStageUpdateLocalWrite
+	pendingCycleStageBeforeCleanup
+	pendingCycleStageCleanupCall
+	pendingCycleStageAfterCleanup
+	pendingCycleStageStoppedForUpdatePush
+	pendingCycleStageUpdatePushed
+	pendingCycleStageAfterUpdate
+	pendingCycleStageStoppedForDelete
+	pendingCycleStageDeleteLocalWrite
+	pendingCycleStageBeforeDelete
+	pendingCycleStageDeletePushed
+	pendingCycleStageAfterDelete
 	pendingCycleStageComplete
 )
 
@@ -244,6 +297,7 @@ const (
 type PendingCycleCoordinatorResult struct {
 	ServerFacts        scenarios.StateFacts
 	IdentityResolution []blackbox.NativeIdentityResolution
+	Evidence           scenarios.PendingCycleNativeEvidence
 }
 
 // NewPendingCycleCoordinator creates an authenticated host-loopback listener.
@@ -268,7 +322,7 @@ func NewPendingCycleCoordinator(config PendingCycleCoordinatorConfig) (*PendingC
 	if serverURL == "" && config.Harness != nil {
 		serverURL = config.Harness.AdapterURL()
 	}
-	adapterURL, err := nativeAdapterURL(serverURL, config.Platform)
+	upstream, err := nativeAdapterURL(serverURL, "ios")
 	if err != nil {
 		return nil, err
 	}
@@ -290,16 +344,22 @@ func NewPendingCycleCoordinator(config PendingCycleCoordinatorConfig) (*PendingC
 	if err != nil {
 		return nil, errors.New("listen for React Native pending-cycle coordinator")
 	}
+	adapterURL, err := nativeAdapterURL("http://"+listener.Addr().String(), config.Platform)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
 	steps := make(map[scenarios.StepID]scenarios.Step, len(config.Scenario.Steps))
 	for _, step := range config.Scenario.Steps {
 		steps[step.ID] = step
 	}
 	coordinator := &PendingCycleCoordinator{
-		config: config, listener: listener, token: token, adapter: adapterURL, database: database,
-		steps: steps, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
+		config: config, listener: listener, token: token, adapter: adapterURL, upstream: upstream, database: database,
+		transport: &http.Client{Timeout: 2 * time.Minute},
+		steps:     steps, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
-		nextSeq: 1,
-		server:  &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
+		nextSeq: 1, captures: make(map[pendingCycleStage]finalCapture), states: make(map[pendingCycleStage]scenarios.PendingCycleNativeState),
+		server: &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
 	}
 	coordinator.server.Handler = coordinator
 	return coordinator, nil
@@ -336,13 +396,37 @@ func (c *PendingCycleCoordinator) Prepare(ctx context.Context) error {
 	if err := c.config.Controller.Install(ctx, c.config.Scenario.Model.Setup[0]); err != nil {
 		return fmt.Errorf("install React Native pending-cycle contract: %w", err)
 	}
-	localWrite, err := c.config.Controller.ApplicationWrite(c.steps[pendingCycleStepOrder[0]].Operation)
+	unprotectedCommit := c.steps[pendingCycleUnprotectedCommitStepID].Operation
+	result, err := c.config.Controller.ApplyStep(ctx, unprotectedCommit)
+	if err != nil || result.Disposition != c.steps[pendingCycleUnprotectedCommitStepID].ExpectedOutcome.Disposition {
+		return fmt.Errorf("commit React Native pending-cycle unprotected row: %w", nativeResultError(err, result.Disposition))
+	}
+	alias, runtimeRecordID, err := c.unprotectedRowIdentity()
+	if err != nil {
+		return err
+	}
+	authoredRecordID, unprotectedValue, err := scenarios.PendingCycleUnprotectedRowTarget(unprotectedCommit, []scenarios.NativeIdentityAlias{alias}, runtimeRecordID)
+	if err != nil {
+		return err
+	}
+	localWrite, err := c.config.Controller.ApplicationWrite(c.steps[pendingCycleLocalWriteStepID].Operation)
 	if err != nil {
 		return fmt.Errorf("bind React Native pending mutation to the application schema: %w", err)
 	}
-	localStep := c.steps[pendingCycleStepOrder[0]]
+	localStep := c.steps[pendingCycleLocalWriteStepID]
 	localStep.Operation = localWrite
-	c.steps[pendingCycleStepOrder[0]] = localStep
+	c.steps[pendingCycleLocalWriteStepID] = localStep
+	target, err := pendingCycleNativeTarget(localWrite)
+	if err != nil {
+		return fmt.Errorf("decode React Native pending-cycle runtime target: %w", err)
+	}
+	c.target = target
+	c.target.UnprotectedAuthoredRecordID = authoredRecordID
+	c.target.UnprotectedRecordID = runtimeRecordID
+	c.target.UnprotectedValue = unprotectedValue
+	c.updated = target.Value + "-updated"
+	c.tableName = target.TableName
+	c.primaryKey = target.PrimaryKeyField
 	if err := c.bindRuntimeIdentities(false); err != nil {
 		return err
 	}
@@ -446,7 +530,7 @@ func (c *PendingCycleCoordinator) Close(ctx context.Context) error {
 
 func (c *PendingCycleCoordinator) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != "/exchange" {
-		writeExchangeError(writer, http.StatusNotFound)
+		c.proxyAdapter(writer, request)
 		return
 	}
 	if request.Method != http.MethodPost {
@@ -516,51 +600,77 @@ func (c *PendingCycleCoordinator) acceptResultLocked(raw json.RawMessage) error 
 		}
 		return nil
 	}
+	if c.stage == pendingCycleStageDeviceRestarted {
+		if !isJSONNull(raw) {
+			return errInvalidExchange
+		}
+		return nil
+	}
 	envelope, err := decodeResultEnvelope(raw)
 	if err != nil || envelope.Outcome != "passed" {
 		return errInvalidExchange
 	}
 	switch c.stage {
-	case pendingCycleStageInstallCurrent:
+	case pendingCycleStageOpened:
 		process, err := validateOpenedResult(envelope.Result)
 		if err != nil {
 			return err
 		}
 		c.process = &process
 		return nil
-	case pendingCycleStageInstallStop:
+	case pendingCycleStageBootstrapped:
 		return c.validateSynchronizedResult(envelope.Result, "idle")
-	case pendingCycleStageLocalWrite:
+	case pendingCycleStageBeforeWrite:
+		return c.captureState(envelope.Result, pendingCycleStageBeforeWrite)
+	case pendingCycleStageStoppedForInitialWrite:
 		if c.process == nil {
 			return errors.New("React Native pending-cycle process identity is unavailable")
 		}
 		return validateStoppedLifecycleResult(envelope.Result, *c.process)
-	case pendingCycleStagePush:
+	case pendingCycleStageInitialLocalWrite:
 		return c.validateLocalResult(envelope.Result)
-	case pendingCycleStagePull:
-		return c.validateSynchronizedResult(envelope.Result, c.steps[pendingCycleStepOrder[1]].NativeBinding.Completion)
-	case pendingCycleStageFinalCapture:
-		return c.validateSynchronizedResult(envelope.Result, c.steps[pendingCycleStepOrder[3]].NativeBinding.Completion)
-	case pendingCycleStageApplicationRows:
-		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace"})
-		if err != nil {
-			return err
-		}
-		if err := validatePendingCycleCapture(c.config.Scenario, capture); err != nil {
-			return err
-		}
-		c.finalResult = &capture
-		return nil
+	case pendingCycleStageAfterInitialWrite:
+		return c.captureState(envelope.Result, pendingCycleStageAfterInitialWrite)
+	case pendingCycleStageInitialPush:
+		return c.validateSynchronizedResult(envelope.Result, c.steps[pendingCyclePushStepID].NativeBinding.Completion)
+	case pendingCycleStageAfterInitialPush:
+		return c.captureState(envelope.Result, pendingCycleStageAfterInitialPush)
+	case pendingCycleStageBeforePull:
+		return c.captureState(envelope.Result, pendingCycleStageBeforePull)
+	case pendingCycleStageInitialPull:
+		return c.validateSynchronizedResult(envelope.Result, c.steps[pendingCyclePullStepID].NativeBinding.Completion)
+	case pendingCycleStageAfterInitialPull:
+		return c.captureState(envelope.Result, pendingCycleStageAfterInitialPull)
+	case pendingCycleStageRestartOpened:
+		return c.validateRestartOpened(envelope.Result)
+	case pendingCycleStageAfterRestart:
+		return c.captureState(envelope.Result, pendingCycleStageAfterRestart)
+	case pendingCycleStageStoppedForUpdate:
+		return c.validateStoppedResult(envelope.Result)
+	case pendingCycleStageUpdateLocalWrite:
+		return c.validateLocalResult(envelope.Result)
+	case pendingCycleStageBeforeCleanup:
+		return c.captureState(envelope.Result, pendingCycleStageBeforeCleanup)
+	case pendingCycleStageCleanupCall:
+		return c.validateCleanupCall(envelope.Result)
+	case pendingCycleStageAfterCleanup:
+		return c.captureState(envelope.Result, pendingCycleStageAfterCleanup)
+	case pendingCycleStageStoppedForUpdatePush:
+		return c.validateStoppedResult(envelope.Result)
+	case pendingCycleStageUpdatePushed:
+		return c.validateSynchronizedResult(envelope.Result, "idle")
+	case pendingCycleStageAfterUpdate:
+		return c.captureState(envelope.Result, pendingCycleStageAfterUpdate)
+	case pendingCycleStageStoppedForDelete:
+		return c.validateStoppedResult(envelope.Result)
+	case pendingCycleStageDeleteLocalWrite:
+		return c.validateLocalResult(envelope.Result)
+	case pendingCycleStageBeforeDelete:
+		return c.captureState(envelope.Result, pendingCycleStageBeforeDelete)
+	case pendingCycleStageDeletePushed:
+		return c.validateSynchronizedResult(envelope.Result, "idle")
 	case pendingCycleStageComplete:
-		if c.finalResult == nil {
-			return errors.New("React Native pending-cycle final capture is unavailable")
-		}
-		rows, err := captureRows(envelope.Result)
-		if err != nil {
-			return err
-		}
-		c.finalResult.Rows = rows
-		return nil
+		return c.captureState(envelope.Result, pendingCycleStageComplete)
 	default:
 		return errInvalidExchange
 	}
@@ -571,23 +681,79 @@ func (c *PendingCycleCoordinator) advanceLocked(ctx context.Context, sequence ui
 	switch c.stage {
 	case pendingCycleStageOpen:
 		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "create", "initialization": "empty", "seed_step_id": nil}, nil)
-	case pendingCycleStageInstallCurrent:
+	case pendingCycleStageOpened:
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
-	case pendingCycleStageInstallStop:
+	case pendingCycleStageBootstrapped:
+		response.Command = c.captureCommand()
+	case pendingCycleStageBeforeWrite:
 		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
-	case pendingCycleStageLocalWrite:
-		response.Command = c.command("client", "execute-step", map[string]any{"client_key": c.clientKey}, []scenarios.StepID{pendingCycleStepOrder[0]})
-	case pendingCycleStagePush:
-		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": c.steps[pendingCycleStepOrder[1]].NativeBinding.Method, "completion": c.steps[pendingCycleStepOrder[1]].NativeBinding.Completion}, []scenarios.StepID{pendingCycleStepOrder[1]})
-	case pendingCycleStagePull:
-		if err := c.preparePull(ctx); err != nil {
+	case pendingCycleStageStoppedForInitialWrite:
+		response.Command = c.command("client", "execute-step", map[string]any{"client_key": c.clientKey}, []scenarios.StepID{pendingCycleLocalWriteStepID})
+	case pendingCycleStageInitialLocalWrite:
+		response.Command = c.captureCommand()
+	case pendingCycleStageAfterInitialWrite:
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": c.steps[pendingCyclePushStepID].NativeBinding.Method, "completion": c.steps[pendingCyclePushStepID].NativeBinding.Completion}, []scenarios.StepID{pendingCyclePushStepID})
+	case pendingCycleStageInitialPush:
+		response.Command = c.captureCommand()
+	case pendingCycleStageAfterInitialPush:
+		if err := c.prepareInitialPull(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
-		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": c.steps[pendingCycleStepOrder[3]].NativeBinding.Method, "completion": c.steps[pendingCycleStepOrder[3]].NativeBinding.Completion}, []scenarios.StepID{pendingCycleStepOrder[3]})
-	case pendingCycleStageFinalCapture:
-		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace"}}, nil)
-	case pendingCycleStageApplicationRows:
-		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"application-rows"}, "row_selectors": []map[string]any{{"table_name": c.tableName, "primary_key_field": c.primaryKey, "primary_key": c.runtimeRecordID()}}}, nil)
+		response.Command = c.captureCommand()
+	case pendingCycleStageBeforePull:
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": c.steps[pendingCyclePullStepID].NativeBinding.Method, "completion": c.steps[pendingCyclePullStepID].NativeBinding.Completion}, []scenarios.StepID{pendingCyclePullStepID})
+	case pendingCycleStageInitialPull:
+		response.Command = c.captureCommand()
+	case pendingCycleStageAfterInitialPull:
+		response.Command = c.command("device", "restart", nil, nil)
+	case pendingCycleStageDeviceRestarted:
+		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil}, nil)
+	case pendingCycleStageRestartOpened:
+		response.Command = c.captureCommand()
+	case pendingCycleStageAfterRestart:
+		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
+	case pendingCycleStageStoppedForUpdate:
+		if err := c.prepareUpdate(); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("client", "execute-step", map[string]any{"client_key": c.clientKey}, []scenarios.StepID{pendingCycleLocalWriteStepID})
+		response.Command.Action.Steps[0].Operation = conformanceOperationFromScenario(c.updateStep.LocalWrite)
+	case pendingCycleStageUpdateLocalWrite:
+		response.Command = c.captureCommand()
+	case pendingCycleStageBeforeCleanup:
+		if err := c.applyCleanupAssignment(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "blocked"}, nil)
+	case pendingCycleStageCleanupCall:
+		response.Command = c.captureCommand()
+	case pendingCycleStageAfterCleanup:
+		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
+	case pendingCycleStageStoppedForUpdatePush:
+		c.releaseCleanupFault()
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
+	case pendingCycleStageUpdatePushed:
+		if err := c.materializeGenerated(ctx, c.updateStep, "update"); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.captureCommand()
+	case pendingCycleStageAfterUpdate:
+		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
+	case pendingCycleStageStoppedForDelete:
+		if err := c.prepareDelete(); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("client", "execute-step", map[string]any{"client_key": c.clientKey}, []scenarios.StepID{pendingCycleLocalWriteStepID})
+		response.Command.Action.Steps[0].Operation = conformanceOperationFromScenario(c.deleteStep.LocalWrite)
+	case pendingCycleStageDeleteLocalWrite:
+		response.Command = c.captureCommand()
+	case pendingCycleStageBeforeDelete:
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
+	case pendingCycleStageDeletePushed:
+		if err := c.materializeGenerated(ctx, c.deleteStep, "delete"); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.captureCommand()
 	case pendingCycleStageComplete:
 		if err := c.validateCompletionLocked(ctx); err != nil {
 			return exchangeResponse{}, err
@@ -602,17 +768,22 @@ func (c *PendingCycleCoordinator) advanceLocked(ctx context.Context, sequence ui
 	return response, nil
 }
 
-func (c *PendingCycleCoordinator) preparePull(ctx context.Context) error {
+func (c *PendingCycleCoordinator) prepareInitialPull(ctx context.Context) error {
 	if c.config.Controller == nil {
 		return errors.New("React Native pending-cycle coordinator controller is unavailable")
 	}
-	push := c.steps[pendingCycleStepOrder[1]].Operation
+	push := c.steps[pendingCyclePushStepID].Operation
 	if err := c.config.Controller.BindApplicationPush(push); err != nil {
 		return fmt.Errorf("bind React Native pending-cycle push transaction: %w", err)
 	}
-	materialize := c.steps[pendingCycleStepOrder[2]].Operation
-	result, err := c.config.Controller.ProcessStep(ctx, nil, materialize)
-	if err != nil || result.Disposition != c.steps[pendingCycleStepOrder[2]].ExpectedOutcome.Disposition {
+	unprotectedMaterialize := c.steps[pendingCycleUnprotectedMaterializeStepID]
+	result, err := c.config.Controller.ProcessStep(ctx, nil, unprotectedMaterialize.Operation)
+	if err != nil || result.Disposition != unprotectedMaterialize.ExpectedOutcome.Disposition {
+		return fmt.Errorf("materialize React Native pending-cycle unprotected row: %w", nativeResultError(err, result.Disposition))
+	}
+	materialize := c.steps[pendingCycleMaterializeStepID].Operation
+	result, err = c.config.Controller.ProcessStep(ctx, nil, materialize)
+	if err != nil || result.Disposition != c.steps[pendingCycleMaterializeStepID].ExpectedOutcome.Disposition {
 		return fmt.Errorf("materialize React Native pending mutation: %w", nativeResultError(err, result.Disposition))
 	}
 	return c.bindRuntimeIdentities(true)
@@ -648,6 +819,35 @@ func (c *PendingCycleCoordinator) validateSynchronizedResult(raw json.RawMessage
 	return c.validateProcess(members["process"])
 }
 
+func (c *PendingCycleCoordinator) validateStoppedResult(raw json.RawMessage) error {
+	if c.process == nil {
+		return errors.New("React Native pending-cycle process identity is unavailable")
+	}
+	return validateStoppedLifecycleResult(raw, *c.process)
+}
+
+func (c *PendingCycleCoordinator) validateRestartOpened(raw json.RawMessage) error {
+	process, err := validateOpenedResult(raw)
+	if err != nil || c.process == nil || process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint || process.ProcessID == c.process.ProcessID {
+		return errors.New("React Native pending-cycle restart did not replace the process and retain its database")
+	}
+	c.process = &process
+	return nil
+}
+
+func (c *PendingCycleCoordinator) validateCleanupCall(raw json.RawMessage) error {
+	if err := c.validateSynchronizedResult(raw, "blocked"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	var status syncStatus
+	if err := decodeStrictMembers(raw, &members, 4, "pending-cycle cleanup result"); err != nil ||
+		json.Unmarshal(members["status"], &status) != nil || status.State != "backoff" || isJSONNull(status.RetryAt) {
+		return errors.New("React Native pending-cycle cleanup did not retain retryable push backoff")
+	}
+	return c.validateCleanupFault()
+}
+
 func (c *PendingCycleCoordinator) validateProcess(raw json.RawMessage) error {
 	process, err := decodeActionProcessIdentity(raw)
 	if err != nil || c.process == nil {
@@ -660,52 +860,593 @@ func (c *PendingCycleCoordinator) validateProcess(raw json.RawMessage) error {
 }
 
 func (c *PendingCycleCoordinator) validateCompletionLocked(ctx context.Context) error {
-	if c.config.Controller == nil || c.finalResult == nil {
+	if c.config.Controller == nil {
 		return errors.New("React Native pending-cycle final evidence is unavailable")
 	}
-	rows, err := decodeRows(c.finalResult.Rows)
+	evidence, err := c.nativeEvidence()
 	if err != nil {
 		return err
 	}
-	localWrites := 0
-	for _, step := range c.config.Scenario.Steps {
-		if scenarios.OperationKey(step.Operation) == "local/write" {
-			localWrites++
-		}
+	finalCapture, found := c.captures[pendingCycleStageComplete]
+	if !found || validateReadyStatus(finalCapture.Status) != nil {
+		return errors.New("React Native pending-cycle final status is not ready")
 	}
-	pullScopes, err := pendingCyclePullScopeCount(c.steps[pendingCycleStepOrder[3]].Operation)
-	if err != nil || len(rows) != localWrites {
-		return errors.New("React Native pending-cycle application row cardinality is invalid")
+	initialCapture, found := c.captures[pendingCycleStageAfterInitialPull]
+	if !found {
+		return errors.New("React Native pending-cycle initial trace is unavailable")
 	}
-	state, err := decodeClientState(c.finalResult.ClientState)
-	if err != nil || len(state.ScopeStates) != pullScopes || state.ApplicationRowCount != uint64(len(rows)) || state.ScopeRowCount != uint64(len(state.ScopeRows)) || state.ScopeStateCount != uint64(len(state.ScopeStates)) {
-		return errors.New("React Native pending-cycle client state is inconsistent")
-	}
-	if len(c.finalResult.Pending) == 0 || validateEmptyArray(c.finalResult.Pending) != nil || len(c.finalResult.Rejected) == 0 || validateEmptyArray(c.finalResult.Rejected) != nil {
-		return errors.New("React Native pending-cycle mutation queues are not empty")
-	}
-	if err := validateReadyStatus(c.finalResult.Status); err != nil {
+	if err := validatePendingCycleTrace(c.config.Scenario, initialCapture.Trace); err != nil {
 		return err
 	}
-	if len(rows) == 0 || len(state.ScopeRows) != len(rows) || state.ScopeRows[0].RecordID != c.runtimeRecordID() || !rowUsesRuntimePrimary(rows[0], c.primaryKey, c.runtimeRecordID()) {
-		return errors.New("React Native pending-cycle row identity is invalid")
-	}
-	if err := validateProvenance(c.finalResult.Provenance, state.ScopeStates[0], state.ScopeRows[0]); err != nil {
-		return err
-	}
-	if err := validatePendingCycleTrace(c.config.Scenario, c.finalResult.Trace); err != nil {
+	if err := c.validateCleanupFault(); err != nil {
 		return err
 	}
 	serverCaptures, err := c.config.Controller.Capture(ctx, []string{c.clientKey}, []string{"server-state"})
 	if err != nil || len(serverCaptures) != 1 {
 		return fmt.Errorf("capture React Native pending-cycle server state: %w", nativeResultError(err, ""))
 	}
+	if err := scenarios.ValidatePendingCycleNativeEvidence(evidence); err != nil {
+		return fmt.Errorf("validate React Native pending-cycle native evidence: %w", err)
+	}
+	if err := scenarios.ValidatePendingCycleServerFacts(serverCaptures[0].StateFacts, c.target); err != nil {
+		return fmt.Errorf("validate React Native pending-cycle server evidence: %w", err)
+	}
 	resolutions, err := c.resolveIdentities()
 	if err != nil {
 		return err
 	}
-	c.result = PendingCycleCoordinatorResult{ServerFacts: serverCaptures[0].StateFacts, IdentityResolution: resolutions}
+	c.result = PendingCycleCoordinatorResult{ServerFacts: serverCaptures[0].StateFacts, IdentityResolution: resolutions, Evidence: evidence}
 	return nil
+}
+
+var pendingCycleCaptureSources = []string{
+	"application-rows",
+	"scope-state",
+	"pending-mutations",
+	"rejected-mutations",
+	"sync-status",
+	"sync-events",
+	"provenance",
+	"request-trace",
+	"durable-proof",
+}
+
+var pendingCycleCaptureKeys = []string{
+	"application_rows",
+	"client_state",
+	"pending_mutations",
+	"rejected_mutations",
+	"sync_status",
+	"sync_events",
+	"provenance",
+	"request_trace",
+	"durable_proof",
+}
+
+// ExchangeCount returns the exact number of coordinator exchanges required by
+// the direct pending-cycle proof.
+func (c *PendingCycleCoordinator) ExchangeCount() int {
+	return int(pendingCycleStageComplete) + 1
+}
+
+func (c *PendingCycleCoordinator) captureCommand() *conformanceCommand {
+	return c.command("observer", "capture", map[string]any{
+		"client_keys": []string{c.clientKey},
+		"sources":     pendingCycleCaptureSources,
+		"row_selectors": []map[string]any{
+			{
+				"table_name":        c.target.TableName,
+				"primary_key_field": c.target.PrimaryKeyField,
+				"primary_key":       c.target.RecordID,
+			},
+			{
+				"table_name":        c.target.TableName,
+				"primary_key_field": c.target.PrimaryKeyField,
+				"primary_key":       c.target.UnprotectedRecordID,
+			},
+		},
+		"durable_proof_identity": map[string]any{
+			"table_name": c.target.TableName,
+			"record_id":  c.target.RecordID,
+		},
+	}, nil)
+}
+
+func conformanceOperationFromScenario(operation scenarios.Operation) conformanceOperation {
+	return conformanceOperation{
+		ContractOperation: operation.ContractOperation,
+		Name:              operation.Name,
+		Payload:           copyRaw(operation.Payload),
+	}
+}
+
+func (c *PendingCycleCoordinator) captureState(raw json.RawMessage, stage pendingCycleStage) error {
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "pending-cycle capture result"); err != nil {
+		return err
+	}
+	if err := c.validateProcess(members["process"]); err != nil {
+		return err
+	}
+	capture, err := decodeCapture(raw, pendingCycleCaptureKeys)
+	if err != nil {
+		return err
+	}
+	if stage == pendingCycleStageAfterCleanup {
+		var status syncStatus
+		if json.Unmarshal(capture.Status, &status) != nil || status.State != "backoff" || isJSONNull(status.RetryAt) {
+			return errors.New("React Native pending-cycle cleanup capture is not in retryable backoff")
+		}
+		if err := c.validateCleanupFault(); err != nil {
+			return err
+		}
+	}
+	state, err := pendingCycleNativeState(c.target, *c.process, capture)
+	if err != nil {
+		return err
+	}
+	c.captures[stage] = capture
+	c.states[stage] = state
+	return nil
+}
+
+func (c *PendingCycleCoordinator) nativeEvidence() (scenarios.PendingCycleNativeEvidence, error) {
+	state := func(stage pendingCycleStage) (scenarios.PendingCycleNativeState, error) {
+		value, found := c.states[stage]
+		if !found {
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle inspection sequence is incomplete")
+		}
+		return value, nil
+	}
+	beforeWrite, err := state(pendingCycleStageBeforeWrite)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	afterWrite, err := state(pendingCycleStageAfterInitialWrite)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	afterPush, err := state(pendingCycleStageAfterInitialPush)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	beforePull, err := state(pendingCycleStageBeforePull)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	afterPull, err := state(pendingCycleStageAfterInitialPull)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	afterRestart, err := state(pendingCycleStageAfterRestart)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	beforeCleanup, err := state(pendingCycleStageBeforeCleanup)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	afterCleanup, err := state(pendingCycleStageAfterCleanup)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	afterUpdate, err := state(pendingCycleStageAfterUpdate)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	beforeDelete, err := state(pendingCycleStageBeforeDelete)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	afterDelete, err := state(pendingCycleStageComplete)
+	if err != nil {
+		return scenarios.PendingCycleNativeEvidence{}, err
+	}
+	return scenarios.PendingCycleNativeEvidence{
+		Target:        c.target,
+		UpdatedValue:  c.updated,
+		BeforeWrite:   beforeWrite,
+		AfterWrite:    afterWrite,
+		AfterPush:     afterPush,
+		BeforePull:    beforePull,
+		AfterPull:     afterPull,
+		AfterRestart:  afterRestart,
+		BeforeCleanup: beforeCleanup,
+		AfterCleanup:  afterCleanup,
+		AfterUpdate:   afterUpdate,
+		BeforeDelete:  beforeDelete,
+		AfterDelete:   afterDelete,
+	}, nil
+}
+
+func (c *PendingCycleCoordinator) prepareUpdate() error {
+	state, found := c.states[pendingCycleStageAfterRestart]
+	if !found || state.TargetServerVersion == "" {
+		return errors.New("React Native pending-cycle update base version is unavailable")
+	}
+	step, err := scenarios.PendingCycleSynchronizedCRUDOperation(
+		c.steps[pendingCycleLocalWriteStepID].Operation,
+		c.steps[pendingCyclePushStepID].Operation,
+		c.steps[pendingCycleMaterializeStepID].Operation,
+		"update", c.target.ValueField, c.target.Value, c.updated, state.TargetServerVersion,
+	)
+	if err != nil {
+		return err
+	}
+	c.updateStep = step
+	return nil
+}
+
+func (c *PendingCycleCoordinator) prepareDelete() error {
+	state, found := c.states[pendingCycleStageAfterUpdate]
+	if !found || state.TargetServerVersion == "" {
+		return errors.New("React Native pending-cycle delete base version is unavailable")
+	}
+	step, err := scenarios.PendingCycleSynchronizedCRUDOperation(
+		c.steps[pendingCycleLocalWriteStepID].Operation,
+		c.steps[pendingCyclePushStepID].Operation,
+		c.steps[pendingCycleMaterializeStepID].Operation,
+		"delete", c.target.ValueField, "", "", state.TargetServerVersion,
+	)
+	if err != nil {
+		return err
+	}
+	c.deleteStep = step
+	return nil
+}
+
+func (c *PendingCycleCoordinator) applyCleanupAssignment(ctx context.Context) error {
+	assignment, err := scenarios.PendingCycleCleanupAssignment(c.userID, c.clientID)
+	if err != nil {
+		return err
+	}
+	result, err := c.config.Controller.ApplyStep(ctx, assignment)
+	if err != nil || result.Disposition != "success" {
+		return fmt.Errorf("assign React Native pending-cycle cleanup scope: %w", nativeResultError(err, result.Disposition))
+	}
+	c.proxyMu.Lock()
+	c.faultArmed = true
+	c.faultPushes = 0
+	c.proxyFailureCause = nil
+	c.proxyMu.Unlock()
+	return nil
+}
+
+func (c *PendingCycleCoordinator) materializeGenerated(ctx context.Context, step scenarios.PendingCycleNativeCRUDStep, name string) error {
+	if c.config.Controller == nil {
+		return errors.New("React Native pending-cycle coordinator controller is unavailable")
+	}
+	if err := c.config.Controller.BindApplicationPush(step.ApplicationPush); err != nil {
+		return fmt.Errorf("bind React Native pending-cycle %s push transaction: %w", name, err)
+	}
+	result, err := c.config.Controller.ProcessStep(ctx, nil, step.Materialize)
+	if err != nil || result.Disposition != "success" {
+		return fmt.Errorf("materialize React Native pending-cycle %s: %w", name, nativeResultError(err, result.Disposition))
+	}
+	return nil
+}
+
+func (c *PendingCycleCoordinator) releaseCleanupFault() {
+	c.proxyMu.Lock()
+	c.faultArmed = false
+	c.proxyMu.Unlock()
+}
+
+func (c *PendingCycleCoordinator) validateCleanupFault() error {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	if c.proxyFailureCause != nil {
+		return fmt.Errorf("React Native pending-cycle cleanup proxy failed: %w", c.proxyFailureCause)
+	}
+	if c.faultPushes != 1 {
+		return fmt.Errorf("React Native pending-cycle cleanup temporary-unavailable pushes = %d, want 1", c.faultPushes)
+	}
+	return nil
+}
+
+type pendingCycleMutationInspection struct {
+	TableName     string `json:"tableName"`
+	RecordID      string `json:"recordID"`
+	Operation     string `json:"operation"`
+	Status        string `json:"status"`
+	ClientVersion string `json:"clientVersion"`
+}
+
+func pendingCycleNativeTarget(operation scenarios.Operation) (scenarios.PendingCycleNativeTarget, error) {
+	var payload struct {
+		TableID string                     `json:"table_id"`
+		PK      map[string]json.RawMessage `json:"pk"`
+		Columns map[string]json.RawMessage `json:"columns"`
+	}
+	if scenarios.OperationKey(operation) != "local/write" || json.Unmarshal(operation.Payload, &payload) != nil ||
+		payload.TableID == "" || len(payload.PK) != 1 || len(payload.Columns) == 0 {
+		return scenarios.PendingCycleNativeTarget{}, errors.New("React Native pending-cycle local runtime target is invalid")
+	}
+	var target scenarios.PendingCycleNativeTarget
+	for field, raw := range payload.PK {
+		if field == "" || json.Unmarshal(raw, &target.RecordID) != nil || target.RecordID == "" {
+			return scenarios.PendingCycleNativeTarget{}, errors.New("React Native pending-cycle runtime primary key is invalid")
+		}
+		target.PrimaryKeyField = field
+	}
+	for field, raw := range payload.Columns {
+		var value string
+		if json.Unmarshal(raw, &value) != nil || value != "pending" {
+			continue
+		}
+		if target.ValueField != "" {
+			return scenarios.PendingCycleNativeTarget{}, errors.New("React Native pending-cycle runtime value field is ambiguous")
+		}
+		target.ValueField = field
+		target.Value = value
+	}
+	if target.ValueField == "" {
+		return scenarios.PendingCycleNativeTarget{}, errors.New("React Native pending-cycle runtime value field is absent")
+	}
+	target.TableName = payload.TableID
+	return target, nil
+}
+
+func pendingCycleNativeState(target scenarios.PendingCycleNativeTarget, process actionProcessIdentity, capture finalCapture) (scenarios.PendingCycleNativeState, error) {
+	if target.TableName == "" || target.PrimaryKeyField == "" || target.RecordID == "" || target.ValueField == "" || target.Value == "" ||
+		target.UnprotectedRecordID == "" || target.UnprotectedValue == "" ||
+		process.ProcessID == "" || process.DatabaseIdentityFingerprint == "" {
+		return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle capture target is incomplete")
+	}
+	state, err := decodeClientState(capture.ClientState)
+	if err != nil || state.ScopeStateCount != uint64(len(state.ScopeStates)) || state.ScopeRowCount != uint64(len(state.ScopeRows)) ||
+		state.ProvenanceCount != uint64(len(state.ScopeRows)) {
+		return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle durable state is invalid")
+	}
+	rows, err := decodeRows(capture.Rows)
+	if err != nil || state.ApplicationRowCount != uint64(len(rows)) || len(rows) > 2 {
+		return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle application row inspection is invalid")
+	}
+	var pending []pendingCycleMutationInspection
+	if err := decodeStrictValue(capture.Pending, &pending); err != nil || pending == nil {
+		return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle mutation inspection is invalid")
+	}
+	var rejected []json.RawMessage
+	if err := decodeStrictValue(capture.Rejected, &rejected); err != nil || rejected == nil || state.RejectedMutationCount != uint64(len(rejected)) {
+		return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle rejected mutation inspection is invalid")
+	}
+	encodedScopeRows, err := json.Marshal(state.ScopeRows)
+	if err != nil || !semanticRawJSONEqual(encodedScopeRows, capture.Provenance) {
+		return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle provenance inspection is inconsistent")
+	}
+	proof, err := decodeDurableProof(capture.DurableProof)
+	if err != nil {
+		return scenarios.PendingCycleNativeState{}, err
+	}
+
+	result := scenarios.PendingCycleNativeState{
+		ProcessID:                   process.ProcessID,
+		DatabaseIdentityFingerprint: process.DatabaseIdentityFingerprint,
+		ApplicationRowCount:         int(state.ApplicationRowCount),
+		PendingChangeCount:          len(pending),
+		MutationLedgerCount:         int(state.MutationLedgerCount),
+		MutationOutcomeCount:        int(state.MutationOutcomeCount),
+		RejectedMutationCount:       int(state.RejectedMutationCount),
+		ScopeStateCount:             int(state.ScopeStateCount),
+		ScopeRowCount:               int(state.ScopeRowCount),
+		RowMetadataCount:            int(state.RowMetadataCount),
+	}
+	if len(state.ScopeStates) != 1 {
+		return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle scope state inspection is ambiguous")
+	}
+	scope := state.ScopeStates[0]
+	result.ScopeID = scope.ScopeID
+	if scope.Cursor != nil {
+		result.ScopeCursor = *scope.Cursor
+	}
+	scopeChecksum, err := checksumDigest(scope.Checksum)
+	if err != nil {
+		return scenarios.PendingCycleNativeState{}, err
+	}
+	if scopeChecksum != nil {
+		result.ScopeChecksum = *scopeChecksum
+	}
+	if scope.LocalChecksum != "" {
+		localChecksum, err := checksumDigest(&scope.LocalChecksum)
+		if err != nil {
+			return scenarios.PendingCycleNativeState{}, err
+		}
+		if localChecksum != nil {
+			result.LocalScopeChecksum = *localChecksum
+		}
+	}
+
+	for _, row := range rows {
+		var value string
+		if json.Unmarshal(row[target.ValueField], &value) != nil || value == "" {
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle application row value is invalid")
+		}
+		switch {
+		case rowUsesRuntimePrimary(row, target.PrimaryKeyField, target.RecordID):
+			if result.TargetRowPresent {
+				return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle target row is duplicated")
+			}
+			result.TargetRowPresent = true
+			result.TargetRowValue = value
+		case rowUsesRuntimePrimary(row, target.PrimaryKeyField, target.UnprotectedRecordID):
+			if result.UnprotectedRowPresent {
+				return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle unprotected row is duplicated")
+			}
+			result.UnprotectedRowPresent = true
+			result.UnprotectedRowValue = value
+		default:
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle application row differs from its targets")
+		}
+	}
+	for _, mutation := range pending {
+		if mutation.TableName != target.TableName || mutation.RecordID != target.RecordID {
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle retained mutation differs from its target")
+		}
+		result.TargetMutations = append(result.TargetMutations, scenarios.PendingCycleNativeMutation{
+			Operation: mutation.Operation, Status: mutation.Status, ClientVersion: mutation.ClientVersion,
+		})
+	}
+	for _, scopeRow := range state.ScopeRows {
+		if scopeRow.TableName != target.TableName {
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle scope row differs from its table")
+		}
+		switch scopeRow.RecordID {
+		case target.RecordID:
+			if result.TargetScopeRowPresent {
+				return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle target scope provenance is ambiguous")
+			}
+			result.TargetScopeRowPresent = true
+			result.TargetScopeRowChecksum = scopeRow.Checksum
+		case target.UnprotectedRecordID:
+			if result.UnprotectedScopeRowPresent {
+				return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle unprotected scope provenance is ambiguous")
+			}
+			result.UnprotectedScopeRowPresent = true
+			result.UnprotectedScopeRowChecksum = scopeRow.Checksum
+		default:
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle scope row differs from its targets")
+		}
+	}
+	if proof.RowMetadata != nil {
+		metadata := *proof.RowMetadata
+		if metadata.TableName != target.TableName || metadata.RecordID != target.RecordID || metadata.ServerVersion == "" || metadata.RowChecksum == nil || *metadata.RowChecksum == "" {
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle durable metadata differs from its target")
+		}
+		checksum, err := checksumDigest(metadata.RowChecksum)
+		if err != nil {
+			return scenarios.PendingCycleNativeState{}, err
+		}
+		result.TargetServerVersion = metadata.ServerVersion
+		if checksum != nil {
+			result.TargetRowChecksum = *checksum
+		}
+	}
+	return result, nil
+}
+
+func (c *PendingCycleCoordinator) proxyAdapter(writer http.ResponseWriter, request *http.Request) {
+	if c == nil || c.transport == nil || c.upstream == "" {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, maximumExchangeBytes+1))
+	if err != nil || len(body) > maximumExchangeBytes {
+		c.recordProxyFailure(errors.New("React Native pending-cycle proxy request is invalid"))
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" && c.cleanupFaultActive() {
+		if err := c.recordTemporaryUnavailablePush(body); err != nil {
+			c.recordProxyFailure(err)
+			writeExchangeError(writer, http.StatusBadGateway)
+			return
+		}
+		response := faults.NewTemporaryUnavailableResponse(request)
+		defer response.Body.Close()
+		responseBody, err := io.ReadAll(response.Body)
+		if err != nil || response.Header.Get("Retry-After") != faults.TemporaryUnavailableRetryAfter {
+			c.recordProxyFailure(errors.New("React Native pending-cycle temporary-unavailable response is invalid"))
+			writeExchangeError(writer, http.StatusBadGateway)
+			return
+		}
+		writePendingCycleProxyResponse(writer, response.StatusCode, response.Header, responseBody)
+		return
+	}
+	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
+	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, bytes.NewReader(body))
+	if err != nil {
+		c.recordProxyFailure(fmt.Errorf("create React Native pending-cycle upstream request: %w", err))
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	for name, values := range request.Header {
+		if strings.EqualFold(name, "Host") {
+			continue
+		}
+		for _, value := range values {
+			upstreamRequest.Header.Add(name, value)
+		}
+	}
+	response, err := c.transport.Do(upstreamRequest)
+	if err != nil {
+		c.recordProxyFailure(fmt.Errorf("execute React Native pending-cycle upstream request: %w", err))
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maximumExchangeBytes+1))
+	if err != nil || len(responseBody) > maximumExchangeBytes {
+		c.recordProxyFailure(errors.New("React Native pending-cycle upstream response is invalid"))
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	writePendingCycleProxyResponse(writer, response.StatusCode, response.Header, responseBody)
+}
+
+func (c *PendingCycleCoordinator) cleanupFaultActive() bool {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	return c.faultArmed
+}
+
+func (c *PendingCycleCoordinator) recordTemporaryUnavailablePush(raw []byte) error {
+	var request struct {
+		Mutations []struct {
+			Operation string `json:"op"`
+		} `json:"mutations"`
+	}
+	if json.Unmarshal(raw, &request) != nil || len(request.Mutations) != 1 || request.Mutations[0].Operation != "update" {
+		return errors.New("React Native pending-cycle temporary-unavailable push is not the generated update")
+	}
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	if !c.faultArmed {
+		return errors.New("React Native pending-cycle temporary-unavailable push arrived after release")
+	}
+	c.faultPushes++
+	return nil
+}
+
+func (c *PendingCycleCoordinator) recordProxyFailure(err error) {
+	if err == nil {
+		return
+	}
+	c.proxyMu.Lock()
+	if c.proxyFailureCause == nil {
+		c.proxyFailureCause = err
+	}
+	c.proxyMu.Unlock()
+}
+
+func writePendingCycleProxyResponse(writer http.ResponseWriter, status int, header http.Header, body []byte) {
+	for name, values := range header {
+		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
+			continue
+		}
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	writer.WriteHeader(status)
+	_, _ = writer.Write(body)
+}
+
+func (c *PendingCycleCoordinator) unprotectedRowIdentity() (scenarios.NativeIdentityAlias, string, error) {
+	alias, err := scenarios.PendingCycleUnprotectedIdentityAlias(c.identities)
+	if err != nil {
+		return scenarios.NativeIdentityAlias{}, "", err
+	}
+	values, err := c.config.Controller.IdentityValues([]scenarios.NativeIdentityAlias{alias})
+	if err != nil || len(values) != 1 || values[0].Alias != alias.Alias {
+		return scenarios.NativeIdentityAlias{}, "", errors.New("React Native pending-cycle unprotected identity has no runtime binding")
+	}
+	var runtimeRecordID string
+	if json.Unmarshal(values[0].RuntimeValue, &runtimeRecordID) != nil || runtimeRecordID == "" {
+		return scenarios.NativeIdentityAlias{}, "", errors.New("React Native pending-cycle unprotected runtime identity is invalid")
+	}
+	c.runtimeIDs[alias.Alias] = copyRaw(values[0].RuntimeValue)
+	return alias, runtimeRecordID, nil
 }
 
 func (c *PendingCycleCoordinator) bindRuntimeIdentities(includePrimary bool) error {
@@ -744,7 +1485,11 @@ func (c *PendingCycleCoordinator) resolveIdentities() ([]blackbox.NativeIdentity
 	// The controller binds only server-owned identities. The client generation
 	// and scope set version are observed on the wire, exactly as the steady-pull
 	// consumer resolves them.
-	trace, err := captureTraceFromRaw(c.finalResult.Trace)
+	initialCapture, found := c.captures[pendingCycleStageAfterInitialPull]
+	if !found {
+		return nil, errors.New("React Native pending-cycle initial identity trace is unavailable")
+	}
+	trace, err := captureTraceFromRaw(initialCapture.Trace)
 	if err != nil {
 		return nil, err
 	}
@@ -810,7 +1555,7 @@ func extractPendingCycleClientIdentity(scenario scenarios.Scenario) (pendingCycl
 		AuthenticatedUserID string `json:"authenticated_user_id"`
 		ClientID            string `json:"client_id"`
 	}
-	if err := json.Unmarshal(scenario.Steps[0].Operation.Payload, &payload); err != nil || payload.AuthenticatedUserID == "" || payload.ClientID == "" {
+	if err := json.Unmarshal(scenario.Steps[1].Operation.Payload, &payload); err != nil || payload.AuthenticatedUserID == "" || payload.ClientID == "" {
 		return pendingCycleClientIdentity{}, errors.New("React Native pending-cycle client identity is invalid")
 	}
 	for _, step := range scenario.Steps {
@@ -910,13 +1655,13 @@ func validatePendingCycleTrace(scenario scenarios.Scenario, raw json.RawMessage)
 	if err != nil {
 		return err
 	}
-	if push.StatusCode != pendingCycleWireStatus(scenario, pendingCycleStepOrder[1]) ||
+	if push.StatusCode != pendingCycleWireStatus(scenario, pendingCyclePushStepID) ||
 		push.CursorFingerprints != nil || push.CursorFingerprintsComplete != nil ||
 		hasJSONValue(push.RebuildResponseFacts) || hasJSONValue(push.PullResponseFacts) {
 		return errors.New("React Native pending-cycle push trace is invalid")
 	}
 	if validateTraceOperation(pull, "pull") != nil ||
-		pull.StatusCode != pendingCycleWireStatus(scenario, pendingCycleStepOrder[3]) {
+		pull.StatusCode != pendingCycleWireStatus(scenario, pendingCyclePullStepID) {
 		return fmt.Errorf("React Native pending-cycle pull trace is invalid: status %d", pull.StatusCode)
 	}
 	return nil

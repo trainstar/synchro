@@ -108,6 +108,15 @@ function parseConformanceEnvelope(raw: string): ConformanceEnvelope {
   return value as unknown as ConformanceEnvelope;
 }
 
+function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
+  const action = command.action;
+  if (!isJSONObject(action)) return false;
+  const nested = action.action;
+  if (!isJSONObject(nested) || nested.actor !== 'client' || nested.command !== 'open') return false;
+  const parameters = nested.parameters;
+  return isJSONObject(parameters) && parameters.database_mode === 'reuse';
+}
+
 async function exchange(endpoint: string, token: string, sequence: number, rawResult: string): Promise<ExchangeResponse> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
@@ -132,6 +141,11 @@ async function exchange(endpoint: string, token: string, sequence: number, rawRe
 }
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
+  if (requiresProcessRelaunch(command)) {
+    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
+    await expect(element(by.id('conformance-harness'))).toBeVisible();
+  }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
   const input = await element(by.id('conformance-command-input')).getAttributes();

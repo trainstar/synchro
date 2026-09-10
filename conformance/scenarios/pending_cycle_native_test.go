@@ -73,6 +73,22 @@ func TestValidatePendingCycleNativeEvidenceRejectsSemanticMutants(t *testing.T) 
 			},
 		},
 		{
+			name: "scope cleanup retains unprotected row",
+			mutate: func(evidence *PendingCycleNativeEvidence) {
+				evidence.AfterCleanup.ApplicationRowCount = 2
+				evidence.AfterCleanup.UnprotectedRowPresent = true
+				evidence.AfterCleanup.UnprotectedRowValue = evidence.Target.UnprotectedValue
+			},
+		},
+		{
+			name: "scope cleanup retains unprotected provenance",
+			mutate: func(evidence *PendingCycleNativeEvidence) {
+				evidence.AfterCleanup.ScopeRowCount = 1
+				evidence.AfterCleanup.UnprotectedScopeRowPresent = true
+				evidence.AfterCleanup.UnprotectedScopeRowChecksum = "unprotected-checksum"
+			},
+		},
+		{
 			name: "scope cleanup creates synthetic mutation",
 			mutate: func(evidence *PendingCycleNativeEvidence) {
 				evidence.AfterCleanup.MutationLedgerCount++
@@ -172,6 +188,13 @@ func validPendingCycleNativeEvidence() PendingCycleNativeEvidence {
 	pulled.LocalScopeChecksum = "scope-checksum"
 	pulled.TargetScopeRowPresent = true
 	pulled.TargetScopeRowChecksum = "row-checksum"
+	pulled.ApplicationRowCount = 2
+	pulled.RowMetadataCount = 2
+	pulled.ScopeRowCount = 2
+	pulled.UnprotectedRowPresent = true
+	pulled.UnprotectedRowValue = "unprotected"
+	pulled.UnprotectedScopeRowPresent = true
+	pulled.UnprotectedScopeRowChecksum = "unprotected-checksum"
 	restarted := pulled
 	restarted.ProcessID = "202"
 	pendingUpdate := restarted
@@ -180,6 +203,8 @@ func validPendingCycleNativeEvidence() PendingCycleNativeEvidence {
 	pendingUpdate.TargetRowValue = "pending-updated"
 	pendingUpdate.TargetMutations = []PendingCycleNativeMutation{{Operation: "update", Status: "pending", ClientVersion: "update-client-version"}}
 	cleaned := pendingUpdate
+	cleaned.ApplicationRowCount = 1
+	cleaned.RowMetadataCount = 1
 	cleaned.ScopeRowCount = 0
 	cleaned.ScopeID = "cf:global"
 	cleaned.ScopeCursor = ""
@@ -187,6 +212,10 @@ func validPendingCycleNativeEvidence() PendingCycleNativeEvidence {
 	cleaned.LocalScopeChecksum = ""
 	cleaned.TargetScopeRowPresent = false
 	cleaned.TargetScopeRowChecksum = ""
+	cleaned.UnprotectedRowPresent = false
+	cleaned.UnprotectedRowValue = ""
+	cleaned.UnprotectedScopeRowPresent = false
+	cleaned.UnprotectedScopeRowChecksum = ""
 	updated := cleaned
 	updated.PendingChangeCount = 0
 	updated.MutationOutcomeCount = 2
@@ -212,11 +241,14 @@ func validPendingCycleNativeEvidence() PendingCycleNativeEvidence {
 	deleted.ScopeCursor = "delete-pull-cursor"
 	return PendingCycleNativeEvidence{
 		Target: PendingCycleNativeTarget{
-			TableName:       "items",
-			PrimaryKeyField: "id",
-			RecordID:        "row-id",
-			ValueField:      "value",
-			Value:           "pending",
+			TableName:                   "items",
+			PrimaryKeyField:             "id",
+			RecordID:                    "row-id",
+			ValueField:                  "value",
+			Value:                       "pending",
+			UnprotectedAuthoredRecordID: "unprotected-row",
+			UnprotectedRecordID:         "unprotected-runtime-row",
+			UnprotectedValue:            "unprotected",
 		},
 		UpdatedValue:  "pending-updated",
 		BeforeWrite:   before,
@@ -230,6 +262,27 @@ func validPendingCycleNativeEvidence() PendingCycleNativeEvidence {
 		AfterUpdate:   updated,
 		BeforeDelete:  pendingDelete,
 		AfterDelete:   deleted,
+	}
+}
+
+func TestValidatePendingCycleServerFactsRequiresUnprotectedRow(t *testing.T) {
+	count := uint64(1)
+	target := validPendingCycleNativeEvidence().Target
+	facts := StateFacts{
+		RowCount: &count,
+		Rows: []RowFact{{
+			TableID:           "items",
+			CanonicalWireJSON: `"unprotected-row"`,
+			Version:           "unprotected-version",
+			Checksum:          "unprotected-checksum",
+		}},
+	}
+	if err := ValidatePendingCycleServerFacts(facts, target); err != nil {
+		t.Fatalf("validate pending-cycle server facts: %v", err)
+	}
+	facts.Rows[0].CanonicalWireJSON = `"pending-row"`
+	if err := ValidatePendingCycleServerFacts(facts, target); err == nil {
+		t.Fatal("pending-cycle server facts accepted the protected row as the unprotected row")
 	}
 }
 

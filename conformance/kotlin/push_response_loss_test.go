@@ -3,6 +3,7 @@ package kotlin
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -31,6 +32,39 @@ func TestPushResponseLossBindingsFollowAuthoredWireCompletions(t *testing.T) {
 	}
 	if got := pushResponseLossNativeCompletion(final); got != steps["STEP-PUSH-RESPONSE-LOSS-004"].NativeBinding.Completion {
 		t.Fatalf("final completion = %q, want %q", got, steps["STEP-PUSH-RESPONSE-LOSS-004"].NativeBinding.Completion)
+	}
+	if got := steps["STEP-PUSH-RESPONSE-LOSS-003"].Operation.Name; got != "restart-client" {
+		t.Fatalf("response-loss process operation = %q, want restart-client", got)
+	}
+}
+
+func TestPushResponseLossTerminalStateRejectsRetryableContinuation(t *testing.T) {
+	status := "error"
+	state := Result{Status: &status, Failure: &runnerFailure{Operation: "pushing", Code: "idempotency_conflict", Retryable: false, RecoveryAction: "none"}}
+	if err := validatePushResponseLossTerminalState(state); err != nil {
+		t.Fatalf("validate terminal response-loss state: %v", err)
+	}
+	state.Failure.Retryable = true
+	if err := validatePushResponseLossTerminalState(state); err == nil {
+		t.Fatal("retryable response-loss failure was accepted as terminal")
+	}
+}
+
+func TestPushResponseLossDurableComparisonDetectsDrift(t *testing.T) {
+	count := 1
+	status := "backoff"
+	before := Result{Status: &status, MutationLedgerCount: &count, SealedBatchCount: &count}
+	after := before
+	errorStatus := "error"
+	after.Status = &errorStatus
+	after.Failure = &runnerFailure{Operation: "pushing", Code: "idempotency_conflict", RecoveryAction: "none"}
+	if !reflect.DeepEqual(durableClientState(before), durableClientState(after)) {
+		t.Fatal("terminal status changed the Kotlin Android durable projection")
+	}
+	driftedCount := 0
+	after.SealedBatchCount = &driftedCount
+	if reflect.DeepEqual(durableClientState(before), durableClientState(after)) {
+		t.Fatal("sealed batch drift passed the Kotlin Android durable comparison")
 	}
 }
 

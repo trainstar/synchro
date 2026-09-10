@@ -7,7 +7,8 @@
   "requirement_ids": [
     "SYNC-IDEMPOTENCY-001",
     "SYNC-IDEMPOTENCY-002",
-    "SYNC-FAILURE-002"
+    "SYNC-FAILURE-002",
+    "SYNC-FAILURE-003"
   ],
   "normative_references": [
     {
@@ -21,6 +22,10 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#non-retryable-failures-are-explicit"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#sealed-batch-retry"
     }
   ],
   "proof_types": [
@@ -64,12 +69,14 @@
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001",
         "SYNC-IDEMPOTENCY-002",
-        "SYNC-FAILURE-002"
+        "SYNC-FAILURE-002",
+        "SYNC-FAILURE-003"
       ],
       "assertion_ids": [
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
         "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001",
-        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002",
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"
       ],
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001",
@@ -95,12 +102,14 @@
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001",
         "SYNC-IDEMPOTENCY-002",
-        "SYNC-FAILURE-002"
+        "SYNC-FAILURE-002",
+        "SYNC-FAILURE-003"
       ],
       "assertion_ids": [
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
         "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001",
-        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002",
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001",
@@ -127,12 +136,14 @@
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001",
         "SYNC-IDEMPOTENCY-002",
-        "SYNC-FAILURE-002"
+        "SYNC-FAILURE-002",
+        "SYNC-FAILURE-003"
       ],
       "assertion_ids": [
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
         "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001",
-        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002",
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -159,12 +170,14 @@
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001",
         "SYNC-IDEMPOTENCY-002",
-        "SYNC-FAILURE-002"
+        "SYNC-FAILURE-002",
+        "SYNC-FAILURE-003"
       ],
       "assertion_ids": [
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
         "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001",
-        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002",
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -193,12 +206,14 @@
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001",
         "SYNC-IDEMPOTENCY-002",
-        "SYNC-FAILURE-002"
+        "SYNC-FAILURE-002",
+        "SYNC-FAILURE-003"
       ],
       "assertion_ids": [
         "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
         "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001",
-        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002",
+        "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -298,7 +313,9 @@
       "control_id": "CTRL-IDEMPOTENCY-002"
     },
     {"obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-FAULT-001","requirement_ids":["SYNC-FAILURE-002"],"assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-002","control_id":"CTRL-FAILURE-002"},
-    {"obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-CONTROL-001","requirement_ids":["SYNC-FAILURE-002"],"assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-002","control_id":"CTRL-FAILURE-002"}
+    {"obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-CONTROL-001","requirement_ids":["SYNC-FAILURE-002"],"assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-002","control_id":"CTRL-FAILURE-002"},
+    {"obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001","requirement_ids":["SYNC-FAILURE-003"],"assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-003","control_id":"CTRL-FAILURE-003"},
+    {"obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-CONTROL-001","requirement_ids":["SYNC-FAILURE-003"],"assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-003","control_id":"CTRL-FAILURE-003"}
   ],
   "ownership": [
     {
@@ -427,7 +444,14 @@
     {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
     {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-FAULT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
-    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-CONTROL-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"negative-control","support_cell_id":null}
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-002","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-002-CONTROL-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-003","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-003","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-MACOS-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-003","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-ANDROID-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-003","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-003","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-003","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PUSH-RESPONSE-LOSS-001","requirement_id":"SYNC-FAILURE-003","proof_obligation_id":"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-CONTROL-001","assertion_id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -630,7 +654,6 @@
       "value": "00000000-0000-4000-8000-000000001041",
       "step_ids": [
         "STEP-PUSH-RESPONSE-LOSS-002",
-        "STEP-PUSH-RESPONSE-LOSS-003",
         "STEP-PUSH-RESPONSE-LOSS-004",
         "STEP-PUSH-RESPONSE-LOSS-005",
         "STEP-PUSH-RESPONSE-LOSS-006"
@@ -746,7 +769,8 @@
         }
       }
     },
-    {"id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-002","requirement_id":"SYNC-FAILURE-002","fault_id":"FAULT-FAILURE-002","control_id":"CTRL-FAILURE-002","barrier_id":"BAR-PUSH-RESPONSE-LOSS-CONTROL-001","expected_assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"],"injection":{"mechanism":"wire-fault","target":"protocol contract error dispatcher","operator":"bypass","parameters":{"scenario":"return an invalid cursor or schema contract response during sync","defect":"continue as though the operation succeeded without entering a typed error or blocked state"}}}
+    {"id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-002","requirement_id":"SYNC-FAILURE-002","fault_id":"FAULT-FAILURE-002","control_id":"CTRL-FAILURE-002","barrier_id":"BAR-PUSH-RESPONSE-LOSS-CONTROL-001","expected_assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"],"injection":{"mechanism":"wire-fault","target":"protocol contract error dispatcher","operator":"bypass","parameters":{"scenario":"return an invalid cursor or schema contract response during sync","defect":"continue as though the operation succeeded without entering a typed error or blocked state"}}},
+    {"id":"FPL-PUSH-RESPONSE-LOSS-FAILURE-003","requirement_id":"SYNC-FAILURE-003","fault_id":"FAULT-FAILURE-003","control_id":"CTRL-FAILURE-003","barrier_id":"BAR-PUSH-RESPONSE-LOSS-CONTROL-001","expected_assertion_ids":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"],"injection":{"mechanism":"wire-fault","target":"sealed batch retry serializer","operator":"replace","parameters":{"scenario":"lose the response, then retry after HTTP 429 and HTTP 503","defect":"change batch identity, mutation order, or canonical bytes between transmissions"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -777,7 +801,8 @@
         "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001"
       ]
     },
-    {"control_id":"CTRL-FAILURE-002","requirement_id":"SYNC-FAILURE-002","fault_id":"FAULT-FAILURE-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"]}
+    {"control_id":"CTRL-FAILURE-002","requirement_id":"SYNC-FAILURE-002","fault_id":"FAULT-FAILURE-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002"]},
+    {"control_id":"CTRL-FAILURE-003","requirement_id":"SYNC-FAILURE-003","fault_id":"FAULT-FAILURE-003","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003"]}
   ],
   "steps": [
     {
@@ -828,8 +853,9 @@
         "user_id": "user-a",
         "client_id": "client-a",
         "call_id": "response_loss_initial",
-        "stage": "begin",
-        "method": "start"
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "blocked"
       },
       "operation": {
         "contract_operation": "push",
@@ -876,21 +902,18 @@
       "id": "STEP-PUSH-RESPONSE-LOSS-003",
       "phase": "exercise",
       "transport": "process",
-      "description": "Record response loss for the same user, client, and batch without changing server state.",
+      "description": "Replace the client process after response loss and reopen the same durable database.",
       "native_binding": {
-        "kind": "public-call",
+        "kind": "process",
         "user_id": "user-a",
-        "client_id": "client-a",
-        "call_id": "response_loss_initial",
-        "stage": "await-step"
+        "client_id": "client-a"
       },
       "operation": {
         "contract_operation": "process",
-        "name": "response-loss",
+        "name": "restart-client",
         "payload": {
-          "authenticated_user_id": "user-a",
-          "client_id": "client-a",
-          "batch_id": "00000000-0000-4000-8000-000000001041"
+          "user_id": "user-a",
+          "client_id": "client-a"
         }
       },
       "expected_outcome": {
@@ -901,14 +924,15 @@
       "id": "STEP-PUSH-RESPONSE-LOSS-004",
       "phase": "exercise",
       "transport": "http",
-      "description": "Replay the unchanged sealed request through native backoff.",
+      "description": "Replay the unchanged sealed request after restart through HTTP 429 and HTTP 503, then stop on HTTP 409.",
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
         "client_id": "client-a",
-        "call_id": "response_loss_initial",
-        "stage": "await-call",
-        "completion": "idle"
+        "call_id": "response_loss_retry",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "error"
       },
       "operation": {
         "contract_operation": "push",
@@ -945,6 +969,9 @@
           "delivery": "apply",
           "commit_lsn": "1041",
           "end_lsn": "1042"
+        },
+        "wire_fault": {
+          "mode": "sealed_retry"
         }
       },
       "expected_outcome": {
@@ -1062,9 +1089,9 @@
     {
       "step_id": "STEP-PUSH-RESPONSE-LOSS-004",
       "assertion_id": "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001",
-      "contract_case": "push_success",
-      "http_status": 200,
-      "error_code": null,
+      "contract_case": "idempotency_conflict",
+      "http_status": 409,
+      "error_code": "idempotency_conflict",
       "retryable": false
     },
     {
@@ -1090,7 +1117,7 @@
       "requirement_ids": [
         "SYNC-IDEMPOTENCY-001"
       ],
-      "description": "The first execution commits once, response loss changes only retry bookkeeping, equal replays return the stored response, and changed content returns 409.",
+      "description": "The first execution commits once, restart preserves sealed intent, transient retries preserve bytes, and terminal conflict stops retrying.",
       "expectation_ids": [
         "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"
       ],
@@ -1131,6 +1158,7 @@
         "CTRL-IDEMPOTENCY-002"
       ]
     },
-    {"id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","requirement_ids":["SYNC-FAILURE-002"],"description":"A non-retryable protocol error enters an explicit typed client error state without silent continuation.","expectation_ids":["EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-FAILURE-002"]}
+    {"id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002","requirement_ids":["SYNC-FAILURE-002"],"description":"A non-retryable protocol error enters an explicit typed client error state without silent continuation.","expectation_ids":["EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-FAILURE-002"]},
+    {"id":"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003","requirement_ids":["SYNC-FAILURE-003"],"description":"Retries after response loss, HTTP 429, and HTTP 503 retain the sealed batch identity, mutation order, and exact canonical request bytes.","expectation_ids":["EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-FAILURE-003"]}
   ]
 }

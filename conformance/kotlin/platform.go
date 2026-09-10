@@ -143,8 +143,18 @@ type Platform struct {
 	clients   map[string]*platformClient
 
 	responseProxy            *httptest.Server
+	sealedRetryPush          *sealedRetryPushFault
 	temporaryUnavailablePush *scenarios.PushWireFaultTarget
 	rebuildResponseCursors   map[string]string
+}
+
+type sealedRetryPushFault struct {
+	target      scenarios.PushWireFaultTarget
+	attempts    int
+	digest      [sha256.Size]byte
+	batchID     string
+	mutationIDs []string
+	failure     error
 }
 
 type platformClient struct {
@@ -296,6 +306,9 @@ func (p *Platform) startResponseProxy() error {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.ModifyResponse = p.observeProxiedResponse
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if p.serveSealedRetryPush(response, request) {
+			return
+		}
 		if p.serveTemporaryUnavailablePush(response, request) {
 			return
 		}
@@ -373,7 +386,7 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 	if !strings.HasSuffix(request.URL.Path, "/sync/push") || !p.hasTemporaryUnavailablePush() {
 		return false
 	}
-	target, err := proxiedPushTarget(request)
+	target, _, _, err := proxiedPushTarget(request)
 	if err != nil {
 		return false
 	}
@@ -386,14 +399,48 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 	return true
 }
 
-func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, error) {
+func (p *Platform) serveSealedRetryPush(response http.ResponseWriter, request *http.Request) bool {
+	if !strings.HasSuffix(request.URL.Path, "/sync/push") || !p.hasSealedRetryPush() {
+		return false
+	}
+	target, mutationIDs, digest, err := proxiedPushTarget(request)
+	if err != nil {
+		p.recordSealedRetryFailure(err)
+		http.Error(response, "bounded push request required", http.StatusBadGateway)
+		return true
+	}
+	status, claimed, err := p.claimSealedRetryPush(target, mutationIDs, digest)
+	if !claimed {
+		return false
+	}
+	if err != nil {
+		http.Error(response, "sealed retry request changed", http.StatusBadGateway)
+		return true
+	}
+	var injected *http.Response
+	switch status {
+	case http.StatusTooManyRequests:
+		injected = faults.NewRetryLaterResponse(request)
+	case http.StatusServiceUnavailable:
+		injected = faults.NewTemporaryUnavailableResponse(request)
+	case http.StatusConflict:
+		injected = faults.NewIdempotencyConflictResponse(request)
+	default:
+		return false
+	}
+	defer injected.Body.Close()
+	copyInjectedResponse(response, injected)
+	return true
+}
+
+func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, []string, [sha256.Size]byte, error) {
 	if request.Body == nil {
-		return scenarios.PushWireFaultTarget{}, errors.New("Kotlin Android proxied push body is absent")
+		return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Kotlin Android proxied push body is absent")
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maximumProxiedPushRequestBytes+1))
 	request.Body.Close()
 	if err != nil || len(body) > maximumProxiedPushRequestBytes {
-		return scenarios.PushWireFaultTarget{}, errors.New("Kotlin Android proxied push body is invalid")
+		return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Kotlin Android proxied push body is invalid")
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.ContentLength = int64(len(body))
@@ -401,13 +448,23 @@ func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, er
 		request.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	}
 	var payload struct {
-		ClientID string `json:"client_id"`
-		BatchID  string `json:"batch_id"`
+		ClientID  string `json:"client_id"`
+		BatchID   string `json:"batch_id"`
+		Mutations []struct {
+			MutationID string `json:"mutation_id"`
+		} `json:"mutations"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.ClientID == "" || payload.BatchID == "" {
-		return scenarios.PushWireFaultTarget{}, errors.New("Kotlin Android proxied push target is invalid")
+		return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Kotlin Android proxied push target is invalid")
 	}
-	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, nil
+	mutationIDs := make([]string, 0, len(payload.Mutations))
+	for _, mutation := range payload.Mutations {
+		if mutation.MutationID == "" {
+			return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Kotlin Android proxied push mutation identity is absent")
+		}
+		mutationIDs = append(mutationIDs, mutation.MutationID)
+	}
+	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, mutationIDs, sha256.Sum256(body), nil
 }
 
 func copyInjectedResponse(writer http.ResponseWriter, response *http.Response) {
@@ -424,6 +481,89 @@ func (p *Platform) hasTemporaryUnavailablePush() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.temporaryUnavailablePush != nil
+}
+
+func (p *Platform) hasSealedRetryPush() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sealedRetryPush != nil
+}
+
+func (p *Platform) claimSealedRetryPush(target scenarios.PushWireFaultTarget, mutationIDs []string, digest [sha256.Size]byte) (int, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fault := p.sealedRetryPush
+	if fault == nil || fault.target.ClientID != target.ClientID {
+		return 0, false, nil
+	}
+	fault.attempts++
+	if fault.attempts == 1 {
+		fault.digest = digest
+		fault.batchID = target.BatchID
+		fault.mutationIDs = append([]string(nil), mutationIDs...)
+	} else if fault.digest != digest || fault.batchID != target.BatchID || !reflect.DeepEqual(fault.mutationIDs, mutationIDs) {
+		fault.failure = errors.New("Kotlin Android sealed retry changed batch identity, mutation order, or canonical request bytes")
+		return 0, true, fault.failure
+	}
+	switch fault.attempts {
+	case 1:
+		return 0, true, nil
+	case 2:
+		return http.StatusTooManyRequests, true, nil
+	case 3:
+		return http.StatusServiceUnavailable, true, nil
+	case 4:
+		return http.StatusConflict, true, nil
+	default:
+		fault.failure = errors.New("Kotlin Android sealed retry sent more than four push attempts")
+		return 0, true, fault.failure
+	}
+}
+
+func (p *Platform) recordSealedRetryFailure(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sealedRetryPush != nil && p.sealedRetryPush.failure == nil {
+		p.sealedRetryPush.failure = err
+	}
+}
+
+func (p *Platform) armSealedRetryPush(operation scenarios.Operation) (func(), bool, error) {
+	target, enabled, err := scenarios.SealedRetryPushTarget(operation)
+	if err != nil || !enabled {
+		return nil, enabled, err
+	}
+	p.mu.Lock()
+	if p.closed || p.sealedRetryPush != nil || p.temporaryUnavailablePush != nil {
+		p.mu.Unlock()
+		return nil, false, errors.New("Kotlin Android sealed-retry push fault is unavailable")
+	}
+	fault := &sealedRetryPushFault{target: target}
+	p.sealedRetryPush = fault
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		if p.sealedRetryPush == fault {
+			p.sealedRetryPush = nil
+		}
+		p.mu.Unlock()
+	}, true, nil
+}
+
+func (p *Platform) validateSealedRetryPush(expectedMutations int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fault := p.sealedRetryPush
+	if fault == nil {
+		return errors.New("Kotlin Android sealed-retry push evidence is absent")
+	}
+	if fault.failure != nil {
+		return fault.failure
+	}
+	if fault.attempts != 4 || fault.batchID == "" || len(fault.mutationIDs) != expectedMutations {
+		return fmt.Errorf("Kotlin Android sealed-retry evidence = %d attempts, %d mutations, want 4 attempts and %d mutations", fault.attempts, len(fault.mutationIDs), expectedMutations)
+	}
+	return nil
 }
 
 func (p *Platform) claimTemporaryUnavailablePush(target scenarios.PushWireFaultTarget) bool {
@@ -1374,7 +1514,10 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 	case "process/restart-client":
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		if state.terminated || state.session == nil || state.pendingLoss != nil || state.activeCall != nil && !state.activeCall.paused {
+		if state.pendingLoss != nil {
+			return p.relaunchPendingResponseLoss(ctx, state, state.pendingLoss)
+		}
+		if state.terminated || state.session == nil || state.activeCall != nil && !state.activeCall.paused {
 			return StepObservation{}, errors.New("Kotlin Android client is unavailable for restart")
 		}
 		// A staged call is paused before its next local transition. Killing it here
@@ -1401,30 +1544,55 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if !state.terminated || state.session != nil || loss == nil || loss.batchID != batchID {
 			return StepObservation{}, errors.New("Kotlin Android response loss has no matching interrupted request")
 		}
-		started := time.Now()
-		opened, err := p.relaunchExistingClient(ctx, state)
-		if err != nil {
-			return StepObservation{}, fmt.Errorf("relaunch Kotlin Android client after response loss: %w", err)
-		}
-		after, err := captureClientState(ctx, state)
-		if err != nil {
-			p.discardRelaunchedClient(state)
-			return StepObservation{}, fmt.Errorf("capture Kotlin Android client after response loss: %w", err)
-		}
-		if err := checkRestartInvariants(state.client, loss.restartCapture, after); err != nil {
-			p.discardRelaunchedClient(state)
-			return StepObservation{}, err
-		}
-		state.pendingLoss = nil
-		state.restarted = true
-		window, err := state.windowFromResults(started, opened, opened, nil)
-		if err != nil {
-			return StepObservation{}, err
-		}
-		return observationWithWindow(StepObservation{Disposition: "success"}, window), nil
+		return p.relaunchPendingResponseLoss(ctx, state, loss)
 	default:
 		return StepObservation{}, fmt.Errorf("Kotlin Android process operation %s is unsupported", scenarios.OperationKey(operation))
 	}
+}
+
+func (p *Platform) relaunchPendingResponseLoss(ctx context.Context, state *platformClient, loss *pendingResponseLoss) (StepObservation, error) {
+	if !state.terminated || state.session != nil || loss == nil {
+		return StepObservation{}, errors.New("Kotlin Android response loss has no interrupted process")
+	}
+	started := time.Now()
+	opened, err := p.relaunchExistingClient(ctx, state)
+	if err != nil {
+		return StepObservation{}, fmt.Errorf("relaunch Kotlin Android client after response loss: %w", err)
+	}
+	after, err := captureClientState(ctx, state)
+	if err != nil {
+		p.discardRelaunchedClient(state)
+		return StepObservation{}, fmt.Errorf("capture Kotlin Android client after response loss: %w", err)
+	}
+	if err := checkRestartInvariants(state.client, loss.restartCapture, after); err != nil {
+		p.discardRelaunchedClient(state)
+		return StepObservation{}, err
+	}
+	state.pendingLoss = nil
+	state.restarted = true
+	window, err := state.windowFromResults(started, opened, opened, nil)
+	if err != nil {
+		return StepObservation{}, err
+	}
+	return observationWithWindow(StepObservation{Disposition: "success"}, window), nil
+}
+
+func durableClientState(result Result) Result {
+	result.Status = nil
+	result.RowsAffected = nil
+	result.ProvenanceMaintenanceWorkCursor = nil
+	result.Events = nil
+	result.EventsOverflowed = false
+	result.Failure = nil
+	result.TransportMilestone = nil
+	result.TransportObservations = nil
+	result.CallID = nil
+	result.State = nil
+	result.Completion = nil
+	result.CallErrorCategory = nil
+	result.ProcessID = ""
+	result.DatabaseIdentityFingerprint = ""
+	return result
 }
 
 func (p *Platform) restartClient(ctx context.Context, client *platformClient) (Result, error) {

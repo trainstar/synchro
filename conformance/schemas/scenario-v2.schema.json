@@ -483,12 +483,12 @@
       }
     },
     "wireFaultControl": {
-      "description": "One fixed native-only push response fault.",
+      "description": "One bounded native-only push response fault.",
       "type": "object",
       "additionalProperties": false,
       "required": ["mode"],
       "properties": {
-        "mode": { "const": "temporary_unavailable" }
+        "mode": { "enum": ["temporary_unavailable", "sealed_retry"] }
       }
     },
     "expectedOutcome": {

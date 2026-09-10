@@ -10,10 +10,17 @@ import (
 	"sync"
 )
 
-const temporaryUnavailableBody = "{\"error\":{\"code\":\"temporary_unavailable\",\"message\":\"service temporarily unavailable\",\"retryable\":true}}\n"
+const (
+	idempotencyConflictBody  = "{\"error\":{\"code\":\"idempotency_conflict\",\"message\":\"push identity has different content\",\"retryable\":false}}\n"
+	retryLaterBody           = "{\"error\":{\"code\":\"retry_later\",\"message\":\"retry later\",\"retryable\":true}}\n"
+	temporaryUnavailableBody = "{\"error\":{\"code\":\"temporary_unavailable\",\"message\":\"service temporarily unavailable\",\"retryable\":true}}\n"
+)
 
 // TemporaryUnavailableRetryAfter is the fixed retry delay for the canonical unavailable response.
 const TemporaryUnavailableRetryAfter = "5"
+
+// RetryLaterRetryAfter is the fixed retry delay for the canonical rate-limit response.
+const RetryLaterRetryAfter = "5"
 
 // WireFault is an HTTP RoundTripper that injects one deterministic fault.
 //
@@ -125,19 +132,39 @@ func (f *WireFault) RoundTrip(request *http.Request) (*http.Response, error) {
 
 // NewTemporaryUnavailableResponse creates the canonical retryable HTTP 503 response.
 func NewTemporaryUnavailableResponse(request *http.Request) *http.Response {
+	return newRetryableServiceResponse(request, http.StatusServiceUnavailable, TemporaryUnavailableRetryAfter, temporaryUnavailableBody)
+}
+
+// NewRetryLaterResponse creates the canonical retryable HTTP 429 response.
+func NewRetryLaterResponse(request *http.Request) *http.Response {
+	return newRetryableServiceResponse(request, http.StatusTooManyRequests, RetryLaterRetryAfter, retryLaterBody)
+}
+
+// NewIdempotencyConflictResponse creates the canonical non-retryable HTTP 409 response.
+func NewIdempotencyConflictResponse(request *http.Request) *http.Response {
+	return newServiceResponse(request, http.StatusConflict, "", idempotencyConflictBody)
+}
+
+func newRetryableServiceResponse(request *http.Request, status int, retryAfter, body string) *http.Response {
+	return newServiceResponse(request, status, retryAfter, body)
+}
+
+func newServiceResponse(request *http.Request, status int, retryAfter, body string) *http.Response {
 	header := make(http.Header)
 	header.Set("Content-Type", "application/json")
-	header.Set("Content-Length", strconv.Itoa(len(temporaryUnavailableBody)))
-	header.Set("Retry-After", TemporaryUnavailableRetryAfter)
+	header.Set("Content-Length", strconv.Itoa(len(body)))
+	if retryAfter != "" {
+		header.Set("Retry-After", retryAfter)
+	}
 	return &http.Response{
-		Status:        strconv.Itoa(http.StatusServiceUnavailable) + " " + http.StatusText(http.StatusServiceUnavailable),
-		StatusCode:    http.StatusServiceUnavailable,
+		Status:        strconv.Itoa(status) + " " + http.StatusText(status),
+		StatusCode:    status,
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
 		Header:        header,
-		Body:          io.NopCloser(strings.NewReader(temporaryUnavailableBody)),
-		ContentLength: int64(len(temporaryUnavailableBody)),
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
 		Request:       request,
 	}
 }

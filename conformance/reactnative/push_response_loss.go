@@ -3,17 +3,20 @@ package reactnative
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/faults"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -53,13 +56,13 @@ func ValidatePushResponseLossScenario(scenario scenarios.Scenario) error {
 	}
 	want := []struct{ operation, kind, stage, method, completion string }{
 		{"local/write", "local-write", "", "", ""},
-		{"push/submit", "public-call", "begin", "start", ""},
-		{"process/response-loss", "public-call", "await-step", "", ""},
-		{"push/submit", "public-call", "await-call", "", "idle"},
+		{"push/submit", "public-call", "synchronous", "start", "blocked"},
+		{"process/restart-client", "process", "", "", ""},
+		{"push/submit", "public-call", "synchronous", "start", "error"},
 		{"push/submit", "controller", "", "", ""},
 		{"push/submit", "controller", "", "", ""},
 	}
-	var callID string
+	callIDs := make(map[scenarios.StepID]string)
 	for index, step := range scenario.Steps {
 		binding := step.NativeBinding
 		if step.ID != pushResponseLossStepOrder[index] || binding == nil || scenarios.OperationKey(step.Operation) != want[index].operation || binding.Kind != want[index].kind || binding.Stage != want[index].stage || binding.Method != want[index].method || binding.Completion != want[index].completion || step.ExpectedOutcome.Disposition != "success" {
@@ -72,12 +75,11 @@ func ValidatePushResponseLossScenario(scenario scenarios.Scenario) error {
 			if binding.CallID == nil || *binding.CallID == "" {
 				return fmt.Errorf("React Native push-response-loss step %s call identity is absent", step.ID)
 			}
-			if callID == "" {
-				callID = string(*binding.CallID)
-			} else if callID != string(*binding.CallID) {
-				return errors.New("React Native push-response-loss public calls do not share one call identity")
-			}
+			callIDs[step.ID] = string(*binding.CallID)
 		}
+	}
+	if callIDs[pushResponseLossStepOrder[1]] == "" || callIDs[pushResponseLossStepOrder[3]] == "" || callIDs[pushResponseLossStepOrder[1]] == callIDs[pushResponseLossStepOrder[3]] {
+		return errors.New("React Native push-response-loss calls do not straddle one process restart")
 	}
 	if err := validatePushResponseLossAliases(scenario.NativeIdentityAliases); err != nil {
 		return err
@@ -116,7 +118,7 @@ func validatePushResponseLossAliases(aliases []scenarios.NativeIdentityAlias) er
 
 func pushResponseLossAliasContract(alias string) (string, []scenarios.StepID, []scenarios.ExpectationID) {
 	all := []scenarios.StepID{pushResponseLossStepOrder[0], pushResponseLossStepOrder[1], pushResponseLossStepOrder[3], pushResponseLossStepOrder[4], pushResponseLossStepOrder[5]}
-	batchSteps := []scenarios.StepID{pushResponseLossStepOrder[1], pushResponseLossStepOrder[2], pushResponseLossStepOrder[3], pushResponseLossStepOrder[4], pushResponseLossStepOrder[5]}
+	batchSteps := []scenarios.StepID{pushResponseLossStepOrder[1], pushResponseLossStepOrder[3], pushResponseLossStepOrder[4], pushResponseLossStepOrder[5]}
 	pushes := []scenarios.StepID{pushResponseLossStepOrder[1], pushResponseLossStepOrder[3], pushResponseLossStepOrder[4], pushResponseLossStepOrder[5]}
 	switch alias {
 	case "response-loss-mutation":
@@ -165,8 +167,8 @@ func validatePushResponseLossOperations(scenario scenarios.Scenario) error {
 	for _, step := range scenario.Steps {
 		operations[step.ID] = step.Operation
 	}
-	if scenarios.OperationKey(operations[pushResponseLossStepOrder[2]]) != "process/response-loss" {
-		return errors.New("React Native push-response-loss response-loss operation is invalid")
+	if scenarios.OperationKey(operations[pushResponseLossStepOrder[2]]) != "process/restart-client" {
+		return errors.New("React Native push-response-loss restart operation is invalid")
 	}
 	ids := []scenarios.StepID{pushResponseLossStepOrder[1], pushResponseLossStepOrder[3], pushResponseLossStepOrder[4], pushResponseLossStepOrder[5]}
 	decoded := make([]pushResponseLossPayload, len(ids))
@@ -179,6 +181,9 @@ func validatePushResponseLossOperations(scenario scenarios.Scenario) error {
 		if err != nil {
 			return err
 		}
+	}
+	if _, enabled, err := scenarios.SealedRetryPushTarget(operations[pushResponseLossStepOrder[3]]); err != nil || !enabled {
+		return errors.New("React Native push-response-loss replay has no sealed-retry wire fault")
 	}
 	if decoded[0].Delivery != "drop_after_server" || decoded[1].Delivery != "apply" || decoded[2].Delivery != "apply" || decoded[3].Delivery != "apply" || decoded[0].AuthenticatedUserID == "" || decoded[0].Request.ClientID == "" || decoded[0].Request.BatchID == "" || len(decoded[0].Request.Mutations) == 0 {
 		return errors.New("React Native push-response-loss request bindings are invalid")
@@ -197,7 +202,7 @@ func validatePushResponseLossOperations(scenario scenarios.Scenario) error {
 		retryable bool
 		code      string
 	}{
-		pushResponseLossStepOrder[1]: {"transport_failure", 0, true, ""}, pushResponseLossStepOrder[3]: {"push_success", 200, false, ""},
+		pushResponseLossStepOrder[1]: {"transport_failure", 0, true, ""}, pushResponseLossStepOrder[3]: {"idempotency_conflict", 409, false, "idempotency_conflict"},
 		pushResponseLossStepOrder[4]: {"push_success", 200, false, ""}, pushResponseLossStepOrder[5]: {"idempotency_conflict", 409, false, "idempotency_conflict"},
 	}
 	if len(scenario.WireExpectations) != len(want) {
@@ -225,7 +230,7 @@ func pushResponseLossOperation(operations map[scenarios.StepID]scenarios.Operati
 }
 
 func validatePushResponseLossAssertion(scenario scenarios.Scenario) error {
-	semantic, failure := false, false
+	semantic, explicitFailure, sealedRetry := false, false, false
 	for _, assertion := range scenario.Assertions {
 		if assertion.ID == "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001" && assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" && assertion.Oracle.ObservedSource == "system-under-test" && len(assertion.ExpectationIDs) == 1 && assertion.ExpectationIDs[0] == "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001" && len(assertion.DetectsControlIDs) == 1 && assertion.DetectsControlIDs[0] == "CTRL-IDEMPOTENCY-001" {
 			semantic = true
@@ -237,10 +242,19 @@ func validatePushResponseLossAssertion(scenario scenarios.Scenario) error {
 			assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" &&
 			assertion.Oracle.ObservedSource == "system-under-test" &&
 			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{"CTRL-FAILURE-002"}) {
-			failure = true
+			explicitFailure = true
+		}
+		if assertion.ID == "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003" &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{"SYNC-FAILURE-003"}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"}) &&
+			assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Predicate.Name == "canonical-wire-outcome" &&
+			assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{"CTRL-FAILURE-003"}) {
+			sealedRetry = true
 		}
 	}
-	if semantic && failure {
+	if semantic && explicitFailure && sealedRetry {
 		return nil
 	}
 	return errors.New("React Native push-response-loss assertion contract is invalid")
@@ -248,9 +262,11 @@ func validatePushResponseLossAssertion(scenario scenarios.Scenario) error {
 
 func validatePushResponseLossProofs(scenario scenarios.Scenario) error {
 	want := map[string]struct{ proof, cell, target string }{
-		"OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001":     {"native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios"},
-		"OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001": {"native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android"},
-		"OBL-PUSH-RESPONSE-LOSS-CONTROL-001":            {"negative-control", "", "test-conformance"},
+		"OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001":      {"native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios"},
+		"OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001":  {"native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android"},
+		"OBL-PUSH-RESPONSE-LOSS-CONTROL-001":             {"negative-control", "", "test-conformance"},
+		"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001":   {"fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox"},
+		"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-CONTROL-001": {"negative-control", "", "test-conformance"},
 	}
 	counts := make(map[string]int)
 	for _, obligation := range scenario.ProofObligations {
@@ -260,8 +276,10 @@ func validatePushResponseLossProofs(scenario scenarios.Scenario) error {
 			continue
 		}
 		fault, control := "", ""
-		if expected.proof == "negative-control" {
+		if id == "OBL-PUSH-RESPONSE-LOSS-CONTROL-001" {
 			fault, control = "FPL-PUSH-RESPONSE-LOSS-001", "CTRL-IDEMPOTENCY-001"
+		} else if id == "OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001" || id == "OBL-PUSH-RESPONSE-LOSS-FAILURE-003-CONTROL-001" {
+			fault, control = "FPL-PUSH-RESPONSE-LOSS-FAILURE-003", "CTRL-FAILURE-003"
 		}
 		matchesClaims := true
 		if expected.proof == "native-e2e" {
@@ -281,10 +299,10 @@ func validatePushResponseLossProofs(scenario scenarios.Scenario) error {
 
 func pushResponseLossNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
 	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
-		"SYNC-IDEMPOTENCY-001", "SYNC-IDEMPOTENCY-002", "SYNC-FAILURE-002",
+		"SYNC-IDEMPOTENCY-001", "SYNC-IDEMPOTENCY-002", "SYNC-FAILURE-002", "SYNC-FAILURE-003",
 	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
 		"ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001", "ASSERT-PUSH-RESPONSE-LOSS-BINDING-001",
-		"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002",
+		"ASSERT-PUSH-RESPONSE-LOSS-FAILURE-002", "ASSERT-PUSH-RESPONSE-LOSS-FAILURE-003",
 	})
 }
 
@@ -402,8 +420,13 @@ type PushResponseLossCoordinator struct {
 	pushCommittedOnce        sync.Once
 	allowInitialResponse     chan struct{}
 	allowInitialResponseOnce sync.Once
+	allowRetry               chan struct{}
+	allowRetryOnce           sync.Once
 	replayCompleted          chan struct{}
 	replayCompletedOnce      sync.Once
+	sealedRequestDigest      [sha256.Size]byte
+	sealedBatchID            string
+	sealedMutationIDs        []string
 
 	mu                          sync.Mutex
 	prepared, closed, completed bool
@@ -411,6 +434,7 @@ type PushResponseLossCoordinator struct {
 	stage                       pushResponseLossStage
 	nextSeq                     uint64
 	process                     *actionProcessIdentity
+	preRestart                  *finalCapture
 	finalResult                 *finalCapture
 	serverFacts                 *scenarios.StateFacts
 	equalReplay, changedReplay  blackbox.NativeStepObservation
@@ -427,8 +451,10 @@ const (
 	pushResponseLossStageBeginCall
 	pushResponseLossStageAwaitStep
 	pushResponseLossStageAwaitCall
+	pushResponseLossStagePreRestartCapture
+	pushResponseLossStageRestart
+	pushResponseLossStageRetry
 	pushResponseLossStageFinalCapture
-	pushResponseLossStageApplicationRows
 	pushResponseLossStageComplete
 )
 
@@ -497,7 +523,7 @@ func NewPushResponseLossCoordinator(config PushResponseLossCoordinatorConfig) (*
 	for _, step := range config.Scenario.Steps {
 		steps[step.ID] = step
 	}
-	c := &PushResponseLossCoordinator{config: config, listener: listener, token: token, adapter: adapter, upstream: upstream, database: database, transport: &http.Client{Timeout: 2 * time.Minute}, steps: steps, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...), runtimeIDs: make(map[string]json.RawMessage), authTokens: make(map[string]string), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID, nextSeq: 1, pushCommitted: make(chan struct{}), allowInitialResponse: make(chan struct{}), replayCompleted: make(chan struct{})}
+	c := &PushResponseLossCoordinator{config: config, listener: listener, token: token, adapter: adapter, upstream: upstream, database: database, transport: &http.Client{Timeout: 2 * time.Minute}, steps: steps, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...), runtimeIDs: make(map[string]json.RawMessage), authTokens: make(map[string]string), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID, nextSeq: 1, pushCommitted: make(chan struct{}), allowInitialResponse: make(chan struct{}), allowRetry: make(chan struct{}), replayCompleted: make(chan struct{})}
 	c.server = &http.Server{Handler: c, MaxHeaderBytes: 16 * 1024, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second}
 	return c, nil
 }
@@ -745,10 +771,27 @@ func (c *PushResponseLossCoordinator) acceptResultLocked(raw json.RawMessage) er
 		return c.validateCallBegun(envelope.Result)
 	case pushResponseLossStageAwaitCall:
 		return c.validateAwaited(envelope.Result)
-	case pushResponseLossStageFinalCapture:
+	case pushResponseLossStagePreRestartCapture:
 		return c.validateCallCompleted(envelope.Result)
-	case pushResponseLossStageApplicationRows:
-		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace"})
+	case pushResponseLossStageRestart:
+		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace", "durable_proof", "application_rows"})
+		if err != nil {
+			return err
+		}
+		if err := c.validatePreRestartCapture(capture); err != nil {
+			return err
+		}
+		c.preRestart = &capture
+	case pushResponseLossStageRetry:
+		process, err := c.validateRestarted(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.process = &process
+	case pushResponseLossStageFinalCapture:
+		return c.validateTerminalSynchronized(envelope.Result)
+	case pushResponseLossStageComplete:
+		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace", "durable_proof", "application_rows"})
 		if err != nil {
 			return err
 		}
@@ -756,15 +799,6 @@ func (c *PushResponseLossCoordinator) acceptResultLocked(raw json.RawMessage) er
 			return err
 		}
 		c.finalResult = &capture
-	case pushResponseLossStageComplete:
-		rows, err := captureRows(envelope.Result)
-		if err != nil {
-			return err
-		}
-		if c.finalResult == nil {
-			return errors.New("React Native push-response-loss final capture is unavailable")
-		}
-		c.finalResult.Rows = rows
 	default:
 		return errInvalidExchange
 	}
@@ -787,10 +821,10 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		response.Command = c.command("client", "execute-step", map[string]any{"client_key": c.clientKey}, []scenarios.StepID{pushResponseLossStepOrder[0]})
 		c.stage = pushResponseLossStageBeginCall
 	case pushResponseLossStageBeginCall:
-		response.Command = c.command("client", "begin-call", map[string]any{"client_key": c.clientKey, "call_id": c.callID(), "method": "start"}, []scenarios.StepID{pushResponseLossStepOrder[1]})
+		response.Command = c.command("client", "begin-call", map[string]any{"client_key": c.clientKey, "call_id": c.initialCallID(), "method": "start"}, []scenarios.StepID{pushResponseLossStepOrder[1]})
 		c.stage = pushResponseLossStageAwaitStep
 	case pushResponseLossStageAwaitStep:
-		response.Command = c.command("observer", "await-step", map[string]any{"client_key": c.clientKey, "call_id": c.callID()}, []scenarios.StepID{pushResponseLossStepOrder[2]})
+		response.Command = c.command("observer", "await-step", map[string]any{"client_key": c.clientKey, "call_id": c.initialCallID()}, nil)
 		c.stage = pushResponseLossStageAwaitCall
 	case pushResponseLossStageAwaitCall:
 		if err := c.waitForPushCommit(ctx); err != nil {
@@ -799,8 +833,25 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		if err := c.bindCommittedPush(); err != nil {
 			return exchangeResponse{}, err
 		}
+		if err := c.bindServerIdentities(true); err != nil {
+			return exchangeResponse{}, err
+		}
 		c.releaseInitialResponse()
-		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.callID()}, []scenarios.StepID{pushResponseLossStepOrder[3]})
+		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.initialCallID()}, nil)
+		c.stage = pushResponseLossStagePreRestartCapture
+	case pushResponseLossStagePreRestartCapture:
+		parameters, err := c.pushResponseLossCaptureParameters()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("observer", "capture", parameters, nil)
+		c.stage = pushResponseLossStageRestart
+	case pushResponseLossStageRestart:
+		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil}, nil)
+		c.stage = pushResponseLossStageRetry
+	case pushResponseLossStageRetry:
+		c.releaseRetries()
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "error"}, []scenarios.StepID{pushResponseLossStepOrder[3]})
 		c.stage = pushResponseLossStageFinalCapture
 	case pushResponseLossStageFinalCapture:
 		if err := c.waitForReplay(ctx); err != nil {
@@ -809,9 +860,13 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		if err := c.runControllerReplays(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
-		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace"}}, nil)
-		c.stage = pushResponseLossStageApplicationRows
-	case pushResponseLossStageApplicationRows:
+		parameters, err := c.pushResponseLossCaptureParameters()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("observer", "capture", parameters, nil)
+		c.stage = pushResponseLossStageComplete
+	case pushResponseLossStageComplete:
 		if c.finalResult == nil {
 			return exchangeResponse{}, errors.New("React Native push-response-loss final capture is unavailable")
 		}
@@ -827,16 +882,6 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 			return exchangeResponse{}, errors.New("React Native push-response-loss server state is invalid")
 		}
 		c.serverFacts = &server
-		if err := c.bindServerIdentities(true); err != nil {
-			return exchangeResponse{}, err
-		}
-		recordID, err := c.runtimeRecordID()
-		if err != nil {
-			return exchangeResponse{}, err
-		}
-		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"application-rows"}, "row_selectors": []map[string]any{{"table_name": c.tableName, "primary_key_field": c.primaryKey, "primary_key": recordID}}}, nil)
-		c.stage = pushResponseLossStageComplete
-	case pushResponseLossStageComplete:
 		if err := c.validateCompletionLocked(); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -857,13 +902,26 @@ func (c *PushResponseLossCoordinator) command(actor, name string, parameters map
 	}
 	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.authTokens[c.clientKey]}}
 }
-func (c *PushResponseLossCoordinator) callID() string {
-	for _, step := range c.steps {
-		if step.NativeBinding != nil && step.NativeBinding.CallID != nil {
-			return string(*step.NativeBinding.CallID)
-		}
+func (c *PushResponseLossCoordinator) initialCallID() string {
+	binding := c.steps[pushResponseLossStepOrder[1]].NativeBinding
+	if binding == nil || binding.CallID == nil {
+		return "response_loss_initial"
 	}
-	return "response_loss_initial"
+	return string(*binding.CallID)
+}
+
+func (c *PushResponseLossCoordinator) pushResponseLossCaptureParameters() (map[string]any, error) {
+	recordID, err := c.runtimeRecordID()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"client_keys": []string{c.clientKey},
+		"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof", "application-rows"},
+		"row_selectors": []map[string]any{{
+			"table_name": c.tableName, "primary_key_field": c.primaryKey, "primary_key": recordID,
+		}},
+	}, nil
 }
 
 func validatePushResponseLossLocal(raw json.RawMessage, process *actionProcessIdentity) error {
@@ -911,7 +969,7 @@ func (c *PushResponseLossCoordinator) validateCallBegun(raw json.RawMessage) err
 		return err
 	}
 	var id, state string
-	if json.Unmarshal(members["call_id"], &id) != nil || id != c.callID() || json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
+	if json.Unmarshal(members["call_id"], &id) != nil || id != c.initialCallID() || json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
 		return errors.New("React Native push-response-loss call did not enter flight")
 	}
 	return validatePushResponseLossProcess(members["process"], c.process)
@@ -938,10 +996,77 @@ func (c *PushResponseLossCoordinator) validateCallCompleted(raw json.RawMessage)
 		return err
 	}
 	var id, state, completion string
-	if json.Unmarshal(members["call_id"], &id) != nil || id != c.callID() || json.Unmarshal(members["state"], &state) != nil || state != "completed" || json.Unmarshal(members["completion"], &completion) != nil || completion != "idle" {
+	if json.Unmarshal(members["call_id"], &id) != nil || id != c.initialCallID() || json.Unmarshal(members["state"], &state) != nil || state != "completed" || json.Unmarshal(members["completion"], &completion) != nil || completion != "blocked" {
 		return errors.New("React Native push-response-loss call completion is invalid")
 	}
-	if err := validateReadyStatus(members["status"]); err != nil {
+	if err := validatePushResponseLossBackoffStatus(members["status"]); err != nil {
+		return err
+	}
+	return validatePushResponseLossProcess(members["process"], c.process)
+}
+
+func validatePushResponseLossBackoffStatus(raw json.RawMessage) error {
+	var status syncStatus
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 4, "React Native push-response-loss backoff status"); err != nil || json.Unmarshal(raw, &status) != nil {
+		return errors.New("React Native push-response-loss backoff status is invalid")
+	}
+	var operation string
+	if status.State != "backoff" || isJSONNull(status.RetryAt) || json.Unmarshal(status.Operation, &operation) != nil || operation != "pushing" || !isJSONNull(status.Failure) {
+		return errors.New("React Native push-response-loss did not persist push backoff")
+	}
+	return nil
+}
+
+func validatePushResponseLossErrorStatus(raw json.RawMessage) error {
+	var status syncStatus
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 4, "React Native push-response-loss error status"); err != nil || json.Unmarshal(raw, &status) != nil {
+		return errors.New("React Native push-response-loss error status is invalid")
+	}
+	var failure struct {
+		Operation      string `json:"operation"`
+		Code           string `json:"code"`
+		Retryable      bool   `json:"retryable"`
+		RecoveryAction string `json:"recovery_action"`
+	}
+	var failureMembers map[string]json.RawMessage
+	if err := decodeStrictMembers(status.Failure, &failureMembers, 4, "React Native push-response-loss terminal failure"); err != nil || json.Unmarshal(status.Failure, &failure) != nil {
+		return errors.New("React Native push-response-loss terminal failure is invalid")
+	}
+	if status.State != "error" || !isJSONNull(status.RetryAt) || !isJSONNull(status.Operation) || failure.Operation != "pushing" || failure.Code != "idempotency_conflict" || failure.Retryable || failure.RecoveryAction != "none" {
+		return errors.New("React Native push-response-loss terminal failure permits silent continuation")
+	}
+	return nil
+}
+
+func (c *PushResponseLossCoordinator) validateRestarted(raw json.RawMessage) (actionProcessIdentity, error) {
+	process, err := validateOpenedResult(raw)
+	if err != nil {
+		return actionProcessIdentity{}, err
+	}
+	if c.process == nil {
+		return actionProcessIdentity{}, errors.New("React Native push-response-loss prior process identity is unavailable")
+	}
+	if process.ProcessID == c.process.ProcessID || process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return actionProcessIdentity{}, errors.New("React Native push-response-loss restart did not replace only the process")
+	}
+	return process, nil
+}
+
+func (c *PushResponseLossCoordinator) validateTerminalSynchronized(raw json.RawMessage) error {
+	if err := validateActionResult(raw, "synchronized"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 4, "React Native push-response-loss terminal synchronized result"); err != nil {
+		return err
+	}
+	var completion string
+	if json.Unmarshal(members["completion"], &completion) != nil || completion != "error" {
+		return errors.New("React Native push-response-loss terminal synchronization did not stop with an error")
+	}
+	if err := validatePushResponseLossErrorStatus(members["status"]); err != nil {
 		return err
 	}
 	return validatePushResponseLossProcess(members["process"], c.process)
@@ -1013,31 +1138,116 @@ func validatePushResponseLossNativeWire(scenario scenarios.Scenario, id scenario
 	return nil
 }
 
-func (c *PushResponseLossCoordinator) validateFinalCapture(capture finalCapture) error {
-	if len(capture.ClientState) == 0 || len(capture.Pending) == 0 || len(capture.Rejected) == 0 || len(capture.Status) == 0 || len(capture.Provenance) == 0 || len(capture.Trace) == 0 {
-		return errors.New("React Native push-response-loss final capture is incomplete")
+func (c *PushResponseLossCoordinator) validateDurableCapture(capture finalCapture) (inspectedClientState, error) {
+	if len(capture.ClientState) == 0 || len(capture.Pending) == 0 || len(capture.Rejected) == 0 || len(capture.Status) == 0 || len(capture.Provenance) == 0 || len(capture.Trace) == 0 || len(capture.DurableProof) == 0 || len(capture.Rows) == 0 {
+		return inspectedClientState{}, errors.New("React Native push-response-loss durable capture is incomplete")
 	}
 	state, err := decodeClientState(capture.ClientState)
 	if err != nil {
-		return err
+		return inspectedClientState{}, err
 	}
 	if state.Schema == nil || len(state.ScopeStates) != 1 || len(state.ScopeRows) != 1 || state.ApplicationRowCount != 1 || state.MutationLedgerCount != 1 || state.SealedBatchCount != 1 || state.RejectedMutationCount != 0 {
-		return errors.New("React Native push-response-loss durable client state is invalid")
+		return inspectedClientState{}, errors.New("React Native push-response-loss durable client state is invalid")
 	}
 	if validateEmptyArray(capture.Pending) != nil || validateEmptyArray(capture.Rejected) != nil {
-		return errors.New("React Native push-response-loss mutation queues are not empty")
+		return inspectedClientState{}, errors.New("React Native push-response-loss mutation queues are not empty")
 	}
-	if err := validateReadyStatus(capture.Status); err != nil {
+	if _, err := decodeDurableProof(capture.DurableProof); err != nil {
+		return inspectedClientState{}, err
+	}
+	rows, err := decodeRows(capture.Rows)
+	if err != nil {
+		return inspectedClientState{}, err
+	}
+	recordID, err := c.runtimeRecordID()
+	if err != nil {
+		return inspectedClientState{}, err
+	}
+	if len(rows) != 1 || !rowUsesRuntimePrimary(rows[0], c.primaryKey, recordID) {
+		return inspectedClientState{}, errors.New("React Native push-response-loss application row identity is invalid")
+	}
+	if err := validateProvenance(capture.Provenance, state.ScopeStates[0], state.ScopeRows[0]); err != nil {
+		return inspectedClientState{}, err
+	}
+	return state, nil
+}
+
+func (c *PushResponseLossCoordinator) validatePreRestartCapture(capture finalCapture) error {
+	if _, err := c.validateDurableCapture(capture); err != nil {
 		return err
 	}
-	trace, err := captureTraceFromRaw(capture.Trace)
+	return validatePushResponseLossBackoffStatus(capture.Status)
+}
+
+func (c *PushResponseLossCoordinator) validateFinalCapture(capture finalCapture) error {
+	_, err := c.validateDurableCapture(capture)
 	if err != nil {
 		return err
 	}
-	if err := validatePushResponseLossTrace(c.config.Scenario, trace); err != nil {
+	if err := validatePushResponseLossErrorStatus(capture.Status); err != nil {
 		return err
 	}
-	return validateProvenance(capture.Provenance, state.ScopeStates[0], state.ScopeRows[0])
+	if c.preRestart == nil {
+		return errors.New("React Native push-response-loss pre-restart capture is unavailable")
+	}
+	equal, err := pushResponseLossDurableCapturesEqual(*c.preRestart, capture)
+	if err != nil {
+		return err
+	}
+	if !equal {
+		return errors.New("React Native push-response-loss restart or retries changed durable client state")
+	}
+	initialTrace, err := captureTraceFromRaw(c.preRestart.Trace)
+	if err != nil {
+		return err
+	}
+	retryTrace, err := captureTraceFromRaw(capture.Trace)
+	if err != nil {
+		return err
+	}
+	trace, err := combinePushResponseLossTraces(initialTrace, retryTrace)
+	if err != nil {
+		return err
+	}
+	return validatePushResponseLossTrace(c.config.Scenario, trace)
+}
+
+func pushResponseLossDurableCapturesEqual(before, after finalCapture) (bool, error) {
+	beforeState, err := decodeClientState(before.ClientState)
+	if err != nil {
+		return false, err
+	}
+	afterState, err := decodeClientState(after.ClientState)
+	if err != nil {
+		return false, err
+	}
+	beforeState.ProvenanceMaintenanceWorkCursor = ""
+	afterState.ProvenanceMaintenanceWorkCursor = ""
+	return reflect.DeepEqual(beforeState, afterState) &&
+		semanticRawJSONEqual(before.Pending, after.Pending) &&
+		semanticRawJSONEqual(before.Rejected, after.Rejected) &&
+		semanticRawJSONEqual(before.Provenance, after.Provenance) &&
+		semanticRawJSONEqual(before.DurableProof, after.DurableProof) &&
+		semanticRawJSONEqual(before.Rows, after.Rows), nil
+}
+
+func combinePushResponseLossTraces(initial, retry traceSnapshot) (traceSnapshot, error) {
+	if initial.Overflowed || retry.Overflowed || initial.SequenceCheckpoint != uint64(len(initial.Observations)) || retry.SequenceCheckpoint != uint64(len(retry.Observations)) {
+		return traceSnapshot{}, errors.New("React Native push-response-loss per-process trace is incomplete")
+	}
+	if err := validateTraceSequence(initial.Observations); err != nil {
+		return traceSnapshot{}, err
+	}
+	if err := validateTraceSequence(retry.Observations); err != nil {
+		return traceSnapshot{}, err
+	}
+	combined := traceSnapshot{Observations: append([]transportObservation(nil), initial.Observations...)}
+	for _, observation := range retry.Observations {
+		observation.Sequence += uint64(len(initial.Observations))
+		combined.Observations = append(combined.Observations, observation)
+	}
+	combined.SequenceCheckpoint = uint64(len(combined.Observations))
+	return combined, nil
 }
 func validatePushResponseLossTrace(scenario scenarios.Scenario, trace traceSnapshot) error {
 	initialWire, initialFound := pushResponseLossWireExpectation(scenario, pushResponseLossStepOrder[1])
@@ -1051,19 +1261,25 @@ func validatePushResponseLossTrace(scenario scenarios.Scenario, trace traceSnaps
 	if err := validateTraceSequence(trace.Observations); err != nil {
 		return fmt.Errorf("React Native push-response-loss request trace sequence = %s, want contiguous sequence: %w", pushResponseLossTraceSummary(trace.Observations), err)
 	}
-	pushes := make([]transportObservation, 0, 2)
+	pushes := make([]transportObservation, 0, 4)
 	for _, observation := range trace.Observations {
 		if observation.OperationClass == "push" {
 			pushes = append(pushes, observation)
 		}
 	}
-	if len(pushes) != 2 {
-		return fmt.Errorf("React Native push-response-loss push replay trace = %s (count %d), want two pushes with statuses [%d %d]", pushResponseLossTraceSummary(pushes), len(pushes), initialWire.HTTPStatus, replayWire.HTTPStatus)
+	if len(pushes) != 4 {
+		return fmt.Errorf("React Native push-response-loss push replay trace = %s (count %d), want four pushes with statuses [%d %d %d %d]", pushResponseLossTraceSummary(pushes), len(pushes), initialWire.HTTPStatus, http.StatusTooManyRequests, http.StatusServiceUnavailable, replayWire.HTTPStatus)
 	}
 	if err := validatePushResponseLossTracePush("initial response-loss", pushes[0], initialWire); err != nil {
 		return err
 	}
-	if err := validatePushResponseLossTracePush("unchanged replay", pushes[1], replayWire); err != nil {
+	if err := validatePushResponseLossTracePush("HTTP 429 retry", pushes[1], scenarios.WireExpectation{HTTPStatus: http.StatusTooManyRequests, Retryable: true}); err != nil {
+		return err
+	}
+	if err := validatePushResponseLossTracePush("HTTP 503 retry", pushes[2], scenarios.WireExpectation{HTTPStatus: http.StatusServiceUnavailable, Retryable: true}); err != nil {
+		return err
+	}
+	if err := validatePushResponseLossTracePush("unchanged replay", pushes[3], replayWire); err != nil {
 		return err
 	}
 	var generation uint64
@@ -1129,7 +1345,21 @@ func (c *PushResponseLossCoordinator) validateCompletionLocked() error {
 	if c.serverFacts == nil {
 		return errors.New("React Native push-response-loss server state is unavailable")
 	}
-	trace, err := captureTraceFromRaw(c.finalResult.Trace)
+	if err := c.validateSealedRetryEvidence(); err != nil {
+		return err
+	}
+	if c.preRestart == nil {
+		return errors.New("React Native push-response-loss pre-restart evidence is unavailable")
+	}
+	initialTrace, err := captureTraceFromRaw(c.preRestart.Trace)
+	if err != nil {
+		return err
+	}
+	retryTrace, err := captureTraceFromRaw(c.finalResult.Trace)
+	if err != nil {
+		return err
+	}
+	trace, err := combinePushResponseLossTraces(initialTrace, retryTrace)
 	if err != nil {
 		return err
 	}
@@ -1191,10 +1421,31 @@ func (c *PushResponseLossCoordinator) proxyAdapter(writer http.ResponseWriter, r
 	isPush := request.Method == http.MethodPost && request.URL.Path == "/sync/push"
 	pushNumber := uint64(0)
 	if isPush {
-		pushNumber = c.beginPushRequest()
-		if pushNumber > 2 {
-			c.recordProxyFailure(errors.New("React Native push-response-loss sent more than two push requests"))
+		if c.hasRecordedPush() && !c.waitForRetryRelease(request.Context()) {
+			return
+		}
+		pushNumber, err = c.beginPushRequest(body)
+		if err != nil {
+			c.recordProxyFailure(err)
 			writeExchangeError(writer, http.StatusBadGateway)
+			return
+		}
+		if pushNumber > 4 {
+			c.recordProxyFailure(errors.New("React Native push-response-loss sent more than four push requests"))
+			writeExchangeError(writer, http.StatusBadGateway)
+			return
+		}
+		if pushNumber == 2 {
+			writePushResponseLossInjectedResponse(writer, faults.NewRetryLaterResponse(request))
+			return
+		}
+		if pushNumber == 3 {
+			writePushResponseLossInjectedResponse(writer, faults.NewTemporaryUnavailableResponse(request))
+			return
+		}
+		if pushNumber == 4 {
+			writePushResponseLossInjectedResponse(writer, faults.NewIdempotencyConflictResponse(request))
+			c.signalReplayCompleted()
 			return
 		}
 	}
@@ -1243,7 +1494,6 @@ func (c *PushResponseLossCoordinator) proxyAdapter(writer http.ResponseWriter, r
 			c.loseInitialResponse(writer)
 			return
 		}
-		c.signalReplayCompleted()
 	}
 	for name, values := range response.Header {
 		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
@@ -1257,11 +1507,94 @@ func (c *PushResponseLossCoordinator) proxyAdapter(writer http.ResponseWriter, r
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(responseBody)
 }
-func (c *PushResponseLossCoordinator) beginPushRequest() uint64 {
+func (c *PushResponseLossCoordinator) beginPushRequest(body []byte) (uint64, error) {
+	batchID, mutationIDs, err := pushResponseLossSealedIdentity(body)
+	if err != nil {
+		return 0, err
+	}
+	digest := sha256.Sum256(body)
 	c.proxyMu.Lock()
 	defer c.proxyMu.Unlock()
 	c.pushRequests++
-	return c.pushRequests
+	if c.pushRequests == 1 {
+		c.sealedRequestDigest = digest
+		c.sealedBatchID = batchID
+		c.sealedMutationIDs = append([]string(nil), mutationIDs...)
+	} else if c.sealedRequestDigest != digest || c.sealedBatchID != batchID || !pushResponseLossStringsEqual(c.sealedMutationIDs, mutationIDs) {
+		return c.pushRequests, errors.New("React Native sealed retry changed batch identity, mutation order, or canonical request bytes")
+	}
+	return c.pushRequests, nil
+}
+
+func (c *PushResponseLossCoordinator) hasRecordedPush() bool {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	return c.pushRequests != 0
+}
+
+func (c *PushResponseLossCoordinator) waitForRetryRelease(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-c.allowRetry:
+		return ctx.Err() == nil
+	}
+}
+
+func pushResponseLossSealedIdentity(body []byte) (string, []string, error) {
+	var request struct {
+		ClientID  string `json:"client_id"`
+		BatchID   string `json:"batch_id"`
+		Mutations []struct {
+			MutationID string `json:"mutation_id"`
+		} `json:"mutations"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || request.ClientID == "" || request.BatchID == "" || len(request.Mutations) == 0 {
+		return "", nil, errors.New("React Native push-response-loss sealed request identity is invalid")
+	}
+	mutationIDs := make([]string, 0, len(request.Mutations))
+	for _, mutation := range request.Mutations {
+		if mutation.MutationID == "" {
+			return "", nil, errors.New("React Native push-response-loss sealed mutation identity is absent")
+		}
+		mutationIDs = append(mutationIDs, mutation.MutationID)
+	}
+	return request.BatchID, mutationIDs, nil
+}
+
+func pushResponseLossStringsEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func writePushResponseLossInjectedResponse(writer http.ResponseWriter, response *http.Response) {
+	defer response.Body.Close()
+	for name, values := range response.Header {
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(writer, response.Body)
+}
+
+func (c *PushResponseLossCoordinator) validateSealedRetryEvidence() error {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	if c.proxyErr != nil {
+		return c.proxyErr
+	}
+	if c.pushRequests != 4 || c.sealedBatchID == "" || len(c.sealedMutationIDs) == 0 {
+		return fmt.Errorf("React Native sealed-retry evidence = %d attempts and %d mutations, want 4 attempts and at least 1 mutation", c.pushRequests, len(c.sealedMutationIDs))
+	}
+	return nil
 }
 func (c *PushResponseLossCoordinator) loseInitialResponse(writer http.ResponseWriter) {
 	hijacker, ok := writer.(http.Hijacker)
@@ -1295,6 +1628,7 @@ func (c *PushResponseLossCoordinator) recordProxyFailure(err error) {
 	c.signalPushCommitted()
 	c.signalReplayCompleted()
 	c.releaseInitialResponse()
+	c.releaseRetries()
 }
 func (c *PushResponseLossCoordinator) proxyFailure(stage string) error {
 	c.proxyMu.Lock()
@@ -1309,6 +1643,9 @@ func (c *PushResponseLossCoordinator) signalPushCommitted() {
 }
 func (c *PushResponseLossCoordinator) releaseInitialResponse() {
 	c.allowInitialResponseOnce.Do(func() { close(c.allowInitialResponse) })
+}
+func (c *PushResponseLossCoordinator) releaseRetries() {
+	c.allowRetryOnce.Do(func() { close(c.allowRetry) })
 }
 func (c *PushResponseLossCoordinator) signalReplayCompleted() {
 	c.replayCompletedOnce.Do(func() { close(c.replayCompleted) })

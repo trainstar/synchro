@@ -90,9 +90,67 @@ func TestPendingCycleCommandUsesAuthoredPullOperation(t *testing.T) {
 		clientKey: "client-a",
 		clientID:  "client-a",
 	}
-	command := coordinator.command("client", "synchronize-step", map[string]any{"client_key": "client-a"}, []scenarios.StepID{pendingCycleStepOrder[3]})
-	if len(command.Action.Steps) != 1 || !bytes.Equal(command.Action.Steps[0].Operation.Payload, scenario.Steps[3].Operation.Payload) {
+	command := coordinator.command("client", "synchronize-step", map[string]any{"client_key": "client-a"}, []scenarios.StepID{pendingCyclePullStepID})
+	if len(command.Action.Steps) != 1 || !bytes.Equal(command.Action.Steps[0].Operation.Payload, coordinator.steps[pendingCyclePullStepID].Operation.Payload) {
 		t.Fatal("pending-cycle pull command did not preserve the authored operation")
+	}
+}
+
+func TestPendingCycleCaptureRequestsDirectNativeEvidence(t *testing.T) {
+	coordinator := &PendingCycleCoordinator{
+		clientKey: "client-a",
+		target: scenarios.PendingCycleNativeTarget{
+			TableName:           "cf_items",
+			PrimaryKeyField:     "id",
+			RecordID:            "runtime-row",
+			ValueField:          "value",
+			Value:               "pending",
+			UnprotectedRecordID: "runtime-unprotected-row",
+			UnprotectedValue:    "unprotected",
+		},
+	}
+	command := coordinator.captureCommand()
+	parameters := command.Action.Action.Parameters
+	sources, ok := parameters["sources"].([]string)
+	if !ok || len(sources) != len(pendingCycleCaptureSources) {
+		t.Fatalf("pending-cycle capture sources = %#v", parameters["sources"])
+	}
+	for index, source := range pendingCycleCaptureSources {
+		if sources[index] != source {
+			t.Fatalf("pending-cycle capture source %d = %q, want %q", index, sources[index], source)
+		}
+	}
+	identity, ok := parameters["durable_proof_identity"].(map[string]any)
+	if !ok || identity["table_name"] != "cf_items" || identity["record_id"] != "runtime-row" {
+		t.Fatalf("pending-cycle durable-proof identity = %#v", parameters["durable_proof_identity"])
+	}
+	selectors, ok := parameters["row_selectors"].([]map[string]any)
+	if !ok || len(selectors) != 2 || selectors[1]["primary_key"] != "runtime-unprotected-row" {
+		t.Fatalf("pending-cycle row selectors = %#v", parameters["row_selectors"])
+	}
+	if coordinator.ExchangeCount() != int(pendingCycleStageComplete)+1 {
+		t.Fatalf("pending-cycle exchange count = %d", coordinator.ExchangeCount())
+	}
+}
+
+func TestPendingCycleRuntimeTargetRejectsAmbiguousValueField(t *testing.T) {
+	operation := scenarios.Operation{
+		ContractOperation: "local",
+		Name:              "write",
+		Payload:           json.RawMessage(`{"table_id":"cf_items","pk":{"id":"runtime-row"},"columns":{"value":"pending","duplicate":"pending"}}`),
+	}
+	if _, err := pendingCycleNativeTarget(operation); err == nil {
+		t.Fatal("ambiguous pending-cycle runtime target was accepted")
+	}
+}
+
+func TestPendingCycleTemporaryUnavailableFaultAcceptsOnlyGeneratedUpdate(t *testing.T) {
+	coordinator := &PendingCycleCoordinator{faultArmed: true}
+	if err := coordinator.recordTemporaryUnavailablePush(json.RawMessage(`{"mutations":[{"op":"update"}]}`)); err != nil {
+		t.Fatalf("generated update fault was rejected: %v", err)
+	}
+	if err := coordinator.recordTemporaryUnavailablePush(json.RawMessage(`{"mutations":[{"op":"delete"}]}`)); err == nil {
+		t.Fatal("generated delete fault was accepted")
 	}
 }
 
@@ -117,6 +175,9 @@ func TestNewPendingCycleCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.
 	}
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android pending-cycle adapter URL = %q", coordinator.adapter)
+	}
+	if coordinator.upstream != "http://127.0.0.1:8080" {
+		t.Fatalf("Android pending-cycle upstream URL = %q", coordinator.upstream)
 	}
 }
 

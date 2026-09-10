@@ -532,20 +532,29 @@ func (v *scenarioValidator) validateOperationsAndWire() {
 
 func (v *scenarioValidator) validateNativeWireFaults() {
 	for _, step := range v.scenario.Steps {
-		_, enabled, err := TemporaryUnavailablePushTarget(step.Operation)
+		_, temporaryUnavailable, err := TemporaryUnavailablePushTarget(step.Operation)
 		if err != nil {
 			v.add("%s step %s has invalid wire fault: %v", v.scenario.ID, step.ID, err)
 			continue
 		}
-		if !enabled {
+		_, sealedRetry, err := SealedRetryPushTarget(step.Operation)
+		if err != nil {
+			v.add("%s step %s has invalid wire fault: %v", v.scenario.ID, step.ID, err)
+			continue
+		}
+		if !temporaryUnavailable && !sealedRetry {
 			continue
 		}
 		if step.NativeBinding == nil || step.NativeBinding.Kind != "public-call" || step.NativeBinding.Stage != "synchronous" {
 			v.add("%s step %s wire fault requires a synchronous public native push step", v.scenario.ID, step.ID)
 		}
 		wire, found := v.wireByStep[step.ID]
-		if !found || wire.ContractCase != wireFaultTemporaryUnavailable {
-			v.add("%s step %s wire fault requires temporary_unavailable wire expectations", v.scenario.ID, step.ID)
+		expectedCase := wireFaultTemporaryUnavailable
+		if sealedRetry {
+			expectedCase = "idempotency_conflict"
+		}
+		if !found || wire.ContractCase != expectedCase {
+			v.add("%s step %s wire fault requires %s wire expectations", v.scenario.ID, step.ID, expectedCase)
 		}
 	}
 }

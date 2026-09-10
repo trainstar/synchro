@@ -324,48 +324,52 @@ func TestSteadyPullForgedAuthoritativeFieldsRetainChecksumAndFail(t *testing.T) 
 func TestPendingCycleDisconnectedSnapshotsKeepTraceGreenButFail(t *testing.T) {
 	result := runSemanticPerformanceScenario(t, "conformance/scenarios/performance/pending-cycle-001.json")
 	mutant := result
-	materialize := cloneSemanticStep(result.Steps[2])
-	materialize.Before = result.Steps[1].Before
+	materialize := cloneSemanticStep(result.Steps[4])
+	materialize.Before = result.Steps[3].Before
 	mutant.Steps = append([]OperationExecution(nil), result.Steps...)
-	mutant.Steps[2] = materialize
+	mutant.Steps[4] = materialize
 	assertSemanticMutantFails(t, result, mutant)
 }
 
 func TestPendingCycleUnrelatedMaterializationKeepsTraceGreenButFails(t *testing.T) {
 	result := runSemanticPerformanceScenario(t, "conformance/scenarios/performance/pending-cycle-001.json")
 	mutant := result
-	materialize := cloneSemanticStep(result.Steps[2])
+	materialize := cloneSemanticStep(result.Steps[4])
 	materialize.Operation.Payload = json.RawMessage(`{"stream_generation":"stream-1","commit_lsn":"999"}`)
 	mutant.Steps = append([]OperationExecution(nil), result.Steps...)
-	mutant.Steps[2] = materialize
+	mutant.Steps[4] = materialize
 	assertSemanticMutantFails(t, result, mutant)
 }
 
 func TestPendingCycleConflictToAppliedDiscontinuityKeepsTraceGreenButFails(t *testing.T) {
 	result := runSemanticPerformanceScenario(t, "conformance/scenarios/performance/pending-cycle-001.json")
 	mutant := result
-	push := cloneSemanticStep(result.Steps[1])
+	push := cloneSemanticStep(result.Steps[2])
 	push.Result.Push.Mutations[0].State = reference.MutationOutcomeConflict
 	mutant.Steps = append([]OperationExecution(nil), result.Steps...)
-	mutant.Steps[1] = push
+	mutant.Steps[2] = push
 	assertSemanticMutantFails(t, result, mutant)
 }
 
 func TestPendingCycleForgedFieldsRetainChecksumAndFail(t *testing.T) {
 	result := runSemanticPerformanceScenario(t, "conformance/scenarios/performance/pending-cycle-001.json")
 	mutant := result
-	push := cloneSemanticStep(result.Steps[1])
+	push := cloneSemanticStep(result.Steps[2])
 	push.After = forgePendingSemanticFields(push.After, `"forged-pending-value"`)
-	materialize := cloneSemanticStep(result.Steps[2])
-	materialize.Before = push.After
+	unprotectedMaterialize := cloneSemanticStep(result.Steps[3])
+	unprotectedMaterialize.Before = push.After
+	unprotectedMaterialize.After = forgePendingSemanticFields(unprotectedMaterialize.After, `"forged-pending-value"`)
+	materialize := cloneSemanticStep(result.Steps[4])
+	materialize.Before = unprotectedMaterialize.After
 	materialize.After = forgePendingSemanticFields(materialize.After, `"forged-pending-value"`)
-	pull := cloneSemanticStep(result.Steps[3])
+	pull := cloneSemanticStep(result.Steps[5])
 	pull.Before = materialize.After
 	pull.After = materialize.After
 	mutant.Steps = append([]OperationExecution(nil), result.Steps...)
-	mutant.Steps[1] = push
-	mutant.Steps[2] = materialize
-	mutant.Steps[3] = pull
+	mutant.Steps[2] = push
+	mutant.Steps[3] = unprotectedMaterialize
+	mutant.Steps[4] = materialize
+	mutant.Steps[5] = pull
 	mutant.FinalSnapshot = pull.After
 	assertSemanticMutantFails(t, result, mutant)
 }
@@ -373,7 +377,7 @@ func TestPendingCycleForgedFieldsRetainChecksumAndFail(t *testing.T) {
 func TestPendingCycleForgedStoredAndReturnedScopeChecksumFails(t *testing.T) {
 	result := runSemanticPerformanceScenario(t, "conformance/scenarios/performance/pending-cycle-001.json")
 	mutant := result
-	materialize := cloneSemanticStep(result.Steps[2])
+	materialize := cloneSemanticStep(result.Steps[4])
 	materialize.After.Scopes = append([]reference.SnapshotEntry[reference.ScopeID, reference.ScopeState](nil), materialize.After.Scopes...)
 	var forged reference.Checksum
 	for index := range materialize.After.Scopes {
@@ -387,14 +391,14 @@ func TestPendingCycleForgedStoredAndReturnedScopeChecksumFails(t *testing.T) {
 	if forged == (reference.Checksum{}) {
 		t.Fatal("scope checksum mutant did not find scope A")
 	}
-	pull := cloneSemanticStep(result.Steps[3])
+	pull := cloneSemanticStep(result.Steps[5])
 	pull.Before = materialize.After
 	pull.After = materialize.After
 	pull.Result.Pull.ScopeChecksums = append([]reference.ScopeChecksumObservation(nil), pull.Result.Pull.ScopeChecksums...)
 	pull.Result.Pull.ScopeChecksums[0].Checksum = forged
 	mutant.Steps = append([]OperationExecution(nil), result.Steps...)
-	mutant.Steps[2] = materialize
-	mutant.Steps[3] = pull
+	mutant.Steps[4] = materialize
+	mutant.Steps[5] = pull
 	mutant.FinalSnapshot = pull.After
 	assertSemanticMutantFails(t, result, mutant)
 }

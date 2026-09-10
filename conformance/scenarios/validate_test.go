@@ -551,6 +551,38 @@ func TestValidateWireFaultRequiresMatchingTemporaryUnavailableExpectation(t *tes
 	}
 }
 
+func TestValidateSealedRetryWireFaultRequiresMatchingIdempotencyConflictExpectation(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	vectorCatalog, err := vectors.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored vector catalog: %v", err)
+	}
+	scenario, err := LoadFile(context.Background(), "../../", "conformance/scenarios/server/push-response-loss-001.json")
+	if err != nil {
+		t.Fatalf("load push response-loss scenario: %v", err)
+	}
+	if err := ValidateWithVectors(scenario, bundle, vectorCatalog); err != nil {
+		t.Fatalf("validate push response-loss sealed retry: %v", err)
+	}
+	mutant := cloneScenario(scenario)
+	for index := range mutant.WireExpectations {
+		wire := &mutant.WireExpectations[index]
+		if wire.StepID != "STEP-PUSH-RESPONSE-LOSS-004" {
+			continue
+		}
+		wire.ContractCase = "push_success"
+		wire.HTTPStatus = 200
+		wire.ErrorCode = nil
+		wire.Retryable = false
+	}
+	if err := requireErrorCategory(ValidateWithVectors(mutant, bundle, vectorCatalog), "wire fault requires idempotency_conflict"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidatePerformanceClosureAndValidateAll(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {

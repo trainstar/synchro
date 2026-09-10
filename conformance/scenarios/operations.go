@@ -10,7 +10,10 @@ import (
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 )
 
-const wireFaultTemporaryUnavailable = "temporary_unavailable"
+const (
+	wireFaultSealedRetry          = "sealed_retry"
+	wireFaultTemporaryUnavailable = "temporary_unavailable"
+)
 
 var closedOperationFields = map[string]operationFields{
 	"artifact/install-portable-seed":                {required: []string{"user_id", "client_id", "portable_seed_artifact_id", "seed_fixture_id"}},
@@ -221,7 +224,7 @@ func ValidateOperation(operation Operation) error {
 		}
 	}
 	if operation.WireFault != nil {
-		if _, _, err := TemporaryUnavailablePushTarget(operation); err != nil {
+		if _, err := pushWireFaultTarget(operation); err != nil {
 			return fmt.Errorf("validate %s wire fault target: %w", key, err)
 		}
 	}
@@ -230,11 +233,28 @@ func ValidateOperation(operation Operation) error {
 
 // TemporaryUnavailablePushTarget returns the request targeted by the one fixed native push fault.
 func TemporaryUnavailablePushTarget(operation Operation) (PushWireFaultTarget, bool, error) {
-	if operation.WireFault == nil {
+	if operation.WireFault == nil || operation.WireFault.Mode != wireFaultTemporaryUnavailable {
 		return PushWireFaultTarget{}, false, nil
 	}
+	target, err := pushWireFaultTarget(operation)
+	return target, err == nil, err
+}
+
+// SealedRetryPushTarget returns the request targeted by the fixed 429/503 retry sequence.
+func SealedRetryPushTarget(operation Operation) (PushWireFaultTarget, bool, error) {
+	if operation.WireFault == nil || operation.WireFault.Mode != wireFaultSealedRetry {
+		return PushWireFaultTarget{}, false, nil
+	}
+	target, err := pushWireFaultTarget(operation)
+	return target, err == nil, err
+}
+
+func pushWireFaultTarget(operation Operation) (PushWireFaultTarget, error) {
+	if operation.WireFault == nil {
+		return PushWireFaultTarget{}, errors.New("push wire fault is absent")
+	}
 	if err := validateWireFaultControl(OperationKey(operation), operation.WireFault); err != nil {
-		return PushWireFaultTarget{}, false, err
+		return PushWireFaultTarget{}, err
 	}
 	var payload struct {
 		Request struct {
@@ -243,9 +263,9 @@ func TemporaryUnavailablePushTarget(operation Operation) (PushWireFaultTarget, b
 		} `json:"request"`
 	}
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || payload.Request.ClientID == "" || payload.Request.BatchID == "" {
-		return PushWireFaultTarget{}, false, errors.New("push wire-fault target is invalid")
+		return PushWireFaultTarget{}, errors.New("push wire-fault target is invalid")
 	}
-	return PushWireFaultTarget{ClientID: payload.Request.ClientID, BatchID: payload.Request.BatchID}, true, nil
+	return PushWireFaultTarget{ClientID: payload.Request.ClientID, BatchID: payload.Request.BatchID}, nil
 }
 
 func validateWireFaultControl(key string, control *WireFaultControl) error {
@@ -255,7 +275,7 @@ func validateWireFaultControl(key string, control *WireFaultControl) error {
 	if key != "push/submit" {
 		return errors.New("wire fault requires push/submit")
 	}
-	if control.Mode != wireFaultTemporaryUnavailable {
+	if control.Mode != wireFaultTemporaryUnavailable && control.Mode != wireFaultSealedRetry {
 		return errors.New("wire fault mode is unsupported")
 	}
 	return nil

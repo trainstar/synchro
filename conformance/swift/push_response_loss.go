@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"reflect"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -69,6 +71,22 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 	if err != nil {
 		return PushResponseLossResult{}, err
 	}
+	replayPush, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-004", "push/submit")
+	if err != nil {
+		return PushResponseLossResult{}, err
+	}
+	initialPayload, err := decodePushResponseLossPayload(initialPush)
+	if err != nil {
+		return PushResponseLossResult{}, err
+	}
+	releaseRetry, armed, err := platform.armSealedRetryPush(replayPush)
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("arm Swift sealed-retry push: %w", err)
+	}
+	if !armed {
+		return PushResponseLossResult{}, errors.New("arm Swift sealed-retry push: fault is absent")
+	}
+	defer releaseRetry()
 	initial, err := platform.Synchronize(ctx, client, "start", RequestOperations{initialPush})
 	if err != nil {
 		return PushResponseLossResult{}, fmt.Errorf("run Swift response-loss push: %w", err)
@@ -85,25 +103,38 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		return PushResponseLossResult{}, fmt.Errorf("bind Swift response-loss committed push: %w", err)
 	}
 
-	recordedLoss, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-003", "process/response-loss")
+	recordedLoss, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-003", "process/restart-client")
 	if err != nil {
 		return PushResponseLossResult{}, err
 	}
 	loss, err := platform.ProcessStep(ctx, client, recordedLoss)
 	if err != nil || loss.Disposition != "success" {
-		return PushResponseLossResult{}, fmt.Errorf("record Swift response loss: %w", resultError(err, loss.Disposition))
+		return PushResponseLossResult{}, fmt.Errorf("restart Swift client after response loss: %w", resultError(err, loss.Disposition))
+	}
+	postRestart, err := capturePushResponseLossState(ctx, platform, client)
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("capture Swift response-loss state after restart: %w", err)
 	}
 
-	replayPush, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-004", "push/submit")
-	if err != nil {
-		return PushResponseLossResult{}, err
-	}
 	replay, err := swiftScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return PushResponseLossResult{}, fmt.Errorf("replay Swift response-loss push: %w", err)
 	}
-	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replay); err != nil {
+	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replayPush, replay); err != nil {
 		return PushResponseLossResult{}, err
+	}
+	if err := platform.validateSealedRetryPush(len(initialPayload.Request.Mutations)); err != nil {
+		return PushResponseLossResult{}, err
+	}
+	terminal, err := capturePushResponseLossState(ctx, platform, client)
+	if err != nil {
+		return PushResponseLossResult{}, fmt.Errorf("capture Swift terminal response-loss state: %w", err)
+	}
+	if err := validatePushResponseLossTerminalState(terminal); err != nil {
+		return PushResponseLossResult{}, err
+	}
+	if !reflect.DeepEqual(durableRunnerState(postRestart), durableRunnerState(terminal)) {
+		return PushResponseLossResult{}, errors.New("Swift response-loss retries changed durable client state")
 	}
 
 	equalPush, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-005", "push/submit")
@@ -130,10 +161,6 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		return PushResponseLossResult{}, err
 	}
 
-	initialPayload, err := decodePushResponseLossPayload(initialPush)
-	if err != nil {
-		return PushResponseLossResult{}, err
-	}
 	batchCount, err := pushResponseLossBatchCount(initialPush, replayPush, equalPush, changedPush)
 	if err != nil {
 		return PushResponseLossResult{}, err
@@ -178,13 +205,13 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 		id, key, kind, stage, method string
 	}{
 		{"STEP-PUSH-RESPONSE-LOSS-001", "local/write", "local-write", "", ""},
-		{"STEP-PUSH-RESPONSE-LOSS-002", "push/submit", "public-call", "begin", "start"},
-		{"STEP-PUSH-RESPONSE-LOSS-003", "process/response-loss", "public-call", "await-step", ""},
-		{"STEP-PUSH-RESPONSE-LOSS-004", "push/submit", "public-call", "await-call", ""},
+		{"STEP-PUSH-RESPONSE-LOSS-002", "push/submit", "public-call", "synchronous", "start"},
+		{"STEP-PUSH-RESPONSE-LOSS-003", "process/restart-client", "process", "", ""},
+		{"STEP-PUSH-RESPONSE-LOSS-004", "push/submit", "public-call", "synchronous", "start"},
 		{"STEP-PUSH-RESPONSE-LOSS-005", "push/submit", "controller", "", ""},
 		{"STEP-PUSH-RESPONSE-LOSS-006", "push/submit", "controller", "", ""},
 	}
-	var callID scenarios.NativeCallID
+	callIDs := make(map[scenarios.StepID]scenarios.NativeCallID)
 	for _, wanted := range expected {
 		step := steps[scenarios.StepID(wanted.id)]
 		if _, err := swiftScenarioOperation(steps, wanted.id, wanted.key); err != nil {
@@ -194,7 +221,7 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 		if binding == nil || binding.Kind != wanted.kind || binding.Stage != wanted.stage || binding.Method != wanted.method || step.ExpectedOutcome.Disposition != "success" {
 			return fmt.Errorf("Swift push-response-loss binding %s is invalid", wanted.id)
 		}
-		if wanted.kind == "local-write" || wanted.kind == "public-call" {
+		if wanted.kind == "local-write" || wanted.kind == "process" || wanted.kind == "public-call" {
 			if err := swiftScenarioClient(step, client); err != nil {
 				return err
 			}
@@ -205,11 +232,10 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 		if binding.CallID == nil || *binding.CallID == "" {
 			return fmt.Errorf("Swift push-response-loss binding %s has no call identity", wanted.id)
 		}
-		if callID == "" {
-			callID = *binding.CallID
-		} else if callID != *binding.CallID {
-			return errors.New("Swift push-response-loss bindings do not share one public call")
-		}
+		callIDs[step.ID] = *binding.CallID
+	}
+	if callIDs["STEP-PUSH-RESPONSE-LOSS-002"] == "" || callIDs["STEP-PUSH-RESPONSE-LOSS-004"] == "" || callIDs["STEP-PUSH-RESPONSE-LOSS-002"] == callIDs["STEP-PUSH-RESPONSE-LOSS-004"] {
+		return errors.New("Swift push-response-loss calls do not straddle one process restart")
 	}
 	wireSteps := []scenarios.StepID{
 		"STEP-PUSH-RESPONSE-LOSS-002",
@@ -237,6 +263,9 @@ func validatePushResponseLossBindings(scenario scenarios.Scenario, steps map[sce
 	replayPush, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-004", "push/submit")
 	if err != nil {
 		return err
+	}
+	if _, enabled, err := scenarios.SealedRetryPushTarget(replayPush); err != nil || !enabled {
+		return errors.New("Swift push-response-loss replay has no sealed-retry wire fault")
 	}
 	equalPush, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-005", "push/submit")
 	if err != nil {
@@ -380,7 +409,7 @@ func validatePushResponseLossInitialCall(scenario scenarios.Scenario, stepID str
 	return nil
 }
 
-func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID string, call SynchronizationResult) error {
+func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID string, operation scenarios.Operation, call SynchronizationResult) error {
 	wire, err := pushResponseLossWireExpectation(scenario, scenarios.StepID(stepID))
 	if err != nil {
 		return err
@@ -388,16 +417,58 @@ func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID stri
 	if call.Completion != pushResponseLossNativeCompletion(wire) {
 		return errors.New("Swift push-response-loss replay completion differs from its authored wire expectation")
 	}
-	pushes := 0
+	if _, enabled, err := scenarios.SealedRetryPushTarget(operation); err != nil || !enabled {
+		return errors.New("Swift push-response-loss replay did not select the sealed-retry fault")
+	}
+	pushes := make([]transportObservation, 0, 3)
 	for _, observation := range call.transportObservations {
 		if observation.OperationClass == "push" {
-			pushes++
+			pushes = append(pushes, observation)
 		}
 	}
-	if pushes != 1 {
-		return fmt.Errorf("Swift push-response-loss replay sent %d push requests, want 1", pushes)
+	if len(pushes) != 3 {
+		return fmt.Errorf("Swift push-response-loss replay sent %d push requests, want 3", len(pushes))
 	}
-	return validateSwiftWireExpectation(scenario, stepID, "push", call)
+	want := []struct {
+		status    int
+		code      string
+		retryable bool
+	}{
+		{http.StatusTooManyRequests, "retry_later", true},
+		{http.StatusServiceUnavailable, "temporary_unavailable", true},
+		{wire.HTTPStatus, optionalStringOrNone(wire.ErrorCode), wire.Retryable},
+	}
+	for index, expected := range want {
+		code := optionalStringOrNone(pushes[index].ErrorCode)
+		wantCode := expected.code
+		if wantCode == "" {
+			wantCode = "none"
+		}
+		if pushes[index].StatusCode != expected.status || pushes[index].Retryable != expected.retryable || code != wantCode {
+			return fmt.Errorf("Swift sealed-retry push %d = %d/%t/%s, want %d/%t/%s", index+1, pushes[index].StatusCode, pushes[index].Retryable, code, expected.status, expected.retryable, wantCode)
+		}
+	}
+	return nil
+}
+
+func capturePushResponseLossState(ctx context.Context, platform *Platform, client Client) (runnerResult, error) {
+	state, err := platform.client(client)
+	if err != nil {
+		return runnerResult{}, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.terminated || state.session == nil {
+		return runnerResult{}, errors.New("Swift push-response-loss client is unavailable for capture")
+	}
+	return captureRunner(ctx, state)
+}
+
+func validatePushResponseLossTerminalState(state runnerResult) error {
+	if state.Status == nil || *state.Status != "error" || state.Failure == nil || state.Failure.Operation != "pushing" || state.Failure.Code != "idempotency_conflict" || state.Failure.Retryable || state.Failure.RecoveryAction != "none" {
+		return fmt.Errorf("Swift push-response-loss terminal state = status:%s failure:%+v, want error/pushing/idempotency_conflict/non-retryable/none", optionalStringOrNone(state.Status), state.Failure)
+	}
+	return nil
 }
 
 func validatePushResponseLossNativeWire(scenario scenarios.Scenario, stepID string, observed blackbox.NativeStepObservation) error {
@@ -499,6 +570,7 @@ func resolvePushResponseLossIdentities(controller *blackbox.NativeController, al
 
 	var generation int64
 	generationObserved := false
+	expectedPushes := []int{1, 3}
 	for callIndex, call := range []SynchronizationResult{initial, replay} {
 		pushes := 0
 		for _, observation := range call.transportObservations {
@@ -516,8 +588,8 @@ func resolvePushResponseLossIdentities(controller *blackbox.NativeController, al
 			generation = observed
 			generationObserved = true
 		}
-		if pushes != 1 {
-			return nil, fmt.Errorf("Swift push-response-loss call %d observed %d push requests, want 1", callIndex+1, pushes)
+		if pushes != expectedPushes[callIndex] {
+			return nil, fmt.Errorf("Swift push-response-loss call %d observed %d push requests, want %d", callIndex+1, pushes, expectedPushes[callIndex])
 		}
 	}
 	if !generationObserved || generation <= 0 {

@@ -174,3 +174,26 @@ func TestTemporaryUnavailablePushWireFaultIsClosedAndTargeted(t *testing.T) {
 		t.Fatal("wire fault on non-push operation passed validation")
 	}
 }
+
+func TestSealedRetryPushWireFaultIsClosedAndTargeted(t *testing.T) {
+	operation := Operation{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload: []byte(`{
+			"authenticated_user_id":"user-a",
+			"request":{"client_id":"client-a","client_generation":1,"batch_id":"batch-a","schema":{"version":1,"hash":"hash"},"mutations":[]},
+			"delivery":"apply","commit_lsn":"1","end_lsn":"2"
+		}`),
+		WireFault: &WireFaultControl{Mode: wireFaultSealedRetry},
+	}
+	if err := ValidateOperation(operation); err != nil {
+		t.Fatalf("validate sealed retry wire fault: %v", err)
+	}
+	target, enabled, err := SealedRetryPushTarget(operation)
+	if err != nil || !enabled || target.ClientID != "client-a" || target.BatchID != "batch-a" {
+		t.Fatalf("sealed retry target = %#v, %t, %v", target, enabled, err)
+	}
+	if _, enabled, err := TemporaryUnavailablePushTarget(operation); err != nil || enabled {
+		t.Fatalf("sealed retry enabled temporary unavailable target: %t, %v", enabled, err)
+	}
+}

@@ -110,10 +110,20 @@ type Platform struct {
 	// intercepted push carried.
 	sealedPushBatchID             string
 	sealedPushMutations           []string
+	sealedRetryPush               *sealedRetryPushFault
 	temporaryUnavailablePush      *scenarios.PushWireFaultTarget
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
 	rebuildResponseCursors        map[string]string
+}
+
+type sealedRetryPushFault struct {
+	target      scenarios.PushWireFaultTarget
+	attempts    int
+	digest      [sha256.Size]byte
+	batchID     string
+	mutationIDs []string
+	failure     error
 }
 
 type platformClient struct {
@@ -143,10 +153,11 @@ type platformCall struct {
 }
 
 type pendingResponseLoss struct {
-	batchID      string
-	before       runnerResult
-	observations []transportObservation
-	started      time.Time
+	batchID        string
+	before         runnerResult
+	restartCapture runnerResult
+	observations   []transportObservation
+	started        time.Time
 }
 
 type operationWindow struct {
@@ -177,6 +188,12 @@ func (p *Platform) startResponseProxy() error {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.ModifyResponse = p.modifyProxiedResponse
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/sync/push") {
+			p.countProxiedPush()
+		}
+		if p.serveSealedRetryPush(response, request) {
+			return
+		}
 		if p.serveTemporaryUnavailablePush(response, request) {
 			return
 		}
@@ -207,13 +224,12 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 	if !strings.HasSuffix(request.URL.Path, "/sync/push") {
 		return false
 	}
-	p.countProxiedPush()
 	if !p.hasTemporaryUnavailablePush() {
 		p.recordTemporaryUnavailableMiss("push observed with no armed fault")
 		p.recordProxiedPushOutcome(fmt.Sprintf("push %d forwarded upstream", p.ProxiedPushCount()))
 		return false
 	}
-	target, sealedMutations, err := proxiedPushTarget(request)
+	target, sealedMutations, _, err := proxiedPushTarget(request)
 	if err != nil {
 		p.recordTemporaryUnavailableMiss("unreadable push target: " + err.Error())
 		return false
@@ -233,14 +249,49 @@ func (p *Platform) serveTemporaryUnavailablePush(response http.ResponseWriter, r
 	return true
 }
 
-func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, []string, error) {
+func (p *Platform) serveSealedRetryPush(response http.ResponseWriter, request *http.Request) bool {
+	if !strings.HasSuffix(request.URL.Path, "/sync/push") || !p.hasSealedRetryPush() {
+		return false
+	}
+	target, mutationIDs, digest, err := proxiedPushTarget(request)
+	if err != nil {
+		p.recordSealedRetryFailure(err)
+		http.Error(response, "bounded push request required", http.StatusBadGateway)
+		return true
+	}
+	status, claimed, err := p.claimSealedRetryPush(target, mutationIDs, digest)
+	if !claimed {
+		return false
+	}
+	if err != nil {
+		http.Error(response, "sealed retry request changed", http.StatusBadGateway)
+		return true
+	}
+	var injected *http.Response
+	switch status {
+	case http.StatusTooManyRequests:
+		injected = faults.NewRetryLaterResponse(request)
+	case http.StatusServiceUnavailable:
+		injected = faults.NewTemporaryUnavailableResponse(request)
+	case http.StatusConflict:
+		injected = faults.NewIdempotencyConflictResponse(request)
+	default:
+		return false
+	}
+	defer injected.Body.Close()
+	p.recordProxiedPushOutcome(fmt.Sprintf("push %d injected %d sealed_retry", p.ProxiedPushCount(), injected.StatusCode))
+	copyInjectedResponse(response, injected)
+	return true
+}
+
+func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, []string, [sha256.Size]byte, error) {
 	if request.Body == nil {
-		return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push body is absent")
+		return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Swift proxied push body is absent")
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maximumProxiedPushRequestBytes+1))
 	request.Body.Close()
 	if err != nil || len(body) > maximumProxiedPushRequestBytes {
-		return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push body is invalid")
+		return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Swift proxied push body is invalid")
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.ContentLength = int64(len(body))
@@ -255,18 +306,18 @@ func proxiedPushTarget(request *http.Request) (scenarios.PushWireFaultTarget, []
 		} `json:"mutations"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.ClientID == "" || payload.BatchID == "" {
-		return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push target is invalid")
+		return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Swift proxied push target is invalid")
 	}
 	// The sealed mutation identities prove which durable records the batch
 	// carried. Only the identifiers are kept, never the mutation payload.
 	sealed := make([]string, 0, len(payload.Mutations))
 	for _, mutation := range payload.Mutations {
 		if mutation.MutationID == "" {
-			return scenarios.PushWireFaultTarget{}, nil, errors.New("Swift proxied push mutation identity is absent")
+			return scenarios.PushWireFaultTarget{}, nil, [sha256.Size]byte{}, errors.New("Swift proxied push mutation identity is absent")
 		}
 		sealed = append(sealed, mutation.MutationID)
 	}
-	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, sealed, nil
+	return scenarios.PushWireFaultTarget{ClientID: payload.ClientID, BatchID: payload.BatchID}, sealed, sha256.Sum256(body), nil
 }
 
 func copyInjectedResponse(writer http.ResponseWriter, response *http.Response) {
@@ -283,6 +334,89 @@ func (p *Platform) hasTemporaryUnavailablePush() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.temporaryUnavailablePush != nil
+}
+
+func (p *Platform) hasSealedRetryPush() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sealedRetryPush != nil
+}
+
+func (p *Platform) claimSealedRetryPush(target scenarios.PushWireFaultTarget, mutationIDs []string, digest [sha256.Size]byte) (int, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fault := p.sealedRetryPush
+	if fault == nil || fault.target.ClientID != target.ClientID {
+		return 0, false, nil
+	}
+	fault.attempts++
+	if fault.attempts == 1 {
+		fault.digest = digest
+		fault.batchID = target.BatchID
+		fault.mutationIDs = append([]string(nil), mutationIDs...)
+	} else if fault.digest != digest || fault.batchID != target.BatchID || !reflect.DeepEqual(fault.mutationIDs, mutationIDs) {
+		fault.failure = errors.New("Swift sealed retry changed batch identity, mutation order, or canonical request bytes")
+		return 0, true, fault.failure
+	}
+	switch fault.attempts {
+	case 1:
+		return 0, true, nil
+	case 2:
+		return http.StatusTooManyRequests, true, nil
+	case 3:
+		return http.StatusServiceUnavailable, true, nil
+	case 4:
+		return http.StatusConflict, true, nil
+	default:
+		fault.failure = errors.New("Swift sealed retry sent more than four push attempts")
+		return 0, true, fault.failure
+	}
+}
+
+func (p *Platform) recordSealedRetryFailure(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sealedRetryPush != nil && p.sealedRetryPush.failure == nil {
+		p.sealedRetryPush.failure = err
+	}
+}
+
+func (p *Platform) armSealedRetryPush(operation scenarios.Operation) (func(), bool, error) {
+	target, enabled, err := scenarios.SealedRetryPushTarget(operation)
+	if err != nil || !enabled {
+		return nil, enabled, err
+	}
+	p.mu.Lock()
+	if p.closed || p.sealedRetryPush != nil || p.temporaryUnavailablePush != nil {
+		p.mu.Unlock()
+		return nil, false, errors.New("Swift sealed-retry push fault is unavailable")
+	}
+	fault := &sealedRetryPushFault{target: target}
+	p.sealedRetryPush = fault
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		if p.sealedRetryPush == fault {
+			p.sealedRetryPush = nil
+		}
+		p.mu.Unlock()
+	}, true, nil
+}
+
+func (p *Platform) validateSealedRetryPush(expectedMutations int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fault := p.sealedRetryPush
+	if fault == nil {
+		return errors.New("Swift sealed-retry push evidence is absent")
+	}
+	if fault.failure != nil {
+		return fault.failure
+	}
+	if fault.attempts != 4 || fault.batchID == "" || len(fault.mutationIDs) != expectedMutations {
+		return fmt.Errorf("Swift sealed-retry evidence = %d attempts, %d mutations, want 4 attempts and %d mutations", fault.attempts, len(fault.mutationIDs), expectedMutations)
+	}
+	return nil
 }
 
 func (p *Platform) claimTemporaryUnavailablePush(target scenarios.PushWireFaultTarget) bool {
@@ -960,6 +1094,10 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if last.StatusCode < 200 || last.StatusCode >= 300 {
 		return SynchronizationResult{}, errors.New("Swift response loss requires a committed server response")
 	}
+	restartCapture, err := captureRunner(ctx, state)
+	if err != nil {
+		return SynchronizationResult{}, fmt.Errorf("capture Swift durable state before response-loss restart: %w", err)
+	}
 	if method == "reset-schema-and-start" {
 		state.selectors = make(map[string]runnerRowSelector)
 	}
@@ -971,10 +1109,11 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	state.terminated = true
 	state.started = false
 	state.pendingLoss = &pendingResponseLoss{
-		batchID:      batchID,
-		before:       before,
-		observations: cloneTransportObservations(observations),
-		started:      started,
+		batchID:        batchID,
+		before:         before,
+		restartCapture: restartCapture,
+		observations:   cloneTransportObservations(observations),
+		started:        started,
 	}
 	window := operationWindow{observations: cloneTransportObservations(observations), duration: time.Since(started)}
 	return synchronizationResult("blocked", mapped, window), nil
@@ -1636,7 +1775,17 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 	defer state.mu.Unlock()
 	switch scenarios.OperationKey(operation) {
 	case "process/restart-client":
-		if state.terminated || state.session == nil || state.pendingLoss != nil || state.activeCall != nil && !state.activeCall.paused {
+		var identity struct {
+			UserID   string `json:"user_id"`
+			ClientID string `json:"client_id"`
+		}
+		if jsonstrict.Decode(operation.Payload, &identity) != nil || identity.UserID != client.UserID || identity.ClientID != client.ClientID {
+			return StepObservation{}, errors.New("Swift client restart identity is invalid")
+		}
+		if state.pendingLoss != nil {
+			return p.relaunchPendingResponseLoss(ctx, state, state.pendingLoss)
+		}
+		if state.terminated || state.session == nil || state.activeCall != nil && !state.activeCall.paused {
 			return StepObservation{}, errors.New("Swift client restart is unavailable")
 		}
 		// A staged call is paused before its next local transition. Killing it here
@@ -1686,32 +1835,58 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if !state.terminated || state.session != nil || loss == nil || loss.batchID != batchID {
 			return StepObservation{}, errors.New("Swift response loss has no matching interrupted request")
 		}
-		if err := requireExistingDatabase(state.databasePath); err != nil {
-			return StepObservation{}, err
-		}
-		if err := p.startClient(ctx, state, ""); err != nil {
-			return StepObservation{}, fmt.Errorf("relaunch Swift runner after response loss: %w", err)
-		}
-		if err := verifyRestartIdentity(loss.before.ProcessID, loss.before.DatabaseIdentityFingerprint, state.processID, state.databaseIdentityFingerprint); err != nil {
-			closeSession(state.session)
-			state.session = nil
-			state.terminated = true
-			return StepObservation{}, err
-		}
-		state.restarted = true
-		state.pendingLoss = nil
-		after, err := captureRunner(ctx, state)
-		if err != nil {
-			return StepObservation{}, err
-		}
-		window, err := windowFromResults(loss.started, loss.before, after, loss.observations)
-		if err != nil {
-			return StepObservation{}, err
-		}
-		return observationWithWindow(StepObservation{Disposition: "success"}, window), nil
+		return p.relaunchPendingResponseLoss(ctx, state, loss)
 	default:
 		return StepObservation{}, fmt.Errorf("Swift process operation %q is unsupported", scenarios.OperationKey(operation))
 	}
+}
+
+func (p *Platform) relaunchPendingResponseLoss(ctx context.Context, state *platformClient, loss *pendingResponseLoss) (StepObservation, error) {
+	if !state.terminated || state.session != nil || loss == nil {
+		return StepObservation{}, errors.New("Swift response loss has no interrupted process")
+	}
+	if err := requireExistingDatabase(state.databasePath); err != nil {
+		return StepObservation{}, err
+	}
+	if err := p.startClient(ctx, state, ""); err != nil {
+		return StepObservation{}, fmt.Errorf("relaunch Swift runner after response loss: %w", err)
+	}
+	if err := verifyRestartIdentity(loss.before.ProcessID, loss.before.DatabaseIdentityFingerprint, state.processID, state.databaseIdentityFingerprint); err != nil {
+		closeSession(state.session)
+		state.session = nil
+		state.terminated = true
+		return StepObservation{}, err
+	}
+	after, err := captureRunner(ctx, state)
+	if err != nil {
+		return StepObservation{}, err
+	}
+	if !reflect.DeepEqual(durableRunnerState(loss.restartCapture), durableRunnerState(after)) {
+		return StepObservation{}, errors.New("Swift response-loss restart changed durable client state")
+	}
+	state.restarted = true
+	state.pendingLoss = nil
+	window, err := windowFromResults(loss.started, loss.before, after, loss.observations)
+	if err != nil {
+		return StepObservation{}, err
+	}
+	return observationWithWindow(StepObservation{Disposition: "success"}, window), nil
+}
+
+func durableRunnerState(result runnerResult) runnerResult {
+	result.Status = nil
+	result.RowsAffected = nil
+	result.ProvenanceMaintenanceWorkCursor = nil
+	result.Events = nil
+	result.Failure = nil
+	result.TransportObservations = nil
+	result.CallID = nil
+	result.State = nil
+	result.Completion = nil
+	result.CallErrorCategory = nil
+	result.ProcessID = ""
+	result.DatabaseIdentityFingerprint = ""
+	return result
 }
 
 func responseLossBatch(operation scenarios.Operation, client Client) (string, error) {
