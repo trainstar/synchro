@@ -11,8 +11,17 @@ import (
 )
 
 func TestValidateMultiScopeProvenanceScenarioAcceptsAuthoredContract(t *testing.T) {
-	if err := ValidateMultiScopeProvenanceScenario(loadMultiScopeProvenanceScenario(t)); err != nil {
+	scenario := loadMultiScopeProvenanceScenario(t)
+	if err := ValidateMultiScopeProvenanceScenario(scenario); err != nil {
 		t.Fatalf("validate authored multi-scope provenance scenario: %v", err)
+	}
+	calls, err := multiScopeProvenanceCalls(scenario)
+	if err != nil {
+		t.Fatalf("read authored multi-scope provenance calls: %v", err)
+	}
+	last := calls[len(calls)-1]
+	if len(calls) != 8 || !last.restart || last.preRestartCall != "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001" || last.step.ID != "STEP-PERF-MULTI-SCOPE-PROVENANCE-008-CONNECT-001" {
+		t.Fatalf("authored restart call is incomplete: %#v", last)
 	}
 }
 
@@ -25,6 +34,52 @@ func TestValidateMultiScopeProvenanceScenarioRejectsContractChanges(t *testing.T
 	}
 	if err := ValidateMultiScopeProvenanceScenario(scenario); err == nil {
 		t.Fatal("changed Android proof target was accepted")
+	}
+}
+
+func TestValidateMultiScopeProvenanceScenarioRejectsMissingDurableRestart(t *testing.T) {
+	scenario := cloneMultiScopeProvenanceScenario(loadMultiScopeProvenanceScenario(t))
+	steps := make([]scenarios.Step, 0, len(scenario.Steps)-1)
+	for _, step := range scenario.Steps {
+		if step.ID != "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-RESTART-001" {
+			steps = append(steps, step)
+		}
+	}
+	scenario.Steps = steps
+	if err := ValidateMultiScopeProvenanceScenario(scenario); err == nil {
+		t.Fatal("missing durable restart was accepted")
+	}
+}
+
+func TestValidateMultiScopeProvenanceRestartRequiresNewProcessAndSameDatabase(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	prior := actionProcessIdentity{ProcessID: "process-a", DatabaseIdentityFingerprint: digest}
+	opened := func(processID, databaseFingerprint string) json.RawMessage {
+		return json.RawMessage(`{"kind":"opened","status":{"state":"local_ready","retry_at":null,"operation":null,"failure":null},"process":{"process_id":"` + processID + `","database_identity_fingerprint":"` + databaseFingerprint + `"}}`)
+	}
+	if _, err := validateMultiScopeProvenanceRestart(prior, opened(prior.ProcessID, digest)); err == nil {
+		t.Fatal("restart retained the old process identity")
+	}
+	if _, err := validateMultiScopeProvenanceRestart(prior, opened("process-b", strings.Repeat("b", 64))); err == nil {
+		t.Fatal("restart changed the database identity")
+	}
+	if _, err := validateMultiScopeProvenanceRestart(prior, opened("process-b", digest)); err != nil {
+		t.Fatalf("valid restart was rejected: %v", err)
+	}
+}
+
+func TestValidateMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testing.T) {
+	before := finalCapture{
+		Rows:        json.RawMessage(`[{"id":"row-a","value":"before"}]`),
+		ClientState: json.RawMessage(`{"scope_states":[]}`),
+		Pending:     json.RawMessage(`[]`),
+		Rejected:    json.RawMessage(`[]`),
+		Provenance:  json.RawMessage(`[]`),
+	}
+	after := before
+	after.Rows = json.RawMessage(`[{"id":"row-a","value":"after"}]`)
+	if err := validateMultiScopeProvenanceNoProgress(before, after); err == nil {
+		t.Fatal("post-restart application row change was accepted")
 	}
 }
 

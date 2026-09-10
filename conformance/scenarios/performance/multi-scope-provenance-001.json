@@ -7,7 +7,6 @@
   "requirement_ids": [
     "SYNC-REBUILD-001",
     "SYNC-PROVENANCE-001",
-    "SYNC-SCOPE-006",
     "SYNC-PROVENANCE-002",
     "SYNC-MEMBERSHIP-002",
     "SYNC-MEMBERSHIP-003"
@@ -20,10 +19,6 @@
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#rebuild-does-not-erase-valid-overlapping-data"
-    },
-    {
-      "path": "docs/src/content/docs/spec/04-invariants.mdx",
-      "anchor": "#scope-cleanup-preserves-pending-intent"
     },
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
@@ -51,13 +46,11 @@
       "requirement_ids": [
         "SYNC-REBUILD-001",
         "SYNC-PROVENANCE-001",
-        "SYNC-SCOPE-006",
         "SYNC-PROVENANCE-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-MULTI-SCOPE-REBUILD-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001",
-        "ASSERT-PERF-MULTI-SCOPE-SCOPE-006",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001"
       ],
@@ -82,14 +75,12 @@
       "requirement_ids": [
         "SYNC-REBUILD-001",
         "SYNC-PROVENANCE-001",
-        "SYNC-SCOPE-006",
         "SYNC-PROVENANCE-002",
         "SYNC-MEMBERSHIP-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-MULTI-SCOPE-REBUILD-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001",
-        "ASSERT-PERF-MULTI-SCOPE-SCOPE-006",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
         "ASSERT-MEMBERSHIP-GENERATION-SEMANTIC-001"
       ],
@@ -203,14 +194,12 @@
       "requirement_ids": [
         "SYNC-REBUILD-001",
         "SYNC-PROVENANCE-001",
-        "SYNC-SCOPE-006",
         "SYNC-PROVENANCE-002",
         "SYNC-MEMBERSHIP-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-MULTI-SCOPE-REBUILD-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001",
-        "ASSERT-PERF-MULTI-SCOPE-SCOPE-006",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-PERFORMANCE-001",
         "ASSERT-MEMBERSHIP-GENERATION-SEMANTIC-001"
@@ -240,14 +229,12 @@
       "requirement_ids": [
         "SYNC-REBUILD-001",
         "SYNC-PROVENANCE-001",
-        "SYNC-SCOPE-006",
         "SYNC-PROVENANCE-002",
         "SYNC-MEMBERSHIP-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-MULTI-SCOPE-REBUILD-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001",
-        "ASSERT-PERF-MULTI-SCOPE-SCOPE-006",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-PERFORMANCE-001",
         "ASSERT-MEMBERSHIP-GENERATION-SEMANTIC-001"
@@ -279,14 +266,12 @@
       "requirement_ids": [
         "SYNC-REBUILD-001",
         "SYNC-PROVENANCE-001",
-        "SYNC-SCOPE-006",
         "SYNC-PROVENANCE-002",
         "SYNC-MEMBERSHIP-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-MULTI-SCOPE-REBUILD-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001",
-        "ASSERT-PERF-MULTI-SCOPE-SCOPE-006",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001",
         "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-PERFORMANCE-001",
         "ASSERT-MEMBERSHIP-GENERATION-SEMANTIC-001"
@@ -431,10 +416,8 @@
       "control_id": "CTRL-MEMBERSHIP-003"
     },
     {"obligation_id":"OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001","requirement_ids":["SYNC-REBUILD-001"],"assertion_ids":["ASSERT-PERF-MULTI-SCOPE-REBUILD-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
-    {"obligation_id":"OBL-PERF-MULTI-SCOPE-SCOPE-006-FAULT-001","requirement_ids":["SYNC-SCOPE-006"],"assertion_ids":["ASSERT-PERF-MULTI-SCOPE-SCOPE-006"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-MULTI-SCOPE-SCOPE-006","control_id":"CTRL-SCOPE-006"},
     {"obligation_id":"OBL-PERF-MULTI-SCOPE-REBUILD-001-CONTROL-001","requirement_ids":["SYNC-REBUILD-001"],"assertion_ids":["ASSERT-PERF-MULTI-SCOPE-REBUILD-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-MULTI-SCOPE-REBUILD-001","control_id":"CTRL-REBUILD-001"},
-    {"obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-001-CONTROL-001","requirement_ids":["SYNC-PROVENANCE-001"],"assertion_ids":["ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-MULTI-SCOPE-OVERLAP-001","control_id":"CTRL-PROVENANCE-001"},
-    {"obligation_id":"OBL-PERF-MULTI-SCOPE-SCOPE-006-CONTROL-001","requirement_ids":["SYNC-SCOPE-006"],"assertion_ids":["ASSERT-PERF-MULTI-SCOPE-SCOPE-006"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-MULTI-SCOPE-SCOPE-006","control_id":"CTRL-SCOPE-006"}
+    {"obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-001-CONTROL-001","requirement_ids":["SYNC-PROVENANCE-001"],"assertion_ids":["ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-MULTI-SCOPE-OVERLAP-001","control_id":"CTRL-PROVENANCE-001"}
   ],
   "ownership": [
     {
@@ -623,24 +606,17 @@
     },
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-REBUILD-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RM-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RM-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RM-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-REBUILD-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-SCOPE-006-FAULT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-REBUILD-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-REBUILD-001-CONTROL-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","proof_type":"negative-control","support_cell_id":null},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-001-CONTROL-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","proof_type":"negative-control","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-SCOPE-006-CONTROL-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","proof_type":"negative-control","support_cell_id":null},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-REBUILD-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-REBUILD-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-REBUILD-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-REBUILD-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
-    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"}
+    {"scenario_id":"SCN-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","proof_obligation_id":"OBL-PERF-MULTI-SCOPE-PROVENANCE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"}
   ],
   "model": {
     "setup": [
@@ -1203,8 +1179,7 @@
       }
     },
     {"id":"FPL-PERF-MULTI-SCOPE-REBUILD-001","requirement_id":"SYNC-REBUILD-001","fault_id":"FAULT-REBUILD-001","control_id":"CTRL-REBUILD-001","barrier_id":"BAR-PERF-MULTI-SCOPE-PROVENANCE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-MULTI-SCOPE-REBUILD-001"],"injection":{"mechanism":"state-fault","target":"single-scope rebuild pruning transaction","operator":"truncate","parameters":{"scenario":"rebuild scope A while scope B and local-only rows are present","defect":"wipe or rematerialize scope B and local-only data as part of scope A recovery"}}},
-    {"id":"FPL-PERF-MULTI-SCOPE-OVERLAP-001","requirement_id":"SYNC-PROVENANCE-001","fault_id":"FAULT-PROVENANCE-001","control_id":"CTRL-PROVENANCE-001","barrier_id":"BAR-PERF-MULTI-SCOPE-PROVENANCE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001"],"injection":{"mechanism":"state-fault","target":"overlapping-scope provenance prune","operator":"omit","parameters":{"scenario":"rebuild scope A for a row that also has valid scope B provenance","defect":"delete the row despite the remaining B edge"}}},
-    {"id":"FPL-PERF-MULTI-SCOPE-SCOPE-006","requirement_id":"SYNC-SCOPE-006","fault_id":"FAULT-SCOPE-006","control_id":"CTRL-SCOPE-006","barrier_id":"BAR-PERF-MULTI-SCOPE-PROVENANCE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-MULTI-SCOPE-SCOPE-006"],"injection":{"mechanism":"state-fault","target":"assignment, seed, and rebuild cleanup with authored-intent protection","operator":"replace","parameters":{"scenario":"remove assignment provenance or rebuild a scope while an application-visible row has unresolved authored insert, update, or blocked schema-incompatible intent","defect":"replace protected-row cleanup with unconditional local deletion instead of retaining the local-intent row until normal reconciliation or explicit policy"}}}
+    {"id":"FPL-PERF-MULTI-SCOPE-OVERLAP-001","requirement_id":"SYNC-PROVENANCE-001","fault_id":"FAULT-PROVENANCE-001","control_id":"CTRL-PROVENANCE-001","barrier_id":"BAR-PERF-MULTI-SCOPE-PROVENANCE-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001"],"injection":{"mechanism":"state-fault","target":"overlapping-scope provenance prune","operator":"omit","parameters":{"scenario":"rebuild scope A for a row that also has valid scope B provenance","defect":"delete the row despite the remaining B edge"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -1241,8 +1216,7 @@
       "detected_by": ["ASSERT-MEMBERSHIP-BACKFILL-SEMANTIC-001"]
     },
     {"control_id":"CTRL-REBUILD-001","requirement_id":"SYNC-REBUILD-001","fault_id":"FAULT-REBUILD-001","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-MULTI-SCOPE-REBUILD-001"]},
-    {"control_id":"CTRL-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","fault_id":"FAULT-PROVENANCE-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001"]},
-    {"control_id":"CTRL-SCOPE-006","requirement_id":"SYNC-SCOPE-006","fault_id":"FAULT-SCOPE-006","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-MULTI-SCOPE-SCOPE-006"]}
+    {"control_id":"CTRL-PROVENANCE-001","requirement_id":"SYNC-PROVENANCE-001","fault_id":"FAULT-PROVENANCE-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001"]}
   ],
   "steps": [
     {
@@ -4213,6 +4187,68 @@
       "expected_outcome": {
         "disposition": "success"
       }
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-RESTART-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Restart client F after the scope-A cleanup reaches durable storage.",
+      "native_binding": {
+        "kind": "process",
+        "user_id": "user-a",
+        "client_id": "client-f"
+      },
+      "operation": {
+        "contract_operation": "process",
+        "name": "restart-client",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-f"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-008-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Reconnect client F without new server work and preserve its cleaned durable state.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-f",
+        "call_id": "multi_scope_post_restart_no_progress",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-f",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 2,
+          "known_scopes": [
+            {
+              "scope_id": "scope-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
     }
   ],
   "wire_expectations": [
@@ -4266,6 +4302,14 @@
     },
     {
       "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001",
+      "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-MULTI-SCOPE-PROVENANCE-008-CONNECT-001",
       "assertion_id": "ASSERT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001",
       "contract_case": "connect_success",
       "http_status": 200,
@@ -4351,7 +4395,7 @@
       "requirement_ids": [
         "SYNC-PROVENANCE-002"
       ],
-      "description": "The ordered workload produces the complete authored durable semantic outcome without partial state.",
+      "description": "The ordered workload produces the complete authored durable semantic outcome without partial state. The final cleanup survives a process restart and a no-progress synchronization.",
       "expectation_ids": [
         "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"
       ],
@@ -4374,7 +4418,7 @@
       "requirement_ids": [
         "SYNC-PROVENANCE-002"
       ],
-      "description": "The seven connect and nine rebuild requests return their canonical successful wire outcomes.",
+      "description": "The eight connect and nine rebuild requests return their canonical successful wire outcomes.",
       "expectation_ids": [
         "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001"
       ],
@@ -4429,9 +4473,8 @@
       "oracle": {"kind": "state-transition", "expected_source": "authored-model", "observed_source": "system-under-test"},
       "detects_control_ids": ["CTRL-MEMBERSHIP-003"]
     },
-    {"id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","requirement_ids":["SYNC-REBUILD-001"],"description":"Each scope rebuild preserves unrelated scope rows, checkpoints, provenance, and local-only state.","expectation_ids":["EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-REBUILD-001"]},
-    {"id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_ids":["SYNC-PROVENANCE-001"],"description":"A scope rebuild preserves each row that retains a valid overlapping scope provenance edge.","expectation_ids":["EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-PROVENANCE-001"]},
-    {"id":"ASSERT-PERF-MULTI-SCOPE-SCOPE-006","requirement_ids":["SYNC-SCOPE-006"],"description":"Scope cleanup removes obsolete provenance while preserving each row protected by unresolved authored intent.","expectation_ids":["EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCOPE-006"]}
+    {"id":"ASSERT-PERF-MULTI-SCOPE-REBUILD-001","requirement_ids":["SYNC-REBUILD-001"],"description":"Each scope rebuild preserves unrelated scope rows, checkpoints, provenance, and local-only state through the final restart and no-progress synchronization.","expectation_ids":["EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-REBUILD-001"]},
+    {"id":"ASSERT-PERF-MULTI-SCOPE-PROVENANCE-001","requirement_ids":["SYNC-PROVENANCE-001"],"description":"A scope rebuild preserves each row that retains a valid overlapping scope provenance edge. The final scope-A cleanup remains durable after restart.","expectation_ids":["EXPECT-PERF-MULTI-SCOPE-PROVENANCE-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-PROVENANCE-001"]}
   ],
   "native_identity_aliases": [
     {

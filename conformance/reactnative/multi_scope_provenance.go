@@ -42,10 +42,12 @@ type MultiScopeProvenanceCoordinatorResult struct {
 }
 
 type multiScopeProvenanceCall struct {
-	step       scenarios.Step
-	operations []scenarios.Step
-	stepIDs    []scenarios.StepID
-	key        string
+	step           scenarios.Step
+	operations     []scenarios.Step
+	stepIDs        []scenarios.StepID
+	key            string
+	restart        bool
+	preRestartCall scenarios.StepID
 }
 
 type multiScopeProvenanceCommitPayload struct {
@@ -78,6 +80,7 @@ type MultiScopeProvenanceCoordinator struct {
 	calls        []multiScopeProvenanceCall
 	expected     scenarios.StateFacts
 	started      map[string]bool
+	processes    map[string]actionProcessIdentity
 	captures     map[string]finalCapture
 	callCaptures map[scenarios.StepID]finalCapture
 	// The adapter treats the bearer claim as the authoritative user, and this
@@ -189,7 +192,7 @@ func NewMultiScopeProvenanceCoordinator(config MultiScopeProvenanceCoordinatorCo
 		_ = listener.Close()
 		return nil, err
 	}
-	coordinator := &MultiScopeProvenanceCoordinator{config: config, listener: listener, token: token, adapter: adapter, calls: calls, expected: *multiScopeProvenanceExpected(config.Scenario), started: make(map[string]bool), captures: make(map[string]finalCapture), callCaptures: make(map[scenarios.StepID]finalCapture), authTokens: make(map[string]string), nextSeq: 1}
+	coordinator := &MultiScopeProvenanceCoordinator{config: config, listener: listener, token: token, adapter: adapter, calls: calls, expected: *multiScopeProvenanceExpected(config.Scenario), started: make(map[string]bool), processes: make(map[string]actionProcessIdentity), captures: make(map[string]finalCapture), callCaptures: make(map[scenarios.StepID]finalCapture), authTokens: make(map[string]string), nextSeq: 1}
 	coordinator.server = &http.Server{Handler: coordinator, MaxHeaderBytes: 16 * 1024, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second}
 	return coordinator, nil
 }
@@ -394,13 +397,23 @@ func (c *MultiScopeProvenanceCoordinator) acceptLocked(raw json.RawMessage) erro
 	}
 	switch c.waiting {
 	case "open":
-		_, err = validateOpenedResult(envelope.Result)
+		var process actionProcessIdentity
+		process, err = validateOpenedResult(envelope.Result)
+		if err == nil {
+			c.processes[c.calls[c.current].key] = process
+		}
+	case "restart":
+		var process actionProcessIdentity
+		process, err = validateMultiScopeProvenanceRestart(c.processes[c.calls[c.current].key], envelope.Result)
+		if err == nil {
+			c.processes[c.calls[c.current].key] = process
+		}
 	case "stop":
 		err = validateActionResult(envelope.Result, "lifecycle")
 	case "sync":
 		err = validateActionResult(envelope.Result, "synchronized")
 	case "capture":
-		capture, captureErr := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace"})
+		capture, captureErr := decodeCapture(envelope.Result, []string{"application_rows", "client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace"})
 		if captureErr != nil {
 			return captureErr
 		}
@@ -430,10 +443,20 @@ func (c *MultiScopeProvenanceCoordinator) advanceLocked(ctx context.Context, seq
 	}
 	call := c.calls[c.current]
 	if c.waiting == "" {
-		if err := c.executeOperations(ctx, call.operations); err != nil {
+		operations := call.operations
+		if call.restart {
+			operations = call.operations[:len(call.operations)-1]
+		}
+		if err := c.executeOperations(ctx, operations); err != nil {
 			return exchangeResponse{}, err
 		}
-		if c.started[call.key] {
+		if call.restart {
+			if !c.started[call.key] || c.processes[call.key].ProcessID == "" {
+				return exchangeResponse{}, errors.New("React Native multi-scope provenance restart has no running client")
+			}
+			c.waiting = "restart"
+			response.Command = c.command(call, "client", "open", map[string]any{"client_key": call.key, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil})
+		} else if c.started[call.key] {
 			c.waiting = "stop"
 			response.Command = c.command(call, "client", "lifecycle", map[string]any{"client_key": call.key, "operation": "stop"})
 		} else {
@@ -443,14 +466,14 @@ func (c *MultiScopeProvenanceCoordinator) advanceLocked(ctx context.Context, seq
 		}
 		return response, nil
 	}
-	if c.waiting == "open" || c.waiting == "stop" {
+	if c.waiting == "open" || c.waiting == "stop" || c.waiting == "restart" {
 		c.waiting = "sync"
 		response.Command = c.command(call, "client", "synchronize-step", map[string]any{"client_key": call.key, "method": "start", "completion": "idle"})
 		return response, nil
 	}
 	if c.waiting == "sync" {
 		c.waiting = "capture"
-		response.Command = c.command(call, "observer", "capture", map[string]any{"client_keys": []string{call.key}, "sources": []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace"}})
+		response.Command = c.command(call, "observer", "capture", map[string]any{"client_keys": []string{call.key}, "sources": []string{"application-rows", "scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace"}})
 		return response, nil
 	}
 	return exchangeResponse{}, errInvalidExchange
@@ -489,6 +512,19 @@ func (c *MultiScopeProvenanceCoordinator) executeOperations(ctx context.Context,
 }
 
 func (c *MultiScopeProvenanceCoordinator) finishLocked(ctx context.Context) error {
+	for _, call := range c.calls {
+		if !call.restart {
+			continue
+		}
+		before, beforeFound := c.callCaptures[call.preRestartCall]
+		after, afterFound := c.callCaptures[call.step.ID]
+		if !beforeFound || !afterFound {
+			return errors.New("React Native multi-scope provenance restart captures are incomplete")
+		}
+		if err := validateMultiScopeProvenanceNoProgress(before, after); err != nil {
+			return err
+		}
+	}
 	if len(c.captures) != len(c.expected.Clients) {
 		return errors.New("React Native multi-scope provenance client captures are incomplete")
 	}
@@ -710,6 +746,8 @@ func multiScopeProvenanceServerRebuildID(server scenarios.StateFacts, call multi
 func multiScopeProvenanceCalls(scenario scenarios.Scenario) ([]multiScopeProvenanceCall, error) {
 	var calls []multiScopeProvenanceCall
 	pending := make([]scenarios.Step, 0)
+	lastCall := make(map[string]scenarios.StepID)
+	restarts := 0
 	for _, step := range scenario.Steps {
 		if step.ExpectedOutcome.Disposition != "success" || scenarios.ValidateOperation(step.Operation) != nil {
 			return nil, fmt.Errorf("React Native multi-scope provenance step %s is invalid", step.ID)
@@ -720,14 +758,30 @@ func multiScopeProvenanceCalls(scenario scenarios.Scenario) ([]multiScopeProvena
 			if step.Transport != "http" || binding == nil || binding.Kind != "public-call" || binding.UserID == "" || binding.ClientID == "" || !multiScopeProvenanceCallMethod(binding.Method) || binding.Completion != "idle" {
 				return nil, fmt.Errorf("React Native multi-scope provenance connect %s is invalid", step.ID)
 			}
-			calls = append(calls, multiScopeProvenanceCall{step: step, operations: append([]scenarios.Step(nil), pending...), stepIDs: []scenarios.StepID{step.ID}, key: binding.UserID + "\x00" + binding.ClientID})
+			call := multiScopeProvenanceCall{step: step, operations: append([]scenarios.Step(nil), pending...), stepIDs: []scenarios.StepID{step.ID}, key: binding.UserID + "\x00" + binding.ClientID}
+			for index, operation := range pending {
+				if scenarios.OperationKey(operation.Operation) != "process/restart-client" {
+					continue
+				}
+				if index != len(pending)-1 || operation.NativeBinding == nil || operation.NativeBinding.Kind != "process" || operation.NativeBinding.UserID != binding.UserID || operation.NativeBinding.ClientID != binding.ClientID || call.step.NativeBinding.Method != "start" {
+					return nil, fmt.Errorf("React Native multi-scope provenance restart %s is invalid", operation.ID)
+				}
+				call.preRestartCall = lastCall[call.key]
+				if call.preRestartCall == "" {
+					return nil, fmt.Errorf("React Native multi-scope provenance restart %s has no prior call", operation.ID)
+				}
+				call.restart = true
+				restarts++
+			}
+			calls = append(calls, call)
+			lastCall[call.key] = step.ID
 			pending = nil
 			continue
 		}
 		if step.NativeBinding == nil {
 			return nil, fmt.Errorf("React Native multi-scope provenance binding %s is absent", step.ID)
 		}
-		if step.NativeBinding.Kind == "controller" {
+		if step.NativeBinding.Kind == "controller" || step.NativeBinding.Kind == "process" && key == "process/restart-client" {
 			pending = append(pending, step)
 			continue
 		}
@@ -736,10 +790,43 @@ func multiScopeProvenanceCalls(scenario scenarios.Scenario) ([]multiScopeProvena
 		}
 		calls[len(calls)-1].stepIDs = append(calls[len(calls)-1].stepIDs, step.ID)
 	}
-	if len(calls) == 0 || len(pending) != 0 {
+	if len(calls) == 0 || len(pending) != 0 || restarts != 1 || !calls[len(calls)-1].restart || len(calls[len(calls)-1].stepIDs) != 1 {
 		return nil, errors.New("React Native multi-scope provenance calls are incomplete")
 	}
 	return calls, nil
+}
+
+func validateMultiScopeProvenanceRestart(prior actionProcessIdentity, raw json.RawMessage) (actionProcessIdentity, error) {
+	process, err := validateOpenedResult(raw)
+	if err != nil {
+		return actionProcessIdentity{}, err
+	}
+	if prior.ProcessID == "" || process.DatabaseIdentityFingerprint != prior.DatabaseIdentityFingerprint {
+		return actionProcessIdentity{}, errors.New("React Native multi-scope provenance restart changed the database identity")
+	}
+	if process.ProcessID == prior.ProcessID {
+		return actionProcessIdentity{}, errors.New("React Native multi-scope provenance restart retained the process identity")
+	}
+	return process, nil
+}
+
+func validateMultiScopeProvenanceNoProgress(before, after finalCapture) error {
+	for _, value := range []struct {
+		name        string
+		beforeValue json.RawMessage
+		afterValue  json.RawMessage
+	}{
+		{"client state", before.ClientState, after.ClientState},
+		{"application rows", before.Rows, after.Rows},
+		{"pending mutations", before.Pending, after.Pending},
+		{"rejected mutations", before.Rejected, after.Rejected},
+		{"provenance", before.Provenance, after.Provenance},
+	} {
+		if !semanticRawJSONEqual(value.beforeValue, value.afterValue) {
+			return fmt.Errorf("React Native multi-scope provenance post-restart synchronization changed %s", value.name)
+		}
+	}
+	return nil
 }
 
 func multiScopeProvenanceExpected(scenario scenarios.Scenario) *scenarios.StateFacts {
@@ -762,6 +849,9 @@ func multiScopeProvenanceSemanticExpectations(values []scenarios.ModelExpectatio
 }
 
 func validateMultiScopeProvenanceCapture(capture finalCapture) error {
+	if _, err := decodeRows(capture.Rows); err != nil {
+		return err
+	}
 	if err := validateEmptyArray(capture.Pending); err != nil {
 		return err
 	}

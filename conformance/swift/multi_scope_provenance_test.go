@@ -150,6 +150,37 @@ func TestMultiScopeProvenancePlanAcceptsAuthoredScenario(t *testing.T) {
 	if len(plan.Calls) == 0 || len(plan.Clients) == 0 || plan.TransactionCount == 0 {
 		t.Fatal("authored plan has incomplete coverage")
 	}
+	if len(plan.Calls) != 8 || plan.RestartStep != "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-RESTART-001" || plan.PreRestartCall != "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-CONNECT-001" || plan.PostRestartCall != "STEP-PERF-MULTI-SCOPE-PROVENANCE-008-CONNECT-001" {
+		t.Fatalf("authored restart plan is incomplete: %#v", plan)
+	}
+}
+
+func TestMultiScopeProvenancePlanRejectsMissingDurableRestart(t *testing.T) {
+	scenario, err := scenarios.LoadFile(context.Background(), "../..", "conformance/scenarios/performance/multi-scope-provenance-001.json")
+	if err != nil {
+		t.Fatalf("load authored scenario: %v", err)
+	}
+	steps := make([]scenarios.Step, 0, len(scenario.Steps)-1)
+	for _, step := range scenario.Steps {
+		if step.ID != "STEP-PERF-MULTI-SCOPE-PROVENANCE-007-RESTART-001" {
+			steps = append(steps, step)
+		}
+	}
+	scenario.Steps = steps
+	if _, err := multiScopeProvenancePlanForScenario(scenario); err == nil {
+		t.Fatal("plan accepted a missing durable restart")
+	}
+}
+
+func TestMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testing.T) {
+	beforeCount := uint64(1)
+	afterCount := uint64(2)
+	plan := multiScopeProvenancePlan{RestartClient: Client{Key: "client-a", UserID: "user-a", ClientID: "client-a"}}
+	before := scenarios.StateFacts{Clients: []scenarios.ClientDurabilityFact{{UserID: "user-a", ClientID: "client-a", RowCount: &beforeCount}}}
+	after := scenarios.StateFacts{Clients: []scenarios.ClientDurabilityFact{{UserID: "user-a", ClientID: "client-a", RowCount: &afterCount}}}
+	if err := validateMultiScopeProvenanceNoProgress(plan, before, after); err == nil {
+		t.Fatal("post-restart application row change was accepted")
+	}
 }
 
 func TestMultiScopeProvenanceModelResultMatchesAuthoredScenario(t *testing.T) {

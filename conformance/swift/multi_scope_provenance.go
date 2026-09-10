@@ -31,6 +31,10 @@ type multiScopeProvenancePlan struct {
 	Calls             map[scenarios.StepID]*multiScopeProvenanceCall
 	CallOrder         []scenarios.StepID
 	Clients           map[string]Client
+	RestartStep       scenarios.StepID
+	RestartClient     Client
+	PreRestartCall    scenarios.StepID
+	PostRestartCall   scenarios.StepID
 	TransactionCount  uint64
 	SyncedEventCount  uint64
 	CaptureEventCount uint64
@@ -187,10 +191,12 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	// author rebuilds for starts empty and rebuilds during the exercise exactly
 	// as those steps declare.
 	started := make(map[string]bool, len(plan.Clients))
+	installed := make(map[string]bool, len(plan.Clients))
 	// A request reports the assignment set the client has already applied.
 	appliedScopeSetVersions := make(map[string]int64, len(plan.Clients))
 	appliedScopeCounts := make(map[string]int, len(plan.Clients))
 	calls := make([]SynchronizationResult, 0, len(plan.CallOrder))
+	var preRestart scenarios.StateFacts
 	for index, step := range plan.Steps {
 		modelOperation := modelResult.Steps[index].Operation
 		switch scenarios.OperationKey(modelOperation) {
@@ -210,6 +216,26 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 			if processErr != nil || observation.Disposition != "success" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("materialize Swift multi-scope provenance step %s: %w", step.ID, resultError(processErr, observation.Disposition))
 			}
+		case "process/restart-client":
+			if step.ID != plan.RestartStep || plan.RestartClient.Key == "" {
+				return MultiScopeProvenanceResult{}, fmt.Errorf("Swift multi-scope provenance restart %s is not in the authored plan", step.ID)
+			}
+			captured, captureErr := platform.Capture(ctx, []Client{plan.RestartClient}, multiScopeProvenanceCaptureSources())
+			if captureErr != nil {
+				return MultiScopeProvenanceResult{}, fmt.Errorf("capture Swift multi-scope provenance state before restart: %w", captureErr)
+			}
+			preRestart, captureErr = mergeSwiftCaptureFacts(captured)
+			if captureErr != nil {
+				return MultiScopeProvenanceResult{}, fmt.Errorf("merge Swift multi-scope provenance state before restart: %w", captureErr)
+			}
+			if len(preRestart.Clients) != 1 {
+				return MultiScopeProvenanceResult{}, errors.New("Swift multi-scope provenance pre-restart capture is incomplete")
+			}
+			observation, processErr := platform.ProcessStep(ctx, plan.RestartClient, modelOperation)
+			if processErr != nil || observation.Disposition != "success" {
+				return MultiScopeProvenanceResult{}, fmt.Errorf("restart Swift multi-scope provenance client %s: %w", plan.RestartClient.ClientID, resultError(processErr, observation.Disposition))
+			}
+			started[plan.RestartClient.Key] = false
 		case "connect/send":
 			if step.Transport != "http" || step.NativeBinding == nil || step.NativeBinding.Kind != "public-call" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("Swift multi-scope provenance step %s connect binding is invalid", step.ID)
@@ -227,8 +253,8 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 					return MultiScopeProvenanceResult{}, fmt.Errorf("stop Swift multi-scope provenance client %s before its authored start: %w", call.Client.ClientID, stopErr)
 				}
 			}
-			if !started[call.Client.Key] {
-				started[call.Client.Key] = true
+			if !installed[call.Client.Key] {
+				installed[call.Client.Key] = true
 				// A client the scenario authors no rebuild for must reach the
 				// declared local_ready state before its authored call. That
 				// establishment creates its own rebuild session, which belongs to
@@ -236,6 +262,9 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 				if installErr := platform.Install(ctx, call.Client, "empty", ""); installErr != nil {
 					return MultiScopeProvenanceResult{}, fmt.Errorf("install Swift multi-scope provenance client %s: %w", call.Client.ClientID, installErr)
 				}
+			}
+			if !started[call.Client.Key] {
+				started[call.Client.Key] = true
 				method = "start"
 			}
 			result, callErr := swiftScenarioCall(ctx, platform, call.Client, method)
@@ -274,19 +303,15 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	}
 
 	clients := multiScopeProvenanceClientsInOrder(plan.Clients)
-	clientFacts, err := platform.Capture(ctx, clients, []string{
-		"application-rows",
-		"pending-mutations",
-		"rejected-mutations",
-		"checkpoints",
-		"provenance",
-		"rebuild-state",
-	})
+	clientFacts, err := platform.Capture(ctx, clients, multiScopeProvenanceCaptureSources())
 	if err != nil {
 		return MultiScopeProvenanceResult{}, fmt.Errorf("capture Swift multi-scope provenance client state: %w", err)
 	}
 	actualClient, err := mergeSwiftCaptureFacts(clientFacts)
 	if err != nil {
+		return MultiScopeProvenanceResult{}, err
+	}
+	if err := validateMultiScopeProvenanceNoProgress(plan, preRestart, actualClient); err != nil {
 		return MultiScopeProvenanceResult{}, err
 	}
 	clientKeys := make([]string, 0, len(clients))
@@ -445,6 +470,22 @@ func multiScopeProvenancePlanForScenario(scenario scenarios.Scenario) (multiScop
 				return multiScopeProvenancePlan{}, fmt.Errorf("Swift multi-scope provenance materialization %s is invalid", payload.CommitLSN)
 			}
 			commits[commitKey] = true
+		case "process/restart-client":
+			if step.Transport != "process" || step.NativeBinding == nil || step.NativeBinding.Kind != "process" {
+				return multiScopeProvenancePlan{}, fmt.Errorf("Swift multi-scope provenance restart %s binding is invalid", step.ID)
+			}
+			client, decodeErr := decodeMultiScopeProvenanceRestart(step.Operation)
+			if decodeErr != nil || step.NativeBinding.UserID != client.UserID || step.NativeBinding.ClientID != client.ClientID {
+				return multiScopeProvenancePlan{}, fmt.Errorf("Swift multi-scope provenance restart %s is invalid", step.ID)
+			}
+			if plan.RestartStep != "" || currentCall == nil || currentCall.Client.UserID != client.UserID || currentCall.Client.ClientID != client.ClientID {
+				return multiScopeProvenancePlan{}, fmt.Errorf("Swift multi-scope provenance restart %s has no matching completed call", step.ID)
+			}
+			plan.RestartStep = step.ID
+			plan.RestartClient = currentCall.Client
+			plan.PreRestartCall = currentCall.Step.ID
+			currentCall = nil
+			currentRebuild = nil
 		case "model/stage-registry-membership-generation":
 			if err := validateMultiScopeProvenanceControllerBinding(step, "model"); err != nil {
 				return multiScopeProvenancePlan{}, err
@@ -513,6 +554,12 @@ func multiScopeProvenancePlanForScenario(scenario scenarios.Scenario) (multiScop
 			}
 			plan.Clients[call.Client.Key] = call.Client
 			currentCall = call
+			if plan.RestartStep != "" && plan.PostRestartCall == "" {
+				if call.Client != plan.RestartClient || call.Step.NativeBinding.Method != "start" {
+					return multiScopeProvenancePlan{}, fmt.Errorf("Swift multi-scope provenance call %s does not resume the restarted client", step.ID)
+				}
+				plan.PostRestartCall = step.ID
+			}
 		case "local/begin-rebuild":
 			if err := validateMultiScopeProvenancePublicBinding(step, currentCall); err != nil {
 				return multiScopeProvenancePlan{}, err
@@ -555,6 +602,11 @@ func multiScopeProvenancePlanForScenario(scenario scenarios.Scenario) (multiScop
 	if currentRebuild != nil {
 		return multiScopeProvenancePlan{}, errors.New("Swift multi-scope provenance scenario ends with a rebuild in progress")
 	}
+	if plan.RestartStep == "" || plan.PostRestartCall == "" || len(plan.Steps) < 3 ||
+		plan.Steps[len(plan.Steps)-3].ID != plan.PreRestartCall || plan.Steps[len(plan.Steps)-2].ID != plan.RestartStep || plan.Steps[len(plan.Steps)-1].ID != plan.PostRestartCall ||
+		plan.CallOrder[len(plan.CallOrder)-1] != plan.PostRestartCall || len(plan.Calls[plan.PostRestartCall].Rebuilds) != 0 {
+		return multiScopeProvenancePlan{}, errors.New("Swift multi-scope provenance durable restart and no-progress call are incomplete")
+	}
 	for _, materialized := range commits {
 		if !materialized {
 			return multiScopeProvenancePlan{}, errors.New("Swift multi-scope provenance source transaction was not materialized")
@@ -572,6 +624,37 @@ func multiScopeProvenancePlanForScenario(scenario scenarios.Scenario) (multiScop
 		return multiScopeProvenancePlan{}, errors.New("Swift multi-scope provenance transaction count differs from the authored state")
 	}
 	return plan, nil
+}
+
+func decodeMultiScopeProvenanceRestart(operation scenarios.Operation) (Client, error) {
+	var payload struct {
+		UserID   string `json:"user_id"`
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil || payload.UserID == "" || payload.ClientID == "" {
+		return Client{}, errors.New("restart payload is invalid")
+	}
+	return Client{UserID: payload.UserID, ClientID: payload.ClientID}, nil
+}
+
+func multiScopeProvenanceCaptureSources() []string {
+	return []string{"application-rows", "pending-mutations", "rejected-mutations", "checkpoints", "provenance", "rebuild-state"}
+}
+
+func validateMultiScopeProvenanceNoProgress(plan multiScopeProvenancePlan, before, after scenarios.StateFacts) error {
+	if plan.RestartClient.Key == "" || len(before.Clients) != 1 {
+		return errors.New("Swift multi-scope provenance pre-restart state is absent")
+	}
+	want := before.Clients[0]
+	for _, got := range after.Clients {
+		if got.UserID == plan.RestartClient.UserID && got.ClientID == plan.RestartClient.ClientID {
+			if !reflect.DeepEqual(want, got) {
+				return errors.New("Swift multi-scope provenance post-restart synchronization changed durable client state")
+			}
+			return nil
+		}
+	}
+	return errors.New("Swift multi-scope provenance restarted client is absent from final state")
 }
 
 func validateMultiScopeProvenanceControllerBinding(step scenarios.Step, transport string) error {

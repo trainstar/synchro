@@ -32,7 +32,24 @@ async function exchange(endpoint: string, token: string, sequence: number, resul
   } finally { clearTimeout(timeout); }
 }
 
+function isJSONObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
+  const action = command.action;
+  if (!isJSONObject(action)) return false;
+  const nested = action.action;
+  if (!isJSONObject(nested) || nested.actor !== 'client' || nested.command !== 'open') return false;
+  const parameters = nested.parameters;
+  return isJSONObject(parameters) && parameters.database_mode === 'reuse';
+}
+
 async function execute(command: Record<string, unknown>): Promise<string> {
+  if (requiresProcessRelaunch(command)) {
+    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    await expect(element(by.id('conformance-harness'))).toBeVisible();
+  }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
   if ((await element(by.id('conformance-command-input')).getAttributes()).text !== serialized) throw new Error('React Native conformance command input changed');
