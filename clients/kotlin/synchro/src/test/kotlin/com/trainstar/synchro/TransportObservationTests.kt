@@ -209,6 +209,44 @@ class TransportObservationTests {
     }
 
     @Test
+    fun successfulRebuildRecordsExactResponseBodyDigest() = runTest {
+        val server = MockWebServer()
+        try {
+            val body = """{"cursor":"opaque-cursor","has_more":true,"records":[],"scope":"scope-a"}"""
+            server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+            server.start()
+            val collector = TransportObservationCollector()
+            val client = HttpClient(
+                SynchroConfig(
+                    dbPath = "",
+                    serverURL = server.url("/").toString().trimEnd('/'),
+                    authProvider = { "test-token" },
+                    clientID = "client",
+                    appVersion = "1.0.0",
+                ).withTransportObservation(collector),
+            )
+            val request = RebuildRequest(
+                clientID = "client",
+                clientGeneration = 1,
+                schema = SchemaRef(version = 1, hash = "a".repeat(64)),
+                scope = "scope-a",
+                rebuildID = "00000000-0000-4000-8000-000000000002",
+                cursor = null,
+                limit = 1,
+            )
+
+            client.rebuild(request)
+
+            assertEquals(
+                "22cf3cb46da3cd46c4daf9999268bdcce423f922baa88eedd41acb6c99ad076a",
+                collector.snapshot().observations.single().rebuildResponseFacts?.responseBodySHA256,
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun configCarriesTheSdkCollectorWithoutChangingTheServerURL() {
         val collector = TransportObservationCollector()
         val config = SynchroConfig(

@@ -286,6 +286,7 @@ type transportRebuildResponseFacts struct {
 	HasChecksum                 bool
 	ScopeFingerprint            string
 	FinalScopeCursorFingerprint *string
+	ResponseBodySHA256          *string
 }
 
 func (f *transportRebuildResponseFacts) UnmarshalJSON(data []byte) error {
@@ -297,6 +298,7 @@ func (f *transportRebuildResponseFacts) UnmarshalJSON(data []byte) error {
 		HasChecksum                 *bool   `json:"has_checksum"`
 		ScopeFingerprint            *string `json:"scope_fingerprint"`
 		FinalScopeCursorFingerprint *string `json:"final_scope_cursor_fingerprint"`
+		ResponseBodySHA256          *string `json:"response_body_sha256"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -313,6 +315,7 @@ func (f *transportRebuildResponseFacts) UnmarshalJSON(data []byte) error {
 	f.HasChecksum = *raw.HasChecksum
 	f.ScopeFingerprint = *raw.ScopeFingerprint
 	f.FinalScopeCursorFingerprint = raw.FinalScopeCursorFingerprint
+	f.ResponseBodySHA256 = raw.ResponseBodySHA256
 	return nil
 }
 
@@ -514,6 +517,11 @@ type retainedMutation struct {
 	BaseVersion           *string         `json:"base_version"`
 	ClientVersion         string          `json:"client_version"`
 	Status                string          `json:"status"`
+	SourceKind            string          `json:"source_kind"`
+	DependsOnMutationID   *string         `json:"depends_on_mutation_id"`
+	NormalizedMutationID  *string         `json:"normalized_mutation_id"`
+	SealedBatchID         *string         `json:"sealed_batch_id"`
+	SealedOrdinal         *int64          `json:"sealed_ordinal"`
 	AuthoredFields        []retainedField `json:"authored_fields"`
 }
 
@@ -1034,7 +1042,7 @@ func validateRunnerResult(result runnerResult) error {
 		}
 	}
 	for _, mutation := range result.RetainedMutations {
-		if mutation.MutationID == "" || mutation.TableID == "" || mutation.RecordID == "" || mutation.PrimaryKeyFieldID == "" || mutation.PrimaryKeyLogicalType == "" || mutation.ClientVersion == "" || mutation.AuthoredSchema.Version <= 0 || !schemaHashPattern.MatchString(mutation.AuthoredSchema.Hash) || (mutation.Operation != "insert" && mutation.Operation != "update" && mutation.Operation != "delete") || !validRetainedMutationStatus(mutation.Status) {
+		if mutation.MutationID == "" || mutation.TableID == "" || mutation.RecordID == "" || mutation.PrimaryKeyFieldID == "" || mutation.PrimaryKeyLogicalType == "" || mutation.ClientVersion == "" || mutation.SourceKind == "" || mutation.AuthoredSchema.Version <= 0 || !schemaHashPattern.MatchString(mutation.AuthoredSchema.Hash) || (mutation.Operation != "insert" && mutation.Operation != "update" && mutation.Operation != "delete") || !validRetainedMutationStatus(mutation.Status) {
 			return errors.New("runner retained mutation fields are invalid")
 		}
 		if len(mutation.AuthoredFields) > maximumRunnerRecords {
@@ -1255,7 +1263,7 @@ func validateTransportRequestAndResponseFacts(observation transportObservation) 
 
 	if observation.StatusCode == 200 && observation.OperationClass == "rebuild" {
 		response := observation.RebuildResponseFacts
-		if response == nil || response.RecordCount < 0 || response.RecordCount > 1000 || !validLowerHexDigest(response.ScopeFingerprint) || facts == nil || facts.ScopeFingerprint == nil || response.ScopeFingerprint != *facts.ScopeFingerprint || response.HasFinalScopeCursor != (response.FinalScopeCursorFingerprint != nil) || response.FinalScopeCursorFingerprint != nil && !validLowerHexDigest(*response.FinalScopeCursorFingerprint) || observation.PullResponseFacts != nil {
+		if response == nil || response.RecordCount < 0 || response.RecordCount > 1000 || !validLowerHexDigest(response.ScopeFingerprint) || facts == nil || facts.ScopeFingerprint == nil || response.ScopeFingerprint != *facts.ScopeFingerprint || response.HasFinalScopeCursor != (response.FinalScopeCursorFingerprint != nil) || response.FinalScopeCursorFingerprint != nil && !validLowerHexDigest(*response.FinalScopeCursorFingerprint) || response.ResponseBodySHA256 != nil && !validLowerHexDigest(*response.ResponseBodySHA256) || observation.PullResponseFacts != nil {
 			return errors.New("runner rebuild response facts are invalid")
 		}
 	} else if observation.RebuildResponseFacts != nil {

@@ -73,6 +73,7 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 	}
 	if !orderedIdentifiersEqual(scenario.RequirementIDs, []string{
 		"SYNC-CURSOR-002",
+		"SYNC-CURSOR-004",
 		"SYNC-INTEGRITY-001",
 		"SYNC-INTEGRITY-003",
 		"SYNC-INTEGRITY-004",
@@ -112,7 +113,7 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 			return fmt.Errorf("React Native steady-pull identity alias %q is absent", name)
 		}
 	}
-	semantic, wire, performance, pullProgress := false, false, false, false
+	semantic, wire, performance, pullProgress, cursorAcknowledgement := false, false, false, false, false
 	for _, assertion := range scenario.Assertions {
 		switch assertion.ID {
 		case "ASSERT-PERF-STEADY-PULL-SEMANTIC-001":
@@ -123,9 +124,16 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
 		case "ASSERT-PERF-STEADY-PULL-PULL-005":
 			pullProgress = assertion.Predicate.ContractPredicate == "state-equality" && assertion.Oracle.ExpectedSource == "authored-model"
+		case "ASSERT-PERF-STEADY-PULL-CURSOR-004":
+			cursorAcknowledgement = orderedIdentifiersEqual(assertion.RequirementIDs, []string{"SYNC-CURSOR-004"}) &&
+				orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PERF-STEADY-PULL-SEMANTIC-001"}) &&
+				assertion.Predicate.ContractPredicate == "state-equality" && assertion.Predicate.Name == "state-equals-authored-model" &&
+				assertion.Oracle.Kind == "model-state-equality" && assertion.Oracle.ExpectedSource == "authored-model" &&
+				assertion.Oracle.ObservedSource == "system-under-test" &&
+				orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{"CTRL-CURSOR-004"})
 		}
 	}
-	if !semantic || !wire || !performance || !pullProgress || steadyPullExpectedState(scenario) == nil {
+	if !semantic || !wire || !performance || !pullProgress || !cursorAcknowledgement || steadyPullExpectedState(scenario) == nil {
 		return errors.New("React Native steady-pull assertion or expected state changed")
 	}
 	obligations := map[string]int{}
@@ -133,25 +141,66 @@ func ValidateSteadyPullScenario(scenario scenarios.Scenario) error {
 		id := string(obligation.ObligationID)
 		switch id {
 		case "OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") && steadyPullNativeClaimsMatch(obligation) {
 				obligations[id]++
 			}
 		case "OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") && steadyPullNativeClaimsMatch(obligation) {
 				obligations[id]++
 			}
 		case "OBL-PERF-STEADY-PULL-CONTROL-001":
 			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-STEADY-PULL-001", "CTRL-INTEGRITY-002") {
 				obligations[id]++
 			}
+		case "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001":
+			if proofTargetMatches(obligation, "server-black-box", "SUP-PG-LINUX-X64-001", "test-blackbox", "", "") && steadyPullServerClaimsMatch(obligation) {
+				obligations[id]++
+			}
+		case "OBL-PERF-STEADY-PULL-CURSOR-004-FAULT-LINUX-X64-001":
+			if proofTargetMatches(obligation, "fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox", "FPL-PERF-STEADY-PULL-CURSOR-004", "CTRL-CURSOR-004") {
+				obligations[id]++
+			}
+		case "OBL-PERF-STEADY-PULL-CURSOR-004-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-integration-mutants", "FPL-PERF-STEADY-PULL-CURSOR-004", "CTRL-CURSOR-004") {
+				obligations[id]++
+			}
 		}
 	}
 	if obligations["OBL-PERF-STEADY-PULL-RN-IOS-CURRENT-001"] != 1 ||
 		obligations["OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001"] != 1 ||
-		obligations["OBL-PERF-STEADY-PULL-CONTROL-001"] != 1 {
+		obligations["OBL-PERF-STEADY-PULL-CONTROL-001"] != 1 ||
+		obligations["OBL-PERF-STEADY-PULL-PG-LINUX-X64-001"] != 1 ||
+		obligations["OBL-PERF-STEADY-PULL-CURSOR-004-FAULT-LINUX-X64-001"] != 1 ||
+		obligations["OBL-PERF-STEADY-PULL-CURSOR-004-CONTROL-001"] != 1 {
 		return errors.New("React Native steady-pull proof obligations are invalid")
 	}
 	return nil
+}
+
+func steadyPullNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-CURSOR-002", "SYNC-INTEGRITY-001", "SYNC-INTEGRITY-003", "SYNC-INTEGRITY-004",
+		"SYNC-INTEGRITY-005", "SYNC-INTEGRITY-006", "SYNC-PULL-005", "SYNC-INTEGRITY-002", "SYNC-CURSOR-004",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PERF-STEADY-PULL-CURSOR-002", "ASSERT-PERF-STEADY-PULL-INTEGRITY-001",
+		"ASSERT-PERF-STEADY-PULL-INTEGRITY-003", "ASSERT-PERF-STEADY-PULL-INTEGRITY-004",
+		"ASSERT-PERF-STEADY-PULL-INTEGRITY-005", "ASSERT-PERF-STEADY-PULL-INTEGRITY-006",
+		"ASSERT-PERF-STEADY-PULL-PULL-005", "ASSERT-PERF-STEADY-PULL-SEMANTIC-001",
+		"ASSERT-PERF-STEADY-PULL-PERFORMANCE-001", "ASSERT-PERF-STEADY-PULL-CURSOR-004",
+	})
+}
+
+func steadyPullServerClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-INTEGRITY-001", "SYNC-INTEGRITY-003", "SYNC-INTEGRITY-004", "SYNC-INTEGRITY-005",
+		"SYNC-INTEGRITY-006", "SYNC-PULL-005", "SYNC-INTEGRITY-002", "SYNC-CURSOR-004",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PERF-STEADY-PULL-INTEGRITY-001", "ASSERT-PERF-STEADY-PULL-INTEGRITY-003",
+		"ASSERT-PERF-STEADY-PULL-INTEGRITY-004", "ASSERT-PERF-STEADY-PULL-INTEGRITY-005",
+		"ASSERT-PERF-STEADY-PULL-INTEGRITY-006", "ASSERT-PERF-STEADY-PULL-PULL-005",
+		"ASSERT-PERF-STEADY-PULL-SEMANTIC-001", "ASSERT-PERF-STEADY-PULL-WIRE-001",
+		"ASSERT-PERF-STEADY-PULL-PERFORMANCE-001", "ASSERT-PERF-STEADY-PULL-CURSOR-004",
+	})
 }
 
 // SteadyPullCoordinatorConfig configures one authenticated React Native steady-pull sidecar.
@@ -806,6 +855,7 @@ func (c *SteadyPullCoordinator) advanceLocked(ctx context.Context, sequence uint
 func validateReactNativeSteadyPullFaultPlans(scenario scenarios.Scenario) error {
 	required := map[string]bool{
 		"FPL-PERF-STEADY-PULL-CURSOR-002":    false,
+		"FPL-PERF-STEADY-PULL-CURSOR-004":    false,
 		"FPL-PERF-STEADY-PULL-INTEGRITY-003": false,
 		"FPL-PERF-STEADY-PULL-INTEGRITY-004": false,
 		"FPL-PERF-STEADY-PULL-INTEGRITY-005": false,

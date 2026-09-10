@@ -97,6 +97,7 @@ public struct TransportRebuildResponseFacts: Codable, Sendable, Equatable {
     public let hasChecksum: Bool
     public let scopeFingerprint: String
     public let finalScopeCursorFingerprint: String?
+    public let responseBodySHA256: String?
 
     enum CodingKeys: String, CodingKey {
         case recordCount = "record_count"
@@ -106,6 +107,7 @@ public struct TransportRebuildResponseFacts: Codable, Sendable, Equatable {
         case hasChecksum = "has_checksum"
         case scopeFingerprint = "scope_fingerprint"
         case finalScopeCursorFingerprint = "final_scope_cursor_fingerprint"
+        case responseBodySHA256 = "response_body_sha256"
     }
 
     public init(
@@ -115,7 +117,8 @@ public struct TransportRebuildResponseFacts: Codable, Sendable, Equatable {
         hasFinalScopeCursor: Bool,
         hasChecksum: Bool,
         scopeFingerprint: String,
-        finalScopeCursorFingerprint: String? = nil
+        finalScopeCursorFingerprint: String? = nil,
+        responseBodySHA256: String? = nil
     ) {
         self.recordCount = recordCount
         self.hasMore = hasMore
@@ -124,6 +127,7 @@ public struct TransportRebuildResponseFacts: Codable, Sendable, Equatable {
         self.hasChecksum = hasChecksum
         self.scopeFingerprint = scopeFingerprint
         self.finalScopeCursorFingerprint = finalScopeCursorFingerprint
+        self.responseBodySHA256 = responseBodySHA256
     }
 }
 
@@ -459,6 +463,10 @@ public final class TransportObservationCollector: @unchecked Sendable {
 
     static func cursorFingerprint(_ cursor: String) -> String {
         Integrity.hexString(SHA256.hash(data: Data(cursor.utf8)))
+    }
+
+    static func bodyFingerprint(_ body: Data) -> String {
+        Integrity.hexString(SHA256.hash(data: body))
     }
 
     @discardableResult

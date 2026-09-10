@@ -521,6 +521,7 @@ class HttpClient(
                 finalScopeCursorFingerprint = response.finalScopeCursor?.let(
                     TransportObservationCollector::cursorFingerprint,
                 ),
+                responseBodySHA256 = TransportObservationCollector.bodyFingerprint(body),
             )
         }
     }

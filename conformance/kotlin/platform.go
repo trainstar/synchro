@@ -2807,7 +2807,11 @@ type retainedMutation struct {
 	BaseVersion           *string         `json:"base_version"`
 	ClientVersion         string          `json:"client_version"`
 	Status                string          `json:"status"`
+	SourceKind            string          `json:"source_kind"`
+	DependsOnMutationID   *string         `json:"depends_on_mutation_id"`
+	NormalizedMutationID  *string         `json:"normalized_mutation_id"`
 	SealedBatchID         *string         `json:"sealed_batch_id"`
+	SealedOrdinal         *int64          `json:"sealed_ordinal"`
 	AuthoredFields        []retainedField `json:"authored_fields"`
 }
 

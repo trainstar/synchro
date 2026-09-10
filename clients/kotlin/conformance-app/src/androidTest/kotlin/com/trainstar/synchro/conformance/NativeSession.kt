@@ -678,7 +678,11 @@ private class ClientSession(private val context: Context) : Closeable {
                 put("base_version", value.baseVersion?.let(::JsonPrimitive) ?: JsonNull)
                 put("client_version", value.clientVersion)
                 put("status", value.status.name.lowercase(Locale.US))
+                put("source_kind", value.sourceKind)
+                put("depends_on_mutation_id", value.dependsOnMutationID?.let(::JsonPrimitive) ?: JsonNull)
+                put("normalized_mutation_id", value.normalizedMutationID?.let(::JsonPrimitive) ?: JsonNull)
                 put("sealed_batch_id", value.sealedBatchID?.let(::JsonPrimitive) ?: JsonNull)
+                put("sealed_ordinal", value.sealedOrdinal?.let(::JsonPrimitive) ?: JsonNull)
                 put("authored_fields", buildJsonArray {
                     value.authoredFields.sortedBy { it.fieldID }.forEach { field ->
                         add(buildJsonObject {

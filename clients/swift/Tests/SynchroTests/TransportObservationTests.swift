@@ -184,6 +184,36 @@ final class TransportObservationTests: XCTestCase {
         XCTAssertNil(observation.pullResponseFacts)
     }
 
+    func testSuccessfulRebuildRecordsExactResponseBodyDigest() async throws {
+        let collector = TransportObservationCollector(capacity: 4)
+        let client = makeClient(collector: collector)
+        let body = Data(#"{"cursor":"opaque-cursor","has_more":true,"records":[],"scope":"scope-a"}"#.utf8)
+        MockURLProtocol.requestHandler = { request in
+            (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                body
+            )
+        }
+        let request = RebuildRequest(
+            clientID: "client",
+            clientGeneration: 1,
+            schema: SchemaRef(version: 1, hash: String(repeating: "a", count: 64)),
+            scope: "scope-a",
+            rebuildID: "00000000-0000-4000-8000-000000000002",
+            cursor: nil,
+            limit: 1
+        )
+
+        _ = try await client.rebuild(request: request)
+
+        let observation = try XCTUnwrap(collector.snapshot().observations.first)
+        let facts = try XCTUnwrap(observation.rebuildResponseFacts)
+        XCTAssertEqual(
+            facts.responseBodySHA256,
+            "22cf3cb46da3cd46c4daf9999268bdcce423f922baa88eedd41acb6c99ad076a"
+        )
+    }
+
     func testNetworkFailureUsesStatusZero() async throws {
         let collector = TransportObservationCollector(capacity: 4)
         let client = makeClient(collector: collector)

@@ -145,6 +145,49 @@ type NativeCRUDEvidence struct {
 	Responses           []NativeCRUDResponse
 }
 
+// NativeQueuedField records one authored field retained with local intent.
+type NativeQueuedField struct {
+	FieldID     string
+	LogicalType string
+	Value       json.RawMessage
+}
+
+// NativeQueuedMutation records immutable authored intent and its queue linkage.
+type NativeQueuedMutation struct {
+	MutationID            string
+	LocalOrder            int64
+	TableID               string
+	TableName             string
+	RecordID              string
+	PrimaryKeyFieldID     string
+	PrimaryKeyLogicalType string
+	Operation             string
+	AuthoredSchemaVersion int64
+	AuthoredSchemaHash    string
+	BaseVersion           *string
+	ClientVersion         string
+	Status                string
+	SourceKind            string
+	DependsOnMutationID   *string
+	NormalizedMutationID  *string
+	SealedBatchID         *string
+	SealedOrdinal         *int64
+	AuthoredFields        []NativeQueuedField
+}
+
+// NativeQueueSuccessorRow records unchanged restart durability and one changed successor.
+type NativeQueueSuccessorRow struct {
+	BeforeRestart       NativeQueuedMutation
+	AfterRestart        NativeQueuedMutation
+	OriginalAfterChange NativeQueuedMutation
+	Successor           NativeQueuedMutation
+}
+
+// NativeQueueSuccessorEvidence records direct queue identity evidence for generated rows.
+type NativeQueueSuccessorEvidence struct {
+	Rows []NativeQueueSuccessorRow
+}
+
 // NativeCRUDInspectionForSetup selects an empty authored scope and the installed WAL stream.
 func NativeCRUDInspectionForSetup(setup Operation, userID string) (NativeCRUDInspection, error) {
 	if OperationKey(setup) != "model/install-current-contract" || userID == "" || ValidateOperation(setup) != nil {
@@ -544,6 +587,71 @@ func ValidateNativeCRUDEvidence(evidence NativeCRUDEvidence) error {
 		}
 	}
 	return nil
+}
+
+// ValidateNativeQueueSuccessorEvidence checks stable restart identity and changed successor identity.
+func ValidateNativeQueueSuccessorEvidence(evidence NativeQueueSuccessorEvidence) error {
+	if len(evidence.Rows) == 0 {
+		return errors.New("native queue successor evidence has no rows")
+	}
+	seen := make(map[string]struct{}, len(evidence.Rows))
+	for _, row := range evidence.Rows {
+		if err := validateNativeQueuedMutation(row.BeforeRestart); err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(row.BeforeRestart, row.AfterRestart) {
+			return errors.New("native queued intent changed across restart")
+		}
+		if !nativeQueuedAuthoredIntentEqual(row.BeforeRestart, row.OriginalAfterChange) {
+			return errors.New("native queued original intent changed after successor capture")
+		}
+		if err := validateNativeQueuedMutation(row.Successor); err != nil {
+			return err
+		}
+		if _, duplicate := seen[row.BeforeRestart.MutationID]; duplicate {
+			return errors.New("native queue successor evidence repeats an original mutation")
+		}
+		seen[row.BeforeRestart.MutationID] = struct{}{}
+		if row.Successor.MutationID == row.BeforeRestart.MutationID ||
+			row.Successor.TableID != row.BeforeRestart.TableID || row.Successor.TableName != row.BeforeRestart.TableName ||
+			row.Successor.RecordID != row.BeforeRestart.RecordID || row.Successor.PrimaryKeyFieldID != row.BeforeRestart.PrimaryKeyFieldID ||
+			row.Successor.PrimaryKeyLogicalType != row.BeforeRestart.PrimaryKeyLogicalType || row.Successor.Operation != "update" ||
+			row.Successor.DependsOnMutationID == nil || *row.Successor.DependsOnMutationID != row.BeforeRestart.MutationID ||
+			nativeQueuedAuthoredIntentEqual(row.BeforeRestart, row.Successor) {
+			return errors.New("native changed intent did not retain a distinct linked successor")
+		}
+	}
+	return nil
+}
+
+func validateNativeQueuedMutation(mutation NativeQueuedMutation) error {
+	if mutation.MutationID == "" || mutation.LocalOrder <= 0 || mutation.TableID == "" || mutation.TableName == "" ||
+		mutation.RecordID == "" || mutation.PrimaryKeyFieldID == "" || mutation.PrimaryKeyLogicalType == "" ||
+		mutation.AuthoredSchemaVersion <= 0 || mutation.AuthoredSchemaHash == "" || mutation.ClientVersion == "" ||
+		mutation.Status == "" || mutation.SourceKind == "" || len(mutation.AuthoredFields) == 0 ||
+		(mutation.Operation != "insert" && mutation.Operation != "update" && mutation.Operation != "delete") {
+		return errors.New("native queued mutation evidence is incomplete")
+	}
+	seen := make(map[string]struct{}, len(mutation.AuthoredFields))
+	for _, field := range mutation.AuthoredFields {
+		if field.FieldID == "" || field.LogicalType == "" || !json.Valid(field.Value) {
+			return errors.New("native queued mutation authored field is incomplete")
+		}
+		if _, duplicate := seen[field.FieldID]; duplicate {
+			return errors.New("native queued mutation authored field is duplicated")
+		}
+		seen[field.FieldID] = struct{}{}
+	}
+	return nil
+}
+
+func nativeQueuedAuthoredIntentEqual(left, right NativeQueuedMutation) bool {
+	return left.MutationID == right.MutationID && left.LocalOrder == right.LocalOrder && left.TableID == right.TableID &&
+		left.TableName == right.TableName && left.RecordID == right.RecordID && left.PrimaryKeyFieldID == right.PrimaryKeyFieldID &&
+		left.PrimaryKeyLogicalType == right.PrimaryKeyLogicalType && left.Operation == right.Operation &&
+		left.AuthoredSchemaVersion == right.AuthoredSchemaVersion && left.AuthoredSchemaHash == right.AuthoredSchemaHash &&
+		reflect.DeepEqual(left.BaseVersion, right.BaseVersion) && left.ClientVersion == right.ClientVersion &&
+		reflect.DeepEqual(left.AuthoredFields, right.AuthoredFields)
 }
 
 func validateNativeCRUDState(state NativeCRUDState, targets []NativeCRUDTarget) error {

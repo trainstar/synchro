@@ -1,7 +1,9 @@
 package reactnative
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,10 +84,13 @@ const (
 	rebuildRequestsStageOpen rebuildRequestsStage = iota
 	rebuildRequestsStageBegin
 	rebuildRequestsStageFirstPage
+	rebuildRequestsStageFirstRestart
+	rebuildRequestsStageFirstRecoveryBegin
+	rebuildRequestsStageFirstRecoveryPage
 	rebuildRequestsStageFinalPage
-	rebuildRequestsStageRestart
-	rebuildRequestsStageRecoveryBegin
-	rebuildRequestsStageRecoveryFinalPage
+	rebuildRequestsStageFinalRestart
+	rebuildRequestsStageFinalRecoveryBegin
+	rebuildRequestsStageFinalRecoveryPage
 	rebuildRequestsStagePull
 	rebuildRequestsStageAwaitCall
 	rebuildRequestsStageFinalCapture
@@ -123,7 +128,14 @@ type RebuildRequestsCoordinator struct {
 	process       *actionProcessIdentity
 	sourceApplied bool
 	finalResult   *finalCapture
+	firstReplays  []rebuildPageReplay
+	finalReplays  []rebuildPageReplay
 	result        RebuildRequestsCoordinatorResult
+}
+
+type rebuildPageReplay struct {
+	requestDigest  [sha256.Size]byte
+	responseDigest [sha256.Size]byte
 }
 
 // rebuildRequestsAuthoredPageLimit reads the page limit the authored rebuild
@@ -159,6 +171,11 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 	if string(scenario.ID) != rebuildRequestsScenarioID || len(scenario.Model.Setup) != 1 ||
 		scenarios.OperationKey(scenario.Model.Setup[0]) != "model/install-current-contract" {
 		return errors.New("React Native rebuild-requests scenario contract is invalid")
+	}
+	if !orderedIdentifiersEqual(scenario.RequirementIDs, []string{
+		"SYNC-REBUILD-003", "SYNC-REBUILD-004", "SYNC-REBUILD-005", "SYNC-REBUILD-008", "SYNC-REBUILD-009", "SYNC-REBUILD-010",
+	}) {
+		return errors.New("React Native rebuild-requests requirement contract changed")
 	}
 	if len(scenario.Steps) != len(rebuildRequestsStepOrder) || len(scenario.NativeLifecycleBoundaries) != 0 ||
 		len(scenario.NativeIdentityAliases) != len(rebuildRequestsAliasNames) {
@@ -225,7 +242,7 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 		}
 	}
 
-	semantic, performance, durable := false, false, false
+	semantic, performance, durable, replay, isolation := false, false, false, false, false
 	for _, assertion := range scenario.Assertions {
 		switch string(assertion.ID) {
 		case "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001":
@@ -234,20 +251,24 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
 		case "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001":
 			durable = assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.ExpectedSource == "authored-model" && len(assertion.DetectsControlIDs) == 1 && assertion.DetectsControlIDs[0] == "CTRL-REBUILD-004"
+		case "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001":
+			replay = rebuildRequestsAssertionMatches(assertion, "SYNC-REBUILD-009", "CTRL-REBUILD-009")
+		case "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001":
+			isolation = rebuildRequestsAssertionMatches(assertion, "SYNC-REBUILD-010", "CTRL-REBUILD-010")
 		}
 	}
-	if !semantic || !performance || !durable {
+	if !semantic || !performance || !durable || !replay || !isolation {
 		return errors.New("React Native rebuild-requests assertions are invalid")
 	}
 	obligations := map[string]int{}
 	for _, obligation := range scenario.ProofObligations {
 		switch string(obligation.ObligationID) {
 		case "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") && rebuildRequestsNativeClaimsMatch(obligation) {
 				obligations[string(obligation.ObligationID)]++
 			}
 		case "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001":
-			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") {
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") && rebuildRequestsNativeClaimsMatch(obligation) {
 				obligations[string(obligation.ObligationID)]++
 			}
 		case "OBL-PERF-REBUILD-REQUESTS-CONTROL-001":
@@ -258,15 +279,60 @@ func ValidateRebuildRequestsScenario(scenario scenarios.Scenario) error {
 			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-REBUILD-REQUESTS-DURABLE-001", "CTRL-REBUILD-004") {
 				obligations[string(obligation.ObligationID)]++
 			}
+		case "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-FAULT-LINUX-X64-001":
+			if proofTargetMatches(obligation, "fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox", "FPL-PERF-REBUILD-REQUESTS-PAGE-REPLAY-001", "CTRL-REBUILD-009") && rebuildRequestsSingleClaimMatches(obligation, "SYNC-REBUILD-009", "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001") {
+				obligations[string(obligation.ObligationID)]++
+			}
+		case "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-integration-mutants", "FPL-PERF-REBUILD-REQUESTS-PAGE-REPLAY-001", "CTRL-REBUILD-009") && rebuildRequestsSingleClaimMatches(obligation, "SYNC-REBUILD-009", "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001") {
+				obligations[string(obligation.ObligationID)]++
+			}
+		case "OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-FAULT-LINUX-X64-001":
+			if proofTargetMatches(obligation, "fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox", "FPL-PERF-REBUILD-REQUESTS-SCOPE-ISOLATION-001", "CTRL-REBUILD-010") && rebuildRequestsSingleClaimMatches(obligation, "SYNC-REBUILD-010", "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001") {
+				obligations[string(obligation.ObligationID)]++
+			}
+		case "OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-integration-mutants", "FPL-PERF-REBUILD-REQUESTS-SCOPE-ISOLATION-001", "CTRL-REBUILD-010") && rebuildRequestsSingleClaimMatches(obligation, "SYNC-REBUILD-010", "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001") {
+				obligations[string(obligation.ObligationID)]++
+			}
 		}
 	}
 	if obligations["OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001"] != 1 ||
 		obligations["OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001"] != 1 ||
 		obligations["OBL-PERF-REBUILD-REQUESTS-CONTROL-001"] != 1 ||
-		obligations["OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001"] != 1 {
+		obligations["OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001"] != 1 ||
+		obligations["OBL-PERF-REBUILD-REQUESTS-REPLAY-009-FAULT-LINUX-X64-001"] != 1 ||
+		obligations["OBL-PERF-REBUILD-REQUESTS-REPLAY-009-CONTROL-001"] != 1 ||
+		obligations["OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-FAULT-LINUX-X64-001"] != 1 ||
+		obligations["OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-CONTROL-001"] != 1 {
 		return errors.New("React Native rebuild-requests proof obligations are invalid")
 	}
 	return nil
+}
+
+func rebuildRequestsAssertionMatches(assertion scenarios.Assertion, requirementID, controlID string) bool {
+	return orderedIdentifiersEqual(assertion.RequirementIDs, []string{requirementID}) &&
+		orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"}) &&
+		assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Predicate.Name == "canonical-wire-outcome" &&
+		assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" &&
+		assertion.Oracle.ObservedSource == "system-under-test" &&
+		orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{controlID})
+}
+
+func rebuildRequestsNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-REBUILD-003", "SYNC-REBUILD-004", "SYNC-REBUILD-005", "SYNC-REBUILD-008", "SYNC-REBUILD-009", "SYNC-REBUILD-010",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001", "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+		"ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001", "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+		"ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001", "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+		"ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+	})
+}
+
+func rebuildRequestsSingleClaimMatches(obligation scenarios.ProofObligation, requirementID, assertionID string) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{requirementID}) &&
+		orderedIdentifiersEqual(obligation.AssertionIDs, []string{assertionID})
 }
 
 // NewRebuildRequestsCoordinator creates an authenticated loopback sidecar and adapter proxy.
@@ -481,14 +547,20 @@ func (stage rebuildRequestsStage) String() string {
 		return "begin"
 	case rebuildRequestsStageFirstPage:
 		return "first-page"
+	case rebuildRequestsStageFirstRestart:
+		return "first-restart"
+	case rebuildRequestsStageFirstRecoveryBegin:
+		return "first-recovery-begin"
+	case rebuildRequestsStageFirstRecoveryPage:
+		return "first-recovery-page"
 	case rebuildRequestsStageFinalPage:
 		return "final-page"
-	case rebuildRequestsStageRestart:
-		return "restart"
-	case rebuildRequestsStageRecoveryBegin:
-		return "recovery-begin"
-	case rebuildRequestsStageRecoveryFinalPage:
-		return "recovery-final-page"
+	case rebuildRequestsStageFinalRestart:
+		return "final-restart"
+	case rebuildRequestsStageFinalRecoveryBegin:
+		return "final-recovery-begin"
+	case rebuildRequestsStageFinalRecoveryPage:
+		return "final-recovery-page"
 	case rebuildRequestsStagePull:
 		return "pull"
 	case rebuildRequestsStageAwaitCall:
@@ -630,15 +702,15 @@ func (c *RebuildRequestsCoordinator) acceptResultLocked(raw json.RawMessage) err
 		c.process = &process
 	case rebuildRequestsStageFirstPage:
 		return c.validateCallBegun(envelope.Result)
-	case rebuildRequestsStageFinalPage, rebuildRequestsStageRecoveryFinalPage, rebuildRequestsStagePull, rebuildRequestsStageAwaitCall:
+	case rebuildRequestsStageFirstRestart, rebuildRequestsStageFinalPage, rebuildRequestsStageFinalRestart, rebuildRequestsStagePull, rebuildRequestsStageAwaitCall:
 		return c.validateAwaited(envelope.Result)
-	case rebuildRequestsStageRestart:
+	case rebuildRequestsStageFirstRecoveryBegin, rebuildRequestsStageFinalRecoveryBegin:
 		process, err := c.validateRestarted(envelope.Result)
 		if err != nil {
 			return err
 		}
 		c.process = &process
-	case rebuildRequestsStageRecoveryBegin:
+	case rebuildRequestsStageFirstRecoveryPage, rebuildRequestsStageFinalRecoveryPage:
 		return c.validateCallBegun(envelope.Result)
 	case rebuildRequestsStageFinalCapture:
 		return c.validateCallCompleted(envelope.Result)
@@ -682,24 +754,40 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 		response.Command = c.command("observer", "await-step", map[string]any{
 			"client_key": clientKey, "call_id": c.callID,
 		}, []scenarios.StepID{rebuildRequestsStepOrder[5]})
+		c.stage = rebuildRequestsStageFirstRestart
+	case rebuildRequestsStageFirstRestart:
+		response.Command = c.command("client", "open", map[string]any{
+			"client_key": clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil,
+		}, nil)
+		c.callID = "rebuild_first_recovery"
+		c.stage = rebuildRequestsStageFirstRecoveryBegin
+	case rebuildRequestsStageFirstRecoveryBegin:
+		response.Command = c.command("client", "begin-call", map[string]any{
+			"client_key": clientKey, "call_id": c.callID, "method": "start",
+		}, nil)
+		c.stage = rebuildRequestsStageFirstRecoveryPage
+	case rebuildRequestsStageFirstRecoveryPage:
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": clientKey, "call_id": c.callID,
+		}, []scenarios.StepID{rebuildRequestsStepOrder[5]})
 		c.stage = rebuildRequestsStageFinalPage
 	case rebuildRequestsStageFinalPage:
 		response.Command = c.command("observer", "await-step", map[string]any{
 			"client_key": clientKey, "call_id": c.callID,
 		}, []scenarios.StepID{rebuildRequestsStepOrder[9]})
-		c.stage = rebuildRequestsStageRestart
-	case rebuildRequestsStageRestart:
+		c.stage = rebuildRequestsStageFinalRestart
+	case rebuildRequestsStageFinalRestart:
 		response.Command = c.command("client", "open", map[string]any{
 			"client_key": clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil,
 		}, nil)
-		c.callID = "rebuild_recovery"
-		c.stage = rebuildRequestsStageRecoveryBegin
-	case rebuildRequestsStageRecoveryBegin:
+		c.callID = "rebuild_final_recovery"
+		c.stage = rebuildRequestsStageFinalRecoveryBegin
+	case rebuildRequestsStageFinalRecoveryBegin:
 		response.Command = c.command("client", "begin-call", map[string]any{
 			"client_key": clientKey, "call_id": c.callID, "method": "start",
 		}, nil)
-		c.stage = rebuildRequestsStageRecoveryFinalPage
-	case rebuildRequestsStageRecoveryFinalPage:
+		c.stage = rebuildRequestsStageFinalRecoveryPage
+	case rebuildRequestsStageFinalRecoveryPage:
 		response.Command = c.command("observer", "await-step", map[string]any{
 			"client_key": clientKey, "call_id": c.callID,
 		}, []scenarios.StepID{rebuildRequestsStepOrder[9]})
@@ -930,6 +1018,16 @@ func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, re
 		return
 	}
 	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
+	var rebuildRequestBody []byte
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/rebuild" {
+		var err error
+		rebuildRequestBody, err = io.ReadAll(io.LimitReader(request.Body, maximumExchangeBytes+1))
+		if err != nil || len(rebuildRequestBody) > maximumExchangeBytes {
+			writeExchangeError(writer, http.StatusBadGateway)
+			return
+		}
+		request.Body = io.NopCloser(bytes.NewReader(rebuildRequestBody))
+	}
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, request.Body)
 	if err != nil {
 		writeExchangeError(writer, http.StatusBadGateway)
@@ -955,7 +1053,7 @@ func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, re
 		return
 	}
 	if request.Method == http.MethodPost && request.URL.Path == "/sync/rebuild" && response.StatusCode == http.StatusOK {
-		if err := c.observeFirstRebuildResponse(request.Context(), body); err != nil {
+		if err := c.observeRebuildResponse(request.Context(), rebuildRequestBody, body); err != nil {
 			c.mu.Lock()
 			if c.failed == nil {
 				c.failed = err
@@ -974,17 +1072,43 @@ func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, re
 	_, _ = writer.Write(body)
 }
 
-func (c *RebuildRequestsCoordinator) observeFirstRebuildResponse(ctx context.Context, body []byte) error {
+func (c *RebuildRequestsCoordinator) observeRebuildResponse(ctx context.Context, requestBody, responseBody []byte) error {
+	facts, err := firstRebuildResponseFacts(responseBody)
+	if err != nil {
+		return errors.New("React Native rebuild-requests response is invalid")
+	}
+	replay := rebuildPageReplay{
+		requestDigest:  sha256.Sum256(requestBody),
+		responseDigest: sha256.Sum256(responseBody),
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	switch facts.hasMore {
+	case "true":
+		if err := validateFirstRebuildResponse(responseBody); err != nil {
+			return err
+		}
+		c.firstReplays = append(c.firstReplays, replay)
+		if len(c.firstReplays) > 2 || len(c.firstReplays) == 2 && c.firstReplays[0] != c.firstReplays[1] {
+			return errors.New("React Native rebuild-requests first page was not replayed exactly")
+		}
+	case "false":
+		if facts.records != "1" || facts.cursor != "absent" && facts.cursor != "null" || facts.finalScopeCursor != "nonempty" || facts.checksum != "present" {
+			return fmt.Errorf("React Native rebuild-requests final rebuild response is invalid: %s", facts)
+		}
+		c.finalReplays = append(c.finalReplays, replay)
+		if len(c.finalReplays) > 2 || len(c.finalReplays) == 2 && c.finalReplays[0] != c.finalReplays[1] {
+			return errors.New("React Native rebuild-requests final page was not replayed exactly")
+		}
+		return nil
+	default:
+		return fmt.Errorf("React Native rebuild-requests response finality is invalid: %s", facts)
+	}
 	if c.sourceApplied {
 		return nil
 	}
 	if c.config.Controller == nil || !c.prepared || c.closed {
 		return errors.New("React Native rebuild-requests source barrier is unavailable")
-	}
-	if err := validateFirstRebuildResponse(body); err != nil {
-		return err
 	}
 	commit := c.steps[rebuildRequestsStepOrder[6]]
 	if scenarios.OperationKey(commit.Operation) != "model/commit-source-transaction" {
@@ -1107,7 +1231,7 @@ func rebuildJSONMemberShape(members map[string]json.RawMessage, name string) str
 }
 
 func (c *RebuildRequestsCoordinator) validateCompletionLocked(ctx context.Context) error {
-	if c.config.Controller == nil || c.finalResult == nil || !c.sourceApplied {
+	if c.config.Controller == nil || c.finalResult == nil || !c.sourceApplied || len(c.firstReplays) != 2 || len(c.finalReplays) != 2 || c.firstReplays[0] != c.firstReplays[1] || c.finalReplays[0] != c.finalReplays[1] {
 		return errors.New("React Native rebuild-requests final evidence is unavailable")
 	}
 	serverCaptures, err := c.config.Controller.Capture(ctx, []string{clientKey}, []string{"server-state"})

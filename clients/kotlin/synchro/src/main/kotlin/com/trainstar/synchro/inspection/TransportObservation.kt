@@ -89,6 +89,7 @@ data class TransportRebuildResponseFacts(
     @SerialName("has_checksum") val hasChecksum: Boolean,
     @SerialName("scope_fingerprint") val scopeFingerprint: String,
     @SerialName("final_scope_cursor_fingerprint") val finalScopeCursorFingerprint: String? = null,
+    @SerialName("response_body_sha256") val responseBodySHA256: String? = null,
 )
 
 @Serializable
@@ -350,6 +351,10 @@ class TransportObservationCollector(capacity: Int = 256) {
 
         fun cursorFingerprint(cursor: String): String = MessageDigest.getInstance("SHA-256")
             .digest(cursor.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(Locale.US, byte.toInt() and 0xff) }
+
+        fun bodyFingerprint(body: String): String = MessageDigest.getInstance("SHA-256")
+            .digest(body.toByteArray(Charsets.UTF_8))
             .joinToString("") { byte -> "%02x".format(Locale.US, byte.toInt() and 0xff) }
     }
 }

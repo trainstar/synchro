@@ -1,0 +1,16 @@
+diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/rebuild.rs
+--- a/extensions/synchro-pg/src/rebuild.rs
++++ b/extensions/synchro-pg/src/rebuild.rs
+@@ -214,8 +214,11 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::J
+                 .as_ref()
+                 .map(|continuation| continuation.next_row_ordinal)
+                 .unwrap_or(0);
+             return match load_stored_page(client, &session, row_ordinal) {
+-                Ok(Some(response)) => response_json(response),
++                Ok(Some(_)) => match create_page(client, p_user_id, &session, row_ordinal) {
++                    Ok(response) => response_json(response),
++                    Err(_) => integrity_failure_response(),
++                },
+                 Ok(None) if continuation.is_some() => {
+                     match create_page(client, p_user_id, &session, row_ordinal) {
+                         Ok(response) => response_json(response),

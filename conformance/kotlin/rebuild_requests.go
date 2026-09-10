@@ -53,6 +53,9 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if err := validateKotlinRebuildRequestsBindings(steps, client); err != nil {
 		return RebuildRequestsResult{}, err
 	}
+	if err := validateKotlinRebuildRequestsFaultPlans(scenario); err != nil {
+		return RebuildRequestsResult{}, err
+	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("install Kotlin Android rebuild-requests contract: %w", err)
 	}
@@ -99,7 +102,8 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 		return RebuildRequestsResult{}, err
 	}
 	callID := string(*steps[scenarios.StepID("STEP-PERF-REBUILD-REQUESTS-001")].NativeBinding.CallID)
-	recoveryCallID := "rebuild_recovery"
+	firstRecoveryCallID := "rebuild_first_recovery"
+	finalRecoveryCallID := "rebuild_final_recovery"
 
 	state, err := platform.clientFor(client)
 	if err != nil {
@@ -138,7 +142,12 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if err := validateKotlinRebuildRequestsFirstPause(firstPaused); err != nil {
 		return RebuildRequestsResult{}, err
 	}
-
+	state.mu.Lock()
+	initialTransport, transportErr := state.session.ObservationsAfter(transportCheckpoint)
+	state.mu.Unlock()
+	if transportErr != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("capture Kotlin Android first rebuild response transport: %w", transportErr)
+	}
 	concurrentCommit, err := kotlinScenarioOperation(steps, "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-COMMIT-001", "model/commit-source-transaction")
 	if err != nil {
 		return RebuildRequestsResult{}, err
@@ -153,8 +162,47 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if observed, processErr := controller.ProcessStep(ctx, nil, concurrentMaterialize); processErr != nil || observed.Disposition != "success" {
 		return RebuildRequestsResult{}, fmt.Errorf("materialize Kotlin Android concurrent rebuild row: %w", kotlinResultError(processErr, observed.Disposition))
 	}
+	restart := scenarios.Operation{ContractOperation: "process", Name: "restart-client", Payload: queueJSON(map[string]any{"user_id": client.UserID, "client_id": client.ClientID})}
+	if observed, processErr := platform.ProcessStep(ctx, client, restart); processErr != nil || observed.Disposition != "success" {
+		return RebuildRequestsResult{}, fmt.Errorf("restart Kotlin Android rebuild-requests client after first page response: %w", kotlinResultError(processErr, observed.Disposition))
+	}
+	firstRestartedRawSnapshot, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("capture Kotlin Android rebuild-requests first-page restart: %w", err)
+	}
+	firstRestarted, err := decodeWarmConnectSnapshot(firstRestartedRawSnapshot)
+	if err != nil {
+		return RebuildRequestsResult{}, err
+	}
+	if err := validateKotlinRebuildRequestsFirstRestart(firstRestarted); err != nil {
+		return RebuildRequestsResult{}, err
+	}
+	state.mu.Lock()
+	firstRecoveryTransportCheckpoint := state.session.Checkpoint()
+	state.mu.Unlock()
+	firstRecoveryBegin, err := platform.BeginCall(ctx, CallRequest{Client: client, CallID: firstRecoveryCallID, Method: "start", Operations: []scenarios.Operation{firstPage}})
+	if err != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("resume Kotlin Android rebuild-requests first page after restart: %w", err)
+	}
+	if firstRecoveryBegin.CallID != firstRecoveryCallID || firstRecoveryBegin.State != "in_flight" || firstRecoveryBegin.Completion != "" || len(firstRecoveryBegin.Steps) != 1 {
+		return RebuildRequestsResult{}, errors.New("Kotlin Android rebuild-requests first-page recovery did not replay the first page")
+	}
+	if err := validateKotlinRebuildRequestsStepWire(scenario, "STEP-PERF-REBUILD-REQUESTS-003", firstRecoveryBegin.Steps[0]); err != nil {
+		return RebuildRequestsResult{}, err
+	}
+	firstReplayedRawSnapshot, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("capture Kotlin Android replayed first rebuild page: %w", err)
+	}
+	firstReplayed, err := decodeWarmConnectSnapshot(firstReplayedRawSnapshot)
+	if err != nil {
+		return RebuildRequestsResult{}, err
+	}
+	if err := validateKotlinRebuildRequestsFirstReplay(firstPaused, firstReplayed); err != nil {
+		return RebuildRequestsResult{}, err
+	}
 
-	finalResult, err := platform.AwaitStep(ctx, AwaitRequest{Client: client, CallID: callID, Operation: finalPage})
+	finalResult, err := platform.AwaitStep(ctx, AwaitRequest{Client: client, CallID: firstRecoveryCallID, Operation: finalPage})
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("await Kotlin Android final rebuild page: %w", err)
 	}
@@ -163,12 +211,11 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	}
 
 	state.mu.Lock()
-	interruptedTransport, transportErr := state.session.ObservationsAfter(transportCheckpoint)
+	firstRecoveryTransport, transportErr := state.session.ObservationsAfter(firstRecoveryTransportCheckpoint)
 	state.mu.Unlock()
 	if transportErr != nil {
-		return RebuildRequestsResult{}, fmt.Errorf("capture Kotlin Android rebuild-requests interrupted transport: %w", transportErr)
+		return RebuildRequestsResult{}, fmt.Errorf("capture Kotlin Android rebuild-requests first recovery transport: %w", transportErr)
 	}
-	restart := scenarios.Operation{ContractOperation: "process", Name: "restart-client", Payload: queueJSON(map[string]any{"user_id": client.UserID, "client_id": client.ClientID})}
 	if observed, processErr := platform.ProcessStep(ctx, client, restart); processErr != nil || observed.Disposition != "success" {
 		return RebuildRequestsResult{}, fmt.Errorf("restart Kotlin Android rebuild-requests client after final page response: %w", kotlinResultError(processErr, observed.Disposition))
 	}
@@ -187,17 +234,17 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	recoveryTransportCheckpoint := state.session.Checkpoint()
 	state.mu.Unlock()
 
-	recoveryBegin, err := platform.BeginCall(ctx, CallRequest{Client: client, CallID: recoveryCallID, Method: "start", Operations: []scenarios.Operation{finalPage}})
+	recoveryBegin, err := platform.BeginCall(ctx, CallRequest{Client: client, CallID: finalRecoveryCallID, Method: "start", Operations: []scenarios.Operation{finalPage}})
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("resume Kotlin Android rebuild-requests call after restart: %w", err)
 	}
-	if recoveryBegin.CallID != recoveryCallID || recoveryBegin.State != "in_flight" || recoveryBegin.Completion != "" || len(recoveryBegin.Steps) != 1 {
+	if recoveryBegin.CallID != finalRecoveryCallID || recoveryBegin.State != "in_flight" || recoveryBegin.Completion != "" || len(recoveryBegin.Steps) != 1 {
 		return RebuildRequestsResult{}, errors.New("Kotlin Android rebuild-requests recovery did not replay the final page")
 	}
 	if err := validateKotlinRebuildRequestsStepWire(scenario, "STEP-PERF-REBUILD-REQUESTS-004", recoveryBegin.Steps[0]); err != nil {
 		return RebuildRequestsResult{}, err
 	}
-	pullResult, err := platform.AwaitStep(ctx, AwaitRequest{Client: client, CallID: recoveryCallID, Operation: pull})
+	pullResult, err := platform.AwaitStep(ctx, AwaitRequest{Client: client, CallID: finalRecoveryCallID, Operation: pull})
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("await Kotlin Android post-rebuild pull: %w", err)
 	}
@@ -215,11 +262,11 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if err := validateKotlinRebuildRequestsPullPause(firstPaused, pullPaused); err != nil {
 		return RebuildRequestsResult{}, err
 	}
-	recovered, err := platform.AwaitCall(ctx, CallRequest{Client: client, CallID: recoveryCallID})
+	recovered, err := platform.AwaitCall(ctx, CallRequest{Client: client, CallID: finalRecoveryCallID})
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("complete Kotlin Android rebuild-requests recovery call: %w", err)
 	}
-	if recovered.CallID != recoveryCallID || recovered.State != "completed" || recovered.Completion != "idle" {
+	if recovered.CallID != finalRecoveryCallID || recovered.State != "completed" || recovered.Completion != "idle" {
 		return RebuildRequestsResult{}, errors.New("Kotlin Android rebuild-requests recovery call did not complete idle")
 	}
 
@@ -229,7 +276,8 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if transportErr != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("capture Kotlin Android rebuild-requests recovery transport: %w", transportErr)
 	}
-	transport := append(interruptedTransport, recoveredTransport...)
+	transport := append(initialTransport, firstRecoveryTransport...)
+	transport = append(transport, recoveredTransport...)
 	if err := validateKotlinRebuildRequestsTransport(scenario, transport); err != nil {
 		return RebuildRequestsResult{}, err
 	}
@@ -340,15 +388,50 @@ func validateKotlinRebuildRequestsStepWire(scenario scenarios.Scenario, stepID s
 }
 
 func validateKotlinRebuildRequestsFirstPause(snapshot warmConnectSnapshot) error {
-	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeRows) != 0 || len(snapshot.rowMetadata) != 0 || snapshot.rebuildAttempts[0].Cursor != nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeStates) != 0 || len(snapshot.scopeRows) != 0 || len(snapshot.rowMetadata) != 0 || snapshot.rebuildAttempts[0].Cursor != nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
 		return errors.New("Kotlin Android first rebuild page was not paused before local apply")
 	}
 	return nil
 }
 
+func validateKotlinRebuildRequestsFirstRestart(snapshot warmConnectSnapshot) error {
+	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeStates) != 0 || len(snapshot.scopeRows) != 0 || len(snapshot.rowMetadata) != 0 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 0 || snapshot.rebuildAttempts[0].Cursor != nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
+		return errors.New("Kotlin Android rebuild restart did not preserve the unapplied first page")
+	}
+	return nil
+}
+
+func validateKotlinRebuildRequestsFirstReplay(first, replay warmConnectSnapshot) error {
+	if err := validateKotlinRebuildRequestsFirstPause(replay); err != nil {
+		return err
+	}
+	if first.rebuildAttempts[0].RebuildID == "" || first.rebuildAttempts[0].RebuildID != replay.rebuildAttempts[0].RebuildID {
+		return errors.New("Kotlin Android rebuild recovery changed the first-page rebuild identity")
+	}
+	return nil
+}
+
 func validateKotlinRebuildRequestsRestart(snapshot warmConnectSnapshot) error {
-	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeRows) != 1 || len(snapshot.rowMetadata) != 1 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 1 || snapshot.rebuildAttempts[0].Cursor == nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeStates) != 0 || len(snapshot.scopeRows) != 1 || len(snapshot.rowMetadata) != 1 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 1 || snapshot.rebuildAttempts[0].Cursor == nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
 		return errors.New("Kotlin Android rebuild restart did not preserve one durable partial page")
+	}
+	return nil
+}
+
+func validateKotlinRebuildRequestsFaultPlans(scenario scenarios.Scenario) error {
+	required := map[string]bool{
+		"FPL-PERF-REBUILD-REQUESTS-PAGE-REPLAY-001":     false,
+		"FPL-PERF-REBUILD-REQUESTS-SCOPE-ISOLATION-001": false,
+	}
+	for _, plan := range scenario.FaultPlans {
+		if _, found := required[string(plan.ID)]; found {
+			required[string(plan.ID)] = true
+		}
+	}
+	for id, found := range required {
+		if !found {
+			return fmt.Errorf("Kotlin Android rebuild-requests fault plan %s is absent", id)
+		}
 	}
 	return nil
 }
@@ -379,12 +462,14 @@ func validateKotlinRebuildRequestsTransport(scenario scenarios.Scenario, observa
 	ids := []string{
 		"STEP-PERF-REBUILD-REQUESTS-001",
 		"STEP-PERF-REBUILD-REQUESTS-003",
+		"STEP-PERF-REBUILD-REQUESTS-001",
+		"STEP-PERF-REBUILD-REQUESTS-003",
 		"STEP-PERF-REBUILD-REQUESTS-004",
 		"STEP-PERF-REBUILD-REQUESTS-001",
 		"STEP-PERF-REBUILD-REQUESTS-004",
 		"STEP-PERF-REBUILD-REQUESTS-002",
 	}
-	classes := []string{"connect", "rebuild", "rebuild", "connect", "rebuild", "pull"}
+	classes := []string{"connect", "rebuild", "connect", "rebuild", "rebuild", "connect", "rebuild", "pull"}
 	if len(observations) != len(ids) {
 		return fmt.Errorf("Kotlin Android rebuild-requests transport count = %d, want %d", len(observations), len(ids))
 	}
@@ -397,10 +482,11 @@ func validateKotlinRebuildRequestsTransport(scenario scenarios.Scenario, observa
 		}
 	}
 	first := observations[1]
-	final := observations[2]
-	replayedFinal := observations[4]
-	pull := observations[5]
-	if first.RequestFacts == nil || final.RequestFacts == nil || replayedFinal.RequestFacts == nil || pull.RequestFacts == nil || first.RebuildResponseFacts == nil || final.RebuildResponseFacts == nil || replayedFinal.RebuildResponseFacts == nil || pull.PullResponseFacts == nil {
+	replayedFirst := observations[3]
+	final := observations[4]
+	replayedFinal := observations[6]
+	pull := observations[7]
+	if first.RequestFacts == nil || replayedFirst.RequestFacts == nil || final.RequestFacts == nil || replayedFinal.RequestFacts == nil || pull.RequestFacts == nil || first.RebuildResponseFacts == nil || replayedFirst.RebuildResponseFacts == nil || final.RebuildResponseFacts == nil || replayedFinal.RebuildResponseFacts == nil || pull.PullResponseFacts == nil {
 		return errors.New("Kotlin Android rebuild-requests transport facts are incomplete")
 	}
 	firstRequest := first.RequestFacts
@@ -419,8 +505,10 @@ func validateKotlinRebuildRequestsTransport(scenario scenarios.Scenario, observa
 	if finalResponse.RecordCount != 1 || finalResponse.HasMore || finalResponse.HasCursor || !finalResponse.HasFinalScopeCursor || !finalResponse.HasChecksum || finalResponse.FinalScopeCursorFingerprint == nil || finalResponse.ScopeFingerprint != *finalRequest.ScopeFingerprint {
 		return errors.New("Kotlin Android final rebuild response is not a terminal one-row page")
 	}
-	if !reflect.DeepEqual(final.RequestFacts, replayedFinal.RequestFacts) || !reflect.DeepEqual(final.RebuildResponseFacts, replayedFinal.RebuildResponseFacts) {
-		return errors.New("Kotlin Android rebuild recovery did not replay the stored final page")
+	if first.RebuildResponseFacts.ResponseBodySHA256 == nil || !validLowerHexDigest(*first.RebuildResponseFacts.ResponseBodySHA256) || final.RebuildResponseFacts.ResponseBodySHA256 == nil || !validLowerHexDigest(*final.RebuildResponseFacts.ResponseBodySHA256) ||
+		!reflect.DeepEqual(first.RequestFacts, replayedFirst.RequestFacts) || !reflect.DeepEqual(first.RebuildResponseFacts, replayedFirst.RebuildResponseFacts) ||
+		!reflect.DeepEqual(final.RequestFacts, replayedFinal.RequestFacts) || !reflect.DeepEqual(final.RebuildResponseFacts, replayedFinal.RebuildResponseFacts) {
+		return errors.New("Kotlin Android rebuild recovery did not replay the exact stored first and final pages")
 	}
 	if pull.RequestFacts.ClientGeneration == nil || *pull.RequestFacts.ClientGeneration != *firstRequest.ClientGeneration || pull.RequestFacts.SchemaVersion != firstRequest.SchemaVersion || pull.RequestFacts.SchemaHash != firstRequest.SchemaHash || pull.RequestFacts.ScopeSetVersion == nil || pull.RequestFacts.ScopeCount == nil || *pull.RequestFacts.ScopeCount != 1 || pull.RequestFacts.Limit == nil || *pull.RequestFacts.Limit != 1 || pull.CursorFingerprintsComplete == nil || !*pull.CursorFingerprintsComplete || len(pull.CursorFingerprints) != 1 || pull.CursorFingerprints[0] != *finalResponse.FinalScopeCursorFingerprint {
 		return errors.New("Kotlin Android post-rebuild pull is not bound to the final rebuild cursor")
@@ -432,7 +520,7 @@ func validateKotlinRebuildRequestsTransport(scenario scenarios.Scenario, observa
 }
 
 func resolveKotlinRebuildRequestsIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, transport []TransportObservation, firstPaused, final warmConnectSnapshot) (rebuildRequestsIdentityEvidence, error) {
-	if len(aliases) != len(rebuildRequestsAliasNames) || len(transport) != 6 || len(firstPaused.rebuildAttempts) != 1 {
+	if len(aliases) != len(rebuildRequestsAliasNames) || len(transport) != 8 || len(firstPaused.rebuildAttempts) != 1 {
 		return rebuildRequestsIdentityEvidence{}, errors.New("Kotlin Android rebuild-requests identity evidence is incomplete")
 	}
 	wanted := make(map[string]struct{}, len(rebuildRequestsAliasNames))
@@ -460,7 +548,7 @@ func resolveKotlinRebuildRequestsIdentities(controller *blackbox.NativeControlle
 		applicationIdentifiers[value.Alias] = value.ApplicationIdentifier
 	}
 	firstRequest := transport[1].RequestFacts
-	pullRequest := transport[5].RequestFacts
+	pullRequest := transport[7].RequestFacts
 	if firstRequest == nil || firstRequest.ClientGeneration == nil || pullRequest == nil || pullRequest.ScopeSetVersion == nil {
 		return rebuildRequestsIdentityEvidence{}, errors.New("Kotlin Android rebuild-requests generated transport identities are absent")
 	}
@@ -602,7 +690,7 @@ func validateKotlinRebuildRequestsState(server, client scenarios.StateFacts, bef
 	}
 	storedChecksum, storedErr := androidChecksumDigest(final.scopeStates[0].Checksum)
 	localChecksum, localErr := androidChecksumDigest(&final.scopeStates[0].LocalChecksum)
-	if final.scopeStates[0].Cursor == nil || storedErr != nil || localErr != nil || storedChecksum == nil || localChecksum == nil || *storedChecksum != *localChecksum || transport[5].PullResponseFacts == nil || len(transport[5].PullResponseFacts.ScopeCursorFingerprints) != 1 || transport[5].PullResponseFacts.ScopeCursorFingerprints[0] != cursorFingerprint(*final.scopeStates[0].Cursor) {
+	if final.scopeStates[0].Cursor == nil || storedErr != nil || localErr != nil || storedChecksum == nil || localChecksum == nil || *storedChecksum != *localChecksum || transport[7].PullResponseFacts == nil || len(transport[7].PullResponseFacts.ScopeCursorFingerprints) != 1 || transport[7].PullResponseFacts.ScopeCursorFingerprints[0] != cursorFingerprint(*final.scopeStates[0].Cursor) {
 		return errors.New("Kotlin Android rebuild-requests final checkpoint is not verified")
 	}
 	return nil

@@ -1031,7 +1031,6 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 	}
 	first, firstBody := requestPage(nil)
 	firstReplay, _ := requestPage(nil)
-	issue49RequireExactReplay(t, first, firstReplay, "first")
 	firstCursor, ok := firstBody["cursor"].(string)
 	if first.Status != http.StatusOK || !ok || firstCursor == "" || firstBody["has_more"] != true {
 		t.Fatalf("first rebuild page is invalid: %#v", firstBody)
@@ -1063,7 +1062,6 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 
 	second, secondBody := requestPage(firstCursor)
 	secondReplay, _ := requestPage(firstCursor)
-	issue49RequireExactReplay(t, second, secondReplay, "intermediate")
 	secondCursor, ok := secondBody["cursor"].(string)
 	if second.Status != http.StatusOK || !ok || secondCursor == "" || secondBody["has_more"] != true {
 		t.Fatalf("intermediate rebuild page is invalid: %#v", secondBody)
@@ -1071,7 +1069,6 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 
 	final, finalBody := requestPage(secondCursor)
 	finalReplay, _ := requestPage(secondCursor)
-	issue49RequireExactReplay(t, final, finalReplay, "final")
 	finalCursor, ok := finalBody["final_scope_cursor"].(string)
 	if final.Status != http.StatusOK || !ok || finalCursor == "" || finalBody["has_more"] != false {
 		t.Fatalf("final rebuild page is invalid: %#v", finalBody)
@@ -1258,6 +1255,20 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 			if _, present := replay["records"]; present {
 				t.Fatalf("stale rebuild epoch returned records: %#v", replay)
 			}
+		}
+	})
+
+	t.Run("assertion", func(t *testing.T) {
+		for _, page := range []struct {
+			name   string
+			first  blackbox.Response
+			replay blackbox.Response
+		}{
+			{"first", first, firstReplay},
+			{"intermediate", second, secondReplay},
+			{"final", final, finalReplay},
+		} {
+			issue49RequireExactReplay(t, page.first, page.replay, page.name)
 		}
 	})
 }

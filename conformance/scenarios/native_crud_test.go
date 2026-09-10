@@ -131,6 +131,50 @@ func TestValidateNativeCRUDEvidenceRejectsResponseAndPersistenceMutants(t *testi
 	}
 }
 
+func TestQueueSuccessorControlRejectsIdentityAndContentMutants(t *testing.T) {
+	if err := ValidateNativeQueueSuccessorEvidence(validNativeQueueSuccessorEvidence()); err != nil {
+		t.Fatalf("validate native queue successor evidence: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*NativeQueueSuccessorEvidence)
+	}{
+		{
+			name: "changed intent reuses original identity",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Successor.MutationID = evidence.Rows[0].BeforeRestart.MutationID
+			},
+		},
+		{
+			name: "restart removes authored content",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].AfterRestart.AuthoredFields = nil
+			},
+		},
+		{
+			name: "successor removes original content",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].OriginalAfterChange.AuthoredFields = nil
+			},
+		},
+		{
+			name: "successor loses dependency",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Successor.DependsOnMutationID = nil
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			evidence := validNativeQueueSuccessorEvidence()
+			test.mutate(&evidence)
+			if err := ValidateNativeQueueSuccessorEvidence(evidence); err == nil {
+				t.Fatal("queue successor mutant passed")
+			}
+		})
+	}
+}
+
 func TestBindNativeCRUDTargetPreservesRuntimeIdentityAndValues(t *testing.T) {
 	plan, err := NewNativeCRUDPlan(testNativeCRUDSchema(), "stream-1", "user-a", "client-a-crud")
 	if err != nil {
@@ -157,6 +201,33 @@ func testNativeCRUDSchema() NativeCRUDSchema {
 			{TableID: "documents", PrimaryKeyFieldID: "id", Fields: []NativeCRUDSchemaField{{FieldID: "id", Type: "string", PrimaryKey: true}, {FieldID: "value", Type: "string", Writable: true}}},
 		},
 	}
+}
+
+func validNativeQueueSuccessorEvidence() NativeQueueSuccessorEvidence {
+	original := NativeQueuedMutation{
+		MutationID: "original", LocalOrder: 1, TableID: "items", TableName: "runtime_items", RecordID: "row-a",
+		PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "insert",
+		AuthoredSchemaVersion: 1, AuthoredSchemaHash: "schema-a", ClientVersion: "2026-08-11T00:30:01.000000Z",
+		Status: "pending", SourceKind: "application",
+		AuthoredFields: []NativeQueuedField{{FieldID: "value", LogicalType: "string", Value: json.RawMessage(`"initial"`)}},
+	}
+	afterRestart := original
+	afterRestart.AuthoredFields = append([]NativeQueuedField(nil), original.AuthoredFields...)
+	afterChange := original
+	normalized := "normalized"
+	afterChange.Status = "superseded_before_send"
+	afterChange.NormalizedMutationID = &normalized
+	dependency := original.MutationID
+	successor := NativeQueuedMutation{
+		MutationID: "successor", LocalOrder: 2, TableID: "items", TableName: "runtime_items", RecordID: "row-a",
+		PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update",
+		AuthoredSchemaVersion: 1, AuthoredSchemaHash: "schema-a", ClientVersion: "2026-08-11T00:30:02.000000Z",
+		Status: "superseded_before_send", SourceKind: "application", DependsOnMutationID: &dependency, NormalizedMutationID: &normalized,
+		AuthoredFields: []NativeQueuedField{{FieldID: "value", LogicalType: "string", Value: json.RawMessage(`"updated"`)}},
+	}
+	return NativeQueueSuccessorEvidence{Rows: []NativeQueueSuccessorRow{{
+		BeforeRestart: original, AfterRestart: afterRestart, OriginalAfterChange: afterChange, Successor: successor,
+	}}}
 }
 
 func validNativeCRUDEvidence() NativeCRUDEvidence {

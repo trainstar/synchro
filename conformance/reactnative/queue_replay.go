@@ -67,6 +67,7 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003": {"SYNC-MUTATION-003", "CTRL-MUTATION-003"},
 		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001":    {"SYNC-QUEUE-001", "CTRL-QUEUE-001"},
 		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002":    {"SYNC-QUEUE-002", "CTRL-QUEUE-002"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003":    {"SYNC-QUEUE-003", "CTRL-QUEUE-003"},
 		"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001":  {"SYNC-FAILURE-001", "CTRL-FAILURE-001"},
 		"ASSERT-PERF-QUEUE-REPLAY-STATE-001":    {"SYNC-STATE-001", "CTRL-STATE-001"},
 		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004":    {"SYNC-QUEUE-004", "CTRL-QUEUE-004"},
@@ -97,7 +98,7 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 			return fmt.Errorf("React Native queue-replay assertion %s changed", id)
 		}
 	}
-	ios, android := 0, 0
+	ios, android, queueFault, queueControl := 0, 0, 0, 0
 	for _, obligation := range scenario.ProofObligations {
 		switch string(obligation.ObligationID) {
 		case "OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001":
@@ -108,9 +109,17 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") && queueReplayNativeClaimsMatch(obligation) {
 				android++
 			}
+		case "OBL-PERF-QUEUE-REPLAY-QUEUE-003-FAULT-001":
+			if proofTargetMatches(obligation, "fault-injection", "SUP-MACOS-CURRENT-001", "test-swift", "FPL-PERF-QUEUE-REPLAY-QUEUE-003", "CTRL-QUEUE-003") {
+				queueFault++
+			}
+		case "OBL-PERF-QUEUE-REPLAY-QUEUE-003-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-QUEUE-REPLAY-QUEUE-003", "CTRL-QUEUE-003") {
+				queueControl++
+			}
 		}
 	}
-	if ios != 1 || android != 1 {
+	if ios != 1 || android != 1 || queueFault != 1 || queueControl != 1 {
 		return errors.New("React Native queue-replay proof obligations are invalid")
 	}
 	workloads, err := queueReplayWorkloads(scenario)
@@ -126,12 +135,12 @@ func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
 func queueReplayNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
 	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
 		"SYNC-OUTCOME-001", "SYNC-MUTATION-001", "SYNC-MUTATION-003", "SYNC-QUEUE-001",
-		"SYNC-QUEUE-002", "SYNC-FAILURE-001", "SYNC-STATE-001", "SYNC-QUEUE-004",
+		"SYNC-QUEUE-002", "SYNC-QUEUE-003", "SYNC-FAILURE-001", "SYNC-STATE-001", "SYNC-QUEUE-004",
 	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
 		"ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001", "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
 		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001", "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
 		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001", "ASSERT-PERF-QUEUE-REPLAY-QUEUE-002",
-		"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001", "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003", "ASSERT-PERF-QUEUE-REPLAY-FAILURE-001", "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
 		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004",
 	})
 }
@@ -180,12 +189,23 @@ type QueueReplayCoordinator struct {
 	finalResult  *finalCapture
 	result       QueueReplayCoordinatorResult
 	responseLoss *queueReplayResponseLoss
+
+	successorClientKey  string
+	successorClientID   string
+	successorDatabase   string
+	successorAssignment scenarios.Operation
+	successorInsert     []scenarios.Operation
+	successorUpdate     []scenarios.Operation
+	successorTargets    []scenarios.NativeCRUDTarget
+	successorBefore     []queueReplayPendingMutation
+	successorRestarted  []queueReplayPendingMutation
 }
 
 // QueueReplayCoordinatorResult contains validated server and native identity evidence.
 type QueueReplayCoordinatorResult struct {
 	ServerFacts        scenarios.StateFacts
 	IdentityResolution []blackbox.NativeIdentityResolution
+	Successor          scenarios.NativeQueueSuccessorEvidence
 }
 
 type queueReplayStage uint8
@@ -205,6 +225,15 @@ const (
 	queueReplayStageReplayCapture
 	queueReplayStageCapture
 	queueReplayStageRejectedCapture
+	queueReplayStageSuccessorOpened
+	queueReplayStageSuccessorBootstrapped
+	queueReplayStageSuccessorStopped
+	queueReplayStageSuccessorInsert
+	queueReplayStageSuccessorBeforeCapture
+	queueReplayStageSuccessorRestarted
+	queueReplayStageSuccessorRestartCapture
+	queueReplayStageSuccessorUpdate
+	queueReplayStageSuccessorChangedCapture
 	queueReplayStageComplete
 )
 
@@ -264,6 +293,10 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 	if !validDatabaseName(database) {
 		return nil, errors.New("React Native queue-replay database name is invalid")
 	}
+	successorDatabase, err := randomDatabaseNameWithPrefix("rn-queue-successor-")
+	if err != nil {
+		return nil, errors.New("create React Native queue successor private database name")
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, errors.New("listen for React Native queue-replay coordinator")
@@ -277,6 +310,7 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 		config: config, listener: listener, token: token, adapter: adapterURL, upstream: serverURL, database: database,
 		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
+		successorClientKey: identity.clientID + "-successor-proof", successorClientID: identity.clientID + "-successor-proof", successorDatabase: successorDatabase,
 		nextSeq: 1,
 		server:  &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
 	}
@@ -316,8 +350,16 @@ func (c *QueueReplayCoordinator) Prepare(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	assignment, insert, update, targets, err := c.queueSuccessorPlan()
+	if err != nil {
+		return err
+	}
 	c.mu.Lock()
 	c.steps = workloads
+	c.successorAssignment = assignment
+	c.successorInsert = insert
+	c.successorUpdate = update
+	c.successorTargets = targets
 	c.prepared = true
 	c.mu.Unlock()
 	return nil
@@ -377,7 +419,7 @@ func (c *QueueReplayCoordinator) ExchangeCount() int {
 }
 
 func (c *QueueReplayCoordinator) exchangeCountLocked() int {
-	count := 5 // open, bootstrap, aggregate capture, rejected detail capture, complete response
+	count := 14 // main open/bootstrap/captures, nine successor-proof commands, complete response
 	for _, workload := range c.steps {
 		count += queueReplayLocalBatchCount(workload) + 7 // write batches, restart, schema check, begin loss, await loss, trace, restart, replay
 	}
@@ -799,6 +841,65 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 		c.finalResult.Rejected = copyRaw(capture.Rejected)
+	case queueReplayStageSuccessorOpened:
+		process, err := validateOpenedResult(envelope.Result)
+		if err != nil {
+			return err
+		}
+		if c.process == nil || process.DatabaseIdentityFingerprint == c.process.DatabaseIdentityFingerprint {
+			return errors.New("React Native queue successor proof did not open an isolated database")
+		}
+		c.process = &process
+	case queueReplayStageSuccessorBootstrapped:
+		if err := c.validateSynchronized(envelope.Result, "idle"); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorStopped:
+		if c.process == nil {
+			return errors.New("React Native queue successor proof process is unavailable")
+		}
+		if err := validateStoppedLifecycleResult(envelope.Result, *c.process); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorInsert:
+		if err := c.validateLocal(envelope.Result, len(c.successorInsert)); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorBeforeCapture:
+		pending, err := c.decodeSuccessorCapture(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.successorBefore = pending
+	case queueReplayStageSuccessorRestarted:
+		process, err := c.validateRestarted(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.process = &process
+	case queueReplayStageSuccessorRestartCapture:
+		pending, err := c.decodeSuccessorCapture(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.successorRestarted = pending
+	case queueReplayStageSuccessorUpdate:
+		if err := c.validateLocal(envelope.Result, len(c.successorUpdate)); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorChangedCapture:
+		pending, err := c.decodeSuccessorCapture(envelope.Result)
+		if err != nil {
+			return err
+		}
+		evidence, err := reactNativeQueueSuccessorEvidence(c.successorTargets, c.successorBefore, c.successorRestarted, pending)
+		if err != nil {
+			return err
+		}
+		if err := scenarios.ValidateNativeQueueSuccessorEvidence(evidence); err != nil {
+			return fmt.Errorf("validate React Native queue successor evidence: %w", err)
+		}
+		c.result.Successor = evidence
 	default:
 		return errInvalidExchange
 	}
@@ -891,6 +992,39 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 	case queueReplayStageRejectedCapture:
 		if err := c.completeLocked(ctx); err != nil {
 			return exchangeResponse{}, err
+		}
+		if observation, err := c.config.Controller.ApplyStep(ctx, c.successorAssignment); err != nil || observation.Disposition != "success" {
+			return exchangeResponse{}, fmt.Errorf("assign React Native queue successor proof scope: %w", nativeResultError(err, observation.Disposition))
+		}
+		response.Command = c.successorCommand("client", "open", map[string]any{"client_key": c.successorClientKey, "database_mode": "create", "initialization": "empty", "seed_step_id": nil})
+		c.stage = queueReplayStageSuccessorOpened
+	case queueReplayStageSuccessorOpened:
+		response.Command = c.successorCommand("client", "synchronize-step", map[string]any{"client_key": c.successorClientKey, "method": "start", "completion": "idle"})
+		c.stage = queueReplayStageSuccessorBootstrapped
+	case queueReplayStageSuccessorBootstrapped:
+		response.Command = c.successorCommand("client", "lifecycle", map[string]any{"client_key": c.successorClientKey, "operation": "stop"})
+		c.stage = queueReplayStageSuccessorStopped
+	case queueReplayStageSuccessorStopped:
+		response.Command = c.successorOperationCommand(c.successorInsert)
+		c.stage = queueReplayStageSuccessorInsert
+	case queueReplayStageSuccessorInsert:
+		response.Command = c.successorCommand("observer", "capture", map[string]any{"client_keys": []string{c.successorClientKey}, "sources": []string{"pending-mutations"}})
+		c.stage = queueReplayStageSuccessorBeforeCapture
+	case queueReplayStageSuccessorBeforeCapture:
+		response.Command = c.successorCommand("client", "open", map[string]any{"client_key": c.successorClientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil})
+		c.stage = queueReplayStageSuccessorRestarted
+	case queueReplayStageSuccessorRestarted:
+		response.Command = c.successorCommand("observer", "capture", map[string]any{"client_keys": []string{c.successorClientKey}, "sources": []string{"pending-mutations"}})
+		c.stage = queueReplayStageSuccessorRestartCapture
+	case queueReplayStageSuccessorRestartCapture:
+		response.Command = c.successorOperationCommand(c.successorUpdate)
+		c.stage = queueReplayStageSuccessorUpdate
+	case queueReplayStageSuccessorUpdate:
+		response.Command = c.successorCommand("observer", "capture", map[string]any{"client_keys": []string{c.successorClientKey}, "sources": []string{"pending-mutations"}})
+		c.stage = queueReplayStageSuccessorChangedCapture
+	case queueReplayStageSuccessorChangedCapture:
+		if len(c.result.Successor.Rows) == 0 {
+			return exchangeResponse{}, errors.New("React Native queue successor proof evidence is unavailable")
 		}
 		response.State = "complete"
 		response.Command = nil
@@ -1361,6 +1495,115 @@ func (c *QueueReplayCoordinator) commandOperations(actor, name string, parameter
 	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken, PushBatchSize: 1000}}
 }
 
+func (c *QueueReplayCoordinator) successorCommand(actor, name string, parameters map[string]any) *conformanceCommand {
+	return &conformanceCommand{
+		SchemaVersion: 1,
+		Action:        conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}},
+		Runtime: conformanceRuntime{
+			ClientKey: c.successorClientKey, Database: c.successorDatabase, ClientID: c.successorClientID,
+			ServerURL: c.adapter, AuthToken: c.config.AuthToken, PushBatchSize: 1000,
+		},
+	}
+}
+
+func (c *QueueReplayCoordinator) successorOperationCommand(operations []scenarios.Operation) *conformanceCommand {
+	command := c.successorCommand("client", "execute-steps", map[string]any{"client_key": c.successorClientKey})
+	command.Action.Steps = make([]conformanceStep, 0, len(operations))
+	for _, operation := range operations {
+		command.Action.Steps = append(command.Action.Steps, conformanceStep{Operation: conformanceOperation{
+			ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload),
+		}})
+	}
+	return command
+}
+
+func (c *QueueReplayCoordinator) queueSuccessorPlan() (scenarios.Operation, []scenarios.Operation, []scenarios.Operation, []scenarios.NativeCRUDTarget, error) {
+	inspection, err := scenarios.NativeCRUDInspectionForSetup(c.config.Scenario.Model.Setup[0], c.userID)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	assignment, err := scenarios.NativeCRUDInspectionAssignment(c.userID, c.successorClientID, inspection.ScopeID)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	current, err := queueReplayFinalSchema(c.config.Scenario)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	plan, err := scenarios.NewNativeCRUDPlan(reactNativeQueueReplayCRUDSchema(current), inspection.StreamGeneration, c.userID, c.successorClientID)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	insert, err := plan.Step("insert", nil, 30)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	versions := make(map[string]string, len(plan.Targets()))
+	for _, target := range plan.Targets() {
+		versions[target.TableID] = "queued-successor-preview-version"
+	}
+	update, err := plan.Step("update", versions, 32)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	bind := func(values []scenarios.Operation) ([]scenarios.Operation, error) {
+		bound := make([]scenarios.Operation, 0, len(values))
+		for index, value := range values {
+			operation, bindErr := c.config.Controller.ApplicationWrite(value)
+			if bindErr != nil {
+				return nil, fmt.Errorf("bind React Native queue successor local write %d: %w", index+1, bindErr)
+			}
+			bound = append(bound, operation)
+		}
+		return bound, nil
+	}
+	boundInsert, err := bind(insert.LocalWrites)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	boundUpdate, err := bind(update.LocalWrites)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	targets := make([]scenarios.NativeCRUDTarget, 0, len(plan.Targets()))
+	for index, target := range plan.Targets() {
+		bound, bindErr := scenarios.BindNativeCRUDTarget(target, boundInsert[index], boundUpdate[index])
+		if bindErr != nil {
+			return scenarios.Operation{}, nil, nil, nil, bindErr
+		}
+		targets = append(targets, bound)
+	}
+	return assignment, boundInsert, boundUpdate, targets, nil
+}
+
+func queueReplayFinalSchema(scenario scenarios.Scenario) (queueReplaySchema, error) {
+	var setup queueReplaySetupPayload
+	if json.Unmarshal(scenario.Model.Setup[0].Payload, &setup) != nil || setup.InitialSchema.Schema.Version == 0 || setup.InitialSchema.Schema.Hash == "" {
+		return queueReplaySchema{}, errors.New("React Native queue successor initial schema is invalid")
+	}
+	current := queueReplaySchema{Version: setup.InitialSchema.Schema.Version, Hash: setup.InitialSchema.Schema.Hash, Tables: setup.InitialSchema.Tables}
+	for index, step := range scenario.Steps {
+		_, _, _, next, err := queueReplayOperations(step, current, uint64(index*2+1))
+		if err != nil {
+			return queueReplaySchema{}, err
+		}
+		current = next
+	}
+	return current, nil
+}
+
+func reactNativeQueueReplayCRUDSchema(current queueReplaySchema) scenarios.NativeCRUDSchema {
+	tables := make([]scenarios.NativeCRUDSchemaTable, 0, len(current.Tables))
+	for _, table := range current.Tables {
+		fields := make([]scenarios.NativeCRUDSchemaField, 0, len(table.Fields))
+		for _, field := range table.Fields {
+			fields = append(fields, scenarios.NativeCRUDSchemaField{FieldID: field.FieldID, Type: field.Type, PrimaryKey: field.PrimaryKey, Writable: field.Writable})
+		}
+		tables = append(tables, scenarios.NativeCRUDSchemaTable{TableID: table.TableID, PrimaryKeyFieldID: table.PrimaryKeyFieldID, Fields: fields})
+	}
+	return scenarios.NativeCRUDSchema{Version: current.Version, Hash: current.Hash, Tables: tables}
+}
+
 func queueReplayLocalBatchCount(workload queueReplayWorkload) int {
 	if len(workload.local) == 0 {
 		return 0
@@ -1398,6 +1641,24 @@ func (stage queueReplayStage) String() string {
 		return "capture"
 	case queueReplayStageRejectedCapture:
 		return "rejected-capture"
+	case queueReplayStageSuccessorOpened:
+		return "successor-opened"
+	case queueReplayStageSuccessorBootstrapped:
+		return "successor-bootstrapped"
+	case queueReplayStageSuccessorStopped:
+		return "successor-stopped"
+	case queueReplayStageSuccessorInsert:
+		return "successor-insert"
+	case queueReplayStageSuccessorBeforeCapture:
+		return "successor-before-capture"
+	case queueReplayStageSuccessorRestarted:
+		return "successor-restarted"
+	case queueReplayStageSuccessorRestartCapture:
+		return "successor-restart-capture"
+	case queueReplayStageSuccessorUpdate:
+		return "successor-update"
+	case queueReplayStageSuccessorChangedCapture:
+		return "successor-changed-capture"
 	case queueReplayStageComplete:
 		return "complete"
 	default:
@@ -1430,6 +1691,118 @@ func queueReplayExpectedState(scenario scenarios.Scenario) (scenarios.StateFacts
 		}
 	}
 	return scenarios.StateFacts{}, errors.New("React Native queue-replay expected state is absent")
+}
+
+type queueReplayPendingMutation struct {
+	MutationID            string       `json:"mutationID"`
+	LocalOrder            int64        `json:"localOrder"`
+	TableID               string       `json:"tableID"`
+	TableName             string       `json:"tableName"`
+	RecordID              string       `json:"recordID"`
+	PrimaryKeyFieldID     string       `json:"primaryKeyFieldID"`
+	PrimaryKeyLogicalType string       `json:"primaryKeyLogicalType"`
+	Operation             string       `json:"operation"`
+	AuthoredSchema        clientSchema `json:"authoredSchema"`
+	BaseVersion           *string      `json:"baseVersion"`
+	ClientVersion         string       `json:"clientVersion"`
+	Status                string       `json:"status"`
+	SourceKind            string       `json:"sourceKind"`
+	DependsOnMutationID   *string      `json:"dependsOnMutationID"`
+	NormalizedMutationID  *string      `json:"normalizedMutationID"`
+	SealedBatchID         *string      `json:"sealedBatchID"`
+	SealedOrdinal         *int64       `json:"sealedOrdinal"`
+	AuthoredFields        []struct {
+		FieldID     string          `json:"fieldID"`
+		LogicalType string          `json:"logicalType"`
+		Value       json.RawMessage `json:"value"`
+	} `json:"authoredFields"`
+}
+
+func (c *QueueReplayCoordinator) decodeSuccessorCapture(raw json.RawMessage) ([]queueReplayPendingMutation, error) {
+	capture, err := decodeCapture(raw, []string{"pending_mutations"})
+	if err != nil {
+		return nil, fmt.Errorf("decode React Native queue successor capture: %w", err)
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "queue successor capture"); err != nil {
+		return nil, err
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || c.process == nil || process != *c.process {
+		return nil, errors.New("React Native queue successor capture process identity changed")
+	}
+	var pending []queueReplayPendingMutation
+	if err := decodeStrictValue(capture.Pending, &pending); err != nil || len(pending) > queueReplayMaximumRejectedDetails {
+		return nil, errors.New("React Native queue successor mutation inspection is invalid")
+	}
+	return pending, nil
+}
+
+func reactNativeQueueSuccessorEvidence(targets []scenarios.NativeCRUDTarget, before, restarted, changed []queueReplayPendingMutation) (scenarios.NativeQueueSuccessorEvidence, error) {
+	evidence := scenarios.NativeQueueSuccessorEvidence{Rows: make([]scenarios.NativeQueueSuccessorRow, 0, len(targets))}
+	for _, target := range targets {
+		originals := reactNativeRetainedForRow(before, target)
+		if len(originals) != 1 {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor original count for table %q is %d", target.TableID, len(originals))
+		}
+		original := originals[0]
+		restartedMutation, found := reactNativeRetainedByID(restarted, original.MutationID)
+		if !found {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor original for table %q is absent after restart", target.TableID)
+		}
+		changedOriginal, found := reactNativeRetainedByID(changed, original.MutationID)
+		if !found {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor original for table %q is absent after changed intent", target.TableID)
+		}
+		successors := make([]queueReplayPendingMutation, 0, 1)
+		for _, mutation := range reactNativeRetainedForRow(changed, target) {
+			if mutation.DependsOnMutationID != nil && *mutation.DependsOnMutationID == original.MutationID && mutation.Operation == "update" {
+				successors = append(successors, mutation)
+			}
+		}
+		if len(successors) != 1 {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor changed-intent count for table %q is %d", target.TableID, len(successors))
+		}
+		evidence.Rows = append(evidence.Rows, scenarios.NativeQueueSuccessorRow{
+			BeforeRestart: reactNativeQueuedMutation(original), AfterRestart: reactNativeQueuedMutation(restartedMutation),
+			OriginalAfterChange: reactNativeQueuedMutation(changedOriginal), Successor: reactNativeQueuedMutation(successors[0]),
+		})
+	}
+	return evidence, nil
+}
+
+func reactNativeRetainedForRow(values []queueReplayPendingMutation, target scenarios.NativeCRUDTarget) []queueReplayPendingMutation {
+	matched := make([]queueReplayPendingMutation, 0, 2)
+	for _, mutation := range values {
+		if mutation.TableName == target.TableName && mutation.RecordID == target.RecordID {
+			matched = append(matched, mutation)
+		}
+	}
+	return matched
+}
+
+func reactNativeRetainedByID(values []queueReplayPendingMutation, mutationID string) (queueReplayPendingMutation, bool) {
+	for _, mutation := range values {
+		if mutation.MutationID == mutationID {
+			return mutation, true
+		}
+	}
+	return queueReplayPendingMutation{}, false
+}
+
+func reactNativeQueuedMutation(value queueReplayPendingMutation) scenarios.NativeQueuedMutation {
+	fields := make([]scenarios.NativeQueuedField, 0, len(value.AuthoredFields))
+	for _, field := range value.AuthoredFields {
+		fields = append(fields, scenarios.NativeQueuedField{FieldID: field.FieldID, LogicalType: field.LogicalType, Value: copyRaw(field.Value)})
+	}
+	return scenarios.NativeQueuedMutation{
+		MutationID: value.MutationID, LocalOrder: value.LocalOrder, TableID: value.TableID, TableName: value.TableName,
+		RecordID: value.RecordID, PrimaryKeyFieldID: value.PrimaryKeyFieldID, PrimaryKeyLogicalType: value.PrimaryKeyLogicalType,
+		Operation: value.Operation, AuthoredSchemaVersion: int64(value.AuthoredSchema.Version), AuthoredSchemaHash: value.AuthoredSchema.Hash,
+		BaseVersion: value.BaseVersion, ClientVersion: value.ClientVersion, Status: value.Status, SourceKind: value.SourceKind,
+		DependsOnMutationID: value.DependsOnMutationID, NormalizedMutationID: value.NormalizedMutationID,
+		SealedBatchID: value.SealedBatchID, SealedOrdinal: value.SealedOrdinal, AuthoredFields: fields,
+	}
 }
 
 type queueReplaySchema struct {

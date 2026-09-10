@@ -472,7 +472,8 @@ final class HttpClient: @unchecked Sendable {
             scopeFingerprint: TransportObservationCollector.cursorFingerprint(response.scope),
             finalScopeCursorFingerprint: response.finalScopeCursor.map(
                 TransportObservationCollector.cursorFingerprint
-            )
+            ),
+            responseBodySHA256: TransportObservationCollector.bodyFingerprint(data)
         )
     }
 

@@ -695,6 +695,11 @@ private struct RetainedMutation: Encodable {
     let baseVersion: String?
     let clientVersion: String
     let status: String
+    let sourceKind: String
+    let dependsOnMutationID: String?
+    let normalizedMutationID: String?
+    let sealedBatchID: String?
+    let sealedOrdinal: Int?
     let authoredFields: [RetainedField]
 
     enum CodingKeys: String, CodingKey {
@@ -710,6 +715,11 @@ private struct RetainedMutation: Encodable {
         case baseVersion = "base_version"
         case clientVersion = "client_version"
         case status
+        case sourceKind = "source_kind"
+        case dependsOnMutationID = "depends_on_mutation_id"
+        case normalizedMutationID = "normalized_mutation_id"
+        case sealedBatchID = "sealed_batch_id"
+        case sealedOrdinal = "sealed_ordinal"
         case authoredFields = "authored_fields"
     }
 
@@ -726,6 +736,11 @@ private struct RetainedMutation: Encodable {
         baseVersion = mutation.baseVersion
         clientVersion = mutation.clientVersion
         status = mutation.status.rawValue
+        sourceKind = mutation.sourceKind
+        dependsOnMutationID = mutation.dependsOnMutationID
+        normalizedMutationID = mutation.normalizedMutationID
+        sealedBatchID = mutation.sealedBatchID
+        sealedOrdinal = mutation.sealedOrdinal
         authoredFields = mutation.authoredFields.map(RetainedField.init)
     }
 }

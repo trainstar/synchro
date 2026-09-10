@@ -53,6 +53,9 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if err := validateRebuildRequestsBindings(steps, client); err != nil {
 		return RebuildRequestsResult{}, err
 	}
+	if err := validateSwiftRebuildRequestsFaultPlans(scenario); err != nil {
+		return RebuildRequestsResult{}, err
+	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("install Swift rebuild-requests contract: %w", err)
 	}
@@ -78,7 +81,8 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	finalPage, _ := swiftScenarioOperation(steps, "STEP-PERF-REBUILD-REQUESTS-004", "rebuild/request-page")
 	pull, _ := swiftScenarioOperation(steps, "STEP-PERF-REBUILD-REQUESTS-002", "pull/request-page")
 	callID := string(*steps[scenarios.StepID("STEP-PERF-REBUILD-REQUESTS-001")].NativeBinding.CallID)
-	recoveryCallID := "rebuild_recovery"
+	firstRecoveryCallID := "rebuild_first_recovery"
+	finalRecoveryCallID := "rebuild_final_recovery"
 
 	state, err := platform.client(client)
 	if err != nil {
@@ -113,7 +117,12 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if err := validateRebuildRequestsFirstPause(firstPaused); err != nil {
 		return RebuildRequestsResult{}, err
 	}
-
+	state.mu.Lock()
+	initialTransport, transportErr := state.session.ObservationsAfter(transportCheckpoint)
+	state.mu.Unlock()
+	if transportErr != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("capture Swift first rebuild response transport: %w", transportErr)
+	}
 	concurrentCommit, _ := swiftScenarioOperation(steps, "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-COMMIT-001", "model/commit-source-transaction")
 	if _, err := controller.ApplyStep(ctx, concurrentCommit); err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("commit Swift concurrent rebuild row: %w", err)
@@ -122,8 +131,39 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if _, err := controller.ProcessStep(ctx, nil, concurrentMaterialize); err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("materialize Swift concurrent rebuild row: %w", err)
 	}
+	restart := scenarios.Operation{ContractOperation: "process", Name: "restart-client", Payload: queueJSON(map[string]any{"user_id": client.UserID, "client_id": client.ClientID})}
+	if _, err := platform.ProcessStep(ctx, client, restart); err != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("restart Swift rebuild-requests client after first page response: %w", err)
+	}
+	firstRestarted, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("capture Swift rebuild-requests first-page restart: %w", err)
+	}
+	if err := validateRebuildRequestsFirstRestart(firstRestarted); err != nil {
+		return RebuildRequestsResult{}, err
+	}
+	state.mu.Lock()
+	firstRecoveryTransportCheckpoint := state.session.Checkpoint()
+	state.mu.Unlock()
+	firstRecoveryBegin, err := platform.BeginCall(ctx, client, firstRecoveryCallID, "start", RequestOperations{firstPage})
+	if err != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("resume Swift rebuild-requests first page after restart: %w", err)
+	}
+	if firstRecoveryBegin.CallID != firstRecoveryCallID || firstRecoveryBegin.State != "in_flight" || firstRecoveryBegin.Completion != "" || len(firstRecoveryBegin.Steps) != 1 {
+		return RebuildRequestsResult{}, errors.New("Swift rebuild-requests first-page recovery did not replay the first page")
+	}
+	if err := validateRebuildRequestsStepWire(scenario, "STEP-PERF-REBUILD-REQUESTS-003", firstRecoveryBegin.Steps[0]); err != nil {
+		return RebuildRequestsResult{}, err
+	}
+	firstReplayed, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return RebuildRequestsResult{}, fmt.Errorf("capture Swift replayed first rebuild page: %w", err)
+	}
+	if err := validateRebuildRequestsFirstReplay(firstPaused, firstReplayed); err != nil {
+		return RebuildRequestsResult{}, err
+	}
 
-	finalResult, err := platform.AwaitStep(ctx, client, callID, finalPage)
+	finalResult, err := platform.AwaitStep(ctx, client, firstRecoveryCallID, finalPage)
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("await Swift final rebuild page: %w", err)
 	}
@@ -132,12 +172,11 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	}
 
 	state.mu.Lock()
-	interruptedTransport, transportErr := state.session.ObservationsAfter(transportCheckpoint)
+	firstRecoveryTransport, transportErr := state.session.ObservationsAfter(firstRecoveryTransportCheckpoint)
 	state.mu.Unlock()
 	if transportErr != nil {
-		return RebuildRequestsResult{}, fmt.Errorf("capture Swift rebuild-requests interrupted transport: %w", transportErr)
+		return RebuildRequestsResult{}, fmt.Errorf("capture Swift rebuild-requests first recovery transport: %w", transportErr)
 	}
-	restart := scenarios.Operation{ContractOperation: "process", Name: "restart-client", Payload: queueJSON(map[string]any{"user_id": client.UserID, "client_id": client.ClientID})}
 	if _, err := platform.ProcessStep(ctx, client, restart); err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("restart Swift rebuild-requests client after final page response: %w", err)
 	}
@@ -152,17 +191,17 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	recoveryTransportCheckpoint := state.session.Checkpoint()
 	state.mu.Unlock()
 
-	recoveryBegin, err := platform.BeginCall(ctx, client, recoveryCallID, "start", RequestOperations{finalPage})
+	recoveryBegin, err := platform.BeginCall(ctx, client, finalRecoveryCallID, "start", RequestOperations{finalPage})
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("resume Swift rebuild-requests call after restart: %w", err)
 	}
-	if recoveryBegin.CallID != recoveryCallID || recoveryBegin.State != "in_flight" || recoveryBegin.Completion != "" || len(recoveryBegin.Steps) != 1 {
+	if recoveryBegin.CallID != finalRecoveryCallID || recoveryBegin.State != "in_flight" || recoveryBegin.Completion != "" || len(recoveryBegin.Steps) != 1 {
 		return RebuildRequestsResult{}, errors.New("Swift rebuild-requests recovery did not replay the final page")
 	}
 	if err := validateRebuildRequestsStepWire(scenario, "STEP-PERF-REBUILD-REQUESTS-004", recoveryBegin.Steps[0]); err != nil {
 		return RebuildRequestsResult{}, err
 	}
-	pullResult, err := platform.AwaitStep(ctx, client, recoveryCallID, pull)
+	pullResult, err := platform.AwaitStep(ctx, client, finalRecoveryCallID, pull)
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("await Swift post-rebuild pull: %w", err)
 	}
@@ -176,11 +215,11 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if err := validateRebuildRequestsPullPause(firstPaused, pullPaused); err != nil {
 		return RebuildRequestsResult{}, err
 	}
-	recovered, err := platform.AwaitCall(ctx, client, recoveryCallID)
+	recovered, err := platform.AwaitCall(ctx, client, finalRecoveryCallID)
 	if err != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("complete Swift rebuild-requests recovery call: %w", err)
 	}
-	if recovered.CallID != recoveryCallID || recovered.State != "completed" || recovered.Completion != "idle" {
+	if recovered.CallID != finalRecoveryCallID || recovered.State != "completed" || recovered.Completion != "idle" {
 		return RebuildRequestsResult{}, errors.New("Swift rebuild-requests recovery call did not complete idle")
 	}
 
@@ -190,7 +229,8 @@ func RunRebuildRequestsScenario(ctx context.Context, scenario scenarios.Scenario
 	if transportErr != nil {
 		return RebuildRequestsResult{}, fmt.Errorf("capture Swift rebuild-requests recovery transport: %w", transportErr)
 	}
-	transport := append(interruptedTransport, recoveredTransport...)
+	transport := append(initialTransport, firstRecoveryTransport...)
+	transport = append(transport, recoveredTransport...)
 	if err := validateRebuildRequestsTransport(scenario, transport); err != nil {
 		return RebuildRequestsResult{}, err
 	}
@@ -293,15 +333,50 @@ func validateRebuildRequestsStepWire(scenario scenarios.Scenario, stepID string,
 }
 
 func validateRebuildRequestsFirstPause(snapshot runnerResult) error {
-	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeRows) != 0 || len(snapshot.RowMetadataRecords) != 0 || snapshot.RebuildAttempts[0].Cursor != nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeStates) != 0 || len(snapshot.ScopeRows) != 0 || len(snapshot.RowMetadataRecords) != 0 || snapshot.RebuildAttempts[0].Cursor != nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
 		return errors.New("Swift first rebuild page was not paused before local apply")
 	}
 	return nil
 }
 
+func validateRebuildRequestsFirstRestart(snapshot runnerResult) error {
+	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeStates) != 0 || len(snapshot.ScopeRows) != 0 || len(snapshot.RowMetadataRecords) != 0 || len(snapshot.ApplicationRows) != 0 || snapshot.RebuildAttempts[0].Cursor != nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
+		return errors.New("Swift rebuild restart did not preserve the unapplied first page")
+	}
+	return nil
+}
+
+func validateRebuildRequestsFirstReplay(first, replay runnerResult) error {
+	if err := validateRebuildRequestsFirstPause(replay); err != nil {
+		return err
+	}
+	if first.RebuildAttempts[0].RebuildID == "" || first.RebuildAttempts[0].RebuildID != replay.RebuildAttempts[0].RebuildID {
+		return errors.New("Swift rebuild recovery changed the first-page rebuild identity")
+	}
+	return nil
+}
+
 func validateRebuildRequestsRestart(snapshot runnerResult) error {
-	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.ApplicationRows) != 1 || snapshot.RebuildAttempts[0].Cursor == nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeStates) != 0 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.ApplicationRows) != 1 || snapshot.RebuildAttempts[0].Cursor == nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
 		return errors.New("Swift rebuild restart did not preserve one durable partial page")
+	}
+	return nil
+}
+
+func validateSwiftRebuildRequestsFaultPlans(scenario scenarios.Scenario) error {
+	required := map[string]bool{
+		"FPL-PERF-REBUILD-REQUESTS-PAGE-REPLAY-001":     false,
+		"FPL-PERF-REBUILD-REQUESTS-SCOPE-ISOLATION-001": false,
+	}
+	for _, plan := range scenario.FaultPlans {
+		if _, found := required[string(plan.ID)]; found {
+			required[string(plan.ID)] = true
+		}
+	}
+	for id, found := range required {
+		if !found {
+			return fmt.Errorf("Swift rebuild-requests fault plan %s is absent", id)
+		}
 	}
 	return nil
 }
@@ -333,12 +408,14 @@ func validateRebuildRequestsTransport(scenario scenarios.Scenario, observations 
 	ids := []string{
 		"STEP-PERF-REBUILD-REQUESTS-001",
 		"STEP-PERF-REBUILD-REQUESTS-003",
+		"STEP-PERF-REBUILD-REQUESTS-001",
+		"STEP-PERF-REBUILD-REQUESTS-003",
 		"STEP-PERF-REBUILD-REQUESTS-004",
 		"STEP-PERF-REBUILD-REQUESTS-001",
 		"STEP-PERF-REBUILD-REQUESTS-004",
 		"STEP-PERF-REBUILD-REQUESTS-002",
 	}
-	classes := []string{"connect", "rebuild", "rebuild", "connect", "rebuild", "pull"}
+	classes := []string{"connect", "rebuild", "connect", "rebuild", "rebuild", "connect", "rebuild", "pull"}
 	if len(observations) != len(ids) {
 		return fmt.Errorf("Swift rebuild-requests transport count = %d, want %d", len(observations), len(ids))
 	}
@@ -351,10 +428,11 @@ func validateRebuildRequestsTransport(scenario scenarios.Scenario, observations 
 		}
 	}
 	first := observations[1]
-	final := observations[2]
-	replayedFinal := observations[4]
-	pull := observations[5]
-	if first.RequestFacts == nil || final.RequestFacts == nil || replayedFinal.RequestFacts == nil || pull.RequestFacts == nil || first.RebuildResponseFacts == nil || final.RebuildResponseFacts == nil || replayedFinal.RebuildResponseFacts == nil || pull.PullResponseFacts == nil {
+	replayedFirst := observations[3]
+	final := observations[4]
+	replayedFinal := observations[6]
+	pull := observations[7]
+	if first.RequestFacts == nil || replayedFirst.RequestFacts == nil || final.RequestFacts == nil || replayedFinal.RequestFacts == nil || pull.RequestFacts == nil || first.RebuildResponseFacts == nil || replayedFirst.RebuildResponseFacts == nil || final.RebuildResponseFacts == nil || replayedFinal.RebuildResponseFacts == nil || pull.PullResponseFacts == nil {
 		return errors.New("Swift rebuild-requests transport facts are incomplete")
 	}
 	firstRequest := first.RequestFacts
@@ -373,8 +451,10 @@ func validateRebuildRequestsTransport(scenario scenarios.Scenario, observations 
 	if finalResponse.RecordCount != 1 || finalResponse.HasMore || finalResponse.HasCursor || !finalResponse.HasFinalScopeCursor || !finalResponse.HasChecksum || finalResponse.FinalScopeCursorFingerprint == nil || finalResponse.ScopeFingerprint != *finalRequest.ScopeFingerprint {
 		return errors.New("Swift final rebuild response is not a terminal one-row page")
 	}
-	if !reflect.DeepEqual(final.RequestFacts, replayedFinal.RequestFacts) || !reflect.DeepEqual(final.RebuildResponseFacts, replayedFinal.RebuildResponseFacts) {
-		return errors.New("Swift rebuild recovery did not replay the stored final page")
+	if first.RebuildResponseFacts.ResponseBodySHA256 == nil || !validLowerHexDigest(*first.RebuildResponseFacts.ResponseBodySHA256) || final.RebuildResponseFacts.ResponseBodySHA256 == nil || !validLowerHexDigest(*final.RebuildResponseFacts.ResponseBodySHA256) ||
+		!reflect.DeepEqual(first.RequestFacts, replayedFirst.RequestFacts) || !reflect.DeepEqual(first.RebuildResponseFacts, replayedFirst.RebuildResponseFacts) ||
+		!reflect.DeepEqual(final.RequestFacts, replayedFinal.RequestFacts) || !reflect.DeepEqual(final.RebuildResponseFacts, replayedFinal.RebuildResponseFacts) {
+		return errors.New("Swift rebuild recovery did not replay the exact stored first and final pages")
 	}
 	if pull.RequestFacts.ClientGeneration == nil || *pull.RequestFacts.ClientGeneration != *firstRequest.ClientGeneration || pull.RequestFacts.SchemaVersion != firstRequest.SchemaVersion || pull.RequestFacts.SchemaHash != firstRequest.SchemaHash || pull.RequestFacts.ScopeSetVersion == nil || pull.RequestFacts.ScopeCount == nil || *pull.RequestFacts.ScopeCount != 1 || pull.RequestFacts.Limit == nil || *pull.RequestFacts.Limit != 1 || pull.CursorFingerprintsComplete == nil || !*pull.CursorFingerprintsComplete || len(pull.CursorFingerprints) != 1 || pull.CursorFingerprints[0] != *finalResponse.FinalScopeCursorFingerprint {
 		return errors.New("Swift post-rebuild pull is not bound to the final rebuild cursor")
@@ -386,7 +466,7 @@ func validateRebuildRequestsTransport(scenario scenarios.Scenario, observations 
 }
 
 func resolveRebuildRequestsIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, transport []transportObservation, firstPaused, final runnerResult) (rebuildRequestsIdentityEvidence, error) {
-	if len(aliases) != len(rebuildRequestsAliasNames) || len(transport) != 6 || len(firstPaused.RebuildAttempts) != 1 {
+	if len(aliases) != len(rebuildRequestsAliasNames) || len(transport) != 8 || len(firstPaused.RebuildAttempts) != 1 {
 		return rebuildRequestsIdentityEvidence{}, errors.New("Swift rebuild-requests identity evidence is incomplete")
 	}
 	wanted := make(map[string]struct{}, len(rebuildRequestsAliasNames))
@@ -414,7 +494,7 @@ func resolveRebuildRequestsIdentities(controller *blackbox.NativeController, ali
 		applicationIdentifiers[value.Alias] = value.ApplicationIdentifier
 	}
 	firstRequest := transport[1].RequestFacts
-	pullRequest := transport[5].RequestFacts
+	pullRequest := transport[7].RequestFacts
 	if firstRequest == nil || firstRequest.ClientGeneration == nil || pullRequest == nil || pullRequest.ScopeSetVersion == nil {
 		return rebuildRequestsIdentityEvidence{}, errors.New("Swift rebuild-requests generated transport identities are absent")
 	}
@@ -515,7 +595,7 @@ func validateRebuildRequestsState(server, client scenarios.StateFacts, beforePul
 	}
 	storedChecksum, storedErr := swiftChecksumDigest(final.ScopeStates[0].Checksum)
 	localChecksum, localErr := swiftChecksumDigest(pointerString(final.ScopeStates[0].LocalChecksum))
-	if final.ScopeStates[0].Cursor == nil || storedErr != nil || localErr != nil || storedChecksum == nil || localChecksum == nil || *storedChecksum != *localChecksum || transport[5].PullResponseFacts == nil || len(transport[5].PullResponseFacts.ScopeCursorFingerprints) != 1 || transport[5].PullResponseFacts.ScopeCursorFingerprints[0] != cursorFingerprint(*final.ScopeStates[0].Cursor) {
+	if final.ScopeStates[0].Cursor == nil || storedErr != nil || localErr != nil || storedChecksum == nil || localChecksum == nil || *storedChecksum != *localChecksum || transport[7].PullResponseFacts == nil || len(transport[7].PullResponseFacts.ScopeCursorFingerprints) != 1 || transport[7].PullResponseFacts.ScopeCursorFingerprints[0] != cursorFingerprint(*final.ScopeStates[0].Cursor) {
 		return errors.New("Swift rebuild-requests final checkpoint is not verified")
 	}
 	return nil

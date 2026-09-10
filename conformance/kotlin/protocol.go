@@ -241,6 +241,7 @@ type TransportRebuildResponseFacts struct {
 	HasChecksum                 bool    `json:"has_checksum"`
 	ScopeFingerprint            string  `json:"scope_fingerprint"`
 	FinalScopeCursorFingerprint *string `json:"final_scope_cursor_fingerprint"`
+	ResponseBodySHA256          *string `json:"response_body_sha256"`
 }
 
 type TransportPullResponseFacts struct {
@@ -998,7 +999,7 @@ func validateTransportRequestAndResponseFacts(observation TransportObservation) 
 
 	if observation.StatusCode == 200 && observation.OperationClass == "rebuild" {
 		response := observation.RebuildResponseFacts
-		if response == nil || response.RecordCount < 0 || response.RecordCount > 1000 || !validLowerHexDigest(response.ScopeFingerprint) || facts == nil || facts.ScopeFingerprint == nil || response.ScopeFingerprint != *facts.ScopeFingerprint || response.HasFinalScopeCursor != (response.FinalScopeCursorFingerprint != nil) || response.FinalScopeCursorFingerprint != nil && !validLowerHexDigest(*response.FinalScopeCursorFingerprint) || observation.PullResponseFacts != nil {
+		if response == nil || response.RecordCount < 0 || response.RecordCount > 1000 || !validLowerHexDigest(response.ScopeFingerprint) || facts == nil || facts.ScopeFingerprint == nil || response.ScopeFingerprint != *facts.ScopeFingerprint || response.HasFinalScopeCursor != (response.FinalScopeCursorFingerprint != nil) || response.FinalScopeCursorFingerprint != nil && !validLowerHexDigest(*response.FinalScopeCursorFingerprint) || response.ResponseBodySHA256 != nil && !validLowerHexDigest(*response.ResponseBodySHA256) || observation.PullResponseFacts != nil {
 			return errors.New("Kotlin rebuild response facts are invalid")
 		}
 	} else if observation.RebuildResponseFacts != nil {

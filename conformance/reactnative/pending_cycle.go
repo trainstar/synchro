@@ -74,6 +74,13 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 		scenarios.OperationKey(scenario.Model.Setup[0]) != "model/install-current-contract" {
 		return errors.New("React Native pending-cycle scenario contract is invalid")
 	}
+	if !orderedIdentifiersEqual(scenario.RequirementIDs, []string{
+		"SYNC-MUTATION-002", "SYNC-CONFLICT-001", "SYNC-CONFLICT-002", "SYNC-TIME-002", "SYNC-VOCAB-001",
+		"SYNC-LOCALSQL-001", "SYNC-CRUD-001", "SYNC-APPLY-001", "SYNC-VERSION-002", "SYNC-SCOPE-006",
+		"SYNC-CLEANUP-001", "SYNC-CURSOR-003", "SYNC-BOUNDARY-003", "SYNC-CRUD-002",
+	}) {
+		return errors.New("React Native pending-cycle requirement set changed")
+	}
 	if len(scenario.Steps) != len(pendingCycleStepOrder) {
 		return errors.New("React Native pending-cycle step set changed")
 	}
@@ -120,6 +127,7 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 	}
 	semantic, performance := false, false
 	claimSpecs := map[string]struct{ requirement, control string }{
+		"ASSERT-PERF-PENDING-CYCLE-CAS-001":      {"SYNC-CONFLICT-001", "CTRL-CONFLICT-001"},
 		"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001": {"SYNC-LOCALSQL-001", "CTRL-LOCALSQL-001"},
 		"ASSERT-PERF-PENDING-CYCLE-CRUD-001":     {"SYNC-CRUD-001", "CTRL-CRUD-001"},
 		"ASSERT-PERF-PENDING-CYCLE-APPLY-001":    {"SYNC-APPLY-001", "CTRL-APPLY-001"},
@@ -180,13 +188,33 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-PENDING-CYCLE-SCOPE-006", "CTRL-SCOPE-006") {
 				obligations[id]++
 			}
+		case "OBL-PERF-PENDING-CYCLE-CONFLICT-001-RM-001":
+			if proofTargetMatches(obligation, "reference-model", "", "test-conformance", "", "") {
+				obligations[id]++
+			}
+		case "OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001":
+			if proofTargetMatches(obligation, "server-black-box", "SUP-PG-LINUX-X64-001", "test-blackbox", "", "") {
+				obligations[id]++
+			}
+		case "OBL-PERF-PENDING-CYCLE-CONFLICT-001-FAULT-LINUX-X64-001":
+			if proofTargetMatches(obligation, "fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox", "FPL-PERF-PENDING-CYCLE-CONFLICT-ATOMIC-001", "CTRL-CONFLICT-001") {
+				obligations[id]++
+			}
+		case "OBL-PERF-PENDING-CYCLE-CONFLICT-001-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-integration-mutants", "FPL-PERF-PENDING-CYCLE-CONFLICT-ATOMIC-001", "CTRL-CONFLICT-001") {
+				obligations[id]++
+			}
 		}
 	}
 	if obligations["OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-CONTROL-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-SCOPE-006-FAULT-001"] != 1 ||
-		obligations["OBL-PERF-PENDING-CYCLE-SCOPE-006-CONTROL-001"] != 1 {
+		obligations["OBL-PERF-PENDING-CYCLE-SCOPE-006-CONTROL-001"] != 1 ||
+		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-RM-001"] != 1 ||
+		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001"] != 1 ||
+		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-FAULT-LINUX-X64-001"] != 1 ||
+		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-CONTROL-001"] != 1 {
 		return errors.New("React Native pending-cycle proof obligations are invalid")
 	}
 	return nil

@@ -23,6 +23,7 @@ type QueueReplayResult struct {
 	ReplayCalls []SynchronizationResult
 	ClientFacts []CaptureFacts
 	ServerFacts scenarios.StateFacts
+	Successor   scenarios.NativeQueueSuccessorEvidence
 	CRUD        scenarios.NativeCRUDEvidence
 }
 
@@ -226,11 +227,183 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 	if err := validateKotlinStateProjection(expected, actual); err != nil {
 		return QueueReplayResult{}, err
 	}
+	successor, err := runKotlinQueueSuccessorProof(ctx, scenario.Model.Setup[0], current, controller, platform, client)
+	if err != nil {
+		return QueueReplayResult{}, err
+	}
 	crud, err := runKotlinQueueReplayCRUD(ctx, scenario.Model.Setup[0], current, controller, platform, client)
 	if err != nil {
 		return QueueReplayResult{}, err
 	}
-	return QueueReplayResult{ReplayCalls: replayCalls, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, CRUD: crud}, nil
+	return QueueReplayResult{ReplayCalls: replayCalls, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, Successor: successor, CRUD: crud}, nil
+}
+
+func runKotlinQueueSuccessorProof(ctx context.Context, setup scenarios.Operation, current queueSchema, controller *blackbox.NativeController, platform *Platform, client Client) (scenarios.NativeQueueSuccessorEvidence, error) {
+	inspection, err := scenarios.NativeCRUDInspectionForSetup(setup, client.UserID)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	proofClient := Client{
+		Key: client.Key + "-successor-proof", UserID: client.UserID,
+		ClientID: client.ClientID + "-successor-proof", DatabaseKey: client.DatabaseKey + "-successor-proof",
+	}
+	assignment, err := scenarios.NativeCRUDInspectionAssignment(proofClient.UserID, proofClient.ClientID, inspection.ScopeID)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	if observation, applyErr := controller.ApplyStep(ctx, assignment); applyErr != nil || observation.Disposition != "success" {
+		return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("assign Kotlin Android queue successor proof scope: %w", kotlinResultError(applyErr, observation.Disposition))
+	}
+	if err := platform.Install(ctx, InstallRequest{Client: proofClient, Initialization: "current"}); err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("install Kotlin Android queue successor proof client: %w", err)
+	}
+	plan, err := scenarios.NewNativeCRUDPlan(kotlinQueueReplayCRUDSchema(current), inspection.StreamGeneration, proofClient.UserID, proofClient.ClientID)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	insert, err := plan.Step("insert", nil, 30)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	versions := make(map[string]string, len(plan.Targets()))
+	for _, target := range plan.Targets() {
+		versions[target.TableID] = "queued-successor-preview-version"
+	}
+	update, err := plan.Step("update", versions, 32)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	boundInsert, err := bindKotlinQueueReplayCRUDWrites(controller, insert.LocalWrites)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	boundUpdate, err := bindKotlinQueueReplayCRUDWrites(controller, update.LocalWrites)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	targets, err := bindKotlinQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundUpdate)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	if err := applyKotlinQueueReplayCRUDWrites(ctx, platform, proofClient, boundInsert, "successor proof insert"); err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	before, err := platform.scenarioSnapshot(ctx, proofClient)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("capture Kotlin Android queued intent before restart: %w", err)
+	}
+	restart, err := scenarios.NativeCRUDRestartOperation(proofClient.UserID, proofClient.ClientID)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	if observation, restartErr := platform.ProcessStep(ctx, proofClient, restart); restartErr != nil || observation.Disposition != "success" {
+		return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("restart Kotlin Android queue successor proof client: %w", kotlinResultError(restartErr, observation.Disposition))
+	}
+	afterRestart, err := platform.scenarioSnapshot(ctx, proofClient)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("capture Kotlin Android queued intent after restart: %w", err)
+	}
+	if err := applyKotlinQueueReplayCRUDWrites(ctx, platform, proofClient, boundUpdate, "successor proof update"); err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	afterChange, err := platform.scenarioSnapshot(ctx, proofClient)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("capture Kotlin Android changed queued intent: %w", err)
+	}
+	evidence, err := kotlinQueueSuccessorEvidence(targets, before.RetainedMutations, afterRestart.RetainedMutations, afterChange.RetainedMutations)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	if err := scenarios.ValidateNativeQueueSuccessorEvidence(evidence); err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("validate Kotlin Android queue successor evidence: %w", err)
+	}
+	return evidence, nil
+}
+
+func kotlinQueueSuccessorEvidence(targets []scenarios.NativeCRUDTarget, beforeRaw, restartedRaw, changedRaw json.RawMessage) (scenarios.NativeQueueSuccessorEvidence, error) {
+	decode := func(raw json.RawMessage) ([]retainedMutation, error) {
+		var values []retainedMutation
+		if err := decodeFactArray(raw, &values, maximumRecords); err != nil {
+			return nil, errors.New("Kotlin Android queue successor mutation inspection is invalid")
+		}
+		return values, nil
+	}
+	before, err := decode(beforeRaw)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	restarted, err := decode(restartedRaw)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	changed, err := decode(changedRaw)
+	if err != nil {
+		return scenarios.NativeQueueSuccessorEvidence{}, err
+	}
+	evidence := scenarios.NativeQueueSuccessorEvidence{Rows: make([]scenarios.NativeQueueSuccessorRow, 0, len(targets))}
+	for _, target := range targets {
+		originals := kotlinRetainedForRow(before, target)
+		if len(originals) != 1 {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("Kotlin Android queue successor original count for table %q is %d", target.TableID, len(originals))
+		}
+		original := originals[0]
+		restartedMutation, found := kotlinRetainedByID(restarted, original.MutationID)
+		if !found {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("Kotlin Android queue successor original for table %q is absent after restart", target.TableID)
+		}
+		changedOriginal, found := kotlinRetainedByID(changed, original.MutationID)
+		if !found {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("Kotlin Android queue successor original for table %q is absent after changed intent", target.TableID)
+		}
+		successors := make([]retainedMutation, 0, 1)
+		for _, mutation := range kotlinRetainedForRow(changed, target) {
+			if mutation.DependsOnMutationID != nil && *mutation.DependsOnMutationID == original.MutationID && mutation.Operation == "update" {
+				successors = append(successors, mutation)
+			}
+		}
+		if len(successors) != 1 {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("Kotlin Android queue successor changed-intent count for table %q is %d", target.TableID, len(successors))
+		}
+		evidence.Rows = append(evidence.Rows, scenarios.NativeQueueSuccessorRow{
+			BeforeRestart: kotlinNativeQueuedMutation(original), AfterRestart: kotlinNativeQueuedMutation(restartedMutation),
+			OriginalAfterChange: kotlinNativeQueuedMutation(changedOriginal), Successor: kotlinNativeQueuedMutation(successors[0]),
+		})
+	}
+	return evidence, nil
+}
+
+func kotlinRetainedForRow(values []retainedMutation, target scenarios.NativeCRUDTarget) []retainedMutation {
+	matched := make([]retainedMutation, 0, 2)
+	for _, mutation := range values {
+		if mutation.TableName == target.TableName && mutation.RecordID == target.RecordID {
+			matched = append(matched, mutation)
+		}
+	}
+	return matched
+}
+
+func kotlinRetainedByID(values []retainedMutation, mutationID string) (retainedMutation, bool) {
+	for _, mutation := range values {
+		if mutation.MutationID == mutationID {
+			return mutation, true
+		}
+	}
+	return retainedMutation{}, false
+}
+
+func kotlinNativeQueuedMutation(value retainedMutation) scenarios.NativeQueuedMutation {
+	fields := make([]scenarios.NativeQueuedField, 0, len(value.AuthoredFields))
+	for _, field := range value.AuthoredFields {
+		fields = append(fields, scenarios.NativeQueuedField{FieldID: field.FieldID, LogicalType: field.LogicalType, Value: append(json.RawMessage(nil), field.Value...)})
+	}
+	return scenarios.NativeQueuedMutation{
+		MutationID: value.MutationID, LocalOrder: value.LocalOrder, TableID: value.TableID, TableName: value.TableName,
+		RecordID: value.RecordID, PrimaryKeyFieldID: value.PrimaryKeyFieldID, PrimaryKeyLogicalType: value.PrimaryKeyLogicalType,
+		Operation: value.Operation, AuthoredSchemaVersion: value.AuthoredSchema.Version, AuthoredSchemaHash: value.AuthoredSchema.Hash,
+		BaseVersion: value.BaseVersion, ClientVersion: value.ClientVersion, Status: value.Status, SourceKind: value.SourceKind,
+		DependsOnMutationID: value.DependsOnMutationID, NormalizedMutationID: value.NormalizedMutationID,
+		SealedBatchID: value.SealedBatchID, SealedOrdinal: value.SealedOrdinal, AuthoredFields: fields,
+	}
 }
 
 func runKotlinQueueReplayCRUD(ctx context.Context, setup scenarios.Operation, current queueSchema, controller *blackbox.NativeController, platform *Platform, client Client) (scenarios.NativeCRUDEvidence, error) {

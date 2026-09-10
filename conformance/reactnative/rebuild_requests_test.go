@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/trainstar/synchro/conformance/internal/contract"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -36,6 +37,27 @@ func TestValidateRebuildRequestsScenarioRejectsContractChanges(t *testing.T) {
 			for index := range scenario.ProofObligations {
 				if string(scenario.ProofObligations[index].ObligationID) == "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001" {
 					scenario.ProofObligations[index].MakeTarget = "test-rn-rebuild-requests-android"
+				}
+			}
+		}},
+		{"page replay assertion claim", func(scenario *scenarios.Scenario) {
+			for index := range scenario.Assertions {
+				if string(scenario.Assertions[index].ID) == "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001" {
+					scenario.Assertions[index].RequirementIDs = []contract.RequirementID{"SYNC-REBUILD-010"}
+				}
+			}
+		}},
+		{"native isolation proof claim", func(scenario *scenarios.Scenario) {
+			for index := range scenario.ProofObligations {
+				if string(scenario.ProofObligations[index].ObligationID) == "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001" {
+					scenario.ProofObligations[index].AssertionIDs = scenario.ProofObligations[index].AssertionIDs[:len(scenario.ProofObligations[index].AssertionIDs)-1]
+				}
+			}
+		}},
+		{"scope isolation control target", func(scenario *scenarios.Scenario) {
+			for index := range scenario.ProofObligations {
+				if string(scenario.ProofObligations[index].ObligationID) == "OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-CONTROL-001" {
+					scenario.ProofObligations[index].MakeTarget = "test-conformance"
 				}
 			}
 		}},
@@ -66,7 +88,7 @@ func TestNewRebuildRequestsCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testi
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android rebuild-requests adapter URL = %q", coordinator.adapter)
 	}
-	if got, want := coordinator.ExchangeCount(), 12; got != want {
+	if got, want := coordinator.ExchangeCount(), 15; got != want {
 		t.Fatalf("rebuild-requests exchange count = %d, want %d", got, want)
 	}
 }
@@ -88,8 +110,9 @@ func TestRebuildRequestsStagesOnePublicStepPerCommand(t *testing.T) {
 	}{
 		{rebuildRequestsStageBegin, "client", "begin-call", rebuildRequestsStepOrder[3]},
 		{rebuildRequestsStageFirstPage, "observer", "await-step", rebuildRequestsStepOrder[5]},
+		{rebuildRequestsStageFirstRecoveryPage, "observer", "await-step", rebuildRequestsStepOrder[5]},
 		{rebuildRequestsStageFinalPage, "observer", "await-step", rebuildRequestsStepOrder[9]},
-		{rebuildRequestsStageRecoveryFinalPage, "observer", "await-step", rebuildRequestsStepOrder[9]},
+		{rebuildRequestsStageFinalRecoveryPage, "observer", "await-step", rebuildRequestsStepOrder[9]},
 		{rebuildRequestsStagePull, "observer", "await-step", rebuildRequestsStepOrder[12]},
 	}
 	for _, test := range tests {
@@ -142,17 +165,20 @@ func TestRebuildRequestsAuthoredFlowMatchesExchangeCount(t *testing.T) {
 	}
 
 	expectedCommands := map[rebuildRequestsStage][2]string{
-		rebuildRequestsStageOpen:              {"client", "open"},
-		rebuildRequestsStageBegin:             {"client", "begin-call"},
-		rebuildRequestsStageFirstPage:         {"observer", "await-step"},
-		rebuildRequestsStageFinalPage:         {"observer", "await-step"},
-		rebuildRequestsStageRestart:           {"client", "open"},
-		rebuildRequestsStageRecoveryBegin:     {"client", "begin-call"},
-		rebuildRequestsStageRecoveryFinalPage: {"observer", "await-step"},
-		rebuildRequestsStagePull:              {"observer", "await-step"},
-		rebuildRequestsStageAwaitCall:         {"client", "await-call"},
-		rebuildRequestsStageFinalCapture:      {"observer", "capture"},
-		rebuildRequestsStageApplicationRows:   {"observer", "capture"},
+		rebuildRequestsStageOpen:               {"client", "open"},
+		rebuildRequestsStageBegin:              {"client", "begin-call"},
+		rebuildRequestsStageFirstPage:          {"observer", "await-step"},
+		rebuildRequestsStageFirstRestart:       {"client", "open"},
+		rebuildRequestsStageFirstRecoveryBegin: {"client", "begin-call"},
+		rebuildRequestsStageFirstRecoveryPage:  {"observer", "await-step"},
+		rebuildRequestsStageFinalPage:          {"observer", "await-step"},
+		rebuildRequestsStageFinalRestart:       {"client", "open"},
+		rebuildRequestsStageFinalRecoveryBegin: {"client", "begin-call"},
+		rebuildRequestsStageFinalRecoveryPage:  {"observer", "await-step"},
+		rebuildRequestsStagePull:               {"observer", "await-step"},
+		rebuildRequestsStageAwaitCall:          {"client", "await-call"},
+		rebuildRequestsStageFinalCapture:       {"observer", "capture"},
+		rebuildRequestsStageApplicationRows:    {"observer", "capture"},
 	}
 	commands := 0
 	for coordinator.stage != rebuildRequestsStageComplete {
@@ -181,7 +207,7 @@ func TestRebuildRequestsAuthoredFlowMatchesExchangeCount(t *testing.T) {
 	if got, want := coordinator.ExchangeCount(), commands+1; got != want {
 		t.Fatalf("rebuild-requests full-flow exchange count = %d, want command walk plus terminal exchange %d", got, want)
 	}
-	if got, want := coordinator.ExchangeCount(), 12; got != want {
+	if got, want := coordinator.ExchangeCount(), 15; got != want {
 		t.Fatalf("rebuild-requests ExchangeCount = %d, want authored e2e stage count %d", got, want)
 	}
 	if got, want := coordinator.nextSeq-1, uint64(commands); got != want {
@@ -192,7 +218,7 @@ func TestRebuildRequestsAuthoredFlowMatchesExchangeCount(t *testing.T) {
 		t.Fatalf("rebuild-requests terminal exchange status = %d, want %d", terminal.Code, http.StatusUnprocessableEntity)
 	}
 	_, terminalErr := coordinator.Result()
-	if terminalErr == nil || !strings.Contains(terminalErr.Error(), "current stage=complete") || !strings.Contains(terminalErr.Error(), "exchanges served=11") || !strings.Contains(terminalErr.Error(), "ExchangeCount=12") {
+	if terminalErr == nil || !strings.Contains(terminalErr.Error(), "current stage=complete") || !strings.Contains(terminalErr.Error(), "exchanges served=14") || !strings.Contains(terminalErr.Error(), "ExchangeCount=15") {
 		t.Fatalf("rebuild-requests terminal error = %v, want current stage, served exchanges, and ExchangeCount", terminalErr)
 	}
 }
@@ -206,10 +232,10 @@ func TestRebuildRequestsIncompleteResultNamesServedAndExpectedExchanges(t *testi
 	}
 	defer func() { _ = coordinator.Close(context.Background()) }()
 	coordinator.stage = rebuildRequestsStageComplete
-	coordinator.nextSeq = 12
+	coordinator.nextSeq = 15
 
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=11") || !strings.Contains(err.Error(), "ExchangeCount=12") {
+	if err == nil || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=14") || !strings.Contains(err.Error(), "ExchangeCount=15") {
 		t.Fatalf("incomplete rebuild-requests error = %v, want current stage, served exchanges, and ExchangeCount", err)
 	}
 }
@@ -224,10 +250,10 @@ func TestRebuildRequestsFailedResultNamesServedAndExpectedExchanges(t *testing.T
 	defer func() { _ = coordinator.Close(context.Background()) }()
 	coordinator.failed = fmt.Errorf("terminal validation failed")
 	coordinator.stage = rebuildRequestsStageComplete
-	coordinator.nextSeq = 12
+	coordinator.nextSeq = 15
 
 	_, err = coordinator.Result()
-	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=11") || !strings.Contains(err.Error(), "ExchangeCount=12") {
+	if err == nil || !strings.Contains(err.Error(), "terminal validation failed") || !strings.Contains(err.Error(), "current stage=complete") || !strings.Contains(err.Error(), "exchanges served=14") || !strings.Contains(err.Error(), "ExchangeCount=15") {
 		t.Fatalf("failed rebuild-requests error = %v, want cause, current stage, served exchanges, and ExchangeCount", err)
 	}
 }
@@ -297,9 +323,11 @@ func TestRebuildRequestsStageResultKindsMatchRunner(t *testing.T) {
 		wantErr  bool
 	}{
 		{rebuildRequestsStageFirstPage, callBegun, "call-begun", false},
+		{rebuildRequestsStageFirstRestart, awaited, "awaited", false},
+		{rebuildRequestsStageFirstRecoveryPage, callBegun, "call-begun", false},
 		{rebuildRequestsStageFinalPage, awaited, "awaited", false},
-		{rebuildRequestsStageRecoveryBegin, callBegun, "call-begun", false},
-		{rebuildRequestsStageRecoveryFinalPage, awaited, "awaited", false},
+		{rebuildRequestsStageFinalRestart, awaited, "awaited", false},
+		{rebuildRequestsStageFinalRecoveryPage, callBegun, "call-begun", false},
 		{rebuildRequestsStagePull, awaited, "awaited", false},
 		{rebuildRequestsStageAwaitCall, awaited, "awaited", false},
 		{rebuildRequestsStageAwaitCall, callBegun, "call-begun", true},
@@ -334,6 +362,19 @@ func TestValidateFirstRebuildResponseRequiresIntermediatePage(t *testing.T) {
 		if !strings.Contains(err.Error(), fact) {
 			t.Fatalf("terminal rebuild response diagnostic = %q, want it to contain %q", err, fact)
 		}
+	}
+}
+
+func TestObserveRebuildResponseRejectsChangedExactReplay(t *testing.T) {
+	coordinator := &RebuildRequestsCoordinator{sourceApplied: true}
+	request := []byte(`{"scope":"runtime-scope","rebuild_id":"rebuild-a","cursor":null}`)
+	first := []byte(`{"scope":"runtime-scope","records":[{"table":"runtime-items","pk":{},"row":{},"row_checksum":{},"server_version":"v1"}],"has_more":true,"cursor":"cursor-1"}`)
+	changed := []byte(`{"scope":"runtime-scope","records":[{"table":"runtime-items","pk":{},"row":{},"row_checksum":{},"server_version":"v2"}],"has_more":true,"cursor":"cursor-1"}`)
+	if err := coordinator.observeRebuildResponse(context.Background(), request, first); err != nil {
+		t.Fatalf("observe first rebuild response: %v", err)
+	}
+	if err := coordinator.observeRebuildResponse(context.Background(), request, changed); err == nil {
+		t.Fatal("changed first-page replay was accepted")
 	}
 }
 
@@ -503,8 +544,11 @@ func rebuildRequestsExchangeBodyForTest(sequence uint64, result json.RawMessage)
 
 func rebuildRequestsResultForStageForTest(coordinator *RebuildRequestsCoordinator) json.RawMessage {
 	process := json.RawMessage(`{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`)
-	if coordinator.stage >= rebuildRequestsStageRecoveryBegin {
+	if coordinator.stage >= rebuildRequestsStageFirstRecoveryBegin {
 		process = json.RawMessage(`{"process_id":"process-b","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	}
+	if coordinator.stage >= rebuildRequestsStageFinalRecoveryBegin {
+		process = json.RawMessage(`{"process_id":"process-c","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`)
 	}
 	status := json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`)
 	switch coordinator.stage {
@@ -518,15 +562,15 @@ func rebuildRequestsResultForStageForTest(coordinator *RebuildRequestsCoordinato
 		return resultEnvelopeForTest(map[string]any{
 			"kind": "call-begun", "call_id": coordinator.callID, "state": "in_flight", "process": process,
 		})
-	case rebuildRequestsStageFinalPage, rebuildRequestsStageRecoveryFinalPage, rebuildRequestsStagePull:
+	case rebuildRequestsStageFirstRestart, rebuildRequestsStageFinalPage, rebuildRequestsStageFinalRestart, rebuildRequestsStagePull:
 		return resultEnvelopeForTest(map[string]any{
 			"kind": "awaited", "status": status, "process": process,
 		})
-	case rebuildRequestsStageRestart:
+	case rebuildRequestsStageFirstRecoveryBegin, rebuildRequestsStageFinalRecoveryBegin:
 		return resultEnvelopeForTest(map[string]any{
-			"kind": "opened", "status": status, "process": json.RawMessage(`{"process_id":"process-b","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`),
+			"kind": "opened", "status": status, "process": process,
 		})
-	case rebuildRequestsStageRecoveryBegin:
+	case rebuildRequestsStageFirstRecoveryPage, rebuildRequestsStageFinalRecoveryPage:
 		return resultEnvelopeForTest(map[string]any{
 			"kind": "call-begun", "call_id": coordinator.callID, "state": "in_flight", "process": process,
 		})

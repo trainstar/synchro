@@ -10,7 +10,7 @@ import (
 	"github.com/trainstar/synchro/conformance/internal/contract"
 )
 
-func TestAuthoredOwnershipSatisfiesRequirementCoverage(t *testing.T) {
+func TestAuthoredRequirementCoverageIsClosed(t *testing.T) {
 	ctx := context.Background()
 	root := repositoryForTest(t)
 	bundle, err := contract.Load(ctx, root)

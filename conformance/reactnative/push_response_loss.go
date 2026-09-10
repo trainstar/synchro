@@ -51,6 +51,12 @@ func ValidatePushResponseLossScenario(scenario scenarios.Scenario) error {
 	if string(scenario.ID) != pushResponseLossScenarioID || len(scenario.Model.Setup) != 1 || scenarios.OperationKey(scenario.Model.Setup[0]) != "model/install-current-contract" {
 		return errors.New("React Native push-response-loss scenario contract is invalid")
 	}
+	if !orderedIdentifiersEqual(scenario.RequirementIDs, []string{
+		"SYNC-IDEMPOTENCY-001", "SYNC-IDEMPOTENCY-002", "SYNC-IDEMPOTENCY-003", "SYNC-ATOMICITY-001",
+		"SYNC-FAILURE-002", "SYNC-FAILURE-003",
+	}) {
+		return errors.New("React Native push-response-loss requirement set changed")
+	}
 	if len(scenario.Steps) != len(pushResponseLossStepOrder) || len(scenario.NativeLifecycleBoundaries) != 0 {
 		return errors.New("React Native push-response-loss step or lifecycle contract changed")
 	}
@@ -230,7 +236,7 @@ func pushResponseLossOperation(operations map[scenarios.StepID]scenarios.Operati
 }
 
 func validatePushResponseLossAssertion(scenario scenarios.Scenario) error {
-	semantic, explicitFailure, sealedRetry := false, false, false
+	semantic, explicitFailure, sealedRetry, ledgerRetention, atomicPush := false, false, false, false, false
 	for _, assertion := range scenario.Assertions {
 		if assertion.ID == "ASSERT-PUSH-RESPONSE-LOSS-SEMANTIC-001" && assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" && assertion.Oracle.ObservedSource == "system-under-test" && len(assertion.ExpectationIDs) == 1 && assertion.ExpectationIDs[0] == "EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001" && len(assertion.DetectsControlIDs) == 1 && assertion.DetectsControlIDs[0] == "CTRL-IDEMPOTENCY-001" {
 			semantic = true
@@ -253,8 +259,26 @@ func validatePushResponseLossAssertion(scenario scenarios.Scenario) error {
 			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{"CTRL-FAILURE-003"}) {
 			sealedRetry = true
 		}
+		if assertion.ID == "ASSERT-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003" &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{"SYNC-IDEMPOTENCY-003"}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"}) &&
+			assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Predicate.Name == "canonical-wire-outcome" &&
+			assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{"CTRL-IDEMPOTENCY-003"}) {
+			ledgerRetention = true
+		}
+		if assertion.ID == "ASSERT-PUSH-RESPONSE-LOSS-ATOMICITY-001" &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{"SYNC-ATOMICITY-001"}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PUSH-RESPONSE-LOSS-SEMANTIC-001"}) &&
+			assertion.Predicate.ContractPredicate == "wire-outcome" && assertion.Predicate.Name == "canonical-wire-outcome" &&
+			assertion.Oracle.Kind == "wire-contract" && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{"CTRL-ATOMICITY-001"}) {
+			atomicPush = true
+		}
 	}
-	if semantic && explicitFailure && sealedRetry {
+	if semantic && explicitFailure && sealedRetry && ledgerRetention && atomicPush {
 		return nil
 	}
 	return errors.New("React Native push-response-loss assertion contract is invalid")
@@ -262,11 +286,17 @@ func validatePushResponseLossAssertion(scenario scenarios.Scenario) error {
 
 func validatePushResponseLossProofs(scenario scenarios.Scenario) error {
 	want := map[string]struct{ proof, cell, target string }{
-		"OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001":      {"native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios"},
-		"OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001":  {"native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android"},
-		"OBL-PUSH-RESPONSE-LOSS-CONTROL-001":             {"negative-control", "", "test-conformance"},
-		"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001":   {"fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox"},
-		"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-CONTROL-001": {"negative-control", "", "test-conformance"},
+		"OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001":                  {"native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios"},
+		"OBL-PUSH-RESPONSE-LOSS-RN-ANDROID-CURRENT-001":              {"native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android"},
+		"OBL-PUSH-RESPONSE-LOSS-CONTROL-001":                         {"negative-control", "", "test-conformance"},
+		"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001":               {"fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox"},
+		"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-CONTROL-001":             {"negative-control", "", "test-conformance"},
+		"OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-PG-LINUX-X64-001":    {"server-black-box", "SUP-PG-LINUX-X64-001", "test-blackbox"},
+		"OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-FAULT-LINUX-X64-001": {"fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox"},
+		"OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-CONTROL-001":         {"negative-control", "", "test-integration-mutants"},
+		"OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-PG-LINUX-X64-001":      {"server-black-box", "SUP-PG-LINUX-X64-001", "test-blackbox"},
+		"OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-FAULT-LINUX-X64-001":   {"fault-injection", "SUP-PG-LINUX-X64-001", "test-blackbox"},
+		"OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-CONTROL-001":           {"negative-control", "", "test-integration-mutants"},
 	}
 	counts := make(map[string]int)
 	for _, obligation := range scenario.ProofObligations {
@@ -280,6 +310,10 @@ func validatePushResponseLossProofs(scenario scenarios.Scenario) error {
 			fault, control = "FPL-PUSH-RESPONSE-LOSS-001", "CTRL-IDEMPOTENCY-001"
 		} else if id == "OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001" || id == "OBL-PUSH-RESPONSE-LOSS-FAILURE-003-CONTROL-001" {
 			fault, control = "FPL-PUSH-RESPONSE-LOSS-FAILURE-003", "CTRL-FAILURE-003"
+		} else if id == "OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-FAULT-LINUX-X64-001" || id == "OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-CONTROL-001" {
+			fault, control = "FPL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003", "CTRL-IDEMPOTENCY-003"
+		} else if id == "OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-FAULT-LINUX-X64-001" || id == "OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-CONTROL-001" {
+			fault, control = "FPL-PUSH-RESPONSE-LOSS-ATOMICITY-001", "CTRL-ATOMICITY-001"
 		}
 		matchesClaims := true
 		if expected.proof == "native-e2e" {

@@ -261,6 +261,7 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 func validateKotlinSteadyPullFaultPlans(scenario scenarios.Scenario) error {
 	required := map[string]bool{
 		"FPL-PERF-STEADY-PULL-CURSOR-002":    false,
+		"FPL-PERF-STEADY-PULL-CURSOR-004":    false,
 		"FPL-PERF-STEADY-PULL-INTEGRITY-003": false,
 		"FPL-PERF-STEADY-PULL-INTEGRITY-004": false,
 		"FPL-PERF-STEADY-PULL-INTEGRITY-005": false,

@@ -51,6 +51,20 @@ func TestValidateQueueReplayScenarioRejectsContractChanges(t *testing.T) {
 				}
 			}
 		}},
+		{"successor fault proof claim", func(scenario *scenarios.Scenario) {
+			for index := range scenario.ProofObligations {
+				if string(scenario.ProofObligations[index].ObligationID) == "OBL-PERF-QUEUE-REPLAY-QUEUE-003-FAULT-001" {
+					scenario.ProofObligations[index].ControlID = nil
+				}
+			}
+		}},
+		{"successor control proof claim", func(scenario *scenarios.Scenario) {
+			for index := range scenario.ProofObligations {
+				if string(scenario.ProofObligations[index].ObligationID) == "OBL-PERF-QUEUE-REPLAY-QUEUE-003-CONTROL-001" {
+					scenario.ProofObligations[index].MakeTarget = "test-swift"
+				}
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -253,6 +267,7 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 		state           string
 		databaseMode    string
 		localOperations []scenarios.Operation
+		measured        bool
 	}
 	want := []exchange{
 		{actor: "client", command: "open", state: "command", databaseMode: "create"},
@@ -264,7 +279,7 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 			if end > len(workload.local) {
 				end = len(workload.local)
 			}
-			want = append(want, exchange{actor: "client", command: "execute-steps", state: "command", localOperations: workload.local[start:end]})
+			want = append(want, exchange{actor: "client", command: "execute-steps", state: "command", localOperations: workload.local[start:end], measured: true})
 		}
 		want = append(want,
 			exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
@@ -281,6 +296,45 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	}
 	want = append(want,
 		exchange{actor: "observer", command: "capture", state: "command"},
+		exchange{actor: "observer", command: "capture", state: "command"},
+	)
+	identity, err := queueReplayClientIdentity(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay successor identity: %v", err)
+	}
+	inspection, err := scenarios.NativeCRUDInspectionForSetup(scenario.Model.Setup[0], identity.userID)
+	if err != nil {
+		t.Fatalf("derive queue-replay successor inspection: %v", err)
+	}
+	current, err := queueReplayFinalSchema(scenario)
+	if err != nil {
+		t.Fatalf("derive queue-replay successor schema: %v", err)
+	}
+	plan, err := scenarios.NewNativeCRUDPlan(reactNativeQueueReplayCRUDSchema(current), inspection.StreamGeneration, identity.userID, identity.clientID+"-successor-proof")
+	if err != nil {
+		t.Fatalf("derive queue-replay successor plan: %v", err)
+	}
+	insert, err := plan.Step("insert", nil, 30)
+	if err != nil {
+		t.Fatalf("derive queue-replay successor insert: %v", err)
+	}
+	versions := make(map[string]string, len(plan.Targets()))
+	for _, target := range plan.Targets() {
+		versions[target.TableID] = "queued-successor-preview-version"
+	}
+	update, err := plan.Step("update", versions, 32)
+	if err != nil {
+		t.Fatalf("derive queue-replay successor update: %v", err)
+	}
+	want = append(want,
+		exchange{actor: "client", command: "open", state: "command", databaseMode: "create"},
+		exchange{actor: "client", command: "synchronize-step", state: "command"},
+		exchange{actor: "client", command: "lifecycle", state: "command"},
+		exchange{actor: "client", command: "execute-steps", state: "command", localOperations: insert.LocalWrites},
+		exchange{actor: "observer", command: "capture", state: "command"},
+		exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
+		exchange{actor: "observer", command: "capture", state: "command"},
+		exchange{actor: "client", command: "execute-steps", state: "command", localOperations: update.LocalWrites},
 		exchange{actor: "observer", command: "capture", state: "command"},
 	)
 	want = append(want, exchange{state: "complete"})
@@ -318,7 +372,9 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 					t.Fatalf("queue-replay exchange %d operation %d does not preserve authored order", sequence+1, index+1)
 				}
 			}
-			localOperations += len(expected.localOperations)
+			if expected.measured {
+				localOperations += len(expected.localOperations)
+			}
 		}
 	}
 	wantLocalOperations := 0

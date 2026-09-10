@@ -29,12 +29,12 @@
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "path": "conformance/scenarios/performance/pending-cycle-001.json",
-      "sha256": "d26007f7aaca404455fd3bc93f62070c2f5e3b8c4349cdcd52defbd2b529528c"
+      "sha256": "dbec09c89f4da8f6653e61d6e14cc52dd6eb534d9642e1ac5174b5f0d58bb645"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "path": "conformance/scenarios/performance/queue-replay-001.json",
-      "sha256": "7f9f78fff3e097072405cd8cfd94905e14e831b2b9712e60a467645ff5bcc2ba"
+      "sha256": "0dc0282d3f9a8919abc10da06b7edc3f0ef64358452a85e4a06c1a8880780d8d"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
@@ -49,7 +49,7 @@
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "path": "conformance/scenarios/performance/rebuild-requests-001.json",
-      "sha256": "2300ca2dad87d92a9a54554731ea07faf2c504b669954af7928f670bafc8cdeb"
+      "sha256": "ed216407b6330da6ad626e0c93702f8383bef98f6edfe8fd3b98b2cdb7eb360e"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
@@ -69,7 +69,7 @@
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "path": "conformance/scenarios/performance/steady-pull-001.json",
-      "sha256": "adfec7ce7af9fb1af0ec17f18e9fb58a985c4558f803ce184bb4da1a91d9e628"
+      "sha256": "9ac086a7fb1ce961964608ca5c7f2baf2ecb8c7303bcfbdd56b25f3bfa09fa19"
     },
     {
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
@@ -89,7 +89,7 @@
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "path": "conformance/scenarios/server/push-response-loss-001.json",
-      "sha256": "1446cc138e39e86f6d6e96a396d7d83111ecfd4de3821b441dbd90333cdf4d80"
+      "sha256": "47960208c37f69ca37d63ef7e7f04a15d6ad1a3a91e10e9e73476d30d1524f34"
     },
     {
       "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
