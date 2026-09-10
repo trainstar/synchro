@@ -13,6 +13,7 @@ type ConformanceEnvelope = {
   outcome: 'passed' | 'error';
   result: unknown;
   error_code: string | null;
+  error_detail: string | null;
 };
 
 const exchangeMembers = ['command', 'schema_version', 'sequence', 'state'];
@@ -105,12 +106,31 @@ function parseConformanceEnvelope(raw: string): ConformanceEnvelope {
     throw new Error('React Native conformance envelope is invalid');
   }
   if (
-    (value.outcome === 'passed' && (value.result === null || value.error_code !== null)) ||
-    (value.outcome === 'error' && (value.result !== null || typeof value.error_code !== 'string'))
+    (value.outcome === 'passed' && (value.result === null || value.error_code !== null || value.error_detail !== null)) ||
+    (value.outcome === 'error' && (value.result !== null || typeof value.error_code !== 'string' || (value.error_detail !== null && typeof value.error_detail !== 'string')))
   ) {
     throw new Error('React Native conformance envelope is invalid');
   }
   return value as unknown as ConformanceEnvelope;
+}
+
+function commandParameters(command: Record<string, unknown>): Record<string, unknown> | null {
+  const manifest = command.action;
+  if (!isJSONObject(manifest)) return null;
+  const action = manifest.action;
+  if (!isJSONObject(action)) return null;
+  return isJSONObject(action.parameters) ? action.parameters : null;
+}
+
+function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
+  return commandParameters(command)?.process_relaunch === true;
+}
+
+function expectedCommandError(command: Record<string, unknown>): { code: string; detailCode: string } | null {
+  const parameters = commandParameters(command);
+  const code = parameters?.expected_error_code;
+  const detailCode = parameters?.expected_error_detail_code;
+  return typeof code === 'string' && typeof detailCode === 'string' ? { code, detailCode } : null;
 }
 
 async function exchange(
@@ -145,6 +165,15 @@ async function exchange(
 }
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
+  if (requiresProcessRelaunch(command)) {
+    await device.launchApp({
+      newInstance: true,
+      delete: false,
+      launchArgs: { synchroConformance: '1' },
+    });
+    await expect(element(by.id('conformance-harness'))).toBeVisible();
+  }
+  const expectedError = expectedCommandError(command);
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
   const input = await element(by.id('conformance-command-input')).getAttributes();
@@ -162,7 +191,17 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
       const raw = typeof result.text === 'string' ? result.text : '';
       const envelope = parseConformanceEnvelope(raw);
       if (envelope.outcome === 'error') {
+        if (
+          expectedError !== null &&
+          envelope.error_code === expectedError.code &&
+          envelope.error_detail?.includes(expectedError.detailCode)
+        ) {
+          return raw;
+        }
         throw new Error(`React Native conformance command failed: ${envelope.error_code}`);
+      }
+      if (expectedError !== null) {
+        throw new Error(`React Native conformance command passed, expected ${expectedError.code}`);
       }
       return raw;
     }
@@ -202,4 +241,4 @@ it('executes the seeded-empty-startup coordinator sequence', async () => {
     }
   }
   throw new Error('React Native seeded-empty-startup coordinator did not complete');
-});
+}, 600000);

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,8 @@ const (
 	seededEmptyStartupScenarioPath = "conformance/scenarios/performance/seeded-empty-startup-001.json"
 	seededEmptyStartupScenarioID   = "SCN-PERF-SEEDED-EMPTY-STARTUP-001"
 	portableSeedAssetName          = "seed.db"
+	corruptSeedAssetName           = "corrupt-seed.db"
+	seededEmptyStartupRestartIndex = 0
 )
 
 // SeededEmptyStartupCoordinatorConfig configures one React Native startup sidecar.
@@ -44,11 +47,12 @@ type SeededEmptyStartupCoordinator struct {
 	adapter  string
 	database string
 
-	clients    []seededEmptyStartupClient
-	identities []scenarios.NativeIdentityAlias
-	runtimeIDs map[string]json.RawMessage
-	authTokens map[string]string
-	processes  map[string]actionProcessIdentity
+	clients     []seededEmptyStartupClient
+	identities  []scenarios.NativeIdentityAlias
+	runtimeIDs  map[string]json.RawMessage
+	authTokens  map[string]string
+	processes   map[string]actionProcessIdentity
+	pullCursors map[string][]string
 
 	mu        sync.Mutex
 	prepared  bool
@@ -65,15 +69,22 @@ type SeededEmptyStartupCoordinator struct {
 type SeededEmptyStartupCoordinatorResult struct {
 	IdentityResolution []blackbox.NativeIdentityResolution
 	StartupCount       int
+	ResumeCount        int
+	RejectedSeedCount  int
 }
 
 type seededEmptyStartupStage uint8
 
 const (
-	seededEmptyStartupStageOpen seededEmptyStartupStage = iota
+	seededEmptyStartupStageControlOpen seededEmptyStartupStage = iota
+	seededEmptyStartupStageControlRejected
+	seededEmptyStartupStageControlRecovered
 	seededEmptyStartupStageOpened
 	seededEmptyStartupStageSynchronized
 	seededEmptyStartupStageCaptured
+	seededEmptyStartupStageRestartOpened
+	seededEmptyStartupStageRestartSynchronized
+	seededEmptyStartupStageRestartCaptured
 )
 
 type seededEmptyStartupClient struct {
@@ -217,7 +228,8 @@ func NewSeededEmptyStartupCoordinator(config SeededEmptyStartupCoordinatorConfig
 	coordinator := &SeededEmptyStartupCoordinator{
 		config: config, listener: listener, token: token, adapter: adapter, database: database,
 		clients: clients, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
-		runtimeIDs: make(map[string]json.RawMessage), authTokens: make(map[string]string), processes: make(map[string]actionProcessIdentity), nextSeq: 1,
+		runtimeIDs: make(map[string]json.RawMessage), authTokens: make(map[string]string), processes: make(map[string]actionProcessIdentity),
+		pullCursors: make(map[string][]string), nextSeq: 1,
 	}
 	coordinator.server = &http.Server{Handler: coordinator, MaxHeaderBytes: 16 * 1024, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second}
 	return coordinator, nil
@@ -331,7 +343,7 @@ func (c *SeededEmptyStartupCoordinator) StageCount() int {
 	if c == nil {
 		return 0
 	}
-	return len(c.clients) * int(seededEmptyStartupStageCaptured)
+	return 2 + len(c.clients)*3 + 3
 }
 
 func (c *SeededEmptyStartupCoordinator) Completed() bool {
@@ -445,17 +457,31 @@ func (c *SeededEmptyStartupCoordinator) ServeHTTP(writer http.ResponseWriter, re
 }
 
 func (c *SeededEmptyStartupCoordinator) acceptLocked(raw json.RawMessage) error {
-	if c.stage == seededEmptyStartupStageOpen {
+	if c.stage == seededEmptyStartupStageControlOpen {
 		if !isJSONNull(raw) {
 			return errInvalidExchange
 		}
 		return nil
 	}
-	client := c.clients[c.client]
 	envelope, err := decodeResultEnvelope(raw)
-	if err != nil || envelope.Outcome != "passed" {
+	if err != nil {
 		return errInvalidExchange
 	}
+	if c.stage == seededEmptyStartupStageControlRejected {
+		if envelope.Outcome != "error" || envelope.ErrorCode == nil || *envelope.ErrorCode != "execution_failed" ||
+			envelope.ErrorDetail == nil || !strings.Contains(*envelope.ErrorDetail, "INVALID_SEED") {
+			return errors.New("React Native seeded-empty-startup corrupt seed was not rejected")
+		}
+		return nil
+	}
+	if envelope.Outcome != "passed" {
+		return errInvalidExchange
+	}
+	if c.stage == seededEmptyStartupStageControlRecovered {
+		_, err := validateOpenedResult(envelope.Result)
+		return err
+	}
+	client := c.clients[c.client]
 	switch c.stage {
 	case seededEmptyStartupStageOpened:
 		process, err := validateOpenedResult(envelope.Result)
@@ -464,10 +490,22 @@ func (c *SeededEmptyStartupCoordinator) acceptLocked(raw json.RawMessage) error 
 		}
 		c.processes[client.key] = process
 		return nil
+	case seededEmptyStartupStageRestartOpened:
+		process, err := validateOpenedResult(envelope.Result)
+		prior, found := c.processes[client.key]
+		if err != nil || !found || process.ProcessID == prior.ProcessID || process.DatabaseIdentityFingerprint != prior.DatabaseIdentityFingerprint {
+			return errors.New("React Native seeded-empty-startup restart identity is invalid")
+		}
+		c.processes[client.key] = process
+		return nil
 	case seededEmptyStartupStageSynchronized:
+		return c.validateSynchronized(client, envelope.Result)
+	case seededEmptyStartupStageRestartSynchronized:
 		return c.validateSynchronized(client, envelope.Result)
 	case seededEmptyStartupStageCaptured:
 		return c.validateCapture(client, envelope.Result)
+	case seededEmptyStartupStageRestartCaptured:
+		return c.validateResumedCapture(client, envelope.Result)
 	default:
 		return errInvalidExchange
 	}
@@ -475,31 +513,63 @@ func (c *SeededEmptyStartupCoordinator) acceptLocked(raw json.RawMessage) error 
 
 func (c *SeededEmptyStartupCoordinator) advanceLocked(sequence uint64) (seededEmptyStartupResponse, error) {
 	response := seededEmptyStartupResponse{SchemaVersion: 1, Sequence: sequence, State: "command"}
-	client := c.clients[c.client]
 	switch c.stage {
-	case seededEmptyStartupStageOpen:
-		response.Command = c.command(client, "open", map[string]any{"client_key": client.key, "database_mode": "reuse", "initialization": client.initialization(), "seed_step_id": client.seedStepID()})
+	case seededEmptyStartupStageControlOpen:
+		response.Command = c.seedControlCommand(true)
+		c.stage = seededEmptyStartupStageControlRejected
+	case seededEmptyStartupStageControlRejected:
+		response.Command = c.seedControlCommand(false)
+		c.stage = seededEmptyStartupStageControlRecovered
+	case seededEmptyStartupStageControlRecovered:
+		client := c.clients[c.client]
+		response.Command = c.command(client, "open", map[string]any{"client_key": client.key, "database_mode": "reuse", "initialization": client.initialization(), "seed_step_id": client.seedStepID()}, true)
 		c.stage = seededEmptyStartupStageOpened
 	case seededEmptyStartupStageOpened:
-		response.Command = c.command(client, "synchronize-step", map[string]any{"client_key": client.key, "method": client.startupStep.NativeBinding.Method, "completion": client.startupStep.NativeBinding.Completion})
+		client := c.clients[c.client]
+		response.Command = c.command(client, "synchronize-step", map[string]any{"client_key": client.key, "method": client.startupStep.NativeBinding.Method, "completion": client.startupStep.NativeBinding.Completion}, true)
 		c.stage = seededEmptyStartupStageSynchronized
 	case seededEmptyStartupStageSynchronized:
-		response.Command = c.command(client, "capture", map[string]any{"client_keys": []string{client.key}, "sources": []string{"request-trace"}})
+		client := c.clients[c.client]
+		response.Command = c.command(client, "capture", map[string]any{"client_keys": []string{client.key}, "sources": []string{"request-trace"}}, true)
 		c.stage = seededEmptyStartupStageCaptured
 	case seededEmptyStartupStageCaptured:
+		client := c.clients[c.client]
+		if c.client == seededEmptyStartupRestartIndex {
+			response.Command = c.command(client, "open", map[string]any{
+				"client_key": client.key, "database_mode": "reuse", "initialization": "existing", "seed_step_id": nil, "process_relaunch": true,
+			}, false)
+			c.stage = seededEmptyStartupStageRestartOpened
+			break
+		}
 		c.client++
 		if c.client == len(c.clients) {
 			resolutions, err := c.resolveIdentities()
 			if err != nil {
 				return seededEmptyStartupResponse{}, err
 			}
-			c.result = SeededEmptyStartupCoordinatorResult{IdentityResolution: resolutions, StartupCount: len(c.clients)}
+			c.result = SeededEmptyStartupCoordinatorResult{IdentityResolution: resolutions, StartupCount: len(c.clients), ResumeCount: 1, RejectedSeedCount: 1}
 			c.completed = true
 			response.State = "complete"
 			return response, nil
 		}
 		next := c.clients[c.client]
-		response.Command = c.command(next, "open", map[string]any{"client_key": next.key, "database_mode": "reuse", "initialization": next.initialization(), "seed_step_id": next.seedStepID()})
+		response.Command = c.command(next, "open", map[string]any{"client_key": next.key, "database_mode": "reuse", "initialization": next.initialization(), "seed_step_id": next.seedStepID()}, true)
+		c.stage = seededEmptyStartupStageOpened
+	case seededEmptyStartupStageRestartOpened:
+		client := c.clients[c.client]
+		response.Command = c.command(client, "synchronize-step", map[string]any{"client_key": client.key, "method": client.startupStep.NativeBinding.Method, "completion": client.startupStep.NativeBinding.Completion}, false)
+		c.stage = seededEmptyStartupStageRestartSynchronized
+	case seededEmptyStartupStageRestartSynchronized:
+		client := c.clients[c.client]
+		response.Command = c.command(client, "capture", map[string]any{"client_keys": []string{client.key}, "sources": []string{"request-trace"}}, false)
+		c.stage = seededEmptyStartupStageRestartCaptured
+	case seededEmptyStartupStageRestartCaptured:
+		c.client++
+		if c.client >= len(c.clients) {
+			return seededEmptyStartupResponse{}, errInvalidExchange
+		}
+		next := c.clients[c.client]
+		response.Command = c.command(next, "open", map[string]any{"client_key": next.key, "database_mode": "reuse", "initialization": next.initialization(), "seed_step_id": next.seedStepID()}, true)
 		c.stage = seededEmptyStartupStageOpened
 	default:
 		return seededEmptyStartupResponse{}, errInvalidExchange
@@ -544,10 +614,53 @@ func (c *SeededEmptyStartupCoordinator) validateCapture(client seededEmptyStartu
 	if err := validateSeededEmptyStartupBootstrapTrace(trace, client.connectScopeProjectionLen, client.pullScopeProjectionLen); err != nil {
 		return fmt.Errorf("React Native seeded-empty-startup %s trace is invalid: %w", client.clientID, err)
 	}
+	if err := validateSeededEmptyStartupPullContinuation(trace, client.pullScopeProjectionLen); err != nil {
+		return fmt.Errorf("React Native seeded-empty-startup %s continuation is invalid: %w", client.clientID, err)
+	}
 	if err := validateSeededEmptyStartupWire(c.config.Scenario, client.startupStep.ID, trace.Observations[0]); err != nil {
 		return err
 	}
+	pull, err := decodePullResponseFacts(trace.Observations[len(trace.Observations)-1].PullResponseFacts)
+	if err != nil {
+		return err
+	}
+	c.pullCursors[client.key] = append([]string(nil), pull.ScopeCursorFingerprints...)
 	return c.observeTraceIdentities(trace)
+}
+
+func (c *SeededEmptyStartupCoordinator) validateResumedCapture(client seededEmptyStartupClient, raw json.RawMessage) error {
+	capture, err := decodeCapture(raw, []string{"request_trace"})
+	if err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "seeded-startup resumed capture result"); err != nil {
+		return err
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || process != c.processes[client.key] {
+		return errors.New("React Native seeded-empty-startup resumed capture process changed")
+	}
+	trace, err := captureTraceFromRaw(capture.Trace)
+	if err != nil {
+		return err
+	}
+	if trace.Overflowed || len(trace.Observations) != 2 || trace.SequenceCheckpoint != 2 || validateTraceSequence(trace.Observations) != nil ||
+		validateTraceOperation(trace.Observations[0], "connect") != nil || validateTraceOperation(trace.Observations[1], "pull") != nil {
+		return errors.New("React Native seeded-empty-startup resumed request sequence is invalid")
+	}
+	connectScopes, connectErr := requestInteger(trace.Observations[0], "scope_count")
+	pullScopes, pullErr := requestInteger(trace.Observations[1], "scope_count")
+	pull := trace.Observations[1]
+	response, responseErr := decodePullResponseFacts(pull.PullResponseFacts)
+	expected := client.pullScopeProjectionLen
+	if connectErr != nil || pullErr != nil || connectScopes != expected || pullScopes != expected ||
+		pull.CursorFingerprintsComplete == nil || !*pull.CursorFingerprintsComplete || uint64(len(pull.CursorFingerprints)) != expected ||
+		responseErr != nil || *response.HasMore || *response.RebuildScopeCount != 0 || *response.ChecksumCount != expected ||
+		uint64(len(response.ScopeCursorFingerprints)) != expected || !equalSeededStartupFingerprints(pull.CursorFingerprints, c.pullCursors[client.key]) {
+		return errors.New("React Native seeded-empty-startup resumed continuation is invalid")
+	}
+	return nil
 }
 
 func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConnectScopeCount, expectedPullScopeCount uint64) error {
@@ -648,6 +761,24 @@ func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConne
 	return nil
 }
 
+func validateSeededEmptyStartupPullContinuation(trace traceSnapshot, expectedScopeCount uint64) error {
+	pull := trace.Observations[len(trace.Observations)-1]
+	response, err := decodePullResponseFacts(pull.PullResponseFacts)
+	if err != nil || pull.CursorFingerprintsComplete == nil || !*pull.CursorFingerprintsComplete ||
+		uint64(len(pull.CursorFingerprints)) != expectedScopeCount || *response.HasMore || *response.RebuildScopeCount != 0 ||
+		*response.ChecksumCount != expectedScopeCount || uint64(len(response.ScopeCursorFingerprints)) != expectedScopeCount {
+		return errors.New("pull continuation facts are invalid")
+	}
+	for _, observation := range trace.Observations[1 : len(trace.Observations)-1] {
+		rebuild, rebuildErr := decodeRebuildResponseFacts(observation.RebuildResponseFacts)
+		if rebuildErr == nil && !*rebuild.HasMore && rebuild.FinalScopeCursorFingerprint != nil &&
+			!containsSeededStartupFingerprint(pull.CursorFingerprints, *rebuild.FinalScopeCursorFingerprint) {
+			return errors.New("pull omitted a rebuilt cursor")
+		}
+	}
+	return nil
+}
+
 func (c *SeededEmptyStartupCoordinator) observeTraceIdentities(trace traceSnapshot) error {
 	pull := trace.Observations[len(trace.Observations)-1]
 	generation, err := requestInteger(pull, "client_generation")
@@ -699,9 +830,9 @@ func (c *SeededEmptyStartupCoordinator) resolveIdentities() ([]blackbox.NativeId
 	return blackbox.ResolveNativeIdentityAliases(c.identities, observations)
 }
 
-func (c *SeededEmptyStartupCoordinator) command(client seededEmptyStartupClient, name string, parameters map[string]any) *seededEmptyStartupCommand {
+func (c *SeededEmptyStartupCoordinator) command(client seededEmptyStartupClient, name string, parameters map[string]any, includeSeed bool) *seededEmptyStartupCommand {
 	runtime := seededEmptyStartupRuntime{ClientKey: client.key, Database: fmt.Sprintf("%s-%d", c.database, c.client), ClientID: client.clientID, ServerURL: c.adapter, AuthToken: c.authTokens[client.key]}
-	if client.artifactStep != nil {
+	if includeSeed && client.artifactStep != nil {
 		seed := portableSeedAssetName
 		runtime.SeedDatabasePath = &seed
 	}
@@ -714,6 +845,51 @@ func (c *SeededEmptyStartupCoordinator) command(client seededEmptyStartupClient,
 		actor = "observer"
 	}
 	return &seededEmptyStartupCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: runtime}
+}
+
+func (c *SeededEmptyStartupCoordinator) seedControlCommand(corrupt bool) *seededEmptyStartupCommand {
+	clientKey := "seeded-empty-startup-invalid-seed"
+	clientID := "client-seed-artifact-control"
+	initialization := "seed"
+	parameters := map[string]any{
+		"client_key": clientKey, "database_mode": "reuse", "initialization": initialization, "seed_step_id": nil,
+		"expected_error_code": "execution_failed", "expected_error_detail_code": "INVALID_SEED",
+	}
+	if !corrupt {
+		clientKey = "seeded-empty-startup-invalid-seed-recovery"
+		clientID = "client-seed-artifact-control-recovery"
+		initialization = "empty"
+		parameters = map[string]any{"client_key": clientKey, "database_mode": "reuse", "initialization": initialization, "seed_step_id": nil}
+	}
+	runtime := seededEmptyStartupRuntime{
+		ClientKey: clientKey, Database: c.database + "-invalid-seed", ClientID: clientID, ServerURL: c.adapter, AuthToken: c.authTokens[c.clients[0].key],
+	}
+	if corrupt {
+		seed := corruptSeedAssetName
+		runtime.SeedDatabasePath = &seed
+	}
+	return &seededEmptyStartupCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: "client", Command: "open", Parameters: parameters}}, Runtime: runtime}
+}
+
+func containsSeededStartupFingerprint(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func equalSeededStartupFingerprints(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (client seededEmptyStartupClient) initialization() string {
