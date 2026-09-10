@@ -875,6 +875,7 @@ func (f *TransportRebuildResponseFacts) UnmarshalJSON(data []byte) error {
 		HasChecksum                 *bool   `json:"has_checksum"`
 		ScopeFingerprint            *string `json:"scope_fingerprint"`
 		FinalScopeCursorFingerprint *string `json:"final_scope_cursor_fingerprint"`
+		ResponseBodySHA256          *string `json:"response_body_sha256"`
 	}
 	if err := decodeStrict(data, &raw); err != nil || raw.RecordCount == nil || raw.HasMore == nil || raw.HasCursor == nil || raw.HasFinalScopeCursor == nil || raw.HasChecksum == nil || raw.ScopeFingerprint == nil {
 		return errors.New("decode Kotlin rebuild response facts failed")
@@ -886,6 +887,7 @@ func (f *TransportRebuildResponseFacts) UnmarshalJSON(data []byte) error {
 	f.HasChecksum = *raw.HasChecksum
 	f.ScopeFingerprint = *raw.ScopeFingerprint
 	f.FinalScopeCursorFingerprint = clonePointer(raw.FinalScopeCursorFingerprint)
+	f.ResponseBodySHA256 = clonePointer(raw.ResponseBodySHA256)
 	return nil
 }
 

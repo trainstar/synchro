@@ -691,6 +691,22 @@ func TestTerminalRebuildResponseRequiresValidCursorFingerprint(t *testing.T) {
 	}
 }
 
+func TestTransportRebuildResponseFactsDecodesResponseBodySHA256(t *testing.T) {
+	const responseBodySHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var facts TransportRebuildResponseFacts
+	data := []byte(`{"record_count":1,"has_more":false,"has_cursor":false,"has_final_scope_cursor":true,"has_checksum":true,"scope_fingerprint":"scope-fingerprint","final_scope_cursor_fingerprint":"cursor-fingerprint","response_body_sha256":"` + responseBodySHA256 + `"}`)
+	if err := json.Unmarshal(data, &facts); err != nil {
+		t.Fatalf("decode rebuild response facts: %v", err)
+	}
+	if facts.ResponseBodySHA256 == nil || *facts.ResponseBodySHA256 != responseBodySHA256 {
+		t.Fatalf("response body SHA-256 = %v, want %q", facts.ResponseBodySHA256, responseBodySHA256)
+	}
+
+	if err := json.Unmarshal(append(data[:len(data)-1], []byte(`,"unexpected":true}`)...), &facts); err == nil {
+		t.Fatal("rebuild response facts accepted an unknown field")
+	}
+}
+
 func TestForgedCursorBindsToDeterministicTransportOverride(t *testing.T) {
 	present := true
 	operation := scenarios.Operation{
