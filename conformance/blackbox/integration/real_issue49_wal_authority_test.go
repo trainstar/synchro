@@ -1072,12 +1072,19 @@ func TestRealIssue49AdapterDelegationAndServerScopes(t *testing.T) {
 				t.Fatalf("restore canonical %s function: %v", control.name, err)
 			}
 			restored = true
-			afterStatus, _ := postSync(t, ctx, harness.AdapterURL(), token, control.path, control.payload)
+			afterStatus, restoredResponse := postSync(t, ctx, harness.AdapterURL(), token, control.path, control.payload)
 			if deniedStatus != http.StatusInternalServerError || afterStatus != control.wantAfter {
 				t.Fatalf("adapter did not delegate %s semantics: denied=%d response=%#v restored=%d", control.name, deniedStatus, deniedResponse, afterStatus)
 			}
 			if control.name == "push" {
 				waitForRealWALRecords(t, ctx, harness, "cf_items", "00000000-0000-4000-8d08-000000000003")
+			}
+			if control.name == "rebuild" && afterStatus == http.StatusOK {
+				cursor, ok := restoredResponse["final_scope_cursor"].(string)
+				if !ok || cursor == "" {
+					t.Fatalf("restored rebuild did not return a final scope cursor: %#v", restoredResponse)
+				}
+				client.Scopes["user:diagnostic-user"] = map[string]any{"cursor": cursor}
 			}
 		})
 	}

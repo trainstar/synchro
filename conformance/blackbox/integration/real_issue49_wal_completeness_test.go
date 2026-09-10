@@ -370,7 +370,7 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 	for _, recordID := range []string{syncedUpdateID, syncedDeleteID} {
 		if _, err := setup.ExecContext(
 			ctx,
-			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'issue49-reset-operation-base')",
+			"INSERT INTO cf_global_items (id, value) VALUES ($1, 'issue49-reset-operation-base')",
 			recordID,
 		); err != nil {
 			_ = setup.Rollback()
@@ -401,7 +401,7 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 	if err := setup.Commit(); err != nil {
 		t.Fatalf("commit reset operation setup: %v", err)
 	}
-	waitForRealWALRecords(t, ctx, harness, "cf_items", syncedUpdateID, syncedDeleteID)
+	waitForRealWALRecords(t, ctx, harness, "cf_global_items", syncedUpdateID, syncedDeleteID)
 	waitForRealWALRecords(t, ctx, harness, "cf_documents", documentIDs...)
 	for _, accessID := range []string{accessUpdateID, accessDeleteID} {
 		if !waitForIssue49CaptureDependencyFence(t, ctx, admin, accessID) {
@@ -417,8 +417,8 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 		arguments []any
 	}{
 		{"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'issue49-reset-insert')", []any{syncedInsertID}},
-		{"UPDATE cf_items SET value = 'issue49-reset-update', updated_at = clock_timestamp() WHERE id = $1", []any{syncedUpdateID}},
-		{"DELETE FROM cf_items WHERE id = $1", []any{syncedDeleteID}},
+		{"UPDATE cf_global_items SET value = 'issue49-reset-update', updated_at = clock_timestamp() WHERE id = $1", []any{syncedUpdateID}},
+		{"DELETE FROM cf_global_items WHERE id = $1", []any{syncedDeleteID}},
 		{"INSERT INTO cf_document_access (id, document_id, owner_id) VALUES ($1, $2, 'diagnostic-user')", []any{accessInsertID, documentIDs[2]}},
 		{"UPDATE cf_document_access SET owner_id = 'issue49-reset-updated-owner' WHERE id = $1", []any{accessUpdateID}},
 		{"DELETE FROM cf_document_access WHERE id = $1", []any{accessDeleteID}},
