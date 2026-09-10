@@ -73,6 +73,9 @@ func runKotlinQueueReplay(t *testing.T) {
 	if len(result.ReplayCalls) != 9 {
 		t.Fatalf("Kotlin Android queue-replay replay calls = %d, want 9", len(result.ReplayCalls))
 	}
+	if err := scenarios.ValidateNativeCRUDEvidence(result.CRUD); err != nil {
+		t.Fatalf("validate direct Kotlin Android queue-replay CRUD evidence: %v", err)
+	}
 	resetKotlinPerformanceServer(t, ctx, harness)
 }
 

@@ -23,6 +23,7 @@ type QueueReplayResult struct {
 	ReplayCalls []SynchronizationResult
 	ClientFacts []CaptureFacts
 	ServerFacts scenarios.StateFacts
+	CRUD        scenarios.NativeCRUDEvidence
 }
 
 type queueSchema struct {
@@ -225,7 +226,320 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 	if err := validateKotlinStateProjection(expected, actual); err != nil {
 		return QueueReplayResult{}, err
 	}
-	return QueueReplayResult{ReplayCalls: replayCalls, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts}, nil
+	crud, err := runKotlinQueueReplayCRUD(ctx, scenario.Model.Setup[0], current, controller, platform, client)
+	if err != nil {
+		return QueueReplayResult{}, err
+	}
+	return QueueReplayResult{ReplayCalls: replayCalls, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, CRUD: crud}, nil
+}
+
+func runKotlinQueueReplayCRUD(ctx context.Context, setup scenarios.Operation, current queueSchema, controller *blackbox.NativeController, platform *Platform, client Client) (scenarios.NativeCRUDEvidence, error) {
+	inspection, err := scenarios.NativeCRUDInspectionForSetup(setup, client.UserID)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	inspectionClient := Client{
+		Key: client.Key + "-crud-inspection", UserID: client.UserID,
+		ClientID: client.ClientID + "-crud-inspection", DatabaseKey: client.DatabaseKey + "-crud-inspection",
+	}
+	assignment, err := scenarios.NativeCRUDInspectionAssignment(inspectionClient.UserID, inspectionClient.ClientID, inspection.ScopeID)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	if observation, applyErr := controller.ApplyStep(ctx, assignment); applyErr != nil || observation.Disposition != "success" {
+		return scenarios.NativeCRUDEvidence{}, fmt.Errorf("assign Kotlin Android queue-replay CRUD inspection scope: %w", kotlinResultError(applyErr, observation.Disposition))
+	}
+	if err := platform.Install(ctx, InstallRequest{Client: inspectionClient, Initialization: "current"}); err != nil {
+		return scenarios.NativeCRUDEvidence{}, fmt.Errorf("install Kotlin Android queue-replay CRUD inspection client: %w", err)
+	}
+	plan, err := scenarios.NewNativeCRUDPlan(kotlinQueueReplayCRUDSchema(current), inspection.StreamGeneration, inspectionClient.UserID, inspectionClient.ClientID)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	insertStep, err := plan.Step("insert", nil, 20)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	boundInsert, err := bindKotlinQueueReplayCRUDWrites(controller, insertStep.LocalWrites)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	previewVersions := make(map[string]string, len(plan.Targets()))
+	for _, target := range plan.Targets() {
+		previewVersions[target.TableID] = "preview-server-version"
+	}
+	previewUpdate, err := plan.Step("update", previewVersions, 22)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	boundPreviewUpdate, err := bindKotlinQueueReplayCRUDWrites(controller, previewUpdate.LocalWrites)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	targets, err := bindKotlinQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundPreviewUpdate)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	beforeSnapshot, err := platform.scenarioSnapshot(ctx, inspectionClient)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, fmt.Errorf("capture Kotlin Android queue-replay CRUD initial state: %w", err)
+	}
+	before, err := kotlinQueueReplayCRUDState(beforeSnapshot, targets)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	if err := applyKotlinQueueReplayCRUDWrites(ctx, platform, inspectionClient, boundInsert, "insert"); err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	insertWrite, err := captureKotlinQueueReplayCRUDState(ctx, platform, inspectionClient, targets, "local insert")
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	insertResponse, insertAccepted, insertRestart, err := completeKotlinQueueReplayCRUDStep(ctx, controller, platform, inspectionClient, insertStep, targets)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	insertVersions, err := scenarios.NativeCRUDServerVersions(insertAccepted)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+
+	updateStep, err := plan.Step("update", insertVersions, 22)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	boundUpdate, err := bindKotlinQueueReplayCRUDWrites(controller, updateStep.LocalWrites)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	targets, err = bindKotlinQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundUpdate)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	if observation, lifecycleErr := platform.Lifecycle(ctx, LifecycleRequest{Client: inspectionClient, Operation: "stop"}); lifecycleErr != nil || observation.Disposition != "success" {
+		return scenarios.NativeCRUDEvidence{}, fmt.Errorf("stop Kotlin Android queue-replay CRUD client before update: %w", kotlinResultError(lifecycleErr, observation.Disposition))
+	}
+	if err := applyKotlinQueueReplayCRUDWrites(ctx, platform, inspectionClient, boundUpdate, "update"); err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	updateWrite, err := captureKotlinQueueReplayCRUDState(ctx, platform, inspectionClient, targets, "local update")
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	updateResponse, updateAccepted, updateRestart, err := completeKotlinQueueReplayCRUDStep(ctx, controller, platform, inspectionClient, updateStep, targets)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	updateVersions, err := scenarios.NativeCRUDServerVersions(updateAccepted)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+
+	deleteStep, err := plan.Step("delete", updateVersions, 24)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	boundDelete, err := bindKotlinQueueReplayCRUDWrites(controller, deleteStep.LocalWrites)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	if observation, lifecycleErr := platform.Lifecycle(ctx, LifecycleRequest{Client: inspectionClient, Operation: "stop"}); lifecycleErr != nil || observation.Disposition != "success" {
+		return scenarios.NativeCRUDEvidence{}, fmt.Errorf("stop Kotlin Android queue-replay CRUD client before delete: %w", kotlinResultError(lifecycleErr, observation.Disposition))
+	}
+	if err := applyKotlinQueueReplayCRUDWrites(ctx, platform, inspectionClient, boundDelete, "delete"); err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	deleteWrite, err := captureKotlinQueueReplayCRUDState(ctx, platform, inspectionClient, targets, "local delete")
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	deleteResponse, deleteAccepted, deleteRestart, err := completeKotlinQueueReplayCRUDStep(ctx, controller, platform, inspectionClient, deleteStep, targets)
+	if err != nil {
+		return scenarios.NativeCRUDEvidence{}, err
+	}
+	evidence := scenarios.NativeCRUDEvidence{
+		Targets: targets, Before: before, AfterInsertWrite: insertWrite, AfterInsertResponse: insertAccepted, AfterInsertRestart: insertRestart,
+		AfterUpdateWrite: updateWrite, AfterUpdateResponse: updateAccepted, AfterUpdateRestart: updateRestart,
+		AfterDeleteWrite: deleteWrite, AfterDeleteResponse: deleteAccepted, AfterDeleteRestart: deleteRestart,
+		Responses: []scenarios.NativeCRUDResponse{insertResponse, updateResponse, deleteResponse},
+	}
+	if err := scenarios.ValidateNativeCRUDEvidence(evidence); err != nil {
+		return scenarios.NativeCRUDEvidence{}, fmt.Errorf("validate Kotlin Android queue-replay CRUD evidence: %w", err)
+	}
+	return evidence, nil
+}
+
+func kotlinQueueReplayCRUDSchema(current queueSchema) scenarios.NativeCRUDSchema {
+	tables := make([]scenarios.NativeCRUDSchemaTable, 0, len(current.Tables))
+	for _, table := range current.Tables {
+		fields := make([]scenarios.NativeCRUDSchemaField, 0, len(table.Fields))
+		for _, field := range table.Fields {
+			fields = append(fields, scenarios.NativeCRUDSchemaField{FieldID: field.FieldID, Type: field.Type, PrimaryKey: field.PrimaryKey, Writable: field.Writable})
+		}
+		tables = append(tables, scenarios.NativeCRUDSchemaTable{TableID: table.TableID, PrimaryKeyFieldID: table.PrimaryKeyFieldID, Fields: fields})
+	}
+	return scenarios.NativeCRUDSchema{Version: current.Version, Hash: current.Hash, Tables: tables}
+}
+
+func bindKotlinQueueReplayCRUDWrites(controller *blackbox.NativeController, operations []scenarios.Operation) ([]scenarios.Operation, error) {
+	bound := make([]scenarios.Operation, 0, len(operations))
+	for index, operation := range operations {
+		value, err := controller.ApplicationWrite(operation)
+		if err != nil {
+			return nil, fmt.Errorf("bind Kotlin Android queue-replay CRUD local write %d: %w", index+1, err)
+		}
+		bound = append(bound, value)
+	}
+	return bound, nil
+}
+
+func bindKotlinQueueReplayCRUDTargets(planTargets []scenarios.NativeCRUDPlanTarget, inserts, updates []scenarios.Operation) ([]scenarios.NativeCRUDTarget, error) {
+	if len(planTargets) != len(inserts) || len(planTargets) != len(updates) {
+		return nil, errors.New("Kotlin Android queue-replay CRUD runtime target count is invalid")
+	}
+	targets := make([]scenarios.NativeCRUDTarget, 0, len(planTargets))
+	for index, target := range planTargets {
+		bound, err := scenarios.BindNativeCRUDTarget(target, inserts[index], updates[index])
+		if err != nil {
+			return nil, fmt.Errorf("bind Kotlin Android queue-replay CRUD target %q: %w", target.TableID, err)
+		}
+		targets = append(targets, bound)
+	}
+	return targets, nil
+}
+
+func applyKotlinQueueReplayCRUDWrites(ctx context.Context, platform *Platform, client Client, operations []scenarios.Operation, name string) error {
+	for index, operation := range operations {
+		observation, err := platform.ApplyStep(ctx, client, operation)
+		if err != nil || observation.Disposition != "success" {
+			return fmt.Errorf("apply Kotlin Android queue-replay CRUD %s %d: %w", name, index+1, kotlinResultError(err, observation.Disposition))
+		}
+	}
+	return nil
+}
+
+func completeKotlinQueueReplayCRUDStep(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, step scenarios.NativeCRUDStep, targets []scenarios.NativeCRUDTarget) (scenarios.NativeCRUDResponse, scenarios.NativeCRUDState, scenarios.NativeCRUDState, error) {
+	call, err := kotlinScenarioCall(ctx, platform, client, "start")
+	if err != nil || call.Completion != "idle" {
+		return scenarios.NativeCRUDResponse{}, scenarios.NativeCRUDState{}, scenarios.NativeCRUDState{}, fmt.Errorf("run Kotlin Android queue-replay CRUD %s: %w", step.Operation, kotlinResultError(err, call.Completion))
+	}
+	response := kotlinQueueReplayCRUDResponse(step.Operation, call)
+	if err := controller.BindApplicationPush(step.ApplicationPush); err != nil {
+		return scenarios.NativeCRUDResponse{}, scenarios.NativeCRUDState{}, scenarios.NativeCRUDState{}, fmt.Errorf("bind Kotlin Android queue-replay CRUD %s push: %w", step.Operation, err)
+	}
+	if observation, processErr := controller.ProcessStep(ctx, nil, step.Materialize); processErr != nil || observation.Disposition != "success" {
+		return scenarios.NativeCRUDResponse{}, scenarios.NativeCRUDState{}, scenarios.NativeCRUDState{}, fmt.Errorf("materialize Kotlin Android queue-replay CRUD %s: %w", step.Operation, kotlinResultError(processErr, observation.Disposition))
+	}
+	accepted, err := captureKotlinQueueReplayCRUDState(ctx, platform, client, targets, step.Operation+" response")
+	if err != nil {
+		return scenarios.NativeCRUDResponse{}, scenarios.NativeCRUDState{}, scenarios.NativeCRUDState{}, err
+	}
+	restart, err := scenarios.NativeCRUDRestartOperation(client.UserID, client.ClientID)
+	if err != nil {
+		return scenarios.NativeCRUDResponse{}, scenarios.NativeCRUDState{}, scenarios.NativeCRUDState{}, err
+	}
+	if observation, restartErr := platform.ProcessStep(ctx, client, restart); restartErr != nil || observation.Disposition != "success" {
+		return scenarios.NativeCRUDResponse{}, scenarios.NativeCRUDState{}, scenarios.NativeCRUDState{}, fmt.Errorf("restart Kotlin Android queue-replay CRUD client after %s: %w", step.Operation, kotlinResultError(restartErr, observation.Disposition))
+	}
+	restarted, err := captureKotlinQueueReplayCRUDState(ctx, platform, client, targets, step.Operation+" restart")
+	if err != nil {
+		return scenarios.NativeCRUDResponse{}, scenarios.NativeCRUDState{}, scenarios.NativeCRUDState{}, err
+	}
+	return response, accepted, restarted, nil
+}
+
+func captureKotlinQueueReplayCRUDState(ctx context.Context, platform *Platform, client Client, targets []scenarios.NativeCRUDTarget, name string) (scenarios.NativeCRUDState, error) {
+	snapshot, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return scenarios.NativeCRUDState{}, fmt.Errorf("capture Kotlin Android queue-replay CRUD %s state: %w", name, err)
+	}
+	return kotlinQueueReplayCRUDState(snapshot, targets)
+}
+
+func kotlinQueueReplayCRUDState(snapshot Result, targets []scenarios.NativeCRUDTarget) (scenarios.NativeCRUDState, error) {
+	if snapshot.ApplicationRowCount == nil || snapshot.PendingChangeCount == nil || snapshot.MutationLedgerCount == nil || snapshot.MutationOutcomeCount == nil || snapshot.RejectedMutationCount == nil || snapshot.RowMetadataCount == nil {
+		return scenarios.NativeCRUDState{}, errors.New("Kotlin Android queue-replay CRUD inspection counts are incomplete")
+	}
+	applicationRows, err := androidApplicationRows(snapshot.ApplicationRows)
+	if err != nil {
+		return scenarios.NativeCRUDState{}, err
+	}
+	var mutations []retainedMutation
+	if err := decodeFactArray(snapshot.RetainedMutations, &mutations, maximumRecords); err != nil {
+		return scenarios.NativeCRUDState{}, errors.New("Kotlin Android queue-replay CRUD mutation inspection is invalid")
+	}
+	var metadata []rowMetadataRecord
+	if err := decodeFactArray(snapshot.RowMetadata, &metadata, maximumRecords); err != nil {
+		return scenarios.NativeCRUDState{}, errors.New("Kotlin Android queue-replay CRUD metadata inspection is invalid")
+	}
+	state := scenarios.NativeCRUDState{
+		ProcessID: snapshot.ProcessID, DatabaseIdentityFingerprint: snapshot.DatabaseIdentityFingerprint,
+		ApplicationRowCount: *snapshot.ApplicationRowCount, PendingChangeCount: *snapshot.PendingChangeCount,
+		MutationLedgerCount: *snapshot.MutationLedgerCount, MutationOutcomeCount: *snapshot.MutationOutcomeCount,
+		RejectedMutationCount: *snapshot.RejectedMutationCount, RowMetadataCount: *snapshot.RowMetadataCount,
+		Rows: make([]scenarios.NativeCRUDRowState, 0, len(targets)),
+	}
+	for _, target := range targets {
+		rowState := scenarios.NativeCRUDRowState{TableID: target.TableID}
+		for _, row := range applicationRows {
+			var recordID string
+			if json.Unmarshal(row[target.PrimaryKeyField], &recordID) != nil || recordID != target.RecordID {
+				continue
+			}
+			if rowState.Present || !json.Valid(row[target.ValueField]) {
+				return scenarios.NativeCRUDState{}, errors.New("Kotlin Android queue-replay CRUD application row is invalid")
+			}
+			rowState.Present = true
+			rowState.Value = append(json.RawMessage(nil), row[target.ValueField]...)
+		}
+		for _, mutation := range mutations {
+			if mutation.TableName != target.TableName || mutation.RecordID != target.RecordID {
+				continue
+			}
+			if rowState.Mutation != nil {
+				return scenarios.NativeCRUDState{}, errors.New("Kotlin Android queue-replay CRUD mutation is duplicated")
+			}
+			rowState.Mutation = &scenarios.NativeCRUDMutation{Operation: mutation.Operation, Status: mutation.Status, ClientVersion: mutation.ClientVersion}
+		}
+		for _, value := range metadata {
+			if value.TableName != target.TableName || value.RecordID != target.RecordID {
+				continue
+			}
+			if rowState.ServerVersion != "" {
+				return scenarios.NativeCRUDState{}, errors.New("Kotlin Android queue-replay CRUD metadata is duplicated")
+			}
+			rowState.ServerVersion = value.ServerVersion
+			checksum, err := androidChecksumDigest(value.RowChecksum)
+			if err != nil {
+				return scenarios.NativeCRUDState{}, err
+			}
+			if checksum != nil {
+				rowState.RowChecksum = *checksum
+			}
+		}
+		state.Rows = append(state.Rows, rowState)
+	}
+	return state, nil
+}
+
+func kotlinQueueReplayCRUDResponse(operation string, call SynchronizationResult) scenarios.NativeCRUDResponse {
+	response := scenarios.NativeCRUDResponse{Operation: operation, Completion: call.Completion, Transport: make([]scenarios.NativeCRUDTransport, 0, len(call.transportObservations))}
+	for _, observation := range call.transportObservations {
+		value := scenarios.NativeCRUDTransport{OperationClass: observation.OperationClass, StatusCode: observation.StatusCode}
+		if observation.ErrorCode != nil {
+			value.ErrorCode = *observation.ErrorCode
+		}
+		if observation.Retryable != nil {
+			value.Retryable = *observation.Retryable
+			value.RetryablePresent = true
+		}
+		if observation.RequestFacts != nil && observation.RequestFacts.MutationCount != nil {
+			value.MutationCount = *observation.RequestFacts.MutationCount
+			value.MutationCountPresent = true
+		}
+		response.Transport = append(response.Transport, value)
+	}
+	return response
 }
 
 func queueCapturedOutcomeCounts(ctx context.Context, platform *Platform, client Client) (queueOutcomeCounts, error) {

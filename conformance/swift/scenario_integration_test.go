@@ -206,6 +206,9 @@ func runSwiftQueueReplay(t *testing.T) {
 	if len(result.ReplayCalls) != 9 {
 		t.Fatalf("Swift queue-replay replay calls = %d, want 9", len(result.ReplayCalls))
 	}
+	if err := scenarios.ValidateNativeCRUDEvidence(result.CRUD); err != nil {
+		t.Fatalf("validate direct Swift queue-replay CRUD evidence: %v", err)
+	}
 }
 
 func resetSwiftPerformanceServer(t *testing.T, ctx context.Context, harness *blackbox.Harness) {
