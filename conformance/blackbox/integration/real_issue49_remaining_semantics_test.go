@@ -1013,6 +1013,62 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 	if compaction.DeletedEntries < 1 {
 		t.Fatalf("retention-floor compaction deleted no effects: %#v", compaction)
 	}
+	type floorState struct {
+		StreamGeneration     string
+		MembershipGeneration int64
+		RetentionGeneration  int64
+		PositionKind         string
+		CommitLSN            string
+		EventOrdinal         int64
+		EffectOrdinal        int32
+	}
+	database, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open retention-floor database: %v", err)
+	}
+	defer database.Close()
+	var remainingEffects int64
+	if err := database.QueryRowContext(ctx, "SELECT count(*) FROM synchro.sync_changelog WHERE bucket_id = 'user:diagnostic-user'").Scan(&remainingEffects); err != nil {
+		t.Fatalf("read retention-floor effect count: %v", err)
+	}
+	if remainingEffects != 0 {
+		t.Fatalf("retention-floor compaction left %d scope effects", remainingEffects)
+	}
+	readFloor := func() floorState {
+		t.Helper()
+		var state floorState
+		if err := database.QueryRowContext(ctx, `
+			SELECT stream_generation, membership_generation, retention_generation,
+			       floor_position_kind, floor_commit_lsn::text,
+			       floor_event_ordinal, floor_effect_ordinal
+			FROM synchro.sync_scope_state
+			WHERE scope_id = 'user:diagnostic-user'`).Scan(
+			&state.StreamGeneration,
+			&state.MembershipGeneration,
+			&state.RetentionGeneration,
+			&state.PositionKind,
+			&state.CommitLSN,
+			&state.EventOrdinal,
+			&state.EffectOrdinal,
+		); err != nil {
+			t.Fatalf("read retention-floor lineage: %v", err)
+		}
+		if state.StreamGeneration == "" || state.MembershipGeneration <= 0 || state.RetentionGeneration <= 0 || state.PositionKind != "effect" || state.CommitLSN == "" || state.EventOrdinal < 0 || state.EffectOrdinal < 0 {
+			t.Fatalf("retention-floor lineage is incomplete: %#v", state)
+		}
+		return state
+	}
+	retainedFloor := readFloor()
+	emptyCompaction, err := harness.Operator().RunDiagnosticRetentionCompaction(ctx)
+	if err != nil {
+		t.Fatalf("compact empty retention-floor effect log: %v", err)
+	}
+	if emptyCompaction.DeletedEntries != 0 {
+		t.Fatalf("empty retention-floor compaction deleted effects: %#v", emptyCompaction)
+	}
+	if afterEmptyCompaction := readFloor(); afterEmptyCompaction != retainedFloor {
+		t.Fatalf("empty effect log changed the durable retention floor: before=%#v after=%#v", retainedFloor, afterEmptyCompaction)
+	}
 	oldScopes["user:diagnostic-user"] = map[string]any{"cursor": oldUserCursor}
 	oldStatus, oldResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, oldScopes, 100))
 	if oldStatus != http.StatusOK || !issue49RemainingContainsString(oldResponse["rebuild"], "user:diagnostic-user") {
