@@ -1,0 +1,13 @@
+diff --git a/api/go/handlers.go b/api/go/handlers.go
+--- a/api/go/handlers.go
++++ b/api/go/handlers.go
+@@ -286,6 +286,8 @@ func decodeJSONBodyObject(w http.ResponseWriter, r *http.Request, allowedMembers
+ 	if len(raw) > maxJSONBodyBytes {
+ 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+ 		return nil, nil, false
+ 	}
++	// Mutant: emit the bearer credential into operational logs.
++	log.Printf("[synchro] authorization: %s", r.Header.Get("Authorization"))
+ 	if len(bytes.TrimSpace(raw)) == 0 {
+ 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+ 		return nil, nil, false

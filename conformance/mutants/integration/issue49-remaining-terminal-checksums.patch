@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -552,7 +552,7 @@ fn final_scope_checksums(
+     has_more: bool,
+ ) -> Result<Option<std::collections::BTreeMap<String, ChecksumObject>>, String> {
+     if has_more {
+-        return Ok(None);
++        return Ok(Some(std::collections::BTreeMap::new()));
+     }
+ 
+     let checksums = compute_bucket_checksums(client, scope_ids)?;

@@ -1,0 +1,11 @@
+diff --git a/extensions/synchro-core/src/checksum.rs b/extensions/synchro-core/src/checksum.rs
+--- a/extensions/synchro-core/src/checksum.rs
++++ b/extensions/synchro-core/src/checksum.rs
+@@ -627,6 +627,6 @@ pub fn row_digest_preimage(
+     preimage.extend_from_slice(schema_hash.as_bytes());
+     append_blob(&mut preimage, identity.as_bytes())?;
+     append_blob(&mut preimage, &row_body)?;
+-    append_text(&mut preimage, server_version)?;
++    append_text(&mut preimage, "cursor-only")?;
+     Ok(preimage)
+ }

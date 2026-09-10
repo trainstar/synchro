@@ -40,6 +40,7 @@
 	_run-r1-benchmark \
 	parse-testresult \
 	conformance-adapter-artifact \
+	conformance-seed-artifact \
 	conformance-pg18-extension-artifact \
 	conformance-pg18-extension-test-artifact \
 	rc-stage-server-artifacts \
@@ -189,6 +190,7 @@ SOAK_DURATION ?= 1s
 TESTRESULT_TEST_NAME ?=
 BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
+CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 ADAPTER_TEST_URL ?=
 REPLICATION_URL = $(ADAPTER_TEST_URL)
@@ -493,7 +495,8 @@ test-blackbox-mutation-control:
 		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder|TestRealS02DivergentPullPaginationIsStarvationFree|\
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
 		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
-		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss) ;; \
+		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
+		TestRealIssue49RemainingSemantics) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac; \
 	case "$$assertion" in assertion|assertion\#[0-9][0-9]) ;; *) echo "MUTATION_CONTROL_TEST does not name a supported assertion" >&2; exit 1 ;; esac; \
@@ -594,6 +597,27 @@ conformance-adapter-artifact:
 		printf '%s\n' "$$digest" > "$$stage/synchrod-pg.sha256.tmp"; \
 		mv "$$stage/synchrod-pg.sha256.tmp" "$$stage/synchrod-pg.sha256"; \
 		mv "$$stage" "$$final"; \
+		rmdir "$$lock"; \
+		trap - EXIT HUP INT TERM
+
+conformance-seed-artifact:
+	@set -eu; \
+		final="$(CONFORMANCE_SEED_ARTIFACT)"; \
+		parent="$$(dirname "$$final")"; \
+		stage="$$final.tmp.$$$$"; \
+		lock="$$final.publish-lock"; \
+		mkdir -p "$$parent"; \
+		mkdir "$$lock" || { echo "seed artifact publication is locked" >&2; exit 1; }; \
+		cleanup() { rm -f "$$stage" "$$stage.sha256.tmp"; rmdir "$$lock" 2>/dev/null || true; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
+		(cd api/go && GOWORK=off go build -o "$$stage" ./cmd/synchro-seed); \
+		test -x "$$stage"; \
+		digest="$$(shasum -a 256 "$$stage" | cut -d ' ' -f 1)"; \
+		test -n "$$digest"; \
+		printf '%s\n' "$$digest" > "$$stage.sha256.tmp"; \
+		mv "$$stage" "$$final"; \
+		mv "$$stage.sha256.tmp" "$$final.sha256"; \
 		rmdir "$$lock"; \
 		trap - EXIT HUP INT TERM
 

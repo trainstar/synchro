@@ -1,0 +1,13 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1856,8 +1856,7 @@ fn accepted_evaluation(
+     row_identity: Option<Vec<u8>>,
+     fence_only_delete: bool,
+ ) -> EvaluatedMutation {
+-    let fence_version = load_current_fence_version(client, mutation, table_reg, record_id)
+-        .unwrap_or_else(|| pgrx::error!("accepted push source write has no version fence"));
++    let fence_version = mutation.client_version.clone();
+     let mut object = base_outcome(
+         mutation,
+         &outcome_schema,

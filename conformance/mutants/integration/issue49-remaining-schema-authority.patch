@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/client.rs b/extensions/synchro-pg/src/client.rs
+--- a/extensions/synchro-pg/src/client.rs
++++ b/extensions/synchro-pg/src/client.rs
+@@ -177,7 +177,7 @@ fn synchro_connect_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::J
+         }
+ 
+         let prior = load_stored_client_state(client, p_user_id, &request.client_id);
+-        if request.schema.is_fresh_sentinel() && prior.is_some() {
++        if request.schema.is_fresh_sentinel() && prior.is_some() && false {
+             return invalid_schema_reference_response(request.schema.clone());
+         }
+         if prior.is_some() && request.client_generation.is_none() {

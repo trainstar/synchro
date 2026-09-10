@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/portable_seed.rs b/extensions/synchro-pg/src/portable_seed.rs
+--- a/extensions/synchro-pg/src/portable_seed.rs
++++ b/extensions/synchro-pg/src/portable_seed.rs
+@@ -458,7 +458,7 @@ fn synchro_portable_seed_manifest(p_page_limit: default!(i32, "1000")) -> pgrx
+                 retention_generation: scope.retention_generation,
+                 cardinality: rows.len() as i64,
+                 checksum: *checksum,
+-                continuation: continuation.clone(),
++                continuation: String::new(),
+                 page_token: page_token.clone(),
+             });
+             state_scopes.push((scope.clone(), rows.len() as i64, *checksum));

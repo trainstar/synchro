@@ -85,8 +85,10 @@ package_artifacts() {
 	target_root="$run_root/targets/$label"
 	adapter_artifact="$artifact_root/adapter"
 	extension_artifact="$artifact_root/extension"
+	seed_artifact="$artifact_root/synchro-seed"
 	adapter_log="$logs_root/$label-adapter-package.log"
 	extension_log="$logs_root/$label-extension-package.log"
+	seed_log="$logs_root/$label-seed-package.log"
 
 	if ! make --no-print-directory -s -C "$workspace" conformance-adapter-artifact \
 		CONFORMANCE_ADAPTER_ARTIFACT_DIR="$adapter_artifact" >"$adapter_log" 2>&1; then
@@ -97,9 +99,14 @@ package_artifacts() {
 		CONFORMANCE_EXTENSION_ARTIFACT="$extension_artifact" >"$extension_log" 2>&1; then
 		fail "extension packaging failed for $label"
 	fi
+	if ! make --no-print-directory -s -C "$workspace" conformance-seed-artifact \
+		CONFORMANCE_SEED_ARTIFACT="$seed_artifact" >"$seed_log" 2>&1; then
+		fail "seed packaging failed for $label"
+	fi
 
 	PACKAGE_EXTENSION_ARTIFACT=$extension_artifact
 	PACKAGE_ADAPTER_ARTIFACT="$adapter_artifact/synchrod-pg"
+	PACKAGE_SEED_ARTIFACT=$seed_artifact
 }
 
 run_control() {
@@ -109,6 +116,7 @@ run_control() {
 	test_path=$4
 	extension_artifact=$5
 	adapter_artifact=$6
+	seed_artifact=$7
 	json_log="$logs_root/$label-$phase.json"
 	stderr_log="$logs_root/$label-$phase.stderr.log"
 	parser_output="$logs_root/$label-$phase.parser.out"
@@ -119,6 +127,7 @@ run_control() {
 		SYNCHRO_CONFORMANCE_PG18_BINDIR="$pg_bindir" \
 		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$extension_artifact" \
 		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$adapter_artifact" \
+		SYNCHRO_CONFORMANCE_SEED_ARTIFACT="$seed_artifact" \
 		SYNCHRO_CONFORMANCE_ADMIN_USER="synchro_mutant_admin" \
 		SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE="$secrets_root/admin-password" \
 		SYNCHRO_CONFORMANCE_ADAPTER_USER="synchro_mutant_adapter" \
@@ -156,9 +165,10 @@ expect_control_result() {
 	test_path=$4
 	extension_artifact=$5
 	adapter_artifact=$6
-	expected=$7
+	seed_artifact=$7
+	expected=$8
 
-	run_control "$label" "$phase" "$workspace" "$test_path" "$extension_artifact" "$adapter_artifact"
+	run_control "$label" "$phase" "$workspace" "$test_path" "$extension_artifact" "$adapter_artifact" "$seed_artifact"
 	case "$expected" in
 		target_pass)
 			if [ "$CONTROL_STATUS" -ne 0 ] || [ "$CONTROL_RESULT" != target_pass ]; then
@@ -203,16 +213,17 @@ run_category() {
 	package_artifacts "$workspace" "$category"
 	mutant_extension=$PACKAGE_EXTENSION_ARTIFACT
 	mutant_adapter=$PACKAGE_ADAPTER_ARTIFACT
+	mutant_seed=$PACKAGE_SEED_ARTIFACT
 
 	expect_control_result \
 		"$category" baseline "$repo_root" "$test_path" \
-		"$baseline_extension" "$baseline_adapter" target_pass
+		"$baseline_extension" "$baseline_adapter" "$baseline_seed" target_pass
 	expect_control_result \
 		"$category" mutant "$workspace" "$test_path" \
-		"$mutant_extension" "$mutant_adapter" target_semantic_test_failure
+		"$mutant_extension" "$mutant_adapter" "$mutant_seed" target_semantic_test_failure
 	expect_control_result \
 		"$category" post-baseline "$repo_root" "$test_path" \
-		"$baseline_extension" "$baseline_adapter" target_pass
+		"$baseline_extension" "$baseline_adapter" "$baseline_seed" target_pass
 	cleanup_category "$category"
 	mutant_count=$((mutant_count + 1))
 	printf 'KILLED %s by %s\n' "$category" "$test_path"
@@ -243,6 +254,7 @@ configure_real_environment
 package_artifacts "$repo_root" baseline
 baseline_extension=$PACKAGE_EXTENSION_ARTIFACT
 baseline_adapter=$PACKAGE_ADAPTER_ARTIFACT
+baseline_seed=$PACKAGE_SEED_ARTIFACT
 
 run_category \
 	cursor-advancement \

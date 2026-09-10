@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1570,7 +1570,7 @@ fn evaluate_mutation(
+                     },
+                 );
+             }
+-            let dml_outcome = if mutation.op == Operation::Update {
++            let dml_outcome = if mutation.op == Operation::Delete {
+                 push_update(
+                     client,
+                     &mutation.mutation_id,

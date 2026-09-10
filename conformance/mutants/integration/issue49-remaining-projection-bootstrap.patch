@@ -1,0 +1,11 @@
+diff --git a/extensions/synchro-pg/src/stream_reset.rs b/extensions/synchro-pg/src/stream_reset.rs
+--- a/extensions/synchro-pg/src/stream_reset.rs
++++ b/extensions/synchro-pg/src/stream_reset.rs
+@@ -1418,7 +1418,6 @@ fn activate_projection_bootstrap(
+     verify_persisted_counts(client, &reset)?;
+     let affected_scopes = projection_bootstrap_affected_scopes(client, &reset, &registry)?;
+ 
+-    cover_projection_bootstrap_fences(client, &reset, barrier)?;
+     replace_live_projection(client, &reset)?;
+     activate_projection_registry(client, &reset, target_generation, barrier, &affected_scopes)?;
+     // The rebuild immutability triggers accept a catching-up projection

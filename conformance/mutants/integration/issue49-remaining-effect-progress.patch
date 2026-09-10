@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -910,7 +910,7 @@ fn query_scope_candidates(
+             .get_by_name::<i32, &str>("effect_ordinal")
+             .map_err(|_| "changelog effect ordinal is malformed".to_string())?
+             .ok_or_else(|| "changelog effect ordinal is null".to_string())?;
+-        let position = StreamPosition::effect(&commit_lsn, event_ordinal, effect_ordinal)?;
++        let position = StreamPosition::effect(&commit_lsn, event_ordinal, 0)?;
+         let relation_id = row
+             .get_by_name::<String, &str>("relation_id")
+             .map_err(|_| "changelog relation identity is malformed".to_string())?

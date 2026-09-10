@@ -1,0 +1,54 @@
+diff --git a/extensions/synchro-core/src/contract.rs b/extensions/synchro-core/src/contract.rs
+--- a/extensions/synchro-core/src/contract.rs
++++ b/extensions/synchro-core/src/contract.rs
+@@ -784,7 +784,7 @@ impl Mutation {
+         }
+ 
+         match self.op {
+-            Operation::Insert => {
++            Operation::Insert | Operation::Upsert => {
+                 if self.base_version.is_some() {
+                     return Err(ContractViolation::UnexpectedMutationBaseVersion);
+                 }
+@@ -806,7 +806,6 @@ impl Mutation {
+                     return Err(ContractViolation::UnexpectedMutationColumns);
+                 }
+             }
+-            Operation::Upsert => return Err(ContractViolation::InvalidPushOperation),
+         }
+         Ok(())
+     }
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1429,12 +1429,12 @@ fn evaluate_mutation(
+         );
+     };
+ 
+-    let dml_data = if matches!(mutation.op, Operation::Insert | Operation::Update) {
++    let dml_data = if matches!(mutation.op, Operation::Insert | Operation::Upsert | Operation::Update) {
+         build_dml_data(table_reg, &policy_columns)
+     } else {
+         serde_json::Value::Object(serde_json::Map::new())
+     };
+-    if mutation.op == Operation::Insert
++    if matches!(mutation.op, Operation::Insert | Operation::Upsert)
+         && !has_required_insert_columns(required_insert_columns, table_reg, &dml_data)
+     {
+         return validation_evaluation(
+@@ -1468,7 +1468,7 @@ fn evaluate_mutation(
+     }
+ 
+     match mutation.op {
+-        Operation::Insert => {
++        Operation::Insert | Operation::Upsert => {
+             if let Some(existing) = existing.as_ref() {
+                 return conflict_evaluation(
+                     mutation,
+@@ -1607,6 +1607,5 @@ fn evaluate_mutation(
+                 ),
+             }
+         }
+-        Operation::Upsert => pgrx::error!("push upsert passed contract validation"),
+     }
+ }

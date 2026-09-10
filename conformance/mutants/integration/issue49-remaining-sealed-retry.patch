@@ -1,0 +1,16 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -263,7 +263,11 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
+             if batch.http_status != Some(200) {
+                 pgrx::error!("completed push batch has an invalid status")
+             }
+-            return json_bytes_response(response);
++            return push_protocol_error(
++                ProtocolErrorCode::TemporaryUnavailable,
++                "stored response is unavailable",
++                true,
++            );
+         }
+ 
+         let mutation_ids = request

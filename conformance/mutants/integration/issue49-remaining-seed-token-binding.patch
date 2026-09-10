@@ -1,0 +1,11 @@
+diff --git a/extensions/synchro-pg/src/portable_seed.rs b/extensions/synchro-pg/src/portable_seed.rs
+--- a/extensions/synchro-pg/src/portable_seed.rs
++++ b/extensions/synchro-pg/src/portable_seed.rs
+@@ -1374,7 +1374,6 @@ fn validate_page_binding(
+         || payload.retention_generation != scope.scope.retention_generation.to_string()
+         || payload.stream_generation != scope.scope.stream_generation
+         || payload.snapshot_boundary != state.boundary
+-        || payload.next_row_ordinal != expected_row_ordinal.to_string()
+         || payload.page_limit != limit.to_string()
+     {
+         return Err("portable seed page token binding is invalid".to_string());

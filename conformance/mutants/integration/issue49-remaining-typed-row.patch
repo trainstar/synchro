@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -2092,7 +2092,7 @@ fn canonicalize_record_id(
+         .get_by_name::<String, &str>("record_id")
+         .unwrap_or_else(|_| pgrx::error!("reading canonical push row identity failed"))
+         .unwrap_or_else(|| pgrx::error!("canonical push row identity is missing"));
+-    (canonical == record_id).then_some(canonical)
++    Some(canonical)
+ }
+ 
+ fn load_existing_record(

@@ -1,0 +1,21 @@
+diff --git a/extensions/synchro-core/src/contract.rs b/extensions/synchro-core/src/contract.rs
+--- a/extensions/synchro-core/src/contract.rs
++++ b/extensions/synchro-core/src/contract.rs
+@@ -1864,11 +1864,12 @@ fn validate_optional_row_checksum(
+ 
+ fn is_canonical_utc_microsecond(value: &str) -> bool {
+     DateTime::parse_from_rfc3339(value)
+-        .map(|time| {
+-            time.with_timezone(&Utc)
+-                .to_rfc3339_opts(SecondsFormat::Micros, true)
+-                == value
+-        })
++        .map(|time| {
++            let _canonical = time
++                .with_timezone(&Utc)
++                .to_rfc3339_opts(SecondsFormat::Micros, true);
++            true
++        })
+         .unwrap_or(false)
+ }
+ 
