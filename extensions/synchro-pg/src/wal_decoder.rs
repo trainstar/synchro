@@ -596,13 +596,15 @@ impl WalDecoder {
         cursor: &mut Cursor<'_>,
         relation: &RelationInfo,
     ) -> Result<TupleImage, DecodeError> {
-        let key_columns: Vec<_> = relation
-            .columns
-            .iter()
-            .filter(|column| column.is_key)
-            .cloned()
-            .collect();
-        self.read_tuple(cursor, &key_columns)
+        // PostgreSQL encodes K tuples with every published column.
+        let mut image = self.read_tuple(cursor, &relation.columns)?;
+        image.retain(|name, _| {
+            relation
+                .columns
+                .iter()
+                .any(|column| column.is_key && column.name == *name)
+        });
+        Ok(image)
     }
 }
 
@@ -869,7 +871,10 @@ mod tests {
             .feed(&dml(
                 DELETE_MSG,
                 7,
-                Some(&[TupleValue::Text(b"b".to_vec())]),
+                Some(&[
+                    TupleValue::Text(b"b".to_vec()),
+                    TupleValue::Text(b"discarded".to_vec()),
+                ]),
                 None,
             ))
             .unwrap();
@@ -1037,7 +1042,10 @@ mod tests {
             .feed(&dml(
                 DELETE_MSG,
                 7,
-                Some(&[TupleValue::Text(b"a".to_vec())]),
+                Some(&[
+                    TupleValue::Text(b"a".to_vec()),
+                    TupleValue::Text(b"discarded".to_vec()),
+                ]),
                 None,
             ))
             .unwrap();
@@ -1057,7 +1065,10 @@ mod tests {
         let mut update = vec![UPDATE_MSG];
         update.extend_from_slice(&7u32.to_be_bytes());
         update.push(b'K');
-        update.extend(tuple(&[TupleValue::Text(b"a".to_vec())]));
+        update.extend(tuple(&[
+            TupleValue::Text(b"a".to_vec()),
+            TupleValue::Text(b"old".to_vec()),
+        ]));
         update.push(b'N');
         update.extend(tuple(&[
             TupleValue::Text(b"a".to_vec()),
@@ -1075,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_key_tuple_with_non_key_column_width() {
+    fn rejects_key_tuple_with_incomplete_column_width() {
         let mut decoder = decoder(7, "public", "items");
         decoder.feed(&relation(7, "public", "items", b'd')).unwrap();
         decoder.feed(&begin(1, 2, 1)).unwrap();
@@ -1083,10 +1094,7 @@ mod tests {
         let result = decoder.feed(&dml(
             DELETE_MSG,
             7,
-            Some(&[
-                TupleValue::Text(b"a".to_vec()),
-                TupleValue::Text(b"unexpected".to_vec()),
-            ]),
+            Some(&[TupleValue::Text(b"a".to_vec())]),
             None,
         ));
 
