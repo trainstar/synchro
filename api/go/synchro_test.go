@@ -393,6 +393,22 @@ func TestConnectPassthrough(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("expected 200, got %d: %v", status, body)
 	}
+	const canonicalServerTimeLayout = "2006-01-02T15:04:05.000000Z"
+	for name, response := range map[string]map[string]any{
+		"canonical function": expected,
+		"adapter":            body,
+	} {
+		serverTime, ok := response["server_time"].(string)
+		if !ok {
+			t.Fatalf("%s response has invalid server_time: %v", name, response["server_time"])
+		}
+		parsed, err := time.Parse(canonicalServerTimeLayout, serverTime)
+		if err != nil || parsed.Format(canonicalServerTimeLayout) != serverTime {
+			t.Fatalf("%s response has noncanonical server_time %q", name, serverTime)
+		}
+	}
+	delete(expected, "server_time")
+	delete(body, "server_time")
 	if !reflect.DeepEqual(body, expected) {
 		t.Fatalf("connect response differs from canonical function: got %v, want %v", body, expected)
 	}
