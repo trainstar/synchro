@@ -649,6 +649,10 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		control="$$out$$sharedir/extension/synchro_pg.control"; \
 		sql="$$out$$sharedir/extension/synchro_pg--0.3.0.sql"; \
 		test -f "$$library" && test -f "$$control" && test -f "$$sql"; \
+		perl -pi -e 's/[ \t]+$$//' "$$sql"; \
+		perl -0pi -e 's/\n+\z/\n/' "$$sql"; \
+		cmp -s extensions/synchro-pg/sql/synchro_pg--0.3.0.sql "$$sql"; \
+		cmp -s extensions/synchro-pg/synchro_pg.control "$$control"; \
 		library_path="$${library#"$$out"/}"; \
 		control_path="$${control#"$$out"/}"; \
 		sql_path="$${sql#"$$out"/}"; \
