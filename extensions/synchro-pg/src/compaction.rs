@@ -159,12 +159,18 @@ fn delete_acknowledged_effects(client: &mut SpiClient<'_>, batch_size: i32) -> (
                              )
                        )
                    )
-                   AND NOT EXISTS (
-                     SELECT 1
-                     FROM sync_rebuild_sessions rebuild_session
-                     JOIN sync_scope_state scope_state
-                       ON scope_state.scope_id = rebuild_session.scope_id
-                      AND scope_state.stream_generation = rebuild_session.stream_generation
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM sync_rebuild_sessions rebuild_session
+                      JOIN sync_clients rebuild_client
+                        ON rebuild_client.user_id = rebuild_session.user_id
+                       AND rebuild_client.client_id = rebuild_session.client_id
+                       AND rebuild_client.client_generation = rebuild_session.client_generation
+                       AND rebuild_client.is_active = true
+                       AND rebuild_session.scope_id = ANY(rebuild_client.bucket_subs)
+                      JOIN sync_scope_state scope_state
+                        ON scope_state.scope_id = rebuild_session.scope_id
+                       AND scope_state.stream_generation = rebuild_session.stream_generation
                       AND scope_state.membership_generation = rebuild_session.membership_generation
                       AND scope_state.retention_generation = rebuild_session.retention_generation
                      WHERE rebuild_session.scope_id = effect.bucket_id

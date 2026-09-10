@@ -1089,6 +1089,7 @@ func TestRealIssue49AdapterDelegationAndServerScopes(t *testing.T) {
 		})
 	}
 
+	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8d08-000000000005")
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 	before := observeCheckpointMap(t, ctx, harness, client.ID)
 	unknownScopes := issue49CloneScopes(client.Scopes)

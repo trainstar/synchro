@@ -119,6 +119,7 @@ func TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary(t *testing.T) {
 		}
 	}
 
+	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8a01-000000000005")
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 	before := observeCheckpointMap(t, ctx, harness, client.ID)
 	unknownScopes := issue49CloneScopes(client.Scopes)
@@ -644,7 +645,8 @@ func TestRealIssue49SecurityDatabaseAuthority(t *testing.T) {
 			  AND auth_method IN ('scram-sha-256', 'cert') AND error IS NULL
 		), EXISTS (
 			SELECT 1 FROM pg_catalog.pg_hba_file_rules
-			WHERE 'all' = ANY(database) AND $2 = ANY(user_name)
+			WHERE 'all' = ANY(database)
+			  AND ($2 = ANY(user_name) OR 'all' = ANY(user_name))
 			  AND auth_method = 'reject' AND error IS NULL
 		)`, harness.Names().Database, environment.Worker.Username).Scan(&workerHBA, &workerHBAReject); err != nil {
 		t.Fatalf("inspect worker HBA boundary: %v", err)

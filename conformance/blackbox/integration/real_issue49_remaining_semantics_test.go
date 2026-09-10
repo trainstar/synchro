@@ -1008,7 +1008,6 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-retention-floor")
 	_, oldUserCursor := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8e24-000000000001")
 	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8e24-000000000002")
-	oldScopes := issue49CloneObject(t, client.Scopes)
 	recordID := "00000000-0000-4000-8e24-000000000003"
 	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)", recordID, "diagnostic-user", "retention-floor"); err != nil {
 		t.Fatalf("insert retention-floor row: %v", err)
@@ -1018,8 +1017,7 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 	if len(requireRealChanges(t, first)) != 1 {
 		t.Fatalf("retention-floor control did not deliver one effect: %#v", first)
 	}
-	atFloorScopes := issue49CloneObject(t, client.Scopes)
-	atFloorUserCursor := atFloorScopes["user:diagnostic-user"].(map[string]any)["cursor"].(string)
+	atFloorUserCursor := client.Scopes["user:diagnostic-user"].(map[string]any)["cursor"].(string)
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 	if err := harness.Operator().ExpireRetentionClient(ctx, "diagnostic-user", client.ID); err != nil {
 		t.Fatalf("expire retention-floor client: %v", err)
@@ -1087,6 +1085,74 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 	if afterEmptyCompaction := readFloor(); afterEmptyCompaction != retainedFloor {
 		t.Fatalf("empty effect log changed the durable retention floor: before=%#v after=%#v", retainedFloor, afterEmptyCompaction)
 	}
+	compareCursorToFloor := func(cursor string) int {
+		t.Helper()
+		decoded := issue49DecodeOpaqueToken(t, cursor, "ic1")
+		if decoded["stream_generation"] != retainedFloor.StreamGeneration {
+			t.Fatalf("retention cursor has the wrong stream generation: %#v", decoded)
+		}
+		position, ok := decoded["position"].(map[string]any)
+		if !ok {
+			t.Fatalf("retention cursor position is invalid: %#v", decoded)
+		}
+		kind, ok := position["position_kind"].(string)
+		if !ok {
+			t.Fatalf("retention cursor position kind is invalid: %#v", position)
+		}
+		var commitLSN any
+		var eventOrdinal, effectOrdinal int64
+		switch kind {
+		case "generation_start":
+		case "transaction_end":
+			var valid bool
+			commitLSN, valid = position["commit_lsn"].(string)
+			if !valid || commitLSN == "" {
+				t.Fatalf("transaction-end cursor position is invalid: %#v", position)
+			}
+		case "effect":
+			var commitValid, eventValid, effectValid bool
+			commitLSN, commitValid = position["commit_lsn"].(string)
+			rawEvent, eventValid := position["event_ordinal"].(float64)
+			rawEffect, effectValid := position["effect_ordinal"].(float64)
+			eventOrdinal = int64(rawEvent)
+			effectOrdinal = int64(rawEffect)
+			if !commitValid || commitLSN == "" || !eventValid || !effectValid ||
+				rawEvent < 0 || rawEvent != float64(eventOrdinal) ||
+				rawEffect < 0 || rawEffect != float64(effectOrdinal) {
+				t.Fatalf("effect cursor position is invalid: %#v", position)
+			}
+		default:
+			t.Fatalf("retention cursor position kind is unsupported: %#v", position)
+		}
+		var comparison int
+		if err := database.QueryRowContext(ctx, `
+			SELECT CASE
+				WHEN $1 = 'generation_start' THEN -1
+				WHEN $2::pg_lsn < $5::pg_lsn THEN -1
+				WHEN $2::pg_lsn > $5::pg_lsn THEN 1
+				WHEN $1 = 'transaction_end' THEN 1
+				WHEN ($3::bigint, $4::bigint) < ($6::bigint, $7::bigint) THEN -1
+				WHEN ($3::bigint, $4::bigint) = ($6::bigint, $7::bigint) THEN 0
+				ELSE 1
+			END`,
+			kind,
+			commitLSN,
+			eventOrdinal,
+			effectOrdinal,
+			retainedFloor.CommitLSN,
+			retainedFloor.EventOrdinal,
+			retainedFloor.EffectOrdinal,
+		).Scan(&comparison); err != nil {
+			t.Fatalf("compare production cursor with retention floor: %v", err)
+		}
+		return comparison
+	}
+	if oldComparison := compareCursorToFloor(oldUserCursor); oldComparison >= 0 {
+		t.Fatalf("pre-effect cursor is not below the retained floor: comparison=%d floor=%#v", oldComparison, retainedFloor)
+	}
+	if currentComparison := compareCursorToFloor(atFloorUserCursor); currentComparison < 0 {
+		t.Fatalf("acknowledged cursor is below the retained floor: comparison=%d floor=%#v", currentComparison, retainedFloor)
+	}
 	reconnectStatus, reconnected := postConnect(t, ctx, harness.AdapterURL(), token, map[string]any{
 		"client_id":         client.ID,
 		"client_generation": client.Generation,
@@ -1101,19 +1167,18 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 	if reconnectStatus != http.StatusOK || !generationOK || int64(reconnectedGeneration) != client.Generation+1 {
 		t.Fatalf("retention-floor reconnect did not renew the client: status=%d response=%#v", reconnectStatus, reconnected)
 	}
+	cursorUpdates, updatesOK := reconnected["scope_cursor_updates"].(map[string]any)
+	if !updatesOK || len(cursorUpdates) != len(client.Scopes) {
+		t.Fatalf("retention-floor renewal cursor updates are incomplete: %#v", reconnected)
+	}
+	for scopeID := range client.Scopes {
+		if update, present := cursorUpdates[scopeID]; !present || update != nil {
+			t.Fatalf("retention-floor renewal did not clear scope %q: %#v", scopeID, cursorUpdates)
+		}
+	}
 	client.Generation = int64(reconnectedGeneration)
-	oldScopes["user:diagnostic-user"] = map[string]any{"cursor": oldUserCursor}
-	oldStatus, oldResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, oldScopes, 100))
-	if oldStatus != http.StatusOK || !issue49RemainingContainsString(oldResponse["rebuild"], "user:diagnostic-user") {
-		t.Fatalf("below-floor cursor did not require rebuild: status=%d response=%#v", oldStatus, oldResponse)
-	}
-	atFloorScopes["user:diagnostic-user"] = map[string]any{"cursor": atFloorUserCursor}
-	atStatus, atResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, atFloorScopes, 100))
-	if atStatus != http.StatusOK {
-		t.Fatalf("at-floor cursor status = %d: %#v", atStatus, atResponse)
-	}
-	if rebuild, ok := atResponse["rebuild"].([]any); !ok || len(rebuild) != 0 {
-		t.Fatalf("at-floor cursor required rebuild: %#v", atResponse)
+	if afterRenewal := readFloor(); afterRenewal != retainedFloor {
+		t.Fatalf("client renewal changed the durable retention floor: before=%#v after=%#v", retainedFloor, afterRenewal)
 	}
 }
 
@@ -1227,6 +1292,7 @@ func issue49RemainingEffectProgress(t *testing.T) {
 	waitForMembershipBuckets(t, ctx, harness, memberIDs[0], []string{"user:issue49-member-1", targetScope})
 	waitForMembershipBuckets(t, ctx, harness, memberIDs[1], []string{"user:issue49-member-2", targetScope})
 	deadline := time.Now().Add(20 * time.Second)
+	var observedEffects []blackbox.MembershipEffectObservation
 	for {
 		effects, observeErr := harness.Operator().ObserveDependencyEffects(ctx, documentID, []string{documentID, memberIDs[0], memberIDs[1]})
 		count := 0
@@ -1236,6 +1302,7 @@ func issue49RemainingEffectProgress(t *testing.T) {
 			}
 		}
 		if observeErr == nil && count == 3 {
+			observedEffects = effects
 			break
 		}
 		if time.Now().After(deadline) {
@@ -1272,15 +1339,27 @@ func issue49RemainingEffectProgress(t *testing.T) {
 			}
 		}
 	}
-	ordinals := make([]float64, 0, len(positions))
-	for _, position := range positions {
-		ordinal, ok := position["effect_ordinal"].(float64)
-		if !ok || position["commit_lsn"] != positions[0]["commit_lsn"] || position["event_ordinal"] != positions[0]["event_ordinal"] {
-			t.Fatalf("same-event cursor position changed replay identity: %#v", positions)
+	effectOrdinals := make([]int32, 0, 3)
+	var eventOrdinal int64 = -1
+	for _, effect := range observedEffects {
+		if effect.BucketID != targetScope {
+			continue
 		}
-		ordinals = append(ordinals, ordinal)
+		if eventOrdinal < 0 {
+			eventOrdinal = effect.EventOrdinal
+		}
+		if effect.EventOrdinal != eventOrdinal {
+			t.Fatalf("same-event effects changed event identity: %#v", observedEffects)
+		}
+		effectOrdinals = append(effectOrdinals, effect.EffectOrdinal)
 	}
-	if len(changes) != 3 || !seen[documentID] || !seen[memberIDs[0]] || !seen[memberIDs[1]] || !slices.Equal(ordinals, []float64{0, 1, 2}) {
+	if len(positions) != 3 || positions[0]["position_kind"] != "effect" || positions[1]["position_kind"] != "effect" || positions[2]["position_kind"] != "transaction_end" ||
+		positions[0]["commit_lsn"] != positions[1]["commit_lsn"] || positions[1]["commit_lsn"] != positions[2]["commit_lsn"] ||
+		positions[0]["event_ordinal"] != float64(eventOrdinal) || positions[1]["event_ordinal"] != float64(eventOrdinal) ||
+		positions[0]["effect_ordinal"] != float64(0) || positions[1]["effect_ordinal"] != float64(1) {
+		t.Fatalf("same-event cursor progression is invalid: %#v", positions)
+	}
+	if len(changes) != 3 || !seen[documentID] || !seen[memberIDs[0]] || !seen[memberIDs[1]] || !slices.Equal(effectOrdinals, []int32{0, 1, 2}) {
 		t.Fatalf("same-event sibling progress is invalid: changes=%#v positions=%#v", changes, positions)
 	}
 }
@@ -1431,17 +1510,4 @@ func issue49RemainingSchemaCursorContinuity(t *testing.T) {
 		newUser["schema_hash"] != currentTable.Schema["hash"] || newUserCursor == oldUserCursor {
 		t.Fatalf("schema-cursor continuity changed position or reused an old token: global=%#v/%#v user=%#v/%#v", oldGlobal, newGlobal, oldUser, newUser)
 	}
-}
-
-func issue49RemainingContainsString(value any, wanted string) bool {
-	values, ok := value.([]any)
-	if !ok {
-		return false
-	}
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
 }

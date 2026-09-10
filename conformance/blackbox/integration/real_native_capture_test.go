@@ -141,18 +141,18 @@ func TestRealNativeCaptureServerObservationSignals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign native capture target token: %v", err)
 	}
-	targetClient := connectRealProtocolClient(t, ctx, harness, targetToken, targetClientID)
+	targetClient := connectRealProtocolClient(t, ctx, harness, targetToken, targetClientID, "user:"+targetUserID)
 	targetTable := requireRealTable(t, targetClient, "cf_items")
 	ownerField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id")
 
-	clientDecoy := connectRealProtocolClient(t, ctx, harness, targetToken, decoyClientID)
+	clientDecoy := connectRealProtocolClient(t, ctx, harness, targetToken, decoyClientID, "user:"+targetUserID)
 	pushNativeCaptureMutation(t, ctx, harness, targetToken, clientDecoy, requireRealTable(t, clientDecoy, "cf_items"), ownerField, targetUserID, clientDecoyBatch, clientDecoyMutation, clientDecoyRow)
 
 	userDecoyToken, err := harness.NativeBearerToken(ctx, decoyUserID, time.Now())
 	if err != nil {
 		t.Fatalf("sign native capture user decoy token: %v", err)
 	}
-	userDecoy := connectRealProtocolClient(t, ctx, harness, userDecoyToken, targetClientID)
+	userDecoy := connectRealProtocolClient(t, ctx, harness, userDecoyToken, targetClientID, "user:"+decoyUserID)
 	pushNativeCaptureMutation(t, ctx, harness, userDecoyToken, userDecoy, requireRealTable(t, userDecoy, "cf_items"), ownerField, decoyUserID, userDecoyBatch, userDecoyMutation, userDecoyRow)
 
 	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)", recordDecoyRow, targetUserID, "native-capture-record-decoy"); err != nil {
