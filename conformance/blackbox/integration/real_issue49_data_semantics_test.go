@@ -1073,14 +1073,16 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 	if final.Status != http.StatusOK || !ok || finalCursor == "" || finalBody["has_more"] != false {
 		t.Fatalf("final rebuild page is invalid: %#v", finalBody)
 	}
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		issue49RequireCursorBindings(t, ctx, harness, client, finalCursor, "user:diagnostic-user")
 		incrementalPayload := issue49DecodeOpaqueToken(t, finalCursor, "ic1")
 		rebuildPayload := issue49DecodeRebuildToken(t, firstCursor)
 		if !reflect.DeepEqual(incrementalPayload["position"], rebuildPayload["snapshot_boundary"]) {
 			t.Fatalf("final rebuild cursor does not preserve the snapshot boundary: incremental=%#v rebuild=%#v", incrementalPayload, rebuildPayload)
 		}
-	})
+	}) {
+		return
+	}
 	rebuildRecords := append(
 		append(requireRealRebuildRecords(t, firstBody), requireRealRebuildRecords(t, secondBody)...),
 		requireRealRebuildRecords(t, finalBody)...,
@@ -1096,9 +1098,11 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 			t.Fatalf("post-boundary source state changed staged row %s", recordID)
 		}
 	}
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		assertCheckpointMapsEqual(t, before, observeCheckpointMap(t, ctx, harness, client.ID))
-	})
+	}) {
+		return
+	}
 
 	client.Scopes["user:diagnostic-user"] = map[string]any{"cursor": finalCursor}
 	presentedRebuildScopes := map[string]any{
@@ -1146,7 +1150,7 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 		}
 		break
 	}
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		seen := map[string]map[string]any{}
 		for _, change := range postBoundaryChanges {
 			pk, ok := change["pk"].(map[string]any)
@@ -1166,7 +1170,9 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 		if seen[postBoundaryMembershipID]["scope"] != "user:diagnostic-user" {
 			t.Fatalf("membership exit used the wrong scope: %#v", seen[postBoundaryMembershipID])
 		}
-	})
+	}) {
+		return
+	}
 	checkpointAfterFirstPresentation := observeCheckpointMap(t, ctx, harness, client.ID)
 	if sameCheckpointPosition(checkpointAfterSelection["user:diagnostic-user"], checkpointAfterFirstPresentation["user:diagnostic-user"]) {
 		t.Fatal("presented post-boundary cursors did not advance the durable checkpoint")
@@ -1177,7 +1183,7 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 		t.Fatal("later cursor presentation did not advance the durable checkpoint")
 	}
 
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		oldScopes := map[string]any{
 			"cf:global":            client.Scopes["cf:global"],
 			"user:diagnostic-user": selectedCursor,
@@ -1187,9 +1193,11 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 			t.Fatalf("older valid cursor status = %d, want 200: %#v", status, response)
 		}
 		assertCheckpointMapsEqual(t, acknowledged, observeCheckpointMap(t, ctx, harness, client.ID))
-	})
+	}) {
+		return
+	}
 
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		currentUserCursor := client.Scopes["user:diagnostic-user"].(map[string]any)["cursor"].(string)
 		for _, test := range []struct {
 			name   string
@@ -1210,22 +1218,28 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 				},
 			},
 		} {
-			t.Run(test.name, func(t *testing.T) {
+			if !t.Run(test.name, func(t *testing.T) {
 				status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, test.scopes, 100))
 				requireRealProtocolError(t, status, response, http.StatusBadRequest, "invalid_request")
 				assertCheckpointMapsEqual(t, acknowledged, observeCheckpointMap(t, ctx, harness, client.ID))
-			})
+			}) {
+				return
+			}
 		}
-	})
+	}) {
+		return
+	}
 
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		currentUserCursor := client.Scopes["user:diagnostic-user"].(map[string]any)["cursor"].(string)
 		other := connectRealProtocolClient(t, ctx, harness, token, "issue49-cursor-other-client")
 		otherScopes := issue49CloneObject(t, other.Scopes)
 		otherScopes["user:diagnostic-user"] = map[string]any{"cursor": currentUserCursor}
 		status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(other, otherScopes, 100))
 		requireRealProtocolError(t, status, response, http.StatusBadRequest, "invalid_request")
-	})
+	}) {
+		return
+	}
 
 	epochRebuildID := "00000000-0000-4000-8d03-000000000040"
 	status, epochFirst := requestRealRebuildPage(t, ctx, harness, token, client, "user:diagnostic-user", epochRebuildID, nil, 1)
@@ -1248,7 +1262,7 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 	}
 	issue49RequireAcceptedOutcome(t, writeResponse, writeMutationID, "applied")
 
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		for _, cursor := range []any{nil, epochCursor} {
 			replayStatus, replay := requestRealRebuildPage(t, ctx, harness, token, client, "user:diagnostic-user", epochRebuildID, cursor, 1)
 			requireRealProtocolError(t, replayStatus, replay, http.StatusConflict, "rebuild_restart_required")
@@ -1256,9 +1270,11 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 				t.Fatalf("stale rebuild epoch returned records: %#v", replay)
 			}
 		}
-	})
+	}) {
+		return
+	}
 
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		for _, page := range []struct {
 			name   string
 			first  blackbox.Response
@@ -1270,7 +1286,9 @@ func TestRealIssue49RebuildReplayEpochAndMonotonicCursor(t *testing.T) {
 		} {
 			issue49RequireExactReplay(t, page.first, page.replay, page.name)
 		}
-	})
+	}) {
+		return
+	}
 }
 
 func TestRealIssue49PublishedSchemaIdentityIsImmutable(t *testing.T) {
