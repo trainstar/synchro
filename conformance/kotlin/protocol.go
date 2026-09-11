@@ -86,6 +86,7 @@ type TypedValue struct {
 type Result struct {
 	Status                          *string                       `json:"status"`
 	RowsAffected                    *int                          `json:"rows_affected"`
+	RetainedDeleteCaptured          *bool                         `json:"retained_delete_captured"`
 	PendingChangeCount              *int                          `json:"pending_change_count"`
 	ApplicationRowCount             *int                          `json:"application_row_count"`
 	MutationLedgerCount             *int                          `json:"mutation_ledger_count"`
@@ -752,7 +753,7 @@ func decodeResult(data []byte) (Result, error) {
 			return Result{}, errors.New("Kotlin instrumentation result is incomplete")
 		}
 	}
-	if result.Status != nil && *result.Status == "" || result.RowsAffected != nil && *result.RowsAffected < 0 || result.PendingChangeCount != nil && *result.PendingChangeCount < 0 || !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) || result.DurableStateFingerprint != "" && !validLowerHexDigest(result.DurableStateFingerprint) {
+	if result.Status != nil && *result.Status == "" || result.RowsAffected != nil && *result.RowsAffected < 0 || result.PendingChangeCount != nil && *result.PendingChangeCount < 0 || result.RetainedDeleteCaptured != nil && (!*result.RetainedDeleteCaptured || result.RowsAffected == nil || *result.RowsAffected != 0) || !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) || result.DurableStateFingerprint != "" && !validLowerHexDigest(result.DurableStateFingerprint) {
 		return Result{}, errors.New("Kotlin instrumentation result is invalid")
 	}
 	for _, count := range []*int{result.ApplicationRowCount, result.MutationLedgerCount, result.RetainedMutationCount, result.MutationOutcomeCount, result.SealedBatchCount, result.RejectedMutationCount, result.ScopeStateCount, result.ScopeRowCount, result.ProvenanceCount, result.RowMetadataCount, result.RebuildAttemptCount, result.RebuildReceiptCount} {

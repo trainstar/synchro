@@ -925,7 +925,8 @@ func (p *Platform) ApplyStep(ctx context.Context, client Client, operation scena
 	if err != nil {
 		return StepObservation{}, fmt.Errorf("execute Kotlin Android local action: %w", err)
 	}
-	if result.RowsAffected == nil || *result.RowsAffected != 1 {
+	validRetainedDelete := action.Operation == "delete" && result.RowsAffected != nil && *result.RowsAffected == 0 && result.RetainedDeleteCaptured != nil && *result.RetainedDeleteCaptured
+	if result.RowsAffected == nil || (*result.RowsAffected != 1 && !validRetainedDelete) {
 		return StepObservation{}, errors.New("Kotlin Android local action did not affect one row")
 	}
 	state.selectors[selectorKey(selector)] = selector

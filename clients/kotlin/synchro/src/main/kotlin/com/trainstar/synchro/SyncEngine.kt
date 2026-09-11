@@ -1347,6 +1347,13 @@ internal class SyncEngine(
             message = "The sync operation failed contract validation.",
             recoveryAction = SyncRecoveryAction.RETRY,
         )
+        is ContractException -> SyncFailure(
+            operation = operation,
+            code = SyncFailureCode.INVALID_RESPONSE,
+            retryable = false,
+            message = "The sync operation failed contract validation.",
+            recoveryAction = SyncRecoveryAction.RETRY,
+        )
         else -> SyncFailure(
             operation = operation,
             code = SyncFailureCode.LOCAL_FAILURE,

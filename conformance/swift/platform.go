@@ -67,6 +67,7 @@ type RequestOperations []scenarios.Operation
 // SynchronizationResult records one completed grouped public call.
 type SynchronizationResult struct {
 	Completion                string            `json:"completion"`
+	CallErrorCategory         string            `json:"call_error_category,omitempty"`
 	Steps                     []StepObservation `json:"steps"`
 	DurationNanoseconds       uint64            `json:"duration_nanoseconds,omitempty"`
 	ProvenanceMaintenanceWork uint64            `json:"provenance_maintenance_work,omitempty"`
@@ -79,6 +80,7 @@ type CallResult struct {
 	CallID                    string            `json:"call_id"`
 	State                     string            `json:"state"`
 	Completion                string            `json:"completion,omitempty"`
+	CallErrorCategory         string            `json:"call_error_category,omitempty"`
 	Steps                     []StepObservation `json:"steps,omitempty"`
 	DurationNanoseconds       uint64            `json:"duration_nanoseconds,omitempty"`
 	ProvenanceMaintenanceWork uint64            `json:"provenance_maintenance_work,omitempty"`
@@ -866,7 +868,8 @@ func (p *Platform) ApplyStep(ctx context.Context, client Client, operation scena
 		}
 		return StepObservation{}, fmt.Errorf("execute Swift local action with existing application fields on %s: %w (runner reported: %s)", action.TableName, err, state.session.stderrReport())
 	}
-	if result.RowsAffected == nil || *result.RowsAffected != 1 {
+	validRetainedDelete := action.Operation == "delete" && result.RowsAffected != nil && *result.RowsAffected == 0 && result.RetainedDeleteCaptured != nil && *result.RetainedDeleteCaptured
+	if result.RowsAffected == nil || (*result.RowsAffected != 1 && !validRetainedDelete) {
 		return StepObservation{}, errors.New("Swift local action did not affect one row")
 	}
 	state.selectors[selectorKey(selector)] = selector
@@ -972,7 +975,7 @@ func (p *Platform) synchronizeLocked(ctx context.Context, state *platformClient,
 		state.restarted = false
 	}
 	state.started = true
-	return synchronizationResult(completed.Completion, mapped, window), nil
+	return synchronizationResult(completed.Completion, completed.CallErrorCategory, mapped, window), nil
 }
 
 func validateRequestOperations(operations RequestOperations) (string, error) {
@@ -1116,7 +1119,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 		started:        started,
 	}
 	window := operationWindow{observations: cloneTransportObservations(observations), duration: time.Since(started)}
-	return synchronizationResult("blocked", mapped, window), nil
+	return synchronizationResult("blocked", "", mapped, window), nil
 }
 
 func waitForTransportObservation(ctx context.Context, state *platformClient, checkpoint uint64, operationClass string) error {
@@ -1215,9 +1218,10 @@ func mapTransportOperations(operations RequestOperations, observations []transpo
 	return mapped, nil
 }
 
-func synchronizationResult(completion string, steps []StepObservation, window operationWindow) SynchronizationResult {
+func synchronizationResult(completion string, callErrorCategory string, steps []StepObservation, window operationWindow) SynchronizationResult {
 	result := SynchronizationResult{
 		Completion:                completion,
+		CallErrorCategory:         callErrorCategory,
 		Steps:                     steps,
 		ProvenanceMaintenanceWork: window.provenanceMaintenanceWork,
 		ReplayedMutationCount:     window.replayedMutationCount,

@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.os.Process
 import android.util.Base64
 import com.trainstar.synchro.AnyCodable
+import com.trainstar.synchro.Operation
 import com.trainstar.synchro.PendingMutationInspection
 import com.trainstar.synchro.RejectedMutationInspection
 import com.trainstar.synchro.SchemaRef
@@ -323,6 +324,11 @@ private class ClientSession(private val context: Context) : Closeable {
         }
         require(authoredColumns.size == authoredColumns.toSet().size) { "authored columns repeat" }
         val client = requireClient()
+        val retainedMutationIDs = if (operation == "delete") {
+            client.inspectRetainedMutations().mapTo(mutableSetOf()) { it.mutationID }
+        } else {
+            emptySet()
+        }
         val rowsAffected = when (operation) {
             "insert" -> {
                 val names = fields.keys.sorted()
@@ -356,8 +362,19 @@ private class ClientSession(private val context: Context) : Closeable {
                 }.rowsAffected
             }
         }
-        check(rowsAffected == 1) { "local action affected an unexpected row count" }
-        return operationResult(rowsAffected)
+        val recordID = when (primaryKey) {
+            is String -> primaryKey
+            is Boolean -> if (primaryKey) "1" else "0"
+            is ByteArray -> Base64.encodeToString(primaryKey, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+            is Byte, is Short, is Int, is Long -> (primaryKey as Number).toLong().toString()
+            is Float, is Double -> (primaryKey as Number).toDouble().toString()
+            else -> throw IllegalArgumentException("primary key record identity is unsupported")
+        }
+        val retainedDelete = operation == "delete" && rowsAffected == 0 && client.inspectRetainedMutations().any {
+            it.mutationID !in retainedMutationIDs && it.tableName == tableName && it.recordID == recordID && it.operation == Operation.DELETE
+        }
+        check(rowsAffected == 1 || retainedDelete) { "local action affected an unexpected row count" }
+        return operationResult(rowsAffected, retainedDelete)
     }
 
     private fun beginCall(command: JsonObject): JsonObject {
@@ -584,11 +601,12 @@ private class ClientSession(private val context: Context) : Closeable {
         }
     }
 
-    private fun operationResult(rowsAffected: Int? = null): JsonObject {
+    private fun operationResult(rowsAffected: Int? = null, retainedDeleteCaptured: Boolean = false): JsonObject {
         val client = requireClient()
         return buildJsonObject {
             put("status", client.getSyncStatus().state.wireName)
             rowsAffected?.let { put("rows_affected", it) }
+            if (retainedDeleteCaptured) put("retained_delete_captured", true)
             put(
                 "provenance_maintenance_work_cursor",
                 client.provenanceMaintenanceWorkCursor(),

@@ -266,7 +266,7 @@ func runSwiftQueueSuccessorProof(ctx context.Context, setup scenarios.Operation,
 	if err != nil {
 		return scenarios.NativeQueueSuccessorEvidence{}, err
 	}
-	targets, err := bindSwiftQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundUpdate)
+	targets, err := bindSwiftQueueReplayCRUDTargets(controller, plan.Targets(), boundInsert, boundUpdate)
 	if err != nil {
 		return scenarios.NativeQueueSuccessorEvidence{}, err
 	}
@@ -415,7 +415,7 @@ func runSwiftQueueReplayCRUD(ctx context.Context, setup scenarios.Operation, cur
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
-	targets, err := bindSwiftQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundPreviewUpdate)
+	targets, err := bindSwiftQueueReplayCRUDTargets(controller, plan.Targets(), boundInsert, boundPreviewUpdate)
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
@@ -451,7 +451,7 @@ func runSwiftQueueReplayCRUD(ctx context.Context, setup scenarios.Operation, cur
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
-	targets, err = bindSwiftQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundUpdate)
+	targets, err = bindSwiftQueueReplayCRUDTargets(controller, plan.Targets(), boundInsert, boundUpdate)
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
@@ -532,7 +532,7 @@ func bindSwiftQueueReplayCRUDWrites(controller *blackbox.NativeController, opera
 	return bound, nil
 }
 
-func bindSwiftQueueReplayCRUDTargets(planTargets []scenarios.NativeCRUDPlanTarget, inserts, updates []scenarios.Operation) ([]scenarios.NativeCRUDTarget, error) {
+func bindSwiftQueueReplayCRUDTargets(controller *blackbox.NativeController, planTargets []scenarios.NativeCRUDPlanTarget, inserts, updates []scenarios.Operation) ([]scenarios.NativeCRUDTarget, error) {
 	if len(planTargets) != len(inserts) || len(planTargets) != len(updates) {
 		return nil, errors.New("Swift queue-replay CRUD runtime target count is invalid")
 	}
@@ -541,6 +541,10 @@ func bindSwiftQueueReplayCRUDTargets(planTargets []scenarios.NativeCRUDPlanTarge
 		bound, err := scenarios.BindNativeCRUDTarget(target, inserts[index], updates[index])
 		if err != nil {
 			return nil, fmt.Errorf("bind Swift queue-replay CRUD target %q: %w", target.TableID, err)
+		}
+		bound.DeletedAtField, err = controller.ApplicationDeletedAtField(target.TableID)
+		if err != nil {
+			return nil, fmt.Errorf("bind Swift queue-replay CRUD deleted-at field %q: %w", target.TableID, err)
 		}
 		targets = append(targets, bound)
 	}
@@ -599,16 +603,24 @@ func swiftQueueReplayCRUDState(snapshot runnerResult, targets []scenarios.Native
 	if snapshot.ApplicationRowCount == nil || snapshot.PendingChangeCount == nil || snapshot.MutationLedgerCount == nil || snapshot.MutationOutcomeCount == nil || snapshot.RejectedMutationCount == nil || snapshot.RowMetadataCount == nil {
 		return scenarios.NativeCRUDState{}, errors.New("Swift queue-replay CRUD inspection counts are incomplete")
 	}
+	lifecycles := make([]swiftApplicationRowLifecycle, 0, len(targets))
+	for _, target := range targets {
+		lifecycles = append(lifecycles, swiftApplicationRowLifecycle{PrimaryKeyField: target.PrimaryKeyField, RecordID: target.RecordID, DeletedAtField: target.DeletedAtField})
+	}
+	applicationRowCount, applicationRows, err := swiftLogicalApplicationRows(*snapshot.ApplicationRowCount, snapshot.ApplicationRows, lifecycles)
+	if err != nil {
+		return scenarios.NativeCRUDState{}, err
+	}
 	state := scenarios.NativeCRUDState{
 		ProcessID: snapshot.ProcessID, DatabaseIdentityFingerprint: snapshot.DatabaseIdentityFingerprint,
-		ApplicationRowCount: *snapshot.ApplicationRowCount, PendingChangeCount: *snapshot.PendingChangeCount,
+		ApplicationRowCount: applicationRowCount, PendingChangeCount: *snapshot.PendingChangeCount,
 		MutationLedgerCount: *snapshot.MutationLedgerCount, MutationOutcomeCount: *snapshot.MutationOutcomeCount,
 		RejectedMutationCount: *snapshot.RejectedMutationCount, RowMetadataCount: *snapshot.RowMetadataCount,
 		Rows: make([]scenarios.NativeCRUDRowState, 0, len(targets)),
 	}
 	for _, target := range targets {
 		rowState := scenarios.NativeCRUDRowState{TableID: target.TableID}
-		for _, row := range snapshot.ApplicationRows {
+		for _, row := range applicationRows {
 			var recordID string
 			if json.Unmarshal(row[target.PrimaryKeyField], &recordID) != nil || recordID != target.RecordID {
 				continue

@@ -13,6 +13,7 @@ type PendingCycleNativeTarget struct {
 	PrimaryKeyField             string
 	RecordID                    string
 	ValueField                  string
+	DeletedAtField              string
 	Value                       string
 	UnprotectedAuthoredRecordID string
 	UnprotectedRecordID         string

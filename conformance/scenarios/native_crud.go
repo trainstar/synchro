@@ -77,6 +77,7 @@ type NativeCRUDTarget struct {
 	PrimaryKeyField string
 	RecordID        string
 	ValueField      string
+	DeletedAtField  string
 	InitialValue    json.RawMessage
 	UpdatedValue    json.RawMessage
 }

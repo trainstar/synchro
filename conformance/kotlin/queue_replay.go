@@ -281,7 +281,7 @@ func runKotlinQueueSuccessorProof(ctx context.Context, setup scenarios.Operation
 	if err != nil {
 		return scenarios.NativeQueueSuccessorEvidence{}, err
 	}
-	targets, err := bindKotlinQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundUpdate)
+	targets, err := bindKotlinQueueReplayCRUDTargets(controller, plan.Targets(), boundInsert, boundUpdate)
 	if err != nil {
 		return scenarios.NativeQueueSuccessorEvidence{}, err
 	}
@@ -449,7 +449,7 @@ func runKotlinQueueReplayCRUD(ctx context.Context, setup scenarios.Operation, cu
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
-	targets, err := bindKotlinQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundPreviewUpdate)
+	targets, err := bindKotlinQueueReplayCRUDTargets(controller, plan.Targets(), boundInsert, boundPreviewUpdate)
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
@@ -485,7 +485,7 @@ func runKotlinQueueReplayCRUD(ctx context.Context, setup scenarios.Operation, cu
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
-	targets, err = bindKotlinQueueReplayCRUDTargets(plan.Targets(), boundInsert, boundUpdate)
+	targets, err = bindKotlinQueueReplayCRUDTargets(controller, plan.Targets(), boundInsert, boundUpdate)
 	if err != nil {
 		return scenarios.NativeCRUDEvidence{}, err
 	}
@@ -566,7 +566,7 @@ func bindKotlinQueueReplayCRUDWrites(controller *blackbox.NativeController, oper
 	return bound, nil
 }
 
-func bindKotlinQueueReplayCRUDTargets(planTargets []scenarios.NativeCRUDPlanTarget, inserts, updates []scenarios.Operation) ([]scenarios.NativeCRUDTarget, error) {
+func bindKotlinQueueReplayCRUDTargets(controller *blackbox.NativeController, planTargets []scenarios.NativeCRUDPlanTarget, inserts, updates []scenarios.Operation) ([]scenarios.NativeCRUDTarget, error) {
 	if len(planTargets) != len(inserts) || len(planTargets) != len(updates) {
 		return nil, errors.New("Kotlin Android queue-replay CRUD runtime target count is invalid")
 	}
@@ -575,6 +575,10 @@ func bindKotlinQueueReplayCRUDTargets(planTargets []scenarios.NativeCRUDPlanTarg
 		bound, err := scenarios.BindNativeCRUDTarget(target, inserts[index], updates[index])
 		if err != nil {
 			return nil, fmt.Errorf("bind Kotlin Android queue-replay CRUD target %q: %w", target.TableID, err)
+		}
+		bound.DeletedAtField, err = controller.ApplicationDeletedAtField(target.TableID)
+		if err != nil {
+			return nil, fmt.Errorf("bind Kotlin Android queue-replay CRUD deleted-at field %q: %w", target.TableID, err)
 		}
 		targets = append(targets, bound)
 	}
@@ -637,6 +641,14 @@ func kotlinQueueReplayCRUDState(snapshot Result, targets []scenarios.NativeCRUDT
 	if err != nil {
 		return scenarios.NativeCRUDState{}, err
 	}
+	lifecycles := make([]kotlinApplicationRowLifecycle, 0, len(targets))
+	for _, target := range targets {
+		lifecycles = append(lifecycles, kotlinApplicationRowLifecycle{PrimaryKeyField: target.PrimaryKeyField, RecordID: target.RecordID, DeletedAtField: target.DeletedAtField})
+	}
+	applicationRowCount, applicationRows, err := kotlinLogicalApplicationRows(*snapshot.ApplicationRowCount, applicationRows, lifecycles)
+	if err != nil {
+		return scenarios.NativeCRUDState{}, err
+	}
 	var mutations []retainedMutation
 	if err := decodeFactArray(snapshot.RetainedMutations, &mutations, maximumRecords); err != nil {
 		return scenarios.NativeCRUDState{}, errors.New("Kotlin Android queue-replay CRUD mutation inspection is invalid")
@@ -647,7 +659,7 @@ func kotlinQueueReplayCRUDState(snapshot Result, targets []scenarios.NativeCRUDT
 	}
 	state := scenarios.NativeCRUDState{
 		ProcessID: snapshot.ProcessID, DatabaseIdentityFingerprint: snapshot.DatabaseIdentityFingerprint,
-		ApplicationRowCount: *snapshot.ApplicationRowCount, PendingChangeCount: *snapshot.PendingChangeCount,
+		ApplicationRowCount: applicationRowCount, PendingChangeCount: *snapshot.PendingChangeCount,
 		MutationLedgerCount: *snapshot.MutationLedgerCount, MutationOutcomeCount: *snapshot.MutationOutcomeCount,
 		RejectedMutationCount: *snapshot.RejectedMutationCount, RowMetadataCount: *snapshot.RowMetadataCount,
 		Rows: make([]scenarios.NativeCRUDRowState, 0, len(targets)),

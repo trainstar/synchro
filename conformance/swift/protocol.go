@@ -90,6 +90,7 @@ func (e *runnerCommandError) Error() string {
 type runnerResult struct {
 	Status                          *string                       `json:"status"`
 	RowsAffected                    *int                          `json:"rows_affected"`
+	RetainedDeleteCaptured          *bool                         `json:"retained_delete_captured"`
 	PendingChangeCount              *int                          `json:"pending_change_count"`
 	ApplicationRowCount             *int                          `json:"application_row_count"`
 	MutationLedgerCount             *int                          `json:"mutation_ledger_count"`
@@ -1023,6 +1024,9 @@ func validateRunnerResult(result runnerResult) error {
 	if !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) {
 		return errors.New("runner process identity is invalid")
 	}
+	if result.RetainedDeleteCaptured != nil && (!*result.RetainedDeleteCaptured || result.RowsAffected == nil || *result.RowsAffected != 0) {
+		return errors.New("runner retained delete proof is invalid")
+	}
 	for _, count := range []*int{result.ApplicationRowCount, result.MutationLedgerCount, result.MutationOutcomeCount, result.SealedBatchCount, result.RejectedMutationCount, result.ScopeStateCount, result.ScopeRowCount, result.ProvenanceCount, result.RowMetadataCount, result.RebuildAttemptCount, result.RebuildReceiptCount} {
 		if count != nil && *count < 0 {
 			return errors.New("runner state count is invalid")
@@ -1107,9 +1111,10 @@ func validRunnerLogicalType(value string) bool {
 }
 
 type callResult struct {
-	CallID     string
-	State      string
-	Completion string
+	CallID            string
+	State             string
+	Completion        string
+	CallErrorCategory string
 }
 
 func runnerClientCallResult(result runnerResult) (*callResult, error) {
@@ -1120,10 +1125,15 @@ func runnerClientCallResult(result runnerResult) (*callResult, error) {
 	if result.Completion != nil {
 		completion = *result.Completion
 	}
+	callErrorCategory := ""
+	if result.CallErrorCategory != nil {
+		callErrorCategory = *result.CallErrorCategory
+	}
 	return &callResult{
-		CallID:     *result.CallID,
-		State:      *result.State,
-		Completion: completion,
+		CallID:            *result.CallID,
+		State:             *result.State,
+		Completion:        completion,
+		CallErrorCategory: callErrorCategory,
 	}, nil
 }
 

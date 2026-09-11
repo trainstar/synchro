@@ -343,7 +343,7 @@ func validateRetentionReconnectFloorResume(before, restarted, after runnerResult
 		return errors.New("Swift retention-reconnect resumed cursor scope changed")
 	}
 	if call.Completion != "idle" {
-		return fmt.Errorf("Swift retention-reconnect floor resume completion = %q, want idle", call.Completion)
+		return fmt.Errorf("Swift retention-reconnect floor resume completion = %q, want idle (call error %q)", call.Completion, call.CallErrorCategory)
 	}
 
 	requestFingerprints := retentionReconnectCursorFingerprints(floor, identity)

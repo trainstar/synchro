@@ -99,7 +99,7 @@ func swiftScenarioCall(ctx context.Context, platform *Platform, client Client, m
 	if method == "start" || method == "reset-schema-and-start" {
 		state.started = completed.Completion != "error"
 	}
-	return synchronizationResult(completed.Completion, nil, window), nil
+	return synchronizationResult(completed.Completion, completed.CallErrorCategory, nil, window), nil
 }
 
 func (p *Platform) captureSnapshot(ctx context.Context, client Client) (runnerResult, error) {

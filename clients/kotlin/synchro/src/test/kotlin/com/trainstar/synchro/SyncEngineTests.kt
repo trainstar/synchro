@@ -345,6 +345,23 @@ class SyncEngineTests {
         }
     }
 
+    @Test
+    fun contractFailurePublishesInvalidResponse() = runTest {
+        val invalidConnect = connectJSON.replace("\"protocol_version\": 3", "\"protocol_version\": 4")
+        val (engine, db) = makeIntegrationEnv { mockResponse(invalidConnect) }
+        try {
+            assertTrue(runCatching { engine.start() }.exceptionOrNull() is ContractException)
+            val durable = db.readTransaction { connection -> SynchroMeta.getClientState(connection) }
+            assertEquals(SyncLifecycleState.ERROR, durable.lifecycleState)
+            assertEquals(SyncFailureCode.INVALID_RESPONSE, durable.failure?.code)
+            assertEquals(SyncOperationKind.CONNECTING, durable.failure?.operation)
+            assertFalse(requireNotNull(durable.failure).retryable)
+            assertEquals(SyncRecoveryAction.RETRY, durable.failure?.recoveryAction)
+        } finally {
+            engine.stop()
+        }
+    }
+
     // MARK: - Behavioral Sync Tests
 
     @Test

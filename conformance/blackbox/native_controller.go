@@ -144,6 +144,7 @@ type nativeTableBinding struct {
 	RuntimeRelationID string
 	AuthoredPrimary   string
 	RuntimePrimary    string
+	RuntimeDeletedAt  string
 	Fields            map[string]string
 	FieldNames        map[string]string
 	// RuntimeFieldNames names every column the runtime table declares, including
@@ -290,6 +291,7 @@ type nativeAuthoredTable struct {
 	RelationID        string                `json:"relation_id"`
 	Name              string                `json:"name"`
 	PrimaryKeyFieldID string                `json:"primary_key_field_id"`
+	DeletedAtFieldID  *string               `json:"deleted_at_field_id"`
 	Fields            []nativeAuthoredField `json:"fields"`
 }
 
@@ -1081,10 +1083,44 @@ func bindNativeTable(authored nativeAuthoredTable, runtime nativeRuntimeManifest
 		binding.Fields[field.FieldID] = runtimeField.ID
 		binding.FieldNames[field.FieldID] = runtimeField.Name
 	}
+	if authored.DeletedAtFieldID != nil {
+		binding.RuntimeDeletedAt = binding.FieldNames[*authored.DeletedAtFieldID]
+		if binding.RuntimeDeletedAt == "" {
+			return nativeTableBinding{}, errors.New("native controller runtime deleted-at binding is absent")
+		}
+	} else if _, runtimeDeletes := fieldsByName["deleted_at"]; runtimeDeletes {
+		authoredField := false
+		for _, runtimeName := range binding.FieldNames {
+			if runtimeName == "deleted_at" {
+				authoredField = true
+				break
+			}
+		}
+		if !authoredField {
+			binding.RuntimeDeletedAt = "deleted_at"
+		}
+	}
 	if binding.Fields[authored.PrimaryKeyFieldID] != runtime.PrimaryKeyFieldID {
 		return nativeTableBinding{}, errors.New("native controller runtime primary-key binding is invalid")
 	}
 	return binding, nil
+}
+
+// ApplicationDeletedAtField resolves one authored table's runtime soft-delete column.
+func (c *NativeController) ApplicationDeletedAtField(tableID string) (string, error) {
+	if c == nil || tableID == "" {
+		return "", errors.New("native application table identity is invalid")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.installation == nil {
+		return "", errors.New("native controller contract is unavailable")
+	}
+	table, found := c.installation.tables[tableID]
+	if !found {
+		return "", errors.New("native application table has no runtime binding")
+	}
+	return table.RuntimeDeletedAt, nil
 }
 
 // RuntimeRowVersions maps each captured row to the row version the server

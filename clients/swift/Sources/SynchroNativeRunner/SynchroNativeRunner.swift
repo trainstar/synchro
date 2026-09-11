@@ -337,6 +337,7 @@ private struct RunnerResult: Encodable {
     var callErrorCategory: String? = nil
     var status: String? = nil
     var rowsAffected: Int? = nil
+    var retainedDeleteCaptured: Bool? = nil
     var pendingChangeCount: Int? = nil
     var applicationRowCount: Int? = nil
     var mutationLedgerCount: Int? = nil
@@ -379,6 +380,7 @@ private struct RunnerResult: Encodable {
         case callErrorCategory = "call_error_category"
         case status
         case rowsAffected = "rows_affected"
+        case retainedDeleteCaptured = "retained_delete_captured"
         case pendingChangeCount = "pending_change_count"
         case applicationRowCount = "application_row_count"
         case mutationLedgerCount = "mutation_ledger_count"
@@ -1055,6 +1057,9 @@ private final class Runner: @unchecked Sendable {
               payload.authoredColumns.allSatisfy({ fields[$0] != nil }) else {
             throw RunnerError.invalidCommand
         }
+        let retainedMutationIDs = payload.operation == .delete
+            ? Set(try client.inspectRetainedMutations().map(\.mutationID))
+            : []
         let result: ExecResult
         switch payload.operation {
         case .insert:
@@ -1108,12 +1113,25 @@ private final class Runner: @unchecked Sendable {
                 )
             }
         }
-        guard result.rowsAffected == 1 else {
+        let retainedDelete: Bool
+        if payload.operation == .delete && result.rowsAffected == 0 {
+            let recordID = try payload.primaryKey.recordID()
+            retainedDelete = try client.inspectRetainedMutations().contains {
+                !retainedMutationIDs.contains($0.mutationID)
+                    && $0.tableName == payload.tableName
+                    && $0.recordID == recordID
+                    && $0.operation == .delete
+            }
+        } else {
+            retainedDelete = false
+        }
+        guard result.rowsAffected == 1 || retainedDelete else {
             throw RunnerError.unexpectedResult
         }
         return RunnerResult(
             status: client.getSyncStatus().rawValue,
-            rowsAffected: result.rowsAffected
+            rowsAffected: result.rowsAffected,
+            retainedDeleteCaptured: retainedDelete ? true : nil
         )
     }
 

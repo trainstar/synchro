@@ -1320,7 +1320,7 @@ func TestRealIssue49PublishedSchemaIdentityIsImmutable(t *testing.T) {
 	if oldBody == "" || oldClass == "" || oldFloor <= 0 {
 		t.Fatal("published schema omitted immutable identity fields")
 	}
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		var storedBody map[string]any
 		if err := json.Unmarshal([]byte(oldBody), &storedBody); err != nil {
 			t.Fatalf("decode canonical manifest identity: %v", err)
@@ -1338,7 +1338,9 @@ func TestRealIssue49PublishedSchemaIdentityIsImmutable(t *testing.T) {
 			storedBody["tables"] == nil {
 			t.Fatalf("stored manifest hash or complete identity is invalid: hash=%s body=%#v", oldHash, storedBody)
 		}
-	})
+	}) {
+		return
+	}
 
 	_, newTable := transitionRealSchemaQueue(t, ctx, harness)
 	newVersion, newHash := realSchemaReference(t, newTable.Schema)
@@ -1354,11 +1356,13 @@ func TestRealIssue49PublishedSchemaIdentityIsImmutable(t *testing.T) {
 		WHERE schema_version = $1 AND schema_hash = $2`, oldVersion, oldHash).Scan(&retainedBody, &retainedClass, &retainedFloor); err != nil {
 		t.Fatalf("read historical schema manifest: %v", err)
 	}
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		if retainedBody != oldBody || retainedClass != oldClass || retainedFloor != oldFloor {
 			t.Fatal("schema transition changed a published manifest in place")
 		}
-	})
+	}) {
+		return
+	}
 
 	t.Run("assertion", func(t *testing.T) {
 		if _, err := database.ExecContext(ctx, `

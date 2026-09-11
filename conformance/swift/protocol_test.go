@@ -8,7 +8,7 @@ import (
 )
 
 func TestValidateRunnerResponseAcceptsClientCallResult(t *testing.T) {
-	result, err := validateRunnerResponse([]byte(`{"schema_version":1,"outcome":"passed","result":{"call_id":"sync_cycle","state":"completed","completion":"idle","process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`))
+	result, err := validateRunnerResponse([]byte(`{"schema_version":1,"outcome":"passed","result":{"call_id":"sync_cycle","state":"completed","completion":"error","call_error_category":"blocking_failure","process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`))
 	if err != nil {
 		t.Fatalf("validate runner response: %v", err)
 	}
@@ -16,8 +16,28 @@ func TestValidateRunnerResponseAcceptsClientCallResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convert client call result: %v", err)
 	}
-	if call.CallID != "sync_cycle" || call.State != "completed" || call.Completion != "idle" {
+	if call.CallID != "sync_cycle" || call.State != "completed" || call.Completion != "error" || call.CallErrorCategory != "blocking_failure" {
 		t.Fatalf("unexpected client call result: %+v", call)
+	}
+}
+
+func TestSynchronizationResultRetainsCallErrorCategory(t *testing.T) {
+	result := synchronizationResult("error", "blocking_failure", nil, operationWindow{})
+	if result.CallErrorCategory != "blocking_failure" {
+		t.Fatalf("call error category = %q, want blocking_failure", result.CallErrorCategory)
+	}
+}
+
+func TestValidateRunnerResponseRejectsInvalidRetainedDeleteProof(t *testing.T) {
+	for _, fields := range []string{
+		`"rows_affected":0,"retained_delete_captured":false`,
+		`"rows_affected":1,"retained_delete_captured":true`,
+		`"retained_delete_captured":true`,
+	} {
+		data := `{"schema_version":1,"outcome":"passed","result":{` + fields + `,"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`
+		if _, err := validateRunnerResponse([]byte(data)); err == nil {
+			t.Fatalf("accepted invalid retained delete proof: %s", fields)
+		}
 	}
 }
 

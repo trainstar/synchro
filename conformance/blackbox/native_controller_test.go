@@ -442,6 +442,63 @@ func TestNativeControllerMapsSchemaQueueApplicationWrite(t *testing.T) {
 	}
 }
 
+func TestNativeControllerResolvesRuntimeDeletedAtField(t *testing.T) {
+	deletedAtFieldID := "deleted-at"
+	authored := nativeAuthoredTable{
+		TableID:           "items",
+		Name:              "items",
+		RelationID:        "public.items",
+		PrimaryKeyFieldID: "id",
+		DeletedAtFieldID:  &deletedAtFieldID,
+		Fields: []nativeAuthoredField{
+			{FieldID: "id", Name: "id", Type: "string", PrimaryKey: true},
+			{FieldID: deletedAtFieldID, Name: "removed_on", Type: "datetime"},
+		},
+	}
+	runtime := nativeRuntimeManifestTable{
+		ID:                "runtime-items",
+		Name:              "items",
+		RelationID:        "runtime-relation",
+		PrimaryKeyFieldID: "runtime-id",
+		Fields: []nativeRuntimeManifestField{
+			{ID: "runtime-id", Name: "id", Type: "string"},
+			{ID: "runtime-deleted-at", Name: "removed_on", Type: "datetime"},
+		},
+	}
+	binding, err := bindNativeTable(authored, runtime)
+	if err != nil {
+		t.Fatalf("bind native table: %v", err)
+	}
+	controller := &NativeController{installation: &nativeInstallationBinding{tables: map[string]nativeTableBinding{"items": binding}}}
+	got, err := controller.ApplicationDeletedAtField("items")
+	if err != nil {
+		t.Fatalf("resolve deleted-at field: %v", err)
+	}
+	if got != "removed_on" {
+		t.Fatalf("deleted-at field = %q, want removed_on", got)
+	}
+
+	authored.DeletedAtFieldID = nil
+	authored.Fields = authored.Fields[:1]
+	runtime.Fields[1] = nativeRuntimeManifestField{ID: "runtime-deleted-at", Name: "deleted_at", Type: "datetime"}
+	binding, err = bindNativeTable(authored, runtime)
+	if err != nil {
+		t.Fatalf("bind runtime-managed deleted-at field: %v", err)
+	}
+	if binding.RuntimeDeletedAt != "deleted_at" {
+		t.Fatalf("runtime-managed deleted-at field = %q, want deleted_at", binding.RuntimeDeletedAt)
+	}
+
+	authored.Fields = append(authored.Fields, nativeAuthoredField{FieldID: "application-deleted-at", Name: "deleted_at", Type: "datetime"})
+	binding, err = bindNativeTable(authored, runtime)
+	if err != nil {
+		t.Fatalf("bind application deleted_at field: %v", err)
+	}
+	if binding.RuntimeDeletedAt != "" {
+		t.Fatalf("application deleted_at field became lifecycle metadata: %q", binding.RuntimeDeletedAt)
+	}
+}
+
 func TestSchemaTransitionColumnValidation(t *testing.T) {
 	tests := []struct {
 		value string

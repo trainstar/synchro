@@ -45,6 +45,19 @@ func TestPlatformConfigDefaultsAndBoundsPushBatchSize(t *testing.T) {
 	}
 }
 
+func TestDecodeResultRejectsInvalidRetainedDeleteProof(t *testing.T) {
+	for _, fields := range []string{
+		`"rows_affected":0,"retained_delete_captured":false`,
+		`"rows_affected":1,"retained_delete_captured":true`,
+		`"retained_delete_captured":true`,
+	} {
+		data := `{` + fields + `,"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}}`
+		if _, err := decodeResult([]byte(data)); err == nil {
+			t.Fatalf("accepted invalid retained delete proof: %s", fields)
+		}
+	}
+}
+
 func TestAdapterReversePortSelectsOnlyLoopbackServers(t *testing.T) {
 	tests := []struct {
 		serverURL string

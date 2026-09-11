@@ -78,6 +78,16 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
+	var authoredWrite struct {
+		TableID string `json:"table_id"`
+	}
+	if json.Unmarshal(write.Payload, &authoredWrite) != nil || authoredWrite.TableID == "" {
+		return PendingCycleResult{}, errors.New("Swift pending-cycle authored table identity is invalid")
+	}
+	deletedAtField, err := controller.ApplicationDeletedAtField(authoredWrite.TableID)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("resolve Swift pending-cycle deleted-at field: %w", err)
+	}
 	write, err = controller.ApplicationWrite(write)
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("bind Swift pending mutation to the application schema: %w", err)
@@ -90,7 +100,7 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if json.Unmarshal(selector.PrimaryKey, &recordID) != nil || recordID == "" {
 		return PendingCycleResult{}, errors.New("Swift pending-cycle runtime record identity is invalid")
 	}
-	target := scenarios.PendingCycleNativeTarget{TableName: action.TableName, PrimaryKeyField: action.PrimaryKeyField, RecordID: recordID, Value: "pending"}
+	target := scenarios.PendingCycleNativeTarget{TableName: action.TableName, PrimaryKeyField: action.PrimaryKeyField, RecordID: recordID, Value: "pending", DeletedAtField: deletedAtField}
 	for field, value := range action.Fields {
 		var text string
 		if json.Unmarshal(value, &text) == nil && text == target.Value {
@@ -460,10 +470,17 @@ func swiftPendingCycleEvidence(target scenarios.PendingCycleNativeTarget, update
 		if snapshot.ApplicationRowCount == nil || snapshot.PendingChangeCount == nil || snapshot.MutationLedgerCount == nil || snapshot.MutationOutcomeCount == nil || snapshot.RejectedMutationCount == nil || snapshot.ScopeStateCount == nil || snapshot.ScopeRowCount == nil || snapshot.RowMetadataCount == nil {
 			return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle inspection counts are incomplete")
 		}
+		applicationRowCount, applicationRows, err := swiftLogicalApplicationRows(*snapshot.ApplicationRowCount, snapshot.ApplicationRows, []swiftApplicationRowLifecycle{
+			{PrimaryKeyField: target.PrimaryKeyField, RecordID: target.RecordID, DeletedAtField: target.DeletedAtField},
+			{PrimaryKeyField: target.PrimaryKeyField, RecordID: target.UnprotectedRecordID, DeletedAtField: target.DeletedAtField},
+		})
+		if err != nil {
+			return scenarios.PendingCycleNativeEvidence{}, err
+		}
 		state := scenarios.PendingCycleNativeState{
 			ProcessID:                   snapshot.ProcessID,
 			DatabaseIdentityFingerprint: snapshot.DatabaseIdentityFingerprint,
-			ApplicationRowCount:         *snapshot.ApplicationRowCount,
+			ApplicationRowCount:         applicationRowCount,
 			PendingChangeCount:          *snapshot.PendingChangeCount,
 			MutationLedgerCount:         *snapshot.MutationLedgerCount,
 			MutationOutcomeCount:        *snapshot.MutationOutcomeCount,
@@ -472,7 +489,7 @@ func swiftPendingCycleEvidence(target scenarios.PendingCycleNativeTarget, update
 			ScopeRowCount:               *snapshot.ScopeRowCount,
 			RowMetadataCount:            *snapshot.RowMetadataCount,
 		}
-		for _, row := range snapshot.ApplicationRows {
+		for _, row := range applicationRows {
 			var recordID string
 			if json.Unmarshal(row[target.PrimaryKeyField], &recordID) != nil {
 				return scenarios.PendingCycleNativeEvidence{}, errors.New("Swift pending-cycle application row identity is invalid")
@@ -578,4 +595,51 @@ func swiftPendingCycleEvidence(target scenarios.PendingCycleNativeTarget, update
 		BeforeDelete:  states[9],
 		AfterDelete:   states[10],
 	}, nil
+}
+
+type swiftApplicationRowLifecycle struct {
+	PrimaryKeyField string
+	RecordID        string
+	DeletedAtField  string
+}
+
+func swiftLogicalApplicationRows(rawCount int, rows []map[string]json.RawMessage, lifecycles []swiftApplicationRowLifecycle) (int, []map[string]json.RawMessage, error) {
+	logicalCount := rawCount
+	logicalRows := make([]map[string]json.RawMessage, 0, len(rows))
+	for _, row := range rows {
+		deletedAtField := ""
+		for _, lifecycle := range lifecycles {
+			var recordID string
+			if lifecycle.DeletedAtField != "" && json.Unmarshal(row[lifecycle.PrimaryKeyField], &recordID) == nil && recordID == lifecycle.RecordID {
+				if deletedAtField != "" {
+					return 0, nil, errors.New("Swift application row lifecycle is ambiguous")
+				}
+				deletedAtField = lifecycle.DeletedAtField
+			}
+		}
+		if deletedAtField == "" {
+			logicalRows = append(logicalRows, row)
+			continue
+		}
+		deletedAt, hasDeletedAt := row[deletedAtField]
+		if !hasDeletedAt {
+			return 0, nil, errors.New("Swift application row deleted-at field is absent")
+		}
+		if !json.Valid(deletedAt) {
+			return 0, nil, errors.New("Swift application row deleted-at field is invalid")
+		}
+		var value any
+		if err := json.Unmarshal(deletedAt, &value); err != nil {
+			return 0, nil, errors.New("Swift application row deleted-at field is invalid")
+		}
+		if value == nil {
+			logicalRows = append(logicalRows, row)
+			continue
+		}
+		logicalCount--
+	}
+	if logicalCount < 0 {
+		return 0, nil, errors.New("Swift application row count is invalid")
+	}
+	return logicalCount, logicalRows, nil
 }
