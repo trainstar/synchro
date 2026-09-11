@@ -6,7 +6,7 @@ diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/re
                  client,
                  &cursor_context,
 -                &session.boundary,
-+                &StreamPosition::generation_start(),
++                &StreamPosition::GenerationStart,
              )?),
              Some(session.snapshot_checksum),
          )
