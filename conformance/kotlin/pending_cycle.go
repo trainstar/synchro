@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -42,6 +43,18 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err := platform.Install(ctx, InstallRequest{Client: client, Initialization: "current"}); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("install Kotlin Android pending-cycle client: %w", err)
 	}
+	resumeWAL, err := controller.PauseWALMaterialization(ctx)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("pause Kotlin Android pending-cycle WAL materialization: %w", err)
+	}
+	walPaused := true
+	defer func() {
+		if walPaused {
+			cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = resumeWAL(cleanupContext)
+		}
+	}()
 	unprotectedCommit, err := kotlinScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-UNPROTECTED-COMMIT-001", "model/commit-source-transaction")
 	if err != nil {
 		return PendingCycleResult{}, err
@@ -146,6 +159,10 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("capture Kotlin Android pending-cycle accepted push: %w", err)
 	}
+	if err := resumeWAL(ctx); err != nil {
+		return PendingCycleResult{}, fmt.Errorf("resume Kotlin Android pending-cycle WAL materialization: %w", err)
+	}
+	walPaused = false
 	unprotectedMaterialize, err := kotlinScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-UNPROTECTED-MATERIALIZE-001", "process/materialize-source-transaction")
 	if err != nil {
 		return PendingCycleResult{}, err

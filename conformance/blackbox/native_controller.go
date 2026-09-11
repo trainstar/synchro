@@ -3095,6 +3095,18 @@ func (c *NativeController) ProcessStep(ctx context.Context, clientKey *string, o
 	}
 }
 
+// PauseWALMaterialization holds committed source transactions outside pull visibility.
+func (c *NativeController) PauseWALMaterialization(ctx context.Context) (func(context.Context) error, error) {
+	if err := c.context(ctx); err != nil {
+		return nil, err
+	}
+	gate, err := c.harness.acquireWALWorkerGate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return gate.release, nil
+}
+
 func (c *NativeController) materializeSourceTransaction(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
 	stream, commit, err := nativeProcessTransactionIdentity(operation.Payload)
 	if err != nil {

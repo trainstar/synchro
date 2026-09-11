@@ -755,6 +755,13 @@ fn migrate_schema_row(
 fn lock_backfill_state(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
         .update(
+            "SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)",
+            None,
+            &[crate::WAL_WORKER_GATE_LOCK_KEY.into()],
+        )
+        .map_err(|error| format!("locking WAL worker for membership backfill: {error}"))?;
+    client
+        .update(
             "SELECT 1 FROM synchro.sync_wal_progress WHERE singleton FOR UPDATE",
             None,
             &[],

@@ -12,6 +12,51 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	harness, token := provisionRealProofHarness(t, ctx)
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+	if err != nil {
+		t.Fatalf("create native controller: %v", err)
+	}
+
+	resumeWAL, err := controller.PauseWALMaterialization(ctx)
+	if err != nil {
+		t.Fatalf("pause WAL materialization: %v", err)
+	}
+	walPaused := true
+	defer func() {
+		if walPaused {
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+			if err := resumeWAL(cleanupContext); err != nil {
+				t.Errorf("resume WAL materialization: %v", err)
+			}
+		}
+	}()
+	pausedID := "00000000-0000-4000-8c03-000000000000"
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		pausedID,
+		"diagnostic-user",
+		"paused-WAL-materialization",
+	); err != nil {
+		t.Fatalf("insert source row while WAL materialization is paused: %v", err)
+	}
+	paused, err := harness.Operator().ObserveWALRecordsForTable(ctx, "cf_items", []string{pausedID})
+	if err != nil {
+		t.Fatalf("observe paused WAL materialization: %v", err)
+	}
+	if len(paused.Records) != 0 {
+		t.Fatalf("WAL worker materialized a source row while paused: %#v", paused)
+	}
+	if err := resumeWAL(ctx); err != nil {
+		t.Fatalf("resume WAL materialization: %v", err)
+	}
+	walPaused = false
+	waitForRealWALRecords(t, ctx, harness, "cf_items", pausedID)
+	if err := harness.Source().ExecContext(ctx, "DELETE FROM cf_items WHERE id = $1", pausedID); err != nil {
+		t.Fatalf("delete WAL materialization gate row: %v", err)
+	}
+	waitForRealWALEffects(t, ctx, harness, "cf_items", 2, pausedID)
 
 	before := connectRealProtocolClient(t, ctx, harness, token, "extension-reinstall-before")
 	rebuildRealScope(t, ctx, harness, token, before, "user:diagnostic-user", "00000000-0000-4000-8c03-000000000011")

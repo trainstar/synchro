@@ -149,6 +149,9 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err != nil {
 		return SteadyPullResult{}, fmt.Errorf("capture Kotlin Android steady-pull pristine state: %w", err)
 	}
+	if pristine.EventsOverflowed {
+		return SteadyPullResult{}, errors.New("Kotlin Android steady-pull pristine event evidence overflowed")
+	}
 
 	commit, err := kotlinScenarioOperation(steps, "STEP-PERF-STEADY-PULL-COMMIT-001", "model/commit-source-transaction")
 	if err != nil {
@@ -248,7 +251,7 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err != nil {
 		return SteadyPullResult{}, err
 	}
-	evidence, err := resolveSteadyPullIdentities(controller, scenario.NativeIdentityAliases, baseline, measured, snapshot)
+	evidence, err := resolveSteadyPullIdentities(controller, scenario.NativeIdentityAliases, baseline, measured, pristine.Events, snapshot)
 	if err != nil {
 		return SteadyPullResult{}, err
 	}
@@ -602,7 +605,7 @@ func equalKotlinSteadyPullDurableState(left, right Result) bool {
 	return reflect.DeepEqual(normalize(left), normalize(right))
 }
 
-func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, measured SynchronizationResult, snapshot warmConnectSnapshot) (steadyPullIdentityEvidence, error) {
+func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, measured SynchronizationResult, baselineEvents json.RawMessage, snapshot warmConnectSnapshot) (steadyPullIdentityEvidence, error) {
 	if len(aliases) != len(steadyPullAliasNames) {
 		return steadyPullIdentityEvidence{}, errors.New("Kotlin Android steady-pull identity alias set changed")
 	}
@@ -658,7 +661,7 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 	if len(baseline.transportObservations) < 3 || measuredPullErr != nil || baseline.transportObservations[1].RequestFacts == nil || baseline.transportObservations[1].RequestFacts.ClientGeneration == nil || measuredPull.RequestFacts == nil || measuredPull.RequestFacts.ScopeSetVersion == nil {
 		return steadyPullIdentityEvidence{}, errors.New("Kotlin Android steady-pull transport identity evidence is incomplete")
 	}
-	rebuildID, err := completedWarmConnectRebuildID(snapshot.result.Events, scope.ScopeID)
+	rebuildID, err := completedWarmConnectRebuildID(baselineEvents, scope.ScopeID)
 	if err != nil {
 		return steadyPullIdentityEvidence{}, err
 	}

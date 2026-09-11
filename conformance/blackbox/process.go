@@ -46,6 +46,7 @@ const (
 	maxWALLagBytes                          = 64 * 1024 * 1024
 	maxWALLagSeconds                        = 30
 	streamResetOperatorLockKey        int64 = 0x7273_746f
+	walWorkerGateLockKey              int64 = 0x7761_6c72
 	streamResetOperationKind                = "stream_reset"
 	projectionBootstrapOperationKind        = "projection_bootstrap"
 	diagnosticSourceRestoreSchemaName       = "synchro_conformance_restore"
@@ -160,6 +161,12 @@ type ExtensionReinstallObservation struct {
 	WorkerRegistryGeneration       int64
 	PendingRegistryGenerationCount int64
 	NoValidationFailurePoison      bool
+}
+
+type walWorkerGate struct {
+	database   *sql.DB
+	connection *sql.Conn
+	released   bool
 }
 
 // SourceExecutor permits source-table DML through one restricted NOLOGIN role.
@@ -2061,50 +2068,37 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 }
 
 // ReinstallExtension replaces the extension atomically without restarting the postmaster.
-func (h *Harness) ReinstallExtension(ctx context.Context) (ExtensionReinstallResult, error) {
+func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReinstallResult, returnedErr error) {
 	if h == nil || ctx == nil || !h.sourceReady {
 		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall is unavailable")
 	}
 	if err := ctx.Err(); err != nil {
 		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall context expired")
 	}
-	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	gate, err := h.acquireWALWorkerGate(ctx)
 	if err != nil {
-		return ExtensionReinstallResult{}, errors.New("open extension reinstall connection failed")
+		return ExtensionReinstallResult{}, fmt.Errorf("fence WAL worker for extension reinstall: %w", err)
 	}
-	defer database.Close()
-	result := ExtensionReinstallResult{}
+	defer func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		returnedErr = errors.Join(returnedErr, gate.release(cleanupContext))
+	}()
 	var workerCount int
-	if err := database.QueryRowContext(ctx, `
+	if err := gate.connection.QueryRowContext(ctx, `
 		SELECT count(*), COALESCE(min(pid), 0)
 		FROM pg_catalog.pg_stat_activity
 		WHERE datname = current_database()
 		  AND backend_type = 'synchro WAL consumer'`).Scan(&workerCount, &result.PriorWorkerPID); err != nil || workerCount != 1 || result.PriorWorkerPID <= 0 {
 		return ExtensionReinstallResult{}, errors.New("unique WAL worker is unavailable before extension reinstall")
 	}
-	// The drop takes locks the live worker's poll transaction can also
-	// hold, and PostgreSQL then cancels one side with a deadlock. The
-	// worker retries its poll, so the reinstall retries the same way.
-	var tx *sql.Tx
-	for attempt := 1; ; attempt++ {
-		var err error
-		tx, err = database.BeginTx(ctx, nil)
-		if err != nil {
-			return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
-		}
-		_, err = tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE")
-		if err == nil {
-			break
-		}
+	tx, err := gate.connection.BeginTx(ctx, nil)
+	if err != nil {
+		return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
+	}
+	if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE"); err != nil {
 		_ = tx.Rollback()
-		if attempt >= 3 || !strings.Contains(err.Error(), "40P01") {
-			return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ExtensionReinstallResult{}, errors.New("isolated extension reinstall context expired")
-		case <-time.After(time.Second):
-		}
+		return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
@@ -2126,10 +2120,81 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (ExtensionReinstallRes
 	if err := tx.Commit(); err != nil {
 		return ExtensionReinstallResult{}, errors.New("commit extension reinstall transaction failed")
 	}
-	if err := database.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&result.ReinstallLSN); err != nil || result.ReinstallLSN == "" {
+	if err := gate.connection.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&result.ReinstallLSN); err != nil || result.ReinstallLSN == "" {
 		return ExtensionReinstallResult{}, errors.New("read extension reinstall WAL position failed")
 	}
 	return result, nil
+}
+
+func (h *Harness) acquireWALWorkerGate(ctx context.Context) (*walWorkerGate, error) {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return nil, errors.New("open WAL worker gate database failed")
+	}
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		_ = database.Close()
+		return nil, errors.New("open WAL worker gate session failed")
+	}
+	if _, err := connection.ExecContext(ctx, "SELECT pg_catalog.pg_advisory_lock($1::bigint)", walWorkerGateLockKey); err != nil {
+		_ = connection.Close()
+		_ = database.Close()
+		return nil, errors.New("acquire WAL worker gate failed")
+	}
+	gate := &walWorkerGate{database: database, connection: connection}
+	releaseAfterFailure := func() error {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return gate.release(cleanupContext)
+	}
+	for {
+		var workerBlocked bool
+		err := connection.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_stat_activity worker
+				WHERE worker.datname = current_database()
+				  AND worker.backend_type = 'synchro WAL consumer'
+				  AND pg_catalog.pg_backend_pid() = ANY(pg_catalog.pg_blocking_pids(worker.pid)))`).Scan(&workerBlocked)
+		if err != nil {
+			return nil, errors.Join(errors.New("observe blocked WAL worker failed"), releaseAfterFailure())
+		}
+		if workerBlocked {
+			return gate, nil
+		}
+		timer := time.NewTimer(processPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, errors.Join(errors.New("wait for blocked WAL worker failed"), releaseAfterFailure())
+		case <-timer.C:
+		}
+	}
+}
+
+func (gate *walWorkerGate) release(ctx context.Context) error {
+	if gate == nil || gate.released {
+		return nil
+	}
+	gate.released = true
+	var cleanupErrors []error
+	var unlocked bool
+	if err := gate.connection.QueryRowContext(
+		ctx,
+		"SELECT pg_catalog.pg_advisory_unlock($1::bigint)",
+		walWorkerGateLockKey,
+	).Scan(&unlocked); err != nil || !unlocked {
+		cleanupErrors = append(cleanupErrors, errors.New("release WAL worker gate failed"))
+	}
+	if err := gate.connection.Close(); err != nil {
+		cleanupErrors = append(cleanupErrors, errors.New("close WAL worker gate session failed"))
+	}
+	if err := gate.database.Close(); err != nil {
+		cleanupErrors = append(cleanupErrors, errors.New("close WAL worker gate database failed"))
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 // RestoreDiagnosticRegistrations restores the fixed source registrations after an extension reinstall.

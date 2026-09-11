@@ -1,3 +1,15 @@
+diff --git a/extensions/synchro-core/src/contract.rs b/extensions/synchro-core/src/contract.rs
+--- a/extensions/synchro-core/src/contract.rs
++++ b/extensions/synchro-core/src/contract.rs
+@@ -657,7 +657,7 @@ impl ConnectRequest {
+         }
+         validate_nonnegative_safe_integer(self.scope_set_version)?;
+         self.schema.validate_connect()?;
+-        if self.schema.is_fresh_sentinel() {
++        if self.schema.is_fresh_sentinel() && false {
+             if self.client_generation.is_some()
+                 || self.schema_reset == Some(true)
+                 || self.scope_set_version != 0
 diff --git a/extensions/synchro-pg/src/client.rs b/extensions/synchro-pg/src/client.rs
 --- a/extensions/synchro-pg/src/client.rs
 +++ b/extensions/synchro-pg/src/client.rs
