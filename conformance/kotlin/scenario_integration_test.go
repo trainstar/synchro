@@ -348,7 +348,9 @@ func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *bl
 		for time.Now().Before(deadline) {
 			ready, err = harness.Operator().ObserveExtensionReinstall(ctx, reinstall.ReinstallLSN)
 			activeSlotReady := ready.ActiveSlotName == harness.Names().ReplicationSlot && ready.RestartLSN != "" && ready.SlotActive && ready.RestartLSNAtOrAfterReinstall
-			if err == nil && ready.WorkerPID > 0 && ready.WorkerPID != reinstall.PriorWorkerPID && activeSlotReady && ready.ActiveRegistryGeneration > minimumGeneration && ready.PendingRegistryGenerationCount == 0 && ready.NoValidationFailurePoison {
+			noSlotReady := phase == 0 && ready.ActiveSlotName == "" && ready.RestartLSN == "" && !ready.SlotActive
+			slotReady := noSlotReady || phase == 1 && activeSlotReady
+			if err == nil && ready.WorkerPID > 0 && ready.WorkerPID != reinstall.PriorWorkerPID && slotReady && ready.ActiveRegistryGeneration > minimumGeneration && ready.PendingRegistryGenerationCount == 0 && ready.NoValidationFailurePoison {
 				readyObserved = true
 				break
 			}
