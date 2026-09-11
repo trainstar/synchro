@@ -302,6 +302,12 @@ class HttpClient(
                         }
                         throw RebuildRestartRequiredException(scopeID)
                     }
+                    if (error?.code == ProtocolErrorCode.IDEMPOTENCY_CONFLICT) {
+                        if (retryContext?.interruptedOperation != RetryOperation.PUSHING || error.retryable) {
+                            throw SynchroError.InvalidResponse("idempotency conflict response is invalid")
+                        }
+                        throw SynchroError.IdempotencyConflict()
+                    }
                     val msg = errorMessage(effectiveResponseBody) ?: "semantic conflict"
                     throw SynchroError.ServerError(status = response.code, serverMessage = msg)
                 }

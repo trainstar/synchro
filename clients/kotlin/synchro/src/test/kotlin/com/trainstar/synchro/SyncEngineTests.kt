@@ -1394,6 +1394,53 @@ class SyncEngineTests {
     }
 
     @Test
+    fun mapsIdempotencyConflictToTerminalPushFailure() = runTest {
+        var pushCalls = 0
+        var pushRequestJSON = ""
+        val (engine, db) = makeIntegrationEnv { request ->
+            when {
+                request.path!!.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                request.path!!.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path!!.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                request.path!!.endsWith("/sync/push") -> {
+                    pushCalls++
+                    pushRequestJSON = request.body.readUtf8()
+                    mockResponse(
+                        """{"error":{"code":"idempotency_conflict","message":"batch conflict","retryable":false}}""",
+                        409,
+                    )
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("conflict", "Conflict Street", "u1", "2026-01-01T10:00:00.000000Z"),
+            )
+
+            val error = runCatching { engine.syncNow() }.exceptionOrNull()
+
+            assertTrue(error is SynchroError.IdempotencyConflict)
+            assertEquals(1, pushCalls)
+            val durable = db.readTransaction { connection -> SynchroMeta.getClientState(connection) }
+            assertEquals(SyncFailureCode.IDEMPOTENCY_CONFLICT, durable.failure?.code)
+            assertEquals(SyncOperationKind.PUSHING, durable.failure?.operation)
+            assertFalse(requireNotNull(durable.failure).retryable)
+            assertEquals(SyncRecoveryAction.NONE, durable.failure?.recoveryAction)
+            val batch = requireNotNull(
+                db.queryOne("SELECT state, request_json FROM _synchro_push_batches"),
+            )
+            assertEquals("pending", batch["state"])
+            assertEquals(pushRequestJSON, batch["request_json"])
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testPushBackoffPersistsBeforeDelayWithSealedBatchIdentity() = runTest {
         val timing = BlockingRetryTiming(1_000L)
         var failPush = false

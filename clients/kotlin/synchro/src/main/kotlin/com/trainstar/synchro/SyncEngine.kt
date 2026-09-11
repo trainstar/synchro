@@ -1285,6 +1285,13 @@ internal class SyncEngine(
             message = "The server rejected the installed schema reference.",
             recoveryAction = SyncRecoveryAction.RETRY,
         )
+        is SynchroError.IdempotencyConflict -> SyncFailure(
+            operation = operation,
+            code = SyncFailureCode.IDEMPOTENCY_CONFLICT,
+            retryable = false,
+            message = "The push batch conflicts with an earlier batch.",
+            recoveryAction = SyncRecoveryAction.NONE,
+        )
         is SynchroError.ServerError -> SyncFailure(
             operation = operation,
             code = SyncFailureCode.SERVER_ERROR,

@@ -304,4 +304,23 @@ class HttpClientTests {
         }
     }
 
+    @Test
+    fun rejectsIdempotencyConflictOutsidePush() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(409)
+                .setBody("""{"error":{"code":"idempotency_conflict","message":"batch conflict","retryable":false}}"""),
+        )
+        val request = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100,
+        )
+
+        assertTrue(runCatching { httpClient.pull(request) }.exceptionOrNull() is SynchroError.InvalidResponse)
+    }
+
 }

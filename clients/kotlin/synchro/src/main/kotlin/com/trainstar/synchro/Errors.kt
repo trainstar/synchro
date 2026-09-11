@@ -19,6 +19,8 @@ sealed class SynchroError(message: String, cause: Throwable? = null) : Exception
     class ServerError(val status: Int, val serverMessage: String) :
         SynchroError("Server error $status: $serverMessage")
 
+    class IdempotencyConflict : SynchroError("The push batch conflicts with an earlier batch")
+
     class DatabaseError(val underlying: Throwable) :
         SynchroError("Database error: ${underlying.message}", underlying)
 
