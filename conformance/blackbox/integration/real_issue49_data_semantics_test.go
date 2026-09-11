@@ -672,12 +672,15 @@ func TestRealIssue49PortableSeedScopeContinuationAndTokenBindings(t *testing.T) 
 	manifest := issue49QueryJSONObject(t, ctx, connection, "SELECT synchro.synchro_portable_seed_manifest(1)")
 	scopes, ok := manifest["portable_scopes"].([]any)
 	var scope map[string]any
+	scopeOK := false
+	if len(scopes) > 0 {
+		scope, scopeOK = scopes[0].(map[string]any)
+	}
 	t.Run("assertion", func(t *testing.T) {
 		if !ok || len(scopes) != 1 {
 			t.Fatalf("seed exported a nonportable scope: %#v", scopes)
 		}
-		scope, ok = scopes[0].(map[string]any)
-		if !ok || scope["id"] != "cf:global" {
+		if !scopeOK || scope["id"] != "cf:global" {
 			t.Fatalf("seed exported a nonportable scope: %#v", scopes)
 		}
 	})
