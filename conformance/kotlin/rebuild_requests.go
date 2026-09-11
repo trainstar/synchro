@@ -388,14 +388,14 @@ func validateKotlinRebuildRequestsStepWire(scenario scenarios.Scenario, stepID s
 }
 
 func validateKotlinRebuildRequestsFirstPause(snapshot warmConnectSnapshot) error {
-	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeStates) != 0 || len(snapshot.scopeRows) != 0 || len(snapshot.rowMetadata) != 0 || snapshot.rebuildAttempts[0].Cursor != nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeRows) != 0 || len(snapshot.rowMetadata) != 0 || snapshot.rebuildAttempts[0].Cursor != nil || snapshot.rebuildAttempts[0].PageLimit != 1 || !isKotlinUninitializedRebuildAssignment(snapshot.scopeStates, snapshot.rebuildAttempts[0].ScopeID) {
 		return errors.New("Kotlin Android first rebuild page was not paused before local apply")
 	}
 	return nil
 }
 
 func validateKotlinRebuildRequestsFirstRestart(snapshot warmConnectSnapshot) error {
-	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeStates) != 0 || len(snapshot.scopeRows) != 0 || len(snapshot.rowMetadata) != 0 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 0 || snapshot.rebuildAttempts[0].Cursor != nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeRows) != 0 || len(snapshot.rowMetadata) != 0 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 0 || snapshot.rebuildAttempts[0].Cursor != nil || snapshot.rebuildAttempts[0].PageLimit != 1 || !isKotlinUninitializedRebuildAssignment(snapshot.scopeStates, snapshot.rebuildAttempts[0].ScopeID) {
 		return errors.New("Kotlin Android rebuild restart did not preserve the unapplied first page")
 	}
 	return nil
@@ -412,10 +412,14 @@ func validateKotlinRebuildRequestsFirstReplay(first, replay warmConnectSnapshot)
 }
 
 func validateKotlinRebuildRequestsRestart(snapshot warmConnectSnapshot) error {
-	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeStates) != 0 || len(snapshot.scopeRows) != 1 || len(snapshot.rowMetadata) != 1 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 1 || snapshot.rebuildAttempts[0].Cursor == nil || snapshot.rebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeRows) != 1 || len(snapshot.rowMetadata) != 1 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 1 || snapshot.rebuildAttempts[0].Cursor == nil || snapshot.rebuildAttempts[0].PageLimit != 1 || !isKotlinUninitializedRebuildAssignment(snapshot.scopeStates, snapshot.rebuildAttempts[0].ScopeID) {
 		return errors.New("Kotlin Android rebuild restart did not preserve one durable partial page")
 	}
 	return nil
+}
+
+func isKotlinUninitializedRebuildAssignment(scopes []scopeStateRecord, attemptScopeID string) bool {
+	return attemptScopeID != "" && len(scopes) == 1 && scopes[0].ScopeID == attemptScopeID && scopes[0].Cursor == nil && scopes[0].Checksum == nil
 }
 
 func validateKotlinRebuildRequestsFaultPlans(scenario scenarios.Scenario) error {

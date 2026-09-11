@@ -162,6 +162,9 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     fun inspectRetainedMutations(): List<PendingMutationInspection> =
         changeTracker.inspectRetainedMutations()
 
+    /** Returns the exact number of mutations retained for local reconciliation. */
+    fun retainedMutationCount(): Int = changeTracker.retainedMutationCount()
+
     fun inspectRejectedMutations(): List<RejectedMutationInspection> =
         database.readTransaction { db ->
             SynchroMeta.listRejectedMutations(db).map { rejected ->

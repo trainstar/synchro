@@ -222,6 +222,42 @@ class InspectionTests {
     }
 
     @Test
+    fun atomicClientStateCaptureKeepsLedgerHistorySeparateFromRetainedMutations() {
+        val config = prepareClientConfig()
+        val client = SynchroClient(config, context)
+        try {
+            client.execute(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf("retained", "retained", "2026-01-01T00:00:00.000000Z"),
+            )
+            client.execute(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf("historical", "historical", "2026-01-01T00:00:01.000000Z"),
+            )
+        } finally {
+            client.close()
+        }
+        withInternalDatabase(config) { database ->
+            database.execute(
+                "UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted' WHERE record_id = ?",
+                arrayOf("historical"),
+            )
+        }
+
+        val reopened = SynchroClient(config, context)
+        try {
+            val capture = SynchroInspection(reopened).captureState(maximumRecords = 10)
+            assertEquals(2, capture.mutationLedgerCount)
+            assertEquals(1, capture.mutationOutcomeCount)
+            assertEquals(1, reopened.retainedMutationCount())
+            assertEquals(listOf("retained"), reopened.inspectRetainedMutations().map { it.recordID })
+        } finally {
+            reopened.close()
+            context.deleteDatabase(config.dbPath)
+        }
+    }
+
+    @Test
     fun atomicClientStateCaptureReturnsBoundedDurableStateAndExactCounts() {
         val config = prepareClientConfig()
         val rebuildID = "00000000-0000-4000-8000-000000000001"

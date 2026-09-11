@@ -89,6 +89,7 @@ type Result struct {
 	PendingChangeCount              *int                          `json:"pending_change_count"`
 	ApplicationRowCount             *int                          `json:"application_row_count"`
 	MutationLedgerCount             *int                          `json:"mutation_ledger_count"`
+	RetainedMutationCount           *int                          `json:"retained_mutation_count"`
 	MutationOutcomeCount            *int                          `json:"mutation_outcome_count"`
 	SealedBatchCount                *int                          `json:"sealed_batch_count"`
 	RejectedMutationCount           *int                          `json:"rejected_mutation_count"`
@@ -98,6 +99,7 @@ type Result struct {
 	RowMetadataCount                *int                          `json:"row_metadata_count"`
 	RebuildAttemptCount             *int                          `json:"rebuild_attempt_count"`
 	RebuildReceiptCount             *int                          `json:"rebuild_receipt_count"`
+	DurableStateFingerprint         string                        `json:"durable_state_fingerprint"`
 	Schema                          json.RawMessage               `json:"schema"`
 	ApplicationRows                 json.RawMessage               `json:"application_rows"`
 	RetainedMutations               json.RawMessage               `json:"retained_mutations"`
@@ -182,7 +184,7 @@ func validRunnerFailureOperation(value string) bool {
 
 func validRunnerFailureCode(value string) bool {
 	switch value {
-	case "auth_required", "client_retired", "idempotency_conflict", "invalid_request", "invalid_response", "invalid_schema_reference", "invalid_state_transition", "local_database", "schema_application_failed", "sync_integrity_failure", "unsupported_schema", "upgrade_required":
+	case "auth_required", "client_retired", "idempotency_conflict", "invalid_request", "invalid_response", "invalid_schema_reference", "invalid_state_transition", "local_database", "schema_application_failed", "sync_integrity_failure", "unsupported_schema", "upgrade_required", "schema_mismatch", "server_error", "network_error", "database_error", "local_failure":
 		return true
 	default:
 		return false
@@ -750,10 +752,10 @@ func decodeResult(data []byte) (Result, error) {
 			return Result{}, errors.New("Kotlin instrumentation result is incomplete")
 		}
 	}
-	if result.Status != nil && *result.Status == "" || result.RowsAffected != nil && *result.RowsAffected < 0 || result.PendingChangeCount != nil && *result.PendingChangeCount < 0 || !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) {
+	if result.Status != nil && *result.Status == "" || result.RowsAffected != nil && *result.RowsAffected < 0 || result.PendingChangeCount != nil && *result.PendingChangeCount < 0 || !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) || result.DurableStateFingerprint != "" && !validLowerHexDigest(result.DurableStateFingerprint) {
 		return Result{}, errors.New("Kotlin instrumentation result is invalid")
 	}
-	for _, count := range []*int{result.ApplicationRowCount, result.MutationLedgerCount, result.MutationOutcomeCount, result.SealedBatchCount, result.RejectedMutationCount, result.ScopeStateCount, result.ScopeRowCount, result.ProvenanceCount, result.RowMetadataCount, result.RebuildAttemptCount, result.RebuildReceiptCount} {
+	for _, count := range []*int{result.ApplicationRowCount, result.MutationLedgerCount, result.RetainedMutationCount, result.MutationOutcomeCount, result.SealedBatchCount, result.RejectedMutationCount, result.ScopeStateCount, result.ScopeRowCount, result.ProvenanceCount, result.RowMetadataCount, result.RebuildAttemptCount, result.RebuildReceiptCount} {
 		if count != nil && *count < 0 {
 			return Result{}, errors.New("Kotlin instrumentation state count is invalid")
 		}

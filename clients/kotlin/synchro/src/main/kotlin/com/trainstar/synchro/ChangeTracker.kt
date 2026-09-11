@@ -74,6 +74,23 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
     internal fun inspectRetainedMutations(): List<PendingMutationInspection> =
         inspectMutations(includeServerRejected = true)
 
+    internal fun retainedMutationCount(): Int = database.readTransaction { db ->
+        db.rawQuery(
+            """
+            SELECT COUNT(*)
+            FROM _synchro_pending_changes
+            WHERE lifecycle_state IN (
+                'captured', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
+                'superseded_before_send', 'cancelled_before_send', 'rejected_terminal'
+            )
+            """.trimIndent(),
+            null,
+        ).use { cursor ->
+            require(cursor.moveToFirst()) { "retained mutation count is absent" }
+            cursor.getLong(0).also { require(it in 0..Int.MAX_VALUE.toLong()) { "retained mutation count is invalid" } }.toInt()
+        }
+    }
+
     private fun inspectMutations(includeServerRejected: Boolean): List<PendingMutationInspection> =
         database.readTransaction { db ->
             val rejectedState = if (includeServerRejected) ", 'rejected_terminal'" else ""

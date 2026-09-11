@@ -85,6 +85,197 @@ func TestRestartInvariantCheckRejectsChangedDatabaseFingerprint(t *testing.T) {
 	}
 }
 
+func TestRestartInvariantCheckRejectsChangedDurableStateFingerprintWithinDetailBounds(t *testing.T) {
+	before := restartInvariantCaptureFixture("process-a", testDigest)
+	after := restartInvariantCaptureFixture("process-b", testDigest)
+	after.DurableStateFingerprint = strings.Repeat("b", 64)
+	if err := checkRestartInvariants(Client{UserID: "user-a", ClientID: "client-a"}, before, after); err == nil || !strings.Contains(err.Error(), string(invariants.RuleStateForkDurableStateChanged)) {
+		t.Fatalf("changed durable fingerprint invariant result = %v", err)
+	}
+}
+
+func TestRestartInvariantCheckUsesAggregateEvidenceAboveDetailBounds(t *testing.T) {
+	before := restartInvariantCaptureFixture("process-a", testDigest)
+	after := restartInvariantCaptureFixture("process-b", testDigest)
+	rowCount := maximumRows + 1
+	before.ApplicationRowCount = &rowCount
+	before.ApplicationRows = nil
+	after.ApplicationRowCount = &rowCount
+	after.ApplicationRows = nil
+
+	if err := checkRestartInvariants(Client{UserID: "user-a", ClientID: "client-a"}, before, after); err != nil {
+		t.Fatalf("aggregate restart evidence failed: %v", err)
+	}
+	after.DurableStateFingerprint = strings.Repeat("b", 64)
+	err := checkRestartInvariants(Client{UserID: "user-a", ClientID: "client-a"}, before, after)
+	if err == nil || !strings.Contains(err.Error(), string(invariants.RuleStateForkDurableStateChanged)) {
+		t.Fatalf("changed aggregate fingerprint invariant result = %v", err)
+	}
+}
+
+func TestDiscardRelaunchedClientInvalidatesEveryClientOnClosedHost(t *testing.T) {
+	host := &Session{}
+	otherHost := &Session{}
+	target := &platformClient{client: Client{Key: "target"}, session: &clientSession{host: host}, started: true}
+	peer := &platformClient{client: Client{Key: "peer"}, session: &clientSession{host: host}, started: true}
+	other := &platformClient{client: Client{Key: "other"}, session: &clientSession{host: otherHost}, started: true}
+	platform := &Platform{
+		host: host,
+		clients: map[string]*platformClient{
+			"target": target,
+			"peer":   peer,
+			"other":  other,
+		},
+	}
+
+	platform.discardRelaunchedClient(target)
+
+	if platform.host != nil || target.session != nil || !target.terminated || target.started {
+		t.Fatalf("target was not invalidated: host %#v target %#v", platform.host, target)
+	}
+	if peer.session != nil || !peer.terminated || peer.started {
+		t.Fatalf("peer on closed host was not invalidated: %#v", peer)
+	}
+	if other.session == nil || other.terminated || !other.started {
+		t.Fatalf("client on another host changed: %#v", other)
+	}
+}
+
+func TestProcessReplacementRejectsActivePeerBeforeHostTermination(t *testing.T) {
+	host := &Session{}
+	target := &platformClient{client: Client{Key: "target"}, session: &clientSession{host: host}}
+	peer := &platformClient{
+		client:     Client{Key: "peer"},
+		session:    &clientSession{host: host},
+		activeCall: &pausedCall{id: "active"},
+	}
+	platform := &Platform{
+		host: host,
+		clients: map[string]*platformClient{
+			"target": target,
+			"peer":   peer,
+		},
+	}
+
+	platform.installMu.Lock()
+	defer platform.installMu.Unlock()
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if _, err := platform.lockPeerClientsForProcessReplacement(target); err == nil {
+		t.Fatal("process replacement accepted an active peer")
+	}
+	if platform.host != host || target.session == nil || peer.session == nil {
+		t.Fatal("active peer rejection changed the shared host")
+	}
+}
+
+func TestProcessReplacementRetainsPeerLocksUntilHostReplacementFinishes(t *testing.T) {
+	target := &platformClient{client: Client{Key: "target"}, session: &clientSession{host: &Session{}}}
+	peer := &platformClient{client: Client{Key: "peer"}, session: &clientSession{host: &Session{}}}
+	platform := &Platform{clients: map[string]*platformClient{"target": target, "peer": peer}}
+
+	platform.installMu.Lock()
+	target.mu.Lock()
+	peers, err := platform.lockPeerClientsForProcessReplacement(target)
+	if err != nil {
+		t.Fatalf("lock replacement peers: %v", err)
+	}
+	acquired := make(chan struct{})
+	go func() {
+		peer.mu.Lock()
+		close(acquired)
+		peer.mu.Unlock()
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("peer operation lock was released during host replacement")
+	case <-time.After(20 * time.Millisecond):
+	}
+	unlockPlatformClients(peers)
+	target.mu.Unlock()
+	platform.installMu.Unlock()
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("peer operation lock did not release after host replacement")
+	}
+}
+
+func TestResponseLossGapMarksHostPeersUnavailable(t *testing.T) {
+	host := &Session{}
+	otherHost := &Session{}
+	target := &platformClient{client: Client{Key: "target"}, session: &clientSession{host: host}, started: true}
+	peer := &platformClient{client: Client{Key: "peer"}, session: &clientSession{host: host}, started: true}
+	other := &platformClient{client: Client{Key: "other"}, session: &clientSession{host: otherHost}, started: true}
+	platform := &Platform{
+		host:                   host,
+		pendingHostReplacement: target,
+		clients: map[string]*platformClient{
+			"target": target,
+			"peer":   peer,
+			"other":  other,
+		},
+	}
+
+	platform.markHostUnavailable(host)
+
+	if platform.pendingHostReplacement != target {
+		t.Fatal("response-loss host replacement was cleared before relaunch")
+	}
+	if target.session != nil || !target.terminated || target.started {
+		t.Fatalf("response-loss target remained available: %#v", target)
+	}
+	if peer.session != nil || !peer.terminated || peer.started {
+		t.Fatalf("response-loss peer remained available: %#v", peer)
+	}
+	if err := peer.available("synchronization"); err == nil {
+		t.Fatal("response-loss peer accepted synchronization during the replacement gap")
+	}
+	if other.session == nil || other.terminated || !other.started {
+		t.Fatalf("client on another host changed: %#v", other)
+	}
+}
+
+func TestInstallRejectsPendingHostReplacement(t *testing.T) {
+	pending := &platformClient{client: Client{Key: "pending"}}
+	platform := &Platform{
+		pendingHostReplacement: pending,
+		clients:                make(map[string]*platformClient),
+	}
+	err := platform.Install(context.Background(), InstallRequest{
+		Client:         Client{Key: "new", UserID: "user", ClientID: "client", DatabaseKey: "new.sqlite"},
+		Initialization: "empty",
+	})
+	if err == nil || !strings.Contains(err.Error(), "host replacement is pending") {
+		t.Fatalf("install during host replacement = %v", err)
+	}
+}
+
+func TestRestartPeerInvariantComparison(t *testing.T) {
+	peer := restartPeerCapture{
+		client: &platformClient{client: Client{Key: "peer", UserID: "user-a", ClientID: "client-peer"}},
+		before: restartInvariantCaptureFixture("process-a", testDigest),
+	}
+	after := restartInvariantCaptureFixture("process-b", testDigest)
+	if err := checkRestartPeerInvariant(peer, after); err != nil {
+		t.Fatalf("matching peer restart invariant failed: %v", err)
+	}
+	after.DurableStateFingerprint = strings.Repeat("b", 64)
+	err := checkRestartPeerInvariant(peer, after)
+	if err == nil || !strings.Contains(err.Error(), string(invariants.RuleStateForkDurableStateChanged)) {
+		t.Fatalf("changed peer restart invariant result = %v", err)
+	}
+}
+
+func TestEffectivePublicMethodStartsReopenedClientForSyncNow(t *testing.T) {
+	if got := effectivePublicMethod("sync-now", false); got != "start" {
+		t.Fatalf("reopened sync-now method = %q, want start", got)
+	}
+	if got := effectivePublicMethod("sync-now", true); got != "sync-now" {
+		t.Fatalf("started sync-now method = %q", got)
+	}
+}
+
 func restartInvariantCaptureFixture(processID, fingerprint string) Result {
 	status := "stopped"
 	zero := 0
@@ -94,6 +285,7 @@ func restartInvariantCaptureFixture(processID, fingerprint string) Result {
 		Status:                          &status,
 		ApplicationRowCount:             &zero,
 		MutationLedgerCount:             &zero,
+		RetainedMutationCount:           &zero,
 		MutationOutcomeCount:            &zero,
 		SealedBatchCount:                &zero,
 		RejectedMutationCount:           &zero,
@@ -103,6 +295,7 @@ func restartInvariantCaptureFixture(processID, fingerprint string) Result {
 		RowMetadataCount:                &zero,
 		RebuildAttemptCount:             &zero,
 		RebuildReceiptCount:             &zero,
+		DurableStateFingerprint:         testDigest,
 		Schema:                          json.RawMessage(`null`),
 		ApplicationRows:                 empty,
 		RetainedMutations:               empty,
@@ -482,6 +675,124 @@ func TestMappedTransportObservationPreservesServerReportedErrorCode(t *testing.T
 	}
 	if mapped.Wire == nil || mapped.Wire.ErrorCode == nil || *mapped.Wire.ErrorCode != errorCode {
 		t.Fatalf("mapped transport error code = %#v", mapped.Wire)
+	}
+}
+
+func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
+	retryable := false
+	protocolVersion := 3
+	scopeSetVersion := int64(0)
+	clientGeneration := int64(1)
+	scopeCount := 1
+	limit := 100
+	complete := true
+	operations := []scenarios.Operation{{
+		ContractOperation: "pull",
+		Name:              "request-page",
+		Payload:           json.RawMessage(`{"scopes":[{"scope_id":"scope-a","cursor_source":"none"}],"limit":100}`),
+	}}
+	observations := []TransportObservation{
+		{
+			Sequence:            1,
+			OperationClass:      "connect",
+			StatusCode:          http.StatusOK,
+			Retryable:           &retryable,
+			DurationNanoseconds: 1,
+			RequestFacts: &TransportRequestFacts{
+				SchemaVersion:   1,
+				SchemaHash:      testDigest,
+				ProtocolVersion: &protocolVersion,
+				ScopeSetVersion: &scopeSetVersion,
+				ScopeCount:      &scopeCount,
+			},
+		},
+		{
+			Sequence:                   2,
+			OperationClass:             "pull",
+			StatusCode:                 http.StatusOK,
+			Retryable:                  &retryable,
+			DurationNanoseconds:        1,
+			CursorFingerprints:         []string{},
+			CursorFingerprintsComplete: &complete,
+			RequestFacts: &TransportRequestFacts{
+				ClientGeneration: &clientGeneration,
+				SchemaVersion:    1,
+				SchemaHash:       testDigest,
+				ScopeSetVersion:  &scopeSetVersion,
+				ScopeCount:       &scopeCount,
+				Limit:            &limit,
+			},
+			PullResponseFacts: &TransportPullResponseFacts{
+				ScopeCursorFingerprints:         []string{},
+				ScopeCursorFingerprintsComplete: true,
+			},
+		},
+	}
+
+	mapped, err := mapTransportOperations(operations, observations, Result{})
+	if err != nil {
+		t.Fatalf("map pull after implicit connect: %v", err)
+	}
+	if len(mapped) != 1 || mapped[0].Wire == nil || mapped[0].Wire.HTTPStatus != http.StatusOK {
+		t.Fatalf("mapped pull = %#v", mapped)
+	}
+	observations[0].StatusCode = http.StatusUnauthorized
+	if _, err := mapTransportOperations(operations, observations, Result{}); err == nil {
+		t.Fatal("failed implicit connect passed transport mapping")
+	}
+}
+
+func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {
+	retryable := false
+	protocolVersion := 3
+	scopeSetVersion := int64(0)
+	scopeCount := 0
+	clientGeneration := int64(1)
+	mutationCount := 1
+	operations := []scenarios.Operation{{
+		ContractOperation: "push",
+		Name:              "submit",
+		Payload: json.RawMessage(`{
+			"authenticated_user_id":"user-a",
+			"request":{"client_id":"client-a","client_generation":1,"batch_id":"batch-a","schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"mutations":[{"mutation_id":"mutation-a","table":"items","pk":{"id":"row-a"},"authored_schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"op":"insert","client_version":"2032-01-02T03:04:05.000000Z","columns":{"value":"value-a"}}]},
+			"delivery":"apply","commit_lsn":"1","end_lsn":"2"
+		}`),
+	}}
+	observations := []TransportObservation{
+		{
+			Sequence:            1,
+			OperationClass:      "connect",
+			StatusCode:          http.StatusOK,
+			Retryable:           &retryable,
+			DurationNanoseconds: 1,
+			RequestFacts: &TransportRequestFacts{
+				SchemaVersion:   1,
+				SchemaHash:      testDigest,
+				ProtocolVersion: &protocolVersion,
+				ScopeSetVersion: &scopeSetVersion,
+				ScopeCount:      &scopeCount,
+			},
+		},
+		{
+			Sequence:            2,
+			OperationClass:      "push",
+			StatusCode:          http.StatusOK,
+			Retryable:           &retryable,
+			DurationNanoseconds: 1,
+			RequestFacts: &TransportRequestFacts{
+				ClientGeneration: &clientGeneration,
+				SchemaVersion:    1,
+				SchemaHash:       testDigest,
+				MutationCount:    &mutationCount,
+			},
+		},
+	}
+	if _, err := mapTransportOperations(operations, observations, Result{}); err != nil {
+		t.Fatalf("map response-loss push after implicit connect: %v", err)
+	}
+	observations[0].StatusCode = http.StatusUnauthorized
+	if _, err := mapTransportOperations(operations, observations, Result{}); err == nil {
+		t.Fatal("response-loss mapping accepted a failed implicit connect")
 	}
 }
 

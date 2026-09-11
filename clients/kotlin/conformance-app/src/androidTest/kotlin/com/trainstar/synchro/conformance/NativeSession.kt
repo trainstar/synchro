@@ -3,6 +3,8 @@
 package com.trainstar.synchro.conformance
 
 import android.content.Context
+import android.database.Cursor
+import android.database.sqlite.SQLiteDatabase
 import android.os.Process
 import android.util.Base64
 import com.trainstar.synchro.AnyCodable
@@ -47,6 +49,7 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import java.io.Closeable
 import java.io.File
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Locale
@@ -447,8 +450,10 @@ private class ClientSession(private val context: Context) : Closeable {
     }
 
     private fun captureInTransaction(client: SynchroClient, selectors: JsonArray): JsonObject {
+        val retainedMutationCount = client.retainedMutationCount()
         val capture = SynchroInspection(client).captureState(MAXIMUM_RECORDS)
-        val retainedMutations = if (capture.mutationLedgerCount <= MAXIMUM_RECORDS) {
+        val durableStateFingerprint = durableStateFingerprint()
+        val retainedMutations = if (retainedMutationCount <= MAXIMUM_RECORDS) {
             client.inspectRetainedMutations()
         } else {
             null
@@ -501,7 +506,9 @@ private class ClientSession(private val context: Context) : Closeable {
             applicationRows = rows,
             captureState = capture,
             retainedMutations = retainedMutations,
+            retainedMutationCount = retainedMutationCount,
             rejectedMutations = rejectedMutations,
+            durableStateFingerprint = durableStateFingerprint,
         )
     }
 
@@ -510,15 +517,17 @@ private class ClientSession(private val context: Context) : Closeable {
         applicationRows: JsonArray? = null,
         captureState: ClientStateCaptureInspection? = null,
         retainedMutations: List<PendingMutationInspection>? = null,
+        retainedMutationCount: Int? = null,
         rejectedMutations: List<RejectedMutationInspection>? = null,
+        durableStateFingerprint: String? = null,
     ): JsonObject {
         val client = requireClient()
         val capture = captureState ?: SynchroInspection(client).captureState(MAXIMUM_RECORDS)
+        val stateFingerprint = durableStateFingerprint ?: this.durableStateFingerprint()
+        val retainedCount = retainedMutationCount ?: client.retainedMutationCount()
         val pending = retainedMutations ?: when {
-            capture.mutationLedgerCount == 0 -> emptyList()
-            // The ledger count covers every retained mutation, including one the
-            // server rejected, so the detail list must cover the same set.
-            capture.mutationLedgerCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutations()
+            retainedCount == 0 -> emptyList()
+            retainedCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutations()
             else -> null
         }
         val rejected = rejectedMutations ?: when {
@@ -543,6 +552,7 @@ private class ClientSession(private val context: Context) : Closeable {
             put("pending_change_count", client.pendingChangeCount())
             put("application_row_count", capture.applicationRowCount)
             put("mutation_ledger_count", capture.mutationLedgerCount)
+            put("retained_mutation_count", retainedCount)
             put("mutation_outcome_count", capture.mutationOutcomeCount)
             put("sealed_batch_count", capture.sealedBatchCount)
             put("rejected_mutation_count", capture.rejectedMutationCount)
@@ -552,6 +562,7 @@ private class ClientSession(private val context: Context) : Closeable {
             put("row_metadata_count", capture.rowMetadataCount)
             put("rebuild_attempt_count", capture.rebuildAttemptCount)
             put("rebuild_receipt_count", capture.rebuildReceiptCount)
+            put("durable_state_fingerprint", stateFingerprint)
             if (capture.applicationRowCount <= MAXIMUM_ROWS) applicationRows?.let { put("application_rows", it) }
             pending?.let { put("retained_mutations", normalizePending(it)) }
             rejected?.let { put("rejected_mutations", normalizeRejected(it)) }
@@ -979,6 +990,104 @@ private class ClientSession(private val context: Context) : Closeable {
         return digest.joinToString("") { "%02x".format(Locale.US, it.toInt() and 0xff) }
     }
 
+    private fun durableStateFingerprint(): String {
+        val path = databaseFile?.canonicalPath ?: throw IllegalStateException("database is not open")
+        return SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY).use(::durableStateFingerprint)
+    }
+
+    private fun durableStateFingerprint(database: SQLiteDatabase): String {
+        requireDurableFingerprintDatabaseBound(database)
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update("synchro:android-durable-state:v1\u0000".toByteArray(Charsets.UTF_8))
+        val tables = mutableListOf<String>()
+        database.rawQuery(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE type IN ('table', 'index', 'trigger', 'view')
+              AND name != 'android_metadata'
+              AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence')
+            ORDER BY type, name
+            """.trimIndent(),
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val type = cursor.getString(0)
+                val name = cursor.getString(1)
+                updateFingerprint(digest, type.toByteArray(Charsets.UTF_8))
+                updateFingerprint(digest, name.toByteArray(Charsets.UTF_8))
+                updateFingerprint(digest, cursor.getString(2).toByteArray(Charsets.UTF_8))
+                updateNullableFingerprint(digest, if (cursor.isNull(3)) null else cursor.getString(3))
+                if (type == "table") tables += name
+            }
+        }
+        tables.forEach { table ->
+            updateFingerprint(digest, table.toByteArray(Charsets.UTF_8))
+            val columns = database.rawQuery("PRAGMA table_info(${quoteIdentifier(table)})", null).use { cursor ->
+                buildList {
+                    while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name")))
+                }
+            }
+            columns.forEach { updateFingerprint(digest, it.toByteArray(Charsets.UTF_8)) }
+            // Process replacement changes lifecycle and update time. Error and recovery fields remain durable.
+            val valueColumns = if (table == "_synchro_client_state") {
+                columns.filter { it != "lifecycle_state" && it != "updated_at" }
+            } else {
+                columns
+            }
+            val projection = valueColumns.joinToString(", ") { quoteIdentifier(it) }
+            // The global checkpoint and lock are volatile. Per-scope cursors carry durable synchronization state.
+            val filter = if (table == "_synchro_meta") " WHERE key NOT IN ('sync_lock', 'checkpoint')" else ""
+            val order = valueColumns.joinToString(", ") { quoteIdentifier(it) }
+            database.rawQuery("SELECT $projection FROM ${quoteIdentifier(table)}$filter ORDER BY $order", null).use { cursor ->
+                var rowCount = 0L
+                while (cursor.moveToNext()) {
+                    rowCount++
+                    for (index in valueColumns.indices) {
+                        val type = cursor.getType(index)
+                        digest.update(type.toByte())
+                        when (type) {
+                            Cursor.FIELD_TYPE_NULL -> Unit
+                            Cursor.FIELD_TYPE_INTEGER -> updateFingerprint(digest, longBytes(cursor.getLong(index)))
+                            Cursor.FIELD_TYPE_FLOAT -> updateFingerprint(digest, longBytes(java.lang.Double.doubleToRawLongBits(cursor.getDouble(index))))
+                            Cursor.FIELD_TYPE_STRING -> updateFingerprint(digest, cursor.getString(index).toByteArray(Charsets.UTF_8))
+                            Cursor.FIELD_TYPE_BLOB -> updateFingerprint(digest, cursor.getBlob(index))
+                            else -> error("unsupported SQLite value type")
+                        }
+                    }
+                }
+                updateFingerprint(digest, longBytes(rowCount))
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(Locale.US, it.toInt() and 0xff) }
+    }
+
+    private fun requireDurableFingerprintDatabaseBound(database: SQLiteDatabase) {
+        val pageCount = pragmaLong(database, "page_count")
+        val pageSize = pragmaLong(database, "page_size")
+        require(pageCount >= 0 && pageSize > 0) { "SQLite fingerprint page facts are invalid" }
+        require(pageCount <= MAXIMUM_DURABLE_FINGERPRINT_DATABASE_BYTES / pageSize) {
+            "SQLite database exceeds durable fingerprint bound"
+        }
+    }
+
+    private fun pragmaLong(database: SQLiteDatabase, name: String): Long = database.rawQuery("PRAGMA $name", null).use { cursor ->
+        require(cursor.moveToFirst()) { "SQLite $name is absent" }
+        cursor.getLong(0)
+    }
+
+    private fun updateFingerprint(digest: MessageDigest, value: ByteArray) {
+        digest.update(longBytes(value.size.toLong()))
+        digest.update(value)
+    }
+
+    private fun updateNullableFingerprint(digest: MessageDigest, value: String?) {
+        digest.update(if (value == null) 0 else 1)
+        value?.let { updateFingerprint(digest, it.toByteArray(Charsets.UTF_8)) }
+    }
+
+    private fun longBytes(value: Long): ByteArray = ByteBuffer.allocate(Long.SIZE_BYTES).putLong(value).array()
+
     private fun requireClient(): SynchroClient = client ?: throw IllegalStateException("client is not open")
     private fun requireTransportObservations(): TransportObservationCollector =
         transportObservations ?: throw IllegalStateException("transport is not open")
@@ -1059,6 +1168,8 @@ private class ClientSession(private val context: Context) : Closeable {
         const val MAXIMUM_ROWS = 256
         const val MAXIMUM_VALUE_BYTES = 1 shl 20
         const val MAXIMUM_ENCODED_VALUE_BYTES = 1_398_102
+        // This bound accommodates the authored 3,306-mutation workload.
+        const val MAXIMUM_DURABLE_FINGERPRINT_DATABASE_BYTES = 64L shl 20
         val CALL_ID = Regex("[a-z][a-z0-9_-]{0,127}")
         val IDENTIFIER = Regex("[A-Za-z_][A-Za-z0-9_]{0,127}")
     }

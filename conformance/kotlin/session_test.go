@@ -113,6 +113,11 @@ func TestDecodeResponseValidatesRunnerFailure(t *testing.T) {
 	if result.Failure == nil || result.Failure.Operation != "connecting" || result.Failure.Code != "auth_required" || result.Failure.Retryable || result.Failure.RecoveryAction != "none" || result.Failure.Metadata["source"] != "sync" {
 		t.Fatalf("decoded Kotlin failure = %+v", result.Failure)
 	}
+	networkFailure := strings.Replace(validFailure, `"code":"auth_required"`, `"code":"network_error"`, 1)
+	networkResponse := strings.Replace(responseWithObservations(""), `"transport_observations"`, `"failure":`+networkFailure+`,"transport_observations"`, 1)
+	if result, err := DecodeResponse([]byte(networkResponse)); err != nil || result.Failure == nil || result.Failure.Code != "network_error" {
+		t.Fatalf("valid Kotlin network failure = %+v, %v", result.Failure, err)
+	}
 	for _, failure := range []string{
 		`{"operation":"connecting","code":"auth_required","retryable":false,"message":"auth failed","recoveryAction":"none"}`,
 		validFailure[:len(validFailure)-1] + `,"unknown":true}`,
@@ -178,7 +183,7 @@ func TestDecodeResponseAcceptsLargeAggregateCounts(t *testing.T) {
 	response := strings.Replace(
 		responseWithObservations(""),
 		`"transport_observations"`,
-		`"application_row_count":1000,"mutation_ledger_count":1000,"mutation_outcome_count":1000,"sealed_batch_count":1,"rejected_mutation_count":1,"scope_state_count":1,"scope_row_count":1000,"provenance_count":1000,"row_metadata_count":1000,"rebuild_attempt_count":1,"rebuild_receipt_count":10,"transport_observations"`,
+		`"application_row_count":1000,"mutation_ledger_count":1000,"retained_mutation_count":1,"mutation_outcome_count":1000,"sealed_batch_count":1,"rejected_mutation_count":1,"scope_state_count":1,"scope_row_count":1000,"provenance_count":1000,"row_metadata_count":1000,"rebuild_attempt_count":1,"rebuild_receipt_count":10,"transport_observations"`,
 		1,
 	)
 	result, err := DecodeResponse([]byte(response))

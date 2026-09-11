@@ -141,6 +141,9 @@ type Platform struct {
 	installed bool
 	host      *Session
 	clients   map[string]*platformClient
+	// pendingHostReplacement prevents a new client from joining between a host
+	// termination and the invariant-checked relaunch of every former member.
+	pendingHostReplacement *platformClient
 
 	responseProxy            *httptest.Server
 	sealedRetryPush          *sealedRetryPushFault
@@ -277,8 +280,14 @@ type pendingResponseLoss struct {
 	batchID        string
 	before         Result
 	restartCapture Result
+	peers          []restartPeerCapture
 	observations   []TransportObservation
 	started        time.Time
+}
+
+type restartPeerCapture struct {
+	client *platformClient
+	before Result
 }
 
 // NewPlatform creates a direct Android client platform.
@@ -674,6 +683,10 @@ func (p *Platform) Install(ctx context.Context, request InstallRequest) error {
 		p.mu.Unlock()
 		return errors.New("Kotlin Android platform is closed")
 	}
+	if p.pendingHostReplacement != nil {
+		p.mu.Unlock()
+		return errors.New("Kotlin Android host replacement is pending")
+	}
 	if _, found := p.clients[client.Key]; found {
 		p.mu.Unlock()
 		return errors.New("Kotlin Android client is already installed")
@@ -683,6 +696,10 @@ func (p *Platform) Install(ctx context.Context, request InstallRequest) error {
 	p.installMu.Lock()
 	defer p.installMu.Unlock()
 	p.mu.Lock()
+	if p.pendingHostReplacement != nil {
+		p.mu.Unlock()
+		return errors.New("Kotlin Android host replacement is pending")
+	}
 	session := p.host
 	p.mu.Unlock()
 	started := false
@@ -974,6 +991,29 @@ func (p *Platform) Synchronize(ctx context.Context, request SynchronizeRequest) 
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
+	if dropBatchID != "" {
+		if _, enabled, faultErr := temporaryUnavailablePushTargetForOperations(request.Operations); faultErr != nil {
+			return SynchronizationResult{}, faultErr
+		} else if enabled {
+			return SynchronizationResult{}, errors.New("Kotlin Android response loss cannot combine with a temporary-unavailable push fault")
+		}
+		p.installMu.Lock()
+		defer p.installMu.Unlock()
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if err := state.available("synchronization"); err != nil {
+			return SynchronizationResult{}, err
+		}
+		if _, dropLast, _, dispatchErr := requestDispatch(request.Operations[len(request.Operations)-1]); dispatchErr != nil || !dropLast {
+			return SynchronizationResult{}, errors.New("Kotlin Android response-loss request must end its public call")
+		}
+		peers, err := p.lockPeerClientsForProcessReplacement(state)
+		if err != nil {
+			return SynchronizationResult{}, err
+		}
+		defer unlockPlatformClients(peers)
+		return p.synchronizeWithResponseLoss(ctx, state, request.Method, request.Operations, dropBatchID)
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if err := state.available("synchronization"); err != nil {
@@ -986,17 +1026,6 @@ func (p *Platform) Synchronize(ctx context.Context, request SynchronizeRequest) 
 	if faultArmed {
 		defer releaseFault()
 	}
-	if dropBatchID != "" {
-		if faultArmed {
-			return SynchronizationResult{}, errors.New("Kotlin Android response loss cannot combine with a temporary-unavailable push fault")
-		}
-		_, dropLast, _, dispatchErr := requestDispatch(request.Operations[len(request.Operations)-1])
-		if dispatchErr != nil || !dropLast {
-			return SynchronizationResult{}, errors.New("Kotlin Android response-loss request must end its public call")
-		}
-		return p.synchronizeWithResponseLoss(ctx, state, request.Method, request.Operations, dropBatchID)
-	}
-
 	before, err := captureClientState(ctx, state)
 	if err != nil {
 		return SynchronizationResult{}, err
@@ -1038,7 +1067,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
 		return SynchronizationResult{}, fmt.Errorf("arm Kotlin Android transport pause: %w", err)
 	}
-	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: method})
+	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: effectivePublicMethod(method, state.started)})
 	if err != nil {
 		return SynchronizationResult{}, fmt.Errorf("start Kotlin Android response-loss call: %w", err)
 	}
@@ -1063,7 +1092,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if len(observations) == 0 || observations[len(observations)-1].OperationClass != operationClass {
 		return SynchronizationResult{}, errors.New("Kotlin Android response-loss transport observation is not the covered request")
 	}
-	mapped, err := mapTransportOperations(operations[:1], observations[len(observations)-1:], before)
+	mapped, err := mapTransportOperations(operations[:1], observations, before)
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
@@ -1125,26 +1154,35 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
-	if err := state.session.Kill(ctx); err != nil {
-		return SynchronizationResult{}, fmt.Errorf("terminate Kotlin Android client after server response: %w", err)
-	}
-	// The engine compares identities but does not confirm that the killed process exited.
-	if err := state.session.WaitForExit(ctx); err != nil {
-		return SynchronizationResult{}, errors.New("Kotlin Android response-loss termination is not confirmed")
-	}
-	if err := state.session.Close(ctx); err != nil {
+	peers, err := p.captureRestartPeers(ctx, state)
+	if err != nil {
 		return SynchronizationResult{}, err
 	}
-	state.session = nil
-	state.terminated = true
-	state.started = false
-	state.pendingLoss = &pendingResponseLoss{
+	oldSession := state.session
+	loss := &pendingResponseLoss{
 		batchID: batchID,
 		before:  before,
 		// The last paused capture is the complete pre-kill state for restart comparison.
 		restartCapture: lastState,
+		peers:          peers,
 		observations:   cloneObservations(observations),
 		started:        started,
+	}
+	if err := p.beginHostReplacement(state); err != nil {
+		return SynchronizationResult{}, err
+	}
+	state.pendingLoss = loss
+	if err := oldSession.Kill(ctx); err != nil {
+		p.markHostUnavailable(oldSession.host)
+		return SynchronizationResult{}, fmt.Errorf("terminate Kotlin Android client after server response: %w", err)
+	}
+	p.markHostUnavailable(oldSession.host)
+	// The engine compares identities but does not confirm that the killed process exited.
+	if err := oldSession.WaitForExit(ctx); err != nil {
+		return SynchronizationResult{}, errors.New("Kotlin Android response-loss termination is not confirmed")
+	}
+	if err := oldSession.Close(ctx); err != nil {
+		return SynchronizationResult{}, err
 	}
 	return synchronizationResult("blocked", mapped, window), nil
 }
@@ -1221,7 +1259,7 @@ func (p *Platform) BeginCall(ctx context.Context, request CallRequest) (ClientCa
 	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: firstPauseClass}); err != nil {
 		return ClientCallResult{}, fmt.Errorf("arm Kotlin Android transport pause: %w", err)
 	}
-	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: request.CallID, Method: request.Method})
+	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: request.CallID, Method: effectivePublicMethod(request.Method, state.started)})
 	if err != nil {
 		return ClientCallResult{}, fmt.Errorf("start paused Kotlin Android call: %w", err)
 	}
@@ -1512,8 +1550,15 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 	}
 	switch scenarios.OperationKey(operation) {
 	case "process/restart-client":
+		p.installMu.Lock()
+		defer p.installMu.Unlock()
 		state.mu.Lock()
 		defer state.mu.Unlock()
+		peers, err := p.lockPeerClientsForProcessReplacement(state)
+		if err != nil {
+			return StepObservation{}, err
+		}
+		defer unlockPlatformClients(peers)
 		if state.pendingLoss != nil {
 			return p.relaunchPendingResponseLoss(ctx, state, state.pendingLoss)
 		}
@@ -1538,8 +1583,15 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if err != nil {
 			return StepObservation{}, err
 		}
+		p.installMu.Lock()
+		defer p.installMu.Unlock()
 		state.mu.Lock()
 		defer state.mu.Unlock()
+		peers, err := p.lockPeerClientsForProcessReplacement(state)
+		if err != nil {
+			return StepObservation{}, err
+		}
+		defer unlockPlatformClients(peers)
 		loss := state.pendingLoss
 		if !state.terminated || state.session != nil || loss == nil || loss.batchID != batchID {
 			return StepObservation{}, errors.New("Kotlin Android response loss has no matching interrupted request")
@@ -1555,7 +1607,7 @@ func (p *Platform) relaunchPendingResponseLoss(ctx context.Context, state *platf
 		return StepObservation{}, errors.New("Kotlin Android response loss has no interrupted process")
 	}
 	started := time.Now()
-	opened, err := p.relaunchExistingClient(ctx, state)
+	opened, err := p.relaunchExistingClient(ctx, state, loss.peers)
 	if err != nil {
 		return StepObservation{}, fmt.Errorf("relaunch Kotlin Android client after response loss: %w", err)
 	}
@@ -1568,7 +1620,12 @@ func (p *Platform) relaunchPendingResponseLoss(ctx context.Context, state *platf
 		p.discardRelaunchedClient(state)
 		return StepObservation{}, err
 	}
+	if err := p.checkRestartPeerInvariants(ctx, loss.peers); err != nil {
+		p.discardRelaunchedClient(state)
+		return StepObservation{}, err
+	}
 	state.pendingLoss = nil
+	p.completeHostReplacement(state)
 	state.restarted = true
 	window, err := state.windowFromResults(started, opened, opened, nil)
 	if err != nil {
@@ -1600,10 +1657,16 @@ func (p *Platform) restartClient(ctx context.Context, client *platformClient) (R
 	if err != nil {
 		return Result{}, fmt.Errorf("capture Kotlin Android client before restart: %w", err)
 	}
-	oldSession := client.session
-	if err := oldSession.Kill(ctx); err != nil {
+	peers, err := p.captureRestartPeers(ctx, client)
+	if err != nil {
 		return Result{}, err
 	}
+	oldSession := client.session
+	if err := oldSession.Kill(ctx); err != nil {
+		p.markHostUnavailable(oldSession.host)
+		return Result{}, err
+	}
+	p.markHostUnavailable(oldSession.host)
 	// The engine compares identities but does not confirm that the killed process exited.
 	if err := oldSession.WaitForExit(ctx); err != nil {
 		return Result{}, errors.New("Kotlin Android client termination is not confirmed")
@@ -1611,9 +1674,7 @@ func (p *Platform) restartClient(ctx context.Context, client *platformClient) (R
 	if err := oldSession.Close(ctx); err != nil {
 		return Result{}, err
 	}
-	client.session = nil
-	client.terminated = true
-	opened, err := p.relaunchExistingClient(ctx, client)
+	opened, err := p.relaunchExistingClient(ctx, client, peers)
 	if err != nil {
 		return Result{}, fmt.Errorf("relaunch Kotlin Android client: %w", err)
 	}
@@ -1626,11 +1687,23 @@ func (p *Platform) restartClient(ctx context.Context, client *platformClient) (R
 		p.discardRelaunchedClient(client)
 		return Result{}, err
 	}
+	if err := p.checkRestartPeerInvariants(ctx, peers); err != nil {
+		p.discardRelaunchedClient(client)
+		return Result{}, err
+	}
 	client.restarted = true
 	return opened, nil
 }
 
-func (p *Platform) relaunchExistingClient(ctx context.Context, client *platformClient) (Result, error) {
+func (p *Platform) relaunchExistingClient(ctx context.Context, client *platformClient, peers []restartPeerCapture) (Result, error) {
+	clients := make([]*platformClient, 0, len(peers)+1)
+	clients = append(clients, client)
+	for _, peer := range peers {
+		clients = append(clients, peer.client)
+	}
+	sort.Slice(clients, func(left, right int) bool {
+		return clients[left].client.Key < clients[right].client.Key
+	})
 	config := p.config
 	config.ApplicationAPKPath = ""
 	config.InstrumentationAPKPath = ""
@@ -1645,8 +1718,21 @@ func (p *Platform) relaunchExistingClient(ctx context.Context, client *platformC
 	p.mu.Lock()
 	p.host = session
 	p.mu.Unlock()
-	client.session = &clientSession{host: session, platform: p, sessionID: androidSessionID(client.client), tracker: &Session{}}
-	opened, err := p.openClient(ctx, client, "", "existing")
+	var opened Result
+	for _, candidate := range clients {
+		candidate.session = &clientSession{host: session, platform: p, sessionID: androidSessionID(candidate.client), tracker: &Session{}}
+		result, openErr := p.openClient(ctx, candidate, "", "existing")
+		if openErr == nil && candidate != client {
+			candidate.restarted = true
+		}
+		if openErr != nil {
+			err = openErr
+			break
+		}
+		if candidate == client {
+			opened = result
+		}
+	}
 	if err != nil {
 		closeKotlinSession(session)
 		p.mu.Lock()
@@ -1654,11 +1740,148 @@ func (p *Platform) relaunchExistingClient(ctx context.Context, client *platformC
 			p.host = nil
 		}
 		p.mu.Unlock()
-		client.session = nil
-		client.terminated = true
+		for _, candidate := range clients {
+			candidate.session = nil
+			candidate.terminated = true
+			candidate.started = false
+		}
 		return Result{}, err
 	}
 	return opened, nil
+}
+
+// captureRestartPeers requires the target and all peer locks. It captures only
+// clients served by the target host before that host is terminated.
+func (p *Platform) captureRestartPeers(ctx context.Context, client *platformClient) ([]restartPeerCapture, error) {
+	if client.session == nil || client.session.host == nil {
+		return nil, errors.New("Kotlin Android client host is unavailable for replacement")
+	}
+	host := client.session.host
+	p.mu.Lock()
+	candidates := make([]*platformClient, 0, len(p.clients))
+	for _, candidate := range p.clients {
+		if candidate != client && candidate.session != nil && candidate.session.host == host && !candidate.terminated {
+			candidates = append(candidates, candidate)
+		}
+	}
+	p.mu.Unlock()
+	sort.Slice(candidates, func(left, right int) bool {
+		return candidates[left].client.Key < candidates[right].client.Key
+	})
+	peers := make([]restartPeerCapture, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.started {
+			stopped, err := candidate.session.Execute(ctx, Request{Operation: "lifecycle", LifecycleOperation: "stop"})
+			if err != nil {
+				return nil, fmt.Errorf("stop Kotlin Android peer %q before restart: %w", candidate.client.Key, err)
+			}
+			if stopped.Status == nil || *stopped.Status == "" {
+				return nil, fmt.Errorf("stop Kotlin Android peer %q before restart failed", candidate.client.Key)
+			}
+			if err := candidate.advanceMaintenanceCursor(stopped); err != nil {
+				return nil, fmt.Errorf("record Kotlin Android peer %q stop before restart: %w", candidate.client.Key, err)
+			}
+			candidate.started = false
+		}
+		before, err := captureClientState(ctx, candidate)
+		if err != nil {
+			return nil, fmt.Errorf("capture Kotlin Android peer %q before restart: %w", candidate.client.Key, err)
+		}
+		peers = append(peers, restartPeerCapture{client: candidate, before: before})
+	}
+	return peers, nil
+}
+
+func (p *Platform) checkRestartPeerInvariants(ctx context.Context, peers []restartPeerCapture) error {
+	for _, peer := range peers {
+		after, err := captureClientState(ctx, peer.client)
+		if err != nil {
+			return fmt.Errorf("capture Kotlin Android peer %q after restart: %w", peer.client.client.Key, err)
+		}
+		if err := checkRestartPeerInvariant(peer, after); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkRestartPeerInvariant(peer restartPeerCapture, after Result) error {
+	if err := checkRestartInvariants(peer.client.client, peer.before, after); err != nil {
+		return fmt.Errorf("Kotlin Android peer %q restart invariant failed: %w", peer.client.client.Key, err)
+	}
+	return nil
+}
+
+func (p *Platform) beginHostReplacement(client *platformClient) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pendingHostReplacement != nil {
+		return errors.New("Kotlin Android host replacement is already pending")
+	}
+	p.pendingHostReplacement = client
+	return nil
+}
+
+func (p *Platform) completeHostReplacement(client *platformClient) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pendingHostReplacement == client {
+		p.pendingHostReplacement = nil
+	}
+}
+
+// markHostUnavailable requires the target and all peer locks. Membership stays
+// in Platform.clients so replacement can reopen each former host member.
+func (p *Platform) markHostUnavailable(host *Session) {
+	if host == nil {
+		return
+	}
+	p.mu.Lock()
+	clients := make([]*platformClient, 0, len(p.clients))
+	for _, candidate := range p.clients {
+		if candidate.session != nil && candidate.session.host == host {
+			clients = append(clients, candidate)
+		}
+	}
+	p.mu.Unlock()
+	for _, candidate := range clients {
+		candidate.session = nil
+		candidate.terminated = true
+		candidate.started = false
+	}
+}
+
+// lockPeerClientsForProcessReplacement requires installMu and client.mu.
+// It retains every peer lock until replacement finishes.
+func (p *Platform) lockPeerClientsForProcessReplacement(client *platformClient) ([]*platformClient, error) {
+	p.mu.Lock()
+	clients := make([]*platformClient, 0, len(p.clients))
+	for _, candidate := range p.clients {
+		clients = append(clients, candidate)
+	}
+	p.mu.Unlock()
+	sort.Slice(clients, func(left, right int) bool {
+		return clients[left].client.Key < clients[right].client.Key
+	})
+	locked := make([]*platformClient, 0, len(clients))
+	for _, candidate := range clients {
+		if candidate == client {
+			continue
+		}
+		candidate.mu.Lock()
+		locked = append(locked, candidate)
+		if candidate.activeCall != nil || candidate.pendingLoss != nil {
+			unlockPlatformClients(locked)
+			return nil, errors.New("Kotlin Android peer client has active work during process replacement")
+		}
+	}
+	return locked, nil
+}
+
+func unlockPlatformClients(clients []*platformClient) {
+	for index := len(clients) - 1; index >= 0; index-- {
+		clients[index].mu.Unlock()
+	}
 }
 
 func (p *Platform) discardRelaunchedClient(client *platformClient) {
@@ -1671,12 +1894,64 @@ func (p *Platform) discardRelaunchedClient(client *platformClient) {
 	if p.host == session {
 		p.host = nil
 	}
+	clients := make([]*platformClient, 0, len(p.clients))
+	for _, candidate := range p.clients {
+		clients = append(clients, candidate)
+	}
 	p.mu.Unlock()
-	client.session = nil
-	client.terminated = true
+	for _, candidate := range clients {
+		if candidate.session != nil && candidate.session.host == session {
+			candidate.session = nil
+			candidate.terminated = true
+			candidate.started = false
+		}
+	}
 }
 
 func checkRestartInvariants(client Client, before, after Result) error {
+	if err := validateCapturedClientState(before); err != nil {
+		return fmt.Errorf("assemble Kotlin Android restart invariant observation 1: %w", err)
+	}
+	if err := validateCapturedClientState(after); err != nil {
+		return fmt.Errorf("assemble Kotlin Android restart invariant observation 2: %w", err)
+	}
+	if restartCaptureExceedsDetailBounds(before) || restartCaptureExceedsDetailBounds(after) {
+		observations := []invariants.Observation{
+			{
+				Sequence: 1,
+				Clients: []invariants.ClientObservation{{
+					State:   scenarios.ClientDurabilityFact{UserID: client.UserID, ClientID: client.ClientID},
+					Process: &invariants.ProcessIdentityObservation{ProcessID: before.ProcessID, DatabaseIdentityFingerprint: before.DatabaseIdentityFingerprint},
+				}},
+			},
+			{
+				Sequence: 2,
+				Clients: []invariants.ClientObservation{{
+					State:           scenarios.ClientDurabilityFact{UserID: client.UserID, ClientID: client.ClientID},
+					Process:         &invariants.ProcessIdentityObservation{ProcessID: after.ProcessID, DatabaseIdentityFingerprint: after.DatabaseIdentityFingerprint},
+					RestartBoundary: true,
+				}},
+			},
+		}
+		violations, err := invariants.CheckNoStateForks(observations)
+		if err != nil {
+			return fmt.Errorf("check Kotlin Android restart invariant: %w", err)
+		}
+		rules := make([]string, 0, len(violations)+1)
+		for _, violation := range violations {
+			// The aggregate fingerprint replaces detail that exceeds the capture bounds.
+			if violation.RuleID != invariants.RuleStateForkCaptureIncomplete {
+				rules = append(rules, string(violation.RuleID))
+			}
+		}
+		if before.DurableStateFingerprint != after.DurableStateFingerprint {
+			rules = append(rules, string(invariants.RuleStateForkDurableStateChanged))
+		}
+		if len(rules) != 0 {
+			return fmt.Errorf("Kotlin Android restart violated invariant rules %s", strings.Join(rules, ","))
+		}
+		return nil
+	}
 	observations := make([]invariants.Observation, 0, 2)
 	for index, capture := range []Result{before, after} {
 		observedClient, err := restartInvariantClientObservation(client, capture, index == 1)
@@ -1692,14 +1967,31 @@ func checkRestartInvariants(client Client, before, after Result) error {
 	if err != nil {
 		return fmt.Errorf("check Kotlin Android restart invariant: %w", err)
 	}
-	if len(violations) == 0 {
-		return nil
+	rules := make([]string, 0, len(violations)+1)
+	durableStateChanged := false
+	for _, violation := range violations {
+		rules = append(rules, string(violation.RuleID))
+		durableStateChanged = durableStateChanged || violation.RuleID == invariants.RuleStateForkDurableStateChanged
 	}
-	rules := make([]string, len(violations))
-	for index, violation := range violations {
-		rules[index] = string(violation.RuleID)
+	if before.DurableStateFingerprint != after.DurableStateFingerprint && !durableStateChanged {
+		rules = append(rules, string(invariants.RuleStateForkDurableStateChanged))
 	}
-	return fmt.Errorf("Kotlin Android restart violated invariant rules %s", strings.Join(rules, ","))
+	if len(rules) != 0 {
+		return fmt.Errorf("Kotlin Android restart violated invariant rules %s", strings.Join(rules, ","))
+	}
+	return nil
+}
+
+func restartCaptureExceedsDetailBounds(capture Result) bool {
+	return *capture.ApplicationRowCount > maximumRows ||
+		*capture.RetainedMutationCount > maximumRecords ||
+		*capture.RejectedMutationCount > maximumRecords ||
+		*capture.ScopeStateCount > maximumRecords ||
+		*capture.ScopeRowCount > maximumRecords ||
+		*capture.ProvenanceCount > maximumRecords ||
+		*capture.RowMetadataCount > maximumRecords ||
+		*capture.RebuildAttemptCount > maximumRecords ||
+		*capture.RebuildReceiptCount > maximumRecords
 }
 
 func restartInvariantClientObservation(client Client, capture Result, restartBoundary bool) (invariants.ClientObservation, error) {
@@ -1707,15 +1999,7 @@ func restartInvariantClientObservation(client Client, capture Result, restartBou
 	if err := validateCapturedClientState(capture); err != nil {
 		return invariants.ClientObservation{}, err
 	}
-	if *capture.ApplicationRowCount > maximumRows ||
-		*capture.MutationLedgerCount > maximumRecords ||
-		*capture.RejectedMutationCount > maximumRecords ||
-		*capture.ScopeStateCount > maximumRecords ||
-		*capture.ScopeRowCount > maximumRecords ||
-		*capture.ProvenanceCount > maximumRecords ||
-		*capture.RowMetadataCount > maximumRecords ||
-		*capture.RebuildAttemptCount > maximumRecords ||
-		*capture.RebuildReceiptCount > maximumRecords {
+	if restartCaptureExceedsDetailBounds(capture) {
 		return invariants.ClientObservation{}, errors.New("Kotlin Android restart invariant capture exceeds complete bounds")
 	}
 
@@ -1733,7 +2017,7 @@ func restartInvariantClientObservation(client Client, capture Result, restartBou
 		return invariants.ClientObservation{}, err
 	}
 	if len(merged.Clients) != 1 ||
-		len(merged.Clients[0].Queue) != *capture.MutationLedgerCount ||
+		len(merged.Clients[0].Queue) != *capture.RetainedMutationCount ||
 		len(merged.Clients[0].Outcomes) != *capture.RejectedMutationCount ||
 		len(merged.Clients[0].Checkpoints) != *capture.ScopeStateCount ||
 		len(merged.Clients[0].Provenance) != *capture.ProvenanceCount {
@@ -1972,7 +2256,7 @@ func closeClientSession(session *clientSession) {
 func (p *Platform) runPublicCall(ctx context.Context, client *platformClient, method string) (ClientCallResult, []TransportObservation, error) {
 	callID := p.nextCallID(client)
 	checkpoint := client.session.Checkpoint()
-	inFlight, err := client.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: method})
+	inFlight, err := client.session.Execute(ctx, Request{Operation: "begin-call", CallID: callID, Method: effectivePublicMethod(method, client.started)})
 	if err != nil {
 		return ClientCallResult{}, nil, fmt.Errorf("start Kotlin Android public call: %w", err)
 	}
@@ -1993,6 +2277,13 @@ func (p *Platform) runPublicCall(ctx context.Context, client *platformClient, me
 		return ClientCallResult{}, nil, err
 	}
 	return completedResult, observations, nil
+}
+
+func effectivePublicMethod(method string, started bool) string {
+	if method == "sync-now" && !started {
+		return "start"
+	}
+	return method
 }
 
 func (p *Platform) nextCallID(client *platformClient) string {
@@ -2020,6 +2311,17 @@ func mapTransportObservation(observation TransportObservation) (StepObservation,
 }
 
 func mapTransportOperations(operations []scenarios.Operation, observations []TransportObservation, source Result) ([]StepObservation, error) {
+	if len(observations) == len(operations)+1 && len(operations) != 0 && observations[0].OperationClass == "connect" {
+		operationClass, _, _, err := requestDispatch(operations[0])
+		if err != nil {
+			return nil, err
+		}
+		implicitConnect := observations[0]
+		if operationClass == "connect" || validateTransportObservation(implicitConnect) != nil || implicitConnect.StatusCode != http.StatusOK || implicitConnect.ErrorCode != nil || implicitConnect.Retryable == nil || *implicitConnect.Retryable {
+			return nil, errors.New("Kotlin Android implicit connect observation is invalid")
+		}
+		observations = observations[1:]
+	}
 	if len(operations) != len(observations) {
 		return nil, errors.New("Kotlin Android transport observations do not close covered requests")
 	}
@@ -2140,7 +2442,7 @@ func validateCursorSourceBinding(operation scenarios.Operation, observation Tran
 				return errors.New("Kotlin Android authored pull cursor sources are mixed")
 			}
 		}
-		var expected []string
+		expected := make([]string, 0)
 		switch sourceKind {
 		case "none":
 		case "local_checkpoint":
@@ -2489,11 +2791,11 @@ func captureClientStateBatch(ctx context.Context, client *platformClient, select
 }
 
 func validateCapturedClientState(result Result) error {
-	if result.Status == nil || *result.Status == "" || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 {
+	if result.Status == nil || *result.Status == "" || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.RetainedMutationCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 || !validLowerHexDigest(result.DurableStateFingerprint) {
 		return errors.New("Kotlin Android capture facts are incomplete")
 	}
 	if (*result.ApplicationRowCount <= maximumRows) != presentJSON(result.ApplicationRows) ||
-		(*result.MutationLedgerCount <= maximumRecords) != presentJSON(result.RetainedMutations) ||
+		(*result.RetainedMutationCount <= maximumRecords) != presentJSON(result.RetainedMutations) ||
 		(*result.RejectedMutationCount <= maximumRecords) != presentJSON(result.RejectedMutations) ||
 		(*result.ScopeStateCount <= maximumRecords) != presentJSON(result.ScopeStates) ||
 		(*result.ScopeRowCount <= maximumRecords) != presentJSON(result.ScopeRows) ||
@@ -2519,6 +2821,15 @@ func validateCapturedClientState(result Result) error {
 		}
 		if len(values) != *result.RejectedMutationCount {
 			return errors.New("Kotlin Android rejected-mutation count does not match detail")
+		}
+	}
+	if *result.RetainedMutationCount <= maximumRecords {
+		values, err := androidQueuedMutationFacts(result.RetainedMutations)
+		if err != nil {
+			return err
+		}
+		if len(values) != *result.RetainedMutationCount {
+			return errors.New("Kotlin Android retained-mutation count does not match detail")
 		}
 	}
 	if *result.ScopeStateCount <= maximumRecords {
@@ -2674,7 +2985,7 @@ func androidClientFactsForSource(source string, client *platformClient, result R
 				return nil, err
 			}
 		}
-		count := androidCount(result.MutationLedgerCount)
+		count := androidCount(result.RetainedMutationCount)
 		facts.QueueCount = &count
 		facts.Queue = queue
 		sealedBatchCount := androidCount(result.SealedBatchCount)
