@@ -3072,19 +3072,30 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	}
 	c.mu.Unlock()
 
-	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
-	defer cancel()
+	walDeadline, cancelWAL := context.WithTimeout(ctx, c.waitTimeout)
 	var resolveErr error
 	for {
-		resolveErr = c.resolveRuntimeTransaction(deadline, transaction)
-		if resolveErr == nil && transaction.ApplicationPush {
-			resolveErr = c.resolveApplicationPushRecords(deadline, transaction)
-		}
+		resolveErr = c.resolveRuntimeTransaction(walDeadline, transaction)
 		if resolveErr == nil {
 			break
 		}
-		if err := waitNativePoll(deadline); err != nil {
+		if err := waitNativePoll(walDeadline); err != nil {
+			cancelWAL()
 			return NativeStepObservation{}, fmt.Errorf("native source transaction did not become WAL-materialized: %w", resolveErr)
+		}
+	}
+	cancelWAL()
+	if transaction.ApplicationPush {
+		applicationDeadline, cancelApplication := context.WithTimeout(ctx, c.waitTimeout)
+		defer cancelApplication()
+		for {
+			resolveErr = c.resolveApplicationPushRecords(applicationDeadline, transaction)
+			if resolveErr == nil {
+				break
+			}
+			if err := waitNativePoll(applicationDeadline); err != nil {
+				return NativeStepObservation{}, fmt.Errorf("native application push records did not resolve: %w", resolveErr)
+			}
 		}
 	}
 	if err := c.validateRuntimeTransactionOrder(ctx, transaction); err != nil {
@@ -3862,6 +3873,29 @@ func mapNativeMutationOutcomeIdentities(identities []nativeMutationOutcomeIdenti
 	return outcomes, nil
 }
 
+// RestoreSharedState removes scenario-specific server configuration before reset.
+func (c *NativeController) RestoreSharedState(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("native controller restore context is required")
+	}
+	c.mu.Lock()
+	configured := c.crossScopeConfigured
+	if !configured {
+		c.mu.Unlock()
+		return nil
+	}
+	if err := c.harness.Operator().RestoreCrossScopeTable(ctx); err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("restore native cross-scope registration: %w", err)
+	}
+	c.crossScopeConfigured = false
+	c.mu.Unlock()
+	return nil
+}
+
 // Close closes the controller and optionally the owned black-box harness.
 func (c *NativeController) Close(ctx context.Context) error {
 	if c == nil {
@@ -3876,17 +3910,12 @@ func (c *NativeController) Close(ctx context.Context) error {
 		return nil
 	}
 	c.closed = true
-	configured := c.crossScopeConfigured
-	c.crossScopeConfigured = false
 	c.mu.Unlock()
 	// The cross-scope registration reconfigures a shared fixture table and
-	// registers a shared scope. It must not outlive the scenario that staged
-	// it, or a later scenario inherits the reconfiguration.
-	if configured {
-		if err := c.harness.Operator().RestoreCrossScopeTable(ctx); err != nil {
-			_ = c.harness.Close(ctx)
-			return fmt.Errorf("restore native cross-scope registration: %w", err)
-		}
+	// registers a shared scope. It must not outlive the scenario that staged it.
+	if err := c.RestoreSharedState(ctx); err != nil {
+		_ = c.harness.Close(ctx)
+		return err
 	}
 	return c.harness.Close(ctx)
 }

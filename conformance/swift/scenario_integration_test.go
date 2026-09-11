@@ -367,14 +367,6 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 	if err != nil {
 		t.Fatalf("create Swift direct platform: %v", err)
 	}
-	t.Cleanup(func() {
-		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		if err := platform.Close(closeContext); err != nil {
-			t.Errorf("close Swift direct platform: %v", err)
-		}
-	})
-
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
@@ -387,16 +379,31 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 	}
 	// The reset runs as a cleanup so a scenario that fails still restores server
 	// state. A trailing call never runs after t.Fatalf, which leaves every later
-	// scenario running against the failed scenario's state. Cleanups run last
-	// registered first, so this reset precedes the platform and controller close
-	// and the context cancel.
+	// scenario running against the failed scenario's state.
 	t.Cleanup(func() {
 		// SYNCHRO_KEEP_SERVER_STATE retains the failing server state for post
 		// mortem inspection. The reset destroys the evidence a failure leaves.
 		if os.Getenv("SYNCHRO_KEEP_SERVER_STATE") != "" && t.Failed() {
 			return
 		}
-		resetSwiftPerformanceServer(t, ctx, harness)
+		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancelReset()
+		resetSwiftPerformanceServer(t, resetContext, harness)
+	})
+	t.Cleanup(func() {
+		restoreContext, cancelRestore := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelRestore()
+		if err := controller.RestoreSharedState(restoreContext); err != nil {
+			t.Errorf("restore Swift scenario server state: %v", err)
+		}
+	})
+	// Cleanup is LIFO. Stop native clients before resetting their shared server.
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := platform.Close(closeContext); err != nil {
+			t.Errorf("close Swift direct platform: %v", err)
+		}
 	})
 	return ctx, scenario, harness, controller, platform
 }

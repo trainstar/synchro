@@ -550,6 +550,13 @@ func validateKotlinSteadyPullFaultResult(fault steadyPullFault, result Synchroni
 }
 
 func equalKotlinSteadyPullDurableState(left, right Result) bool {
+	if left.DurableStateFingerprint == "" || right.DurableStateFingerprint == "" {
+		return false
+	}
+	failurePresenceChanged := (left.Failure == nil) != (right.Failure == nil)
+	if failurePresenceChanged == (left.DurableStateFingerprint == right.DurableStateFingerprint) {
+		return false
+	}
 	normalize := func(value Result) Result {
 		value.Status = nil
 		value.RowsAffected = nil
@@ -564,6 +571,7 @@ func equalKotlinSteadyPullDurableState(left, right Result) bool {
 		value.CallErrorCategory = nil
 		value.ProcessID = ""
 		value.ProvenanceMaintenanceWorkCursor = nil
+		value.DurableStateFingerprint = ""
 		return value
 	}
 	return reflect.DeepEqual(normalize(left), normalize(right))

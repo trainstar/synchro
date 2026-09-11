@@ -39,7 +39,7 @@ func TestRealKotlinPerformance(t *testing.T) {
 
 func runKotlinSteadyPull(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/steady-pull-001.json", 0)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/steady-pull-001.json", 0)
 	result, err := RunSteadyPullScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "steady-pull-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android steady-pull scenario: %v", err)
@@ -47,12 +47,11 @@ func runKotlinSteadyPull(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android steady-pull identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinPendingCycle(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/pending-cycle-001.json", 0)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/pending-cycle-001.json", 0)
 	result, err := RunPendingCycleScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "pending-cycle-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android pending-cycle scenario: %v", err)
@@ -60,12 +59,11 @@ func runKotlinPendingCycle(t *testing.T) {
 	if err := scenarios.ValidatePendingCycleNativeEvidence(result.Evidence); err != nil {
 		t.Fatalf("validate direct Kotlin Android pending-cycle evidence: %v", err)
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinQueueReplay(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/queue-replay-001.json", 0)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/queue-replay-001.json", 0)
 	result, err := RunQueueReplayScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "queue-replay-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android queue-replay scenario: %v", err)
@@ -76,7 +74,6 @@ func runKotlinQueueReplay(t *testing.T) {
 	if err := scenarios.ValidateNativeCRUDEvidence(result.CRUD); err != nil {
 		t.Fatalf("validate direct Kotlin Android queue-replay CRUD evidence: %v", err)
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinSeededEmptyStartup(t *testing.T) {
@@ -162,7 +159,7 @@ func kotlinMultiScopeProvenancePageSize(t *testing.T, scenarioPath string) int {
 
 func runKotlinPushResponseLoss(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/push-response-loss-001.json", 0)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/push-response-loss-001.json", 0)
 	result, err := RunPushResponseLossScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "push-response-loss-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android push-response-loss scenario: %v", err)
@@ -170,12 +167,11 @@ func runKotlinPushResponseLoss(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android push-response-loss identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinRetentionReconnect(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/retention-reconnect-001.json", 1)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/retention-reconnect-001.json", 1)
 	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android retention-reconnect scenario: %v", err)
@@ -183,12 +179,11 @@ func runKotlinRetentionReconnect(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android retention-reconnect identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinSchemaQueuedMutation(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/schema-queued-mutation-001.json", 100)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/schema-queued-mutation-001.json", 100)
 	result, err := RunSchemaQueuedMutationScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "schema-queued-mutation-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android schema-queued-mutation scenario: %v", err)
@@ -196,12 +191,11 @@ func runKotlinSchemaQueuedMutation(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android schema-queued-mutation identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinSchemaCheck(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/schema-check-001.json", 0)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/schema-check-001.json", 0)
 	result, err := RunSchemaCheckScenario(ctx, scenario, controller, platform)
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android schema-check scenario: %v", err)
@@ -211,12 +205,11 @@ func runKotlinSchemaCheck(t *testing.T) {
 	if len(result.Calls) != len(scenario.WireExpectations) {
 		t.Fatalf("Kotlin Android schema-check calls = %d, want %d", len(result.Calls), len(scenario.WireExpectations))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinRebuildRequests(t *testing.T) {
 	t.Helper()
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/rebuild-requests-001.json", 1)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/performance/rebuild-requests-001.json", 1)
 	result, err := RunRebuildRequestsScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "rebuild-requests-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android rebuild-requests scenario: %v", err)
@@ -224,14 +217,13 @@ func runKotlinRebuildRequests(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android rebuild-requests identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func runKotlinRebuildApply(t *testing.T) {
 	t.Helper()
 	const scenarioPath = "conformance/scenarios/performance/rebuild-apply-001.json"
 	pullPageSize := kotlinRebuildApplyPageSize(t, scenarioPath)
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
 	result, err := RunRebuildApplyScenario(ctx, scenario, controller, platform)
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android rebuild-apply scenario: %v", err)
@@ -239,7 +231,6 @@ func runKotlinRebuildApply(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android rebuild-apply identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func kotlinRebuildApplyPageSize(t *testing.T, scenarioPath string) int {
@@ -269,7 +260,7 @@ func runKotlinRebuildCardinality(t *testing.T) {
 	t.Helper()
 	const scenarioPath = "conformance/scenarios/performance/rebuild-cardinality-001.json"
 	pullPageSize := kotlinRebuildCardinalityPageSize(t, scenarioPath)
-	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
 	result, err := RunRebuildCardinalityScenario(ctx, scenario, controller, platform)
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android rebuild-cardinality scenario: %v", err)
@@ -277,7 +268,6 @@ func runKotlinRebuildCardinality(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android rebuild-cardinality identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func kotlinRebuildCardinalityPageSize(t *testing.T, scenarioPath string) int {
@@ -334,7 +324,6 @@ func runKotlinForgedCursor(t *testing.T) {
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Kotlin Android forged-cursor identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
-	resetKotlinPerformanceServer(t, ctx, harness)
 }
 
 func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *blackbox.Harness) {
@@ -441,13 +430,6 @@ func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize
 	if err != nil {
 		t.Fatalf("create Kotlin Android direct platform: %v", err)
 	}
-	t.Cleanup(func() {
-		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		if err := platform.Close(closeContext); err != nil {
-			t.Errorf("close Kotlin Android direct platform: %v", err)
-		}
-	})
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
@@ -458,5 +440,29 @@ func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize
 	if err != nil {
 		t.Fatalf("load Kotlin Android performance scenario %s: %v", scenarioPath, err)
 	}
+	// The reset isolates both successful and failed scenarios.
+	t.Cleanup(func() {
+		if t.Failed() && os.Getenv("SYNCHRO_KEEP_SERVER_STATE") != "" {
+			return
+		}
+		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancelReset()
+		resetKotlinPerformanceServer(t, resetContext, harness)
+	})
+	t.Cleanup(func() {
+		restoreContext, cancelRestore := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelRestore()
+		if err := controller.RestoreSharedState(restoreContext); err != nil {
+			t.Errorf("restore Kotlin Android scenario server state: %v", err)
+		}
+	})
+	// Cleanup is LIFO. Stop native clients before resetting their shared server.
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := platform.Close(closeContext); err != nil {
+			t.Errorf("close Kotlin Android direct platform: %v", err)
+		}
+	})
 	return ctx, scenario, harness, controller, platform
 }
