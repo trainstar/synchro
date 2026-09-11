@@ -10,3 +10,14 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
  CREATE TABLE IF NOT EXISTS sync_runtime_state (
      singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
      stream_generation TEXT NOT NULL,
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -13,3 +13,7 @@
++-- Mutant: opportunistic pre-baseline compatibility logic.
++CREATE TABLE IF NOT EXISTS sync_pre_0_3_0_compatibility (
++    legacy_version TEXT PRIMARY KEY
++);
+ CREATE TABLE IF NOT EXISTS sync_runtime_state (
+     singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+     stream_generation TEXT NOT NULL,

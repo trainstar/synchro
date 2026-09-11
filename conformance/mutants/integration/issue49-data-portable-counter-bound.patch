@@ -9,3 +9,15 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
      CHECK (client_generation > 0 AND client_generation <= 9007199254740991),
      CHECK (accepted_write_epoch > 0 AND accepted_write_epoch <= 9007199254740991),
      CHECK (generation_expires_at IS NULL OR generation_expires_at >= generation_created_at),
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -388,7 +388,7 @@ CREATE TABLE sync_clients (
+     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+     UNIQUE (user_id, client_id),
+-    CHECK (scope_set_version > 0 AND scope_set_version <= 9007199254740991),
++    CHECK (scope_set_version > 0 AND scope_set_version <= 9007199254740992),
+     CHECK (client_generation > 0 AND client_generation <= 9007199254740991),
+     CHECK (accepted_write_epoch > 0 AND accepted_write_epoch <= 9007199254740991),
+     CHECK (generation_expires_at IS NULL OR generation_expires_at >= generation_created_at),
