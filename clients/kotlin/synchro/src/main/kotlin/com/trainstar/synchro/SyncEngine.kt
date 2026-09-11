@@ -303,7 +303,14 @@ internal class SyncEngine(
     suspend fun syncNow() {
         database.requireOutsideApplicationTransaction("syncNow")
         val job = scheduleEngineOwnedCycle()
-        job.await()
+        try {
+            job.await()
+        } catch (error: Exception) {
+            if (error !is CancellationException && error !is RetryableError) {
+                terminateAfterFailedSync()
+            }
+            throw error
+        }
     }
 
     private fun scheduleEngineOwnedCycle(): Deferred<Unit> {
@@ -1380,6 +1387,13 @@ internal class SyncEngine(
     private fun finishStartupFailure(generation: Long) {
         synchronized(lifecycleLock) {
             if (generation != lifecycleGeneration) return
+            cancelLifecycleLocked()
+        }
+    }
+
+    private fun terminateAfterFailedSync() {
+        synchronized(lifecycleLock) {
+            if (currentStatus.state != SyncLifecycleState.ERROR) return
             cancelLifecycleLocked()
         }
     }

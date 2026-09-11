@@ -2405,6 +2405,46 @@ class SyncEngineTests {
     }
 
     @Test
+    fun nonRetryableSyncNowFailureTerminatesLifecycleAndAllowsRetry() = runTest {
+        var connectCallCount = 0
+        var pullCallCount = 0
+        val (engine, _) = makeIntegrationEnv { request ->
+            when {
+                request.path.orEmpty().endsWith("/sync/connect") -> {
+                    connectCallCount++
+                    mockResponse(if (connectCallCount == 1) connectJSON else connectResumeJSON)
+                }
+                request.path.orEmpty().endsWith("/sync/rebuild") ->
+                    mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path.orEmpty().endsWith("/sync/pull") -> {
+                    pullCallCount++
+                    if (pullCallCount == 2) {
+                        mockResponse("""{"error":"fatal sync"}""", 500)
+                    } else {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_$pullCallCount"))
+                    }
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+
+            assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is SynchroError.ServerError)
+            assertTrue(engine.getSyncStatus() is SyncStatus.Error)
+
+            engine.retry()
+
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+            assertEquals(2, connectCallCount)
+            assertEquals(3, pullCallCount)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testConnectUnsupportedFailsExplicitly() = runTest {
         val events = java.util.Collections.synchronizedList(mutableListOf<SyncEvent>())
         val (engine, db) = makeIntegrationEnv { request ->
