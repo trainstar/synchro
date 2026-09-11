@@ -915,6 +915,42 @@ func TestCursorSourcesBindToExactDurableFingerprints(t *testing.T) {
 	if err := validateCursorSourceBinding(rebuild, rebuildObservation, source, nil); err == nil {
 		t.Fatal("mismatched rebuild continuation cursor passed")
 	}
+
+	runtimeRebuildID := "00000000-0000-4000-8000-000000000002"
+	rebuildObservation.RequestFacts.CursorFingerprint = pointer(cursorFingerprint(continuation))
+	rebuildObservation.RequestFacts.RebuildIDFingerprint = pointer(cursorFingerprint(runtimeRebuildID))
+	source = Result{RebuildAttempts: json.RawMessage(`[{"scope_id":"user:user-a","rebuild_id":"` + runtimeRebuildID + `","client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"cursor":"` + continuation + `","page_limit":1}]`)}
+	if err := validateCursorSourceBinding(rebuild, rebuildObservation, source, nil); err != nil {
+		t.Fatalf("bind runtime rebuild continuation cursor: %v", err)
+	}
+	source = Result{RebuildAttempts: json.RawMessage(`[{"scope_id":"user:user-a","rebuild_id":"` + runtimeRebuildID + `","client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"cursor":"` + continuation + `","page_limit":1},{"scope_id":"user:user-b","rebuild_id":"` + runtimeRebuildID + `","client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"cursor":"` + continuation + `","page_limit":1}]`)}
+	if err := validateCursorSourceBinding(rebuild, rebuildObservation, source, nil); err == nil {
+		t.Fatal("duplicate runtime rebuild attempts passed continuation validation")
+	}
+}
+
+func TestKotlinSteadyPullTransportPullSelectsOnlySuccessfulCoveredPull(t *testing.T) {
+	for name, observations := range map[string][]TransportObservation{
+		"pull":         {{OperationClass: "pull", StatusCode: http.StatusOK}},
+		"connect pull": {{OperationClass: "connect", StatusCode: http.StatusOK}, {OperationClass: "pull", StatusCode: http.StatusOK}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pull, err := kotlinSteadyPullTransportPull(observations)
+			if err != nil || pull.OperationClass != "pull" || pull.StatusCode != http.StatusOK {
+				t.Fatalf("extract steady pull = %#v, %v", pull, err)
+			}
+		})
+	}
+	for name, observations := range map[string][]TransportObservation{
+		"failed pull":            {{OperationClass: "pull", StatusCode: http.StatusServiceUnavailable}},
+		"unexpected observation": {{OperationClass: "connect", StatusCode: http.StatusOK}, {OperationClass: "rebuild", StatusCode: http.StatusOK}, {OperationClass: "pull", StatusCode: http.StatusOK}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := kotlinSteadyPullTransportPull(observations); err == nil {
+				t.Fatal("invalid steady-pull transport sequence passed")
+			}
+		})
+	}
 }
 
 func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {

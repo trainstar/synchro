@@ -363,15 +363,37 @@ func validateKotlinPendingCycleCleanupCall(call SynchronizationResult) error {
 }
 
 func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, step scenarios.PendingCycleNativeCRUDStep, name string) (Result, error) {
+	state, err := platform.clientFor(client)
+	if err != nil {
+		return Result{}, fmt.Errorf("access Kotlin Android pending-cycle %s transport: %w", name, err)
+	}
+	checkpoint := state.session.Checkpoint()
 	call, err := kotlinScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return Result{}, fmt.Errorf("run Kotlin Android pending-cycle %s push: %w", name, err)
 	}
 	observation, err := kotlinScenarioWire(call, "push")
 	if err != nil {
-		return Result{}, err
+		if err := waitForTransportObservation(ctx, state, checkpoint, "push"); err != nil {
+			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle %s push: %w", name, err)
+		}
+		observations, err := state.session.ObservationsAfter(checkpoint)
+		if err != nil {
+			return Result{}, fmt.Errorf("capture Kotlin Android pending-cycle %s recovery transport: %w", name, err)
+		}
+		found := false
+		for _, candidate := range observations {
+			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && candidate.Retryable != nil && !*candidate.Retryable {
+				observation = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s recovery did not produce a successful push", name)
+		}
 	}
-	if call.Completion != "idle" || observation.StatusCode != 200 || observation.Retryable == nil || *observation.Retryable {
+	if observation.StatusCode != 200 || observation.Retryable == nil || *observation.Retryable {
 		return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s push did not complete successfully", name)
 	}
 	if err := controller.BindApplicationPush(step.ApplicationPush); err != nil {

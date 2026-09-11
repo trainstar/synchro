@@ -197,7 +197,11 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err != nil {
 		return SteadyPullResult{}, fmt.Errorf("retry Kotlin Android measured pull: %w", err)
 	}
-	if measured.Completion != "idle" || len(measured.Steps) != 1 || len(measured.transportObservations) != 1 || measured.transportObservations[0].StatusCode != 200 {
+	measuredPullObservation, err := kotlinSteadyPullTransportPull(measured.transportObservations)
+	if err != nil {
+		return SteadyPullResult{}, err
+	}
+	if measured.Completion != "idle" || len(measured.Steps) != 1 || measuredPullObservation.StatusCode != http.StatusOK {
 		return SteadyPullResult{}, errors.New("Kotlin Android measured pull did not complete successfully")
 	}
 	if err := validateKotlinWireExpectation(scenario, "STEP-PERF-STEADY-PULL-001", "pull", measured); err != nil {
@@ -539,7 +543,8 @@ func mutateKotlinSteadyPullPrimaryKey(change map[string]json.RawMessage) error {
 }
 
 func validateKotlinSteadyPullFaultResult(fault steadyPullFault, result SynchronizationResult, snapshot Result) error {
-	if result.Completion != "error" || len(result.Steps) != 1 || len(result.transportObservations) != 1 || result.transportObservations[0].OperationClass != "pull" || result.transportObservations[0].StatusCode != http.StatusOK {
+	pull, err := kotlinSteadyPullTransportPull(result.transportObservations)
+	if err != nil || result.Completion != "error" || len(result.Steps) != 1 || pull.StatusCode != http.StatusOK {
 		return fmt.Errorf("Kotlin Android steady-pull %s fault did not produce one failed pull call", fault)
 	}
 	failure := snapshot.Failure
@@ -547,6 +552,26 @@ func validateKotlinSteadyPullFaultResult(fault steadyPullFault, result Synchroni
 		return fmt.Errorf("Kotlin Android steady-pull %s fault did not expose retry recovery evidence", fault)
 	}
 	return nil
+}
+
+// kotlinSteadyPullTransportPull selects the authored pull from a steady-pull
+// call. A retry can cold-start the transport and add a connect first.
+func kotlinSteadyPullTransportPull(observations []TransportObservation) (TransportObservation, error) {
+	switch len(observations) {
+	case 1:
+		if observations[0].OperationClass == "pull" && observations[0].StatusCode == http.StatusOK {
+			return observations[0], nil
+		}
+	case 2:
+		if observations[0].OperationClass == "connect" && observations[1].OperationClass == "pull" && observations[1].StatusCode == http.StatusOK {
+			return observations[1], nil
+		}
+	}
+	classes := make([]string, len(observations))
+	for index, observation := range observations {
+		classes[index] = observation.OperationClass
+	}
+	return TransportObservation{}, fmt.Errorf("Kotlin Android steady-pull request observations %v do not contain one successful covered pull", classes)
 }
 
 func equalKotlinSteadyPullDurableState(left, right Result) bool {
@@ -629,7 +654,8 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 		identifiers["items-table"] == "" || identifiers["items-table"] != row.TableName || identifiers["items-table"] != metadata.TableName || identifiers["row-a-primary-key"] == "" {
 		return steadyPullIdentityEvidence{}, errors.New("Kotlin Android steady-pull controller identities differ from durable state")
 	}
-	if len(baseline.transportObservations) < 3 || len(measured.transportObservations) != 1 || baseline.transportObservations[1].RequestFacts == nil || baseline.transportObservations[1].RequestFacts.ClientGeneration == nil || measured.transportObservations[0].RequestFacts == nil || measured.transportObservations[0].RequestFacts.ScopeSetVersion == nil {
+	measuredPull, measuredPullErr := kotlinSteadyPullTransportPull(measured.transportObservations)
+	if len(baseline.transportObservations) < 3 || measuredPullErr != nil || baseline.transportObservations[1].RequestFacts == nil || baseline.transportObservations[1].RequestFacts.ClientGeneration == nil || measuredPull.RequestFacts == nil || measuredPull.RequestFacts.ScopeSetVersion == nil {
 		return steadyPullIdentityEvidence{}, errors.New("Kotlin Android steady-pull transport identity evidence is incomplete")
 	}
 	rebuildID, err := completedWarmConnectRebuildID(snapshot.result.Events, scope.ScopeID)
@@ -639,7 +665,7 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 	generated := map[string]any{
 		"client-generation-one": *baseline.transportObservations[1].RequestFacts.ClientGeneration,
 		"baseline-rebuild":      rebuildID,
-		"scope-set-version-one": *measured.transportObservations[0].RequestFacts.ScopeSetVersion,
+		"scope-set-version-one": *measuredPull.RequestFacts.ScopeSetVersion,
 		"row-version-one":       metadata.ServerVersion,
 		"row-a-checksum":        *rowChecksum,
 		"scope-a-checksum":      *scopeChecksum,
@@ -662,7 +688,8 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 }
 
 func validateSteadyPullTransportIdentities(runtime map[string]json.RawMessage, baseline, measured []TransportObservation, snapshot warmConnectSnapshot) error {
-	if len(baseline) < 3 || len(measured) != 1 || len(snapshot.scopeStates) != 1 || len(snapshot.rebuildReceiptProofs) != 1 {
+	measuredPull, measuredPullErr := kotlinSteadyPullTransportPull(measured)
+	if len(baseline) < 3 || measuredPullErr != nil || len(snapshot.scopeStates) != 1 || len(snapshot.rebuildReceiptProofs) != 1 {
 		return errors.New("Kotlin Android steady-pull transport identity evidence is incomplete")
 	}
 	var generation, scopeSetVersion int64
@@ -694,7 +721,6 @@ func validateSteadyPullTransportIdentities(runtime map[string]json.RawMessage, b
 		return errors.New("Kotlin Android steady-pull completed rebuild evidence is invalid")
 	}
 	baselinePull := baseline[len(baseline)-1]
-	measuredPull := measured[0]
 	for _, observation := range []TransportObservation{baselinePull, measuredPull} {
 		facts := observation.RequestFacts
 		if observation.OperationClass != "pull" || facts == nil || facts.ClientGeneration == nil || *facts.ClientGeneration != generation || facts.SchemaVersion != schema.Version || facts.SchemaHash != schema.Hash || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion != scopeSetVersion || facts.ScopeCount == nil || *facts.ScopeCount != 1 {

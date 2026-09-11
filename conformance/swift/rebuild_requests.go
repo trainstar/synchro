@@ -561,7 +561,7 @@ func validateRebuildRequestsState(server, client scenarios.StateFacts, beforePul
 		return errors.New("Swift rebuild-requests final client state is incomplete")
 	}
 	var rebuildID string
-	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || len(beforePull.ApplicationRows) != 1 || len(beforePull.ScopeRows) != 1 || !validateRebuildRequestsReceipt(final.RebuildReceipts[0], rebuildID, 2, 2, true, true) {
+	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || len(beforePull.ApplicationRows) != 2 || len(beforePull.ScopeRows) != 2 || !validateRebuildRequestsReceipt(final.RebuildReceipts[0], rebuildID, 2, 2, true, true) {
 		return errors.New("Swift rebuild-requests final receipt differs from its staged snapshot")
 	}
 

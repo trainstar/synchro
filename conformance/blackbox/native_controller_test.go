@@ -516,6 +516,28 @@ func TestValidateNativeRuntimeRowBoundsFieldMismatchDiagnostics(t *testing.T) {
 	}
 }
 
+func TestValidateNativeRuntimeRowMapsSchemaQueueAuthoredMutation(t *testing.T) {
+	record := nativeRecordBinding{
+		Table: nativeTableBinding{
+			RuntimeName: "cf_schema_queue",
+			Fields:      map[string]string{"value": "authored_mutation"},
+		},
+		Image: nativeAuthoredImage{
+			Fields: map[string]json.RawMessage{"value": json.RawMessage(`"pending"`)},
+		},
+	}
+
+	canonicalRuntimeJSON := []byte(`{"authored_mutation":"\"pending\""}`)
+	if err := validateNativeRuntimeRow(&record, canonicalRuntimeJSON); err != nil {
+		t.Fatalf("validate canonical schema-queue runtime row: %v", err)
+	}
+
+	authoredRuntimeJSON := []byte(`{"authored_mutation":"pending"}`)
+	if err := validateNativeRuntimeRow(&record, authoredRuntimeJSON); err == nil {
+		t.Fatal("native runtime row accepted an unencoded authored schema-queue value")
+	}
+}
+
 func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T) {
 	table := nativeTableBinding{
 		AuthoredID:       "items",

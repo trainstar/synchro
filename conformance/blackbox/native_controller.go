@@ -3743,6 +3743,20 @@ func validateNativeRuntimeRow(record *nativeRecordBinding, raw []byte) error {
 		if authoredField == record.Table.AuthoredPrimary {
 			expected, _ = json.Marshal(record.RuntimeRecordID)
 		}
+		var authoredValue any
+		decoder := json.NewDecoder(bytes.NewReader(expected))
+		decoder.UseNumber()
+		if err := decoder.Decode(&authoredValue); err != nil {
+			return errors.New("decode native runtime authored field value failed")
+		}
+		runtimeValue, err := nativeRuntimeFieldValue(record.Table, authoredField, authoredValue)
+		if err != nil {
+			return err
+		}
+		expected, err = json.Marshal(runtimeValue)
+		if err != nil {
+			return errors.New("encode native runtime expected field value failed")
+		}
 		if !nativeJSONEqual(actual, expected) {
 			tableID := record.Table.AuthoredID
 			if len(tableID) > 128 {

@@ -2500,8 +2500,12 @@ func validateCursorSourceBinding(operation scenarios.Operation, observation Tran
 			}
 			var cursor string
 			matches := 0
+			rebuildFingerprint := cursorFingerprint(payload.RebuildID)
+			if facts.RebuildIDFingerprint != nil {
+				rebuildFingerprint = *facts.RebuildIDFingerprint
+			}
 			for _, attempt := range attempts {
-				if attempt.RebuildID == payload.RebuildID {
+				if cursorFingerprint(attempt.RebuildID) == rebuildFingerprint {
 					matches++
 					if attempt.Cursor != nil {
 						cursor = *attempt.Cursor

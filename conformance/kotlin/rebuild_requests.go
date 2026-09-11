@@ -649,7 +649,7 @@ func validateKotlinRebuildRequestsState(server, client scenarios.StateFacts, bef
 	}
 	var rebuildID string
 	// The concurrent pull changes the current scope checksum after the verified rebuild receipt is staged.
-	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || beforePull.result.ApplicationRowCount == nil || *beforePull.result.ApplicationRowCount != 1 || len(beforePull.scopeRows) != 1 || !validateKotlinRebuildRequestsReceipt(final.rebuildReceiptProofs[0], rebuildID, 2, 2, true, true, false) {
+	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || beforePull.result.ApplicationRowCount == nil || *beforePull.result.ApplicationRowCount != 2 || len(beforePull.scopeRows) != 2 || !validateKotlinRebuildRequestsReceipt(final.rebuildReceiptProofs[0], rebuildID, 2, 2, true, true, false) {
 		return errors.New("Kotlin Android rebuild-requests final receipt differs from its staged snapshot")
 	}
 

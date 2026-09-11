@@ -529,8 +529,8 @@ func retentionReconnectRenewalPair(transport []transportObservation) (transportO
 // awaitRetentionReconnectRecovery waits for the client to complete its own
 // expired-generation recovery. The client resumes the interrupted push on its
 // durable deadline, the server rejects the expired generation, the client
-// reconnects, and it settles. It reports the settled status and the transport
-// the recovery produced.
+// reconnects, and it becomes ready. It reports the ready status and the
+// transport the recovery produced.
 func awaitRetentionReconnectRecovery(ctx context.Context, scenario scenarios.Scenario, state *platformClient, checkpoint uint64, want string) (string, []transportObservation, error) {
 	_ = scenario
 	// The client resumes on its durable retry deadline, so the recovery
@@ -551,15 +551,14 @@ func awaitRetentionReconnectRecovery(ctx context.Context, scenario scenarios.Sce
 			return "", nil, fmt.Errorf("capture Swift retention-reconnect renewal transport: %w", observationErr)
 		}
 		status := optionalStringOrNone(snapshot.Status)
-		// The client settles at an idle completion when it holds no blocking
-		// failure and rests in neither backoff nor error. That is the same
-		// mapping the runner uses to report a call completion.
-		settled := snapshot.Failure == nil && status != "backoff" && status != "error"
+		// Recovery is complete only when the snapshot has no failure and the
+		// native client reports its exact ready status.
+		ready := snapshot.Failure == nil && status == "ready"
 		// The authored call covers the rejected push and the connect that
 		// renews the generation. The client continues its normal loop after
 		// that, so the authored pair is selected rather than the whole window.
 		rejected, renewed, paired := retentionReconnectRenewalPair(transport)
-		if settled && paired {
+		if ready && paired {
 			return want, []transportObservation{rejected, renewed}, nil
 		}
 		select {

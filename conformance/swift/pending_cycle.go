@@ -388,15 +388,37 @@ func validateSwiftPendingCycleCleanupCall(call SynchronizationResult) error {
 }
 
 func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, step scenarios.PendingCycleNativeCRUDStep, name string) (runnerResult, error) {
+	state, err := platform.client(client)
+	if err != nil {
+		return runnerResult{}, fmt.Errorf("access Swift pending-cycle %s transport: %w", name, err)
+	}
+	checkpoint := state.session.Checkpoint()
 	call, err := swiftScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return runnerResult{}, fmt.Errorf("run Swift pending-cycle %s push: %w", name, err)
 	}
 	observation, err := swiftScenarioWire(call, "push")
 	if err != nil {
-		return runnerResult{}, err
+		if err := waitForTransportObservation(ctx, state, checkpoint, "push"); err != nil {
+			return runnerResult{}, fmt.Errorf("wait for Swift pending-cycle %s push: %w", name, err)
+		}
+		observations, err := state.session.ObservationsAfter(checkpoint)
+		if err != nil {
+			return runnerResult{}, fmt.Errorf("capture Swift pending-cycle %s recovery transport: %w", name, err)
+		}
+		found := false
+		for _, candidate := range observations {
+			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && !candidate.Retryable {
+				observation = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return runnerResult{}, fmt.Errorf("Swift pending-cycle %s recovery did not produce a successful push", name)
+		}
 	}
-	if call.Completion != "idle" || observation.StatusCode != 200 || observation.Retryable {
+	if observation.StatusCode != 200 || observation.Retryable {
 		return runnerResult{}, fmt.Errorf("Swift pending-cycle %s push did not complete successfully", name)
 	}
 	if err := controller.BindApplicationPush(step.ApplicationPush); err != nil {

@@ -511,7 +511,7 @@ func retentionReconnectRenewalPair(transport []TransportObservation) (TransportO
 	return TransportObservation{}, TransportObservation{}, false
 }
 
-// awaitRetentionReconnectRecovery waits for the client's automatic expired-generation recovery.
+// awaitRetentionReconnectRecovery waits until automatic expired-generation recovery reports ready.
 func awaitRetentionReconnectRecovery(ctx context.Context, platform *Platform, client Client, state *platformClient, checkpoint uint64, want string) (string, []TransportObservation, error) {
 	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
@@ -528,9 +528,11 @@ func awaitRetentionReconnectRecovery(ctx context.Context, platform *Platform, cl
 			return "", nil, fmt.Errorf("capture Kotlin Android retention-reconnect renewal transport: %w", observationErr)
 		}
 		status := pushResponseLossOptionalString(snapshot.Status)
-		settled := snapshot.Failure == nil && status != "backoff" && status != "error"
+		// Recovery is complete only when the snapshot has no failure and the
+		// native client reports its exact ready status.
+		ready := snapshot.Failure == nil && status == "ready"
 		rejected, renewed, paired := retentionReconnectRenewalPair(transport)
-		if settled && paired {
+		if ready && paired {
 			return want, []TransportObservation{rejected, renewed}, nil
 		}
 		select {
