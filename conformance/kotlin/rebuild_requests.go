@@ -412,7 +412,7 @@ func validateKotlinRebuildRequestsFirstReplay(first, replay warmConnectSnapshot)
 }
 
 func validateKotlinRebuildRequestsRestart(snapshot warmConnectSnapshot) error {
-	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 0 || len(snapshot.scopeRows) != 1 || len(snapshot.rowMetadata) != 1 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 1 || snapshot.rebuildAttempts[0].Cursor == nil || snapshot.rebuildAttempts[0].PageLimit != 1 || !isKotlinUninitializedRebuildAssignment(snapshot.scopeStates, snapshot.rebuildAttempts[0].ScopeID) {
+	if len(snapshot.rebuildAttempts) != 1 || len(snapshot.rebuildReceiptProofs) != 1 || len(snapshot.scopeRows) != 1 || len(snapshot.rowMetadata) != 1 || snapshot.result.ApplicationRowCount == nil || *snapshot.result.ApplicationRowCount != 1 || snapshot.rebuildAttempts[0].Cursor == nil || snapshot.rebuildAttempts[0].PageLimit != 1 || !isKotlinUninitializedRebuildAssignment(snapshot.scopeStates, snapshot.rebuildAttempts[0].ScopeID) || !validateKotlinRebuildRequestsReceipt(snapshot.rebuildReceiptProofs[0], snapshot.rebuildAttempts[0].RebuildID, 1, 1, false, false, false) {
 		return errors.New("Kotlin Android rebuild restart did not preserve one durable partial page")
 	}
 	return nil
@@ -445,20 +445,20 @@ func validateKotlinRebuildRequestsPullPause(first, pull warmConnectSnapshot) err
 		return errors.New("Kotlin Android two-page rebuild did not finalize before incremental pull")
 	}
 	// The two pages and their verified final state are authored at rebuild-requests-001.json:1016-1308.
-	if !validateKotlinRebuildRequestsReceipt(pull.rebuildReceiptProofs[0], first.rebuildAttempts[0].RebuildID, true) {
+	if !validateKotlinRebuildRequestsReceipt(pull.rebuildReceiptProofs[0], first.rebuildAttempts[0].RebuildID, 2, 2, true, true, true) {
 		return errors.New("Kotlin Android two-page rebuild receipt is invalid")
 	}
 	return nil
 }
 
-func validateKotlinRebuildRequestsReceipt(receipt rebuildReceiptProofRecord, rebuildID string, finalChecksumMatchesLocal bool) bool {
+func validateKotlinRebuildRequestsReceipt(receipt rebuildReceiptProofRecord, rebuildID string, pageCount, returnedRecordCount int, requestChainValid, scopeChecksumValid, finalChecksumMatchesLocal bool) bool {
 	return receipt.RebuildIDFingerprint == cursorFingerprint(rebuildID) &&
-		receipt.PageCount == 2 &&
-		receipt.ReturnedRecordCount == 2 &&
-		receipt.RequestChainValid &&
+		receipt.PageCount == pageCount &&
+		receipt.ReturnedRecordCount == returnedRecordCount &&
+		receipt.RequestChainValid == requestChainValid &&
 		receipt.RecordsInCanonicalOrder &&
 		receipt.RowChecksumsValid &&
-		receipt.ScopeChecksumValid &&
+		receipt.ScopeChecksumValid == scopeChecksumValid &&
 		receipt.FinalChecksumMatchesLocal == finalChecksumMatchesLocal
 }
 
@@ -649,7 +649,7 @@ func validateKotlinRebuildRequestsState(server, client scenarios.StateFacts, bef
 	}
 	var rebuildID string
 	// The concurrent pull changes the current scope checksum after the verified rebuild receipt is staged.
-	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || beforePull.result.ApplicationRowCount == nil || *beforePull.result.ApplicationRowCount != 1 || len(beforePull.scopeRows) != 1 || !validateKotlinRebuildRequestsReceipt(final.rebuildReceiptProofs[0], rebuildID, false) {
+	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || beforePull.result.ApplicationRowCount == nil || *beforePull.result.ApplicationRowCount != 1 || len(beforePull.scopeRows) != 1 || !validateKotlinRebuildRequestsReceipt(final.rebuildReceiptProofs[0], rebuildID, 2, 2, true, true, false) {
 		return errors.New("Kotlin Android rebuild-requests final receipt differs from its staged snapshot")
 	}
 

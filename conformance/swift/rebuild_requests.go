@@ -357,7 +357,7 @@ func validateRebuildRequestsFirstReplay(first, replay runnerResult) error {
 }
 
 func validateRebuildRequestsRestart(snapshot runnerResult) error {
-	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.ApplicationRows) != 1 || snapshot.RebuildAttempts[0].Cursor == nil || snapshot.RebuildAttempts[0].PageLimit != 1 || !isUninitializedRebuildAssignment(snapshot.ScopeStates, snapshot.RebuildAttempts[0].ScopeID) {
+	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 1 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.ApplicationRows) != 1 || snapshot.RebuildAttempts[0].Cursor == nil || snapshot.RebuildAttempts[0].PageLimit != 1 || !isUninitializedRebuildAssignment(snapshot.ScopeStates, snapshot.RebuildAttempts[0].ScopeID) || !validateRebuildRequestsReceipt(snapshot.RebuildReceipts[0], snapshot.RebuildAttempts[0].RebuildID, 1, 1, false, false) {
 		return errors.New("Swift rebuild restart did not preserve one durable partial page")
 	}
 	return nil
@@ -390,22 +390,29 @@ func validateRebuildRequestsPullPause(first, pull runnerResult) error {
 		return errors.New("Swift two-page rebuild did not finalize before incremental pull")
 	}
 	receipt := pull.RebuildReceipts[0]
-	if !validateRebuildRequestsReceipt(receipt, first.RebuildAttempts[0].RebuildID) {
+	if !validateRebuildRequestsReceipt(receipt, first.RebuildAttempts[0].RebuildID, 2, 2, true, true) {
 		return errors.New("Swift two-page rebuild receipt is invalid")
 	}
 	return nil
 }
 
-func validateRebuildRequestsReceipt(receipt rebuildReceiptRecord, rebuildID string) bool {
-	return receipt.RebuildIDFingerprint == cursorFingerprint(rebuildID) &&
-		receipt.PageCount == 2 &&
-		receipt.ReturnedRecordCount == 2 &&
-		reflect.DeepEqual(receipt.RequestChainExpected, receipt.RequestChainObserved) &&
-		receipt.RecordsInCanonicalOrder &&
-		receipt.RowChecksumsValid &&
-		receipt.ComputedScopeChecksum != nil &&
-		receipt.FinalScopeChecksum != nil &&
-		*receipt.ComputedScopeChecksum == *receipt.FinalScopeChecksum
+func validateRebuildRequestsReceipt(receipt rebuildReceiptRecord, rebuildID string, pageCount, returnedRecordCount int, complete, hasFinalChecksum bool) bool {
+	requestChainComplete := len(receipt.RequestChainExpected) > 0 && len(receipt.RequestChainObserved) > 0 && reflect.DeepEqual(receipt.RequestChainExpected, receipt.RequestChainObserved)
+	if receipt.RebuildIDFingerprint != cursorFingerprint(rebuildID) ||
+		receipt.PageCount != pageCount ||
+		receipt.ReturnedRecordCount != returnedRecordCount ||
+		len(receipt.RequestChainExpected) == 0 ||
+		len(receipt.RequestChainObserved) == 0 ||
+		requestChainComplete != complete ||
+		!receipt.RecordsInCanonicalOrder ||
+		!receipt.RowChecksumsValid ||
+		receipt.ComputedScopeChecksum == nil {
+		return false
+	}
+	if !hasFinalChecksum {
+		return receipt.FinalScopeChecksum == nil && receipt.StoredScopeChecksum == nil
+	}
+	return receipt.FinalScopeChecksum != nil && *receipt.ComputedScopeChecksum == *receipt.FinalScopeChecksum
 }
 
 func validateRebuildRequestsTransport(scenario scenarios.Scenario, observations []transportObservation) error {
@@ -554,7 +561,7 @@ func validateRebuildRequestsState(server, client scenarios.StateFacts, beforePul
 		return errors.New("Swift rebuild-requests final client state is incomplete")
 	}
 	var rebuildID string
-	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || len(beforePull.ApplicationRows) != 1 || len(beforePull.ScopeRows) != 1 || !validateRebuildRequestsReceipt(final.RebuildReceipts[0], rebuildID) {
+	if json.Unmarshal(evidence.runtime["rebuild-cycle"], &rebuildID) != nil || rebuildID == "" || len(beforePull.ApplicationRows) != 1 || len(beforePull.ScopeRows) != 1 || !validateRebuildRequestsReceipt(final.RebuildReceipts[0], rebuildID, 2, 2, true, true) {
 		return errors.New("Swift rebuild-requests final receipt differs from its staged snapshot")
 	}
 

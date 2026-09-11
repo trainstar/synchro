@@ -491,6 +491,31 @@ func TestPostgresTypeForAuthoredField(t *testing.T) {
 	}
 }
 
+func TestValidateNativeRuntimeRowBoundsFieldMismatchDiagnostics(t *testing.T) {
+	tableID := strings.Repeat("table", 300)
+	fieldID := strings.Repeat("field", 300)
+	runtimeFieldID := strings.Repeat("runtime", 300)
+	record := nativeRecordBinding{
+		Table: nativeTableBinding{
+			AuthoredID:      tableID,
+			AuthoredPrimary: "id",
+			Fields:          map[string]string{fieldID: runtimeFieldID},
+		},
+		Image: nativeAuthoredImage{Fields: map[string]json.RawMessage{fieldID: json.RawMessage(`"expected"`)}},
+	}
+	raw, err := json.Marshal(map[string]string{runtimeFieldID: "actual"})
+	if err != nil {
+		t.Fatalf("marshal runtime row: %v", err)
+	}
+	err = validateNativeRuntimeRow(&record, raw)
+	if err == nil {
+		t.Fatal("native runtime row accepted a changed field value")
+	}
+	if len(err.Error()) > 640 || strings.Contains(err.Error(), tableID) || strings.Contains(err.Error(), fieldID) || strings.Contains(err.Error(), runtimeFieldID) || strings.Count(err.Error(), "sha256:") != 3 {
+		t.Fatalf("native runtime field mismatch diagnostic is not bounded: length=%d", len(err.Error()))
+	}
+}
+
 func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T) {
 	table := nativeTableBinding{
 		AuthoredID:       "items",

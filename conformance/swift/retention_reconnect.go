@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -209,7 +210,11 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if observed, applyErr := controller.ApplyStep(ctx, compact); applyErr != nil || observed.Disposition != "success" {
 		return RetentionReconnectResult{}, fmt.Errorf("compact Swift retention-reconnect scope: %w", resultError(applyErr, observed.Disposition))
 	}
-	floorResumeCall, err := resumeRetentionReconnectAtFloor(ctx, platform, client)
+	runtimeScope, err := retentionReconnectRuntimeScope(controller, scenario.NativeIdentityAliases)
+	if err != nil {
+		return RetentionReconnectResult{}, err
+	}
+	floorResumeCall, err := resumeRetentionReconnectAtFloor(ctx, platform, client, runtimeScope)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
@@ -243,12 +248,12 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 // resumeRetentionReconnectAtFloor proves that a compacted floor remains usable
 // after the native process restarts. The post-restart pull must reuse the
 // durable cursor and must not enter rebuild.
-func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, client Client) (RetentionReconnectCall, error) {
+func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, client Client, runtimeScope string) (RetentionReconnectCall, error) {
 	before, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
 		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect floor cursor: %w", err)
 	}
-	if _, err := retentionReconnectFloorCursor(before); err != nil {
+	if _, err := retentionReconnectFloorCursor(before, runtimeScope); err != nil {
 		return RetentionReconnectCall{}, err
 	}
 	restartPayload, err := json.Marshal(map[string]string{"user_id": client.UserID, "client_id": client.ClientID})
@@ -271,47 +276,78 @@ func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, cl
 	if err != nil {
 		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect resumed cursor: %w", err)
 	}
-	if err := validateRetentionReconnectFloorResume(before, restarted, after, resumed); err != nil {
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, resumed, runtimeScope); err != nil {
 		return RetentionReconnectCall{}, err
 	}
 	return RetentionReconnectCall{Completion: resumed.Completion, Transport: resumed.transportObservations}, nil
 }
 
-func retentionReconnectFloorCursor(snapshot runnerResult) (scopeStateRecord, error) {
-	if len(snapshot.ScopeStates) != 1 {
-		return scopeStateRecord{}, fmt.Errorf("Swift retention-reconnect floor cursor count = %d, want 1", len(snapshot.ScopeStates))
+func retentionReconnectFloorCursor(snapshot runnerResult, runtimeScope string) (scopeStateRecord, error) {
+	floor, _, err := retentionReconnectScopeStates(snapshot, runtimeScope)
+	if err != nil {
+		return scopeStateRecord{}, err
 	}
-	state := snapshot.ScopeStates[0]
-	if state.ScopeID == "" || state.Cursor == nil || *state.Cursor == "" {
+	if floor.Cursor == nil || *floor.Cursor == "" {
 		return scopeStateRecord{}, errors.New("Swift retention-reconnect compacted floor cursor is absent")
 	}
-	return state, nil
+	return floor, nil
 }
 
-func validateRetentionReconnectFloorResume(before, restarted, after runnerResult, call SynchronizationResult) error {
-	floor, err := retentionReconnectFloorCursor(before)
+// retentionReconnectScopeStates selects the server-resolved authored scope and
+// verifies that the separate identity scope remains present.
+func retentionReconnectScopeStates(snapshot runnerResult, runtimeScope string) (scopeStateRecord, scopeStateRecord, error) {
+	if runtimeScope == "" {
+		return scopeStateRecord{}, scopeStateRecord{}, errors.New("Swift retention-reconnect runtime scope identity is absent")
+	}
+	var floor, identity scopeStateRecord
+	floorCount := 0
+	identityCount := 0
+	for _, state := range snapshot.ScopeStates {
+		if state.ScopeID == "" {
+			return scopeStateRecord{}, scopeStateRecord{}, errors.New("Swift retention-reconnect scope state identity is absent")
+		}
+		if state.ScopeID == runtimeScope {
+			floor = state
+			floorCount++
+			continue
+		}
+		identity = state
+		identityCount++
+	}
+	if floorCount != 1 || identityCount != 1 {
+		return scopeStateRecord{}, scopeStateRecord{}, fmt.Errorf("Swift retention-reconnect scope states contain %d authored and %d identity scopes, want 1 each", floorCount, identityCount)
+	}
+	return floor, identity, nil
+}
+
+func validateRetentionReconnectFloorResume(before, restarted, after runnerResult, call SynchronizationResult, runtimeScope string) error {
+	floor, identity, err := retentionReconnectScopeStates(before, runtimeScope)
 	if err != nil {
 		return err
 	}
-	restartedFloor, err := retentionReconnectFloorCursor(restarted)
+	if floor.Cursor == nil || *floor.Cursor == "" {
+		return errors.New("Swift retention-reconnect compacted floor cursor is absent")
+	}
+	restartedFloor, restartedIdentity, err := retentionReconnectScopeStates(restarted, runtimeScope)
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(floor, restartedFloor) {
+	if !reflect.DeepEqual(floor, restartedFloor) || !reflect.DeepEqual(identity, restartedIdentity) {
 		return errors.New("Swift retention-reconnect restart changed the durable floor cursor")
 	}
-	resumedFloor, err := retentionReconnectFloorCursor(after)
+	resumedFloor, resumedIdentity, err := retentionReconnectScopeStates(after, runtimeScope)
 	if err != nil {
 		return err
 	}
-	if resumedFloor.ScopeID != floor.ScopeID {
+	if resumedFloor.ScopeID != floor.ScopeID || !reflect.DeepEqual(resumedIdentity, identity) {
 		return errors.New("Swift retention-reconnect resumed cursor scope changed")
 	}
 	if call.Completion != "idle" {
 		return fmt.Errorf("Swift retention-reconnect floor resume completion = %q, want idle", call.Completion)
 	}
 
-	floorFingerprint := cursorFingerprint(*floor.Cursor)
+	requestFingerprints := retentionReconnectCursorFingerprints(floor, identity)
+	responseFingerprints := retentionReconnectCursorFingerprints(resumedFloor, resumedIdentity)
 	connects := 0
 	pulls := 0
 	for _, observed := range call.transportObservations {
@@ -326,9 +362,9 @@ func validateRetentionReconnectFloorResume(before, restarted, after runnerResult
 		case "pull":
 			response := observed.PullResponseFacts
 			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable || observed.CursorFingerprintsComplete == nil ||
-				!*observed.CursorFingerprintsComplete || !equalStrings(observed.CursorFingerprints, []string{floorFingerprint}) || response == nil ||
+				!*observed.CursorFingerprintsComplete || !equalStrings(observed.CursorFingerprints, requestFingerprints) || response == nil ||
 				response.ChangeCount != 0 || response.HasMore || response.RebuildScopeCount != 0 || !response.ScopeCursorFingerprintsComplete ||
-				!equalStrings(response.ScopeCursorFingerprints, []string{cursorFingerprint(*resumedFloor.Cursor)}) {
+				response.ChecksumCount != len(responseFingerprints) || !equalStrings(response.ScopeCursorFingerprints, responseFingerprints) {
 				return errors.New("Swift retention-reconnect floor-equal pull is invalid")
 			}
 			pulls++
@@ -338,6 +374,46 @@ func validateRetentionReconnectFloorResume(before, restarted, after runnerResult
 		return fmt.Errorf("Swift retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
 	}
 	return nil
+}
+
+func retentionReconnectCursorFingerprints(states ...scopeStateRecord) []string {
+	fingerprints := make([]string, 0, len(states))
+	for _, state := range states {
+		if state.Cursor != nil {
+			fingerprints = append(fingerprints, cursorFingerprint(*state.Cursor))
+		}
+	}
+	sort.Strings(fingerprints)
+	return fingerprints
+}
+
+func retentionReconnectRuntimeScope(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias) (string, error) {
+	var scopeAlias *scenarios.NativeIdentityAlias
+	for index := range aliases {
+		alias := &aliases[index]
+		if alias.Kind != "scope" || alias.Alias != "scope-a" {
+			continue
+		}
+		if scopeAlias != nil {
+			return "", errors.New("Swift retention-reconnect authored scope identity is duplicated")
+		}
+		scopeAlias = alias
+	}
+	if scopeAlias == nil {
+		return "", errors.New("Swift retention-reconnect authored scope identity is absent")
+	}
+	values, err := controller.IdentityValues([]scenarios.NativeIdentityAlias{*scopeAlias})
+	if err != nil {
+		return "", fmt.Errorf("resolve Swift retention-reconnect runtime scope identity: %w", err)
+	}
+	if len(values) != 1 || values[0].Alias != scopeAlias.Alias {
+		return "", errors.New("Swift retention-reconnect runtime scope identity is incomplete")
+	}
+	var runtimeScope string
+	if err := json.Unmarshal(values[0].RuntimeValue, &runtimeScope); err != nil || runtimeScope == "" {
+		return "", errors.New("Swift retention-reconnect runtime scope identity is invalid")
+	}
+	return runtimeScope, nil
 }
 
 func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client, sealedPush scenarios.Operation) (RetentionReconnectCall, error) {

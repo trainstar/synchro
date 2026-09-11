@@ -53,13 +53,19 @@ func TestPushResponseLossTerminalStateRejectsRetryableContinuation(t *testing.T)
 func TestPushResponseLossDurableComparisonDetectsDrift(t *testing.T) {
 	count := 1
 	status := "backoff"
-	before := Result{Status: &status, MutationLedgerCount: &count, SealedBatchCount: &count}
+	before := Result{
+		Status:                  &status,
+		MutationLedgerCount:     &count,
+		SealedBatchCount:        &count,
+		DurableStateFingerprint: testDigest,
+	}
 	after := before
 	errorStatus := "error"
 	after.Status = &errorStatus
 	after.Failure = &runnerFailure{Operation: "pushing", Code: "idempotency_conflict", RecoveryAction: "none"}
+	after.DurableStateFingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	if !reflect.DeepEqual(durableClientState(before), durableClientState(after)) {
-		t.Fatal("terminal status changed the Kotlin Android durable projection")
+		t.Fatal("terminal error fields changed the Kotlin Android durable projection")
 	}
 	driftedCount := 0
 	after.SealedBatchCount = &driftedCount

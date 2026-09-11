@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -107,13 +108,16 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("capture Kotlin Android pending-cycle local write: %w", err)
 	}
+	if err := validateKotlinPendingCyclePostWrite(beforeWrite, afterWrite); err != nil {
+		return PendingCycleResult{}, err
+	}
 	push, err := kotlinScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("run Kotlin Android pending push: %w", err)
 	}
 	pushObservation, err := kotlinScenarioWire(push, "push")
 	if err != nil {
-		return PendingCycleResult{}, err
+		return PendingCycleResult{}, fmt.Errorf("Kotlin Android pending push transport is absent: completion %q, call error category <none>, operation classes %s: %w", push.Completion, kotlinPendingCycleOperationClasses(push), err)
 	}
 	if push.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable == nil || *pushObservation.Retryable {
 		return PendingCycleResult{}, errors.New("Kotlin Android pending push did not complete successfully")
@@ -315,6 +319,27 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 		return PendingCycleResult{}, fmt.Errorf("validate Kotlin Android pending-cycle server evidence: %w", err)
 	}
 	return PendingCycleResult{PushCall: push, PullCall: pullCall, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, Evidence: evidence}, nil
+}
+
+func validateKotlinPendingCyclePostWrite(before, after Result) error {
+	if before.PendingChangeCount == nil || before.MutationLedgerCount == nil || after.PendingChangeCount == nil || after.MutationLedgerCount == nil {
+		return errors.New("Kotlin Android pending-cycle post-write capture is incomplete")
+	}
+	if *after.PendingChangeCount != 1 || *after.MutationLedgerCount != *before.MutationLedgerCount+1 {
+		return fmt.Errorf("Kotlin Android pending-cycle post-write capture is invalid: pending changes %d, mutation ledger before %d after %d; want pending changes 1 and one mutation-ledger increase", *after.PendingChangeCount, *before.MutationLedgerCount, *after.MutationLedgerCount)
+	}
+	return nil
+}
+
+func kotlinPendingCycleOperationClasses(call SynchronizationResult) string {
+	if len(call.transportObservations) == 0 {
+		return "<none>"
+	}
+	classes := make([]string, 0, len(call.transportObservations))
+	for _, observation := range call.transportObservations {
+		classes = append(classes, observation.OperationClass)
+	}
+	return strings.Join(classes, ",")
 }
 
 func validateKotlinPendingCycleCleanupCall(call SynchronizationResult) error {

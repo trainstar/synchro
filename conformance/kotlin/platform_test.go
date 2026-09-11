@@ -544,6 +544,45 @@ func TestAggregateCountsProduceFactsWithoutDetailedRecords(t *testing.T) {
 	}
 }
 
+func TestPendingMutationFactsUseLedgerCountWithRetainedDetail(t *testing.T) {
+	ledgerCount := 3
+	retainedCount := 1
+	result := restartInvariantCaptureFixture("process-a", testDigest)
+	result.MutationLedgerCount = &ledgerCount
+	result.RetainedMutationCount = &retainedCount
+	result.RetainedMutations = json.RawMessage(`[{
+		"mutation_id":"mutation-a",
+		"local_order":0,
+		"table_id":"items",
+		"table_name":"items",
+		"record_id":"record-a",
+		"primary_key_field_id":"id",
+		"primary_key_logical_type":"string",
+		"operation":"insert",
+		"authored_schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"base_version":null,
+		"client_version":"client-version",
+		"status":"pending",
+		"sealed_batch_id":null,
+		"authored_fields":[]
+	}]`)
+	if err := validateCapturedClientState(result); err != nil {
+		t.Fatalf("validate retained mutation detail against retained count: %v", err)
+	}
+	client := &platformClient{client: Client{UserID: "user-a", ClientID: "client-a"}}
+
+	facts, err := androidClientFactsForSource("pending-mutations", client, result)
+	if err != nil {
+		t.Fatalf("map pending mutation facts: %v", err)
+	}
+	if facts.QueueCount == nil || *facts.QueueCount != 3 {
+		t.Fatalf("queue count = %v, want ledger count 3", facts.QueueCount)
+	}
+	if len(facts.Queue) != 1 {
+		t.Fatalf("retained queue detail count = %d, want 1", len(facts.Queue))
+	}
+}
+
 func TestOperationWindowReportsMaintenanceCursorDelta(t *testing.T) {
 	beforeCursor := int64(3)
 	afterCursor := int64(5)

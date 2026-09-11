@@ -3744,7 +3744,19 @@ func validateNativeRuntimeRow(record *nativeRecordBinding, raw []byte) error {
 			expected, _ = json.Marshal(record.RuntimeRecordID)
 		}
 		if !nativeJSONEqual(actual, expected) {
-			return errors.New("native runtime captured field differs from the authored source image")
+			tableID := record.Table.AuthoredID
+			if len(tableID) > 128 {
+				tableID = "sha256:" + nativeCanonicalJSONFingerprint([]byte(tableID))
+			}
+			fieldID := authoredField
+			if len(fieldID) > 128 {
+				fieldID = "sha256:" + nativeCanonicalJSONFingerprint([]byte(fieldID))
+			}
+			runtimeFieldID := runtimeField
+			if len(runtimeFieldID) > 128 {
+				runtimeFieldID = "sha256:" + nativeCanonicalJSONFingerprint([]byte(runtimeFieldID))
+			}
+			return fmt.Errorf("native runtime captured field differs from the authored source image: table=%q field=%q runtime_field=%q expected_sha256=%s actual_sha256=%s", tableID, fieldID, runtimeFieldID, nativeCanonicalJSONFingerprint(expected), nativeCanonicalJSONFingerprint(actual))
 		}
 	}
 	return nil
@@ -4096,6 +4108,19 @@ func nativeJSONEqual(left, right []byte) bool {
 	rightDecoder := json.NewDecoder(bytes.NewReader(right))
 	rightDecoder.UseNumber()
 	return leftDecoder.Decode(&leftValue) == nil && rightDecoder.Decode(&rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
+}
+
+func nativeCanonicalJSONFingerprint(raw []byte) string {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) == nil {
+		if canonical, err := json.Marshal(value); err == nil {
+			raw = canonical
+		}
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
 }
 
 func waitNativePoll(ctx context.Context) error {

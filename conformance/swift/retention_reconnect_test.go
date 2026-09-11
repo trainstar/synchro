@@ -117,25 +117,40 @@ func TestRetentionReconnectObservedIdentitiesUseWireAndCapturedState(t *testing.
 }
 
 func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
+	runtimeScope := "resolved-scope-a"
+	identityScope := "identity-scope"
 	floorCursor := "floor-cursor"
 	resumedCursor := "resumed-cursor"
 	complete := true
-	before := runnerResult{ScopeStates: []scopeStateRecord{{ScopeID: "runtime-scope", Cursor: &floorCursor, Generation: 1}}}
-	restarted := runnerResult{ScopeStates: []scopeStateRecord{{ScopeID: "runtime-scope", Cursor: &floorCursor, Generation: 1}}}
-	after := runnerResult{ScopeStates: []scopeStateRecord{{ScopeID: "runtime-scope", Cursor: &resumedCursor, Generation: 1}}}
+	identityCursor := "identity-cursor"
+	before := runnerResult{ScopeStates: []scopeStateRecord{{ScopeID: identityScope, Cursor: &identityCursor, Generation: 1}, {ScopeID: runtimeScope, Cursor: &floorCursor, Generation: 1}}}
+	restarted := runnerResult{ScopeStates: []scopeStateRecord{{ScopeID: identityScope, Cursor: &identityCursor, Generation: 1}, {ScopeID: runtimeScope, Cursor: &floorCursor, Generation: 1}}}
+	after := runnerResult{ScopeStates: []scopeStateRecord{{ScopeID: identityScope, Cursor: &identityCursor, Generation: 1}, {ScopeID: runtimeScope, Cursor: &resumedCursor, Generation: 1}}}
 	call := SynchronizationResult{Completion: "idle", transportObservations: []transportObservation{
 		{OperationClass: "connect", StatusCode: 200},
 		{
-			OperationClass: "pull", StatusCode: 200, CursorFingerprints: []string{cursorFingerprint(floorCursor)}, CursorFingerprintsComplete: &complete,
-			PullResponseFacts: &transportPullResponseFacts{ChangeCount: 0, HasMore: false, RebuildScopeCount: 0, ChecksumCount: 1, ScopeCursorFingerprints: []string{cursorFingerprint(resumedCursor)}, ScopeCursorFingerprintsComplete: true},
+			OperationClass: "pull", StatusCode: 200, CursorFingerprints: retentionReconnectCursorFingerprints(before.ScopeStates...), CursorFingerprintsComplete: &complete,
+			PullResponseFacts: &transportPullResponseFacts{ChangeCount: 0, HasMore: false, RebuildScopeCount: 0, ChecksumCount: 2, ScopeCursorFingerprints: retentionReconnectCursorFingerprints(after.ScopeStates...), ScopeCursorFingerprintsComplete: true},
 		},
 	}}
-	if err := validateRetentionReconnectFloorResume(before, restarted, after, call); err != nil {
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err != nil {
 		t.Fatalf("validate floor-equal retention resume: %v", err)
 	}
 	call.transportObservations[1].PullResponseFacts.RebuildScopeCount = 1
-	if err := validateRetentionReconnectFloorResume(before, restarted, after, call); err == nil {
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err == nil {
 		t.Fatal("floor-equal retention resume accepted a rebuild")
+	}
+	after.ScopeStates[0].Generation = 2
+	call.transportObservations[1].PullResponseFacts.RebuildScopeCount = 0
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err == nil {
+		t.Fatal("floor-equal retention resume accepted a changed identity scope generation")
+	}
+	after.ScopeStates[0].Generation = 1
+	changedIdentityCursor := "changed-identity-cursor"
+	after.ScopeStates[0].Cursor = &changedIdentityCursor
+	call.transportObservations[1].PullResponseFacts.ScopeCursorFingerprints = retentionReconnectCursorFingerprints(after.ScopeStates...)
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err == nil {
+		t.Fatal("floor-equal retention resume accepted a changed identity scope cursor")
 	}
 }
 

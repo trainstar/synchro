@@ -53,7 +53,17 @@ func TestRebuildRequestsRestartPreservesUninitializedAssignment(t *testing.T) {
 		ScopeRows:          []scopeRowRecord{{ScopeID: "scope-a"}},
 		RowMetadataRecords: []rowMetadataRecord{{RecordID: "row-a"}},
 		RebuildAttempts:    []rebuildAttemptRecord{{ScopeID: "scope-a", RebuildID: "rebuild-a", Cursor: &cursor, PageLimit: 1}},
-		ScopeStates:        []scopeStateRecord{{ScopeID: "scope-a"}},
+		RebuildReceipts: []rebuildReceiptRecord{{
+			RebuildIDFingerprint:    cursorFingerprint("rebuild-a"),
+			PageCount:               1,
+			ReturnedRecordCount:     1,
+			RequestChainExpected:    []string{"final"},
+			RequestChainObserved:    []string{"partial"},
+			RecordsInCanonicalOrder: true,
+			RowChecksumsValid:       true,
+			ComputedScopeChecksum:   pointerString("computed"),
+		}},
+		ScopeStates: []scopeStateRecord{{ScopeID: "scope-a"}},
 	}
 	if err := validateRebuildRequestsRestart(snapshot); err != nil {
 		t.Fatalf("validate partial rebuild restart: %v", err)
@@ -61,5 +71,44 @@ func TestRebuildRequestsRestartPreservesUninitializedAssignment(t *testing.T) {
 	snapshot.ScopeStates[0].Checksum = pointerString("checksum")
 	if err := validateRebuildRequestsRestart(snapshot); err == nil {
 		t.Fatal("partial rebuild restart accepted an assigned scope checksum")
+	}
+	snapshot.ScopeStates[0].Checksum = nil
+	for name, mutate := range map[string]func(*rebuildReceiptRecord){
+		"page count":   func(receipt *rebuildReceiptRecord) { receipt.PageCount = 2 },
+		"record count": func(receipt *rebuildReceiptRecord) { receipt.ReturnedRecordCount = 2 },
+		"complete request chain": func(receipt *rebuildReceiptRecord) {
+			receipt.RequestChainObserved = append([]string(nil), receipt.RequestChainExpected...)
+		},
+		"final checksum": func(receipt *rebuildReceiptRecord) {
+			receipt.FinalScopeChecksum = pointerString("final")
+		},
+		"stored checksum": func(receipt *rebuildReceiptRecord) {
+			receipt.StoredScopeChecksum = pointerString("stored")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := snapshot
+			invalid.RebuildReceipts = append([]rebuildReceiptRecord(nil), snapshot.RebuildReceipts...)
+			mutate(&invalid.RebuildReceipts[0])
+			if err := validateRebuildRequestsRestart(invalid); err == nil {
+				t.Fatalf("partial rebuild restart accepted receipt with %s", name)
+			}
+		})
+	}
+}
+
+func TestRebuildRequestsFinalReceiptRejectsEmptyRequestChain(t *testing.T) {
+	checksum := "checksum"
+	receipt := rebuildReceiptRecord{
+		RebuildIDFingerprint:    cursorFingerprint("rebuild-a"),
+		PageCount:               2,
+		ReturnedRecordCount:     2,
+		RecordsInCanonicalOrder: true,
+		RowChecksumsValid:       true,
+		ComputedScopeChecksum:   &checksum,
+		FinalScopeChecksum:      &checksum,
+	}
+	if validateRebuildRequestsReceipt(receipt, "rebuild-a", 2, 2, true, true) {
+		t.Fatal("final rebuild receipt accepted an empty request chain")
 	}
 }

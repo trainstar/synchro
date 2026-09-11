@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -113,6 +114,9 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("capture Swift pending-cycle local write: %w", err)
 	}
+	if err := validateSwiftPendingCyclePostWrite(beforeWrite, afterWrite); err != nil {
+		return PendingCycleResult{}, err
+	}
 
 	push, err := swiftScenarioCall(ctx, platform, client, "start")
 	if err != nil {
@@ -120,7 +124,7 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	}
 	pushObservation, err := swiftScenarioWire(push, "push")
 	if err != nil {
-		return PendingCycleResult{}, err
+		return PendingCycleResult{}, fmt.Errorf("Swift pending push transport is absent: completion %q, call error category <none>, operation classes %s: %w", push.Completion, swiftPendingCycleOperationClasses(push), err)
 	}
 	if push.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable {
 		// The observed values separate a push the server rejected from a push
@@ -340,6 +344,27 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 		return PendingCycleResult{}, fmt.Errorf("validate Swift pending-cycle server evidence: %w", err)
 	}
 	return PendingCycleResult{PushCall: push, PullCall: pullCall, ClientFacts: clientFacts, ServerFacts: serverCaptures[0].StateFacts, Evidence: evidence}, nil
+}
+
+func validateSwiftPendingCyclePostWrite(before, after runnerResult) error {
+	if before.PendingChangeCount == nil || before.MutationLedgerCount == nil || after.PendingChangeCount == nil || after.MutationLedgerCount == nil {
+		return errors.New("Swift pending-cycle post-write capture is incomplete")
+	}
+	if *after.PendingChangeCount != 1 || *after.MutationLedgerCount != *before.MutationLedgerCount+1 {
+		return fmt.Errorf("Swift pending-cycle post-write capture is invalid: pending changes %d, mutation ledger before %d after %d; want pending changes 1 and one mutation-ledger increase", *after.PendingChangeCount, *before.MutationLedgerCount, *after.MutationLedgerCount)
+	}
+	return nil
+}
+
+func swiftPendingCycleOperationClasses(call SynchronizationResult) string {
+	if len(call.transportObservations) == 0 {
+		return "<none>"
+	}
+	classes := make([]string, 0, len(call.transportObservations))
+	for _, observation := range call.transportObservations {
+		classes = append(classes, observation.OperationClass)
+	}
+	return strings.Join(classes, ",")
 }
 
 func validateSwiftPendingCycleCleanupCall(call SynchronizationResult) error {

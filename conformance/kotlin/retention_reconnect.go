@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -194,7 +195,11 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if observed, applyErr := controller.ApplyStep(ctx, compact); applyErr != nil || observed.Disposition != "success" {
 		return RetentionReconnectResult{}, fmt.Errorf("compact Kotlin Android retention-reconnect scope: %w", kotlinResultError(applyErr, observed.Disposition))
 	}
-	floorResumeCall, err := resumeRetentionReconnectAtFloor(ctx, platform, client)
+	runtimeScope, err := retentionReconnectRuntimeScope(controller, scenario.NativeIdentityAliases)
+	if err != nil {
+		return RetentionReconnectResult{}, err
+	}
+	floorResumeCall, err := resumeRetentionReconnectAtFloor(ctx, platform, client, runtimeScope)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
@@ -228,12 +233,12 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 // resumeRetentionReconnectAtFloor proves that a compacted floor remains usable
 // after Android restarts. The resumed pull must reuse its durable cursor and
 // must not start a rebuild.
-func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, client Client) (RetentionReconnectCall, error) {
+func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, client Client, runtimeScope string) (RetentionReconnectCall, error) {
 	before, err := platform.scenarioSnapshot(ctx, client)
 	if err != nil {
 		return RetentionReconnectCall{}, fmt.Errorf("capture Kotlin Android retention-reconnect floor cursor: %w", err)
 	}
-	if _, err := retentionReconnectFloorCursor(before); err != nil {
+	if _, err := retentionReconnectFloorCursor(before, runtimeScope); err != nil {
 		return RetentionReconnectCall{}, err
 	}
 	restartPayload, err := json.Marshal(map[string]string{"user_id": client.UserID, "client_id": client.ClientID})
@@ -256,51 +261,94 @@ func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, cl
 	if err != nil {
 		return RetentionReconnectCall{}, fmt.Errorf("capture Kotlin Android retention-reconnect resumed cursor: %w", err)
 	}
-	if err := validateRetentionReconnectFloorResume(before, restarted, after, resumed); err != nil {
+	if err := validateRetentionReconnectFloorResume(before, restarted, after, resumed, runtimeScope); err != nil {
 		return RetentionReconnectCall{}, err
 	}
 	return RetentionReconnectCall{Completion: resumed.Completion, Transport: resumed.transportObservations}, nil
 }
 
-func retentionReconnectFloorCursor(snapshot Result) (scopeStateRecord, error) {
+func retentionReconnectFloorCursor(snapshot Result, runtimeScope string) (scopeStateRecord, error) {
 	states, err := androidCursorScopeStates(snapshot.ScopeStates)
 	if err != nil {
 		return scopeStateRecord{}, err
 	}
-	if len(states) != 1 {
-		return scopeStateRecord{}, fmt.Errorf("Kotlin Android retention-reconnect floor cursor count = %d, want 1", len(states))
+	floor, _, err := retentionReconnectScopeStates(states, runtimeScope)
+	if err != nil {
+		return scopeStateRecord{}, err
 	}
-	state := states[0]
-	if state.Cursor == nil || *state.Cursor == "" {
+	if floor.Cursor == nil || *floor.Cursor == "" {
 		return scopeStateRecord{}, errors.New("Kotlin Android retention-reconnect compacted floor cursor is absent")
 	}
-	return state, nil
+	return floor, nil
 }
 
-func validateRetentionReconnectFloorResume(before, restarted, after Result, call SynchronizationResult) error {
-	floor, err := retentionReconnectFloorCursor(before)
+// retentionReconnectScopeStates selects the server-resolved authored scope and
+// verifies that the separate identity scope remains present.
+func retentionReconnectScopeStates(states []scopeStateRecord, runtimeScope string) (scopeStateRecord, scopeStateRecord, error) {
+	if runtimeScope == "" {
+		return scopeStateRecord{}, scopeStateRecord{}, errors.New("Kotlin Android retention-reconnect runtime scope identity is absent")
+	}
+	var floor, identity scopeStateRecord
+	floorCount := 0
+	identityCount := 0
+	for _, state := range states {
+		if state.ScopeID == "" {
+			return scopeStateRecord{}, scopeStateRecord{}, errors.New("Kotlin Android retention-reconnect scope state identity is absent")
+		}
+		if state.ScopeID == runtimeScope {
+			floor = state
+			floorCount++
+			continue
+		}
+		identity = state
+		identityCount++
+	}
+	if floorCount != 1 || identityCount != 1 {
+		return scopeStateRecord{}, scopeStateRecord{}, fmt.Errorf("Kotlin Android retention-reconnect scope states contain %d authored and %d identity scopes, want 1 each", floorCount, identityCount)
+	}
+	return floor, identity, nil
+}
+
+func validateRetentionReconnectFloorResume(before, restarted, after Result, call SynchronizationResult, runtimeScope string) error {
+	beforeStates, err := androidCursorScopeStates(before.ScopeStates)
 	if err != nil {
 		return err
 	}
-	restartedFloor, err := retentionReconnectFloorCursor(restarted)
+	floor, identity, err := retentionReconnectScopeStates(beforeStates, runtimeScope)
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(floor, restartedFloor) {
+	if floor.Cursor == nil || *floor.Cursor == "" {
+		return errors.New("Kotlin Android retention-reconnect compacted floor cursor is absent")
+	}
+	restartedStates, err := androidCursorScopeStates(restarted.ScopeStates)
+	if err != nil {
+		return err
+	}
+	restartedFloor, restartedIdentity, err := retentionReconnectScopeStates(restartedStates, runtimeScope)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(floor, restartedFloor) || !reflect.DeepEqual(identity, restartedIdentity) {
 		return errors.New("Kotlin Android retention-reconnect restart changed the durable floor cursor")
 	}
-	resumedFloor, err := retentionReconnectFloorCursor(after)
+	afterStates, err := androidCursorScopeStates(after.ScopeStates)
 	if err != nil {
 		return err
 	}
-	if resumedFloor.ScopeID != floor.ScopeID {
+	resumedFloor, resumedIdentity, err := retentionReconnectScopeStates(afterStates, runtimeScope)
+	if err != nil {
+		return err
+	}
+	if resumedFloor.ScopeID != floor.ScopeID || !reflect.DeepEqual(resumedIdentity, identity) {
 		return errors.New("Kotlin Android retention-reconnect resumed cursor scope changed")
 	}
 	if call.Completion != "idle" {
 		return fmt.Errorf("Kotlin Android retention-reconnect floor resume completion = %q, want idle", call.Completion)
 	}
 
-	floorFingerprint := cursorFingerprint(*floor.Cursor)
+	requestFingerprints := retentionReconnectCursorFingerprints(floor, identity)
+	responseFingerprints := retentionReconnectCursorFingerprints(resumedFloor, resumedIdentity)
 	connects := 0
 	pulls := 0
 	for _, observed := range call.transportObservations {
@@ -315,9 +363,9 @@ func validateRetentionReconnectFloorResume(before, restarted, after Result, call
 		case "pull":
 			response := observed.PullResponseFacts
 			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable == nil || *observed.Retryable || observed.CursorFingerprintsComplete == nil ||
-				!*observed.CursorFingerprintsComplete || !reflect.DeepEqual(observed.CursorFingerprints, []string{floorFingerprint}) || response == nil ||
+				!*observed.CursorFingerprintsComplete || !reflect.DeepEqual(observed.CursorFingerprints, requestFingerprints) || response == nil ||
 				response.ChangeCount != 0 || response.HasMore || response.RebuildScopeCount != 0 || !response.ScopeCursorFingerprintsComplete ||
-				!reflect.DeepEqual(response.ScopeCursorFingerprints, []string{cursorFingerprint(*resumedFloor.Cursor)}) {
+				response.ChecksumCount != len(responseFingerprints) || !reflect.DeepEqual(response.ScopeCursorFingerprints, responseFingerprints) {
 				return errors.New("Kotlin Android retention-reconnect floor-equal pull is invalid")
 			}
 			pulls++
@@ -327,6 +375,46 @@ func validateRetentionReconnectFloorResume(before, restarted, after Result, call
 		return fmt.Errorf("Kotlin Android retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
 	}
 	return nil
+}
+
+func retentionReconnectCursorFingerprints(states ...scopeStateRecord) []string {
+	fingerprints := make([]string, 0, len(states))
+	for _, state := range states {
+		if state.Cursor != nil {
+			fingerprints = append(fingerprints, cursorFingerprint(*state.Cursor))
+		}
+	}
+	sort.Strings(fingerprints)
+	return fingerprints
+}
+
+func retentionReconnectRuntimeScope(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias) (string, error) {
+	var scopeAlias *scenarios.NativeIdentityAlias
+	for index := range aliases {
+		alias := &aliases[index]
+		if alias.Kind != "scope" || alias.Alias != "scope-a" {
+			continue
+		}
+		if scopeAlias != nil {
+			return "", errors.New("Kotlin Android retention-reconnect authored scope identity is duplicated")
+		}
+		scopeAlias = alias
+	}
+	if scopeAlias == nil {
+		return "", errors.New("Kotlin Android retention-reconnect authored scope identity is absent")
+	}
+	values, err := controller.IdentityValues([]scenarios.NativeIdentityAlias{*scopeAlias})
+	if err != nil {
+		return "", fmt.Errorf("resolve Kotlin Android retention-reconnect runtime scope identity: %w", err)
+	}
+	if len(values) != 1 || values[0].Alias != scopeAlias.Alias {
+		return "", errors.New("Kotlin Android retention-reconnect runtime scope identity is incomplete")
+	}
+	var runtimeScope string
+	if err := json.Unmarshal(values[0].RuntimeValue, &runtimeScope); err != nil || runtimeScope == "" {
+		return "", errors.New("Kotlin Android retention-reconnect runtime scope identity is invalid")
+	}
+	return runtimeScope, nil
 }
 
 func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client) (RetentionReconnectCall, error) {

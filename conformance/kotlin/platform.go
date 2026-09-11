@@ -1649,6 +1649,7 @@ func durableClientState(result Result) Result {
 	result.CallErrorCategory = nil
 	result.ProcessID = ""
 	result.DatabaseIdentityFingerprint = ""
+	result.DurableStateFingerprint = ""
 	return result
 }
 
@@ -2985,7 +2986,7 @@ func androidClientFactsForSource(source string, client *platformClient, result R
 				return nil, err
 			}
 		}
-		count := androidCount(result.RetainedMutationCount)
+		count := androidCount(result.MutationLedgerCount)
 		facts.QueueCount = &count
 		facts.Queue = queue
 		sealedBatchCount := androidCount(result.SealedBatchCount)
