@@ -653,7 +653,7 @@ func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T)
 }
 
 func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.T) {
-	controller := nativeApplicationPushChangeController()
+	controller := nativeApplicationPushChangeController("deleted_at")
 	operation := scenarios.Operation{
 		ContractOperation: "push",
 		Name:              "submit",
@@ -708,7 +708,6 @@ func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.
 }
 
 func TestNativeControllerBindsAcceptedApplicationDeleteToWALIdentity(t *testing.T) {
-	controller := nativeApplicationPushChangeController()
 	operation := scenarios.Operation{
 		ContractOperation: "push",
 		Name:              "submit",
@@ -735,32 +734,45 @@ func TestNativeControllerBindsAcceptedApplicationDeleteToWALIdentity(t *testing.
 		}`),
 	}
 
-	if err := controller.BindApplicationPush(operation); err != nil {
-		t.Fatalf("bind native application delete: %v", err)
-	}
-	transaction := controller.transactions[nativeTransactionKey("stream-1", "24")]
-	if transaction == nil || !transaction.ApplicationPush || len(transaction.Events) != 1 {
-		t.Fatalf("application delete transaction = %#v, want one bound event", transaction)
-	}
-	event := transaction.Events[0]
-	if event.Operation != "delete" || event.Before == nil || event.After != nil {
-		t.Fatalf("application delete event = %#v, want prior image and no after image", event)
-	}
-	if event.Before.Version != "server-version" || string(event.Before.Fields["value"]) != `"pending"` {
-		t.Fatalf("application delete before image = %#v, want materialized prior image", event.Before)
-	}
-	if len(event.AuthoredScopes) != 1 || event.AuthoredScopes[0] != "scope-a" {
-		t.Fatalf("application delete scopes = %v, want prior authored scope", event.AuthoredScopes)
+	for _, test := range []struct {
+		name              string
+		runtimeDeletedAt  string
+		physicalOperation string
+	}{
+		{name: "soft delete", runtimeDeletedAt: "deleted_at", physicalOperation: "update"},
+		{name: "hard delete", physicalOperation: "delete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			controller := nativeApplicationPushChangeController(test.runtimeDeletedAt)
+			if err := controller.BindApplicationPush(operation); err != nil {
+				t.Fatalf("bind native application delete: %v", err)
+			}
+			transaction := controller.transactions[nativeTransactionKey("stream-1", "24")]
+			if transaction == nil || !transaction.ApplicationPush || len(transaction.Events) != 1 {
+				t.Fatalf("application delete transaction = %#v, want one bound event", transaction)
+			}
+			event := transaction.Events[0]
+			if event.Operation != "delete" || event.PhysicalOperation != test.physicalOperation || event.Before == nil || event.After != nil {
+				t.Fatalf("application delete event = %#v, want logical delete, physical %s, prior image, and no after image", event, test.physicalOperation)
+			}
+			if event.Before.Version != "server-version" || string(event.Before.Fields["value"]) != `"pending"` {
+				t.Fatalf("application delete before image = %#v, want materialized prior image", event.Before)
+			}
+			if len(event.AuthoredScopes) != 1 || event.AuthoredScopes[0] != "scope-a" {
+				t.Fatalf("application delete scopes = %v, want prior authored scope", event.AuthoredScopes)
+			}
+		})
 	}
 }
 
-func nativeApplicationPushChangeController() *NativeController {
+func nativeApplicationPushChangeController(runtimeDeletedAt string) *NativeController {
 	table := nativeTableBinding{
 		AuthoredID:       "items",
 		AuthoredRelation: "public.items",
 		RuntimeName:      "cf_items",
 		AuthoredPrimary:  "id",
 		RuntimePrimary:   "runtime-id",
+		RuntimeDeletedAt: runtimeDeletedAt,
 		Fields:           map[string]string{"id": "runtime-id", "owner": "runtime-owner", "value": "runtime-value"},
 	}
 	canonical := `"pending-row"`

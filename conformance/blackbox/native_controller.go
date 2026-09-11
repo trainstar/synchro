@@ -185,16 +185,17 @@ type nativeTransactionBinding struct {
 }
 
 type nativeEventBinding struct {
-	AuthoredOrdinal uint64
-	Operation       string
-	Relation        string
-	Table           nativeTableBinding
-	Dependency      *nativeCaptureDependencyBinding
-	RecordID        string
-	RuntimeRecordID string
-	Before          *nativeAuthoredImage
-	After           *nativeAuthoredImage
-	AuthoredScopes  []string
+	AuthoredOrdinal   uint64
+	Operation         string
+	PhysicalOperation string
+	Relation          string
+	Table             nativeTableBinding
+	Dependency        *nativeCaptureDependencyBinding
+	RecordID          string
+	RuntimeRecordID   string
+	Before            *nativeAuthoredImage
+	After             *nativeAuthoredImage
+	AuthoredScopes    []string
 }
 
 type nativeRecordBinding struct {
@@ -1620,16 +1621,21 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 				}
 			}
 		}
+		physicalOperation := mutation.Op
+		if mutation.Op == "delete" && table.RuntimeDeletedAt != "" {
+			physicalOperation = "update"
+		}
 		transaction.Events = append(transaction.Events, nativeEventBinding{
-			AuthoredOrdinal: uint64(ordinal),
-			Operation:       mutation.Op,
-			Relation:        table.AuthoredRelation,
-			Table:           table,
-			RecordID:        recordID,
-			RuntimeRecordID: runtimeRecordID,
-			Before:          before,
-			After:           after,
-			AuthoredScopes:  scopes,
+			AuthoredOrdinal:   uint64(ordinal),
+			Operation:         mutation.Op,
+			PhysicalOperation: physicalOperation,
+			Relation:          table.AuthoredRelation,
+			Table:             table,
+			RecordID:          recordID,
+			RuntimeRecordID:   runtimeRecordID,
+			Before:            before,
+			After:             after,
+			AuthoredScopes:    scopes,
 		})
 	}
 	key := nativeTransactionKey(transaction.AuthoredStream, transaction.AuthoredCommitLSN)
@@ -2318,12 +2324,13 @@ func bindNativeTransaction(payload nativeCommitPayload, installation *nativeInst
 			}
 			seenCaptureKeys[event.Relation+"\x00"+captureKey] = struct{}{}
 			result.Events = append(result.Events, nativeEventBinding{
-				AuthoredOrdinal: event.EventOrdinal,
-				Operation:       event.Operation,
-				Relation:        event.Relation,
-				Dependency:      &dependency,
-				Before:          before,
-				After:           after,
+				AuthoredOrdinal:   event.EventOrdinal,
+				Operation:         event.Operation,
+				PhysicalOperation: event.Operation,
+				Relation:          event.Relation,
+				Dependency:        &dependency,
+				Before:            before,
+				After:             after,
 			})
 			continue
 		}
@@ -2357,15 +2364,16 @@ func bindNativeTransaction(payload nativeCommitPayload, installation *nativeInst
 		seenRecords[table.AuthoredID+"\x00"+runtimeRecordID] = struct{}{}
 		scopes := nativeScopesForRecord(installation, table.AuthoredRelation, table.AuthoredID, image.CanonicalWireJSON)
 		result.Events = append(result.Events, nativeEventBinding{
-			AuthoredOrdinal: event.EventOrdinal,
-			Operation:       event.Operation,
-			Relation:        event.Relation,
-			Table:           table,
-			RecordID:        recordID,
-			RuntimeRecordID: runtimeRecordID,
-			Before:          before,
-			After:           after,
-			AuthoredScopes:  scopes,
+			AuthoredOrdinal:   event.EventOrdinal,
+			Operation:         event.Operation,
+			PhysicalOperation: event.Operation,
+			Relation:          event.Relation,
+			Table:             table,
+			RecordID:          recordID,
+			RuntimeRecordID:   runtimeRecordID,
+			Before:            before,
+			After:             after,
+			AuthoredScopes:    scopes,
 		})
 	}
 	sort.Slice(result.Events, func(left, right int) bool {
@@ -3344,7 +3352,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				  AND event.operation = $2
 				  AND (fence.new_capture_key = $3::jsonb OR fence.old_capture_key = $3::jsonb)
 				ORDER BY event.commit_lsn DESC
-				LIMIT 1`, event.Dependency.RuntimeName, event.Operation, captureKey).Scan(
+				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
 			)
 		} else {
@@ -3360,7 +3368,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
 				  AND event.operation = $3
 				ORDER BY event.commit_lsn DESC
-				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.Operation).Scan(
+				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
 			)
 		}
@@ -3373,7 +3381,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				}
 				identifier = nativeCaptureDependencyKey(*image)
 			}
-			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s; emitted %s", event.Relation, event.Operation, identifier, describeNativeRelationEvents(ctx, database, event.Table.RuntimeName, event.Dependency))
+			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s; emitted %s", event.Relation, event.PhysicalOperation, identifier, describeNativeRelationEvents(ctx, database, event.Table.RuntimeName, event.Dependency))
 		}
 		identity.ordinal = uint64(ordinal)
 		identities = append(identities, identity)
