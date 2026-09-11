@@ -114,6 +114,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 "status" to error.status.toString(),
                 "message" to error.serverMessage
             )
+            is SynchroError.IdempotencyConflict -> "IDEMPOTENCY_CONFLICT" to emptyMap()
             is SynchroError.UnsupportedSchema -> "UNSUPPORTED_SCHEMA" to mapOf(
                 "reason" to error.reason.name.lowercase()
             )
