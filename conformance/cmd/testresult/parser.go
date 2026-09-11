@@ -27,15 +27,19 @@ type testEvent struct {
 }
 
 type eventState struct {
-	packageName    string
-	packageStarted bool
-	packageFinal   string
-	targetRun      bool
-	targetFinal    string
-	assertionRun   bool
-	assertionFinal string
-	outerFailure   bool
-	eventCount     int
+	packageName     string
+	packageStarted  bool
+	packageFinal    string
+	targetRun       bool
+	targetFinal     string
+	targetPaused    bool
+	assertionRun    bool
+	assertionFinal  string
+	assertionPaused bool
+	descendants     map[string]string
+	descendantFail  bool
+	outerFailure    bool
+	eventCount      int
 }
 
 func classifyTestResult(input io.Reader, target string) result {
@@ -124,7 +128,7 @@ func (state *eventState) accepts(event testEvent, target, assertion string) bool
 			return false
 		}
 		return state.acceptFinal(event.Test, event.Action, target, assertion)
-	case "output", "pause", "cont", "bench":
+	case "output", "bench":
 		if !state.acceptsScopedEvent(event.Test, target, assertion) {
 			return false
 		}
@@ -132,6 +136,10 @@ func (state *eventState) accepts(event testEvent, target, assertion string) bool
 			state.outerFailure = true
 		}
 		return true
+	case "pause":
+		return state.acceptPause(event.Test, target, assertion)
+	case "cont":
+		return state.acceptContinue(event.Test, target, assertion)
 	default:
 		return false
 	}
@@ -146,23 +154,30 @@ func (state eventState) acceptsScopedEvent(name, target, assertion string) bool 
 	case assertion:
 		return state.assertionRun && state.assertionFinal == ""
 	default:
-		return false
+		return isAssertionDescendant(name, assertion) && (state.descendants[name] == "run" || state.descendants[name] == "pause")
 	}
 }
 
 func (state eventState) isOuterFailureOutput(event testEvent, target, assertion string) bool {
-	if !state.targetRun || event.Test == assertion {
+	if !state.targetRun || event.Test == assertion || isAssertionDescendant(event.Test, assertion) {
 		return false
 	}
 	if event.Test == "" {
-		return !isPackageFrameworkOutput(event.Output, state.packageName)
+		return !isPackageFrameworkOutput(event.Output, state.packageName, target, assertion)
 	}
 	return !isTestFrameworkOutput(event.Output, target)
 }
 
-func isPackageFrameworkOutput(output, packageName string) bool {
+func isPackageFrameworkOutput(output, packageName, target, assertion string) bool {
 	if output == "PASS\n" || output == "FAIL\n" {
 		return true
+	}
+	for _, prefix := range []string{"--- PASS: ", "--- FAIL: ", "--- SKIP: "} {
+		if !strings.HasPrefix(output, prefix) {
+			continue
+		}
+		name, _, found := strings.Cut(strings.TrimPrefix(output, prefix), " (")
+		return found && (name == target || name == assertion || isAssertionDescendant(name, assertion))
 	}
 	if packageName == "" || !strings.HasSuffix(output, "\n") {
 		return false
@@ -201,13 +216,83 @@ func (state *eventState) acceptRun(name, target, assertion string) bool {
 		state.targetRun = true
 		return true
 	case assertion:
-		if !state.targetRun || state.targetFinal != "" || state.assertionRun {
+		if !state.targetRun || state.targetFinal != "" || state.targetPaused || state.assertionRun {
 			return false
 		}
 		state.assertionRun = true
 		return true
 	default:
-		return false
+		if !state.targetRun || state.targetFinal != "" || !state.assertionRun || state.assertionFinal != "" || state.targetPaused || state.assertionPaused || !isAssertionDescendant(name, assertion) {
+			return false
+		}
+		parent := name[:strings.LastIndex(name, "/")]
+		if parent != assertion && state.descendants[parent] != "run" {
+			return false
+		}
+		if state.descendants == nil {
+			state.descendants = make(map[string]string)
+		}
+		if _, found := state.descendants[name]; found {
+			return false
+		}
+		state.descendants[name] = "run"
+		return true
+	}
+}
+
+func (state *eventState) acceptPause(name, target, assertion string) bool {
+	switch name {
+	case target:
+		if !state.targetRun || state.targetFinal != "" || state.targetPaused || (state.assertionRun && state.assertionFinal == "") {
+			return false
+		}
+		state.targetPaused = true
+		return true
+	case assertion:
+		if !state.assertionRun || state.assertionFinal != "" || state.assertionPaused {
+			return false
+		}
+		for _, descendantState := range state.descendants {
+			if descendantState == "run" || descendantState == "pause" {
+				return false
+			}
+		}
+		state.assertionPaused = true
+		return true
+	default:
+		if !isAssertionDescendant(name, assertion) || state.descendants[name] != "run" {
+			return false
+		}
+		for descendant, descendantState := range state.descendants {
+			if (descendantState == "run" || descendantState == "pause") && strings.HasPrefix(descendant, name+"/") {
+				return false
+			}
+		}
+		state.descendants[name] = "pause"
+		return true
+	}
+}
+
+func (state *eventState) acceptContinue(name, target, assertion string) bool {
+	switch name {
+	case target:
+		if !state.targetPaused {
+			return false
+		}
+		state.targetPaused = false
+		return true
+	case assertion:
+		if !state.assertionPaused {
+			return false
+		}
+		state.assertionPaused = false
+		return true
+	default:
+		if !isAssertionDescendant(name, assertion) || state.descendants[name] != "pause" {
+			return false
+		}
+		state.descendants[name] = "run"
+		return true
 	}
 }
 
@@ -223,7 +308,7 @@ func (state *eventState) acceptFinal(name, action, target, assertion string) boo
 		state.packageFinal = action
 		return true
 	case target:
-		if !state.targetRun || state.targetFinal != "" {
+		if !state.targetRun || state.targetFinal != "" || state.targetPaused {
 			return false
 		}
 		if state.assertionRun && state.assertionFinal == "" {
@@ -232,14 +317,36 @@ func (state *eventState) acceptFinal(name, action, target, assertion string) boo
 		state.targetFinal = action
 		return true
 	case assertion:
-		if !state.assertionRun || state.assertionFinal != "" {
+		if !state.assertionRun || state.assertionFinal != "" || state.assertionPaused {
+			return false
+		}
+		for _, descendantState := range state.descendants {
+			if descendantState == "run" || descendantState == "pause" {
+				return false
+			}
+		}
+		if state.descendantFail && action != "fail" {
 			return false
 		}
 		state.assertionFinal = action
 		return true
 	default:
-		return false
+		if !isAssertionDescendant(name, assertion) || state.descendants[name] != "run" {
+			return false
+		}
+		for descendant, descendantState := range state.descendants {
+			if (descendantState == "run" || descendantState == "pause") && strings.HasPrefix(descendant, name+"/") {
+				return false
+			}
+		}
+		state.descendants[name] = action
+		state.descendantFail = state.descendantFail || action == "fail"
+		return true
 	}
+}
+
+func isAssertionDescendant(name, assertion string) bool {
+	return strings.HasPrefix(name, assertion+"/") && len(name) > len(assertion)+1
 }
 
 func (state eventState) result() result {

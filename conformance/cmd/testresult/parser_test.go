@@ -110,6 +110,132 @@ func TestClassifyTestResultSelectsNumberedAssertion(t *testing.T) {
 	}
 }
 
+func TestClassifyTestResultAcceptsSelectedAssertionDescendants(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/scope_misbound"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/scope_misbound"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"pass","Package":"example/integration"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultTargetPass {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultTargetPass)
+	}
+}
+
+func TestClassifyTestResultRejectsUnfinishedAssertionDescendant(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultMalformedOutput {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultMalformedOutput)
+	}
+}
+
+func TestClassifyTestResultRejectsPassingAssertionWithFailedDescendant(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultMalformedOutput {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultMalformedOutput)
+	}
+}
+
+func TestClassifyTestResultRejectsAssertionDescendantBeforeAssertion(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultMalformedOutput {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultMalformedOutput)
+	}
+}
+
+func TestClassifyTestResultRejectsAssertionDescendantContinueWithoutPause(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"cont","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultMalformedOutput {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultMalformedOutput)
+	}
+}
+
+func TestClassifyTestResultRejectsTargetPauseDuringAssertion(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"pause","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultMalformedOutput {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultMalformedOutput)
+	}
+}
+
+func TestClassifyTestResultAcceptsOutputFromPausedAssertionDescendant(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"pause","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"output","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged","Output":"    diagnostic\n"}`,
+		`{"Action":"cont","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"pass","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"pass","Package":"example/integration"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultTargetPass {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultTargetPass)
+	}
+}
+
+func TestClassifyTestResultAcceptsSelectedPackageScopedSummary(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	input := eventStream(
+		`{"Action":"start","Package":"example/integration"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"output","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged","Output":"    proof_test.go:42: semantic assertion failed\n"}`,
+		`{"Action":"output","Package":"example/integration","Output":"--- FAIL: TestRealIssue49Proof/assertion#04 (0.00s)\n"}`,
+		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/forged"}`,
+		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+		`{"Action":"fail","Package":"example/integration"}`,
+	)
+	if got := classifyTestResult(strings.NewReader(input), target); got != resultTargetSemanticTestFailure {
+		t.Fatalf("classifyTestResult() = %q, want %q", got, resultTargetSemanticTestFailure)
+	}
+}
+
 func TestClassifyTestResultClassifiesNumberedAssertionFailure(t *testing.T) {
 	const target = "TestRealIssue49Proof/assertion#03"
 	input := eventStream(
