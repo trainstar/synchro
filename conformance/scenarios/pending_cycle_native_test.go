@@ -286,6 +286,22 @@ func TestValidatePendingCycleServerFactsRequiresUnprotectedRow(t *testing.T) {
 	}
 }
 
+func TestPendingCycleUnprotectedRowTargetSelectsTheNonPrimaryField(t *testing.T) {
+	operation := Operation{
+		ContractOperation: "model",
+		Name:              "commit-source-transaction",
+		Payload:           json.RawMessage(`{"stream_generation":"stream-1","commit_lsn":"18","end_lsn":"19","events":[{"event_ordinal":1,"relation":"public.items","operation":"insert","before":null,"after":{"identity":{"kind":"synced","synced_row":{"canonical_identity_bytes":"identity","table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"row-a\""},"capture_key":null},"fields":[{"field":"id","type":"string","wire_json":"\"different-runtime-value\""},{"field":"value","type":"string","wire_json":"\"unprotected\""}],"version":"v1","checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","deleted":false}}]}`),
+	}
+	aliases := []NativeIdentityAlias{{Alias: "unprotected-row-primary-key", Kind: "primary-key", Value: json.RawMessage(`"row-a"`)}}
+	authoredID, value, err := PendingCycleUnprotectedRowTarget(operation, aliases, "runtime-row-a")
+	if err != nil {
+		t.Fatalf("resolve unprotected row target: %v", err)
+	}
+	if authoredID != "row-a" || value != "unprotected" {
+		t.Fatalf("unprotected target = %q/%q, want row-a/unprotected", authoredID, value)
+	}
+}
+
 func TestPendingCycleSynchronizedCRUDOperationsPreserveIdentity(t *testing.T) {
 	insert := Operation{
 		ContractOperation: "local",

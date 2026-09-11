@@ -333,14 +333,14 @@ func validateRebuildRequestsStepWire(scenario scenarios.Scenario, stepID string,
 }
 
 func validateRebuildRequestsFirstPause(snapshot runnerResult) error {
-	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeStates) != 0 || len(snapshot.ScopeRows) != 0 || len(snapshot.RowMetadataRecords) != 0 || snapshot.RebuildAttempts[0].Cursor != nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ApplicationRows) != 0 || len(snapshot.ScopeRows) != 0 || len(snapshot.RowMetadataRecords) != 0 || snapshot.RebuildAttempts[0].Cursor != nil || snapshot.RebuildAttempts[0].PageLimit != 1 || !isUninitializedRebuildAssignment(snapshot.ScopeStates, snapshot.RebuildAttempts[0].ScopeID) {
 		return errors.New("Swift first rebuild page was not paused before local apply")
 	}
 	return nil
 }
 
 func validateRebuildRequestsFirstRestart(snapshot runnerResult) error {
-	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeStates) != 0 || len(snapshot.ScopeRows) != 0 || len(snapshot.RowMetadataRecords) != 0 || len(snapshot.ApplicationRows) != 0 || snapshot.RebuildAttempts[0].Cursor != nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeRows) != 0 || len(snapshot.RowMetadataRecords) != 0 || len(snapshot.ApplicationRows) != 0 || snapshot.RebuildAttempts[0].Cursor != nil || snapshot.RebuildAttempts[0].PageLimit != 1 || !isUninitializedRebuildAssignment(snapshot.ScopeStates, snapshot.RebuildAttempts[0].ScopeID) {
 		return errors.New("Swift rebuild restart did not preserve the unapplied first page")
 	}
 	return nil
@@ -357,10 +357,14 @@ func validateRebuildRequestsFirstReplay(first, replay runnerResult) error {
 }
 
 func validateRebuildRequestsRestart(snapshot runnerResult) error {
-	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeStates) != 0 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.ApplicationRows) != 1 || snapshot.RebuildAttempts[0].Cursor == nil || snapshot.RebuildAttempts[0].PageLimit != 1 {
+	if len(snapshot.RebuildAttempts) != 1 || len(snapshot.RebuildReceipts) != 0 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.ApplicationRows) != 1 || snapshot.RebuildAttempts[0].Cursor == nil || snapshot.RebuildAttempts[0].PageLimit != 1 || !isUninitializedRebuildAssignment(snapshot.ScopeStates, snapshot.RebuildAttempts[0].ScopeID) {
 		return errors.New("Swift rebuild restart did not preserve one durable partial page")
 	}
 	return nil
+}
+
+func isUninitializedRebuildAssignment(scopes []scopeStateRecord, attemptScopeID string) bool {
+	return attemptScopeID != "" && len(scopes) == 1 && scopes[0].ScopeID == attemptScopeID && scopes[0].Cursor == nil && scopes[0].Checksum == nil
 }
 
 func validateSwiftRebuildRequestsFaultPlans(scenario scenarios.Scenario) error {

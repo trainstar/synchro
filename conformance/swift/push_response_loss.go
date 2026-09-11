@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -116,29 +117,10 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		return PushResponseLossResult{}, fmt.Errorf("capture Swift response-loss state after restart: %w", err)
 	}
 
-	retryLater, err := swiftScenarioCall(ctx, platform, client, "start")
+	replay, err := runPushResponseLossReplay(ctx, platform, client)
 	if err != nil {
-		return PushResponseLossResult{}, fmt.Errorf("replay Swift response-loss push: %w", err)
-	}
-	if err := validatePushResponseLossRetryStage(retryLater, http.StatusTooManyRequests, "retry_later"); err != nil {
 		return PushResponseLossResult{}, err
 	}
-	temporaryUnavailable, err := swiftScenarioCall(ctx, platform, client, "retry-after-error")
-	if err != nil {
-		return PushResponseLossResult{}, fmt.Errorf("retry Swift response-loss push after 429: %w", err)
-	}
-	if err := validatePushResponseLossRetryStage(temporaryUnavailable, http.StatusServiceUnavailable, "temporary_unavailable"); err != nil {
-		return PushResponseLossResult{}, err
-	}
-	terminalReplay, err := swiftScenarioCall(ctx, platform, client, "retry-after-error")
-	if err != nil {
-		return PushResponseLossResult{}, fmt.Errorf("retry Swift response-loss push after 503: %w", err)
-	}
-	replay := terminalReplay
-	replay.transportObservations = append(
-		append(cloneTransportObservations(retryLater.transportObservations), temporaryUnavailable.transportObservations...),
-		terminalReplay.transportObservations...,
-	)
 	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replayPush, replay); err != nil {
 		return PushResponseLossResult{}, err
 	}
@@ -210,6 +192,56 @@ func RunPushResponseLossScenario(ctx context.Context, scenario scenarios.Scenari
 		ServerFacts:        serverCaptures[0].StateFacts,
 		IdentityResolution: identities,
 	}, nil
+}
+
+// runPushResponseLossReplay starts the one authored replay call. The managed
+// lifecycle owns transient retries, so the harness observes its final result
+// without invoking another public method.
+func runPushResponseLossReplay(ctx context.Context, platform *Platform, client Client) (SynchronizationResult, error) {
+	state, err := platform.client(client)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	state.mu.Lock()
+	if state.terminated || state.session == nil {
+		state.mu.Unlock()
+		return SynchronizationResult{}, errors.New("Swift push-response-loss client is unavailable for replay")
+	}
+	checkpoint := state.session.Checkpoint()
+	state.mu.Unlock()
+
+	call, err := swiftScenarioCall(ctx, platform, client, "start")
+	if err != nil {
+		return SynchronizationResult{}, fmt.Errorf("replay Swift response-loss push: %w", err)
+	}
+	if err := validatePushResponseLossRetryStage(call, http.StatusTooManyRequests, "retry_later"); err != nil {
+		return SynchronizationResult{}, err
+	}
+
+	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	for {
+		snapshot, captureErr := capturePushResponseLossState(deadline, platform, client)
+		if captureErr != nil {
+			return SynchronizationResult{}, fmt.Errorf("capture Swift response-loss replay state: %w", captureErr)
+		}
+		state.mu.Lock()
+		observations, observationErr := state.session.ObservationsAfter(checkpoint)
+		state.mu.Unlock()
+		if observationErr != nil {
+			return SynchronizationResult{}, fmt.Errorf("capture Swift response-loss replay transport: %w", observationErr)
+		}
+		if snapshot.Failure != nil && snapshot.Failure.Code == "idempotency_conflict" && !snapshot.Failure.Retryable {
+			call.Completion = "error"
+			call.transportObservations = observations
+			return call, nil
+		}
+		select {
+		case <-deadline.Done():
+			return SynchronizationResult{}, fmt.Errorf("wait for Swift response-loss retry lifecycle: %w", deadline.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func validatePushResponseLossRetryStage(call SynchronizationResult, status int, code string) error {

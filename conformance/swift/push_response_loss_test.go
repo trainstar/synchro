@@ -2,6 +2,7 @@ package swift
 
 import (
 	"context"
+	"net/http"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -64,6 +65,33 @@ func TestPushResponseLossRetryStageBindsPushAfterColdStartConnect(t *testing.T) 
 	call.transportObservations = append(call.transportObservations, transportObservation{OperationClass: "pull", StatusCode: 200})
 	if err := validatePushResponseLossRetryStage(call, 429, "retry_later"); err == nil {
 		t.Fatal("retry stage accepted an extra transport operation")
+	}
+}
+
+func TestPushResponseLossReplayRequiresTransientRetriesBeforeTerminalConflict(t *testing.T) {
+	scenario := loadPushResponseLossScenario(t)
+	steps, err := swiftScenarioStepMap(scenario, pushResponseLossScenarioID, 6)
+	if err != nil {
+		t.Fatalf("map push-response-loss scenario: %v", err)
+	}
+	replay, err := swiftScenarioOperation(steps, "STEP-PUSH-RESPONSE-LOSS-004", "push/submit")
+	if err != nil {
+		t.Fatalf("read replay operation: %v", err)
+	}
+	call := SynchronizationResult{
+		Completion: "error",
+		transportObservations: []transportObservation{
+			{OperationClass: "push", StatusCode: http.StatusTooManyRequests, ErrorCode: pointerString("retry_later"), Retryable: true},
+			{OperationClass: "push", StatusCode: http.StatusServiceUnavailable, ErrorCode: pointerString("temporary_unavailable"), Retryable: true},
+			{OperationClass: "push", StatusCode: http.StatusConflict, ErrorCode: pointerString("idempotency_conflict")},
+		},
+	}
+	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replay, call); err != nil {
+		t.Fatalf("validate replay retries: %v", err)
+	}
+	call.transportObservations[1].StatusCode = http.StatusConflict
+	if err := validatePushResponseLossReplayCall(scenario, "STEP-PUSH-RESPONSE-LOSS-004", replay, call); err == nil {
+		t.Fatal("replay accepted a missing temporary-unavailable retry")
 	}
 }
 

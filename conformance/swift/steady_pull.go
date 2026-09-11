@@ -245,7 +245,7 @@ func RunSteadyPullScenario(ctx context.Context, scenario scenarios.Scenario, con
 	if err != nil {
 		return SteadyPullResult{}, err
 	}
-	identityEvidence, err := resolveSteadyPullIdentities(controller, scenario.NativeIdentityAliases, baseline, measured, snapshot)
+	identityEvidence, err := resolveSteadyPullIdentities(controller, scenario.NativeIdentityAliases, baseline, measured, beforeRestart)
 	if err != nil {
 		return SteadyPullResult{}, err
 	}
@@ -602,7 +602,7 @@ func equalSwiftSteadyPullDurableState(left, right runnerResult) bool {
 	return reflect.DeepEqual(normalize(left), normalize(right))
 }
 
-func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, measured SynchronizationResult, snapshot runnerResult) (steadyPullIdentityEvidence, error) {
+func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, measured SynchronizationResult, preRestartSnapshot runnerResult) (steadyPullIdentityEvidence, error) {
 	if len(aliases) != len(steadyPullAliasNames) {
 		return steadyPullIdentityEvidence{}, errors.New("Swift steady-pull identity alias set changed")
 	}
@@ -621,12 +621,12 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 		seenAliases[alias.Alias] = struct{}{}
 	}
 
-	if len(snapshot.ScopeStates) != 1 || len(snapshot.ScopeRows) != 1 || len(snapshot.RowMetadataRecords) != 1 || len(snapshot.RebuildAttempts) != 0 || len(snapshot.RebuildReceipts) != 1 || snapshot.Schema == nil {
+	if len(preRestartSnapshot.ScopeStates) != 1 || len(preRestartSnapshot.ScopeRows) != 1 || len(preRestartSnapshot.RowMetadataRecords) != 1 || len(preRestartSnapshot.RebuildAttempts) != 0 || len(preRestartSnapshot.RebuildReceipts) != 1 || preRestartSnapshot.Schema == nil {
 		return steadyPullIdentityEvidence{}, errors.New("Swift steady-pull identity state is incomplete")
 	}
-	scope := snapshot.ScopeStates[0]
-	row := snapshot.ScopeRows[0]
-	metadata := snapshot.RowMetadataRecords[0]
+	scope := preRestartSnapshot.ScopeStates[0]
+	row := preRestartSnapshot.ScopeRows[0]
+	metadata := preRestartSnapshot.RowMetadataRecords[0]
 	scopeChecksum, scopeChecksumErr := swiftChecksumDigest(scope.Checksum)
 	localChecksum, localChecksumErr := swiftChecksumDigest(pointerString(scope.LocalChecksum))
 	rowChecksum, rowChecksumErr := swiftChecksumDigest(metadata.RowChecksum)
@@ -652,12 +652,12 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 	if json.Unmarshal(runtime["scope-a"], &runtimeScopeA) != nil || runtimeScopeA == "" || runtimeScopeA != scope.ScopeID || runtimeScopeA != row.ScopeID ||
 		json.Unmarshal(runtime["scope-b"], &runtimeScopeB) != nil || runtimeScopeB == "" || runtimeScopeB == runtimeScopeA ||
 		json.Unmarshal(runtime["row-a-primary-key"], &runtimeRecord) != nil || runtimeRecord == "" || runtimeRecord != row.RecordID || runtimeRecord != metadata.RecordID ||
-		json.Unmarshal(runtime["current-schema"], &runtimeSchema) != nil || runtimeSchema != *snapshot.Schema ||
+		json.Unmarshal(runtime["current-schema"], &runtimeSchema) != nil || runtimeSchema != *preRestartSnapshot.Schema ||
 		applicationIdentifiers["items-table"] == "" || applicationIdentifiers["items-table"] != row.TableName || applicationIdentifiers["items-table"] != metadata.TableName {
 		return steadyPullIdentityEvidence{}, errors.New("Swift steady-pull controller identities differ from durable state")
 	}
 
-	rebuildID, err := completedSwiftRebuildID(snapshot.Events, scope.ScopeID)
+	rebuildID, err := completedSwiftRebuildID(preRestartSnapshot.Events, scope.ScopeID)
 	if err != nil {
 		return steadyPullIdentityEvidence{}, err
 	}
@@ -680,7 +680,7 @@ func resolveSteadyPullIdentities(controller *blackbox.NativeController, aliases 
 		}
 		runtime[alias] = encoded
 	}
-	if err := validateSteadyPullTransportIdentities(runtime, baseline.transportObservations, measured.transportObservations, snapshot); err != nil {
+	if err := validateSteadyPullTransportIdentities(runtime, baseline.transportObservations, measured.transportObservations, preRestartSnapshot); err != nil {
 		return steadyPullIdentityEvidence{}, err
 	}
 	for _, alias := range steadyPullAliasNames {

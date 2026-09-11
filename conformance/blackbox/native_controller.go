@@ -3444,9 +3444,10 @@ func (c *NativeController) Capture(ctx context.Context, clientKeys, sources []st
 	}
 	// Only a materialized source transaction resolves application push
 	// identities today. A rejected push never materializes, so resolve any
-	// pending binding here. The caller that needs an identity reports its own
-	// error when the binding stays absent.
-	c.resolvePendingApplicationPushRecords(ctx)
+	// pending binding here before capturing server state.
+	if err := c.resolvePendingApplicationPushRecords(ctx); err != nil {
+		return nil, fmt.Errorf("resolve native application push identities for capture: %w", err)
+	}
 	facts, err := c.captureServerState(ctx)
 	if err != nil {
 		return nil, err
@@ -3457,7 +3458,7 @@ func (c *NativeController) Capture(ctx context.Context, clientKeys, sources []st
 // resolvePendingApplicationPushRecords binds the runtime identities of each
 // application push that has none. A push the server rejected materializes no
 // row, so the source transaction path never resolves it.
-func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Context) {
+func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Context) error {
 	c.mu.Lock()
 	pending := make([]*nativeTransactionBinding, 0, len(c.transactions))
 	for _, transaction := range c.transactions {
@@ -3467,8 +3468,11 @@ func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Cont
 	}
 	c.mu.Unlock()
 	for _, transaction := range pending {
-		_ = c.resolveApplicationPushRecords(ctx, transaction)
+		if err := c.resolveApplicationPushRecords(ctx, transaction); err != nil {
+			return fmt.Errorf("resolve pending native application push records: %w", err)
+		}
 	}
+	return nil
 }
 
 func (c *NativeController) captureServerState(ctx context.Context) (scenarios.StateFacts, error) {

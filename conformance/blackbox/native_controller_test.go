@@ -27,6 +27,24 @@ func TestNativeControllerApplyRejectsWorkloadMacro(t *testing.T) {
 	}
 }
 
+func TestNativeControllerCaptureReportsPendingApplicationPushResolutionError(t *testing.T) {
+	controller := &NativeController{
+		harness:      &Harness{socketDir: t.TempDir(), port: 1},
+		installation: &nativeInstallationBinding{},
+		transactions: map[string]*nativeTransactionBinding{
+			"pending": {
+				ApplicationPush:  true,
+				AuthoredUserID:   "user-a",
+				AuthoredClientID: "client-a",
+			},
+		},
+	}
+	_, err := controller.Capture(context.Background(), nil, []string{"server-state"})
+	if err == nil || !strings.Contains(err.Error(), "resolve native application push identities for capture") {
+		t.Fatalf("Capture error = %v, want pending application-push resolution context", err)
+	}
+}
+
 func TestNativeControllerAssignmentPreservesSharedScope(t *testing.T) {
 	controller := &NativeController{installation: &nativeInstallationBinding{
 		scopes:        map[string]string{"scope-a": "cf:global"},

@@ -237,12 +237,13 @@ func PendingCycleUnprotectedRowTarget(operation Operation, aliases []NativeIdent
 			After     *struct {
 				Identity struct {
 					SyncedRow *struct {
+						PrimaryKeyFieldID string `json:"primary_key_field_id"`
 						CanonicalWireJSON string `json:"canonical_wire_json"`
 					} `json:"synced_row"`
 				} `json:"identity"`
 				Fields []struct {
-					Field    string          `json:"field"`
-					WireJSON json.RawMessage `json:"wire_json"`
+					Field    string `json:"field"`
+					WireJSON string `json:"wire_json"`
 				} `json:"fields"`
 			} `json:"after"`
 		} `json:"events"`
@@ -262,13 +263,20 @@ func PendingCycleUnprotectedRowTarget(operation Operation, aliases []NativeIdent
 	if json.Unmarshal(alias.Value, &aliasValue) != nil || aliasValue != authoredRecordID {
 		return "", "", errors.New("pending-cycle unprotected alias differs from its source row")
 	}
+	primaryField := payload.Events[0].After.Identity.SyncedRow.PrimaryKeyFieldID
+	if primaryField == "" {
+		return "", "", errors.New("pending-cycle unprotected source primary field is absent")
+	}
 	value := ""
 	for _, field := range payload.Events[0].After.Fields {
-		var text string
-		if json.Unmarshal(field.WireJSON, &text) != nil || text == authoredRecordID {
+		if field.Field == primaryField {
 			continue
 		}
-		if value != "" || text == "" {
+		var text string
+		if json.Unmarshal([]byte(field.WireJSON), &text) != nil || text == "" {
+			return "", "", errors.New("pending-cycle unprotected source value is invalid")
+		}
+		if value != "" {
 			return "", "", errors.New("pending-cycle unprotected source value is ambiguous")
 		}
 		value = text
