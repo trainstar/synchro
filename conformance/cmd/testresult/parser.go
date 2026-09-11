@@ -128,7 +128,7 @@ func (state *eventState) accepts(event testEvent, target, assertion string) bool
 		if !state.acceptsScopedEvent(event.Test, target, assertion) {
 			return false
 		}
-		if event.Action == "output" && state.isOuterFailureOutput(event, target) {
+		if event.Action == "output" && state.isOuterFailureOutput(event, target, assertion) {
 			state.outerFailure = true
 		}
 		return true
@@ -150,8 +150,8 @@ func (state eventState) acceptsScopedEvent(name, target, assertion string) bool 
 	}
 }
 
-func (state eventState) isOuterFailureOutput(event testEvent, target string) bool {
-	if !state.targetRun || event.Test == target+"/assertion" {
+func (state eventState) isOuterFailureOutput(event testEvent, target, assertion string) bool {
+	if !state.targetRun || event.Test == assertion {
 		return false
 	}
 	if event.Test == "" {

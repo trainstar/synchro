@@ -116,6 +116,7 @@ func TestClassifyTestResultClassifiesNumberedAssertionFailure(t *testing.T) {
 		`{"Action":"start","Package":"example/integration"}`,
 		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
 		`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#03"}`,
+		`{"Action":"output","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#03","Output":"    proof_test.go:42: semantic assertion failed\n"}`,
 		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#03"}`,
 		`{"Action":"output","Package":"example/integration","Test":"TestRealIssue49Proof","Output":"--- FAIL: TestRealIssue49Proof (0.01s)\n"}`,
 		`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
