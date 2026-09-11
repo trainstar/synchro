@@ -328,6 +328,134 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertNil(try recovered.readTransaction { try SynchroMeta.getBackoffRecord($0) })
     }
 
+    func testBindingRenewalClearsOnlySupersededBatchBackoff() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "local", "u1", "2026-01-01T10:00:00.000000Z"]
+        )
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: sessionConfiguration)
+        defer {
+            MockURLProtocol.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        let config = SynchroConfig(
+            dbPath: db.path,
+            serverURL: URL(string: "http://test.local")!,
+            authProvider: { "test-token" },
+            clientID: "test-device",
+            appVersion: "1.0.0"
+        )
+        let httpClient = HttpClient(config: config, session: session)
+        var serverGeneration = 2
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 409,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = try JSONSerialization.data(withJSONObject: [
+                "error": [
+                    "code": "client_generation_expired",
+                    "message": "generation expired",
+                    "retryable": false,
+                    "current_client_generation": serverGeneration,
+                ] as [String: Any]
+            ])
+            return (response, body)
+        }
+
+        do {
+            _ = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "test-device",
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable.localSchema]
+            )
+            XCTFail("expected binding renewal")
+        } catch is BindingRenewalError {
+        }
+
+        let oldBatchID = try XCTUnwrap(
+            db.queryOne(
+                "SELECT batch_id FROM _synchro_push_batches WHERE state = 'renewal_required'",
+                params: nil
+            )?["batch_id"] as String?
+        )
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertBackoffRecord(
+                connection,
+                record: LocalBackoffRecord(
+                    resumeState: .pushing,
+                    workIdentity: oldBatchID,
+                    retryClassification: .network,
+                    attemptCount: 1,
+                    nextRetryAtMS: 1
+                )
+            )
+        }
+
+        XCTAssertTrue(
+            try processor.renewSealedBatchesAfterBindingChange(
+                clientID: "test-device",
+                clientGeneration: 2,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable.localSchema]
+            )
+        )
+        XCTAssertNil(try db.readTransaction { try SynchroMeta.getBackoffRecord($0) })
+        let states = try db.query("SELECT state FROM _synchro_push_batches", params: nil)
+            .compactMap { $0["state"] as String? }
+        XCTAssertEqual(Set(states), ["pending", "superseded"])
+
+        serverGeneration = 3
+        do {
+            _ = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "test-device",
+                clientGeneration: 2,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable.localSchema]
+            )
+            XCTFail("expected second binding renewal")
+        } catch is BindingRenewalError {
+        }
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertBackoffRecord(
+                connection,
+                record: LocalBackoffRecord(
+                    resumeState: .pushing,
+                    workIdentity: "unrelated-batch",
+                    retryClassification: .network,
+                    attemptCount: 1,
+                    nextRetryAtMS: 1
+                )
+            )
+        }
+
+        XCTAssertTrue(
+            try processor.renewSealedBatchesAfterBindingChange(
+                clientID: "test-device",
+                clientGeneration: 3,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable.localSchema]
+            )
+        )
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getBackoffRecord($0) }?.workIdentity,
+            "unrelated-batch"
+        )
+    }
+
     func testRemovePending() throws {
         let (db, tracker, _) = try makeTestEnv()
 

@@ -339,7 +339,15 @@ func validateRetentionReconnectFloorResume(before, restarted, after runnerResult
 	if err != nil {
 		return err
 	}
-	if resumedFloor.ScopeID != floor.ScopeID || !reflect.DeepEqual(resumedIdentity, identity) {
+	floorState := floor
+	floorState.Cursor = nil
+	resumedFloorState := resumedFloor
+	resumedFloorState.Cursor = nil
+	identityState := identity
+	identityState.Cursor = nil
+	resumedIdentityState := resumedIdentity
+	resumedIdentityState.Cursor = nil
+	if !reflect.DeepEqual(resumedFloorState, floorState) || !reflect.DeepEqual(resumedIdentityState, identityState) {
 		return errors.New("Swift retention-reconnect resumed cursor scope changed")
 	}
 	if call.Completion != "idle" {

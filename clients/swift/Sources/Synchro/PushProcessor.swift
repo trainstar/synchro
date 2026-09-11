@@ -604,6 +604,11 @@ final class PushProcessor: @unchecked Sendable {
             guard db.changesCount == 1 else {
                 throw SynchroError.invalidResponse(message: "sealed push batch supersession was not durable")
             }
+            try SynchroMeta.clearMatchingBackoffRecord(
+                db,
+                resumeState: .pushing,
+                workIdentity: oldBatchID
+            )
 
             for member in members {
                 try db.execute(

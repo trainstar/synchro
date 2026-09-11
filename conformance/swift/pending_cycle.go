@@ -43,6 +43,9 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("install Swift pending-cycle contract: %w", err)
 	}
+	if err := platform.Install(ctx, client, "current", ""); err != nil {
+		return PendingCycleResult{}, fmt.Errorf("install Swift pending-cycle client: %w", err)
+	}
 	unprotectedCommit, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-UNPROTECTED-COMMIT-001", "model/commit-source-transaction")
 	if err != nil {
 		return PendingCycleResult{}, err
@@ -65,9 +68,6 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	unprotectedAuthoredID, unprotectedValue, err := scenarios.PendingCycleUnprotectedRowTarget(unprotectedCommit, []scenarios.NativeIdentityAlias{unprotectedAlias}, unprotectedRuntimeID)
 	if err != nil {
 		return PendingCycleResult{}, err
-	}
-	if err := platform.Install(ctx, client, "current", ""); err != nil {
-		return PendingCycleResult{}, fmt.Errorf("install Swift pending-cycle client: %w", err)
 	}
 	beforeWrite, err := platform.captureSnapshot(ctx, client)
 	if err != nil {

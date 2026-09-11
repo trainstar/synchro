@@ -233,7 +233,9 @@ func resetSwiftPerformanceServer(t *testing.T, ctx context.Context, harness *bla
 		for time.Now().Before(deadline) {
 			ready, err = harness.Operator().ObserveExtensionReinstall(ctx, reinstall.ReinstallLSN)
 			namedFreshSlot := ready.ActiveSlotName == harness.Names().ReplicationSlot && ready.RestartLSN != "" && ready.RestartLSNAtOrAfterReinstall
-			slotReady := namedFreshSlot && (phase == 0 && !ready.SlotActive || phase == 1 && ready.SlotActive)
+			noSlot := ready.ActiveSlotName == "" && ready.RestartLSN == "" && !ready.SlotActive
+			slotReady := (phase == 0 && (noSlot || namedFreshSlot && !ready.SlotActive)) ||
+				(phase == 1 && namedFreshSlot && ready.SlotActive)
 			if err == nil && ready.WorkerPID > 0 && ready.WorkerPID != reinstall.PriorWorkerPID &&
 				slotReady &&
 				ready.ActiveRegistryGeneration > minimumGeneration &&

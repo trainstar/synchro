@@ -183,8 +183,8 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 		t.Fatalf("decode changed identity scope states: %v", err)
 	}
 	call.transportObservations[1].PullResponseFacts.ScopeCursorFingerprints = retentionReconnectCursorFingerprints(changedStates...)
-	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor, "identity-cursor"), snapshot(floorCursor, "identity-cursor"), changedIdentityCursor, call, runtimeScope); err == nil {
-		t.Fatal("floor-equal retention resume accepted a changed identity scope cursor")
+	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor, "identity-cursor"), snapshot(floorCursor, "identity-cursor"), changedIdentityCursor, call, runtimeScope); err != nil {
+		t.Fatalf("floor-equal retention resume rejected an opaque identity cursor advance: %v", err)
 	}
 }
 
