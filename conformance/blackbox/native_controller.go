@@ -1232,11 +1232,10 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
-		if usesDefaultSharedScope {
-			if err := c.harness.Operator().RegisterDefaultSharedScope(ctx); err != nil {
-				return NativeStepObservation{}, err
-			}
-		} else {
+		// Registration assigns the scope to every active client and bumps each
+		// scope set version, so a scenario that already holds its assignments
+		// must not re-register. Only removal is safe to drive from this step.
+		if !usesDefaultSharedScope {
 			if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
 				return NativeStepObservation{}, err
 			}
