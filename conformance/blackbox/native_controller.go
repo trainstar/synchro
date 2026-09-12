@@ -46,15 +46,15 @@ type NativeController struct {
 	// crossScopeConfigured records that a membership stage reconfigured the
 	// shared fixture table, so the close path restores it.
 	crossScopeConfigured bool
-	// defaultSharedScopeRemoved records that a step removed the default shared
-	// assignment, so a later step restores only what this controller removed.
+	// defaultSharedScopeRemoved records that setup or a step removed the default
+	// shared assignment. A later step restores only what this controller removed.
 	// Registration assigns the scope to every active client, so a scenario that
 	// never removed it must not re-register it.
 	defaultSharedScopeRemoved bool
-	harness              *Harness
-	httpClient           *http.Client
-	now                  func() time.Time
-	waitTimeout          time.Duration
+	harness                   *Harness
+	httpClient                *http.Client
+	now                       func() time.Time
+	waitTimeout               time.Duration
 
 	mu             sync.Mutex
 	closed         bool
@@ -475,6 +475,7 @@ func (c *NativeController) Install(ctx context.Context, operation scenarios.Oper
 		if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
 			return err
 		}
+		c.defaultSharedScopeRemoved = true
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1809,8 +1810,10 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 	for _, assignment := range payload.Assignments {
 		if existing, found := c.installation.scopes[assignment.ScopeID]; found {
 			switch existing {
-			case "cf:global", nativeStagedSharedRuntimeScope:
+			case "cf:global":
 				usesDefaultSharedScope = true
+				continue
+			case nativeStagedSharedRuntimeScope:
 				continue
 			case "user:" + payload.UserID:
 				continue

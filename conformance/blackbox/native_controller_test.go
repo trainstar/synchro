@@ -124,7 +124,7 @@ func TestNativeControllerAssignmentDoesNotStageSharedScope(t *testing.T) {
 	}
 }
 
-func TestNativeControllerAssignmentBindsStagedSharedScope(t *testing.T) {
+func TestNativeControllerStagedSharedAssignmentDoesNotRestoreDefaultScope(t *testing.T) {
 	controller := &NativeController{installation: &nativeInstallationBinding{
 		scopes:        map[string]string{nativeStagedSharedAuthoredScope: nativeStagedSharedRuntimeScope},
 		runtimeScopes: map[string]string{nativeStagedSharedRuntimeScope: nativeStagedSharedAuthoredScope},
@@ -135,12 +135,15 @@ func TestNativeControllerAssignmentBindsStagedSharedScope(t *testing.T) {
 		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-b"}]}`),
 	}
 
-	_, retainsSharedScope, _, err := controller.setClientAssignments(operation)
+	_, usesDefaultSharedScope, _, err := controller.setClientAssignments(operation)
 	if err != nil {
 		t.Fatalf("set client assignments: %v", err)
 	}
-	if !retainsSharedScope {
-		t.Fatal("staged shared assignment did not retain shared scopes")
+	if usesDefaultSharedScope {
+		t.Fatal("staged shared assignment requested the unrelated default shared scope")
+	}
+	if got := controller.installation.scopes[nativeStagedSharedAuthoredScope]; got != nativeStagedSharedRuntimeScope {
+		t.Fatalf("runtime scope = %q, want %q", got, nativeStagedSharedRuntimeScope)
 	}
 }
 
