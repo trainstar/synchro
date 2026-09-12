@@ -131,6 +131,28 @@ func TestValidateSuiteResult(t *testing.T) {
 			wantErrorText: "contains no test files",
 		},
 		{
+			name: "zero matching subtests with passing parent",
+			input: eventStream(
+				`{"Action":"start","Package":"example/one"}`,
+				`{"Action":"run","Package":"example/one","Test":"TestOne"}`,
+				`{"Action":"output","Package":"example/one","Test":"TestOne","Output":"testing: warning: no tests to run\n"}`,
+				`{"Action":"pass","Package":"example/one","Test":"TestOne"}`,
+				`{"Action":"pass","Package":"example/one"}`,
+			),
+			wantError: true,
+		},
+		{
+			name: "zero matching subtests in package summary",
+			input: eventStream(
+				`{"Action":"start","Package":"example/one"}`,
+				`{"Action":"run","Package":"example/one","Test":"TestOne"}`,
+				`{"Action":"pass","Package":"example/one","Test":"TestOne"}`,
+				`{"Action":"output","Package":"example/one","Output":"ok  \texample/one\t0.001s [no tests to run]\n"}`,
+				`{"Action":"pass","Package":"example/one"}`,
+			),
+			wantError: true,
+		},
+		{
 			name: "skipped test",
 			input: eventStream(
 				`{"Action":"start","Package":"example/one"}`,

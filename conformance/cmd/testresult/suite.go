@@ -208,6 +208,10 @@ func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) e
 			return fmt.Errorf("test %s in package %s has an invalid %s event", event.Test, event.Package, event.Action)
 		}
 	case "output":
+		if event.Output == "testing: warning: no tests to run\n" ||
+			(event.Test == "" && strings.Contains(event.Output, "[no tests to run]")) {
+			return fmt.Errorf("package %s executed zero matching tests", event.Package)
+		}
 		if event.Test == "" {
 			if testName, ok := suiteSubtestSummary(event.Output); ok {
 				event.Test = testName
