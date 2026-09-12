@@ -1501,11 +1501,32 @@ func (p *Platform) AwaitCall(ctx context.Context, client Client, callID string) 
 	return callResultWithWindow(*completed, window), nil
 }
 
+// AbortCall replaces a client process that still owns a staged call.
+func (p *Platform) AbortCall(ctx context.Context, client Client, callID string) error {
+	if err := p.context(ctx); err != nil {
+		return err
+	}
+	if !validRunnerCallID(callID) {
+		return errors.New("Swift abort-call identity is invalid")
+	}
+	state, err := p.client(client)
+	if err != nil {
+		return err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.terminated || state.session == nil || state.activeCall == nil || state.activeCall.id != callID {
+		return errors.New("Swift abort-call has no matching active call")
+	}
+	return p.restartClientProcess(ctx, state)
+}
+
 func callResultWithWindow(completed callResult, window operationWindow) CallResult {
 	result := CallResult{
 		CallID:                    completed.CallID,
 		State:                     completed.State,
 		Completion:                completed.Completion,
+		CallErrorCategory:         completed.CallErrorCategory,
 		ProvenanceMaintenanceWork: window.provenanceMaintenanceWork,
 		ReplayedMutationCount:     window.replayedMutationCount,
 	}
@@ -1792,31 +1813,10 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 		if state.terminated || state.session == nil || state.activeCall != nil && !state.activeCall.paused {
 			return StepObservation{}, errors.New("Swift client restart is unavailable")
 		}
-		// A staged call is paused before its next local transition. Killing it here
-		// models process loss at that durable boundary, not a completed call restart.
-		state.activeCall = nil
-		priorProcessID := state.processID
-		priorFingerprint := state.databaseIdentityFingerprint
 		started := time.Now()
-		if err := state.session.Kill(ctx); err != nil {
+		if err := p.restartClientProcess(ctx, state); err != nil {
 			return StepObservation{}, err
 		}
-		closeSession(state.session)
-		state.session = nil
-		state.terminated = true
-		if err := requireExistingDatabase(state.databasePath); err != nil {
-			return StepObservation{}, err
-		}
-		if err := p.startClient(ctx, state, ""); err != nil {
-			return StepObservation{}, fmt.Errorf("relaunch Swift runner: %w", err)
-		}
-		if err := verifyRestartIdentity(priorProcessID, priorFingerprint, state.processID, state.databaseIdentityFingerprint); err != nil {
-			closeSession(state.session)
-			state.session = nil
-			state.terminated = true
-			return StepObservation{}, err
-		}
-		state.restarted = true
 		after, err := captureRunner(ctx, state)
 		if err != nil {
 			return StepObservation{}, err
@@ -1843,6 +1843,32 @@ func (p *Platform) ProcessStep(ctx context.Context, client Client, operation sce
 	default:
 		return StepObservation{}, fmt.Errorf("Swift process operation %q is unsupported", scenarios.OperationKey(operation))
 	}
+}
+
+func (p *Platform) restartClientProcess(ctx context.Context, state *platformClient) error {
+	priorProcessID := state.processID
+	priorFingerprint := state.databaseIdentityFingerprint
+	if err := state.session.Kill(ctx); err != nil {
+		return err
+	}
+	state.activeCall = nil
+	closeSession(state.session)
+	state.session = nil
+	state.terminated = true
+	if err := requireExistingDatabase(state.databasePath); err != nil {
+		return err
+	}
+	if err := p.startClient(ctx, state, ""); err != nil {
+		return fmt.Errorf("relaunch Swift runner: %w", err)
+	}
+	if err := verifyRestartIdentity(priorProcessID, priorFingerprint, state.processID, state.databaseIdentityFingerprint); err != nil {
+		closeSession(state.session)
+		state.session = nil
+		state.terminated = true
+		return err
+	}
+	state.restarted = true
+	return nil
 }
 
 func (p *Platform) relaunchPendingResponseLoss(ctx context.Context, state *platformClient, loss *pendingResponseLoss) (StepObservation, error) {

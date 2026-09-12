@@ -3,7 +3,7 @@
   "schema_version": 2,
   "id": "SCN-PERF-PENDING-CYCLE-001",
   "title": "Canonical mutation reconciliation performance scenario",
-  "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
+  "description": "The staged start proves accepted local push state before WAL visibility. The first automatic pull must return capture_pending because start always pulls after push, and the same call must retry successfully after materialization.",
   "requirement_ids": [
     "SYNC-MUTATION-002",
     "SYNC-CONFLICT-001",
@@ -1089,6 +1089,7 @@
       "value": 1,
       "step_ids": [
         "STEP-PERF-PENDING-CYCLE-002",
+        "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001",
         "STEP-PERF-PENDING-CYCLE-003"
       ],
       "expectation_ids": []
@@ -1103,6 +1104,7 @@
       "step_ids": [
         "STEP-PERF-PENDING-CYCLE-001",
         "STEP-PERF-PENDING-CYCLE-002",
+        "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001",
         "STEP-PERF-PENDING-CYCLE-003"
       ],
       "expectation_ids": []
@@ -1141,6 +1143,7 @@
       "alias": "scope-a",
       "value": "scope-a",
       "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001",
         "STEP-PERF-PENDING-CYCLE-003"
       ],
       "expectation_ids": []
@@ -1150,6 +1153,7 @@
       "alias": "scope-set-version-one",
       "value": 1,
       "step_ids": [
+        "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001",
         "STEP-PERF-PENDING-CYCLE-003"
       ],
       "expectation_ids": []
@@ -1424,9 +1428,8 @@
         "user_id": "user-a",
         "client_id": "client-a",
         "call_id": "pending_push",
-        "stage": "synchronous",
-        "method": "start",
-        "completion": "idle"
+        "stage": "begin",
+        "method": "start"
       },
       "operation": {
         "contract_operation": "push",
@@ -1463,6 +1466,43 @@
           "delivery": "apply",
           "commit_lsn": "20",
           "end_lsn": "21"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Observe the required capture_pending pull before WAL materialization. This staged response proves that accepted push state cannot become pull-visible early.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "pending_push",
+        "stage": "await-step"
+      },
+      "operation": {
+        "contract_operation": "pull",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "scopes": [
+            {
+              "scope_id": "scope-a",
+              "cursor_source": "none"
+            }
+          ],
+          "limit": 100
         }
       },
       "expected_outcome": {
@@ -1518,9 +1558,8 @@
         "kind": "public-call",
         "user_id": "user-a",
         "client_id": "client-a",
-        "call_id": "pending_pull",
-        "stage": "synchronous",
-        "method": "sync-now",
+        "call_id": "pending_push",
+        "stage": "await-call",
         "completion": "idle"
       },
       "operation": {
@@ -1557,6 +1596,14 @@
       "http_status": 200,
       "error_code": null,
       "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001",
+      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
+      "contract_case": "capture_pending",
+      "http_status": 503,
+      "error_code": "capture_pending",
+      "retryable": true
     },
     {
       "step_id": "STEP-PERF-PENDING-CYCLE-003",

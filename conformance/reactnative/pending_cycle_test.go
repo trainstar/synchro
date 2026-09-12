@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -49,6 +52,31 @@ func TestValidatePendingCycleScenarioRejectsContractChanges(t *testing.T) {
 			name: "expected outcome",
 			mutate: func(scenario *scenarios.Scenario) {
 				scenario.Steps[0].ExpectedOutcome.Disposition = "error"
+			},
+		},
+		{
+			name: "capture-pending stage",
+			mutate: func(scenario *scenarios.Scenario) {
+				scenario.Steps[3].NativeBinding.Stage = "await-call"
+			},
+		},
+		{
+			name: "capture-pending status",
+			mutate: func(scenario *scenarios.Scenario) {
+				pendingCycleScenarioWire(t, scenario, pendingCycleCapturePendingStepID).HTTPStatus = http.StatusOK
+			},
+		},
+		{
+			name: "capture-pending error code",
+			mutate: func(scenario *scenarios.Scenario) {
+				code := "temporary_unavailable"
+				pendingCycleScenarioWire(t, scenario, pendingCycleCapturePendingStepID).ErrorCode = &code
+			},
+		},
+		{
+			name: "capture-pending retryability",
+			mutate: func(scenario *scenarios.Scenario) {
+				pendingCycleScenarioWire(t, scenario, pendingCycleCapturePendingStepID).Retryable = false
 			},
 		},
 		{
@@ -133,6 +161,74 @@ func TestPendingCycleCaptureRequestsDirectNativeEvidence(t *testing.T) {
 	}
 }
 
+func TestPendingCycleStagedCommandsBindOneAuthoredCall(t *testing.T) {
+	coordinator, err := NewPendingCycleCoordinator(PendingCycleCoordinatorConfig{
+		Scenario: loadPendingCycleAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create pending-cycle coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+
+	coordinator.initialPushRecorded = true
+	close(coordinator.initialPushDone)
+	coordinator.capturePendingRecorded = true
+	close(coordinator.capturePendingDone)
+	coordinator.retryPullRecorded = true
+	close(coordinator.retryPullDone)
+
+	tests := []struct {
+		stage  pendingCycleStage
+		actor  string
+		name   string
+		stepID scenarios.StepID
+	}{
+		{pendingCycleStageAfterInitialWrite, "client", "begin-call", pendingCyclePushStepID},
+		{pendingCycleStageInitialPushBegun, "observer", "await-step", pendingCyclePushStepID},
+		{pendingCycleStageInitialPushObserved, "observer", "await-step", pendingCycleCapturePendingStepID},
+		{pendingCycleStageBeforePull, "client", "await-call", pendingCyclePullStepID},
+	}
+	for _, test := range tests {
+		t.Run(string(test.stepID), func(t *testing.T) {
+			coordinator.stage = test.stage
+			response, err := coordinator.advanceLocked(context.Background(), 1)
+			if err != nil {
+				t.Fatalf("advance pending-cycle stage: %v", err)
+			}
+			action := response.Command.Action.Action
+			if action.Actor != test.actor || action.Command != test.name || action.Parameters["call_id"] != pendingCycleCallID {
+				t.Fatalf("pending-cycle command = %#v, want %s/%s call %q", action, test.actor, test.name, pendingCycleCallID)
+			}
+			if len(response.Command.Action.Steps) != 1 || !bytes.Equal(response.Command.Action.Steps[0].Operation.Payload, coordinator.steps[test.stepID].Operation.Payload) {
+				t.Fatalf("pending-cycle command step = %#v, want %s", response.Command.Action.Steps, test.stepID)
+			}
+		})
+	}
+}
+
+func TestPendingCycleCapturePendingWireRejectsChangedResponse(t *testing.T) {
+	scenario := loadPendingCycleAuthoredScenario(t)
+	valid := []byte(`{"error":{"code":"capture_pending","message":"capture pending","retryable":true}}`)
+	if err := pendingCycleValidateHTTPWire(scenario, pendingCycleCapturePendingStepID, http.StatusServiceUnavailable, valid); err != nil {
+		t.Fatalf("validate capture-pending wire: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		status int
+		body   []byte
+	}{
+		{"status", http.StatusOK, valid},
+		{"code", http.StatusServiceUnavailable, []byte(`{"error":{"code":"temporary_unavailable","message":"capture pending","retryable":true}}`)},
+		{"retryability", http.StatusServiceUnavailable, []byte(`{"error":{"code":"capture_pending","message":"capture pending","retryable":false}}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := pendingCycleValidateHTTPWire(scenario, pendingCycleCapturePendingStepID, test.status, test.body); err == nil {
+				t.Fatal("changed capture-pending wire was accepted")
+			}
+		})
+	}
+}
+
 func TestPendingCycleRuntimeTargetRejectsAmbiguousValueField(t *testing.T) {
 	operation := scenarios.Operation{
 		ContractOperation: "local",
@@ -194,6 +290,68 @@ func TestNewPendingCycleCoordinatorRejectsUnknownPlatform(t *testing.T) {
 	}
 }
 
+func TestPendingCycleCloseReleasesWALMaterialization(t *testing.T) {
+	coordinator, err := NewPendingCycleCoordinator(PendingCycleCoordinatorConfig{
+		Scenario: loadPendingCycleAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create pending-cycle coordinator: %v", err)
+	}
+	releases := 0
+	coordinator.resumeWAL = func(context.Context) error {
+		releases++
+		return nil
+	}
+	if err := coordinator.Close(context.Background()); err != nil {
+		t.Fatalf("close pending-cycle coordinator: %v", err)
+	}
+	if releases != 1 {
+		t.Fatalf("pending-cycle WAL releases = %d, want 1", releases)
+	}
+}
+
+func TestPendingCycleProxyHoldsRetryPullUntilMaterialization(t *testing.T) {
+	upstreamCalled := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalled <- struct{}{}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	coordinator, err := NewPendingCycleCoordinator(PendingCycleCoordinatorConfig{
+		Scenario: loadPendingCycleAuthoredScenario(t), Platform: "ios", ServerURL: upstream.URL, AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create pending-cycle coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	coordinator.initialPushRecorded = true
+	coordinator.capturePendingRecorded = true
+
+	completed := make(chan struct{})
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/sync/pull", strings.NewReader(`{}`))
+		coordinator.proxyAdapter(httptest.NewRecorder(), request)
+		close(completed)
+	}()
+	select {
+	case <-upstreamCalled:
+		t.Fatal("retry pull reached the adapter before materialization")
+	case <-time.After(50 * time.Millisecond):
+	}
+	coordinator.signalInitialPullMaterialized()
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("retry pull did not resume after materialization")
+	}
+	select {
+	case <-upstreamCalled:
+	default:
+		t.Fatal("retry pull did not reach the adapter after materialization")
+	}
+}
+
 func loadPendingCycleAuthoredScenario(t *testing.T) scenarios.Scenario {
 	t.Helper()
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -219,6 +377,17 @@ func cloneReactNativePendingCycleScenario(scenario scenarios.Scenario) scenarios
 	return clone
 }
 
+func pendingCycleScenarioWire(t *testing.T, scenario *scenarios.Scenario, stepID scenarios.StepID) *scenarios.WireExpectation {
+	t.Helper()
+	for index := range scenario.WireExpectations {
+		if scenario.WireExpectations[index].StepID == stepID {
+			return &scenario.WireExpectations[index]
+		}
+	}
+	t.Fatalf("pending-cycle wire expectation %s is absent", stepID)
+	return nil
+}
+
 // A pull between an accepted push and its materialization returns 503
 // capture_pending, and the client retries it. The trace must accept that retry
 // and must still reject a failure that the contract does not allow.
@@ -235,6 +404,9 @@ func TestPendingCycleTraceHonorsCapturePendingRetry(t *testing.T) {
 			transportWithPull("pull", 7, requestFacts(1, schema, 1, 1, "", ""), "cursor-b", "cursor-c"),
 		)
 		trace.Observations[5].StatusCode = pendingCycleCapturePendingStatus
+		complete := true
+		trace.Observations[5].CursorFingerprints = []string{hashFingerprint("cursor-b")}
+		trace.Observations[5].CursorFingerprintsComplete = &complete
 		trace.SequenceCheckpoint = 7
 		if mutate != nil {
 			mutate(&trace)
@@ -257,9 +429,9 @@ func TestPendingCycleTraceHonorsCapturePendingRetry(t *testing.T) {
 		{"capture pending before the push", func(trace *traceSnapshot) {
 			trace.Observations[4].StatusCode = pendingCycleCapturePendingStatus
 		}},
-		{"no pull after the push", func(trace *traceSnapshot) {
-			trace.Observations = trace.Observations[:5]
-			trace.SequenceCheckpoint = 5
+		{"missing retry pull", func(trace *traceSnapshot) {
+			trace.Observations = trace.Observations[:6]
+			trace.SequenceCheckpoint = 6
 		}},
 		{"second push", func(trace *traceSnapshot) {
 			trace.Observations[6].OperationClass = "push"
@@ -267,6 +439,19 @@ func TestPendingCycleTraceHonorsCapturePendingRetry(t *testing.T) {
 		}},
 		{"pull never succeeds", func(trace *traceSnapshot) {
 			trace.Observations[6].StatusCode = pendingCycleCapturePendingStatus
+		}},
+		{"capture pending cursor absent", func(trace *traceSnapshot) {
+			trace.Observations[5].CursorFingerprints = nil
+			trace.Observations[5].CursorFingerprintsComplete = nil
+		}},
+		{"capture pending cursor changed", func(trace *traceSnapshot) {
+			trace.Observations[5].CursorFingerprints = []string{hashFingerprint("wrong-cursor")}
+		}},
+		{"retry cursor absent", func(trace *traceSnapshot) {
+			trace.Observations[6].CursorFingerprints = []string{}
+		}},
+		{"retry cursor changed", func(trace *traceSnapshot) {
+			trace.Observations[6].CursorFingerprints = []string{hashFingerprint("wrong-cursor")}
 		}},
 	}
 	for _, test := range tests {

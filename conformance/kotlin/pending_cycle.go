@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -25,17 +24,20 @@ type PendingCycleResult struct {
 
 // RunPendingCycleScenario executes the authored pending-cycle flow through Kotlin Android.
 func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (PendingCycleResult, error) {
-	steps, err := kotlinScenarioStepMap(scenario, pendingCycleScenarioID, 6)
+	steps, err := kotlinScenarioStepMap(scenario, pendingCycleScenarioID, 7)
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
 	if controller == nil || platform == nil {
 		return PendingCycleResult{}, errors.New("Kotlin Android pending-cycle dependencies are unavailable")
 	}
-	for _, id := range []string{"STEP-PERF-PENDING-CYCLE-001", "STEP-PERF-PENDING-CYCLE-002", "STEP-PERF-PENDING-CYCLE-003"} {
+	for _, id := range []string{"STEP-PERF-PENDING-CYCLE-001", "STEP-PERF-PENDING-CYCLE-002", "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", "STEP-PERF-PENDING-CYCLE-003"} {
 		if err := kotlinScenarioClient(steps[scenarios.StepID(id)], client); err != nil {
 			return PendingCycleResult{}, err
 		}
+	}
+	if err := validateKotlinPendingCycleCallBindings(steps); err != nil {
+		return PendingCycleResult{}, err
 	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("install Kotlin Android pending-cycle contract: %w", err)
@@ -134,26 +136,71 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err := validateKotlinPendingCyclePostWrite(beforeWrite, afterWrite); err != nil {
 		return PendingCycleResult{}, err
 	}
-	push, err := kotlinScenarioCall(ctx, platform, client, "start")
+	authoredPush, err := kotlinScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-002", "push/submit")
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("run Kotlin Android pending push: %w", err)
 	}
-	pushObservation, err := kotlinScenarioWire(push, "push")
+	capturePendingPull, err := kotlinScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", "pull/request-page")
 	if err != nil {
-		return PendingCycleResult{}, fmt.Errorf("Kotlin Android pending push transport is absent: completion %q, call error category <none>, operation classes %s: %w", push.Completion, kotlinPendingCycleOperationClasses(push), err)
-	}
-	if push.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable == nil || *pushObservation.Retryable {
-		return PendingCycleResult{}, errors.New("Kotlin Android pending push did not complete successfully")
-	}
-	if err := validateKotlinWireExpectation(scenario, "STEP-PERF-PENDING-CYCLE-002", "push", push); err != nil {
 		return PendingCycleResult{}, err
 	}
-	authoredPush, err := kotlinScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-002", "push/submit")
+	capturePendingPull, err = kotlinPendingCycleRuntimePull(capturePendingPull)
 	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	callID := "pending_push"
+	state, err := platform.clientFor(client)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("access Kotlin Android pending-cycle transport: %w", err)
+	}
+	state.mu.Lock()
+	if state.session == nil {
+		state.mu.Unlock()
+		return PendingCycleResult{}, errors.New("Kotlin Android pending-cycle transport session is unavailable")
+	}
+	transportCheckpoint := state.session.Checkpoint()
+	state.mu.Unlock()
+	begin, err := platform.BeginCall(ctx, CallRequest{Client: client, CallID: callID, Method: "start", Operations: []scenarios.Operation{authoredPush}})
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("begin Kotlin Android pending-cycle call: %w", err)
+	}
+	callActive := true
+	defer func() {
+		if callActive {
+			cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = platform.AbortCall(cleanupContext, CallRequest{Client: client, CallID: callID})
+		}
+	}()
+	if begin.CallID != callID || begin.State != "in_flight" || begin.Completion != "" || len(begin.Steps) != 1 {
+		return PendingCycleResult{}, errors.New("Kotlin Android pending-cycle call did not enter flight")
+	}
+	observations, err := kotlinPendingCycleTransportObservations(platform, client, transportCheckpoint)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("capture Kotlin Android pending-cycle begin transport: %w", err)
+	}
+	if err := validateKotlinPendingCycleBeginTransport(observations); err != nil {
+		return PendingCycleResult{}, err
+	}
+	if err := validateKotlinPendingCycleStepWire(scenario, "STEP-PERF-PENDING-CYCLE-002", "push", begin.Steps[0], observations[1]); err != nil {
 		return PendingCycleResult{}, err
 	}
 	if err := controller.BindApplicationPush(authoredPush); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("bind Kotlin Android pending push transaction: %w", err)
+	}
+	pendingPullStep, err := platform.AwaitStep(ctx, AwaitRequest{Client: client, CallID: callID, Operation: capturePendingPull})
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("await Kotlin Android pending-cycle capture-pending pull: %w", err)
+	}
+	observations, err = kotlinPendingCycleTransportObservations(platform, client, transportCheckpoint)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("capture Kotlin Android pending-cycle capture-pending transport: %w", err)
+	}
+	if err := validateKotlinPendingCycleTransport(observations, 3); err != nil {
+		return PendingCycleResult{}, err
+	}
+	if err := validateKotlinPendingCycleStepWire(scenario, "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", "pull", pendingPullStep, observations[2]); err != nil {
+		return PendingCycleResult{}, err
 	}
 	afterPush, err := platform.scenarioSnapshot(ctx, client)
 	if err != nil {
@@ -181,6 +228,10 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
+	pull, err = kotlinPendingCycleRuntimePull(pull)
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
 	beforePull, err := platform.scenarioSnapshot(ctx, client)
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("capture Kotlin Android pending pull checkpoint: %w", err)
@@ -189,35 +240,53 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil || len(states) != 1 || states[0].Cursor == nil || *states[0].Cursor == "" {
 		return PendingCycleResult{}, errors.New("Kotlin Android pending pull checkpoint is invalid")
 	}
-	var runtimePayload map[string]any
-	if err := json.Unmarshal(pull.Payload, &runtimePayload); err != nil {
-		return PendingCycleResult{}, errors.New("decode Kotlin Android pending pull runtime binding failed")
-	}
-	rawScopes, ok := runtimePayload["scopes"].([]any)
-	if !ok || len(rawScopes) != 1 {
-		return PendingCycleResult{}, errors.New("Kotlin Android pending pull scope binding is invalid")
-	}
-	for _, rawScope := range rawScopes {
-		scope, ok := rawScope.(map[string]any)
-		if !ok || scope["cursor_source"] != "none" {
-			return PendingCycleResult{}, errors.New("Kotlin Android pending pull authored cursor source is invalid")
-		}
-		scope["cursor_source"] = "local_checkpoint"
-	}
-	runtimePull := pull
-	runtimePull.Payload, err = json.Marshal(runtimePayload)
-	if err != nil || scenarios.ValidateOperation(runtimePull) != nil {
-		return PendingCycleResult{}, errors.New("encode Kotlin Android pending pull runtime binding failed")
-	}
-	pullCall, err := platform.Synchronize(ctx, SynchronizeRequest{Client: client, Method: "sync-now", Operations: []scenarios.Operation{runtimePull}})
+	retryPullStep, err := platform.AwaitStep(ctx, AwaitRequest{Client: client, CallID: callID, Operation: pull})
 	if err != nil {
-		return PendingCycleResult{}, fmt.Errorf("run Kotlin Android pending pull: %w", err)
+		return PendingCycleResult{}, fmt.Errorf("await Kotlin Android pending-cycle retry pull: %w", err)
 	}
-	if pullCall.Completion != "idle" || len(pullCall.Steps) != 1 || len(pullCall.transportObservations) != 1 || pullCall.transportObservations[0].StatusCode != 200 {
-		return PendingCycleResult{}, errors.New("Kotlin Android pending pull did not complete successfully")
+	observations, err = kotlinPendingCycleTransportObservations(platform, client, transportCheckpoint)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("capture Kotlin Android pending-cycle retry transport: %w", err)
 	}
-	if err := validateKotlinWireExpectation(scenario, "STEP-PERF-PENDING-CYCLE-003", "pull", pullCall); err != nil {
+	if err := validateKotlinPendingCycleTransport(observations, 4); err != nil {
 		return PendingCycleResult{}, err
+	}
+	if err := validateKotlinPendingCycleStepWire(scenario, "STEP-PERF-PENDING-CYCLE-003", "pull", retryPullStep, observations[3]); err != nil {
+		return PendingCycleResult{}, err
+	}
+	completed, err := platform.AwaitCall(ctx, CallRequest{Client: client, CallID: callID})
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("complete Kotlin Android pending-cycle call: %w", err)
+	}
+	callActive = false
+	if completed.CallID != callID || completed.State != "completed" || completed.Completion != "idle" {
+		return PendingCycleResult{}, errors.New("Kotlin Android pending-cycle call did not complete idle")
+	}
+	observations, err = kotlinPendingCycleTransportObservations(platform, client, transportCheckpoint)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("capture Kotlin Android pending-cycle completed transport: %w", err)
+	}
+	if err := validateKotlinPendingCycleTransport(observations, 4); err != nil {
+		return PendingCycleResult{}, err
+	}
+	push := SynchronizationResult{
+		Completion:                completed.Completion,
+		Steps:                     []StepObservation{begin.Steps[0], pendingPullStep, retryPullStep},
+		DurationNanoseconds:       completed.DurationNanoseconds,
+		ProvenanceMaintenanceWork: completed.ProvenanceMaintenanceWork,
+		ReplayedMutationCount:     completed.ReplayedMutationCount,
+		transportObservations:     cloneObservations(observations[1:]),
+	}
+	pullCall := SynchronizationResult{
+		Completion:                completed.Completion,
+		Steps:                     []StepObservation{pendingPullStep, retryPullStep},
+		DurationNanoseconds:       completed.DurationNanoseconds,
+		ProvenanceMaintenanceWork: completed.ProvenanceMaintenanceWork,
+		ReplayedMutationCount:     completed.ReplayedMutationCount,
+		transportObservations: cloneObservations([]TransportObservation{
+			observations[2],
+			observations[3],
+		}),
 	}
 	afterPull, err := platform.scenarioSnapshot(ctx, client)
 	if err != nil {
@@ -358,15 +427,99 @@ func validateKotlinPendingCyclePostWrite(before, after Result) error {
 	return nil
 }
 
-func kotlinPendingCycleOperationClasses(call SynchronizationResult) string {
-	if len(call.transportObservations) == 0 {
-		return "<none>"
+func kotlinPendingCycleRuntimePull(operation scenarios.Operation) (scenarios.Operation, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil {
+		return scenarios.Operation{}, errors.New("decode Kotlin Android pending pull runtime binding failed")
 	}
-	classes := make([]string, 0, len(call.transportObservations))
-	for _, observation := range call.transportObservations {
-		classes = append(classes, observation.OperationClass)
+	scopes, ok := payload["scopes"].([]any)
+	if !ok || len(scopes) != 1 {
+		return scenarios.Operation{}, errors.New("Kotlin Android pending pull scope binding is invalid")
 	}
-	return strings.Join(classes, ",")
+	scope, ok := scopes[0].(map[string]any)
+	if !ok || scope["cursor_source"] != "none" {
+		return scenarios.Operation{}, errors.New("Kotlin Android pending pull authored cursor source is invalid")
+	}
+	scope["cursor_source"] = "local_checkpoint"
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return scenarios.Operation{}, errors.New("encode Kotlin Android pending pull runtime binding failed")
+	}
+	operation.Payload = encoded
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return scenarios.Operation{}, errors.New("encode Kotlin Android pending pull runtime binding failed")
+	}
+	return operation, nil
+}
+
+func validateKotlinPendingCycleCallBindings(steps map[scenarios.StepID]scenarios.Step) error {
+	expected := []struct {
+		id         string
+		stage      string
+		method     string
+		completion string
+	}{
+		{id: "STEP-PERF-PENDING-CYCLE-002", stage: "begin", method: "start"},
+		{id: "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", stage: "await-step"},
+		{id: "STEP-PERF-PENDING-CYCLE-003", stage: "await-call", completion: "idle"},
+	}
+	for _, value := range expected {
+		step, found := steps[scenarios.StepID(value.id)]
+		if !found || step.NativeBinding == nil || step.NativeBinding.Kind != "public-call" || step.NativeBinding.CallID == nil || string(*step.NativeBinding.CallID) != "pending_push" || step.NativeBinding.Stage != value.stage || step.NativeBinding.Method != value.method || step.NativeBinding.Completion != value.completion {
+			return fmt.Errorf("Kotlin Android pending-cycle call binding %s is invalid", value.id)
+		}
+	}
+	return nil
+}
+
+func kotlinPendingCycleTransportObservations(platform *Platform, client Client, checkpoint uint64) ([]TransportObservation, error) {
+	state, err := platform.clientFor(client)
+	if err != nil {
+		return nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.session == nil {
+		return nil, errors.New("Kotlin Android pending-cycle transport session is unavailable")
+	}
+	return state.session.ObservationsAfter(checkpoint)
+}
+
+func validateKotlinPendingCycleBeginTransport(observations []TransportObservation) error {
+	if err := validateKotlinPendingCycleTransport(observations, 2); err != nil {
+		return err
+	}
+	connect := observations[0]
+	if connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable == nil || *connect.Retryable {
+		return errors.New("Kotlin Android pending-cycle setup connect did not succeed")
+	}
+	return nil
+}
+
+func validateKotlinPendingCycleTransport(observations []TransportObservation, expected int) error {
+	expectedClasses := []string{"connect", "push", "pull", "pull"}
+	if expected < 1 || expected > len(expectedClasses) || len(observations) != expected {
+		return fmt.Errorf("Kotlin Android pending-cycle transport has %d observations, want %d", len(observations), expected)
+	}
+	for index, observation := range observations {
+		if observation.OperationClass != expectedClasses[index] {
+			return fmt.Errorf("Kotlin Android pending-cycle transport operation class %q at position %d, want %q", observation.OperationClass, index, expectedClasses[index])
+		}
+		if observation.Retryable == nil {
+			return fmt.Errorf("Kotlin Android pending-cycle %s transport retryability is absent", observation.OperationClass)
+		}
+	}
+	return nil
+}
+
+func validateKotlinPendingCycleStepWire(scenario scenarios.Scenario, stepID, operationClass string, step StepObservation, observed TransportObservation) error {
+	if step.Disposition != "success" || step.Wire == nil || step.Wire.HTTPStatus != observed.StatusCode || observed.Retryable == nil || step.Wire.Retryable != *observed.Retryable || !equalKotlinOptionalStrings(step.Wire.ErrorCode, observed.ErrorCode) {
+		return fmt.Errorf("Kotlin Android pending-cycle %s step result does not match transport", stepID)
+	}
+	if observed.OperationClass != operationClass {
+		return fmt.Errorf("Kotlin Android pending-cycle %s operation class is %q, want %q", stepID, observed.OperationClass, operationClass)
+	}
+	return validateKotlinWireObservation(scenario, stepID, observed)
 }
 
 func validateKotlinPendingCycleCleanupCall(call SynchronizationResult) error {

@@ -1494,6 +1494,37 @@ func (p *Platform) AwaitCall(ctx context.Context, request CallRequest) (ClientCa
 	return clientCallResultWithWindow(completed, window), nil
 }
 
+// AbortCall replaces a client process that still owns a staged call.
+func (p *Platform) AbortCall(ctx context.Context, request CallRequest) error {
+	if err := platformContext(ctx); err != nil {
+		return err
+	}
+	if !validCallID(request.CallID) || request.Method != "" || len(request.Operations) != 0 {
+		return errors.New("Kotlin Android abort-call request is invalid")
+	}
+	state, err := p.clientFor(request.Client)
+	if err != nil {
+		return err
+	}
+	p.installMu.Lock()
+	defer p.installMu.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	peers, err := p.lockPeerClientsForProcessReplacement(state)
+	if err != nil {
+		return err
+	}
+	defer unlockPlatformClients(peers)
+	if state.terminated || state.session == nil || state.activeCall == nil || state.activeCall.id != request.CallID {
+		return errors.New("Kotlin Android abort-call has no matching active call")
+	}
+	if _, err := p.restartClient(ctx, state); err != nil {
+		return err
+	}
+	state.activeCall = nil
+	return nil
+}
+
 // Lifecycle invokes one public client lifecycle operation.
 func (p *Platform) Lifecycle(ctx context.Context, request LifecycleRequest) (StepObservation, error) {
 	if err := platformContext(ctx); err != nil {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
@@ -25,7 +24,7 @@ type PendingCycleResult struct {
 
 // RunPendingCycleScenario executes the authored pending-cycle flow through Swift.
 func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (PendingCycleResult, error) {
-	steps, err := swiftScenarioStepMap(scenario, pendingCycleScenarioID, 6)
+	steps, err := swiftScenarioStepMap(scenario, pendingCycleScenarioID, 7)
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
@@ -35,11 +34,16 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	for _, id := range []string{
 		"STEP-PERF-PENDING-CYCLE-001",
 		"STEP-PERF-PENDING-CYCLE-002",
+		"STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001",
 		"STEP-PERF-PENDING-CYCLE-003",
 	} {
 		if err := swiftScenarioClient(steps[scenarios.StepID(id)], client); err != nil {
 			return PendingCycleResult{}, err
 		}
+	}
+	callID, err := validateSwiftPendingCycleCallBindings(steps)
+	if err != nil {
+		return PendingCycleResult{}, err
 	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("install Swift pending-cycle contract: %w", err)
@@ -141,35 +145,60 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 		return PendingCycleResult{}, err
 	}
 
-	push, err := swiftScenarioCall(ctx, platform, client, "start")
-	if err != nil {
-		return PendingCycleResult{}, fmt.Errorf("run Swift pending push: %w", err)
-	}
-	pushObservation, err := swiftScenarioWire(push, "push")
-	if err != nil {
-		return PendingCycleResult{}, fmt.Errorf("Swift pending push transport is absent: completion %q, call error category <none>, operation classes %s: %w", push.Completion, swiftPendingCycleOperationClasses(push), err)
-	}
-	if push.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable {
-		// The observed values separate a push the server rejected from a push
-		// the client left in durable backoff.
-		state, stateErr := platform.client(client)
-		report := "client unavailable"
-		if stateErr == nil {
-			report = state.session.stderrReport()
-		}
-		return PendingCycleResult{}, fmt.Errorf(
-			"Swift pending push did not complete successfully: completion %q, status %d, retryable %t, error code %s (runner reported: %s)",
-			push.Completion, pushObservation.StatusCode, pushObservation.Retryable, optionalStringOrNone(pushObservation.ErrorCode), report)
-	}
-	if err := validateSwiftWireExpectation(scenario, "STEP-PERF-PENDING-CYCLE-002", "push", push); err != nil {
-		return PendingCycleResult{}, err
-	}
 	authoredPush, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-002", "push/submit")
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
+	capturePending, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", "pull/request-page")
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	capturePending, err = swiftPendingCycleRuntimePull(capturePending)
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	pull, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-003", "pull/request-page")
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	pull, err = swiftPendingCycleRuntimePull(pull)
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	state, err := platform.client(client)
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	state.mu.Lock()
+	transportCheckpoint := state.session.Checkpoint()
+	state.mu.Unlock()
+	begin, err := platform.BeginCall(ctx, client, callID, "start", RequestOperations{authoredPush})
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("begin Swift pending-cycle call: %w", err)
+	}
+	callActive := true
+	defer func() {
+		if callActive {
+			cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = platform.AbortCall(cleanupContext, client, callID)
+		}
+	}()
+	if err := validateSwiftPendingCycleBegin(begin, callID); err != nil {
+		return PendingCycleResult{}, err
+	}
+	if err := validateSwiftPendingCycleStepWire(scenario, "STEP-PERF-PENDING-CYCLE-002", begin.Steps[0]); err != nil {
+		return PendingCycleResult{}, err
+	}
 	if err := controller.BindApplicationPush(authoredPush); err != nil {
 		return PendingCycleResult{}, fmt.Errorf("bind Swift pending push transaction: %w", err)
+	}
+	pendingPull, err := platform.AwaitStep(ctx, client, callID, capturePending)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("await Swift pending capture-pending pull: %w", err)
+	}
+	if err := validateSwiftPendingCycleStepWire(scenario, "STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", pendingPull); err != nil {
+		return PendingCycleResult{}, err
 	}
 	afterPush, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
@@ -191,58 +220,55 @@ func RunPendingCycleScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil {
 		return PendingCycleResult{}, err
 	}
-	if _, err := controller.ProcessStep(ctx, nil, materialize); err != nil {
-		return PendingCycleResult{}, fmt.Errorf("materialize Swift pending mutation: %w", err)
-	}
-	pull, err := swiftScenarioOperation(steps, "STEP-PERF-PENDING-CYCLE-003", "pull/request-page")
-	if err != nil {
-		return PendingCycleResult{}, err
+	if result, processErr := controller.ProcessStep(ctx, nil, materialize); processErr != nil || result.Disposition != "success" {
+		return PendingCycleResult{}, fmt.Errorf("materialize Swift pending mutation: %w", resultError(processErr, result.Disposition))
 	}
 	beforePull, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
 		return PendingCycleResult{}, fmt.Errorf("capture Swift pending pull checkpoint: %w", err)
 	}
-	if len(beforePull.ScopeStates) != 1 || beforePull.ScopeStates[0].Cursor == nil || *beforePull.ScopeStates[0].Cursor == "" {
-		scopes := make([]string, 0, len(beforePull.ScopeStates))
-		for _, scope := range beforePull.ScopeStates {
-			scopes = append(scopes, scope.ScopeID+":"+optionalStringOrNone(scope.Cursor))
-		}
-		state, stateErr := platform.client(client)
-		report := "client unavailable"
-		if stateErr == nil {
-			report = state.session.stderrReport()
-		}
-		return PendingCycleResult{}, fmt.Errorf("Swift pending pull checkpoint is invalid: scopes %v (runner reported: %s)", scopes, report)
-	}
-	var runtimePullPayload map[string]any
-	if err := json.Unmarshal(pull.Payload, &runtimePullPayload); err != nil {
-		return PendingCycleResult{}, errors.New("decode Swift pending pull runtime binding failed")
-	}
-	rawScopes, ok := runtimePullPayload["scopes"].([]any)
-	if !ok || len(rawScopes) != 1 {
-		return PendingCycleResult{}, errors.New("Swift pending pull scope binding is invalid")
-	}
-	for _, rawScope := range rawScopes {
-		scope, ok := rawScope.(map[string]any)
-		if !ok || scope["cursor_source"] != "none" {
-			return PendingCycleResult{}, errors.New("Swift pending pull authored cursor source is invalid")
-		}
-		scope["cursor_source"] = "local_checkpoint"
-	}
-	runtimePull := pull
-	runtimePull.Payload, err = json.Marshal(runtimePullPayload)
-	if err != nil || scenarios.ValidateOperation(runtimePull) != nil {
-		return PendingCycleResult{}, errors.New("encode Swift pending pull runtime binding failed")
-	}
-	pullCall, err := platform.Synchronize(ctx, client, "sync-now", RequestOperations{runtimePull})
+	retryPull, err := platform.AwaitStep(ctx, client, callID, pull)
 	if err != nil {
-		return PendingCycleResult{}, fmt.Errorf("run Swift pending pull: %w", err)
+		return PendingCycleResult{}, fmt.Errorf("await Swift pending-cycle retry pull: %w", err)
 	}
-	if pullCall.Completion != "idle" || len(pullCall.Steps) != 1 || len(pullCall.transportObservations) != 1 || pullCall.transportObservations[0].StatusCode != 200 {
-		return PendingCycleResult{}, errors.New("Swift pending pull did not complete successfully")
-	}
-	if err := validateSwiftWireExpectation(scenario, "STEP-PERF-PENDING-CYCLE-003", "pull", pullCall); err != nil {
+	if err := validateSwiftPendingCycleStepWire(scenario, "STEP-PERF-PENDING-CYCLE-003", retryPull); err != nil {
 		return PendingCycleResult{}, err
+	}
+	completed, err := platform.AwaitCall(ctx, client, callID)
+	if err != nil {
+		return PendingCycleResult{}, fmt.Errorf("complete Swift pending-cycle call: %w", err)
+	}
+	callActive = false
+	if err := validateSwiftPendingCycleCompletion(completed, callID); err != nil {
+		return PendingCycleResult{}, err
+	}
+	state.mu.Lock()
+	transport, transportErr := state.session.ObservationsAfter(transportCheckpoint)
+	state.mu.Unlock()
+	if transportErr != nil {
+		return PendingCycleResult{}, fmt.Errorf("capture Swift pending-cycle transport: %w", transportErr)
+	}
+	coveredTransport, err := validateSwiftPendingCycleTransport(scenario, transport)
+	if err != nil {
+		return PendingCycleResult{}, err
+	}
+	push := SynchronizationResult{
+		Completion:                completed.Completion,
+		CallErrorCategory:         completed.CallErrorCategory,
+		Steps:                     []StepObservation{begin.Steps[0], pendingPull, retryPull},
+		DurationNanoseconds:       completed.DurationNanoseconds,
+		ProvenanceMaintenanceWork: completed.ProvenanceMaintenanceWork,
+		ReplayedMutationCount:     completed.ReplayedMutationCount,
+		transportObservations:     cloneTransportObservations(coveredTransport),
+	}
+	pullCall := SynchronizationResult{
+		Completion:                completed.Completion,
+		CallErrorCategory:         completed.CallErrorCategory,
+		Steps:                     []StepObservation{pendingPull, retryPull},
+		DurationNanoseconds:       completed.DurationNanoseconds,
+		ProvenanceMaintenanceWork: completed.ProvenanceMaintenanceWork,
+		ReplayedMutationCount:     completed.ReplayedMutationCount,
+		transportObservations:     cloneTransportObservations(coveredTransport[1:]),
 	}
 	afterPull, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
@@ -383,15 +409,105 @@ func validateSwiftPendingCyclePostWrite(before, after runnerResult) error {
 	return nil
 }
 
-func swiftPendingCycleOperationClasses(call SynchronizationResult) string {
-	if len(call.transportObservations) == 0 {
-		return "<none>"
+func swiftPendingCycleRuntimePull(operation scenarios.Operation) (scenarios.Operation, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil {
+		return scenarios.Operation{}, errors.New("decode Swift pending pull runtime binding failed")
 	}
-	classes := make([]string, 0, len(call.transportObservations))
-	for _, observation := range call.transportObservations {
-		classes = append(classes, observation.OperationClass)
+	scopes, ok := payload["scopes"].([]any)
+	if !ok || len(scopes) != 1 {
+		return scenarios.Operation{}, errors.New("Swift pending pull scope binding is invalid")
 	}
-	return strings.Join(classes, ",")
+	scope, ok := scopes[0].(map[string]any)
+	if !ok || scope["cursor_source"] != "none" {
+		return scenarios.Operation{}, errors.New("Swift pending pull authored cursor source is invalid")
+	}
+	scope["cursor_source"] = "local_checkpoint"
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return scenarios.Operation{}, errors.New("encode Swift pending pull runtime binding failed")
+	}
+	operation.Payload = encoded
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return scenarios.Operation{}, errors.New("encode Swift pending pull runtime binding failed")
+	}
+	return operation, nil
+}
+
+func validateSwiftPendingCycleCallBindings(steps map[scenarios.StepID]scenarios.Step) (string, error) {
+	expected := []struct {
+		id, stage, method, completion string
+	}{
+		{"STEP-PERF-PENDING-CYCLE-002", "begin", "start", ""},
+		{"STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", "await-step", "", ""},
+		{"STEP-PERF-PENDING-CYCLE-003", "await-call", "", "idle"},
+	}
+	const callID = "pending_push"
+	for _, want := range expected {
+		step, found := steps[scenarios.StepID(want.id)]
+		if !found || step.NativeBinding == nil {
+			return "", fmt.Errorf("Swift pending-cycle step %s has no native call binding", want.id)
+		}
+		binding := step.NativeBinding
+		if binding.Kind != "public-call" || binding.CallID == nil || string(*binding.CallID) != callID || binding.Stage != want.stage || binding.Method != want.method || binding.Completion != want.completion {
+			return "", fmt.Errorf("Swift pending-cycle step %s native call binding is invalid", want.id)
+		}
+	}
+	return callID, nil
+}
+
+func validateSwiftPendingCycleBegin(call CallResult, callID string) error {
+	if call.CallID != callID || call.State != "in_flight" || call.Completion != "" || call.CallErrorCategory != "" || len(call.Steps) != 1 {
+		return errors.New("Swift pending-cycle push did not enter the staged call")
+	}
+	return nil
+}
+
+func validateSwiftPendingCycleStepWire(scenario scenarios.Scenario, stepID string, observed StepObservation) error {
+	for _, expected := range scenario.WireExpectations {
+		if expected.StepID != scenarios.StepID(stepID) {
+			continue
+		}
+		if observed.Disposition != "success" || observed.Wire == nil || observed.Wire.HTTPStatus != expected.HTTPStatus || observed.Wire.Retryable != expected.Retryable || !equalOptionalStrings(observed.Wire.ErrorCode, expected.ErrorCode) {
+			return fmt.Errorf("Swift pending-cycle wire result %s differs from its authored expectation", stepID)
+		}
+		return nil
+	}
+	return fmt.Errorf("Swift pending-cycle wire expectation %s is absent", stepID)
+}
+
+func validateSwiftPendingCycleCompletion(call CallResult, callID string) error {
+	if call.CallID != callID || call.State != "completed" || call.Completion != "idle" || call.CallErrorCategory != "" || len(call.Steps) != 0 {
+		return errors.New("Swift pending-cycle call did not complete idle")
+	}
+	return nil
+}
+
+func validateSwiftPendingCycleTransport(scenario scenarios.Scenario, observed []transportObservation) ([]transportObservation, error) {
+	if len(observed) != 4 {
+		return nil, fmt.Errorf("Swift pending-cycle transport count = %d, want 4", len(observed))
+	}
+	connect := observed[0]
+	if connect.OperationClass != "connect" || connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable {
+		return nil, errors.New("Swift pending-cycle staged call setup connect is invalid")
+	}
+	expected := []struct {
+		stepID, operationClass string
+	}{
+		{"STEP-PERF-PENDING-CYCLE-002", "push"},
+		{"STEP-PERF-PENDING-CYCLE-CAPTURE-PENDING-001", "pull"},
+		{"STEP-PERF-PENDING-CYCLE-003", "pull"},
+	}
+	covered := observed[1:]
+	for index, want := range expected {
+		if covered[index].OperationClass != want.operationClass {
+			return nil, fmt.Errorf("Swift pending-cycle transport %d operation class = %q, want %q", index+1, covered[index].OperationClass, want.operationClass)
+		}
+		if err := validateSwiftWireObservation(scenario, want.stepID, covered[index]); err != nil {
+			return nil, err
+		}
+	}
+	return covered, nil
 }
 
 func validateSwiftPendingCycleCleanupCall(call SynchronizationResult) error {

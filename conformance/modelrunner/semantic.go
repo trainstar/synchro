@@ -702,6 +702,7 @@ func pendingCycleSatisfied(result Result) bool {
 		"model/commit-source-transaction",
 		"local/write",
 		"push/submit",
+		"pull/request-page",
 		"process/materialize-source-transaction",
 		"process/materialize-source-transaction",
 		"pull/request-page",
@@ -709,12 +710,24 @@ func pendingCycleSatisfied(result Result) bool {
 	if !ok {
 		return false
 	}
-	commit, localWrite, push, unprotectedMaterialize, materialize, pull := steps[0], steps[1], steps[2], steps[3], steps[4], steps[5]
+	commit, localWrite, push, capturePending, unprotectedMaterialize, materialize, pull := steps[0], steps[1], steps[2], steps[3], steps[4], steps[5], steps[6]
 	client, mutation, ok := pendingTraceIdentity(localWrite, push)
-	if !ok || !pendingLocalWriteSatisfied(localWrite, client, mutation) || !pendingPushSatisfied(push, client, mutation) || !sourceMaterializationSatisfied(commit, unprotectedMaterialize, "scope-a", 1) || !pendingMaterializationSatisfied(materialize, push, client, mutation) {
+	if !ok || !pendingLocalWriteSatisfied(localWrite, client, mutation) || !pendingPushSatisfied(push, client, mutation) || !capturePendingPullSatisfied(capturePending, client) || !sourceMaterializationSatisfied(commit, unprotectedMaterialize, "scope-a", 1) || !pendingMaterializationSatisfied(materialize, push, client, mutation) {
 		return false
 	}
 	return terminalPullExecutionSatisfied(pull) && reflect.DeepEqual(materialize.After, pull.Before) && reflect.DeepEqual(pull.After, result.FinalSnapshot)
+}
+
+func capturePendingPullSatisfied(execution OperationExecution, client reference.ClientKey) bool {
+	if execution.Err != nil || execution.Result.Kind != reference.StepResultKindPull || execution.Result.HTTP == nil || execution.Result.Pull == nil || !reflect.DeepEqual(execution.Before, execution.After) {
+		return false
+	}
+	http := execution.Result.HTTP
+	if http.Status != 503 || !http.HasCode || http.Code != "capture_pending" || !http.Retryable || http.HasRetryAfterMilliseconds || http.RetryAfterMilliseconds != 0 || len(http.Body) != 0 || !reflect.DeepEqual(*execution.Result.Pull, reference.PullObservation{}) {
+		return false
+	}
+	var request semanticPullRequest
+	return json.Unmarshal(execution.Operation.Payload, &request) == nil && request.UserID == string(client.UserID) && request.ClientID == string(client.ClientID) && len(request.Scopes) == 1 && request.Scopes[0].ScopeID == "scope-a"
 }
 
 func rebuildRequestsSatisfied(result Result) bool {

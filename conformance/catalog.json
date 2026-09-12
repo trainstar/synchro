@@ -29,7 +29,7 @@
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "path": "conformance/scenarios/performance/pending-cycle-001.json",
-      "sha256": "dbec09c89f4da8f6653e61d6e14cc52dd6eb534d9642e1ac5174b5f0d58bb645"
+      "sha256": "8347aea78b574ce6130a422763fbea6272a7fe2ca38f9f444c294ee604f0e36f"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",

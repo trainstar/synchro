@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateRunnerResponseAcceptsClientCallResult(t *testing.T) {
@@ -23,6 +24,18 @@ func TestValidateRunnerResponseAcceptsClientCallResult(t *testing.T) {
 
 func TestSynchronizationResultRetainsCallErrorCategory(t *testing.T) {
 	result := synchronizationResult("error", "blocking_failure", nil, operationWindow{})
+	if result.CallErrorCategory != "blocking_failure" {
+		t.Fatalf("call error category = %q, want blocking_failure", result.CallErrorCategory)
+	}
+}
+
+func TestCallResultWithWindowRetainsCallErrorCategory(t *testing.T) {
+	result := callResultWithWindow(callResult{
+		CallID:            "sync_cycle",
+		State:             "completed",
+		Completion:        "error",
+		CallErrorCategory: "blocking_failure",
+	}, operationWindow{duration: time.Nanosecond})
 	if result.CallErrorCategory != "blocking_failure" {
 		t.Fatalf("call error category = %q, want blocking_failure", result.CallErrorCategory)
 	}
