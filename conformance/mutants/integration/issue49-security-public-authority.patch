@@ -7,6 +7,18 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
  REVOKE USAGE ON TYPE synchro.synchro_row_ref FROM PUBLIC;
 +-- Mutant: expose one extension-owned type through PUBLIC.
 +GRANT USAGE ON TYPE synchro.synchro_row_ref TO PUBLIC;
+
+ GRANT USAGE ON SCHEMA synchro
+     TO synchro_adapter, synchro_seed, synchro_monitor, synchro_operator, synchro_worker;
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -2549,6 +2549,8 @@ REVOKE ALL ON ALL TABLES IN SCHEMA synchro FROM PUBLIC;
+ REVOKE ALL ON ALL SEQUENCES IN SCHEMA synchro FROM PUBLIC;
+ REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA synchro FROM PUBLIC;
+ REVOKE USAGE ON TYPE synchro.synchro_row_ref FROM PUBLIC;
++-- Mutant: expose one extension-owned type through PUBLIC.
++GRANT USAGE ON TYPE synchro.synchro_row_ref TO PUBLIC;
  
  GRANT USAGE ON SCHEMA synchro
      TO synchro_adapter, synchro_seed, synchro_monitor, synchro_operator, synchro_worker;

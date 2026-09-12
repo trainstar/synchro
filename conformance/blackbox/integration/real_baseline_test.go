@@ -106,16 +106,13 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	}
 	barrierContext, barrierCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer barrierCancel()
-	if err := barrierControl.QueueBarrier(barrierContext); err != nil {
+	if err := barrierControl.AcquireBarrier(barrierContext); err != nil {
 		select {
 		case outcome := <-completed:
 			t.Fatalf("queue projection bootstrap barrier: %v; bootstrap result: %v", err, outcome.err)
 		default:
 			t.Fatalf("queue projection bootstrap barrier: %v", err)
 		}
-	}
-	if err := barrierControl.WaitForBarrier(ctx); err != nil {
-		t.Fatalf("wait for projection bootstrap barrier: %v", err)
 	}
 	if err := harness.Source().ExecContext(
 		ctx,
@@ -1443,6 +1440,11 @@ func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *black
 	if status != http.StatusOK {
 		t.Fatalf("real protocol client connect status = %d, want 200", status)
 	}
+	return parseRealProtocolClient(t, response, clientID, expectedScopes...)
+}
+
+func parseRealProtocolClient(t *testing.T, response map[string]any, clientID string, expectedScopes ...string) *realProtocolClient {
+	t.Helper()
 	generation, ok := response["client_generation"].(float64)
 	if !ok || generation <= 0 {
 		t.Fatal("real protocol client generation is invalid")

@@ -11,3 +11,16 @@ diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/hea
      );
      if configuration.publication.is_some() {
          status.set(
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -2051,3 +2051,3 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1065
++-- synchro-pg/src/health.rs:1066
+ -- synchro_pg::health::synchro_health_detail
+@@ -2263,3 +2263,3 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1058
++-- synchro-pg/src/health.rs:1059
+ -- synchro_pg::health::synchro_readiness

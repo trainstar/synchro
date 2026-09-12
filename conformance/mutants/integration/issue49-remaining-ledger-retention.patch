@@ -47,3 +47,43 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
          RETURN OLD;
      END IF;
      IF TG_OP = 'DELETE'
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -548,11 +548,7 @@ BEGIN
+        AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
+         RETURN NEW;
+     END IF;
+-    IF TG_OP = 'DELETE'
+-       AND EXISTS (
+-           SELECT 1 FROM sync_client_retirements
+-           WHERE user_id = OLD.user_id AND client_id = OLD.client_id
+-       ) THEN
++    IF TG_OP = 'DELETE' THEN
+         RETURN OLD;
+     END IF;
+     RAISE EXCEPTION 'push ledger rows are immutable outside client retirement'
+@@ -565,11 +561,7 @@ RETURNS trigger
+ LANGUAGE plpgsql
+ AS $$
+ BEGIN
+-    IF TG_OP = 'DELETE'
+-       AND EXISTS (
+-           SELECT 1 FROM sync_client_retirements
+-           WHERE user_id = OLD.user_id AND client_id = OLD.client_id
+-       ) THEN
++    IF TG_OP = 'DELETE' THEN
+         RETURN OLD;
+     END IF;
+     IF TG_OP = 'DELETE'
+@@ -2060,4 +2052,4 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/compaction.rs:37
++-- synchro-pg/src/compaction.rs:47
+ -- synchro_pg::compaction::synchro_inject_client_retention_expiry
+ CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
+@@ -2453,3 +2445,3 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/lib.rs:1929
++-- synchro-pg/src/lib.rs:1921
+ -- finalize

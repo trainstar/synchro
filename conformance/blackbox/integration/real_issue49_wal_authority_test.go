@@ -170,38 +170,42 @@ func TestRealIssue49WALPoisonBlocksContiguousProgress(t *testing.T) {
 	_ = response.Body.Close()
 	diagnostics := harness.FailureDiagnostics()
 
-	if err := harness.RestartPostgres(ctx); err != nil {
-		t.Fatalf("restart PostgreSQL with active poison: %v", err)
-	}
-	afterRestart := waitForIssue49Poison(t, ctx, harness, laterID)
-	afterRestartAcknowledgement := observeIssue49BlockedAcknowledgement(t, ctx, openIssue49Admin(t, ctx, harness), afterRestart.CommitLSN)
-	retried, err := harness.Operator().RetryWALPoison(ctx)
-	if err != nil || !retried {
-		t.Fatalf("request same-identity poison retry: requested=%t err=%v", retried, err)
-	}
-	waitForRealWALRecords(t, ctx, harness, "cf_items", poisonID, laterID)
-	recovery, err := harness.Operator().ObserveWALPoisonRecovery(ctx, poisonID)
-	if err != nil {
-		t.Fatalf("observe Issue 49 poison recovery: %v", err)
-	}
-	recoveredPipeline, err := harness.Operator().ObserveWALRecords(ctx, []string{poisonID, laterID})
-	if err != nil {
-		t.Fatalf("observe recovered contiguous WAL acknowledgement: %v", err)
-	}
-	waitForIssue49PublicReady(t, ctx, harness.AdapterURL(), true)
-
 	t.Run("assertion", func(t *testing.T) {
-		if before.FailureClass != "decode_failed" || before.CommitLSN == "" || !before.AcknowledgementBlocked ||
+		if before.FailureClass != "decode_failed" || before.CommitLSN == "" {
+			t.Fatalf("decoder poison was not persisted: %#v", before)
+		}
+		if !beforeAcknowledgement.SlotMatchesProgress || !beforeAcknowledgement.ProgressBeforePoison ||
+			!beforeAcknowledgement.SlotBeforePoison || beforeAcknowledgement.ProgressEndLSN == "" ||
+			beforeAcknowledgement.ProgressEndLSN != prefixEndLSN || beforeAcknowledgement.SlotFlushLSN != prefixEndLSN {
+			t.Fatalf("logical slot advanced past the poisoned contiguous prefix: poison=%s prefix=%s acknowledgement=%#v", before.CommitLSN, prefixEndLSN, beforeAcknowledgement)
+		}
+		if err := harness.RestartPostgres(ctx); err != nil {
+			t.Fatalf("restart PostgreSQL with active poison: %v", err)
+		}
+		afterRestart := waitForIssue49Poison(t, ctx, harness, laterID)
+		afterRestartAcknowledgement := observeIssue49BlockedAcknowledgement(t, ctx, openIssue49Admin(t, ctx, harness), afterRestart.CommitLSN)
+		retried, err := harness.Operator().RetryWALPoison(ctx)
+		if err != nil || !retried {
+			t.Fatalf("request same-identity poison retry: requested=%t err=%v", retried, err)
+		}
+		waitForRealWALRecords(t, ctx, harness, "cf_items", poisonID, laterID)
+		recovery, err := harness.Operator().ObserveWALPoisonRecovery(ctx, poisonID)
+		if err != nil {
+			t.Fatalf("observe Issue 49 poison recovery: %v", err)
+		}
+		recoveredPipeline, err := harness.Operator().ObserveWALRecords(ctx, []string{poisonID, laterID})
+		if err != nil {
+			t.Fatalf("observe recovered contiguous WAL acknowledgement: %v", err)
+		}
+		waitForIssue49PublicReady(t, ctx, harness.AdapterURL(), true)
+		if !before.AcknowledgementBlocked ||
 			before.LaterRecordMaterialized || !before.LaterFencePending || !before.WorkerBlocked ||
 			!before.ReadinessBlocked || !before.PoisonCheckFailed || before.WALLagSeconds < 0 ||
 			afterRestart.CommitLSN != before.CommitLSN || !afterRestart.AcknowledgementBlocked ||
 			afterRestart.LaterRecordMaterialized || !afterRestart.LaterFencePending {
 			t.Fatalf("poison did not block one contiguous durable prefix: before=%#v after=%#v", before, afterRestart)
 		}
-		if !beforeAcknowledgement.SlotMatchesProgress || !beforeAcknowledgement.ProgressBeforePoison ||
-			!beforeAcknowledgement.SlotBeforePoison || beforeAcknowledgement.ProgressEndLSN == "" ||
-			beforeAcknowledgement.ProgressEndLSN != prefixEndLSN || beforeAcknowledgement.SlotFlushLSN != prefixEndLSN ||
-			afterRestartAcknowledgement != beforeAcknowledgement {
+		if afterRestartAcknowledgement != beforeAcknowledgement {
 			t.Fatalf("logical slot advanced past the blocked durable prefix: before=%#v after=%#v", beforeAcknowledgement, afterRestartAcknowledgement)
 		}
 		if readyStatus != http.StatusServiceUnavailable || !bytes.Equal(readyBody, []byte(`{"ready":false}`)) {
@@ -947,9 +951,6 @@ func TestRealIssue49FenceCorrelationAndCapturePending(t *testing.T) {
 	mismatch := injectIssue49FenceKeyVersionMismatch(
 		t, ctx, harness, admin, mismatchRecordID, mismatchedRecordID, laterRecordID,
 	)
-	mismatchPoison := waitForIssue49Poison(t, ctx, harness, laterRecordID)
-	mismatchState := observeIssue49FenceMismatchBlock(t, ctx, admin, mismatch, mismatchRecordID, mismatchedRecordID)
-
 	t.Run("assertion", func(t *testing.T) {
 		if correlation.Fences != 4 || correlation.Events != 4 || correlation.UniqueFenceIDs != 4 ||
 			correlation.Mismatches != 0 ||
@@ -969,6 +970,8 @@ func TestRealIssue49FenceCorrelationAndCapturePending(t *testing.T) {
 		if !issue49CheckpointMapsEqual(beforeCheckpoints, afterCheckpoints) {
 			t.Fatalf("capture_pending advanced durable progress: before=%#v after=%#v", beforeCheckpoints, afterCheckpoints)
 		}
+		mismatchPoison := waitForIssue49Poison(t, ctx, harness, laterRecordID)
+		mismatchState := observeIssue49FenceMismatchBlock(t, ctx, admin, mismatch, mismatchRecordID, mismatchedRecordID)
 		if mismatch.OriginalVersion == mismatch.MismatchedVersion || mismatch.FenceID == "" ||
 			mismatchPoison.FailureClass != "fence_correlation_failed" || !mismatchPoison.AcknowledgementBlocked ||
 			!mismatchPoison.RelationIDMatchesRegistry || mismatchPoison.LaterRecordMaterialized ||

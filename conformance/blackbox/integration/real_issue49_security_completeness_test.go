@@ -119,25 +119,6 @@ func TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary(t *testing.T) {
 		}
 	}
 
-	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8a01-000000000005")
-	acknowledgeRealClientCursors(t, ctx, harness, token, client)
-	before := observeCheckpointMap(t, ctx, harness, client.ID)
-	unknownScopes := issue49CloneScopes(client.Scopes)
-	unknownScopes["security49:client-authored"] = client.Scopes["user:diagnostic-user"]
-	unknownStatus, unknownResponse := postSync(
-		t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, unknownScopes, 100),
-	)
-	predicateRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 100)
-	predicateRequest["predicate"] = "owner_id = current_user"
-	predicateStatus, predicateResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", predicateRequest)
-	SQLRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 100)
-	SQLRequest["scope_sql"] = "SELECT scope_id FROM private_assignments"
-	SQLStatus, SQLResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", SQLRequest)
-	rebuildRequest := endpoints[3].request
-	rebuildRequest["scope"] = "security49:client-authored"
-	rebuildStatus, rebuildResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/rebuild", rebuildRequest)
-	after := observeCheckpointMap(t, ctx, harness, client.ID)
-
 	t.Run("assertion", func(t *testing.T) {
 		for _, endpoint := range endpoints {
 			if deniedStatuses[endpoint.name] != http.StatusInternalServerError || restoredStatuses[endpoint.name] != endpoint.wantAfter {
@@ -149,6 +130,24 @@ func TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary(t *testing.T) {
 				)
 			}
 		}
+		rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8a01-000000000005")
+		acknowledgeRealClientCursors(t, ctx, harness, token, client)
+		before := observeCheckpointMap(t, ctx, harness, client.ID)
+		unknownScopes := issue49CloneScopes(client.Scopes)
+		unknownScopes["security49:client-authored"] = client.Scopes["user:diagnostic-user"]
+		unknownStatus, unknownResponse := postSync(
+			t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, unknownScopes, 100),
+		)
+		predicateRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 100)
+		predicateRequest["predicate"] = "owner_id = current_user"
+		predicateStatus, predicateResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", predicateRequest)
+		SQLRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 100)
+		SQLRequest["scope_sql"] = "SELECT scope_id FROM private_assignments"
+		SQLStatus, SQLResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", SQLRequest)
+		rebuildRequest := endpoints[3].request
+		rebuildRequest["scope"] = "security49:client-authored"
+		rebuildStatus, rebuildResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/rebuild", rebuildRequest)
+		after := observeCheckpointMap(t, ctx, harness, client.ID)
 		assertIssue49ProtocolError(t, unknownStatus, unknownResponse, http.StatusBadRequest, "invalid_request", false)
 		assertIssue49ProtocolError(t, predicateStatus, predicateResponse, http.StatusBadRequest, "invalid_request", false)
 		assertIssue49ProtocolError(t, SQLStatus, SQLResponse, http.StatusBadRequest, "invalid_request", false)
@@ -748,6 +747,14 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 	scopeRequest["predicate"] = scopeCanary
 	_, _ = postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", scopeRequest)
 	readyStatus, readyBody := getIssue49Readiness(t, ctx, harness.AdapterURL())
+	for readyStatus == http.StatusServiceUnavailable && bytes.Equal(readyBody, []byte(`{"ready":false}`)) {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("operational redaction fixture did not become ready: %s", harness.FailureDiagnostics())
+		case <-time.After(50 * time.Millisecond):
+		}
+		readyStatus, readyBody = getIssue49Readiness(t, ctx, harness.AdapterURL())
+	}
 	admin := openIssue49Admin(t, ctx, harness)
 	health := loadIssue49Health(t, ctx, admin)
 	wALDiagnostic, diagnosticErr := harness.Operator().WALDiagnostics(ctx)
@@ -785,8 +792,15 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		metricsBody,
 		tracesBody,
 	}
+	logDisclosure, err := harness.StopAdapterAndObserveLogDisclosure(ctx, canaries)
+	if err != nil {
+		t.Fatalf("observe operational logs: %v", err)
+	}
 
 	t.Run("assertion", func(t *testing.T) {
+		if logDisclosure {
+			t.Fatal("operational logs disclosed protected data")
+		}
 		if status != http.StatusOK || readyStatus != http.StatusOK || !bytes.Equal(readyBody, []byte(`{"ready":true}`)) {
 			t.Fatalf("redaction exercise did not reach healthy operational output: push=%d ready=%d body=%q", status, readyStatus, readyBody)
 		}

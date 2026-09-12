@@ -485,6 +485,50 @@ func TestCaptureReadinessFailureIncludesLastObservedStateAndQueryError(t *testin
 	}
 }
 
+func TestOperationalLogDisclosureUsesCompleteUnsanitizedLogs(t *testing.T) {
+	const canary = "protected-log-canary"
+	for _, test := range []struct {
+		name      string
+		adapter   string
+		postgres  string
+		collector string
+		wantLeak  bool
+		wantError bool
+	}{
+		{name: "clean", adapter: "adapter started", collector: "database ready"},
+		{name: "redacted credential", adapter: canary, wantLeak: true},
+		{name: "outside diagnostic suffix", adapter: canary + strings.Repeat("x", 600), wantLeak: true},
+		{name: "postgres process", postgres: canary, wantLeak: true},
+		{name: "unfiltered collector", collector: "LOG: " + canary, wantLeak: true},
+		{name: "truncated process", adapter: strings.Repeat("x", 2049), wantError: true},
+		{name: "truncated collector", collector: strings.Repeat("x", 2049), wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			if err := os.Mkdir(filepath.Join(directory, "log"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "log", "postgresql.log"), []byte(test.collector), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			adapter := newBoundedLog(2048, [][]byte{[]byte(canary)})
+			postgres := newBoundedLog(2048, [][]byte{[]byte(canary)})
+			_, _ = adapter.Write([]byte(test.adapter))
+			_, _ = postgres.Write([]byte(test.postgres))
+			harness := &Harness{
+				config:   HarnessConfig{ProcessLogBytes: 2048, ShutdownTimeout: time.Second},
+				dataDir:  directory,
+				adapter:  &ownedProcess{log: adapter},
+				postgres: &ownedProcess{log: postgres},
+			}
+			leaked, err := harness.StopAdapterAndObserveLogDisclosure(context.Background(), []string{canary})
+			if (err != nil) != test.wantError || leaked != test.wantLeak {
+				t.Fatalf("log observation: disclosure=%t error=%v", leaked, err)
+			}
+		})
+	}
+}
+
 func TestFailureDiagnosticsIncludesRedactedPostgresFileLog(t *testing.T) {
 	dataDir := t.TempDir()
 	logDir := filepath.Join(dataDir, "log")

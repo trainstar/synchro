@@ -499,7 +499,7 @@ func TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay(t *te
 		}
 	})
 
-	t.Run("assertion", func(t *testing.T) {
+	if !t.Run("assertion", func(t *testing.T) {
 		resurrectionMutationID := "00000000-0000-4000-8d01-000000000033"
 		resurrectionStatus, resurrection := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", phase4PushPayload(
 			client,
@@ -531,7 +531,9 @@ func TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay(t *te
 		if state.Live || !state.ValueMatches || !state.VersionMatches {
 			t.Fatalf("implicit resurrection changed the authoritative tombstone: %#v", state)
 		}
-	})
+	}) {
+		return
+	}
 
 	t.Run("assertion", func(t *testing.T) {
 		versions := []string{insertVersion, updateVersion, deleteVersion}

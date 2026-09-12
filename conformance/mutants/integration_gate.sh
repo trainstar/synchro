@@ -254,11 +254,34 @@ PY
 
 printf '%s\n' 'Packaging unmodified integration mutation artifacts'
 validate_manifest
+manifest_rows >"$run_root/manifest.tsv"
+tab=$(printf '\t')
+selected_id=${2:-}
+selected_patch=
+selected_test=
+if [ -n "$selected_id" ]; then
+	while IFS="$tab" read -r category patch test_path; do
+		if [ "$category" = "$selected_id" ]; then
+			selected_patch=$patch
+			selected_test=$test_path
+		fi
+	done <"$run_root/manifest.tsv"
+	if [ -z "$selected_patch" ] || [ -z "$selected_test" ]; then
+		fail "integration mutant is not in the manifest: $selected_id"
+	fi
+fi
 configure_real_environment
 package_artifacts "$repo_root" baseline
 baseline_extension=$PACKAGE_EXTENSION_ARTIFACT
 baseline_adapter=$PACKAGE_ADAPTER_ARTIFACT
 baseline_seed=$PACKAGE_SEED_ARTIFACT
+
+if [ -n "$selected_id" ]; then
+	run_category "$selected_id" "$selected_patch" "$selected_test"
+	gate_passed=1
+	printf 'Focused integration mutation control passed: %s\n' "$selected_id"
+	exit 0
+fi
 
 run_category \
 	cursor-advancement \
@@ -289,8 +312,6 @@ run_category \
 	conformance/mutants/integration/pull-deduplication.patch \
 	TestRealS02DivergentPullPaginationIsStarvationFree
 
-manifest_rows >"$run_root/manifest.tsv"
-tab=$(printf '\t')
 while IFS="$tab" read -r category patch test_path; do
 	run_category "$category" "$patch" "$test_path"
 done <"$run_root/manifest.tsv"

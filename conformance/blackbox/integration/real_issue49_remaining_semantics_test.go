@@ -872,11 +872,13 @@ func issue49RemainingOperationalRedaction(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("redaction control push status = %d: %#v", status, response)
 	}
-	diagnostics := []byte(harness.FailureDiagnostics())
-	for _, canary := range []string{client.ID, valueCanary, recordCanary, mutationCanary, token} {
-		if bytes.Contains(diagnostics, []byte(canary)) {
-			t.Fatal("operational diagnostics disclosed protected data")
-		}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", recordCanary)
+	disclosed, err := harness.StopAdapterAndObserveLogDisclosure(ctx, []string{client.ID, valueCanary, recordCanary, mutationCanary, token})
+	if err != nil {
+		t.Fatalf("observe operational logs: %v", err)
+	}
+	if disclosed {
+		t.Fatal("operational logs disclosed protected data")
 	}
 }
 
@@ -1005,19 +1007,82 @@ func issue49RemainingSeedArtifactVerification(t *testing.T) {
 
 func issue49RemainingRetentionFloor(t *testing.T) {
 	ctx, harness, token := issue49RemainingHarness(t, 5*time.Minute)
-	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-retention-floor")
-	_, oldUserCursor := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8e24-000000000001")
-	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8e24-000000000002")
+	database, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open retention-floor database: %v", err)
+	}
+	defer database.Close()
+	// A portable seed supplies the initial cursor without a live rebuild pin.
+	// The pin would prevent compaction at the tested boundary.
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire retention seed connection: %v", err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE"); err != nil {
+		t.Fatalf("begin retention seed transaction: %v", err)
+	}
+	defer connection.ExecContext(context.Background(), "ROLLBACK")
+	manifest := issue49QueryJSONObject(t, ctx, connection, "SELECT synchro.synchro_portable_seed_manifest(1)")
+	seedScope := issue49RemainingSeedScope(t, manifest)
+	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("commit retention seed transaction: %v", err)
+	}
+	const clientID = "issue49-remaining-retention-floor"
+	status, connected := postConnect(t, ctx, harness.AdapterURL(), token, map[string]any{
+		"client_id": clientID, "platform": "conformance", "app_version": "0.3.0", "protocol_version": 3,
+		"schema": map[string]any{"version": 0, "hash": ""}, "scope_set_version": 0, "known_scopes": map[string]any{},
+		"seed_receipts": map[string]any{"cf:global": seedScope["continuation"]},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("connect seeded retention client: status=%d", status)
+	}
+	client := parseRealProtocolClient(t, connected, clientID)
+	oldScopeCursor := client.Scopes["cf:global"].(map[string]any)["cursor"].(string)
+	rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8e24-000000000001")
 	recordID := "00000000-0000-4000-8e24-000000000003"
-	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)", recordID, "diagnostic-user", "retention-floor"); err != nil {
+	secondRecordID := "00000000-0000-4000-8e24-000000000004"
+	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_global_items (id, value) VALUES ($1, $2), ($3, $2)", recordID, "retention-floor", secondRecordID); err != nil {
 		t.Fatalf("insert retention-floor row: %v", err)
 	}
-	waitForRealWALRecords(t, ctx, harness, "cf_items", recordID)
-	first := pullRealClientWithLimit(t, ctx, harness, token, client, client.Scopes, 100)
-	if len(requireRealChanges(t, first)) != 1 {
-		t.Fatalf("retention-floor control did not deliver one effect: %#v", first)
+	waitForRealWALRecords(t, ctx, harness, "cf_global_items", recordID, secondRecordID)
+	first := pullRealClientWithLimit(t, ctx, harness, token, client, client.Scopes, 1)
+	if len(requireRealChanges(t, first)) != 1 || first["has_more"] != true {
+		t.Fatalf("retention-floor control did not create an effect-boundary page: %#v", first)
 	}
-	atFloorUserCursor := client.Scopes["user:diagnostic-user"].(map[string]any)["cursor"].(string)
+	boundaryCursor := client.Scopes["cf:global"].(map[string]any)["cursor"].(string)
+	second := pullRealClientWithLimit(t, ctx, harness, token, client, client.Scopes, 1)
+	if len(requireRealChanges(t, second)) != 1 || second["has_more"] != false {
+		t.Fatalf("retention-floor control did not finish the remaining page: %#v", second)
+	}
+	partialCompaction, err := harness.Operator().RunDiagnosticRetentionCompaction(ctx)
+	if err != nil || partialCompaction.DeletedEntries != 1 || partialCompaction.DeactivatedClients != 0 {
+		t.Fatalf("compact acknowledged effect boundary: result=%#v error=%v", partialCompaction, err)
+	}
+	boundary := issue49DecodeOpaqueToken(t, boundaryCursor, "ic1")
+	boundaryPosition, err := json.Marshal(boundary["position"])
+	if err != nil {
+		t.Fatalf("encode retention boundary position: %v", err)
+	}
+	var boundaryEqualsFloor bool
+	if err := database.QueryRowContext(ctx, `
+		SELECT floor_position_kind = 'effect'
+		   AND floor_position_kind = $1::jsonb->>'position_kind'
+		   AND floor_commit_lsn = ($1::jsonb->>'commit_lsn')::pg_lsn
+		   AND floor_event_ordinal = ($1::jsonb->>'event_ordinal')::bigint
+		   AND floor_effect_ordinal = ($1::jsonb->>'effect_ordinal')::integer
+		FROM synchro.sync_scope_state WHERE scope_id = 'cf:global'`, boundaryPosition).Scan(&boundaryEqualsFloor); err != nil {
+		t.Fatalf("compare retained floor with the issued effect cursor: %v", err)
+	}
+	if !boundaryEqualsFloor {
+		t.Fatal("retention boundary control did not produce a cursor exactly at the floor")
+	}
+	client.Scopes["cf:global"] = map[string]any{"cursor": boundaryCursor}
+	atFloor := pullRealClientWithLimit(t, ctx, harness, token, client, client.Scopes, 100)
+	if !reflect.DeepEqual(requireRealChanges(t, atFloor), requireRealChanges(t, second)) || atFloor["has_more"] != false {
+		t.Fatalf("floor-equal cursor did not replay the remaining effect: %#v", atFloor)
+	}
+	acknowledgedScopeCursor := client.Scopes["cf:global"].(map[string]any)["cursor"].(string)
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 	if err := harness.Operator().ExpireRetentionClient(ctx, "diagnostic-user", client.ID); err != nil {
 		t.Fatalf("expire retention-floor client: %v", err)
@@ -1038,13 +1103,8 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 		EventOrdinal         int64
 		EffectOrdinal        int32
 	}
-	database, err := sql.Open("pgx", harness.DatabaseURL())
-	if err != nil {
-		t.Fatalf("open retention-floor database: %v", err)
-	}
-	defer database.Close()
 	var remainingEffects int64
-	if err := database.QueryRowContext(ctx, "SELECT count(*) FROM synchro.sync_changelog WHERE bucket_id = 'user:diagnostic-user'").Scan(&remainingEffects); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT count(*) FROM synchro.sync_changelog WHERE bucket_id = 'cf:global'").Scan(&remainingEffects); err != nil {
 		t.Fatalf("read retention-floor effect count: %v", err)
 	}
 	if remainingEffects != 0 {
@@ -1058,7 +1118,7 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 			       floor_position_kind, floor_commit_lsn::text,
 			       floor_event_ordinal, floor_effect_ordinal
 			FROM synchro.sync_scope_state
-			WHERE scope_id = 'user:diagnostic-user'`).Scan(
+			WHERE scope_id = 'cf:global'`).Scan(
 			&state.StreamGeneration,
 			&state.MembershipGeneration,
 			&state.RetentionGeneration,
@@ -1147,10 +1207,10 @@ func issue49RemainingRetentionFloor(t *testing.T) {
 		}
 		return comparison
 	}
-	if oldComparison := compareCursorToFloor(oldUserCursor); oldComparison >= 0 {
+	if oldComparison := compareCursorToFloor(oldScopeCursor); oldComparison >= 0 {
 		t.Fatalf("pre-effect cursor is not below the retained floor: comparison=%d floor=%#v", oldComparison, retainedFloor)
 	}
-	if currentComparison := compareCursorToFloor(atFloorUserCursor); currentComparison < 0 {
+	if currentComparison := compareCursorToFloor(acknowledgedScopeCursor); currentComparison < 0 {
 		t.Fatalf("acknowledged cursor is below the retained floor: comparison=%d floor=%#v", currentComparison, retainedFloor)
 	}
 	reconnectStatus, reconnected := postConnect(t, ctx, harness.AdapterURL(), token, map[string]any{
@@ -1420,11 +1480,8 @@ func issue49RemainingProjectionBootstrap(t *testing.T) {
 	if !candidateObserved {
 		t.Fatal("projection bootstrap did not create a permanent candidate slot")
 	}
-	if err := barrier.QueueBarrier(ctx); err != nil {
+	if err := barrier.AcquireBarrier(ctx); err != nil {
 		t.Fatalf("queue projection-bootstrap barrier: %v", err)
-	}
-	if err := barrier.WaitForBarrier(ctx); err != nil {
-		t.Fatalf("wait for projection-bootstrap barrier: %v", err)
 	}
 	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_late_registration (id, owner_id, value) VALUES ($1, $2, $3)", catchupID, "diagnostic-user", "bootstrap-catchup"); err != nil {
 		t.Fatalf("insert projection-bootstrap catch-up row: %v", err)

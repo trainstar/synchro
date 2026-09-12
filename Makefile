@@ -64,6 +64,7 @@
 	test-rust-core \
 	test-rust-mutants \
 	test-integration-mutants \
+	test-integration-mutant \
 	test-rust-pg \
 	test-rust-pg-all \
 	test-adapter \
@@ -185,6 +186,7 @@ PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
 PGRX_TARGET_DIR ?= $(CURDIR)/.pgrx-target
 MUTATION_CONTROL_TEST ?=
 MUTATION_CONTROL_EXPECT ?= target_pass
+INTEGRATION_MUTANT_ID ?=
 SOAK_SEED ?= 1
 SOAK_DURATION ?= 1s
 TESTRESULT_TEST_NAME ?=
@@ -303,6 +305,7 @@ help:
 	@echo "  test-rust-core        - Run synchro-core unit tests"
 	@echo "  test-rust-mutants     - Run targeted synchro-core mutation tests"
 	@echo "  test-integration-mutants - Run curated production integration mutants"
+	@echo "  test-integration-mutant - Run one manifest mutant with INTEGRATION_MUTANT_ID"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
 	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
@@ -686,7 +689,7 @@ test-inventory:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./inventory -count=1
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness test-evidence test-inventory
 
@@ -866,7 +869,7 @@ test-swift-performance: conformance-mod-download build-swift-native-runner build
 		SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
 			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
 			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=30m \
-			-run '^TestRealSwiftPerformance$$' -args --provision --install
+			-run '^TestRealSwiftPerformance$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-swift: synchrod-pg-test-restart test-swift-warm-connect test-swift-performance
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
@@ -935,7 +938,7 @@ test-kotlin-performance: conformance-mod-download build-kotlin-conformance-app b
 			SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
 			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
 			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=75m \
-			-run '^TestRealKotlinPerformance$$' -args --provision --install
+			-run '^TestRealKotlinPerformance$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-kotlin-instrumentation: build-kotlin-conformance-app
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
@@ -1711,6 +1714,10 @@ test-rust-mutants:
 
 test-integration-mutants: test-conformance-testresult
 	sh conformance/mutants/integration_gate.sh "$(CURDIR)"
+
+test-integration-mutant: test-conformance-testresult
+	@test -n "$(INTEGRATION_MUTANT_ID)" || { echo "INTEGRATION_MUTANT_ID is required" >&2; exit 1; }
+	sh conformance/mutants/integration_gate.sh "$(CURDIR)" "$(INTEGRATION_MUTANT_ID)"
 
 test-rust-pg:
 	cd conformance && GOFLAGS= GOWORK=off CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" go run ./cmd/testresult rust -dir ../extensions/synchro-pg -- cargo pgrx test $(PGRX_PG)

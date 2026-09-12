@@ -226,9 +226,7 @@ type ProjectionBootstrapBarrierControl struct {
 	harness      *Harness
 	database     *sql.DB
 	tx           *sql.Tx
-	acquired     chan error
 	mu           sync.Mutex
-	queued       bool
 	lockAcquired bool
 	released     bool
 }
@@ -963,7 +961,7 @@ func (extension *installedExtension) restore() error {
 		}
 		actual, err := fileSHA256(file.destination)
 		if err != nil || actual != file.installedDigest {
-			failures = append(failures, errors.New("extension restoration refused changed destination"))
+			failures = append(failures, fmt.Errorf("extension restoration refused changed destination %s: expected digest %s, observed digest %s", filepath.Base(file.destination), file.installedDigest, actual))
 			continue
 		}
 		if file.hadOriginal {
@@ -2244,6 +2242,53 @@ func (h *Harness) RestoreDiagnosticRegistrations(ctx context.Context) error {
 	return nil
 }
 
+// StopAdapterAndObserveLogDisclosure checks raw logs without returning protected values.
+// Stopping the adapter drains its output before the final observation.
+func (h *Harness) StopAdapterAndObserveLogDisclosure(ctx context.Context, canaries []string) (bool, error) {
+	if ctx == nil || h == nil || h.adapter == nil || h.postgres == nil || len(canaries) == 0 {
+		return false, errors.New("operational log observation is unavailable")
+	}
+	for _, canary := range canaries {
+		if canary == "" {
+			return false, errors.New("operational log canary is empty")
+		}
+	}
+	if err := h.adapter.Stop(ctx, h.config.ShutdownTimeout); err != nil {
+		return false, errors.New("stop adapter for operational log observation failed")
+	}
+	disclosed := false
+	observe := func(data []byte) {
+		for _, canary := range canaries {
+			if bytes.Contains(data, []byte(canary)) {
+				disclosed = true
+			}
+		}
+	}
+	for _, log := range []*boundedLog{h.adapter.log, h.postgres.log} {
+		if log == nil {
+			return false, errors.New("operational process log is unavailable")
+		}
+		log.mu.Lock()
+		truncated := log.truncated
+		observe(log.data)
+		log.mu.Unlock()
+		if truncated {
+			return false, errors.New("operational process log is truncated")
+		}
+	}
+	file, err := os.Open(filepath.Join(h.dataDir, "log", "postgresql.log"))
+	if err != nil {
+		return false, errors.New("open operational PostgreSQL log failed")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, int64(h.config.ProcessLogBytes)+1))
+	if err != nil || len(data) > h.config.ProcessLogBytes {
+		return false, errors.New("operational PostgreSQL log is incomplete")
+	}
+	observe(data)
+	return disclosed, nil
+}
+
 // FailureDiagnostics returns bounded, sanitized process output for a failed run.
 func (h *Harness) FailureDiagnostics() string {
 	if h == nil {
@@ -2546,13 +2591,13 @@ func (executor *OperatorExecutor) NewProjectionBootstrapBarrier() (*ProjectionBo
 	return &ProjectionBootstrapBarrierControl{harness: executor.harness}, nil
 }
 
-// QueueBarrier queues a reset-state lock behind active baseline staging.
-func (control *ProjectionBootstrapBarrierControl) QueueBarrier(ctx context.Context) error {
+// AcquireBarrier holds reset state only after baseline staging commits.
+func (control *ProjectionBootstrapBarrierControl) AcquireBarrier(ctx context.Context) error {
 	if control == nil || control.harness == nil {
 		return errors.New("projection bootstrap barrier control is unavailable")
 	}
 	control.mu.Lock()
-	if control.queued || control.released {
+	if control.lockAcquired || control.released {
 		control.mu.Unlock()
 		return errors.New("projection bootstrap barrier control state is invalid")
 	}
@@ -2564,11 +2609,35 @@ func (control *ProjectionBootstrapBarrierControl) QueueBarrier(ctx context.Conte
 			return err
 		}
 		if !acquiredEarly {
+			select {
+			case lockErr := <-acquired:
+				if lockErr != nil {
+					_ = tx.Rollback()
+					_ = database.Close()
+					return errors.New("acquire projection bootstrap barrier failed")
+				}
+			case <-ctx.Done():
+				_ = tx.Rollback()
+				_ = database.Close()
+				return errors.New("acquire projection bootstrap barrier timed out")
+			}
+		}
+		var baselineStaged bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM synchro.sync_stream_resets
+				WHERE operation_kind = 'projection_bootstrap'
+				  AND lifecycle = 'baseline_staged'
+			)`).Scan(&baselineStaged); err != nil {
+			_ = tx.Rollback()
+			_ = database.Close()
+			return errors.New("observe projection bootstrap barrier phase failed")
+		}
+		if baselineStaged {
 			control.mu.Lock()
 			control.database = database
 			control.tx = tx
-			control.acquired = acquired
-			control.queued = true
+			control.lockAcquired = true
 			control.mu.Unlock()
 			return nil
 		}
@@ -2664,37 +2733,6 @@ func beginProjectionBootstrapBarrierAttempt(
 			return nil, nil, nil, false, errors.New("queue projection bootstrap barrier timed out")
 		case <-timer.C:
 		}
-	}
-}
-
-// WaitForBarrier waits until baseline staging commits and the queued lock is held.
-func (control *ProjectionBootstrapBarrierControl) WaitForBarrier(ctx context.Context) error {
-	if control == nil {
-		return errors.New("projection bootstrap barrier control is unavailable")
-	}
-	control.mu.Lock()
-	if control.lockAcquired {
-		control.mu.Unlock()
-		return nil
-	}
-	if !control.queued || control.released {
-		control.mu.Unlock()
-		return errors.New("projection bootstrap barrier control state is invalid")
-	}
-	acquired := control.acquired
-	control.mu.Unlock()
-
-	select {
-	case err := <-acquired:
-		if err != nil {
-			return errors.New("acquire projection bootstrap queued barrier failed")
-		}
-		control.mu.Lock()
-		control.lockAcquired = true
-		control.mu.Unlock()
-		return nil
-	case <-ctx.Done():
-		return errors.New("acquire projection bootstrap queued barrier timed out")
 	}
 }
 

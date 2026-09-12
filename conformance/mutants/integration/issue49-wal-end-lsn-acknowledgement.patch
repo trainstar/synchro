@@ -1,12 +1,35 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -5685,7 +5685,7 @@ fn advance_slot(
-     end_lsn: u64,
-     worker_role_oid: pg_sys::Oid,
- ) -> Result<(), PoisonFailure> {
--    let requested = format_lsn(end_lsn);
-+    let requested = format_lsn(commit_lsn);
-     run_replication_transaction(worker_role_oid, || {
-         Spi::connect_mut(|client| {
-             let actual = client
+@@ -623,6 +623,23 @@
+                 let failure_class = failure.class;
+                 if let Err(error) = persist_poison(failure) {
+                     log!("synchro WAL poison persistence failed for {failure_class}: {error}");
++                } else {
++                    // Mutant: skip persisted poison by acknowledging the flushed WAL suffix.
++                    let slot = decoder_state.identity.slot_name.clone();
++                    if run_replication_transaction(worker_role_oid, || {
++                        Spi::connect_mut(|client| {
++                            client
++                                .select(
++                                    "SELECT pg_catalog.pg_replication_slot_advance($1, pg_catalog.pg_current_wal_flush_lsn())",
++                                    None,
++                                    &[slot.as_str().into()],
++                                )
++                                .map(|_| ())
++                                .map_err(|_| ())
++                        })
++                    }).is_err() {
++                        log!("synchro WAL poison skip failed");
++                    }
+                 }
+                 blocked = true;
+             }
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -2356,3 +2356,3 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/bgworker.rs:700
++-- synchro-pg/src/bgworker.rs:717
+ -- synchro_pg::bgworker::synchro_retry_wal_poison

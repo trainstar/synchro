@@ -13,3 +13,23 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
      RETURN NEW;
  END;
  $$;
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -1665,10 +1665,7 @@ SECURITY DEFINER
+ SET search_path = pg_catalog, synchro
+ AS $$
+ BEGIN
+-    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
+-        RAISE EXCEPTION 'registered primary key cannot change'
+-            USING ERRCODE = '23514';
+-    END IF;
++    -- Mutant: permit a registered primary-key value update.
+     RETURN NEW;
+ END;
+ $$;
+@@ -2453,3 +2450,3 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/lib.rs:1929
++-- synchro-pg/src/lib.rs:1926
+ -- finalize

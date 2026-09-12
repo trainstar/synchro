@@ -5,8 +5,20 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
      TO synchro_adapter, synchro_seed, synchro_monitor, synchro_operator, synchro_worker;
  GRANT USAGE ON SCHEMA synchro_projection TO synchro_owner, synchro_operator, synchro_worker;
  GRANT USAGE ON TYPE synchro.synchro_row_ref TO synchro_operator;
-+-- Mutant: the monitor group inherits extension-owner authority.
-+GRANT synchro_owner TO synchro_monitor;
++-- Mutant: the seed group inherits extension-owner authority.
++GRANT synchro_owner TO synchro_seed;
+
+ DO $function_grants$
+ DECLARE
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -2554,6 +2554,8 @@ GRANT USAGE ON SCHEMA synchro
+     TO synchro_adapter, synchro_seed, synchro_monitor, synchro_operator, synchro_worker;
+ GRANT USAGE ON SCHEMA synchro_projection TO synchro_owner, synchro_operator, synchro_worker;
+ GRANT USAGE ON TYPE synchro.synchro_row_ref TO synchro_operator;
++-- Mutant: the seed group inherits extension-owner authority.
++GRANT synchro_owner TO synchro_seed;
  
  DO $function_grants$
  DECLARE
