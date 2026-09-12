@@ -1188,6 +1188,11 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         } finally {
             stmt.close()
         }
+        db.delete(
+            "_synchro_row_versions",
+            "table_name = ? AND record_id = ?",
+            arrayOf(tableName, recordId),
+        )
     }
 
 }

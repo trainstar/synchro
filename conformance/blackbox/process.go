@@ -179,6 +179,23 @@ type OperatorExecutor struct {
 	harness *Harness
 }
 
+// RegisterDefaultSharedScope restores the default shared assignment for native fixtures.
+func (executor *OperatorExecutor) RegisterDefaultSharedScope(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("native shared scope context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native shared scope context expired")
+	}
+	if err := executor.exec(ctx, "SELECT synchro.synchro_register_shared_scope('cf:global', false)"); err != nil {
+		return errors.New("register default native shared scope failed")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native shared scope context expired")
+	}
+	return nil
+}
+
 // UnregisterDefaultSharedScope removes the default shared assignment from native fixtures.
 func (executor *OperatorExecutor) UnregisterDefaultSharedScope(ctx context.Context) error {
 	if ctx == nil {

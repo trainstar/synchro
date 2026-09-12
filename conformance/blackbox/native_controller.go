@@ -1232,7 +1232,11 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
-		if !usesDefaultSharedScope {
+		if usesDefaultSharedScope {
+			if err := c.harness.Operator().RegisterDefaultSharedScope(ctx); err != nil {
+				return NativeStepObservation{}, err
+			}
+		} else {
 			if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
 				return NativeStepObservation{}, err
 			}

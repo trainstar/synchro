@@ -1399,5 +1399,9 @@ final class PullProcessor: @unchecked Sendable {
             sql: "DELETE FROM \(quoted) WHERE \(quotedPK) = ?",
             arguments: [recordID]
         )
+        try db.execute(
+            sql: "DELETE FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+            arguments: [tableName, recordID]
+        )
     }
 }

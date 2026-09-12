@@ -1436,12 +1436,18 @@ class PullProcessorTests {
         insertOrder(db, "protected", shipAddress = "local", updatedAt = "2026-01-03T00:00:00.000000Z")
         insertOrder(db, "unprotected", updatedAt = "2026-01-03T00:00:00.000000Z")
         insertPendingChange(db, "protected", "captured")
+        db.writeTransaction {
+            SynchroMeta.upsertRowVersion(it, "orders", "protected", "protected-version", null)
+            SynchroMeta.upsertRowVersion(it, "orders", "unprotected", "unprotected-version", null)
+        }
 
         processor.removeScope(scopeID, listOf(localTestTable))
 
         assertNotNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("protected")))
         assertNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("unprotected")))
         assertNull(db.queryOne("SELECT scope_id FROM _synchro_scopes WHERE scope_id = ?", arrayOf(scopeID)))
+        assertNotNull(db.queryOne("SELECT record_id FROM _synchro_row_versions WHERE record_id = ?", arrayOf("protected")))
+        assertNull(db.queryOne("SELECT record_id FROM _synchro_row_versions WHERE record_id = ?", arrayOf("unprotected")))
     }
 
     @Test

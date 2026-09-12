@@ -157,6 +157,8 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 
 	cleaned := evidence.AfterCleanup
 	expectedCleaned := pendingUpdate
+	expectedCleaned.TargetMutations = append([]PendingCycleNativeMutation(nil), pendingUpdate.TargetMutations...)
+	expectedCleaned.TargetMutations[0].Status = "sealed"
 	expectedCleaned.ApplicationRowCount--
 	expectedCleaned.RowMetadataCount--
 	expectedCleaned.ScopeRowCount = 0
@@ -171,7 +173,7 @@ func ValidatePendingCycleNativeEvidence(evidence PendingCycleNativeEvidence) err
 	expectedCleaned.UnprotectedScopeRowPresent = false
 	expectedCleaned.UnprotectedScopeRowChecksum = ""
 	if cleaned.ScopeStateCount != 1 || cleaned.ScopeID == "" || cleaned.ScopeID == pendingUpdate.ScopeID || !reflect.DeepEqual(expectedCleaned, cleaned) {
-		return errors.New("pending-cycle scope cleanup did not retain pending intent and remove unprotected cache state")
+		return errors.New("pending-cycle scope cleanup did not retain sealed intent and remove unprotected cache state")
 	}
 
 	updated := evidence.AfterUpdate

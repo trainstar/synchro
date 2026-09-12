@@ -65,6 +65,12 @@ func TestValidatePendingCycleNativeEvidenceRejectsSemanticMutants(t *testing.T) 
 			},
 		},
 		{
+			name: "scope cleanup unseals retryable intent",
+			mutate: func(evidence *PendingCycleNativeEvidence) {
+				evidence.AfterCleanup.TargetMutations[0].Status = "pending"
+			},
+		},
+		{
 			name: "scope cleanup deletes protected row",
 			mutate: func(evidence *PendingCycleNativeEvidence) {
 				evidence.AfterCleanup.ApplicationRowCount = 0
@@ -203,6 +209,7 @@ func validPendingCycleNativeEvidence() PendingCycleNativeEvidence {
 	pendingUpdate.TargetRowValue = "pending-updated"
 	pendingUpdate.TargetMutations = []PendingCycleNativeMutation{{Operation: "update", Status: "pending", ClientVersion: "update-client-version"}}
 	cleaned := pendingUpdate
+	cleaned.TargetMutations = append([]PendingCycleNativeMutation(nil), pendingUpdate.TargetMutations...)
 	cleaned.ApplicationRowCount = 1
 	cleaned.RowMetadataCount = 1
 	cleaned.ScopeRowCount = 0
@@ -216,6 +223,7 @@ func validPendingCycleNativeEvidence() PendingCycleNativeEvidence {
 	cleaned.UnprotectedRowValue = ""
 	cleaned.UnprotectedScopeRowPresent = false
 	cleaned.UnprotectedScopeRowChecksum = ""
+	cleaned.TargetMutations[0].Status = "sealed"
 	updated := cleaned
 	updated.PendingChangeCount = 0
 	updated.MutationOutcomeCount = 2

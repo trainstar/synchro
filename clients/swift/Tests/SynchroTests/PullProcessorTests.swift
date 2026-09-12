@@ -948,12 +948,18 @@ final class PullProcessorTests: XCTestCase {
         try insertOrder(db, id: "protected", shipAddress: "local", updatedAt: "2026-01-01T00:00:00.000000Z")
         try insertOrder(db, id: "unprotected", shipAddress: "local", updatedAt: "2026-01-01T00:00:00.000000Z")
         try addPendingIntent(db, table: testTable, recordID: "protected", state: "legacy_blocked")
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertRowVersion(connection, tableName: "orders", recordID: "protected", serverVersion: "protected-version", rowChecksum: nil)
+            try SynchroMeta.upsertRowVersion(connection, tableName: "orders", recordID: "unprotected", serverVersion: "unprotected-version", rowChecksum: nil)
+        }
 
         try processor.removeScope(scopeID: scopeID, syncedTables: [testTable.localSchema])
 
         XCTAssertNotNil(try db.queryOne("SELECT id FROM orders WHERE id = 'protected'", params: nil))
         XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = 'unprotected'", params: nil))
         XCTAssertEqual(try db.query("SELECT * FROM _synchro_scope_rows", params: nil).count, 0)
+        XCTAssertNotNil(try db.queryOne("SELECT record_id FROM _synchro_row_versions WHERE record_id = 'protected'", params: nil))
+        XCTAssertNil(try db.queryOne("SELECT record_id FROM _synchro_row_versions WHERE record_id = 'unprotected'", params: nil))
     }
 
     func testPullApplyClearsMatchingDurableBackoffWithCommittedState() throws {
