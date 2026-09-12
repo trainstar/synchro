@@ -1526,35 +1526,15 @@ class SyncEngineTests {
     }
 
     @Test
-    fun testRestartWaitsForDurablePullThenPushesPendingWorkAndClearsBackoff() = runTest {
+    fun testRestartWaitsForDurableDeadlineThenReconnectsAndClearsBackoff() = runTest {
         val timing = BlockingRetryTiming(1_000L)
         val initialSyncCompleted = CountDownLatch(1)
         var resumedPullJSON: String? = null
-        val callLog = mutableListOf<String>()
         val (engine, db) = makeIntegrationEnv(retryTiming = timing) { request ->
             when {
-                request.path!!.endsWith("/sync/connect") -> {
-                    callLog += "connect"
-                    mockResponse(connectResumeJSON)
-                }
-                request.path!!.endsWith("/sync/push") -> {
-                    callLog += "push"
-                    val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
-                    val mutations = body.getValue("mutations").jsonArray
-                    val accepted = mutations.map { mutation ->
-                        acceptedPushOutcomeJSON(
-                            mutation = mutation.jsonObject,
-                            serverVersion = "2026-01-01T14:00:00.000000Z",
-                        )
-                    }
-                    mockResponse("""{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""")
-                }
+                request.path!!.endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
                 request.path!!.endsWith("/sync/pull") -> {
-                    callLog += "pull"
-                    val body = request.body.readUtf8()
-                    if (resumedPullJSON == null) {
-                        resumedPullJSON = body
-                    }
+                    resumedPullJSON = request.body.readUtf8()
                     mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 }
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
@@ -1588,10 +1568,6 @@ class SyncEngineTests {
             ),
         )
         db.execute(
-            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            arrayOf("w1", "offline", "u1", "2026-01-01T10:00:00.000Z"),
-        )
-        db.execute(
             """
             INSERT INTO _synchro_backoff (
                 singleton, resume_state, work_identity, retry_classification,
@@ -1609,9 +1585,8 @@ class SyncEngineTests {
 
             timing.releaseAt(61_000L)
             assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
-            assertEquals(listOf("connect", "pull", "push", "pull"), callLog)
+            assertEquals(2, server!!.requestCount)
             assertEquals(exactPullRequestJSON, resumedPullJSON)
-            assertFalse(ChangeTracker(db).hasPendingChanges())
             assertNull(DurableBackoffStore.load(db))
         } finally {
             timing.releaseAt(61_000L)

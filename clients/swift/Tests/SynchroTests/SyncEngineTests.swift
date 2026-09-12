@@ -1398,29 +1398,13 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.connectResumeJSON)
             } else if path.hasSuffix("/sync/push") {
                 callLog.append("push")
-                let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-                let mutations = body["mutations"] as! [[String: Any]]
-                let accepted = try mutations.map {
-                    try self.acceptedPushOutcome(
-                        mutation: $0,
-                        updatedAt: "2026-01-01T14:00:00.000000Z",
-                        serverVersion: "2026-01-01T14:00:00.000000Z"
-                    )
-                }
-                return try self.mockResponse(json: [
-                    "batch_id": body["batch_id"]!,
-                    "server_time": "2026-01-01T14:00:00.000Z",
-                    "accepted": accepted,
-                    "rejected": [] as [Any],
-                ])
+                return try self.mockResponse(statusCode: 500, json: ["error": "push ran before pull replay"])
             } else if path.hasSuffix("/sync/rebuild") {
                 callLog.append("rebuild")
                 return try self.mockResponse(statusCode: 500, json: ["error": "unexpected rebuild"])
             } else if path.hasSuffix("/sync/pull") {
                 callLog.append("pull")
-                if replayedRequestJSON == nil {
-                    replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
-                }
+                replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
                 return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
@@ -1433,9 +1417,8 @@ final class SyncEngineTests: XCTestCase {
         }
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "pull", "push", "pull"])
+        XCTAssertEqual(callLog, ["connect", "pull"])
         XCTAssertEqual(replayedRequestJSON, requestJSON)
-        XCTAssertFalse(try ChangeTracker(database: recoveredDatabase).hasPendingChanges())
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         })

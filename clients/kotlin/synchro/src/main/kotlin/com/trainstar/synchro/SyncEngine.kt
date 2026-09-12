@@ -653,9 +653,6 @@ internal class SyncEngine(
                 val rebuilds = runPullLoop(replayRequestJSON = backoff.workIdentity)
                 completeRequestedRebuilds(rebuilds)
                 transitionTo(SyncStatus.Ready)
-                if (changeTracker.hasPendingChanges()) {
-                    runSyncCycle()
-                }
             }
             RetryOperation.REBUILDING -> {
                 val request = decodeBackoffRequest<RebuildRequest>(backoff.workIdentity)
