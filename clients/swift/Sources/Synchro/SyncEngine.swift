@@ -888,6 +888,9 @@ final class SyncEngine: @unchecked Sendable {
                 try schemaManager.finishAppliedMigrationIfPossible()
             }
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            if try changeTracker.hasPendingChanges() {
+                try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
+            }
 
         case .rebuilding:
             let requestBody = Data(backoff.workIdentity.utf8)
