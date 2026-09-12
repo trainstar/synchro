@@ -982,7 +982,8 @@ final class PullProcessor: @unchecked Sendable {
                 db: db,
                 tableName: scopeRow.tableName,
                 recordID: scopeRow.recordID,
-                schema: schema
+                schema: schema,
+                removeRowVersion: true
             )
         }
     }
@@ -1383,7 +1384,9 @@ final class PullProcessor: @unchecked Sendable {
         ) != nil
     }
 
-    private func removeLocalRowIfUnreferenced(db: GRDB.Database, tableName: String, recordID: String, schema: LocalSchemaTable) throws {
+    // Only scope removal drops the cached server version. A rebuild path removes
+    // the row but keeps that version as its compare-and-swap base.
+    private func removeLocalRowIfUnreferenced(db: GRDB.Database, tableName: String, recordID: String, schema: LocalSchemaTable, removeRowVersion: Bool = false) throws {
         guard try !Self.isProtectedApplicationRow(db: db, tableName: tableName, recordID: recordID) else {
             return
         }
@@ -1399,9 +1402,11 @@ final class PullProcessor: @unchecked Sendable {
             sql: "DELETE FROM \(quoted) WHERE \(quotedPK) = ?",
             arguments: [recordID]
         )
-        try db.execute(
-            sql: "DELETE FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
-            arguments: [tableName, recordID]
-        )
+        if removeRowVersion {
+            try db.execute(
+                sql: "DELETE FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+                arguments: [tableName, recordID]
+            )
+        }
     }
 }

@@ -770,7 +770,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
 
         for ((tableName, recordId) in scopeRows) {
             val schema = tablesByName[tableName] ?: continue
-            removeLocalRowIfUnreferenced(db, tableName, recordId, schema)
+            removeLocalRowIfUnreferenced(db, tableName, recordId, schema, removeRowVersion = true)
         }
     }
 
@@ -1162,11 +1162,14 @@ internal class PullProcessor(private val database: SynchroDatabase) {
     private fun checksumJSON(checksum: ChecksumObject): String =
         kotlinx.serialization.json.Json.encodeToString(ChecksumObject.serializer(), checksum)
 
+    // Only scope removal drops the cached server version. A rebuild path removes
+    // the row but keeps that version as its compare-and-swap base.
     private fun removeLocalRowIfUnreferenced(
         db: SQLiteDatabase,
         tableName: String,
         recordId: String,
-        schema: LocalSchemaTable
+        schema: LocalSchemaTable,
+        removeRowVersion: Boolean = false
     ) {
         if (SynchroMeta.hasScopeRows(db, tableName, recordId)) {
             return
@@ -1188,11 +1191,13 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         } finally {
             stmt.close()
         }
-        db.delete(
-            "_synchro_row_versions",
-            "table_name = ? AND record_id = ?",
-            arrayOf(tableName, recordId),
-        )
+        if (removeRowVersion) {
+            db.delete(
+                "_synchro_row_versions",
+                "table_name = ? AND record_id = ?",
+                arrayOf(tableName, recordId),
+            )
+        }
     }
 
 }
