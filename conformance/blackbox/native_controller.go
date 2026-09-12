@@ -46,6 +46,11 @@ type NativeController struct {
 	// crossScopeConfigured records that a membership stage reconfigured the
 	// shared fixture table, so the close path restores it.
 	crossScopeConfigured bool
+	// defaultSharedScopeRemoved records that a step removed the default shared
+	// assignment, so a later step restores only what this controller removed.
+	// Registration assigns the scope to every active client, so a scenario that
+	// never removed it must not re-register it.
+	defaultSharedScopeRemoved bool
 	harness              *Harness
 	httpClient           *http.Client
 	now                  func() time.Time
@@ -1232,13 +1237,18 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 		if err != nil {
 			return NativeStepObservation{}, err
 		}
-		// Registration assigns the scope to every active client and bumps each
-		// scope set version, so a scenario that already holds its assignments
-		// must not re-register. Only removal is safe to drive from this step.
-		if !usesDefaultSharedScope {
+		if usesDefaultSharedScope {
+			if c.defaultSharedScopeRemoved {
+				if err := c.harness.Operator().RegisterDefaultSharedScope(ctx); err != nil {
+					return NativeStepObservation{}, err
+				}
+				c.defaultSharedScopeRemoved = false
+			}
+		} else {
 			if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
 				return NativeStepObservation{}, err
 			}
+			c.defaultSharedScopeRemoved = true
 		}
 		for _, revocation := range revocations {
 			if err := c.harness.Operator().RevokeUserScope(ctx, revocation.UserID, revocation.RuntimeScope); err != nil {
