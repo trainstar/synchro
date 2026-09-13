@@ -220,7 +220,8 @@
         assert_eq!(sent, 1);
 
         let mut waiting = false;
-        for _ in 0..1000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             let waiting_row: Option<bool> = Spi::get_one_with_args(
                 "SELECT EXISTS (
                      SELECT 1 FROM pg_locks
@@ -233,6 +234,7 @@
                 waiting = true;
                 break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(waiting, "registration did not wait for the source write gate");
         dblink_exec(driver_name, "COMMIT");
