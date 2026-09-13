@@ -23,7 +23,7 @@ const SYNCHRO_TEST_URL =
 const USER1_JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJleHAiOjQxMDI0NDQ4MDB9.ZPjufmc-mgkQC6rc6GVNzH9V3jhqQZMl2AuF0Cleuz8';
 const USER1_ID = 'a1111111-1111-1111-1111-111111111111';
-const TEST_SYNC_INTERVAL_SECONDS = 1;
+const TEST_SYNC_INTERVAL_SECONDS = 300;
 const TEST_PUSH_DEBOUNCE_SECONDS = 60;
 interface AppProps {
   conformanceDetox?: boolean;
@@ -153,7 +153,13 @@ async function runAndWaitForScheduledPullRetry(
       throw error;
     }
     const retryCompleted = await waitForCondition(
-      async () => (await client.getSyncStatus()).status === 'ready',
+      async () => {
+        const current = await client.getSyncStatus();
+        if (current.status === 'error' || current.status === 'stopped') {
+          throw error;
+        }
+        return current.status === 'ready';
+      },
       15000
     );
     if (!retryCompleted) {
