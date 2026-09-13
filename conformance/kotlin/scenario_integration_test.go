@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -382,6 +383,9 @@ func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *bl
 	}
 }
 
+// kotlinPerformanceSuiteReset resets inherited server state before the first scenario.
+var kotlinPerformanceSuiteReset sync.Once
+
 func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
@@ -418,6 +422,11 @@ func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize
 		if err := controller.Close(closeContext); err != nil {
 			t.Errorf("close Kotlin Android native controller: %v", err)
 		}
+	})
+	kotlinPerformanceSuiteReset.Do(func() {
+		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancelReset()
+		resetKotlinPerformanceServer(t, resetContext, harness)
 	})
 	platform, err := NewPlatform(Config{
 		ADBPath: adbPath, DeviceSerial: deviceSerial, ApplicationAPKPath: applicationAPK, InstrumentationAPKPath: instrumentationAPK,
