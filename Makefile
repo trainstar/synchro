@@ -871,7 +871,8 @@ test-swift-performance: conformance-mod-download build-swift-native-runner build
 			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=30m \
 			-run '^TestRealSwiftPerformance$$' $(GO_TEST_ARGS) -args --provision --install
 
-test-swift: synchrod-pg-test-restart test-swift-warm-connect test-swift-performance
+test-swift: test-swift-warm-connect test-swift-performance
+	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 synchrod-pg-test-restart
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
 	cd clients/swift && xcodebuild build-for-testing -quiet -scheme Synchro-Package -destination 'platform=macOS' -derivedDataPath .build/integration-derived-data
@@ -947,7 +948,8 @@ test-kotlin-instrumentation: build-kotlin-conformance-app
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.injected.device.serial="$(KOTLIN_ANDROID_SERIAL)" -Pandroid.testInstrumentationRunnerArguments.notClass=com.trainstar.synchro.conformance.NativeSessionInstrumentationTest :conformance-app:connectedDebugAndroidTest
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
 
-test-kotlin: synchrod-pg-test-restart test-kotlin-warm-connect test-kotlin-performance
+test-kotlin: test-kotlin-warm-connect test-kotlin-performance
+	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 synchrod-pg-test-restart
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results

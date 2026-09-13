@@ -29,8 +29,8 @@ final class Issue49RequirementProofTests: XCTestCase {
             insertedID: "20000000-0000-0000-0000-000000000001",
             updateColumn: "name",
             cloneSQL: """
-                INSERT INTO regions
-                SELECT created_at, updated_at, ?, description, deleted_at, name
+                INSERT INTO regions (id, name, description, created_at, updated_at, deleted_at)
+                SELECT ?, name, description, created_at, updated_at, deleted_at
                 FROM regions WHERE id = ?
                 """
         ),
@@ -40,8 +40,8 @@ final class Issue49RequirementProofTests: XCTestCase {
             insertedID: "20000000-0000-0000-0000-000000000002",
             updateColumn: "name",
             cloneSQL: """
-                INSERT INTO nations
-                SELECT iso_code, metadata, deleted_at, updated_at, name, created_at, region_id, ?
+                INSERT INTO nations (id, name, iso_code, region_id, metadata, created_at, updated_at, deleted_at)
+                SELECT ?, name, iso_code, region_id, metadata, created_at, updated_at, deleted_at
                 FROM nations WHERE id = ?
                 """
         ),
@@ -51,9 +51,12 @@ final class Issue49RequirementProofTests: XCTestCase {
             insertedID: "20000000-0000-0000-0000-000000000003",
             updateColumn: "name",
             cloneSQL: """
-                INSERT INTO suppliers
-                SELECT address, created_at, updated_at, phone, name, website, deleted_at,
-                       rating, tags, ?, nation_id, is_active
+                INSERT INTO suppliers (
+                    id, nation_id, name, address, phone, website, rating, is_active,
+                    tags, created_at, updated_at, deleted_at
+                )
+                SELECT ?, nation_id, name, address, phone, website, rating, is_active,
+                       tags, created_at, updated_at, deleted_at
                 FROM suppliers WHERE id = ?
                 """
         ),
@@ -63,9 +66,12 @@ final class Issue49RequirementProofTests: XCTestCase {
             insertedID: "20000000-0000-0000-0000-000000000004",
             updateColumn: "name",
             cloneSQL: """
-                INSERT INTO parts
-                SELECT ?, name, description, brand, tags, created_at, specifications, updated_at,
-                       weight_kg, retail_price, size_cm, deleted_at, part_type, manufacturer
+                INSERT INTO parts (
+                    id, name, description, brand, manufacturer, part_type, weight_kg,
+                    size_cm, retail_price, specifications, tags, created_at, updated_at, deleted_at
+                )
+                SELECT ?, name, description, brand, manufacturer, part_type, weight_kg,
+                       size_cm, retail_price, specifications, tags, created_at, updated_at, deleted_at
                 FROM parts WHERE id = ?
                 """
         ),
@@ -75,9 +81,12 @@ final class Issue49RequirementProofTests: XCTestCase {
             insertedID: "20000000-0000-0000-0000-000000000005",
             updateColumn: "notes",
             cloneSQL: """
-                INSERT INTO part_suppliers
-                SELECT part_id, notes, deleted_at, supply_cost, updated_at, created_at,
-                       lead_time_days, supplier_id, available_quantity, ?
+                INSERT INTO part_suppliers (
+                    id, part_id, supplier_id, supply_cost, available_quantity,
+                    lead_time_days, notes, created_at, updated_at, deleted_at
+                )
+                SELECT ?, part_id, supplier_id, supply_cost, available_quantity,
+                       lead_time_days, notes, created_at, updated_at, deleted_at
                 FROM part_suppliers WHERE id = ?
                 """
         ),
@@ -87,8 +96,8 @@ final class Issue49RequirementProofTests: XCTestCase {
             insertedID: "20000000-0000-0000-0000-000000000006",
             updateColumn: "name",
             cloneSQL: """
-                INSERT INTO categories
-                SELECT ?, updated_at, parent_id, deleted_at, created_at, metadata, sort_order, name
+                INSERT INTO categories (id, parent_id, name, sort_order, metadata, created_at, updated_at, deleted_at)
+                SELECT ?, parent_id, name, sort_order, metadata, created_at, updated_at, deleted_at
                 FROM categories WHERE id = ?
                 """
         ),

@@ -99,7 +99,13 @@ final class SchemaIntegrationTests: XCTestCase {
         )
     }
 
-    private func makeConfigWithClientID(userID: String, clientID: String, dbPath: String, seedPath: String? = nil) -> SynchroConfig {
+    private func makeConfigWithClientID(
+        userID: String,
+        clientID: String,
+        dbPath: String,
+        syncInterval: TimeInterval = 999,
+        seedPath: String? = nil
+    ) -> SynchroConfig {
         let token = signTestJWT(userID: userID)
         return SynchroConfig(
             dbPath: dbPath,
@@ -107,10 +113,24 @@ final class SchemaIntegrationTests: XCTestCase {
             authProvider: { token },
             clientID: clientID,
             appVersion: "1.0.0",
-            syncInterval: 999,
+            syncInterval: syncInterval,
             maxRetryAttempts: 1,
             seedDatabasePath: seedPath
         )
+    }
+
+    private func syncAndWaitForScheduledRetry(_ client: SynchroClient) async throws {
+        do {
+            try await client.syncNow()
+        } catch is RetryableError {
+            let deadline = DispatchTime.now().uptimeNanoseconds + 15_000_000_000
+            while client.getSyncStatus() != .ready {
+                guard DispatchTime.now().uptimeNanoseconds < deadline else {
+                    return XCTFail("timed out waiting for the scheduled capture retry")
+                }
+                try await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
     }
 
     /// Fetch the live schema from the test server.
@@ -133,7 +153,12 @@ final class SchemaIntegrationTests: XCTestCase {
         }
 
         // 1. Full initial sync — creates all local tables from server schema
-        let config1 = makeConfigWithClientID(userID: userID, clientID: clientID, dbPath: dbPath)
+        let config1 = makeConfigWithClientID(
+            userID: userID,
+            clientID: clientID,
+            dbPath: dbPath,
+            syncInterval: 0.1
+        )
         let client1 = try SynchroClient(config: config1)
         try await client1.start()
 
@@ -148,7 +173,7 @@ final class SchemaIntegrationTests: XCTestCase {
             "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
             params: [orderID, custID, userID, #"{"street":"123 Main St"}"#, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
         )
-        try await client1.syncNow()
+        try await syncAndWaitForScheduledRetry(client1)
 
         await client1.stop()
         try await client1.close()
@@ -596,6 +621,7 @@ final class SchemaIntegrationTests: XCTestCase {
                 userID: userID,
                 clientID: clientID,
                 dbPath: dbPath,
+                syncInterval: 0.1,
                 seedPath: canonicalSeedPath
             )
         )
@@ -609,7 +635,7 @@ final class SchemaIntegrationTests: XCTestCase {
             "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
             params: [orderID, customerID, userID, #"{"street":"User Scoped Order"}"#, "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z"]
         )
-        try await client.syncNow()
+        try await syncAndWaitForScheduledRetry(client)
 
         let categoryScopes = try client.query(
             """

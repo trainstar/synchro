@@ -69,6 +69,7 @@ final class IntegrationTests: XCTestCase {
         userID: String,
         clientID: String = UUID().uuidString.lowercased(),
         dbPath: String,
+        syncInterval: TimeInterval = 999,
         pushDebounce: TimeInterval = 0.5,
         transportObservationCollector: TransportObservationCollector? = nil
     ) -> SynchroConfig {
@@ -80,7 +81,7 @@ final class IntegrationTests: XCTestCase {
                 authProvider: { token },
                 clientID: clientID,
                 appVersion: "1.0.0",
-                syncInterval: 999,
+                syncInterval: syncInterval,
                 pushDebounce: pushDebounce,
                 maxRetryAttempts: 1,
                 transportObservationCollector: transportObservationCollector
@@ -92,7 +93,7 @@ final class IntegrationTests: XCTestCase {
             authProvider: { token },
             clientID: clientID,
             appVersion: "1.0.0",
-            syncInterval: 999,
+            syncInterval: syncInterval,
             pushDebounce: pushDebounce,
             maxRetryAttempts: 1
         )
@@ -139,6 +140,16 @@ final class IntegrationTests: XCTestCase {
         try? await client?.close()
     }
 
+    private func syncAndWaitForScheduledRetry(_ client: SynchroClient) async throws {
+        do {
+            try await client.syncNow()
+        } catch is RetryableError {
+            try await waitForCondition(timeoutNanoseconds: 15_000_000_000) {
+                client.getSyncStatus() == .ready
+            }
+        }
+    }
+
     private func waitForCondition(
         timeoutNanoseconds: UInt64 = 5_000_000_000,
         intervalNanoseconds: UInt64 = 250_000_000,
@@ -177,7 +188,7 @@ final class IntegrationTests: XCTestCase {
 
     func testPushPullBetweenTwoClients() async throws {
         let userID = UUID().uuidString.lowercased()
-        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath())
+        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath(), syncInterval: 0.1)
         let clientBConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let customerID = UUID().uuidString.lowercased()
         let orderID = UUID().uuidString.lowercased()
@@ -191,7 +202,7 @@ final class IntegrationTests: XCTestCase {
 
         try await clientA.start()
         try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"123 Main St"}"#, updatedAt: "2026-01-01T00:00:00.000Z")
-        try await clientA.syncNow()
+        try await syncAndWaitForScheduledRetry(clientA)
 
         try await clientB.start()
         try await waitForCondition {
@@ -203,7 +214,7 @@ final class IntegrationTests: XCTestCase {
 
     func testFreshClientBootstrapsExistingServerState() async throws {
         let userID = UUID().uuidString.lowercased()
-        let writerConfig = makeConfig(userID: userID, dbPath: tempDBPath())
+        let writerConfig = makeConfig(userID: userID, dbPath: tempDBPath(), syncInterval: 0.1)
         let readerConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let customerID = UUID().uuidString.lowercased()
         let orderID = UUID().uuidString.lowercased()
@@ -213,7 +224,7 @@ final class IntegrationTests: XCTestCase {
 
         try await writer.start()
         try seedOrder(writer, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"Bootstrap Ave"}"#, updatedAt: "2026-01-02T00:00:00.000Z")
-        try await writer.syncNow()
+        try await syncAndWaitForScheduledRetry(writer)
         await writer.stop()
         try await writer.close()
 
@@ -229,7 +240,7 @@ final class IntegrationTests: XCTestCase {
 
     func testSoftDeletePropagatesBetweenClients() async throws {
         let userID = UUID().uuidString.lowercased()
-        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath())
+        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath(), syncInterval: 0.1)
         let clientBConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let customerID = UUID().uuidString.lowercased()
         let orderID = UUID().uuidString.lowercased()
@@ -243,7 +254,7 @@ final class IntegrationTests: XCTestCase {
 
         try await clientA.start()
         try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"Delete Me"}"#, updatedAt: "2026-01-03T00:00:00.000Z")
-        try await clientA.syncNow()
+        try await syncAndWaitForScheduledRetry(clientA)
 
         try await clientB.start()
         try await waitForCondition {
@@ -255,7 +266,7 @@ final class IntegrationTests: XCTestCase {
             "UPDATE orders SET deleted_at = ?, updated_at = ? WHERE id = ?",
             params: ["2026-01-04T00:00:00.000Z", "2026-01-04T00:00:00.000Z", orderID]
         )
-        try await clientA.syncNow()
+        try await syncAndWaitForScheduledRetry(clientA)
         let expectedDeletedAt = try clientA.queryOne(
             "SELECT deleted_at FROM orders WHERE id = ?",
             params: [orderID]

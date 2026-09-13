@@ -292,8 +292,14 @@ class SchemaIntegrationTests {
             ColumnDef(name = "key", type = "TEXT", nullable = false, primaryKey = true),
             ColumnDef(name = "value", type = "TEXT", nullable = false),
         ))
-        client1.execute("INSERT INTO app_settings (key, value) VALUES ('theme', 'dark')")
-        client1.execute("INSERT INTO app_settings (key, value) VALUES ('locale', 'en')")
+        client1.execute(
+            """INSERT INTO app_settings ("key", value) VALUES (?, ?)""",
+            arrayOf("theme", "dark"),
+        )
+        client1.execute(
+            """INSERT INTO app_settings ("key", value) VALUES (?, ?)""",
+            arrayOf("locale", "en"),
+        )
 
         client1.stop()
         client1.close()
@@ -303,7 +309,7 @@ class SchemaIntegrationTests {
         client2.start()
 
         // Verify local-only table and data survived
-        val settings = client2.query("SELECT key, value FROM app_settings ORDER BY key")
+        val settings = client2.query("""SELECT "key", value FROM app_settings ORDER BY "key"""")
         assertEquals(2, settings.size)
         assertEquals("locale", settings[0]["key"])
         assertEquals("en", settings[0]["value"])
