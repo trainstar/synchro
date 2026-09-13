@@ -233,6 +233,8 @@ SEED_BINARY ?= bin/synchro-seed
 RN_PINNED_SEED ?= clients/react-native/example/seed.db
 RN_CONSUMER_SEED ?= clients/react-native/example/verification/seed.db
 RN_ANDROID_SEED_ASSET ?= clients/react-native/example/android/app/src/main/assets/seed.db
+CLIENT_INTEGRATION_SEED ?= $(CURDIR)/.ignore/client-integration/seed.db
+REFRESH_RN_SEED_OUTPUT ?= $(CURDIR)/clients/react-native/example/seed.db
 GO_TEST_ARGS ?= -v -count=1 -p 1
 GO_TEST_PKGS ?= ./...
 GRADLE_TEST_ARGS ?= --rerun-tasks
@@ -872,7 +874,7 @@ test-swift-performance: conformance-mod-download build-swift-native-runner build
 			-run '^TestRealSwiftPerformance$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-swift: test-swift-warm-connect test-swift-performance
-	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 synchrod-pg-test-restart
+	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
 	cd clients/swift && xcodebuild build-for-testing -quiet -scheme Synchro-Package -destination 'platform=macOS' -derivedDataPath .build/integration-derived-data
@@ -890,7 +892,7 @@ test-swift: test-swift-warm-connect test-swift-performance
 		plutil -insert "$$environment_path.TEST_REPLICATION_URL" -string "$(REPLICATION_URL)" "$$xctestrun"; \
 		plutil -insert "$$environment_path.SYNCHRO_TEST_URL" -string "$(SYNCHRO_TEST_URL)" "$$xctestrun"; \
 		plutil -insert "$$environment_path.SYNCHRO_TEST_JWT_SECRET" -string "$(SYNCHRO_TEST_JWT_SECRET)" "$$xctestrun"; \
-		plutil -insert "$$environment_path.SYNCHRO_TEST_SEED_PATH" -string "$(CURDIR)/clients/react-native/example/seed.db" "$$xctestrun"; \
+		plutil -insert "$$environment_path.SYNCHRO_TEST_SEED_PATH" -string "$(CLIENT_INTEGRATION_SEED)" "$$xctestrun"; \
 		xcodebuild test-without-building -quiet -xctestrun "$$xctestrun" -destination 'platform=macOS' -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath clients/swift/.build/test-results/integration.xcresult
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/integration.xcresult
 
@@ -949,11 +951,11 @@ test-kotlin-instrumentation: build-kotlin-conformance-app
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
 
 test-kotlin: test-kotlin-warm-connect test-kotlin-performance
-	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 synchrod-pg-test-restart
+	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:test
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) SYNCHRO_TEST_SEED_PATH="$(CLIENT_INTEGRATION_SEED)" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:test
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
 
 test-kotlin-integration: test-kotlin
@@ -1865,19 +1867,23 @@ synchrod-pg-test-start: build build-seed verify-rn-seed
 		exit 1; \
 	fi; \
 	if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
-		echo "Refreshing canonical seed asset..."; \
-		if lsof "$(CURDIR)/clients/react-native/example/seed.db" "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm" >/dev/null 2>&1; then \
-			echo "canonical seed asset is in use"; \
+		seed_output="$(REFRESH_RN_SEED_OUTPUT)"; \
+		echo "Refreshing client seed database..."; \
+		if lsof "$$seed_output" "$$seed_output-wal" "$$seed_output-shm" >/dev/null 2>&1; then \
+			echo "client seed database is in use"; \
 			exit 1; \
 		fi; \
-		rm -f "$(CURDIR)/clients/react-native/example/seed.db-wal" "$(CURDIR)/clients/react-native/example/seed.db-shm"; \
-		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$(CURDIR)/clients/react-native/example/seed.db" --overwrite || { \
+		mkdir -p "$$(dirname "$$seed_output")"; \
+		rm -f "$$seed_output-wal" "$$seed_output-shm"; \
+		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$$seed_output" --overwrite || { \
 			cat "$(SYNCHROD_PG_LOG_FILE)" 2>/dev/null || true; \
 			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
 			exit 1; \
 		}; \
-		cd "$(CURDIR)/clients/react-native/example"; \
-		shasum -a 256 seed.db > seed.db.sha256; \
+		if [ "$$seed_output" = "$(CURDIR)/clients/react-native/example/seed.db" ]; then \
+			cd "$(CURDIR)/clients/react-native/example"; \
+			shasum -a 256 seed.db > seed.db.sha256; \
+		fi; \
 	fi; \
 	echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
 
