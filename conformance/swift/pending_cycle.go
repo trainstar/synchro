@@ -531,6 +531,9 @@ func validateSwiftPendingCycleCleanupCall(call SynchronizationResult) error {
 }
 
 func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, step scenarios.PendingCycleNativeCRUDStep, name string) (runnerResult, error) {
+	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	ctx = deadline
 	state, err := platform.client(client)
 	if err != nil {
 		return runnerResult{}, fmt.Errorf("access Swift pending-cycle %s transport: %w", name, err)
@@ -539,6 +542,9 @@ func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox
 	call, err := swiftScenarioCall(ctx, platform, client, "start")
 	if err != nil {
 		return runnerResult{}, fmt.Errorf("run Swift pending-cycle %s push: %w", name, err)
+	}
+	if call.Completion == "error" || call.CallErrorCategory != "" {
+		return runnerResult{}, fmt.Errorf("Swift pending-cycle %s start failed: completion %q, category %q", name, call.Completion, call.CallErrorCategory)
 	}
 	observation, err := swiftScenarioWire(call, "push")
 	if err != nil {
@@ -570,11 +576,54 @@ func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox
 	if result, processErr := controller.ProcessStep(ctx, nil, step.Materialize); processErr != nil || result.Disposition != "success" {
 		return runnerResult{}, fmt.Errorf("materialize Swift pending-cycle %s: %w", name, resultError(processErr, result.Disposition))
 	}
-	snapshot, err := platform.captureSnapshot(ctx, client)
+	snapshot, err := awaitSwiftPendingCycleReady(ctx, platform, client, observation.Sequence)
 	if err != nil {
 		return runnerResult{}, fmt.Errorf("capture Swift pending-cycle synchronized %s: %w", name, err)
 	}
 	return snapshot, nil
+}
+
+func awaitSwiftPendingCycleReady(ctx context.Context, platform *Platform, client Client, pushSequence uint64) (runnerResult, error) {
+	state, err := platform.client(client)
+	if err != nil {
+		return runnerResult{}, err
+	}
+	for {
+		state.mu.Lock()
+		if state.terminated || state.session == nil {
+			state.mu.Unlock()
+			return runnerResult{}, errors.New("Swift pending-cycle synchronization is unavailable")
+		}
+		observations, err := state.session.ObservationsAfter(pushSequence)
+		state.mu.Unlock()
+		if err != nil {
+			return runnerResult{}, err
+		}
+		snapshot, err := platform.captureSnapshot(ctx, client)
+		if err != nil {
+			return runnerResult{}, err
+		}
+		if snapshot.Status == nil || *snapshot.Status == "error" || *snapshot.Status == "stopped" {
+			return runnerResult{}, errors.New("Swift pending-cycle synchronization is unavailable")
+		}
+		// Stop must not preserve pull backoff for the next generated mutation.
+		// Ready also occurs between push and pull, so require the terminal pull.
+		// Read transport first, so ready is sampled after that response arrived.
+		if *snapshot.Status == "ready" && snapshot.Failure == nil && len(observations) > 0 {
+			last := observations[len(observations)-1]
+			if last.OperationClass == "pull" && last.StatusCode == 200 && !last.Retryable && last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore {
+				if snapshot.PendingChangeCount == nil || *snapshot.PendingChangeCount != 0 {
+					return runnerResult{}, errors.New("Swift pending-cycle synchronization retained pending mutations")
+				}
+				return snapshot, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return runnerResult{}, fmt.Errorf("wait for Swift pending-cycle ready state: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func swiftPendingCycleServerVersion(target scenarios.PendingCycleNativeTarget, snapshot runnerResult) (string, error) {
