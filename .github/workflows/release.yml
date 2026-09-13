@@ -644,8 +644,9 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             scripts/ci/capture-gate-result.py --gate test-kotlin-instrumentation --output dist/verification/gate-results/test-kotlin-instrumentation.json -- make test-kotlin-instrumentation
-            make test-client-platforms SUPPORT_CELL_ID=SUP-PG-LINUX-X64-001 SUPPORT_PLATFORM_VERSION=18
+            # The native suite must inherit the fresh registry state.
             scripts/ci/capture-gate-result.py --gate test-kotlin --output dist/verification/gate-results/test-kotlin.json -- make test-kotlin
+            make test-client-platforms SUPPORT_CELL_ID=SUP-PG-LINUX-X64-001 SUPPORT_PLATFORM_VERSION=18
             make test-client-platforms SUPPORT_CELL_ID=SUP-ANDROID-CURRENT-001 SUPPORT_PLATFORM_VERSION=34
 
       - name: Preserve packaged PostgreSQL manifest
