@@ -161,6 +161,14 @@ func TestBootstrapTraceRejectsInvalidResponseFacts(t *testing.T) {
 		{"page cursor in terminal rebuild facts", mutateRebuildBoolean("has_cursor", true)},
 		{"missing final cursor in rebuild facts", mutateRebuildBoolean("has_final_scope_cursor", false)},
 		{"missing checksum in rebuild facts", mutateRebuildBoolean("has_checksum", false)},
+		{"invalid response body fingerprint", func(trace *traceSnapshot) {
+			var facts map[string]any
+			if err := json.Unmarshal(trace.Observations[1].RebuildResponseFacts, &facts); err != nil {
+				panic(err)
+			}
+			facts["response_body_sha256"] = "invalid"
+			trace.Observations[1].RebuildResponseFacts, _ = json.Marshal(facts)
+		}},
 		{"absent pull facts", func(trace *traceSnapshot) { trace.Observations[2].PullResponseFacts = nil }},
 		{"null pull facts", func(trace *traceSnapshot) { trace.Observations[2].PullResponseFacts = json.RawMessage(`null`) }},
 		{"malformed pull facts", func(trace *traceSnapshot) {
@@ -556,6 +564,7 @@ func validRebuildResponseFacts() string {
 		"record_count": 0, "has_more": false, "has_cursor": false, "has_final_scope_cursor": true,
 		"has_checksum": true, "scope_fingerprint": hashFingerprint("scope-a"),
 		"final_scope_cursor_fingerprint": hashFingerprint("cursor-a"),
+		"response_body_sha256":           hashFingerprint("response-body"),
 	})
 	if err != nil {
 		panic(err)
