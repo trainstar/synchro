@@ -1526,6 +1526,129 @@ class SyncEngineTests {
     }
 
     @Test
+    fun exhaustedSyncNowRetryWakesManagedLoopAtDurableDeadline() = runTest {
+        val timing = BlockingRetryTiming(1_000L)
+        val pushRequestJSONs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val pushCalls = AtomicInteger()
+        val retryCompleted = CountDownLatch(1)
+        val (engine, db) = makeIntegrationEnv(
+            syncInterval = 3_600.0,
+            pushDebounce = 3_600.0,
+            maxRetryAttempts = 0,
+            retryTiming = timing,
+        ) { request ->
+            when {
+                request.path!!.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                request.path!!.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path!!.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                request.path!!.endsWith("/sync/push") -> {
+                    val body = request.body.readUtf8()
+                    pushRequestJSONs += body
+                    if (pushCalls.incrementAndGet() == 1) {
+                        MockResponse()
+                            .setResponseCode(503)
+                            .setHeader("Retry-After", "60")
+                            .setBody(RETRYABLE_503_ERROR_JSON)
+                    } else {
+                        val requestBody = Json.decodeFromString<JsonObject>(body)
+                        val accepted = requestBody.getValue("mutations").jsonArray.map { mutation ->
+                            acceptedPushOutcomeJSON(mutation.jsonObject, "retry-complete")
+                        }
+                        mockResponse(
+                            """{"batch_id":${requestBody["batch_id"]},"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""",
+                        )
+                    }
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+        val registration = engine.onStatusChange { status ->
+            if (status is SyncStatus.Ready && pushCalls.get() >= 2) {
+                retryCompleted.countDown()
+            }
+        }
+
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("retry-wakeup", "Retry Wakeup", "u1", "2026-01-01T10:00:00.000000Z"),
+            )
+
+            assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is RetryableError)
+            assertTrue(
+                "the managed loop must wait for the durable retry before the ordinary interval",
+                timing.sleepStarted.await(2, TimeUnit.SECONDS),
+            )
+
+            val backoff = requireNotNull(DurableBackoffStore.load(db))
+            val sealedBatch = requireNotNull(
+                db.queryOne("SELECT batch_id, request_json FROM _synchro_push_batches WHERE state = 'pending'"),
+            )
+            assertEquals(RetryOperation.PUSHING, backoff.resumeState)
+            assertEquals(sealedBatch["batch_id"], backoff.workIdentity)
+            assertEquals(sealedBatch["request_json"], pushRequestJSONs.single())
+
+            timing.releaseAt(61_000L)
+            assertTrue(retryCompleted.await(2, TimeUnit.SECONDS))
+            assertEquals(2, pushCalls.get())
+            assertEquals(pushRequestJSONs[0], pushRequestJSONs[1])
+            assertNull(DurableBackoffStore.load(db))
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+        } finally {
+            registration.cancel()
+            timing.releaseAt(61_000L)
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun stopCancelsManagedLoopRetryWokenByExhaustedSyncNow() = runTest {
+        val timing = BlockingRetryTiming(1_000L)
+        val pushCalls = AtomicInteger()
+        val (engine, db) = makeIntegrationEnv(
+            syncInterval = 3_600.0,
+            pushDebounce = 3_600.0,
+            maxRetryAttempts = 0,
+            retryTiming = timing,
+        ) { request ->
+            when {
+                request.path!!.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                request.path!!.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path!!.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                request.path!!.endsWith("/sync/push") -> {
+                    pushCalls.incrementAndGet()
+                    MockResponse()
+                        .setResponseCode(503)
+                        .setHeader("Retry-After", "60")
+                        .setBody(RETRYABLE_503_ERROR_JSON)
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("retry-stop", "Retry Stop", "u1", "2026-01-01T10:00:00.000000Z"),
+            )
+
+            assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is RetryableError)
+            assertTrue(timing.sleepStarted.await(2, TimeUnit.SECONDS))
+            val retained = requireNotNull(DurableBackoffStore.load(db))
+
+            engine.stop()
+
+            assertEquals(1, pushCalls.get())
+            assertEquals(retained, DurableBackoffStore.load(db))
+        } finally {
+            timing.releaseAt(61_000L)
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testRestartWaitsForDurableDeadlineThenReconnectsAndClearsBackoff() = runTest {
         val timing = BlockingRetryTiming(1_000L)
         val initialSyncCompleted = CountDownLatch(1)
@@ -3031,6 +3154,7 @@ class SyncEngineTests {
         dbName: String = "synchro_test_${UUID.randomUUID()}.sqlite",
         clientID: String = "test-device",
         maxRetryAttempts: Int = 3,
+        syncInterval: Double = 999.0,
         pushDebounce: Double = 0.5,
         retryTiming: RetryTiming? = null,
         handler: (RecordedRequest) -> MockResponse
@@ -3049,7 +3173,7 @@ class SyncEngineTests {
             authProvider = { "token" },
             clientID = clientID,
             appVersion = "1.0.0",
-            syncInterval = 999.0,
+            syncInterval = syncInterval,
             pushDebounce = pushDebounce,
             maxRetryAttempts = maxRetryAttempts
         )

@@ -1,6 +1,8 @@
 package com.trainstar.synchro
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.decodeFromString
@@ -38,11 +40,22 @@ internal class SyncEngine(
         val seedReceipts: Map<String, String>,
     )
 
+    private data class RetryWakeup(
+        val generation: Long,
+        val backoff: DurableBackoffRecord,
+    )
+
+    private data class ScheduledLoopWork(
+        val backoff: DurableBackoffRecord?,
+        val shouldRun: Boolean,
+    )
+
     private var scope: CoroutineScope? = null
     private var syncJob: Job? = null
     private var debounceJob: Job? = null
     private var pendingObserver: Cancellable? = null
     private val ownedCycleJobs = linkedSetOf<Job>()
+    private var retryWakeups: Channel<RetryWakeup>? = null
 
     @Volatile
     private var currentStatus: SyncStatus = SyncStatus.Uninitialized
@@ -162,6 +175,7 @@ internal class SyncEngine(
 
             // Create a fresh scope
             val createdScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val createdRetryWakeups = Channel<RetryWakeup>(Channel.CONFLATED)
 
             // Clear any stale sync lock from a previous crash.
             // If the process was killed while sync_lock was set, CDC triggers
@@ -179,8 +193,9 @@ internal class SyncEngine(
                     throw CancellationException("sync engine lifecycle changed")
                 }
                 scope = createdScope
+                retryWakeups = createdRetryWakeups
                 syncJob = createdScope.launch {
-                    runManagedLoop(startupGate, options, generation, schemaReset)
+                    runManagedLoop(startupGate, options, generation, schemaReset, createdRetryWakeups)
                 }
             }
             startupGate.await()
@@ -266,6 +281,7 @@ internal class SyncEngine(
         debounceJob = null
         pendingObserver?.cancel()
         pendingObserver = null
+        retryWakeups = null
         scope?.cancel()
         scope = null
         ownedCycleJobs.clear()
@@ -322,10 +338,11 @@ internal class SyncEngine(
                 throw SynchroError.NotConnected()
             }
             val owner = scope ?: throw SynchroError.NotStarted()
+            val generation = lifecycleGeneration
             if (!beginOperationLocked()) throw SynchroError.NotStarted()
             val job = owner.async {
                 try {
-                    runSyncCycleWithRetry()
+                    runSyncCycleWithRetry(retryWakeupGeneration = generation)
                 } finally {
                     endOperation()
                 }
@@ -386,19 +403,52 @@ internal class SyncEngine(
 
     // MARK: - Sync Loop
 
-    private suspend fun syncLoop() {
+    private suspend fun syncLoop(retryWakeups: ReceiveChannel<RetryWakeup>) {
+        var pendingBackoff: DurableBackoffRecord? = null
         while (currentCoroutineContext().isActive) {
-            delay((config.syncInterval * 1000).toLong())
+            val scheduledWork = pendingBackoff?.let { backoff ->
+                ScheduledLoopWork(backoff, shouldRun = true)
+            } ?: awaitLoopWakeup(retryWakeups)
+            pendingBackoff = null
             if (!currentCoroutineContext().isActive) return
+            if (!scheduledWork.shouldRun) continue
+            val backoff = scheduledWork.backoff
+            if (backoff != null) {
+                awaitBackoffDeadline(backoff)
+                if (!currentCoroutineContext().isActive) return
+            }
             if (!isApplicationForeground()) continue
             try {
-                runSyncCycleWithRetry()
+                if (backoff == null) {
+                    runSyncCycleWithRetry()
+                } else {
+                    runSyncCycleWithRetry(
+                        initialBackoff = backoff,
+                        recoverStoredBackoff = false,
+                        requiredStoredBackoff = backoff,
+                    )
+                }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RetryableError) {
+                pendingBackoff = e.persistedBackoff ?: DurableBackoffStore.load(database)
             } catch (_: Exception) {
                 Unit
             }
         }
+    }
+
+    private suspend fun awaitLoopWakeup(retryWakeups: ReceiveChannel<RetryWakeup>): ScheduledLoopWork {
+        val wakeup = withTimeoutOrNull((config.syncInterval * 1000).toLong()) {
+            retryWakeups.receive()
+        } ?: return ScheduledLoopWork(DurableBackoffStore.load(database), shouldRun = true)
+        if (!isCurrentLifecycleGeneration(wakeup.generation)) {
+            return ScheduledLoopWork(null, shouldRun = false)
+        }
+        return DurableBackoffStore.load(database)
+            ?.takeIf { it == wakeup.backoff }
+            ?.let { backoff -> ScheduledLoopWork(backoff, shouldRun = true) }
+            ?: ScheduledLoopWork(null, shouldRun = false)
     }
 
     private suspend fun runManagedLoop(
@@ -406,6 +456,7 @@ internal class SyncEngine(
         options: SyncOptions?,
         generation: Long,
         schemaReset: Boolean,
+        retryWakeups: ReceiveChannel<RetryWakeup>,
     ) {
         if (!beginOperation()) {
             startupGate.complete(Unit)
@@ -414,7 +465,7 @@ internal class SyncEngine(
         try {
             val startupCompleted = runStartupSequence(startupGate, options, generation, schemaReset)
             if (!startupCompleted) return
-            syncLoop()
+            syncLoop(retryWakeups)
         } finally {
             endOperation()
         }
@@ -522,9 +573,14 @@ internal class SyncEngine(
     private suspend fun runSyncCycleWithRetry(
         initialBackoff: DurableBackoffRecord? = null,
         recoverStoredBackoff: Boolean = true,
+        retryWakeupGeneration: Long? = null,
+        requiredStoredBackoff: DurableBackoffRecord? = null,
     ) {
         cycleMutex.withLock {
             val storedBackoff = DurableBackoffStore.load(database)
+            if (requiredStoredBackoff != null && storedBackoff != requiredStoredBackoff) {
+                return@withLock
+            }
             val backoff = when {
                 initialBackoff != null -> storedBackoff
                 recoverStoredBackoff -> storedBackoff
@@ -534,11 +590,14 @@ internal class SyncEngine(
                 awaitBackoffDeadline(backoff)
                 ensureLifecycleActive()
             }
-            runSingleSyncCycleWithRetry(backoff)
+            runSingleSyncCycleWithRetry(backoff, retryWakeupGeneration)
         }
     }
 
-    private suspend fun runSingleSyncCycleWithRetry(initialBackoff: DurableBackoffRecord? = null) {
+    private suspend fun runSingleSyncCycleWithRetry(
+        initialBackoff: DurableBackoffRecord? = null,
+        retryWakeupGeneration: Long? = null,
+    ) {
         var attempt = 0
         var lastError: Exception? = null
         var backoff = initialBackoff
@@ -567,7 +626,12 @@ internal class SyncEngine(
                 attempt++
                 lastError = e
                 val persistedBackoff = enterBackoff(e)
-                if (attempt > config.maxRetryAttempts) break
+                if (attempt > config.maxRetryAttempts) {
+                    retryWakeupGeneration?.let { generation ->
+                        wakeManagedLoop(generation, persistedBackoff)
+                    }
+                    break
+                }
                 awaitBackoffDeadline(persistedBackoff)
                 ensureLifecycleActive()
                 backoff = persistedBackoff
@@ -1213,12 +1277,13 @@ internal class SyncEngine(
         synchronized(lifecycleLock) {
             if (!appInForeground) return
             debounceJob?.cancel()
+            val generation = lifecycleGeneration
             debounceJob = scope?.launch {
                 if (!beginOperation()) return@launch
                 try {
                     delay((config.pushDebounce * 1000).toLong())
                     if (!isActive || !isApplicationForeground()) return@launch
-                    runSyncCycleWithRetry()
+                    runSyncCycleWithRetry(retryWakeupGeneration = generation)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
@@ -1249,6 +1314,15 @@ internal class SyncEngine(
         return record
     }
 
+    private fun wakeManagedLoop(generation: Long, backoff: DurableBackoffRecord) {
+        synchronized(lifecycleLock) {
+            if (lifecycleGeneration != generation || !started.get() || shutdownRequested || shutdownInProgress) {
+                return
+            }
+            retryWakeups?.trySend(RetryWakeup(generation, backoff))
+        }
+    }
+
     private suspend fun awaitBackoffDeadline(record: DurableBackoffRecord) {
         val currentTime = retryTiming.currentTimeMillis()
         val remaining = if (record.nextRetryAtMs <= currentTime) {
@@ -1264,6 +1338,10 @@ internal class SyncEngine(
             started.get() && !shutdownRequested && !shutdownInProgress
         }
         if (!active) throw CancellationException("sync engine lifecycle changed")
+    }
+
+    private fun isCurrentLifecycleGeneration(generation: Long): Boolean = synchronized(lifecycleLock) {
+        lifecycleGeneration == generation && started.get() && !shutdownRequested && !shutdownInProgress
     }
 
     private fun handleSyncError(error: Exception) {
