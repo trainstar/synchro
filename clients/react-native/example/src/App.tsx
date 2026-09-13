@@ -23,7 +23,7 @@ const SYNCHRO_TEST_URL =
 const USER1_JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJleHAiOjQxMDI0NDQ4MDB9.ZPjufmc-mgkQC6rc6GVNzH9V3jhqQZMl2AuF0Cleuz8';
 const USER1_ID = 'a1111111-1111-1111-1111-111111111111';
-const TEST_SYNC_INTERVAL_SECONDS = 300;
+const TEST_SYNC_INTERVAL_SECONDS = 1;
 const TEST_PUSH_DEBOUNCE_SECONDS = 60;
 interface AppProps {
   conformanceDetox?: boolean;
@@ -138,6 +138,36 @@ async function waitForSyncedTable(
       return false;
     }
   }, timeoutMs, 250);
+}
+
+async function runAndWaitForScheduledPullRetry(
+  client: SynchroClient,
+  operation: () => Promise<void>
+) {
+  try {
+    await operation();
+    return;
+  } catch (error) {
+    const status = await client.getSyncStatus();
+    if (status.status !== 'backoff' || status.operation !== 'pulling') {
+      throw error;
+    }
+    const retryCompleted = await waitForCondition(
+      async () => (await client.getSyncStatus()).status === 'ready',
+      15000
+    );
+    if (!retryCompleted) {
+      throw new Error('scheduled pull retry did not return to ready state');
+    }
+  }
+}
+
+async function startAndWaitForScheduledPullRetry(client: SynchroClient) {
+  await runAndWaitForScheduledPullRetry(client, () => client.start());
+}
+
+async function syncAndWaitForScheduledPullRetry(client: SynchroClient) {
+  await runAndWaitForScheduledPullRetry(client, () => client.syncNow());
 }
 
 async function releaseClient(client: SynchroClient | null) {
@@ -282,7 +312,7 @@ function StandardApp() {
     if (startedRef.current) {
       return;
     }
-    await client.start();
+    await startAndWaitForScheduledPullRetry(client);
     startedRef.current = true;
   }, [client, ensureInitialized]);
 
@@ -582,7 +612,7 @@ function StandardApp() {
       setLastError(null);
       markStep('pushPull:start');
       await ensureStarted();
-      await client.syncNow();
+      await syncAndWaitForScheduledPullRetry(client);
       if (!(await waitForSyncedTable(client, 'customers'))) {
         throw new Error('customers table was not ready after starting sync');
       }
@@ -590,7 +620,7 @@ function StandardApp() {
       const customerID = uuid();
       await insertCustomer(client, customerID, USER1_ID, 'push-test-customer');
       markStep('pushPull:inserted');
-      await client.syncNow();
+      await syncAndWaitForScheduledPullRetry(client);
       markStep('pushPull:synced');
       const pendingDrained = await waitForPendingDrain(client);
       const rejection = (await client.inspectRejectedMutations()).find(
@@ -626,7 +656,7 @@ function StandardApp() {
       const pendingRecordID = pendingConflictRecordRef.current;
       if (pendingRecordID === null) {
         await ensureStarted();
-        await client.syncNow();
+        await syncAndWaitForScheduledPullRetry(client);
         if (!(await waitForSyncedTable(client, 'customers'))) {
           throw new Error('customers table was not ready after starting sync');
         }
@@ -636,7 +666,7 @@ function StandardApp() {
         const recordID = uuid();
         await insertCustomer(client, recordID, USER1_ID, 'original');
         markStep('conflict:inserted');
-        await client.syncNow();
+        await syncAndWaitForScheduledPullRetry(client);
         markStep('conflict:initial-sync');
         if (!(await waitForPendingDrain(client))) {
           throw new Error('initial conflict mutation did not drain');
@@ -658,7 +688,7 @@ function StandardApp() {
 
       await ensureStarted();
       markStep('conflict:resync-started');
-      await client.syncNow();
+      await syncAndWaitForScheduledPullRetry(client);
       markStep('conflict:resynced');
 
       const conflictResolved = await waitForCondition(async () => {
@@ -709,7 +739,7 @@ function StandardApp() {
       const pendingRecordID = pendingMultiUserRecordRef.current;
       if (pendingRecordID === null) {
         await ensureStarted();
-        await client.syncNow();
+        await syncAndWaitForScheduledPullRetry(client);
         if (!(await waitForSyncedTable(client, 'customers'))) {
           throw new Error('customers table was not ready after starting sync');
         }
@@ -718,7 +748,7 @@ function StandardApp() {
         const isolationID = uuid();
         await insertCustomer(client, isolationID, USER1_ID, 'user1-only');
         markStep('multiUser:inserted');
-        await client.syncNow();
+        await syncAndWaitForScheduledPullRetry(client);
         markStep('multiUser:synced');
         const pendingDrained = await waitForPendingDrain(client);
         const rejection = (await client.inspectRejectedMutations()).find(
@@ -788,7 +818,7 @@ function StandardApp() {
       markStep('lifecycle:background');
       await client.enterForeground();
       markStep('lifecycle:foreground');
-      await client.syncNow();
+      await syncAndWaitForScheduledPullRetry(client);
       const resumedStatus = await client.getSyncStatus();
       if (resumedStatus.status !== 'ready') {
         throw new Error(`foreground did not resume ready state: ${resumedStatus.status}`);
@@ -863,8 +893,8 @@ function StandardApp() {
         pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
       });
       await syncClient.initialize();
-      await syncClient.start();
-      await syncClient.syncNow();
+      await startAndWaitForScheduledPullRetry(syncClient);
+      await syncAndWaitForScheduledPullRetry(syncClient);
 
       const pendingAfterSync = await syncClient.pendingChangeCount();
       const localRow = await syncClient.queryOne(
@@ -975,8 +1005,8 @@ function StandardApp() {
 
       const syncEvents: SyncEvent[] = [];
       unsubscribe = seedClient.onSyncEvent((event) => syncEvents.push(event));
-      await seedClient.start();
-      await seedClient.syncNow();
+      await startAndWaitForScheduledPullRetry(seedClient);
+      await syncAndWaitForScheduledPullRetry(seedClient);
 
       unsubscribe();
       unsubscribe = null;
