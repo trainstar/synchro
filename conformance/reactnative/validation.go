@@ -676,15 +676,26 @@ func decodeRebuildResponseFacts(raw json.RawMessage) (rebuildResponseFacts, erro
 	}
 	var members map[string]json.RawMessage
 	var facts rebuildResponseFacts
-	if jsonstrict.Decode(raw, &members) != nil || jsonstrict.Decode(raw, &facts) != nil ||
-		len(members) < 6 || len(members) > 8 || members["record_count"] == nil ||
+	if jsonstrict.Decode(raw, &members) != nil || jsonstrict.Decode(raw, &facts) != nil {
+		return rebuildResponseFacts{}, errors.New("React Native rebuild response facts are invalid")
+	}
+	wantMembers := 6
+	if members["final_scope_cursor_fingerprint"] != nil {
+		wantMembers++
+	}
+	if members["response_body_sha256"] != nil {
+		wantMembers++
+		if facts.ResponseBodySHA256 == nil || !validLowerHexDigest(*facts.ResponseBodySHA256) {
+			return rebuildResponseFacts{}, errors.New("React Native rebuild response facts are invalid")
+		}
+	}
+	if len(members) != wantMembers || members["record_count"] == nil ||
 		members["has_more"] == nil || members["has_cursor"] == nil || members["has_final_scope_cursor"] == nil ||
 		members["has_checksum"] == nil || members["scope_fingerprint"] == nil ||
 		facts.RecordCount == nil || facts.HasMore == nil || facts.HasCursor == nil || facts.HasFinalScopeCursor == nil ||
 		facts.HasChecksum == nil || facts.ScopeFingerprint == nil || *facts.RecordCount > 1000 ||
 		!validLowerHexDigest(*facts.ScopeFingerprint) || *facts.HasFinalScopeCursor != (facts.FinalScopeCursorFingerprint != nil) ||
-		facts.FinalScopeCursorFingerprint != nil && !validLowerHexDigest(*facts.FinalScopeCursorFingerprint) ||
-		facts.ResponseBodySHA256 != nil && !validLowerHexDigest(*facts.ResponseBodySHA256) {
+		facts.FinalScopeCursorFingerprint != nil && !validLowerHexDigest(*facts.FinalScopeCursorFingerprint) {
 		return rebuildResponseFacts{}, errors.New("React Native rebuild response facts are invalid")
 	}
 	return facts, nil

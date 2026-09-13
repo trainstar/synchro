@@ -161,14 +161,6 @@ func TestBootstrapTraceRejectsInvalidResponseFacts(t *testing.T) {
 		{"page cursor in terminal rebuild facts", mutateRebuildBoolean("has_cursor", true)},
 		{"missing final cursor in rebuild facts", mutateRebuildBoolean("has_final_scope_cursor", false)},
 		{"missing checksum in rebuild facts", mutateRebuildBoolean("has_checksum", false)},
-		{"invalid response body fingerprint", func(trace *traceSnapshot) {
-			var facts map[string]any
-			if err := json.Unmarshal(trace.Observations[1].RebuildResponseFacts, &facts); err != nil {
-				panic(err)
-			}
-			facts["response_body_sha256"] = "invalid"
-			trace.Observations[1].RebuildResponseFacts, _ = json.Marshal(facts)
-		}},
 		{"absent pull facts", func(trace *traceSnapshot) { trace.Observations[2].PullResponseFacts = nil }},
 		{"null pull facts", func(trace *traceSnapshot) { trace.Observations[2].PullResponseFacts = json.RawMessage(`null`) }},
 		{"malformed pull facts", func(trace *traceSnapshot) {
@@ -570,6 +562,71 @@ func validRebuildResponseFacts() string {
 		panic(err)
 	}
 	return string(value)
+}
+
+func TestRebuildResponseFactsRequireClosedShape(t *testing.T) {
+	for _, page := range []struct {
+		name     string
+		terminal bool
+	}{
+		{name: "intermediate"},
+		{name: "terminal", terminal: true},
+	} {
+		t.Run(page.name, func(t *testing.T) {
+			for _, test := range []struct {
+				name      string
+				mutate    func(map[string]any)
+				wantError bool
+			}{
+				{name: "response hash present"},
+				{name: "response hash absent", mutate: func(facts map[string]any) {
+					delete(facts, "response_body_sha256")
+				}},
+				{name: "unknown replaces response hash", wantError: true, mutate: func(facts map[string]any) {
+					delete(facts, "response_body_sha256")
+					facts["unknown"] = true
+				}},
+				{name: "unknown member", wantError: true, mutate: func(facts map[string]any) {
+					facts["unknown"] = true
+				}},
+				{name: "null response hash", wantError: true, mutate: func(facts map[string]any) {
+					facts["response_body_sha256"] = nil
+				}},
+				{name: "uppercase response hash", wantError: true, mutate: func(facts map[string]any) {
+					facts["response_body_sha256"] = strings.Repeat("A", 64)
+				}},
+				{name: "short response hash", wantError: true, mutate: func(facts map[string]any) {
+					facts["response_body_sha256"] = strings.Repeat("a", 63)
+				}},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					facts := map[string]any{
+						"record_count": 1, "has_more": !page.terminal, "has_cursor": !page.terminal,
+						"has_final_scope_cursor": page.terminal, "has_checksum": page.terminal,
+						"scope_fingerprint":    strings.Repeat("a", 64),
+						"response_body_sha256": strings.Repeat("b", 64),
+					}
+					if page.terminal {
+						facts["final_scope_cursor_fingerprint"] = strings.Repeat("c", 64)
+					}
+					if test.mutate != nil {
+						test.mutate(facts)
+					}
+					raw, err := json.Marshal(facts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					decoded, err := decodeRebuildResponseFacts(raw)
+					if (err != nil) != test.wantError {
+						t.Fatalf("decode error = %v, want error %t", err, test.wantError)
+					}
+					if err == nil && (decoded.ResponseBodySHA256 != nil) != (facts["response_body_sha256"] != nil) {
+						t.Fatal("response hash presence changed during decoding")
+					}
+				})
+			}
+		})
+	}
 }
 
 func validPullResponseFacts(cursor string) string {
