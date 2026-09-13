@@ -40,7 +40,14 @@ private struct ConnectOperationResult {
 private struct LifecycleResources {
     let syncTask: Task<Void, Never>?
     let debounceTask: Task<Void, Never>?
+    let schedulerIdleTask: Task<Bool, Never>?
     let pendingObserver: DatabaseCancellable?
+}
+
+private struct SchedulerIdleWait {
+    let id: UUID
+    let generation: Int64
+    let task: Task<Bool, Never>
 }
 
 private actor StartupGate {
@@ -164,6 +171,7 @@ final class SyncEngine: @unchecked Sendable {
     private var pendingObserver: DatabaseCancellable?
     private var pendingObserverGeneration: Int64?
     private var stopTask: Task<Void, Never>?
+    private var schedulerIdleWait: SchedulerIdleWait?
     private var nativeLifecycleObservers: [NSObjectProtocol] = []
 
     private let state = OSAllocatedUnfairLock(initialState: SyncEngineState())
@@ -446,11 +454,13 @@ final class SyncEngine: @unchecked Sendable {
                     continue
                 }
 
-                try await Task.sleep(nanoseconds: UInt64(config.syncInterval * 1_000_000_000))
-                try ensureLifecycleActive(generation)
+                let regularIntervalElapsed = try await waitForRegularCycleOrBackoff(
+                    generation: generation
+                )
                 if try loadPersistedBackoff() != nil {
                     continue
                 }
+                guard regularIntervalElapsed else { continue }
                 try await runSerializedSyncCyclePersistingBackoff(lifecycleGeneration: generation)
             } catch is CancellationError {
                 return
@@ -642,13 +652,19 @@ final class SyncEngine: @unchecked Sendable {
                 try self.ensureLifecycleActive(generation)
                 let alreadyPersisted = self.getSyncStatus() == .backoff
                 let persistedBackoff: LocalBackoffRecord
+                let persistedNewBackoff: Bool
                 if alreadyPersisted, let current = try self.currentBackoff(for: error) {
                     persistedBackoff = current
+                    persistedNewBackoff = false
                 } else {
                     persistedBackoff = try self.persistBackoff(error)
+                    persistedNewBackoff = true
                 }
                 if !alreadyPersisted {
                     try self.transition(to: .backoff, lifecycleGeneration: generation)
+                }
+                if persistedNewBackoff {
+                    self.wakeManagedScheduler(generation: generation)
                 }
                 self.emitBackoffEvent(persistedBackoff)
                 throw error
@@ -810,6 +826,74 @@ final class SyncEngine: @unchecked Sendable {
                 nanoseconds: min(remaining, RetryTiming.maximumSleepChunkNanoseconds)
             )
         }
+    }
+
+    private func waitForRegularCycleOrBackoff(generation: Int64) async throws -> Bool {
+        let waitID = UUID()
+        let intervalNanoseconds = UInt64(config.syncInterval * 1_000_000_000)
+        let idleTask = Task<Bool, Never> {
+            do {
+                try await Task.sleep(nanoseconds: intervalNanoseconds)
+                return true
+            } catch {
+                return false
+            }
+        }
+        let installation = state.withLock { state -> (installed: Bool, previousTask: Task<Bool, Never>?) in
+            guard state.started,
+                  !state.stopping,
+                  !state.backgrounded,
+                  !state.closed,
+                  state.lifecycleGeneration == generation else {
+                return (false, nil)
+            }
+            let previousTask = schedulerIdleWait?.task
+            schedulerIdleWait = SchedulerIdleWait(
+                id: waitID,
+                generation: generation,
+                task: idleTask
+            )
+            return (true, previousTask)
+        }
+        guard installation.installed else {
+            idleTask.cancel()
+            throw CancellationError()
+        }
+        installation.previousTask?.cancel()
+        defer {
+            idleTask.cancel()
+            state.withLock { _ in
+                guard schedulerIdleWait?.id == waitID,
+                      schedulerIdleWait?.generation == generation else { return }
+                schedulerIdleWait = nil
+            }
+        }
+
+        if try loadPersistedBackoff() != nil {
+            idleTask.cancel()
+        }
+        let intervalElapsed = await withTaskCancellationHandler {
+            await idleTask.value
+        } onCancel: {
+            idleTask.cancel()
+        }
+        try ensureLifecycleActive(generation)
+        return intervalElapsed
+    }
+
+    private func wakeManagedScheduler(generation: Int64) {
+        let idleTask = state.withLock { state -> Task<Bool, Never>? in
+            guard state.started,
+                  !state.stopping,
+                  !state.backgrounded,
+                  !state.closed,
+                  state.lifecycleGeneration == generation,
+                  schedulerIdleWait?.generation == generation else {
+                return nil
+            }
+            return schedulerIdleWait?.task
+        }
+        idleTask?.cancel()
     }
 
     private func currentTimeMS() -> Int64 {
@@ -1675,11 +1759,13 @@ final class SyncEngine: @unchecked Sendable {
                 let resources = LifecycleResources(
                     syncTask: syncTask,
                     debounceTask: debounceTask,
+                    schedulerIdleTask: schedulerIdleWait?.task,
                     pendingObserver: pendingObserver
                 )
                 syncTask = nil
                 debounceTask = nil
                 debounceTaskID = nil
+                schedulerIdleWait = nil
                 pendingObserver = nil
                 pendingObserverGeneration = nil
                 state.started = false
@@ -1695,6 +1781,7 @@ final class SyncEngine: @unchecked Sendable {
             _ = cycleGate.invalidate(generation: terminated.generation)
             terminated.resources.syncTask?.cancel()
             terminated.resources.debounceTask?.cancel()
+            terminated.resources.schedulerIdleTask?.cancel()
             terminated.resources.pendingObserver?.cancel()
             if terminated.canEnterError {
                 try transition(to: .error)
@@ -1714,11 +1801,13 @@ final class SyncEngine: @unchecked Sendable {
             let resources = LifecycleResources(
                 syncTask: syncTask,
                 debounceTask: debounceTask,
+                schedulerIdleTask: schedulerIdleWait?.task,
                 pendingObserver: pendingObserver
             )
             syncTask = nil
             debounceTask = nil
             debounceTaskID = nil
+            schedulerIdleWait = nil
             pendingObserver = nil
             pendingObserverGeneration = nil
             state.started = false
@@ -1727,6 +1816,7 @@ final class SyncEngine: @unchecked Sendable {
         }
         resources?.syncTask?.cancel()
         resources?.debounceTask?.cancel()
+        resources?.schedulerIdleTask?.cancel()
         resources?.pendingObserver?.cancel()
     }
 
@@ -1737,11 +1827,13 @@ final class SyncEngine: @unchecked Sendable {
             let resources = LifecycleResources(
                 syncTask: nil,
                 debounceTask: debounceTask,
+                schedulerIdleTask: schedulerIdleWait?.task,
                 pendingObserver: pendingObserver
             )
             syncTask = nil
             debounceTask = nil
             debounceTaskID = nil
+            schedulerIdleWait = nil
             pendingObserver = nil
             pendingObserverGeneration = nil
             state.started = false
@@ -1749,6 +1841,7 @@ final class SyncEngine: @unchecked Sendable {
             return resources
         }
         resources?.debounceTask?.cancel()
+        resources?.schedulerIdleTask?.cancel()
         resources?.pendingObserver?.cancel()
     }
 
@@ -1827,11 +1920,13 @@ final class SyncEngine: @unchecked Sendable {
             let resources = LifecycleResources(
                 syncTask: syncTask,
                 debounceTask: debounceTask,
+                schedulerIdleTask: schedulerIdleWait?.task,
                 pendingObserver: pendingObserver
             )
             syncTask = nil
             debounceTask = nil
             debounceTaskID = nil
+            schedulerIdleWait = nil
             pendingObserver = nil
             pendingObserverGeneration = nil
             return (generation: generation, resources: resources)
@@ -1840,11 +1935,15 @@ final class SyncEngine: @unchecked Sendable {
         let cycleTasks = cycleGate.invalidate(generation: stopState.generation)
         stopState.resources.syncTask?.cancel()
         stopState.resources.debounceTask?.cancel()
+        stopState.resources.schedulerIdleTask?.cancel()
         stopState.resources.pendingObserver?.cancel()
         for task in cycleTasks {
             _ = await task.result
         }
         if let task = stopState.resources.debounceTask {
+            _ = await task.result
+        }
+        if let task = stopState.resources.schedulerIdleTask {
             _ = await task.result
         }
         if let task = stopState.resources.syncTask {

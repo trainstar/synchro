@@ -1657,8 +1657,9 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(backoff?.retryClassification, .http503)
     }
 
-    func testDurableSchedulerRetriesSyncNowRetryableError() async throws {
-        var pushCallCount = 0
+    func testDurableSchedulerWakesForSyncNowBackoffBeforeRegularInterval() async throws {
+        let pushRequestBodies = OSAllocatedUnfairLock(initialState: [Data]())
+        let retryStartedAtMS = OSAllocatedUnfairLock(initialState: Int64?.none)
         let resumed = expectation(description: "durable push retry resumed")
 
         MockURLProtocol.requestHandler = { request in
@@ -1668,15 +1669,22 @@ final class SyncEngineTests: XCTestCase {
             } else if path.hasSuffix("/sync/rebuild") {
                 return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
             } else if path.hasSuffix("/sync/push") {
-                pushCallCount += 1
+                let requestBody = try XCTUnwrap(request.bodyData())
+                let pushCallCount = pushRequestBodies.withLock { requestBodies in
+                    requestBodies.append(requestBody)
+                    return requestBodies.count
+                }
                 if pushCallCount == 1 {
                     let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
                     let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
-                                                   headerFields: ["Retry-After": "0.01"])!
+                                                   headerFields: ["Retry-After": "1"])!
                     return (response, data)
                 } else {
+                    retryStartedAtMS.withLock {
+                        $0 = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+                    }
                     resumed.fulfill()
-                    let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+                    let body = try JSONSerialization.jsonObject(with: requestBody) as! [String: Any]
                     let mutations = body["mutations"] as! [[String: Any]]
                     let accepted: [[String: Any]] = try mutations.map {
                         try self.acceptedPushOutcome(
@@ -1699,10 +1707,11 @@ final class SyncEngineTests: XCTestCase {
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, db) = try makeIntegrationEnv(syncInterval: 0.2)
+        let (engine, db) = try makeIntegrationEnv(syncInterval: 3_600)
         addTeardownBlock { await engine.stop() }
 
         try await engine.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
 
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
@@ -1714,15 +1723,74 @@ final class SyncEngineTests: XCTestCase {
             XCTFail("Expected the durable scheduler to own the retry")
         } catch is RetryableError {
         }
+        let persistedBackoff = try XCTUnwrap(try db.readTransaction { db in
+            try SynchroMeta.getBackoffRecord(db)
+        })
         await fulfillment(of: [resumed], timeout: 4.0)
         try await waitForBackoffClear(in: db)
 
-        XCTAssertEqual(pushCallCount, 2)
+        let retryTime = try XCTUnwrap(retryStartedAtMS.withLock { $0 })
+        XCTAssertGreaterThanOrEqual(retryTime, persistedBackoff.nextRetryAtMS)
+        XCTAssertLessThan(retryTime - persistedBackoff.nextRetryAtMS, 2_500)
+        let requestBodies = pushRequestBodies.withLock { $0 }
+        XCTAssertEqual(requestBodies.count, 2)
+        XCTAssertEqual(requestBodies[1], requestBodies[0])
         let tracker = ChangeTracker(database: db)
         XCTAssertFalse(try tracker.hasPendingChanges())
         XCTAssertNil(try db.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         })
+    }
+
+    func testStopCancelsWokenSyncNowRetryAndRetainsDurableBackoff() async throws {
+        let pushCallCount = OSAllocatedUnfairLock(initialState: 0)
+
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            } else if path.hasSuffix("/sync/push") {
+                pushCallCount.withLock { $0 += 1 }
+                let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 503,
+                    httpVersion: nil,
+                    headerFields: ["Retry-After": "1"]
+                )!
+                return (response, data)
+            } else if path.hasSuffix("/sync/pull") {
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, db) = try makeIntegrationEnv(syncInterval: 3_600)
+        try await engine.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+
+        do {
+            try await engine.syncNow()
+            XCTFail("Expected the durable scheduler to own the retry")
+        } catch is RetryableError {
+        }
+        let beforeStop = try XCTUnwrap(try db.readTransaction { db in
+            try SynchroMeta.getBackoffRecord(db)
+        })
+
+        await engine.stop()
+
+        XCTAssertEqual(pushCallCount.withLock { $0 }, 1)
+        XCTAssertEqual(
+            try db.readTransaction { db in try SynchroMeta.getBackoffRecord(db) },
+            beforeStop
+        )
     }
 
     func testPeriodicRetryExhaustionResumesDurableWorkWithoutIllegalTransition() async throws {
