@@ -1,9 +1,20 @@
+function stripInlineHtml(value) {
+  let result = "";
+  let insideTag = false;
+  for (const character of value) {
+    if (character === "<") insideTag = true;
+    else if (insideTag && character === ">") insideTag = false;
+    else if (!insideTag) result += character;
+  }
+  return result;
+}
+
 function stripInlineMarkdown(value) {
   let text = value;
   text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
   text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
   text = text.replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1");
-  text = text.replace(/<[^>]+>/g, "");
+  text = stripInlineHtml(text);
   text = text.replace(/[`*_~]/g, "");
   text = text.replace(/\\([!"#$%&'()*+,./:;<=>?@[\]^_`{|}~-])/g, "$1");
   return text;

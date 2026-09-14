@@ -98,7 +98,7 @@ jobs:
       security-events: write
     uses: ./.github/workflows/codeql.yml
     with:
-      include-swift: ${{ github.event_name == 'push' }}
+      include-swift: true
 
   dependency-scan:
     name: dependency scan

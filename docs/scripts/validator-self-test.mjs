@@ -61,7 +61,7 @@ export function runValidatorSelfTests() {
 
   const markdown = [
     "# Repeated Heading",
-    "### Child `Code`",
+    "### Child <em>`Code`</em>",
     "# Repeated Heading",
     "```markdown",
     "# Hidden Heading",

@@ -2454,7 +2454,7 @@ PODS:
     - SocketRocket
   - SocketRocket (0.7.1)
   - Synchro (0.3.0):
-    - GRDB.swift
+    - GRDB.swift (~> 7.0)
   - SynchroReactNative (0.3.0):
     - boost
     - DoubleConversion
@@ -2822,7 +2822,7 @@ SPEC CHECKSUMS:
   ReactCodegen: 10a61330b137caaad6f7fbe7f5d0e7a40d621700
   ReactCommon: c6cd81778336e767e27fe63c6707dd6b735fff5c
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
-  Synchro: b7ed6f77cc7144cd2e1105585622e4b5ca6465f7
+  Synchro: 9ef0b48ff8d311975ed6660d739e4d225e71a57e
   SynchroReactNative: 4bbe05bf980cc2f307385d974cda77c21ff1acf1
   Yoga: 7a9f26c70daf0b08d82ec2f862e9a8872442129e
 
