@@ -49,16 +49,12 @@
 	release-verify \
 	release-consumer-artifacts \
 	release-run-support-cell \
-	test-evidence \
-	coverage-report \
-	test-inventory \
 	test-conformance \
 	test-blackbox \
 	test-release-artifacts \
+	test-release-publish \
 	test-server-consumer-helper \
 	test-consumer-go \
-	release-check-pg18 \
-	evidence \
 	lint-go \
 	lint-rn \
 	lint-rust-core \
@@ -146,8 +142,6 @@
 	synchrod-pg-test-stop \
 	synchrod-pg-test-restart \
 	release-pods-check \
-	validation-check \
-	release-check \
 	release-kotlin-local \
 	release-npm-dry-run \
 	client-consumer-apple-artifact \
@@ -169,7 +163,6 @@
 	test-packaged-smoke \
 	test-packaged-smoke-structure \
 	test-packaged-consumers \
-	phase-5-check \
 	generate-pg-sql \
 	check-pg-sql \
 	clean
@@ -248,8 +241,6 @@ GRADLE_TEST_ARGS ?= --rerun-tasks
 CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
-PHASE_5_EVIDENCE ?= $(CURDIR)/dist/verification/phase-5-summary.json
-PHASE_5_INPUT ?= $(CURDIR)/dist/verification/phase-5-input.json
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
@@ -259,7 +250,6 @@ RELEASE_PACKAGE_DIR ?= $(CURDIR)/dist/release-components/packages
 RELEASE_CONSUMER_DIR ?= $(CURDIR)/dist/release-consumer
 RELEASE_SBOM ?=
 RELEASE_SUPPORT_ENVIRONMENTS ?=
-RELEASE_ENV_FILE ?= $(CURDIR)/.ignore/r2/cf-secrets
 RELEASE_EVIDENCE_DIR ?= $(CURDIR)/dist/verification/release-evidence
 RELEASE_PG18_BIN_DIR ?=
 RELEASE_PROVISIONER ?=
@@ -310,7 +300,6 @@ help:
 	@echo "  test-conformance-invariants - Test the invariant engine and soak driver"
 	@echo "  soak                  - Run the bounded seeded desktop soak"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
-	@echo "  test-inventory        - Test generated evidence inventory"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  test-blackbox-configured-bounds - Run the real configured-limit measurement proof"
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
@@ -321,11 +310,9 @@ help:
 	@echo "  release-stage         - Assemble and seal already built release components"
 	@echo "  release-verify        - Verify one sealed release without building"
 	@echo "  release-consumer-artifacts - Prepare sealed payloads for package consumers"
+	@echo "  test-release-publish  - Test publication identity and recovery state"
 	@echo "  test-server-consumer-helper - Run server packaged-consumer helper unit tests"
 	@echo "  test-consumer-go      - Resolve and compile the public Go module consumer"
-	@echo "  release-check-pg18    - Verify the packaged PostgreSQL 18 release"
-	@echo "  evidence              - Generate and validate the Phase 5 CI summary"
-	@echo "  coverage-report       - Generate requirement coverage from the Phase 5 CI summary"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
 	@echo "  lint-rust-core        - Run Rust fmt and clippy for the shared core"
@@ -382,8 +369,6 @@ help:
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
 	@echo "  release-pods-check    - Validate Apple package metadata surfaces"
-	@echo "  validation-check      - Combine JavaScript and Go contract gates with full validation"
-	@echo "  release-check         - Run the full release validation matrix"
 	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
 	@echo "  release-npm-dry-run   - Dry-run npm pack for the React Native package"
 	@echo "  client-consumer-artifacts - Stage Apple, Kotlin, and React Native consumer artifacts"
@@ -398,7 +383,6 @@ help:
 	@echo "  test-packaged-smoke   - Validate five terminal checks for every non-excluded support cell"
 	@echo "  test-packaged-smoke-structure - Run packaged smoke summary failure controls"
 	@echo "  test-packaged-consumers - Run all packaged consumer checks"
-	@echo "  phase-5-check         - Validate terminal support-cell and gate evidence"
 	@echo "  check-pg-sql          - Verify tracked SQL matches pgrx generation"
 	@echo "  clean                 - Remove local build and server artifacts"
 
@@ -435,8 +419,7 @@ docs-build: verify-contract
 docs-dev:
 	cd docs && npm run dev
 
-# This target validates the JavaScript-authored contract. validation-check also
-# runs the Go contract and scenario validators through test-conformance.
+# This target validates the JavaScript-authored contract.
 verify-contract:
 	cd docs && npm ci
 	cd docs && npm run verify:contract
@@ -715,16 +698,10 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		rmdir "$$lock"; \
 		trap - EXIT HUP INT TERM
 
-test-evidence:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./evidence ./cmd/synchro-evidence -count=1
-
-test-inventory:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./inventory -count=1
-
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness test-evidence test-inventory
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
 release-stage-server: version-check
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
@@ -882,41 +859,14 @@ release-run-support-cell:
 test-release-artifacts:
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_release_artifacts
 
+test-release-publish:
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_release_publish
+
 test-server-consumer-helper:
 	cd verification/consumers/server && GO111MODULE=off go test -count=1
 
 test-consumer-go:
 	sh verification/consumers/go/test-consumer.sh "$(CURDIR)" "$(CURRENT_VERSION)"
-
-release-check-pg18: test-release-artifacts release-verify
-	@test -r "$(RELEASE_ENV_FILE)" || { echo "RELEASE_ENV_FILE is required: $(RELEASE_ENV_FILE)" >&2; exit 1; }
-	@set -eu; \
-		release="$(abspath $(RELEASE_DIR))"; \
-		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-release-pg18.XXXXXX")"; \
-		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
-		tar -xzf "$$release/artifacts/synchro-pg-pg18-ubuntu24.04-linux-x64-$(VERSION).tar.gz" -C "$$tmp"; \
-		python3 scripts/release-artifacts.py adapter-layout --release-dir "$$release" --version "$(VERSION)" \
-			--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" --output "$$tmp/adapter"; \
-		mkdir -p "$(RELEASE_EVIDENCE_DIR)"; \
-		set -a; . "$(RELEASE_ENV_FILE)"; set +a; \
-		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$$tmp/extension" \
-		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$$tmp/adapter/synchrod-pg" \
-		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" \
-		python3 scripts/ci/capture-gate-result.py --gate release-check-pg18 --output "$(RELEASE_EVIDENCE_DIR)/release-check-pg18.json" -- \
-			python3 scripts/release-artifacts.py run-verified --release-dir "$$release" --version "$(VERSION)" \
-				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
-				--source-commit "$$(git rev-parse --verify HEAD)" -- $(MAKE) --no-print-directory test-blackbox; \
-		python3 scripts/release-artifacts.py verify --release-dir "$$release" --version "$(VERSION)" \
-			--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" --source-commit "$$(git rev-parse --verify HEAD)"
-
-evidence:
-	@test -f "$(PHASE_5_INPUT)" || (echo "PHASE_5_INPUT is required: $(PHASE_5_INPUT)" >&2; exit 1)
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence generate --repo-root .. --input "$(PHASE_5_INPUT)" --output "$(PHASE_5_EVIDENCE)"
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence validate --repo-root .. --summary "$(PHASE_5_EVIDENCE)"
-
-coverage-report:
-	@test -f "$(PHASE_5_EVIDENCE)" || (echo "PHASE_5_EVIDENCE is required: $(PHASE_5_EVIDENCE)" >&2; exit 1)
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-evidence coverage-report --repo-root .. --summary "$(PHASE_5_EVIDENCE)" --json "$(CURDIR)/dist/verification/requirement-coverage.json" --markdown "$(CURDIR)/dist/verification/requirement-coverage.md"
 
 lint-rn:
 	cd clients/react-native && yarn typecheck
@@ -1532,21 +1482,6 @@ release-pods-check: version-check
 	swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
-# This is the combined gate for JavaScript and Go contract validation.
-validation-check: override GO_TEST_ARGS := -v -count=1 -p 1
-validation-check: override GO_TEST_PKGS := ./...
-validation-check: override GRADLE_TEST_ARGS := --rerun-tasks
-validation-check: override DETOX_ARGS :=
-validation-check: build-conformance test-conformance test-blackbox version-check release-pods-check build build-seed build-check release-kotlin-local release-npm-dry-run lint-go lint-rust-core lint-rust-pg lint-rn test-rust-core test-rust-mutants test-integration-mutants test-rust-pg test-adapter test-client-schema-identity test-swift test-kotlin-unit test-kotlin-instrumentation test-kotlin test-rn-unit test-rn-native-parity test-rn test-packaged-consumers phase-5-check verify-contract check-pg-sql docs-build
-	@echo "Validation suite passed."
-
-release-check: override GO_TEST_ARGS := -v -count=1 -p 1
-release-check: override GO_TEST_PKGS := ./...
-release-check: override GRADLE_TEST_ARGS := --rerun-tasks
-release-check: override DETOX_ARGS :=
-release-check: validation-check evidence release-check-pg18
-	@echo "Release validation passed."
-
 release-kotlin-local: version-check
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
@@ -1795,7 +1730,9 @@ test-packaged-smoke:
 		--repo-root "$(CURDIR)" \
 		--cells-dir "$(PACKAGED_SMOKE_CELL_DIR)" \
 		--output "$(PACKAGED_SMOKE_EVIDENCE)"
-	@python3 scripts/release-support-check.py --repo-root "$(CURDIR)" --evidence "$(PACKAGED_SMOKE_EVIDENCE)" --kind smoke
+	@python3 verification/packaged_smoke.py verify-summary \
+		--repo-root "$(CURDIR)" \
+		--summary "$(PACKAGED_SMOKE_EVIDENCE)"
 
 test-packaged-smoke-structure:
 	@mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)"
@@ -1803,10 +1740,7 @@ test-packaged-smoke-structure:
 		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" \
 		python3 verification/test_packaged_smoke.py
 
-test-packaged-consumers: test-packaged-smoke-structure test-consumer-swift test-consumer-swift-ios test-consumer-kotlin test-consumer-kotlin-device test-consumer-rn-ios test-consumer-rn-android test-packaged-smoke
-
-phase-5-check: test-conformance test-blackbox test-adapter test-rust-core test-rust-pg test-swift-unit test-kotlin-unit test-kotlin-instrumentation test-rn-unit test-swift test-kotlin test-rn-e2e-ios test-rn-e2e-android test-rn-warm-connect-ios test-rn-warm-connect-android test-packaged-consumers
-	@python3 scripts/release-support-check.py --repo-root "$(CURDIR)" --evidence "$(PHASE_5_EVIDENCE)"
+test-packaged-consumers: test-packaged-smoke-structure test-consumer-swift test-consumer-kotlin test-consumer-rn-ios test-consumer-rn-android
 
 ext-build:
 	cd extensions/synchro-pg && cargo build

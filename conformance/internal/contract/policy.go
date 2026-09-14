@@ -57,6 +57,7 @@ var lockedArtifactRoles = map[ArtifactInventoryID]string{
 	"ARTDEF-PG-SQL-001":             "pg-install-sql",
 	"ARTDEF-ADAPTER-001":            "adapter",
 	"ARTDEF-SEED-TOOL-001":          "seed-tool",
+	"ARTDEF-GO-MODULE-001":          "go-module",
 	"ARTDEF-SWIFT-SPM-001":          "swift-spm",
 	"ARTDEF-COCOAPODS-001":          "cocoapods",
 	"ARTDEF-KOTLIN-MAVEN-001":       "kotlin-maven",
@@ -554,7 +555,7 @@ func validateApplicability(requirement Requirement) error {
 
 func validateSupportMatrix(matrix SupportMatrix) []error {
 	var failures []error
-	if matrix.CurrentTrackPolicy != (CurrentTrackPolicy{Selector: "current-stable", ResolveAt: "release-candidate-start", RecordExactVersionsIn: "rc-manifest"}) {
+	if matrix.CurrentTrackPolicy != (CurrentTrackPolicy{Selector: "current-stable", ResolveAt: "release-candidate-start", RecordExactVersionsIn: "release-manifest.json"}) {
 		failures = append(failures, fmt.Errorf("support matrix current-track policy does not match the locked policy"))
 	}
 	if !supportCellIDSlicesEqual(matrix.SemanticCorpusCellIDs, lockedSemanticCorpusCellIDs) {

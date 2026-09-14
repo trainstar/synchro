@@ -214,9 +214,6 @@ type SchemaFiles struct {
 	Requirements       FileBinding `json:"requirements"`
 	SupportMatrix      FileBinding `json:"support_matrix"`
 	Scenario           FileBinding `json:"scenario"`
-	CISummary          FileBinding `json:"ci_summary"`
-	RCCandidateLock    FileBinding `json:"rc_candidate_lock"`
-	RCManifest         FileBinding `json:"rc_manifest"`
 	FaultCatalog       FileBinding `json:"fault_catalog"`
 	ArtifactInventory  FileBinding `json:"artifact_inventory"`
 	PerformanceBudgets FileBinding `json:"performance_budgets"`

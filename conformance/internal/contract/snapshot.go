@@ -31,16 +31,13 @@ var schemaPaths = []string{
 	"conformance/schemas/requirements-v2.schema.json",
 	"conformance/schemas/support-matrix.schema.json",
 	"conformance/schemas/scenario-v2.schema.json",
-	"conformance/schemas/ci-summary-v1.schema.json",
-	"conformance/schemas/rc-candidate-lock-v1.schema.json",
-	"conformance/schemas/rc-manifest-v2.schema.json",
 	"conformance/schemas/fault-catalog-v1.schema.json",
 	"conformance/schemas/artifact-inventory-v1.schema.json",
 	"conformance/schemas/performance-budgets-v2.schema.json",
 	"conformance/schemas/vector-catalog-v1.schema.json",
 }
 
-// BuildSnapshot validates the authored contract and hashes the exact 28
+// BuildSnapshot validates the authored contract and hashes the exact 25
 // release-contract bindings.
 func BuildSnapshot(ctx context.Context, repoRoot string) (Snapshot, error) {
 	if err := checkContext(ctx); err != nil {
@@ -126,13 +123,10 @@ func BuildSnapshot(ctx context.Context, repoRoot string) (Snapshot, error) {
 		Requirements:       bindings[0],
 		SupportMatrix:      bindings[1],
 		Scenario:           bindings[2],
-		CISummary:          bindings[3],
-		RCCandidateLock:    bindings[4],
-		RCManifest:         bindings[5],
-		FaultCatalog:       bindings[6],
-		ArtifactInventory:  bindings[7],
-		PerformanceBudgets: bindings[8],
-		VectorCatalog:      bindings[9],
+		FaultCatalog:       bindings[3],
+		ArtifactInventory:  bindings[4],
+		PerformanceBudgets: bindings[5],
+		VectorCatalog:      bindings[6],
 	}
 	if err := snapshot.Validate(); err != nil {
 		return Snapshot{}, err
@@ -154,8 +148,8 @@ func bindCapturedFile(captured map[string][]byte, path string) (FileBinding, err
 
 func captureSnapshotFiles(ctx context.Context, root *os.Root) (map[string][]byte, error) {
 	paths := snapshotFilePaths()
-	if len(paths) != 28 {
-		return nil, fmt.Errorf("snapshot binding path count is %d, want 28", len(paths))
+	if len(paths) != 25 {
+		return nil, fmt.Errorf("snapshot binding path count is %d, want 25", len(paths))
 	}
 	captured := make(map[string][]byte, len(paths))
 	for _, path := range paths {
@@ -266,13 +260,10 @@ func (s Snapshot) Validate() error {
 		{s.SchemaFiles.Requirements, schemaPaths[0], "schema_files.requirements"},
 		{s.SchemaFiles.SupportMatrix, schemaPaths[1], "schema_files.support_matrix"},
 		{s.SchemaFiles.Scenario, schemaPaths[2], "schema_files.scenario"},
-		{s.SchemaFiles.CISummary, schemaPaths[3], "schema_files.ci_summary"},
-		{s.SchemaFiles.RCCandidateLock, schemaPaths[4], "schema_files.rc_candidate_lock"},
-		{s.SchemaFiles.RCManifest, schemaPaths[5], "schema_files.rc_manifest"},
-		{s.SchemaFiles.FaultCatalog, schemaPaths[6], "schema_files.fault_catalog"},
-		{s.SchemaFiles.ArtifactInventory, schemaPaths[7], "schema_files.artifact_inventory"},
-		{s.SchemaFiles.PerformanceBudgets, schemaPaths[8], "schema_files.performance_budgets"},
-		{s.SchemaFiles.VectorCatalog, schemaPaths[9], "schema_files.vector_catalog"},
+		{s.SchemaFiles.FaultCatalog, schemaPaths[3], "schema_files.fault_catalog"},
+		{s.SchemaFiles.ArtifactInventory, schemaPaths[4], "schema_files.artifact_inventory"},
+		{s.SchemaFiles.PerformanceBudgets, schemaPaths[5], "schema_files.performance_budgets"},
+		{s.SchemaFiles.VectorCatalog, schemaPaths[6], "schema_files.vector_catalog"},
 	} {
 		failures = append(failures, validateBinding(expected.binding, expected.path, expected.name)...)
 	}

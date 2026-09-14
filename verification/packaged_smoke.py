@@ -463,6 +463,60 @@ def collect_summary(repo_root: Path, cells_dir: Path, output: Path) -> None:
     )
 
 
+def verify_summary(repo_root: Path, summary_path: Path) -> None:
+    value = load_json(summary_path, "packaged smoke summary")
+    required_keys = {
+        "schema_version",
+        "source_commit",
+        "artifact_hashes",
+        "obligations",
+        "status",
+    }
+    if not isinstance(value, dict) or set(value) != required_keys:
+        raise EvidenceError("packaged smoke summary has invalid members")
+    if value.get("schema_version") != SUMMARY_SCHEMA_VERSION:
+        raise EvidenceError("packaged smoke summary has the wrong schema version")
+    if value.get("source_commit") != source_commit(repo_root):
+        raise EvidenceError("packaged smoke summary source commit does not match HEAD")
+    if value.get("status") != "passed":
+        raise EvidenceError("packaged smoke summary did not pass")
+    summary_hashes = set(validate_hash_list(value.get("artifact_hashes"), "summary artifact hashes"))
+    obligations = value.get("obligations")
+    if not isinstance(obligations, list):
+        raise EvidenceError("packaged smoke summary obligations are missing")
+    expected_ids = {
+        f"smoke/{cell_id}/{operation}"
+        for cell_id in required_cells(repo_root)
+        for operation in SMOKE_OPERATIONS
+    }
+    seen: set[str] = set()
+    for obligation in obligations:
+        if not isinstance(obligation, dict) or set(obligation) != {
+            "id",
+            "kind",
+            "status",
+            "terminal",
+            "test_count",
+            "artifact_hashes",
+        }:
+            raise EvidenceError("packaged smoke summary contains a malformed obligation")
+        obligation_id = obligation.get("id")
+        if obligation_id not in expected_ids or obligation_id in seen:
+            raise EvidenceError("packaged smoke summary contains an unknown or duplicate obligation")
+        seen.add(obligation_id)
+        hashes = set(validate_hash_list(obligation.get("artifact_hashes"), f"{obligation_id} artifact hashes"))
+        if (
+            obligation.get("kind") != "smoke"
+            or obligation.get("status") != "passed"
+            or obligation.get("terminal") is not True
+            or required_integer(obligation.get("test_count"), f"{obligation_id} test count", 1) < 1
+            or not hashes.issubset(summary_hashes)
+        ):
+            raise EvidenceError(f"packaged smoke obligation did not pass: {obligation_id}")
+    if seen != expected_ids:
+        raise EvidenceError("packaged smoke summary has missing obligations")
+
+
 def dry_summary(repo_root: Path, output: Path) -> None:
     commit = source_commit(repo_root)
     structural_hash = hashlib.sha256((repo_root / "verification/packaged-smoke-cell.schema.json").read_bytes()).hexdigest()
@@ -641,6 +695,10 @@ def parse_args() -> argparse.Namespace:
     collect.add_argument("--cells-dir", type=Path, required=True)
     collect.add_argument("--output", type=Path, required=True)
 
+    verify = subparsers.add_parser("verify-summary")
+    verify.add_argument("--repo-root", type=Path, required=True)
+    verify.add_argument("--summary", type=Path, required=True)
+
     dry = subparsers.add_parser("dry-run")
     dry.add_argument("--repo-root", type=Path, required=True)
     dry.add_argument("--output", type=Path, required=True)
@@ -695,6 +753,8 @@ def main() -> int:
             complete_server_cell(args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(), args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact], args.expected_artifact_hash)
         elif args.command == "collect":
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
+        elif args.command == "verify-summary":
+            verify_summary(args.repo_root.resolve(), args.summary.resolve())
         elif args.command == "dry-run":
             dry_summary(args.repo_root.resolve(), args.output.resolve())
         elif args.command == "config":

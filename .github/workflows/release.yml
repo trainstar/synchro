@@ -818,7 +818,9 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             --cells-dir dist/package-evidence/cells \
             --output dist/package-evidence/summary.json
-          jq -e '.status == "passed" and ([.obligations[].id | split("/")[1]] | unique | length) == 7 and (.obligations | length) == 35 and all(.obligations[]; .status == "passed" and .terminal == true and .test_count > 0)' dist/package-evidence/summary.json >/dev/null
+          python3 verification/packaged_smoke.py verify-summary \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --summary dist/package-evidence/summary.json
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:

@@ -278,9 +278,6 @@ func TestDefaultPolicyProtectsModelRunnerAndStrictReleasePackages(t *testing.T) 
 	for _, packagePath := range []string{
 		modulePath + "/modelrunner",
 		modulePath + "/execution",
-		modulePath + "/evidence",
-		modulePath + "/inventory",
-		modulePath + "/cmd/synchro-evidence",
 	} {
 		if !containsExact(defaultProtected, packagePath) {
 			t.Fatalf("strict release package %q is not protected", packagePath)
@@ -326,7 +323,6 @@ func TestDiagnosticBlackboxImporterClassificationIsExact(t *testing.T) {
 		modulePath + "/blackbox/syntheticproof",
 		modulePath + "/cmd/synchro-local-postgres",
 		modulePath + "/cmd/synchro-conformance",
-		modulePath + "/evidence",
 		modulePath + "/kotlin",
 		modulePath + "/reactnative",
 		modulePath + "/swift",

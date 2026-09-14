@@ -54,10 +54,7 @@ var defaultProtected = []string{
 	modulePath + "/faults",
 	modulePath + "/observer",
 	modulePath + "/execution",
-	modulePath + "/evidence",
-	modulePath + "/inventory",
 	modulePath + "/mutants",
-	modulePath + "/cmd/synchro-evidence",
 }
 
 var diagnosticBlackboxImporters = map[string]struct{}{
@@ -65,7 +62,6 @@ var diagnosticBlackboxImporters = map[string]struct{}{
 	modulePath + "/blackbox/syntheticproof":    {},
 	modulePath + "/cmd/synchro-local-postgres": {},
 	modulePath + "/cmd/synchro-conformance":    {},
-	modulePath + "/evidence":                   {},
 	modulePath + "/kotlin":                     {},
 	modulePath + "/reactnative":                {},
 	modulePath + "/swift":                      {},

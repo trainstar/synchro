@@ -96,7 +96,6 @@ If the corpus outgrows plain JSON later, the format can evolve deliberately.
 - `artifacts/`: artifact roles
 - `faults/`: typed fault recipes and negative controls
 - `schemas/`: versioned contract schemas
-- `test-inventory.md`: engineering test inventory
 
 ## Current Seed Corpus
 

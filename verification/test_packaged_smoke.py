@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import copy
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,27 +14,7 @@ import packaged_smoke
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CHECKER = REPO_ROOT / "scripts/release-support-check.py"
-
-
 class PackagedSmokeStructureTests(unittest.TestCase):
-    def run_checker(self, summary: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                "python3",
-                str(CHECKER),
-                "--repo-root",
-                str(REPO_ROOT),
-                "--evidence",
-                str(summary),
-                "--kind",
-                "smoke",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
     def test_dry_summary_and_mutations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-structure.") as raw_directory:
             directory = Path(raw_directory)
@@ -44,9 +23,8 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             dry = packaged_smoke.load_json(dry_path, "dry summary")
             self.assertIsInstance(dry, dict)
 
-            result = self.run_checker(dry_path)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("missing obligations", result.stderr)
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "invalid members"):
+                packaged_smoke.verify_summary(REPO_ROOT, dry_path)
 
     def test_missing_cells_become_terminal_failures(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-collect.") as raw_directory:

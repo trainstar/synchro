@@ -52,15 +52,15 @@ func TestBuildSnapshotUsesCompleteRealContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build real contract snapshot: %v", err)
 	}
-	if got, want := snapshot.SchemaFiles.RCCandidateLock.Path, "conformance/schemas/rc-candidate-lock-v1.schema.json"; got != want {
-		t.Fatalf("candidate-lock schema path = %q, want %q", got, want)
+	if got, want := snapshot.SchemaFiles.ArtifactInventory.Path, "conformance/schemas/artifact-inventory-v1.schema.json"; got != want {
+		t.Fatalf("artifact-inventory schema path = %q, want %q", got, want)
 	}
-	if !isLowerSHA256(snapshot.SchemaFiles.RCCandidateLock.SHA256) {
-		t.Fatal("candidate-lock schema binding does not contain a lowercase SHA-256")
+	if !isLowerSHA256(snapshot.SchemaFiles.ArtifactInventory.SHA256) {
+		t.Fatal("artifact-inventory schema binding does not contain a lowercase SHA-256")
 	}
 }
 
-func TestSnapshotDigestBindsCandidateLockSchemaBytes(t *testing.T) {
+func TestSnapshotDigestBindsArtifactInventorySchemaBytes(t *testing.T) {
 	root := completeSnapshotFixture(t)
 	before, err := BuildSnapshot(context.Background(), root)
 	if err != nil {
@@ -70,10 +70,10 @@ func TestSnapshotDigestBindsCandidateLockSchemaBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("digest initial fixture snapshot: %v", err)
 	}
-	path := "conformance/schemas/rc-candidate-lock-v1.schema.json"
+	path := "conformance/schemas/artifact-inventory-v1.schema.json"
 	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
 	if err != nil {
-		t.Fatalf("read candidate-lock schema fixture: %v", err)
+		t.Fatalf("read artifact-inventory schema fixture: %v", err)
 	}
 	writeFixtureFile(t, root, path, append(data, '\n'))
 	after, err := BuildSnapshot(context.Background(), root)
@@ -85,10 +85,10 @@ func TestSnapshotDigestBindsCandidateLockSchemaBytes(t *testing.T) {
 		t.Fatalf("digest changed fixture snapshot: %v", err)
 	}
 	if beforeDigest == afterDigest {
-		t.Fatal("candidate-lock schema byte change reused the prior snapshot digest")
+		t.Fatal("artifact-inventory schema byte change reused the prior snapshot digest")
 	}
-	if before.SchemaFiles.RCCandidateLock.SHA256 == after.SchemaFiles.RCCandidateLock.SHA256 {
-		t.Fatal("candidate-lock schema byte change reused the prior file digest")
+	if before.SchemaFiles.ArtifactInventory.SHA256 == after.SchemaFiles.ArtifactInventory.SHA256 {
+		t.Fatal("artifact-inventory schema byte change reused the prior file digest")
 	}
 }
 
@@ -426,9 +426,9 @@ func TestSnapshotFixtureIsDeterministicAndRejectsBindingMutants(t *testing.T) {
 	}
 	requireJSONKeys(t, behavioral[0], "path", "sha256", "status")
 	requireJSONKeys(t, topLevel["verification_inputs"], "artifact_inventory", "fault_catalog", "performance_budgets", "scenario_catalog", "vector_catalog")
-	requireJSONKeys(t, topLevel["schema_files"], "artifact_inventory", "ci_summary", "fault_catalog", "performance_budgets", "rc_candidate_lock", "rc_manifest", "requirements", "scenario", "support_matrix", "vector_catalog")
-	if got, want := snapshotBindingPaths(first), expectedSnapshotBindingPaths(); !equalStringSets(got, want) || len(got) != 28 {
-		t.Fatalf("snapshot binding paths = %#v, want all 28 %#v", got, want)
+	requireJSONKeys(t, topLevel["schema_files"], "artifact_inventory", "fault_catalog", "performance_budgets", "requirements", "scenario", "support_matrix", "vector_catalog")
+	if got, want := snapshotBindingPaths(first), expectedSnapshotBindingPaths(); !equalStringSets(got, want) || len(got) != 25 {
+		t.Fatalf("snapshot binding paths = %#v, want all 25 %#v", got, want)
 	}
 	lastIndex := -1
 	for _, key := range []string{"behavioral_files", "protocol_version", "release_version", "requirements", "schema_files", "support_matrix", "verification_inputs"} {
@@ -877,9 +877,6 @@ func snapshotBindingPaths(snapshot Snapshot) []string {
 		snapshot.SchemaFiles.Requirements.Path,
 		snapshot.SchemaFiles.SupportMatrix.Path,
 		snapshot.SchemaFiles.Scenario.Path,
-		snapshot.SchemaFiles.CISummary.Path,
-		snapshot.SchemaFiles.RCCandidateLock.Path,
-		snapshot.SchemaFiles.RCManifest.Path,
 		snapshot.SchemaFiles.FaultCatalog.Path,
 		snapshot.SchemaFiles.ArtifactInventory.Path,
 		snapshot.SchemaFiles.PerformanceBudgets.Path,
