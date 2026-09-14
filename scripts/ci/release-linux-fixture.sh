@@ -53,11 +53,6 @@ case "${1:-}" in
     setup_ssh "$@"
     exit 0
     ;;
-  select-free-port)
-    shift
-    select_free_port "$@"
-    exit 0
-    ;;
 esac
 
 usage() {

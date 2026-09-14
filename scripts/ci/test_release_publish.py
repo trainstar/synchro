@@ -6,7 +6,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
-import socket
 import subprocess
 import tempfile
 import unittest
@@ -421,30 +420,6 @@ esac
             self.assertIn("retained /srv/synchro/run-123-1-candidate-swift-CI-SWIFT", result.stderr)
             self.assertIn("pre-attach", ssh_log.read_text(encoding="utf-8").splitlines()[2])
             self.assertTrue(os.access(provisioner, os.X_OK))
-
-    def test_fixture_selects_and_exports_distinct_local_adapter_port(self) -> None:
-        script = ROOT / "scripts/ci/release-linux-fixture.sh"
-        with socket.socket() as postgres, socket.socket() as http:
-            postgres.bind(("127.0.0.1", 0))
-            http.bind(("127.0.0.1", 0))
-            excluded = {postgres.getsockname()[1], http.getsockname()[1]}
-            result = subprocess.run(
-                ["sh", str(script), "select-free-port", *(str(port) for port in sorted(excluded))],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        selected = int(result.stdout.strip())
-        self.assertNotIn(selected, excluded)
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", selected))
-
-        source = script.read_text(encoding="utf-8")
-        self.assertIn('local_http_port=$(select_free_port "$local_pg_port")', source)
-        self.assertIn('SYNCHROD_PG_PORT=$(select_free_port "$local_pg_port" "$local_http_port")', source)
-        self.assertIn("export SYNCHROD_PG_PORT", source)
-        self.assertIn('export SYNCHRO_TEST_URL="http://127.0.0.1:$local_http_port"', source)
 
     def test_release_has_one_post_package_approval_before_public_side_effects(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
