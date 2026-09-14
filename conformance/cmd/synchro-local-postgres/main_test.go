@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/trainstar/synchro/conformance/blackbox"
 )
 
 func TestRunArgumentValidation(t *testing.T) {
@@ -41,21 +43,11 @@ func TestRunArgumentValidation(t *testing.T) {
 
 func TestAttachEnvironmentIncludesOwnedLifecycleFields(t *testing.T) {
 	runID := strings.Repeat("a", 32)
-	installationLock := testCanonicalInstallationLock(t)
-	command := []string{
-		"verified-ssh-wrapper",
-		"fixture",
-		"synchro-local-postgres",
-		"lifecycle",
-		"--state-dir",
-		"/owned/state",
-		"--installation-lock",
-		installationLock,
-	}
+	command := []string{"verified-ssh-wrapper", "fixture", "synchro-local-postgres", "lifecycle", "--state-dir", "/owned/state"}
 	environment := attachEnvironment("postgres://fixture", runID, command, localCredentials{})
 	for _, wanted := range []string{
 		"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID='" + runID + "'",
-		`SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND='["verified-ssh-wrapper","fixture","synchro-local-postgres","lifecycle","--state-dir","/owned/state","--installation-lock","` + installationLock + `"]'`,
+		`SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND='["verified-ssh-wrapper","fixture","synchro-local-postgres","lifecycle","--state-dir","/owned/state"]'`,
 		"SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE='false'",
 	} {
 		if !strings.Contains(environment, wanted) {
@@ -67,19 +59,11 @@ func TestAttachEnvironmentIncludesOwnedLifecycleFields(t *testing.T) {
 func TestStartLifecycleCommandDefaultAndRemoteOverride(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "owned-state")
 	executable := filepath.Join(t.TempDir(), "synchro-local-postgres")
-	installationLock := testCanonicalInstallationLock(t)
-	defaultCommand, err := startLifecycleCommand("", false, executable, stateDir, installationLock)
+	defaultCommand, err := startLifecycleCommand("", false, executable, stateDir)
 	if err != nil {
 		t.Fatalf("default lifecycle command rejected: %v", err)
 	}
-	wantDefault := []string{
-		executable,
-		"lifecycle",
-		"--state-dir",
-		stateDir,
-		"--installation-lock",
-		installationLock,
-	}
+	wantDefault := []string{executable, "lifecycle", "--state-dir", stateDir}
 	if strings.Join(defaultCommand, "\x00") != strings.Join(wantDefault, "\x00") {
 		t.Fatalf("default lifecycle command = %#v", defaultCommand)
 	}
@@ -96,12 +80,11 @@ func TestStartLifecycleCommandDefaultAndRemoteOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command, err := startLifecycleCommand(string(remoteJSON), true, executable, stateDir, installationLock)
+	command, err := startLifecycleCommand(string(remoteJSON), true, executable, stateDir)
 	if err != nil {
 		t.Fatalf("valid remote lifecycle command rejected: %v", err)
 	}
-	wantRemote := append(append([]string(nil), remote...), "--installation-lock", installationLock)
-	if strings.Join(command, "\x00") != strings.Join(wantRemote, "\x00") {
+	if strings.Join(command, "\x00") != strings.Join(remote, "\x00") {
 		t.Fatalf("remote lifecycle command = %#v", command)
 	}
 }
@@ -109,7 +92,6 @@ func TestStartLifecycleCommandDefaultAndRemoteOverride(t *testing.T) {
 func TestStartLifecycleCommandRejectsWrongStateAndShell(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "owned-state")
 	executable := filepath.Join(t.TempDir(), "synchro-local-postgres")
-	installationLock := testCanonicalInstallationLock(t)
 	tests := []struct {
 		name    string
 		command []string
@@ -122,19 +104,6 @@ func TestStartLifecycleCommandRejectsWrongStateAndShell(t *testing.T) {
 			name:    "shell",
 			command: []string{"verified-ssh-wrapper", "fixture", "/bin/sh", "lifecycle", "--state-dir", stateDir},
 		},
-		{
-			name: "wrong installation lock",
-			command: []string{
-				"verified-ssh-wrapper",
-				"fixture",
-				"synchro-local-postgres",
-				"lifecycle",
-				"--state-dir",
-				stateDir,
-				"--installation-lock",
-				filepath.Join(t.TempDir(), "wrong.lock"),
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -142,20 +111,17 @@ func TestStartLifecycleCommandRejectsWrongStateAndShell(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := startLifecycleCommand(string(data), true, executable, stateDir, installationLock); err == nil {
+			if _, err := startLifecycleCommand(string(data), true, executable, stateDir); err == nil {
 				t.Fatal("invalid lifecycle command was accepted")
 			}
 		})
 	}
-	if _, err := startLifecycleCommand("", true, executable, stateDir, installationLock); err == nil {
+	if _, err := startLifecycleCommand("", true, executable, stateDir); err == nil {
 		t.Fatal("explicit empty lifecycle command was accepted")
-	}
-	if _, err := startLifecycleCommand("", false, executable, stateDir, "relative.lock"); err == nil {
-		t.Fatal("relative lifecycle installation lock was accepted")
 	}
 }
 
-func TestResolveInstallationLockPathUsesCanonicalDestinationPair(t *testing.T) {
+func TestPostgreSQLInstallationLockPathUsesCanonicalDestinationPair(t *testing.T) {
 	root := t.TempDir()
 	pkglibdir := filepath.Join(root, "shared", "lib")
 	sharedir := filepath.Join(root, "shared", "share")
@@ -184,15 +150,15 @@ func TestResolveInstallationLockPathUsesCanonicalDestinationPair(t *testing.T) {
 	writePGConfig(wrapperBinDir, pkglibdir, sharedir)
 	writePGConfig(distinctBinDir, otherPKGLibDir, otherShareDir)
 
-	first, err := resolveInstallationLockPath(context.Background(), binDir, "")
+	first, err := blackbox.PostgreSQLInstallationLockPath(context.Background(), binDir)
 	if err != nil {
 		t.Fatalf("resolve installation lock: %v", err)
 	}
-	second, err := resolveInstallationLockPath(context.Background(), wrapperBinDir, first)
+	second, err := blackbox.PostgreSQLInstallationLockPath(context.Background(), wrapperBinDir)
 	if err != nil {
 		t.Fatalf("resolve shared destination lock: %v", err)
 	}
-	distinct, err := resolveInstallationLockPath(context.Background(), distinctBinDir, "")
+	distinct, err := blackbox.PostgreSQLInstallationLockPath(context.Background(), distinctBinDir)
 	if err != nil {
 		t.Fatalf("resolve distinct destination lock: %v", err)
 	}
@@ -202,16 +168,10 @@ func TestResolveInstallationLockPathUsesCanonicalDestinationPair(t *testing.T) {
 	if first == distinct {
 		t.Fatalf("distinct destination pairs resolved one lock: %q", first)
 	}
-	if _, err := resolveInstallationLockPath(context.Background(), distinctBinDir, first); err == nil {
-		t.Fatal("explicit lock from a different destination pair was accepted")
-	}
 	if within := strings.HasPrefix(first, root+string(filepath.Separator)); within {
 		t.Fatalf("installation lock %q is private to fixture root %q", first, root)
 	}
-	if _, err := resolveInstallationLockPath(context.Background(), binDir, filepath.Join(root, "private.lock")); err == nil {
-		t.Fatal("private per-fixture installation lock was accepted")
-	}
-	if _, err := resolveInstallationLockPath(nil, binDir, ""); err == nil {
+	if _, err := blackbox.PostgreSQLInstallationLockPath(nil, binDir); err == nil {
 		t.Fatal("nil installation lock context was accepted")
 	}
 }
@@ -222,16 +182,14 @@ func TestRunLifecycleUsesOwnedControlProtocolAndSameRunDestroyIsIdempotent(t *te
 		t.Fatal(err)
 	}
 	runID := strings.Repeat("b", 32)
-	installationLock := testCanonicalInstallationLock(t)
 	listener, err := openLifecycleListener()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
 	if err := writeLifecycleState(stateDir, lifecycleState{
-		RunID:            runID,
-		ControlAddress:   listener.Addr().String(),
-		InstallationLock: installationLock,
+		RunID:          runID,
+		ControlAddress: listener.Addr().String(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -252,14 +210,7 @@ func TestRunLifecycleUsesOwnedControlProtocolAndSameRunDestroyIsIdempotent(t *te
 		})
 	}()
 	output := captureStandardOutput(t, func() error {
-		return runLifecycle(context.Background(), []string{
-			"--state-dir",
-			stateDir,
-			"--installation-lock",
-			installationLock,
-			"restart",
-			runID,
-		})
+		return runLifecycle(context.Background(), []string{"--state-dir", stateDir, "restart", runID})
 	})
 	request := <-requestResult
 	if request.Operation != "restart" || request.RunID != runID {
@@ -270,99 +221,22 @@ func TestRunLifecycleUsesOwnedControlProtocolAndSameRunDestroyIsIdempotent(t *te
 	}
 
 	if err := writeLifecycleState(stateDir, lifecycleState{
-		RunID:            runID,
-		InstallationLock: installationLock,
-		Destroyed:        true,
+		RunID:     runID,
+		Destroyed: true,
 	}); err != nil {
 		t.Fatal(err)
-	}
-	output = captureStandardOutput(t, func() error {
-		return runLifecycle(context.Background(), []string{
-			"--state-dir",
-			stateDir,
-			"--installation-lock",
-			installationLock,
-			"destroy",
-			runID,
-		})
-	})
-	if !strings.Contains(output, `"destroyed":true`) {
-		t.Fatalf("idempotent destroy output = %q", output)
 	}
 	output = captureStandardOutput(t, func() error {
 		return runLifecycle(context.Background(), []string{"--state-dir", stateDir, "destroy", runID})
 	})
 	if !strings.Contains(output, `"destroyed":true`) {
-		t.Fatalf("stored-lock idempotent destroy output = %q", output)
+		t.Fatalf("idempotent destroy output = %q", output)
 	}
-	if err := runLifecycle(context.Background(), []string{
-		"--state-dir",
-		stateDir,
-		"--installation-lock",
-		installationLock,
-		"destroy",
-		strings.Repeat("c", 32),
-	}); err == nil {
+	if err := runLifecycle(context.Background(), []string{"--state-dir", stateDir, "destroy", strings.Repeat("c", 32)}); err == nil {
 		t.Fatal("destroy accepted a mismatched run identity")
 	}
-	if err := runLifecycle(context.Background(), []string{
-		"--state-dir",
-		stateDir,
-		"--installation-lock",
-		installationLock,
-		"restart",
-		runID,
-	}); err == nil {
+	if err := runLifecycle(context.Background(), []string{"--state-dir", stateDir, "restart", runID}); err == nil {
 		t.Fatal("restart accepted a destroyed run")
-	}
-	if err := runLifecycle(context.Background(), []string{
-		"--state-dir",
-		stateDir,
-		"--installation-lock",
-		filepath.Join(t.TempDir(), "wrong.lock"),
-		"destroy",
-		runID,
-	}); err == nil {
-		t.Fatal("destroy accepted a mismatched installation lock")
-	}
-}
-
-func TestLifecycleStateRejectsMalformedInstallationLock(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), "state")
-	if err := ensurePrivateDirectory(stateDir); err != nil {
-		t.Fatal(err)
-	}
-	state := lifecycleState{
-		RunID:            strings.Repeat("d", 32),
-		ControlAddress:   "127.0.0.1:5432",
-		InstallationLock: "relative.lock",
-	}
-	if err := writeLifecycleState(stateDir, state); err == nil {
-		t.Fatal("lifecycle state accepted a relative installation lock")
-	}
-	state.InstallationLock = testCanonicalInstallationLock(t)
-	if err := writeLifecycleState(stateDir, state); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(stateDir, lifecycleStateName)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatal(err)
-	}
-	delete(raw, "installation_lock")
-	data, err = json.Marshal(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readLifecycleState(stateDir); err == nil {
-		t.Fatal("lifecycle state accepted a missing installation lock")
 	}
 }
 
@@ -374,16 +248,6 @@ func TestLifecycleAttachDatabaseURLContainsNoCredential(t *testing.T) {
 	if strings.Contains(result, "admin") || strings.Contains(result, "private-value") || result != "postgres://127.0.0.1:55432/synchro_conformance_owned?sslmode=disable" {
 		t.Fatalf("sanitized lifecycle attach URL = %q", result)
 	}
-}
-
-func testCanonicalInstallationLock(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "postgresql-install.lock")
-	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Join(parent, filepath.Base(path))
 }
 
 func captureStandardOutput(t *testing.T, operation func() error) string {
