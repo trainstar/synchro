@@ -241,6 +241,7 @@ GRADLE_TEST_ARGS ?= --rerun-tasks
 CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
+SWIFTPM_GIT_ENV := GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
@@ -875,7 +876,7 @@ lint-rn:
 test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit verify-contract docs-build
 
 build-swift-native-runner:
-	cd clients/swift && swift build --product synchro-native-runner
+	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --product synchro-native-runner
 
 build-kotlin-library:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
@@ -890,7 +891,7 @@ build-kotlin-conformance-app:
 test-swift-unit:
 	rm -rf clients/swift/.build/test-results/unit.xcresult
 	mkdir -p clients/swift/.build/test-results
-	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath .build/test-results/unit.xcresult
+	cd clients/swift && $(SWIFTPM_GIT_ENV) xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath .build/test-results/unit.xcresult
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/unit.xcresult
 
 test-client-schema-identity: conformance-mod-download
@@ -910,7 +911,7 @@ _test-client-schema-identity:
 		-expect target_pass \
 		-- go test -tags ddlidentity -json ./seeddb -count=1 -run '^TestCanonicalClientSeedMatchesSeedDBDDL$$'
 	rm -rf clients/swift/.build/test-results/schema-identity.xcresult
-	cd clients/swift && xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' \
+	cd clients/swift && $(SWIFTPM_GIT_ENV) xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' \
 		-only-testing:SynchroTests/ClientSchemaIdentityTests/testCanonicalGoSeedDDLConvergesWithFreshSwiftDDL \
 		-resultBundlePath .build/test-results/schema-identity.xcresult
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/schema-identity.xcresult
@@ -923,7 +924,7 @@ _test-client-schema-identity:
 test-swift-warm-connect: conformance-mod-download build-swift-native-runner
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
-		runner_dir="$$(cd clients/swift && swift build --show-bin-path)"; \
+		runner_dir="$$(cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --show-bin-path)"; \
 		test -x "$$runner_dir/synchro-native-runner"; \
 		cd conformance; \
 		SYNCHRO_SWIFT_NATIVE_RUNNER="$$runner_dir/synchro-native-runner" \
@@ -936,7 +937,7 @@ test-swift-warm-connect: conformance-mod-download build-swift-native-runner
 test-swift-scenarios: conformance-mod-download build-swift-native-runner build-seed
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
-		runner_dir="$$(cd clients/swift && swift build --show-bin-path)"; \
+		runner_dir="$$(cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --show-bin-path)"; \
 		test -x "$$runner_dir/synchro-native-runner"; \
 		test -x "$(CURDIR)/$(SEED_BINARY)"; \
 		cd conformance; \
@@ -950,7 +951,7 @@ test-swift: test-swift-warm-connect test-swift-scenarios
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
-	cd clients/swift && xcodebuild build-for-testing -quiet -scheme Synchro-Package -destination 'platform=macOS' -derivedDataPath .build/integration-derived-data
+	cd clients/swift && $(SWIFTPM_GIT_ENV) xcodebuild build-for-testing -quiet -scheme Synchro-Package -destination 'platform=macOS' -derivedDataPath .build/integration-derived-data
 	@set -eu; \
 		set -- clients/swift/.build/integration-derived-data/Build/Products/*.xctestrun; \
 		test "$$#" -eq 1 && test -f "$$1"; \
@@ -1479,7 +1480,7 @@ test-rn:
 release-pods-check: version-check
 	@command -v pod >/dev/null 2>&1 || (echo "CocoaPods CLI is required for release-pods-check."; exit 1)
 	pod ipc spec Synchro.podspec >/dev/null
-	swift package dump-package >/dev/null
+	$(SWIFTPM_GIT_ENV) swift package dump-package >/dev/null
 	@echo "Apple package metadata validated."
 
 release-kotlin-local: version-check
@@ -1580,7 +1581,7 @@ test-consumer-swift: client-consumer-apple-artifact
 		mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)"; \
 		tmp="$$(mktemp -d "$(PACKAGED_SMOKE_TMP_ROOT)/synchro-swift-consumer.XXXXXX")"; \
 		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
-		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all \
+		$(SWIFTPM_GIT_ENV) \
 		SYNCHRO_SWIFT_PACKAGE_PATH="$$artifact" swift package \
 			--package-path verification/consumers/swift \
 			--scratch-path "$$tmp/build" \
@@ -1591,7 +1592,7 @@ test-consumer-swift: client-consumer-apple-artifact
 			echo "Swift consumer resolved workspace client sources" >&2; \
 			exit 1; \
 		fi; \
-		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all \
+		$(SWIFTPM_GIT_ENV) \
 		SYNCHRO_SWIFT_PACKAGE_PATH="$$artifact" swift run \
 			--package-path verification/consumers/swift \
 			--scratch-path "$$tmp/build" \
