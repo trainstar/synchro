@@ -521,7 +521,7 @@ def required_support_cells(path: Path) -> set[str]:
     cells = value.get("cells") if isinstance(value, dict) else None
     if not isinstance(cells, list):
         raise ReleaseError("support matrix does not contain cells")
-    return {str(cell["id"]) for cell in cells if isinstance(cell, dict) and cell.get("policy") in {"required", "tested"}}
+    return {str(cell["id"]) for cell in cells if isinstance(cell, dict) and cell.get("policy") == "required"}
 
 
 def load_support_resolution(path: Path, matrix_path: Path) -> list[dict[str, Any]]:
