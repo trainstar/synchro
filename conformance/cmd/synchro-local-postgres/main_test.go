@@ -45,11 +45,14 @@ func TestRunArgumentValidation(t *testing.T) {
 
 func TestAttachEnvironmentIncludesOwnedLifecycleFields(t *testing.T) {
 	runID := strings.Repeat("a", 32)
-	command := []string{"verified-ssh-wrapper", "fixture", "synchro-local-postgres", "lifecycle", "--state-dir", "/owned/state"}
+	command, err := localLifecycleCommand("/owned/synchro-local-postgres", "/owned/state")
+	if err != nil {
+		t.Fatal(err)
+	}
 	environment := attachEnvironment("postgres://fixture", runID, command, localCredentials{})
 	for _, wanted := range []string{
 		"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID='" + runID + "'",
-		`SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND='["verified-ssh-wrapper","fixture","synchro-local-postgres","lifecycle","--state-dir","/owned/state"]'`,
+		`SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND='["/owned/synchro-local-postgres","lifecycle","--state-dir","/owned/state"]'`,
 		"SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE='false'",
 	} {
 		if !strings.Contains(environment, wanted) {
@@ -58,68 +61,19 @@ func TestAttachEnvironmentIncludesOwnedLifecycleFields(t *testing.T) {
 	}
 }
 
-func TestStartLifecycleCommandDefaultAndRemoteOverride(t *testing.T) {
+func TestLocalLifecycleCommandUsesOwnedExecutableAndState(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "owned-state")
 	executable := filepath.Join(t.TempDir(), "synchro-local-postgres")
-	defaultCommand, err := startLifecycleCommand("", false, executable, stateDir)
+	command, err := localLifecycleCommand(executable, stateDir)
 	if err != nil {
-		t.Fatalf("default lifecycle command rejected: %v", err)
+		t.Fatalf("local lifecycle command rejected: %v", err)
 	}
-	wantDefault := []string{executable, "lifecycle", "--state-dir", stateDir}
-	if strings.Join(defaultCommand, "\x00") != strings.Join(wantDefault, "\x00") {
-		t.Fatalf("default lifecycle command = %#v", defaultCommand)
+	want := []string{executable, "lifecycle", "--state-dir", stateDir}
+	if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("local lifecycle command = %#v", command)
 	}
-
-	remote := []string{
-		"/controller/verified-ssh-wrapper",
-		"fixture.example",
-		"/remote/bin/synchro-local-postgres",
-		"lifecycle",
-		"--state-dir",
-		stateDir,
-	}
-	remoteJSON, err := json.Marshal(remote)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command, err := startLifecycleCommand(string(remoteJSON), true, executable, stateDir)
-	if err != nil {
-		t.Fatalf("valid remote lifecycle command rejected: %v", err)
-	}
-	if strings.Join(command, "\x00") != strings.Join(remote, "\x00") {
-		t.Fatalf("remote lifecycle command = %#v", command)
-	}
-}
-
-func TestStartLifecycleCommandRejectsWrongStateAndShell(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), "owned-state")
-	executable := filepath.Join(t.TempDir(), "synchro-local-postgres")
-	tests := []struct {
-		name    string
-		command []string
-	}{
-		{
-			name:    "wrong state directory",
-			command: []string{"verified-ssh-wrapper", "fixture", "synchro-local-postgres", "lifecycle", "--state-dir", filepath.Join(t.TempDir(), "other-state")},
-		},
-		{
-			name:    "shell",
-			command: []string{"verified-ssh-wrapper", "fixture", "/bin/sh", "lifecycle", "--state-dir", stateDir},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			data, err := json.Marshal(test.command)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := startLifecycleCommand(string(data), true, executable, stateDir); err == nil {
-				t.Fatal("invalid lifecycle command was accepted")
-			}
-		})
-	}
-	if _, err := startLifecycleCommand("", true, executable, stateDir); err == nil {
-		t.Fatal("explicit empty lifecycle command was accepted")
+	if _, err := localLifecycleCommand(executable, "relative-state"); err == nil {
+		t.Fatal("relative local lifecycle state was accepted")
 	}
 }
 

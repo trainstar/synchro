@@ -97,7 +97,6 @@ func runStart(ctx context.Context, args []string) error {
 	tempParent := flags.String("temp-parent", "", "private temporary directory parent")
 	urlFile := flags.String("url-file", "", "administrator URL output file")
 	attachEnvironmentFile := flags.String("attach-environment-file", "", "attach-mode environment output file")
-	lifecycleCommandJSON := flags.String("lifecycle-command-json", "", "JSON argv prefix for lifecycle commands")
 	listen := flags.String("listen", "127.0.0.1", "PostgreSQL listen address")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("start flags are invalid")
@@ -116,12 +115,6 @@ func runStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return errors.New("local provisioner state directory is invalid")
 	}
-	lifecycleCommandSet := false
-	flags.Visit(func(value *flag.Flag) {
-		if value.Name == "lifecycle-command-json" {
-			lifecycleCommandSet = true
-		}
-	})
 	executable, err := os.Executable()
 	if err != nil {
 		return errors.New("resolve local provisioner executable failed")
@@ -130,12 +123,7 @@ func runStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return errors.New("resolve local provisioner executable failed")
 	}
-	lifecycleCommand, err := startLifecycleCommand(
-		*lifecycleCommandJSON,
-		lifecycleCommandSet,
-		executable,
-		stateRoot,
-	)
+	lifecycleCommand, err := localLifecycleCommand(executable, stateRoot)
 	if err != nil {
 		return err
 	}
@@ -240,24 +228,17 @@ func runStart(ctx context.Context, args []string) error {
 	return nil
 }
 
-func startLifecycleCommand(value string, overrideSet bool, executable, stateDir string) ([]string, error) {
+func localLifecycleCommand(executable, stateDir string) ([]string, error) {
 	if !filepath.IsAbs(stateDir) {
 		return nil, errors.New("lifecycle command state directory must be absolute")
 	}
-	if !overrideSet {
-		encoded, err := json.Marshal([]string{executable, "lifecycle", "--state-dir", stateDir})
-		if err != nil {
-			return nil, errors.New("encode default lifecycle command failed")
-		}
-		value = string(encoded)
-	}
-	command, err := blackbox.ParseAttachLifecycleCommand(value)
+	encoded, err := json.Marshal([]string{executable, "lifecycle", "--state-dir", stateDir})
 	if err != nil {
-		return nil, fmt.Errorf("start lifecycle command is invalid: %w", err)
+		return nil, errors.New("encode local lifecycle command failed")
 	}
-	if len(command) < 4 || command[len(command)-3] != "lifecycle" ||
-		command[len(command)-2] != "--state-dir" || command[len(command)-1] != stateDir {
-		return nil, errors.New("start lifecycle command does not identify the owned lifecycle state")
+	command, err := blackbox.ParseAttachLifecycleCommand(string(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("local lifecycle command is invalid: %w", err)
 	}
 	return command, nil
 }
