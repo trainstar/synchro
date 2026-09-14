@@ -169,7 +169,7 @@ jobs:
       - name: Archive PG18 pgrx runtime
         run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
 
-      - uses: actions/upload-artifact@v7.0.0
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: pgrx-pg18-linux
           path: ${{ runner.temp }}/pgrx-pg18-linux.tar
@@ -773,7 +773,7 @@ jobs:
           GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchrod-pg
           GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchro-seed-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchro-seed
 
-      - uses: actions/upload-artifact@v7.0.0
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: go-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -861,7 +861,7 @@ jobs:
           cd "${GITHUB_WORKSPACE}/dist"
           tar -czf "synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz" synchro-pg-pg18
 
-      - uses: actions/upload-artifact@v7.0.0
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}
           path: dist/synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz

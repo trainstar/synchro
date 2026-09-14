@@ -125,7 +125,7 @@ jobs:
       - name: Archive PG18 pgrx runtime
         run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
 
-      - uses: actions/upload-artifact@v7.0.0
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: pgrx-pg18-linux
           path: ${{ runner.temp }}/pgrx-pg18-linux.tar
@@ -322,7 +322,7 @@ jobs:
           go-version: '1.25.0'
           cache: false
 
-      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: dtolnay/rust-toolchain@1.120.0
 
       - name: Install PostgreSQL extension build dependencies
         run: |
