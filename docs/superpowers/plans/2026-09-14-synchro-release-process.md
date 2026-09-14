@@ -69,6 +69,7 @@ A preinstalled runner image does not establish the current stable runtime.
 Missing required runtimes block the affected gate.
 
 Keep macOS as an Apple toolchain and Swift semantic-test host.
+Use host-local PostgreSQL 18 and the host-local adapter as real Apple test dependencies.
 Do not certify or publish a macOS PostgreSQL extension.
 Android host selection does not add support cells.
 Run semantics on representative hosts and package boundaries on the declared minimum/current cells.
@@ -253,7 +254,7 @@ Deleting every historical report is not an acceptance criterion.
 12. Configure npm trusted publishing for this workflow and environment.
 13. Require npm two-factor authentication and disable token publication.
 14. Verify the Maven account, namespace, Portal token, signing key, and public-key distribution.
-15. Verify the Linux fixture host, isolated networking, credentials, and minimum/current mobile runtimes.
+15. Verify the GitHub-hosted Ubuntu, macOS, and minimum/current mobile runtimes.
 
 Missing credentials or external approval block the affected step explicitly.
 They never produce a skipped success.
@@ -275,30 +276,27 @@ Its integrated gate requires the corresponding host and repository controls.
 7. Keep critical deterministic faults and bounded real stateful execution in candidate CI.
 8. Move only wider exploration, broad mutation search, timing characterization, and endurance to scheduled validation.
 9. Keep focused Make targets without adding redundant host wrappers.
-10. Connect Apple and Android clients to isolated Linux server fixtures.
-11. Preserve fixture control, reset, and fault operations across the host boundary.
-12. Verify server artifact identity, endpoint reachability, per-run isolation, and cleanup before accepting remote evidence.
+10. Run Apple clients with host-local PostgreSQL and the adapter on GitHub-hosted macOS.
+11. Run the certified server, Android, and React Native Android on GitHub-hosted Ubuntu.
+12. Reuse one host-local provisioner for control, reset, fault operations, per-run isolation, and cleanup.
 13. Reject preview databases without converting or deleting pending writes.
 14. Preserve current Protocol 3 schema journals and storage transitions.
 15. Remove stale mutation selectors without removing required assertion controls.
 
-The adapter data URL alone is not a complete fixture-control interface.
-Reuse `SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL` and the existing transferable attach bundle.
-Attach already provides remote SQL setup, observation, and WAL pause control.
-It does not own remote PostgreSQL restart or cleanup.
+Use `synchro-local-postgres` as the single fixture mechanism on Ubuntu and macOS.
+Each job owns one temporary database, adapter, credentials, and cleanup lifecycle.
 
-Use SSH forwarding for database and adapter connections to the isolated Linux test host.
-Verify the host key and bind forwarded ports to loopback.
-Add restart and destroy operations to the existing provisioner control path.
-Each operation must accept only its owned run identity and return the corresponding attach configuration.
-Clean remote databases, slots, roles, processes, and temporary files through that owner.
-Do not add a second fixture service or share mutable fixtures between CI runs.
+Apple semantic and package checks use the real host-local extension and adapter.
+This internal dependency does not add a macOS server support claim.
 
-Native semantic CI can use the existing host-local development adapter against attached Linux PostgreSQL.
-That internal test build is not a published macOS server binary.
-Packaged and public consumer checks must use the sealed Linux adapter on the Linux fixture host.
-Forward its HTTP endpoint to the Apple or Android consumer.
-Do not substitute a host-local development adapter in package evidence.
+Ubuntu server checks exercise the sealed Linux extension, adapter, and seed tool.
+Android and React Native Android provide representative client-to-certified-server end-to-end proof.
+Shared authored scenarios and wire vectors bind Apple behavior to the same protocol.
+
+Do not add cross-host forwarding or test every client and server-host combination.
+Those combinations exercise no additional Synchro code path.
+Package checks test exact client distributions.
+The separate Linux package cell tests exact server distributions.
 
 **Acceptance:** Each required engine and bridge runs against real dependencies.
 Negative controls reject missing tests, failed children, wrong environments, and incomplete results.
@@ -467,7 +465,6 @@ That file was not inspected or accessed through another route.
 | Existing server staging omits the seed tool | `Makefile:608-627`, `Makefile:698-735` | Stage and exercise the existing seed artifact |
 | Server has an operator command | `api/go/cmd/synchrod-pg/main.go:179-230` | Include projection-bootstrap package smoke |
 | Go is a subdirectory module | `api/go/go.mod:1-4` | Publish `api/go/v<version>` and verify Go consumers |
-| Remote SQL attach exists, but lifecycle remains local | `conformance/blackbox/environment.go:150-158`, `conformance/blackbox/process.go:1468-1485`, `conformance/blackbox/process.go:1905-1930` | Reuse SQL attach and add owned remote lifecycle control |
 
 GitHub API inspection on 2026-09-14 UTC found unprotected `dev`, no rulesets, and no release environment.
 It also found disabled secret scanning, push protection, and dependency security updates.
