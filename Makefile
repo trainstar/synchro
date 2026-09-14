@@ -1645,18 +1645,22 @@ test-consumer-swift: client-consumer-apple-artifact
 		mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)"; \
 		tmp="$$(mktemp -d "$(PACKAGED_SMOKE_TMP_ROOT)/synchro-swift-consumer.XXXXXX")"; \
 		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all \
 		SYNCHRO_SWIFT_PACKAGE_PATH="$$artifact" swift package \
 			--package-path verification/consumers/swift \
 			--scratch-path "$$tmp/build" \
+			--disable-dependency-cache \
 			show-dependencies --format json > "$$tmp/dependencies.json"; \
 		grep -F "$$artifact" "$$tmp/dependencies.json" >/dev/null; \
 		if grep -F "$(CURDIR)/clients/swift" "$$tmp/dependencies.json" >/dev/null; then \
 			echo "Swift consumer resolved workspace client sources" >&2; \
 			exit 1; \
 		fi; \
+		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all \
 		SYNCHRO_SWIFT_PACKAGE_PATH="$$artifact" swift run \
 			--package-path verification/consumers/swift \
 			--scratch-path "$$tmp/build" \
+			--disable-dependency-cache \
 			SynchroConsumer
 
 test-consumer-swift-smoke: client-consumer-apple-artifact

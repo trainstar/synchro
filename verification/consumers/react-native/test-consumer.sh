@@ -5,7 +5,7 @@ platform=${1:?platform is required}
 artifact_dir=${2:?artifact directory is required}
 version=${3:?version is required}
 mode=${4:-smoke}
-resolution=${SYNCHRO_CONSUMER_RESOLUTION:-public}
+resolution=${SYNCHRO_CONSUMER_RESOLUTION:-prepublication}
 
 case "$mode" in
   smoke)
@@ -33,11 +33,6 @@ if [ "$resolution" = "prepublication" ]; then
     android) test -d "$maven_dir/fit/trainstar/synchro/$version" ;;
   esac
 fi
-if [ "$resolution" = "public" ]; then
-  synchro_git_url=https://github.com/trainstar/synchro.git
-else
-  synchro_git_url=${SYNCHRO_PREPUBLICATION_GIT_URL:?SYNCHRO_PREPUBLICATION_GIT_URL is required}
-fi
 
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$source_dir/../../.." && pwd -P)
@@ -46,6 +41,15 @@ tmp_root=${PACKAGED_SMOKE_TMP_ROOT:-$repo_root/.ignore/r2/tmp}
 mkdir -p "$tmp_root"
 work_dir=$(mktemp -d "$tmp_root/synchro-rn-consumer.XXXXXX")
 work_dir=$(cd "$work_dir" && pwd -P)
+if [ "$resolution" = "public" ]; then
+  synchro_git_url=https://github.com/trainstar/synchro.git
+elif [ -n "${SYNCHRO_PREPUBLICATION_GIT_URL:-}" ]; then
+  synchro_git_url=$SYNCHRO_PREPUBLICATION_GIT_URL
+else
+  git clone --bare --quiet "$repo_root" "$work_dir/source.git"
+  git --git-dir="$work_dir/source.git" tag -f "v$version" "$(git -C "$repo_root" rev-parse HEAD)"
+  synchro_git_url=file://$work_dir/source.git
+fi
 installed_platform=
 simulator_udid=
 adb=

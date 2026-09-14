@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=safe.bareRepository
+GIT_CONFIG_VALUE_0=all
+export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+
 artifact_dir=${1:?artifact directory is required}
 apple_package="$artifact_dir/apple/Synchro"
 

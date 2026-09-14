@@ -35,8 +35,8 @@ esac
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/synchro-go-consumer.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
 cp "$consumer_root/go.mod" "$consumer_root/main.go" "$work_dir/"
-(cd "$work_dir" && GOWORK=off go mod edit -require="github.com/trainstar/synchro/api/go@v$version" -dropreplace)
-(cd "$work_dir" && GOWORK=off go mod download github.com/trainstar/synchro/api/go)
+(cd "$work_dir" && GOWORK=off go mod edit -require="github.com/trainstar/synchro/api/go@v$version")
+(cd "$work_dir" && GOWORK=off go mod tidy)
 (cd "$work_dir" && GOWORK=off go list -m -json github.com/trainstar/synchro/api/go > "$work_dir/module.json")
 resolved=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["Version"])' "$work_dir/module.json")
 test "$resolved" = "v$version"
