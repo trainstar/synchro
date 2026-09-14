@@ -1,5 +1,5 @@
 import Foundation
-@_spi(Inspection) import Synchro
+import Synchro
 
 private struct PackagedSmokeConfig: Decodable {
     let schemaVersion: Int
@@ -102,7 +102,6 @@ private func runPackagedSmoke(
     else {
         throw CocoaError(.fileReadCorruptFile)
     }
-    let transportCollector = TransportObservationCollector(capacity: 256)
     let client = try SynchroClient(
         config: SynchroConfig(
             dbPath: databasePath,
@@ -115,8 +114,7 @@ private func runPackagedSmoke(
             appVersion: "1.0.0",
             syncInterval: 3_600,
             pushDebounce: 3_600,
-            maxRetryAttempts: 1,
-            transportObservationCollector: transportCollector
+            maxRetryAttempts: 1
         )
     )
 
@@ -151,19 +149,6 @@ private func runPackagedSmoke(
         }
         guard try client.pendingChangeCount() == 0 else {
             throw CocoaError(.fileWriteUnknown)
-        }
-        let snapshot = transportCollector.snapshot()
-        guard !snapshot.overflowed else {
-            throw CocoaError(.fileReadCorruptFile)
-        }
-        let observations = snapshot.observations
-        let requiredOperations: [TransportOperationClass] = [.connect, .push, .pull]
-        guard requiredOperations.allSatisfy({ operation in
-            observations.contains { observation in
-                observation.operationClass == operation && (200 ..< 300).contains(observation.statusCode)
-            }
-        }) else {
-            throw CocoaError(.fileReadCorruptFile)
         }
         _ = try client.execute(
             "UPDATE orders SET ship_address = ?, updated_at = ? WHERE id = ?",

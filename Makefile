@@ -43,17 +43,21 @@
 	conformance-seed-artifact \
 	conformance-pg18-extension-artifact \
 	conformance-pg18-extension-test-artifact \
-	rc-stage-server-artifacts \
-	rc-stage-artifacts \
-	rc-verify-artifacts \
-	rc-run-support-cell \
+	release-stage-server \
+	release-stage-packages \
+	release-stage \
+	release-verify \
+	release-consumer-artifacts \
+	release-run-support-cell \
 	test-evidence \
 	coverage-report \
 	test-inventory \
 	test-conformance \
 	test-blackbox \
-	test-rc-artifacts \
-	rc-check-pg18 \
+	test-release-artifacts \
+	test-server-consumer-helper \
+	test-consumer-go \
+	release-check-pg18 \
 	evidence \
 	lint-go \
 	lint-rn \
@@ -249,11 +253,25 @@ PHASE_5_INPUT ?= $(CURDIR)/dist/verification/phase-5-input.json
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
-RC_CANDIDATE_ID ?=
-RC_CANDIDATE_DIR ?= $(CURDIR)/dist/verification/$(RC_CANDIDATE_ID)
-RC_SERVER_ARTIFACT_DIR ?= $(CURDIR)/dist/rc-server-artifacts/$(RC_CANDIDATE_ID)
-RC_ENV_FILE ?= $(CURDIR)/.ignore/r2/cf-secrets
-RC_STAGED_ARTIFACTS ?= 0
+RELEASE_DIR ?=
+RELEASE_SERVER_DIR ?= $(CURDIR)/dist/release-components/server
+RELEASE_PACKAGE_DIR ?= $(CURDIR)/dist/release-components/packages
+RELEASE_CONSUMER_DIR ?= $(CURDIR)/dist/release-consumer
+RELEASE_SBOM ?=
+RELEASE_SUPPORT_ENVIRONMENTS ?=
+RELEASE_ENV_FILE ?= $(CURDIR)/.ignore/r2/cf-secrets
+RELEASE_EVIDENCE_DIR ?= $(CURDIR)/dist/verification/release-evidence
+RELEASE_PG18_BIN_DIR ?=
+RELEASE_PROVISIONER ?=
+RELEASE_SERVER_LISTEN_URL ?= http://127.0.0.1:8091
+RELEASE_CANDIDATE_CI_RUN_ID ?=
+RELEASE_CANDIDATE_CI_RUN_ATTEMPT ?=
+RELEASE_BUILD_RUN_ID ?= $(GITHUB_RUN_ID)
+RELEASE_BUILD_RUN_ATTEMPT ?= $(GITHUB_RUN_ATTEMPT)
+RELEASE_STAGED_ARTIFACTS ?= 0
+CLIENT_ARTIFACTS_PREPARED ?= 0
+RELEASE_INVENTORY := $(CURDIR)/conformance/artifacts/inventory.json
+RELEASE_SUPPORT_MATRIX := $(CURDIR)/conformance/support-matrix.json
 
 TEST_ENV = \
 	TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" \
@@ -298,7 +316,14 @@ help:
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
 	@echo "  record-r1-benchmark   - Record one R1 benchmark candidate"
 	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
-	@echo "  rc-check-pg18         - Verify the packaged PostgreSQL 18 candidate"
+	@echo "  release-stage-server  - Build Linux x64 server release components"
+	@echo "  release-stage-packages - Build signed Maven and npm release components"
+	@echo "  release-stage         - Assemble and seal already built release components"
+	@echo "  release-verify        - Verify one sealed release without building"
+	@echo "  release-consumer-artifacts - Prepare sealed payloads for package consumers"
+	@echo "  test-server-consumer-helper - Run server packaged-consumer helper unit tests"
+	@echo "  test-consumer-go      - Resolve and compile the public Go module consumer"
+	@echo "  release-check-pg18    - Verify the packaged PostgreSQL 18 release"
 	@echo "  evidence              - Generate and validate the Phase 5 CI summary"
 	@echo "  coverage-report       - Generate requirement coverage from the Phase 5 CI summary"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
@@ -658,11 +683,11 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		case "$$(uname -s)" in Darwin) suffix=dylib ;; *) suffix=so ;; esac; \
 		library="$$out$$pkglibdir/synchro_pg.$$suffix"; \
 		control="$$out$$sharedir/extension/synchro_pg.control"; \
-		sql="$$out$$sharedir/extension/synchro_pg--0.3.0.sql"; \
+		sql="$$out$$sharedir/extension/synchro_pg--$(CURRENT_VERSION).sql"; \
 		test -f "$$library" && test -f "$$control" && test -f "$$sql"; \
 		perl -pi -e 's/[ \t]+$$//' "$$sql"; \
 		perl -0pi -e 's/\n+\z/\n/' "$$sql"; \
-		cmp -s extensions/synchro-pg/sql/synchro_pg--0.3.0.sql "$$sql"; \
+		cmp -s extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql "$$sql"; \
 		cmp -s extensions/synchro-pg/synchro_pg.control "$$control"; \
 		library_path="$${library#"$$out"/}"; \
 		control_path="$${control#"$$out"/}"; \
@@ -678,7 +703,7 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 			'  "files": [' \
 			"    {\"path\": \"$$library_path\", \"destination\": \"pkglibdir/synchro_pg.$$suffix\", \"sha256\": \"$$library_hash\"}," \
 			"    {\"path\": \"$$control_path\", \"destination\": \"sharedir/extension/synchro_pg.control\", \"sha256\": \"$$control_hash\"}," \
-			"    {\"path\": \"$$sql_path\", \"destination\": \"sharedir/extension/synchro_pg--0.3.0.sql\", \"sha256\": \"$$sql_hash\"}" \
+			"    {\"path\": \"$$sql_path\", \"destination\": \"sharedir/extension/synchro_pg--$(CURRENT_VERSION).sql\", \"sha256\": \"$$sql_hash\"}" \
 			'  ]' \
 			'}' > "$$out/artifact-manifest.json.tmp"; \
 		mv "$$out/artifact-manifest.json.tmp" "$$out/artifact-manifest.json"; \
@@ -701,101 +726,188 @@ test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-comp
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness test-evidence test-inventory
 
-rc-stage-server-artifacts:
-	@test -n "$(RC_CANDIDATE_ID)" || { echo "RC_CANDIDATE_ID is required" >&2; exit 1; }
-	@python3 scripts/rc-artifacts.py validate-id --candidate-id "$(RC_CANDIDATE_ID)"
+release-stage-server: version-check
+	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
 	@set -eu; \
-		test "$$(uname -s)" = Linux && test "$$(uname -m)" = x86_64 || { echo "RC server artifacts require linux-x64" >&2; exit 1; }; \
-		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "RC staging requires a clean worktree" >&2; exit 1; }; \
+		test "$$(uname -s)" = Linux && test "$$(uname -m)" = x86_64 || { echo "release server components require Linux x64" >&2; exit 1; }; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "release staging requires a clean worktree" >&2; exit 1; }; \
 		revision="$$(git rev-parse --verify HEAD)"; \
-		final="$(abspath $(RC_SERVER_ARTIFACT_DIR))"; \
+		final="$(abspath $(RELEASE_SERVER_DIR))"; \
 		stage="$$final.tmp.$$$$"; \
 		trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
-		test ! -e "$$final" || { echo "server artifacts already exist: $$final" >&2; exit 1; }; \
-		mkdir -p "$$stage"; \
-		$(MAKE) --no-print-directory conformance-adapter-artifact CONFORMANCE_ADAPTER_ARTIFACT_DIR="$$stage/adapter"; \
-		$(MAKE) --no-print-directory conformance-pg18-extension-artifact CONFORMANCE_EXTENSION_ARTIFACT="$$stage/extension"; \
-		python3 scripts/rc-artifacts.py archive-extension --source "$$stage/extension" --output "$$stage/synchro-pg-pg18-linux-x64.tar.gz"; \
-		test -z "$$(git status --porcelain --untracked-files=normal)" && test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "source changed during RC server staging" >&2; exit 1; }; \
-		printf '%s\n' "$$revision" > "$$stage/source-commit"; \
+		test ! -e "$$final" || { echo "server component staging already exists: $$final" >&2; exit 1; }; \
+		mkdir -p "$$stage/extension" "$$stage/adapter" "$$stage/seed"; \
+		$(MAKE) --no-print-directory conformance-pg18-extension-artifact CONFORMANCE_EXTENSION_ARTIFACT="$$stage/extension-bundle"; \
+		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(MAKE) --no-print-directory build BINARY="$$stage/adapter/synchrod-pg-linux-x64-$(VERSION)"; \
+		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(MAKE) --no-print-directory build-seed SEED_BINARY="$$stage/seed/synchro-seed-linux-x64-$(VERSION)"; \
+		python3 scripts/release-artifacts.py archive-extension --source "$$stage/extension-bundle" --output "$$stage/extension/synchro-pg-pg18-ubuntu24.04-linux-x64-$(VERSION).tar.gz"; \
+		rm -rf "$$stage/extension-bundle"; \
+		python3 scripts/release-artifacts.py server-metadata --output "$$stage/server-metadata.json" --source-commit "$$revision" \
+			--binary "adapter/synchrod-pg-linux-x64-$(VERSION)=$$stage/adapter/synchrod-pg-linux-x64-$(VERSION)" \
+			--binary "seed/synchro-seed-linux-x64-$(VERSION)=$$stage/seed/synchro-seed-linux-x64-$(VERSION)"; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" && test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "source changed during release server staging" >&2; exit 1; }; \
 		mkdir -p "$$(dirname "$$final")"; \
 		mv "$$stage" "$$final"; \
 		trap - EXIT HUP INT TERM
 
-rc-stage-artifacts:
-	@test -n "$(RC_CANDIDATE_ID)" || { echo "RC_CANDIDATE_ID is required" >&2; exit 1; }
-	@python3 scripts/rc-artifacts.py validate-id --candidate-id "$(RC_CANDIDATE_ID)"
+release-stage-packages: version-check
+	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
+	@test -n "$(ANDROID_JAVA_HOME)" || { echo "ANDROID_JAVA_HOME is required" >&2; exit 1; }
+	@test -d "$(ANDROID_HOME)" || { echo "ANDROID_HOME is required" >&2; exit 1; }
 	@set -eu; \
-		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "RC staging requires a clean worktree" >&2; exit 1; }; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "release staging requires a clean worktree" >&2; exit 1; }; \
 		revision="$$(git rev-parse --verify HEAD)"; \
-		server="$(abspath $(RC_SERVER_ARTIFACT_DIR))"; \
-		final="$(abspath $(RC_CANDIDATE_DIR))"; \
-		work="$$final.tmp.$$$$"; \
-		stage="$$work/$(RC_CANDIDATE_ID)"; \
-		trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
-		test -d "$$server/adapter" && test -d "$$server/extension" && test -f "$$server/synchro-pg-pg18-linux-x64.tar.gz" || { echo "complete staged server artifacts are required: $$server" >&2; exit 1; }; \
-		test "$$(cat "$$server/source-commit")" = "$$revision" || { echo "server artifacts do not match the candidate source commit" >&2; exit 1; }; \
-		test ! -e "$$final" || { echo "candidate already exists: $$final" >&2; exit 1; }; \
-		mkdir -p "$$stage/artifacts"; \
-		cp -R "$$server/adapter" "$$server/extension" "$$stage/artifacts/"; \
-		cp "$$server/synchro-pg-pg18-linux-x64.tar.gz" "$$stage/artifacts/"; \
-		$(MAKE) --no-print-directory client-consumer-artifacts CLIENT_ARTIFACT_DIR="$$stage/artifacts/clients"; \
-		test -z "$$(git status --porcelain --untracked-files=normal)" && test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "source changed during RC staging" >&2; exit 1; }; \
-		python3 scripts/rc-artifacts.py seal --candidate-dir "$$stage" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$revision"; \
+		final="$(abspath $(RELEASE_PACKAGE_DIR))"; \
+		stage="$$final.tmp.$$$$"; \
+		trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
+		test ! -e "$$final" || { echo "package component staging already exists: $$final" >&2; exit 1; }; \
+		mkdir -p "$$stage/maven" "$$stage/npm" "$$stage/maven-repository"; \
+		(cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+			JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+			SYNCHRO_RELEASE_MAVEN_REPOSITORY="$$stage/maven-repository" \
+			./gradlew -Pversion="$(VERSION)" :synchro:releaseBundle); \
+		python3 scripts/release-artifacts.py prepare-maven --repository "$$stage/maven-repository" --version "$(VERSION)"; \
+		python3 scripts/release-artifacts.py archive-maven --source "$$stage/maven-repository" --output "$$stage/maven/synchro-maven-$(VERSION).zip" --version "$(VERSION)"; \
+		rm -rf "$$stage/maven-repository"; \
+		(cd clients/react-native && corepack enable >/dev/null 2>&1 && yarn install --immutable && yarn prepare && npm pack --ignore-scripts --silent --pack-destination "$$stage/npm"); \
+		test -f "$$stage/npm/trainstar-synchro-react-native-$(VERSION).tgz"; \
+		python3 scripts/release-artifacts.py package-metadata --output "$$stage/package-metadata.json" --source-commit "$$revision"; \
+		test -z "$$(git status --porcelain --untracked-files=normal)" && test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "source changed during release package staging" >&2; exit 1; }; \
 		mkdir -p "$$(dirname "$$final")"; \
 		mv "$$stage" "$$final"; \
-		rmdir "$$work"; \
 		trap - EXIT HUP INT TERM
 
-rc-verify-artifacts:
-	@test -n "$(RC_CANDIDATE_ID)" || { echo "RC_CANDIDATE_ID is required" >&2; exit 1; }
-	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "RC verification requires a clean worktree" >&2; exit 1; }
-	@python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$(git rev-parse --verify HEAD)"
+release-stage:
+	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
+	@test -n "$(RELEASE_DIR)" || { echo "RELEASE_DIR is required" >&2; exit 1; }
+	@test -f "$(RELEASE_SBOM)" || { echo "RELEASE_SBOM is required" >&2; exit 1; }
+	@test -f "$(RELEASE_SUPPORT_ENVIRONMENTS)" || { echo "RELEASE_SUPPORT_ENVIRONMENTS is required" >&2; exit 1; }
+	@test -n "$(RELEASE_CANDIDATE_CI_RUN_ID)" && test -n "$(RELEASE_CANDIDATE_CI_RUN_ATTEMPT)" || { echo "RELEASE_CANDIDATE_CI_RUN_ID and RELEASE_CANDIDATE_CI_RUN_ATTEMPT are required" >&2; exit 1; }
+	@test -n "$(RELEASE_BUILD_RUN_ID)" && test -n "$(RELEASE_BUILD_RUN_ATTEMPT)" || { echo "RELEASE_BUILD_RUN_ID and RELEASE_BUILD_RUN_ATTEMPT are required" >&2; exit 1; }
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "release staging requires a clean worktree" >&2; exit 1; }
+	@revision="$$(git rev-parse --verify HEAD)"; \
+		python3 scripts/release-artifacts.py stage \
+			--release-dir "$(abspath $(RELEASE_DIR))" --version "$(VERSION)" --source-commit "$$revision" \
+			--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
+			--support-resolution "$(abspath $(RELEASE_SUPPORT_ENVIRONMENTS))" \
+			--server-dir "$(abspath $(RELEASE_SERVER_DIR))" --packages-dir "$(abspath $(RELEASE_PACKAGE_DIR))" \
+			--sbom "$(abspath $(RELEASE_SBOM))" --repo-root "$(CURDIR)" \
+			--source-tree "repo-root=$$(git rev-parse HEAD^{tree})" --source-tree "api/go=$$(git rev-parse HEAD:api/go)" \
+			--candidate-ci-run-id "$(RELEASE_CANDIDATE_CI_RUN_ID)" --candidate-ci-run-attempt "$(RELEASE_CANDIDATE_CI_RUN_ATTEMPT)" \
+			--build-run-id "$(RELEASE_BUILD_RUN_ID)" --build-run-attempt "$(RELEASE_BUILD_RUN_ATTEMPT)"
 
-rc-run-support-cell: rc-verify-artifacts
-	@test -n "$(SUPPORT_CELL_ID)" || { echo "SUPPORT_CELL_ID is required" >&2; exit 1; }
-	@python3 scripts/rc-artifacts.py run-verified \
-		--candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)" \
-		--source-commit "$$(git rev-parse --verify HEAD)" -- $(MAKE) --no-print-directory test-client-platforms \
-		SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
-		CLIENT_ARTIFACT_DIR="$(abspath $(RC_CANDIDATE_DIR))/artifacts/clients" \
-		CONFORMANCE_ADAPTER_ARTIFACT_DIR="$(abspath $(RC_CANDIDATE_DIR))/artifacts/adapter" \
-		CONFORMANCE_EXTENSION_ARTIFACT="$(abspath $(RC_CANDIDATE_DIR))/artifacts/extension" \
-		PACKAGED_SMOKE_CELL_DIR="$(abspath $(RC_CANDIDATE_DIR))/evidence/cells" \
-		RC_CANDIDATE_DIR="$(abspath $(RC_CANDIDATE_DIR))" RC_CANDIDATE_ID="$(RC_CANDIDATE_ID)" RC_STAGED_ARTIFACTS=1
-	@$(MAKE) --no-print-directory rc-verify-artifacts RC_CANDIDATE_ID="$(RC_CANDIDATE_ID)" RC_CANDIDATE_DIR="$(abspath $(RC_CANDIDATE_DIR))"
+release-verify:
+	@test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }
+	@test -n "$(RELEASE_DIR)" || { echo "RELEASE_DIR is required" >&2; exit 1; }
+	@python3 scripts/release-artifacts.py verify --release-dir "$(abspath $(RELEASE_DIR))" --version "$(VERSION)" \
+		--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
+		--source-commit "$$(git rev-parse --verify HEAD)"
 
-test-rc-artifacts:
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_rc_artifacts
-
-rc-check-pg18: test-rc-artifacts rc-verify-artifacts
-	@test -r "$(RC_ENV_FILE)" || { echo "RC_ENV_FILE is required: $(RC_ENV_FILE)" >&2; exit 1; }
+release-consumer-artifacts: release-verify
+	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
 	@set -eu; \
-		candidate="$(abspath $(RC_CANDIDATE_DIR))"; \
-		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-rc-pg18.XXXXXX")"; \
-		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
-		tar -xzf "$$candidate/artifacts/synchro-pg-pg18-linux-x64.tar.gz" -C "$$tmp"; \
-		set -a; . "$(RC_ENV_FILE)"; set +a; \
-		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$$tmp/extension" \
-		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$$candidate/artifacts/adapter/synchrod-pg" \
-		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" \
-		python3 scripts/ci/capture-gate-result.py \
-			--gate rc-check-pg18 --output "$$candidate/evidence/rc-check-pg18.json" -- \
-			python3 scripts/rc-artifacts.py run-verified \
-				--candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" \
+		release="$(abspath $(RELEASE_DIR))"; \
+		final="$(abspath $(RELEASE_CONSUMER_DIR))"; \
+		manifest_hash="$$(shasum -a 256 "$$release/release-manifest.json" | cut -d ' ' -f 1)"; \
+		if [ -d "$$final" ]; then \
+			test "$$(cat "$$final/.release-manifest.sha256")" = "$$manifest_hash"; \
+			exit 0; \
+		fi; \
+		stage="$$final.tmp.$$$$"; \
+		trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
+		test ! -e "$$final" || { echo "release consumer artifact path is not a directory: $$final" >&2; exit 1; }; \
+		mkdir -p "$$stage/apple/Synchro" "$$stage/maven" "$$stage/npm"; \
+		git archive --format=tar HEAD Package.swift Synchro.podspec LICENSE clients/swift/Sources \
+			| tar -xf - -C "$$stage/apple/Synchro"; \
+		test ! -e "$$stage/apple/Synchro/Package.resolved"; \
+		find "$$stage/apple/Synchro" -exec touch -t 202601010000 {} +; \
+		COPYFILE_DISABLE=1 tar -cf - -C "$$stage/apple" Synchro | gzip -n > "$$stage/apple/synchro-spm-$(VERSION).tar.gz"; \
+		python3 -m zipfile -e "$$release/artifacts/synchro-maven-$(VERSION).zip" "$$stage/maven"; \
+		cp "$$release/artifacts/trainstar-synchro-react-native-$(VERSION).tgz" "$$stage/npm/"; \
+		git clone --bare --quiet . "$$stage/source.git"; \
+		git --git-dir="$$stage/source.git" tag -f "v$(VERSION)" "$$(git rev-parse HEAD)"; \
+		git --git-dir="$$stage/source.git" tag -f "api/go/v$(VERSION)" "$$(git rev-parse HEAD)"; \
+		printf '%s\n' "$$manifest_hash" > "$$stage/.release-manifest.sha256"; \
+		mkdir -p "$$(dirname "$$final")"; \
+		mv "$$stage" "$$final"; \
+		trap - EXIT HUP INT TERM
+
+release-run-support-cell:
+	@test -n "$(SUPPORT_CELL_ID)" || { echo "SUPPORT_CELL_ID is required" >&2; exit 1; }
+	@$(MAKE) --no-print-directory release-verify VERSION="$(VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"
+	@set -eu; \
+		release="$(abspath $(RELEASE_DIR))"; \
+		mkdir -p "$(RELEASE_EVIDENCE_DIR)/cells"; \
+		case "$(SUPPORT_CELL_ID)" in \
+		SUP-PG-LINUX-X64-001) \
+			test -d "$(RELEASE_PG18_BIN_DIR)" || { echo "RELEASE_PG18_BIN_DIR is required" >&2; exit 1; }; \
+			test -x "$(RELEASE_PROVISIONER)" || { echo "RELEASE_PROVISIONER is required" >&2; exit 1; }; \
+			python3 verification/packaged_smoke.py begin-cell --repo-root "$(CURDIR)" \
+				--cell "$(SUPPORT_CELL_ID)" --output "$(RELEASE_EVIDENCE_DIR)/cells/$(SUPPORT_CELL_ID).json"; \
+			hashes="$$(python3 scripts/release-artifacts.py print-payload-hashes --release-dir "$$release" --version "$(VERSION)" \
+				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
+				--role pg-extension --role adapter --role seed-tool)"; \
+			python3 scripts/release-artifacts.py run-verified --release-dir "$$release" --version "$(VERSION)" \
+				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 				--source-commit "$$(git rev-parse --verify HEAD)" -- \
-				$(MAKE) --no-print-directory test-blackbox; \
-		python3 scripts/rc-artifacts.py verify --candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$(git rev-parse --verify HEAD)"; \
-		$(MAKE) --no-print-directory test-packaged-smoke \
-			PACKAGED_SMOKE_CELL_DIR="$$candidate/evidence/cells" \
-			PACKAGED_SMOKE_EVIDENCE="$$candidate/evidence/packaged-smoke-summary.json"; \
-		python3 scripts/rc-artifacts.py manifest \
-			--candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" \
-			--source-commit "$$(git rev-parse --verify HEAD)" \
-			--cells-dir "$$candidate/evidence/cells" \
-			--smoke-summary "$$candidate/evidence/packaged-smoke-summary.json" \
-			--pg-receipt "$$candidate/evidence/rc-check-pg18.json"; \
-		python3 scripts/rc-artifacts.py verify --candidate-dir "$$candidate" --candidate-id "$(RC_CANDIDATE_ID)" --source-commit "$$(git rev-parse --verify HEAD)"
+				sh verification/consumers/server/test-consumer.sh \
+					"$(abspath $(RELEASE_PG18_BIN_DIR))" \
+					"$$release/artifacts/synchro-pg-pg18-ubuntu24.04-linux-x64-$(VERSION).tar.gz" \
+					"$(abspath $(RELEASE_PROVISIONER))" \
+					"$$release/artifacts/synchrod-pg-linux-x64-$(VERSION)" \
+					"$$release/artifacts/synchro-seed-linux-x64-$(VERSION)" \
+					"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" "$(SUPPORT_CELL_ID)" \
+					"$(RELEASE_EVIDENCE_DIR)/cells/$(SUPPORT_CELL_ID).json" "$$hashes" ;; \
+		SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-ANDROID-MIN-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+			$(MAKE) --no-print-directory release-consumer-artifacts VERSION="$(VERSION)" RELEASE_DIR="$$release" \
+				RELEASE_CONSUMER_DIR="$(abspath $(RELEASE_CONSUMER_DIR))"; \
+			case "$(SUPPORT_CELL_ID)" in \
+			SUP-IOS-*) artifacts="$$release/release-manifest.json" ;; \
+			SUP-ANDROID-*) artifacts="$$release/artifacts/synchro-maven-$(VERSION).zip" ;; \
+			SUP-RN-IOS-*) artifacts="$$release/release-manifest.json $$release/artifacts/trainstar-synchro-react-native-$(VERSION).tgz" ;; \
+			SUP-RN-ANDROID-*) artifacts="$$release/artifacts/synchro-maven-$(VERSION).zip $$release/artifacts/trainstar-synchro-react-native-$(VERSION).tgz" ;; \
+			esac; \
+			hashes=""; for artifact in $$artifacts; do hashes="$$hashes $$(shasum -a 256 "$$artifact" | cut -d ' ' -f 1)"; done; \
+			$(MAKE) --no-print-directory test-client-platforms \
+				SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+				CLIENT_ARTIFACT_DIR="$(abspath $(RELEASE_CONSUMER_DIR))" CLIENT_ARTIFACTS_PREPARED=1 \
+				PACKAGED_SMOKE_CELL_DIR="$(abspath $(RELEASE_EVIDENCE_DIR))/cells" \
+				PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$$artifacts" PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$$hashes" \
+				SYNCHRO_CONSUMER_RESOLUTION=prepublication \
+				SYNCHRO_PREPUBLICATION_GIT_URL="file://$(abspath $(RELEASE_CONSUMER_DIR))/source.git" ;; \
+		*) echo "unsupported required release support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
+		esac
+	@$(MAKE) --no-print-directory release-verify VERSION="$(VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"
+
+test-release-artifacts:
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_release_artifacts
+
+test-server-consumer-helper:
+	cd verification/consumers/server && GO111MODULE=off go test -count=1
+
+test-consumer-go:
+	sh verification/consumers/go/test-consumer.sh "$(CURDIR)" "$(CURRENT_VERSION)"
+
+release-check-pg18: test-release-artifacts release-verify
+	@test -r "$(RELEASE_ENV_FILE)" || { echo "RELEASE_ENV_FILE is required: $(RELEASE_ENV_FILE)" >&2; exit 1; }
+	@set -eu; \
+		release="$(abspath $(RELEASE_DIR))"; \
+		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-release-pg18.XXXXXX")"; \
+		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+		tar -xzf "$$release/artifacts/synchro-pg-pg18-ubuntu24.04-linux-x64-$(VERSION).tar.gz" -C "$$tmp"; \
+		python3 scripts/release-artifacts.py adapter-layout --release-dir "$$release" --version "$(VERSION)" \
+			--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" --output "$$tmp/adapter"; \
+		mkdir -p "$(RELEASE_EVIDENCE_DIR)"; \
+		set -a; . "$(RELEASE_ENV_FILE)"; set +a; \
+		SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT="$$tmp/extension" \
+		SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT="$$tmp/adapter/synchrod-pg" \
+		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" \
+		python3 scripts/ci/capture-gate-result.py --gate release-check-pg18 --output "$(RELEASE_EVIDENCE_DIR)/release-check-pg18.json" -- \
+			python3 scripts/release-artifacts.py run-verified --release-dir "$$release" --version "$(VERSION)" \
+				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
+				--source-commit "$$(git rev-parse --verify HEAD)" -- $(MAKE) --no-print-directory test-blackbox; \
+		python3 scripts/release-artifacts.py verify --release-dir "$$release" --version "$(VERSION)" \
+			--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" --source-commit "$$(git rev-parse --verify HEAD)"
 
 evidence:
 	@test -f "$(PHASE_5_INPUT)" || (echo "PHASE_5_INPUT is required: $(PHASE_5_INPUT)" >&2; exit 1)
@@ -1432,7 +1544,7 @@ release-check: override GO_TEST_ARGS := -v -count=1 -p 1
 release-check: override GO_TEST_PKGS := ./...
 release-check: override GRADLE_TEST_ARGS := --rerun-tasks
 release-check: override DETOX_ARGS :=
-release-check: validation-check evidence rc-check-pg18
+release-check: validation-check evidence release-check-pg18
 	@echo "Release validation passed."
 
 release-kotlin-local: version-check
@@ -1448,15 +1560,19 @@ release-npm-dry-run: version-check
 
 client-consumer-apple-artifact: version-check release-pods-check
 	@set -eu; \
-		if [ "$(RC_STAGED_ARTIFACTS)" = 1 ]; then python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)"; exit 0; fi; \
+		if [ "$(CLIENT_ARTIFACTS_PREPARED)" = 1 ]; then \
+			test -f "$(abspath $(CLIENT_ARTIFACT_DIR))/apple/Synchro/Package.swift"; \
+			test -f "$(abspath $(CLIENT_ARTIFACT_DIR))/apple/synchro-spm-$(CURRENT_VERSION).tar.gz"; \
+			exit 0; \
+		fi; \
+		if [ "$(RELEASE_STAGED_ARTIFACTS)" = 1 ]; then $(MAKE) --no-print-directory release-verify VERSION="$(CURRENT_VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"; exit 0; fi; \
 		final="$(abspath $(CLIENT_ARTIFACT_DIR))/apple"; \
 		stage="$$final.tmp.$$$$"; \
 		cleanup() { rm -rf "$$stage"; }; \
 		trap cleanup EXIT HUP INT TERM; \
 		rm -rf "$$stage"; \
 		mkdir -p "$$stage/Synchro/clients/swift"; \
-		test -f Package.resolved || swift package resolve >/dev/null; \
-		cp Package.swift Package.resolved Synchro.podspec LICENSE "$$stage/Synchro/"; \
+		cp Package.swift Synchro.podspec LICENSE "$$stage/Synchro/"; \
 		cp -R clients/swift/Sources "$$stage/Synchro/clients/swift/"; \
 		find "$$stage/Synchro" -exec touch -t 202601010000 {} +; \
 		COPYFILE_DISABLE=1 tar -cf - -C "$$stage" Synchro | gzip -n > "$$stage/synchro-spm-$(CURRENT_VERSION).tar.gz"; \
@@ -1467,7 +1583,11 @@ client-consumer-apple-artifact: version-check release-pods-check
 
 client-consumer-kotlin-artifact: version-check
 	@set -eu; \
-		if [ "$(RC_STAGED_ARTIFACTS)" = 1 ]; then python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)"; exit 0; fi; \
+		if [ "$(CLIENT_ARTIFACTS_PREPARED)" = 1 ]; then \
+			test -f "$(abspath $(CLIENT_ARTIFACT_DIR))/maven/fit/trainstar/synchro/$(CURRENT_VERSION)/synchro-$(CURRENT_VERSION).aar"; \
+			exit 0; \
+		fi; \
+		if [ "$(RELEASE_STAGED_ARTIFACTS)" = 1 ]; then $(MAKE) --no-print-directory release-verify VERSION="$(CURRENT_VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"; exit 0; fi; \
 		test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1; }; \
 		test -d "$(ANDROID_HOME)" || { echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1; }; \
 		final="$(abspath $(CLIENT_ARTIFACT_DIR))/maven"; \
@@ -1489,7 +1609,11 @@ client-consumer-kotlin-artifact: version-check
 
 client-consumer-rn-artifact: version-check
 	@set -eu; \
-		if [ "$(RC_STAGED_ARTIFACTS)" = 1 ]; then python3 scripts/rc-artifacts.py verify --candidate-dir "$(abspath $(RC_CANDIDATE_DIR))" --candidate-id "$(RC_CANDIDATE_ID)"; exit 0; fi; \
+		if [ "$(CLIENT_ARTIFACTS_PREPARED)" = 1 ]; then \
+			test -f "$(abspath $(CLIENT_ARTIFACT_DIR))/npm/trainstar-synchro-react-native-$(CURRENT_VERSION).tgz"; \
+			exit 0; \
+		fi; \
+		if [ "$(RELEASE_STAGED_ARTIFACTS)" = 1 ]; then $(MAKE) --no-print-directory release-verify VERSION="$(CURRENT_VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"; exit 0; fi; \
 		final="$(abspath $(CLIENT_ARTIFACT_DIR))/npm"; \
 		stage="$$final.tmp.$$$$"; \
 		cleanup() { rm -rf "$$stage"; }; \
@@ -1684,21 +1808,21 @@ ext-build:
 	cd extensions/synchro-pg && cargo build
 
 generate-pg-sql:
-	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx schema pg18 --pg-config "$(PGRX_PG_CONFIG)" --out sql/synchro_pg--0.3.0.sql
-	perl -pi -e 's/[ \t]+$$//' extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
-	perl -0pi -e 's/\n+\z/\n/' extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx schema pg18 --pg-config "$(PGRX_PG_CONFIG)" --out sql/synchro_pg--$(CURRENT_VERSION).sql
+	perl -pi -e 's/[ \t]+$$//' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
+	perl -0pi -e 's/\n+\z/\n/' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
 
 check-pg-sql:
 	@set -eu; \
 		tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/synchro-pg-sql.XXXXXX")"; \
 		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
-		generated="$$tmp/synchro_pg--0.3.0.sql"; \
+		generated="$$tmp/synchro_pg--$(CURRENT_VERSION).sql"; \
 		cd extensions/synchro-pg; \
 		CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx schema pg18 --pg-config "$(PGRX_PG_CONFIG)" --out "$$generated"; \
 		perl -pi -e 's/[ \t]+$$//' "$$generated"; \
 		perl -0pi -e 's/\n+\z/\n/' "$$generated"; \
-		if ! cmp -s sql/synchro_pg--0.3.0.sql "$$generated"; then \
-			diff -u sql/synchro_pg--0.3.0.sql "$$generated" || true; \
+		if ! cmp -s sql/synchro_pg--$(CURRENT_VERSION).sql "$$generated"; then \
+			diff -u sql/synchro_pg--$(CURRENT_VERSION).sql "$$generated" || true; \
 			printf '%s\n' 'tracked PostgreSQL SQL differs from pgrx generation' >&2; \
 			exit 1; \
 		fi

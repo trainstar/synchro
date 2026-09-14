@@ -95,6 +95,28 @@ providers.environmentVariable("SYNCHRO_CONSUMER_MAVEN_REPOSITORY").orNull?.let {
     }
 }
 
+providers.environmentVariable("SYNCHRO_RELEASE_MAVEN_REPOSITORY").orNull?.let { repositoryPath ->
+    publishing {
+        repositories {
+            maven {
+                name = "release"
+                url = uri(repositoryPath)
+            }
+        }
+    }
+}
+
+tasks.register("releaseBundle") {
+    group = "publishing"
+    description = "Write the signed Maven release repository bundle."
+    doFirst {
+        require(!providers.environmentVariable("SYNCHRO_RELEASE_MAVEN_REPOSITORY").orNull.isNullOrBlank()) {
+            "SYNCHRO_RELEASE_MAVEN_REPOSITORY is required"
+        }
+    }
+    dependsOn("publishAllPublicationsToReleaseRepository")
+}
+
 val integrationTestPatterns = listOf(
     "com.trainstar.synchro.IntegrationTests",
     "com.trainstar.synchro.SchemaIntegrationTests"

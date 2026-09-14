@@ -49,6 +49,7 @@ func TestSetSyncsAndChecksVersionedSurfaces(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "clients/kotlin/synchro/build.gradle.kts"), `coordinates("fit.trainstar", "synchro", project.version.toString())`)
 	assertFileContains(t, filepath.Join(root, "extensions/Cargo.toml"), `version = "1.4.5"`)
 	assertFileContains(t, filepath.Join(root, "extensions/synchro-pg/synchro_pg.control"), `default_version = '1.4.5'`)
+	assertFileContains(t, filepath.Join(root, "conformance/artifacts/inventory.json"), `"release": "1.4.5"`)
 
 	if _, err := os.Stat(filepath.Join(root, "extensions/synchro-pg/sql/synchro_pg--1.4.5.sql")); err != nil {
 		t.Fatalf("expected PostgreSQL install SQL to be renamed: %v", err)
@@ -113,6 +114,7 @@ func newFixtureRepo(t *testing.T) string {
 	writeFixtureFile(t, root, "clients/kotlin/synchro/build.gradle.kts", "mavenPublishing {\n    coordinates(\"fit.trainstar\", \"synchro\", project.findProperty(\"version\")?.toString() ?: \"0.1.0\")\n}\n")
 	writeFixtureFile(t, root, "extensions/Cargo.toml", "[workspace]\nresolver = \"2\"\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2021\"\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/synchro_pg.control", "comment = 'fixture'\ndefault_version = '0.1.0'\n")
+	writeFixtureFile(t, root, "conformance/artifacts/inventory.json", "{\n  \"release\": \"0.1.0\",\n  \"artifacts\": []\n}\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/sql/synchro_pg--0.1.0.sql", "-- install script\n")
 	writeFixtureFile(t, root, "VERSION", "0.2.0\n")
 

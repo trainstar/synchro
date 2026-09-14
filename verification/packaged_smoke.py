@@ -25,6 +25,19 @@ CELL_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_VERSION = 1
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+PUBLIC_CONSUMER_FORBIDDEN = (
+    "@_spi(Inspection)",
+    "SynchroInspection",
+    "TransportObservationCollector",
+    "TransportOperationClass",
+    "withTransportObservation",
+    "com.trainstar.synchro.inspection",
+    "@trainstar/synchro-react-native/inspection",
+    "mavenLocal()",
+    ".package(path:",
+    "npm install file:",
+    "pod 'Synchro', :path =>",
+)
 
 
 class EvidenceError(ValueError):
@@ -85,7 +98,7 @@ def required_cells(repo_root: Path) -> list[str]:
         if cell_id in seen:
             raise EvidenceError(f"support matrix repeats cell {cell_id}")
         seen.add(cell_id)
-        if raw_cell.get("policy") != "excluded":
+        if raw_cell.get("policy") == "required":
             result.append(cell_id)
     if not result:
         raise EvidenceError("support matrix has no packaged smoke cells")
@@ -105,6 +118,28 @@ def hash_files(paths: list[Path]) -> list[str]:
             hashes.append(digest)
             seen.add(digest)
     return hashes
+
+
+def validate_public_consumer_sources(consumer_root: Path) -> None:
+    if not consumer_root.is_dir():
+        raise EvidenceError(f"public consumer root is missing: {consumer_root}")
+    source_files = [
+        path
+        for path in consumer_root.rglob("*")
+        if path.is_file()
+        and path.name != "Package.swift"
+        and path.suffix in {".go", ".kt", ".swift", ".ts", ".tsx", ".sh", ".py"}
+    ]
+    if not source_files:
+        raise EvidenceError(f"public consumer root has no source files: {consumer_root}")
+    for path in source_files:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise EvidenceError(f"cannot read public consumer source {path}: {error}") from error
+        for forbidden in PUBLIC_CONSUMER_FORBIDDEN:
+            if forbidden in content:
+                raise EvidenceError(f"public consumer source imports or resolves forbidden dependency {forbidden}: {path}")
 
 
 def operation_entries(status: str, test_count: int) -> list[dict[str, object]]:
@@ -166,6 +201,7 @@ def complete_cell(
     resume_path: Path,
     killed_pid: int,
     artifacts: list[Path],
+    expected_hashes: list[str],
 ) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
@@ -186,6 +222,9 @@ def complete_cell(
     hashes = hash_files(artifacts)
     if not hashes:
         raise EvidenceError("packaged smoke cell has no packaged artifact hash")
+    expected = validate_hash_list(expected_hashes, "expected artifact hashes")
+    if sorted(hashes) != sorted(expected):
+        raise EvidenceError("packaged smoke artifact hashes do not match sealed artifact hashes")
     write_json(
         output,
         {
@@ -201,6 +240,58 @@ def complete_cell(
                 "resume_pid": resume_pid,
                 "durable_pending_before_kill": pending_before,
                 "durable_pending_after_resume": pending_after,
+            },
+        },
+    )
+
+
+def validate_server_phase(path: Path, expected_phase: str) -> dict[str, object]:
+    value = load_json(path, f"server {expected_phase} phase result")
+    expected = {"schema_version", "phase", "status", "adapter_pid", "push_digest"}
+    if expected_phase == "resume":
+        expected.add("replay_equal")
+    if not isinstance(value, dict) or set(value) != expected:
+        raise EvidenceError(f"server {expected_phase} phase result has invalid members")
+    if value.get("schema_version") != 1 or value.get("phase") != expected_phase or value.get("status") != "passed":
+        raise EvidenceError(f"server {expected_phase} phase result is invalid")
+    required_integer(value.get("adapter_pid"), f"server {expected_phase} adapter pid", 1)
+    if not isinstance(value.get("push_digest"), str) or not SHA256.fullmatch(value["push_digest"]):
+        raise EvidenceError(f"server {expected_phase} push digest is invalid")
+    if expected_phase == "resume" and value.get("replay_equal") is not True:
+        raise EvidenceError("server replay response differs from the persisted response")
+    return value
+
+
+def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path, killed_pid: int, artifacts: list[Path], expected_hashes: list[str]) -> None:
+    if cell_id not in required_cells(repo_root):
+        raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
+    initial = validate_server_phase(initial_path, "initial")
+    resume = validate_server_phase(resume_path, "resume")
+    initial_pid = required_integer(initial["adapter_pid"], "server initial adapter pid", 1)
+    resume_pid = required_integer(resume["adapter_pid"], "server resume adapter pid", 1)
+    if killed_pid != initial_pid or resume_pid == initial_pid:
+        raise EvidenceError("server adapter process replacement proof is invalid")
+    if initial["push_digest"] != resume["push_digest"]:
+        raise EvidenceError("server replay digest differs from the persisted push")
+    hashes = hash_files(artifacts)
+    if sorted(hashes) != sorted(validate_hash_list(expected_hashes, "expected artifact hashes")):
+        raise EvidenceError("packaged smoke artifact hashes do not match sealed artifact hashes")
+    write_json(
+        output,
+        {
+            "schema_version": CELL_SCHEMA_VERSION,
+            "cell_id": cell_id,
+            "source_commit": source_commit(repo_root),
+            "status": "passed",
+            "artifact_hashes": hashes,
+            "operations": operation_entries("passed", 1),
+            "process_lifecycle": {
+                "kind": "server",
+                "initial_pid": initial_pid,
+                "kill_signal": 9,
+                "resume_pid": resume_pid,
+                "push_digest": initial["push_digest"],
+                "replay_equal": True,
             },
         },
     )
@@ -276,23 +367,29 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
         lifecycle = value.get("process_lifecycle")
         if not isinstance(lifecycle, dict):
             raise EvidenceError(f"cell {expected_cell} process lifecycle is missing")
-        expected_lifecycle_keys = {
-            "initial_pid",
-            "kill_signal",
-            "resume_pid",
-            "durable_pending_before_kill",
-            "durable_pending_after_resume",
-        }
-        if set(lifecycle) != expected_lifecycle_keys:
+        kind = lifecycle.get("kind", "client")
+        common_keys = {"initial_pid", "kill_signal", "resume_pid"}
+        client_keys = common_keys | {"durable_pending_before_kill", "durable_pending_after_resume"}
+        server_keys = common_keys | {"kind", "push_digest", "replay_equal"}
+        lifecycle_keys = set(lifecycle)
+        if lifecycle_keys != client_keys and lifecycle_keys != server_keys:
             raise EvidenceError(f"cell {expected_cell} process lifecycle has invalid members")
         initial_pid = required_integer(lifecycle.get("initial_pid"), "initial pid", 1)
         resume_pid = required_integer(lifecycle.get("resume_pid"), "resume pid", 1)
         if lifecycle.get("kill_signal") != 9 or initial_pid == resume_pid:
             raise EvidenceError(f"cell {expected_cell} process kill proof is invalid")
-        if required_integer(lifecycle.get("durable_pending_before_kill"), "pending before kill") <= 0:
-            raise EvidenceError(f"cell {expected_cell} has no durable work before kill")
-        if lifecycle.get("durable_pending_after_resume") != 0:
-            raise EvidenceError(f"cell {expected_cell} did not drain durable work after resume")
+        if kind == "server":
+            if (
+                not isinstance(lifecycle.get("push_digest"), str)
+                or not SHA256.fullmatch(lifecycle["push_digest"])
+                or lifecycle.get("replay_equal") is not True
+            ):
+                raise EvidenceError(f"cell {expected_cell} server replay proof is invalid")
+        else:
+            if required_integer(lifecycle.get("durable_pending_before_kill"), "pending before kill") <= 0:
+                raise EvidenceError(f"cell {expected_cell} has no durable work before kill")
+            if lifecycle.get("durable_pending_after_resume") != 0:
+                raise EvidenceError(f"cell {expected_cell} did not drain durable work after resume")
     return {
         "status": status,
         "artifact_hashes": hashes,
@@ -312,6 +409,11 @@ def missing_cell(cell_id: str) -> dict[str, object]:
 def collect_summary(repo_root: Path, cells_dir: Path, output: Path) -> None:
     commit = source_commit(repo_root)
     cells = required_cells(repo_root)
+    if cells_dir.exists():
+        evidence_cells = {path.stem for path in cells_dir.glob("*.json")}
+        unexpected = evidence_cells.difference(cells)
+        if unexpected:
+            raise EvidenceError(f"packaged smoke has unexpected cell evidence: {', '.join(sorted(unexpected))}")
     records: dict[str, dict[str, object]] = {}
     for cell_id in cells:
         path = cells_dir / f"{cell_id}.json"
@@ -525,6 +627,14 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument("--resume", type=Path, required=True)
     complete.add_argument("--killed-pid", type=int, required=True)
     complete.add_argument("--artifact", action="append", type=Path, default=[])
+    complete.add_argument("--expected-artifact-hash", action="append", default=[])
+
+    server_complete = subparsers.add_parser("complete-server-cell")
+    for argument in ("--repo-root", "--cell", "--output", "--initial", "--resume"):
+        server_complete.add_argument(argument, type=Path if argument in {"--repo-root", "--output", "--initial", "--resume"} else str, required=True)
+    server_complete.add_argument("--killed-pid", type=int, required=True)
+    server_complete.add_argument("--artifact", action="append", type=Path, default=[])
+    server_complete.add_argument("--expected-artifact-hash", action="append", default=[])
 
     collect = subparsers.add_parser("collect")
     collect.add_argument("--repo-root", type=Path, required=True)
@@ -559,6 +669,9 @@ def parse_args() -> argparse.Namespace:
     phase.add_argument("--pid", type=int, required=True)
     phase.add_argument("--pending-count", type=int, required=True)
 
+    public_imports = subparsers.add_parser("public-import-check")
+    public_imports.add_argument("--consumer-root", type=Path, action="append", required=True)
+
     return parser.parse_args()
 
 
@@ -576,7 +689,10 @@ def main() -> int:
                 args.resume.resolve(),
                 args.killed_pid,
                 [path.resolve() for path in args.artifact],
+                args.expected_artifact_hash,
             )
+        elif args.command == "complete-server-cell":
+            complete_server_cell(args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(), args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact], args.expected_artifact_hash)
         elif args.command == "collect":
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
         elif args.command == "dry-run":
@@ -591,6 +707,9 @@ def main() -> int:
             set_config_phase(args.config.resolve(), args.phase, args.output.resolve())
         elif args.command == "phase-result":
             write_phase(args.output.resolve(), args.phase, args.pid, args.pending_count)
+        elif args.command == "public-import-check":
+            for consumer_root in args.consumer_root:
+                validate_public_consumer_sources(consumer_root.resolve())
         else:
             raise EvidenceError(f"unsupported command {args.command}")
     except EvidenceError as error:

@@ -63,23 +63,16 @@ export function artifactInventorySemanticErrors(inventory) {
   const errors = [
     ...duplicateLogicalIdErrors(inventory.artifacts, "id", "Artifact inventory"),
   ];
-  const roles = new Map();
+  const publicationIdentities = new Map();
   for (const artifact of inventory.artifacts) {
-    roles.set(artifact.role, (roles.get(artifact.role) ?? 0) + 1);
-  }
-  for (const role of [
-    "pg-extension",
-    "pg-install-sql",
-    "adapter",
-    "seed-tool",
-    "swift-spm",
-    "cocoapods",
-    "kotlin-maven",
-    "react-native-npm",
-    "portable-seed",
-  ]) {
-    if ((roles.get(role) ?? 0) !== 1) {
-      errors.push(`Artifact inventory requires exactly one ${role} role`);
+    if (artifact.visibility !== "public" || artifact.kind !== "file") continue;
+    const identity = `file:${artifact.release_path_template}`;
+    if (publicationIdentities.has(identity)) {
+      errors.push(
+        `Artifact inventory repeats publication identity ${JSON.stringify(identity)} for ${publicationIdentities.get(identity)} and ${artifact.id}`,
+      );
+    } else {
+      publicationIdentities.set(identity, artifact.id);
     }
   }
   return errors;

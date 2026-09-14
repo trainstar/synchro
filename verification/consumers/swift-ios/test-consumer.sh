@@ -48,6 +48,17 @@ cp -R "$source_dir" "$work_dir/app"
 mkdir -p "$work_dir/app/Packages"
 ln -s "$apple_package" "$work_dir/app/Packages/Synchro"
 
+xcodebuild \
+  -project "$work_dir/app/SynchroConsumer.xcodeproj" \
+  -scheme SynchroConsumer \
+  -configuration Release \
+  -sdk iphoneos \
+  -destination 'generic/platform=iOS' \
+  -derivedDataPath "$work_dir/device-derived-data" \
+  IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+
 if [ -n "${IOS_SIMULATOR_UDID:-}" ]; then
   simulator_udid=$IOS_SIMULATOR_UDID
 else
@@ -210,11 +221,17 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
     --output "$cell_result" \
     --initial "$work_dir/initial.json" \
     --resume "$work_dir/resume.json" \
-    --killed-pid "$initial_pid" \
-    --artifact "$archive"
+    --killed-pid "$initial_pid"
+  distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-$archive}
+  for artifact in $distribution_artifacts; do
+    set -- "$@" --artifact "$artifact"
+  done
   if [ -n "${PACKAGED_SMOKE_EXTRA_ARTIFACT:-}" ]; then
     set -- "$@" --artifact "$PACKAGED_SMOKE_EXTRA_ARTIFACT"
   fi
+  for expected_hash in ${PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES:?PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES is required}; do
+    set -- "$@" --expected-artifact-hash "$expected_hash"
+  done
   "$@"
   printf '%s\n' "Packaged Swift iOS smoke passed for $PACKAGED_SMOKE_CELL_ID"
   exit 0

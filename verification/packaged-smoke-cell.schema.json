@@ -40,22 +40,46 @@
     },
     "failure": { "type": "string", "minLength": 1 },
     "process_lifecycle": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "initial_pid",
-        "kill_signal",
-        "resume_pid",
-        "durable_pending_before_kill",
-        "durable_pending_after_resume"
-      ],
-      "properties": {
-        "initial_pid": { "type": "integer", "minimum": 1 },
-        "kill_signal": { "const": 9 },
-        "resume_pid": { "type": "integer", "minimum": 1 },
-        "durable_pending_before_kill": { "type": "integer", "minimum": 1 },
-        "durable_pending_after_resume": { "const": 0 }
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "initial_pid",
+            "kill_signal",
+            "resume_pid",
+            "durable_pending_before_kill",
+            "durable_pending_after_resume"
+          ],
+          "properties": {
+            "initial_pid": { "type": "integer", "minimum": 1 },
+            "kill_signal": { "const": 9 },
+            "resume_pid": { "type": "integer", "minimum": 1 },
+            "durable_pending_before_kill": { "type": "integer", "minimum": 1 },
+            "durable_pending_after_resume": { "const": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "initial_pid",
+            "kill_signal",
+            "resume_pid",
+            "push_digest",
+            "replay_equal"
+          ],
+          "properties": {
+            "kind": { "const": "server" },
+            "initial_pid": { "type": "integer", "minimum": 1 },
+            "kill_signal": { "const": 9 },
+            "resume_pid": { "type": "integer", "minimum": 1 },
+            "push_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "replay_equal": { "const": true }
+          }
+        }
+      ]
     }
   },
   "allOf": [

@@ -11,5 +11,5 @@ Pod::Spec.new do |s|
   s.swift_version = "5.9"
   s.source_files = "clients/swift/Sources/Synchro/**/*.swift"
   s.pod_target_xcconfig = { "OTHER_SWIFT_FLAGS" => "$(inherited) -package-name Synchro" }
-  s.dependency "GRDB.swift"
+  s.dependency "GRDB.swift", "~> 7.0"
 end

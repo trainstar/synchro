@@ -104,11 +104,17 @@ set -- python3 "$tool" complete-cell \
   --output "$cell_result" \
   --initial "$work_dir/initial.json" \
   --resume "$work_dir/resume.json" \
-  --killed-pid "$initial_pid" \
-  --artifact "$archive"
+  --killed-pid "$initial_pid"
+distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-$archive}
+for artifact in $distribution_artifacts; do
+  set -- "$@" --artifact "$artifact"
+done
 if [ -n "${PACKAGED_SMOKE_EXTRA_ARTIFACT:-}" ]; then
   set -- "$@" --artifact "$PACKAGED_SMOKE_EXTRA_ARTIFACT"
 fi
+for expected_hash in ${PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES:?PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES is required}; do
+  set -- "$@" --expected-artifact-hash "$expected_hash"
+done
 "$@"
 
 printf '%s\n' "Packaged Swift smoke passed for $cell_id"

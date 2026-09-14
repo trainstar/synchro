@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { SafeAreaView, Text } from 'react-native';
 import { SynchroClient } from '@trainstar/synchro-react-native';
-import { SynchroInspection } from '@trainstar/synchro-react-native/inspection';
 import { packagedSmokeConfig } from './packagedSmokeConfig';
 
 const client = new SynchroClient({
@@ -16,9 +15,6 @@ const client = new SynchroClient({
   syncInterval: 3600,
   pushDebounce: 3600,
   maxRetryAttempts: 1,
-});
-const inspection = new SynchroInspection(client, {
-  transportObservationCapacity: 256,
 });
 
 async function waitForCondition(
@@ -125,22 +121,6 @@ export default function App(): React.JSX.Element {
         await syncAndWaitForScheduledPullRetry();
         if ((await client.pendingChangeCount()) !== 0) {
           throw new Error('initial packaged work was not pushed');
-        }
-        const snapshot = await inspection.transportObservations();
-        if (snapshot.overflowed) {
-          throw new Error('packaged transport observations overflowed');
-        }
-        for (const operation of ['connect', 'push', 'pull'] as const) {
-          if (
-            !snapshot.observations.some(
-              observation =>
-                observation.operationClass === operation &&
-                observation.statusCode >= 200 &&
-                observation.statusCode < 300
-            )
-          ) {
-            throw new Error(`packaged ${operation} was not observed`);
-          }
         }
         await client.execute(
           'UPDATE orders SET ship_address = ?, updated_at = ? WHERE id = ?',

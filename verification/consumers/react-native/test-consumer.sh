@@ -5,6 +5,7 @@ platform=${1:?platform is required}
 artifact_dir=${2:?artifact directory is required}
 version=${3:?version is required}
 mode=${4:-smoke}
+resolution=${SYNCHRO_CONSUMER_RESOLUTION:-public}
 
 case "$mode" in
   smoke)
@@ -21,13 +22,22 @@ case "$platform" in
 esac
 
 tarball="$artifact_dir/npm/trainstar-synchro-react-native-$version.tgz"
-apple_dir="$artifact_dir/apple/Synchro"
 maven_dir="$artifact_dir/maven"
-test -f "$tarball"
-case "$platform" in
-  ios) test -f "$apple_dir/Synchro.podspec" ;;
-  android) test -d "$maven_dir/fit/trainstar/synchro/$version" ;;
+case "$resolution" in
+  public|prepublication) ;;
+  *) printf '%s\n' "unsupported React Native consumer resolution: $resolution" >&2; exit 1 ;;
 esac
+if [ "$resolution" = "prepublication" ]; then
+  test -f "$tarball"
+  case "$platform" in
+    android) test -d "$maven_dir/fit/trainstar/synchro/$version" ;;
+  esac
+fi
+if [ "$resolution" = "public" ]; then
+  synchro_git_url=https://github.com/trainstar/synchro.git
+else
+  synchro_git_url=${SYNCHRO_PREPUBLICATION_GIT_URL:?SYNCHRO_PREPUBLICATION_GIT_URL is required}
+fi
 
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$source_dir/../../.." && pwd -P)
@@ -74,7 +84,11 @@ if [ "$mode" = "smoke" ]; then
 fi
 (
   cd "$work_dir/app"
-  npm install --ignore-scripts --save-exact "$tarball"
+  if [ "$resolution" = "public" ]; then
+    npm install --ignore-scripts --save-exact "@trainstar/synchro-react-native@$version"
+  else
+    npm install --ignore-scripts --save-exact "$tarball"
+  fi
   package_root=$(node -p "require('path').dirname(require.resolve('@trainstar/synchro-react-native/package.json'))")
   package_root=$(cd "$package_root" && pwd -P)
   case "$package_root" in
@@ -87,15 +101,15 @@ fi
 
 case "$platform" in
   ios)
-    ruby - "$work_dir/app/ios/Podfile" "$apple_dir" <<'RUBY'
-podfile, apple_dir = ARGV
+    ruby - "$work_dir/app/ios/Podfile" "$version" "$synchro_git_url" <<'RUBY'
+podfile, version, synchro_git_url = ARGV
 content = File.read(podfile)
 target = "target 'SynchroConsumer' do\n"
 abort "consumer Podfile target was not found" unless content.include?(target)
 abort "consumer Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '16.0'")
 pods = <<~PODS
   target 'SynchroConsumer' do
-    pod 'Synchro', :path => '#{apple_dir}'
+    pod 'Synchro', :git => '#{synchro_git_url}', :tag => 'v#{version}'
     pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 PODS
 File.write(podfile, content.sub(target, pods))
@@ -106,6 +120,18 @@ RUBY
       # A Debug build queries the Metro port and can retry it forever on
       # a machine with no packager, so the consumer builds Release and
       # always runs its embedded bundle.
+      FORCE_BUNDLING=1 xcodebuild \
+        -workspace SynchroConsumer.xcworkspace \
+        -scheme SynchroConsumer \
+        -configuration Release \
+        -sdk iphoneos \
+        -destination 'generic/platform=iOS' \
+        -derivedDataPath "$work_dir/device-derived-data" \
+        PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.consumer \
+        IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+        CODE_SIGNING_ALLOWED=NO \
+        DEBUG_INFORMATION_FORMAT=dwarf \
+        build
       FORCE_BUNDLING=1 xcodebuild \
         -workspace SynchroConsumer.xcworkspace \
         -scheme SynchroConsumer \
@@ -221,7 +247,8 @@ RUBY
     native_artifact="$artifact_dir/apple/synchro-spm-$version.tar.gz"
     ;;
   android)
-    cat > "$work_dir/synchro-repository.gradle" <<EOF
+    if [ "$resolution" = "prepublication" ]; then
+      cat > "$work_dir/synchro-repository.gradle" <<EOF
 allprojects {
     repositories {
         exclusiveContent {
@@ -231,6 +258,7 @@ allprojects {
     }
 }
 EOF
+    fi
     (
       cd "$work_dir/app"
       # The packaged module and Kotlin SDK require core library desugaring.
@@ -253,17 +281,21 @@ GRADLE
         --bundle-output android/app/src/main/assets/index.android.bundle \
         --assets-dest android/app/src/main/res
     )
+    init_script=
+    if [ "$resolution" = "prepublication" ]; then
+      init_script="--init-script $work_dir/synchro-repository.gradle"
+    fi
     (
       cd "$work_dir/app/android"
+      gradle_tasks=":app:assembleRelease"
+      if [ "$mode" = "smoke" ]; then
+        gradle_tasks="$gradle_tasks :app:assembleDebug"
+      fi
       ANDROID_HOME="${ANDROID_HOME:?ANDROID_HOME is required}" \
       ANDROID_SDK_ROOT="${ANDROID_HOME}" \
       JAVA_HOME="${ANDROID_JAVA_HOME:?ANDROID_JAVA_HOME is required}" \
       PATH="$ANDROID_JAVA_HOME/bin:$PATH" \
-      ./gradlew \
-        --no-daemon \
-        --init-script "$work_dir/synchro-repository.gradle" \
-         -PsynchroVersion="$version" \
-         :app:assembleDebug
+        ./gradlew --no-daemon $init_script -PsynchroVersion="$version" $gradle_tasks
     )
     if [ "$mode" = "build-only" ]; then
       printf '%s\n' "Packaged React Native Android consumer build passed"
@@ -360,12 +392,17 @@ set -- python3 "$tool" complete-cell \
   --output "$cell_result" \
   --initial "$work_dir/initial.json" \
   --resume "$work_dir/resume.json" \
-  --killed-pid "$initial_pid" \
-  --artifact "$tarball" \
-  --artifact "$native_artifact"
+  --killed-pid "$initial_pid"
+distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-"$tarball $native_artifact"}
+for artifact in $distribution_artifacts; do
+  set -- "$@" --artifact "$artifact"
+done
 if [ -n "${PACKAGED_SMOKE_EXTRA_ARTIFACT:-}" ]; then
   set -- "$@" --artifact "$PACKAGED_SMOKE_EXTRA_ARTIFACT"
 fi
+for expected_hash in ${PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES:?PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES is required}; do
+  set -- "$@" --expected-artifact-hash "$expected_hash"
+done
 "$@"
 
 printf '%s\n' "Packaged React Native $platform smoke passed for $cell_id"

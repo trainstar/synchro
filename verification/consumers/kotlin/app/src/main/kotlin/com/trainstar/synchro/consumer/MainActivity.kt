@@ -1,5 +1,3 @@
-@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
-
 package com.trainstar.synchro.consumer
 
 import android.app.Activity
@@ -9,9 +7,6 @@ import com.trainstar.synchro.RetryableError
 import com.trainstar.synchro.SyncStatus
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
-import com.trainstar.synchro.inspection.TransportObservationCollector
-import com.trainstar.synchro.inspection.TransportOperationClass
-import com.trainstar.synchro.inspection.withTransportObservation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -58,7 +53,6 @@ class MainActivity : Activity() {
         val phase = config.getString("phase")
         check(phase == "initial" || phase == "resume")
         val orderID = config.getString("order_id")
-        val transportCollector = TransportObservationCollector(capacity = 256)
         val client = SynchroClient(
             SynchroConfig(
                 dbPath = "consumer.db",
@@ -71,7 +65,7 @@ class MainActivity : Activity() {
                 syncInterval = 3_600.0,
                 pushDebounce = 3_600.0,
                 maxRetryAttempts = 1,
-            ).withTransportObservation(transportCollector),
+            ),
             this,
         )
 
@@ -109,18 +103,6 @@ class MainActivity : Activity() {
                 client.syncNow()
             }
             check(client.pendingChangeCount() == 0)
-            val snapshot = transportCollector.snapshot()
-            check(!snapshot.overflowed)
-            val observations = snapshot.observations
-            check(
-                listOf(
-                    TransportOperationClass.CONNECT,
-                    TransportOperationClass.PUSH,
-                    TransportOperationClass.PULL,
-                ).all { operation ->
-                    observations.any { it.operationClass == operation && it.statusCode in 200..299 }
-                },
-            )
             client.execute(
                 "UPDATE orders SET ship_address = ?, updated_at = ? WHERE id = ?",
                 arrayOf("""{"street":"Packaged Durable"}""", Instant.now().toString(), orderID),

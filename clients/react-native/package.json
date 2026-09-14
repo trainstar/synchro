@@ -64,6 +64,9 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
+  "engines": {
+    "node": ">=20.19.4"
+  },
   "devDependencies": {
     "@react-native/babel-preset": "0.83.0",
     "@testing-library/react-native": "^12.4.0",

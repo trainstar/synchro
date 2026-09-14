@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  artifactInventorySemanticErrors,
   duplicateLogicalIdErrors,
   faultCatalogSemanticErrors,
   performanceCatalogSemanticErrors,
@@ -86,6 +87,25 @@ export function runValidatorSelfTests() {
       "Self-test items",
     ).some((error) => error.includes("duplicate logical ID")),
     "catalog validation accepted a duplicate logical ID",
+  );
+  requireSelfTest(
+    artifactInventorySemanticErrors({
+      artifacts: [
+        {
+          id: "ARTDEF-ONE-001",
+          visibility: "public",
+          kind: "file",
+          release_path_template: "artifacts/item-{version}.tgz",
+        },
+        {
+          id: "ARTDEF-TWO-001",
+          visibility: "public",
+          kind: "file",
+          release_path_template: "artifacts/item-{version}.tgz",
+        },
+      ],
+    }).some((error) => error.includes("repeats publication identity")),
+    "artifact inventory validation accepted a duplicate public path",
   );
   requireSelfTest(
     vectorCatalogSemanticErrors({
