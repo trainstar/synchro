@@ -63,6 +63,44 @@ func TestVerifyAdapterArtifactRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestVerifyInstallationLockPathRequiresCanonicalSafePath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "install.lock")
+	canonical, err := VerifyInstallationLockPath(path)
+	if err != nil {
+		t.Fatalf("valid installation lock rejected: %v", err)
+	}
+	parent, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(parent, "install.lock")
+	if canonical != want {
+		t.Fatalf("canonical installation lock = %q, want %q", canonical, want)
+	}
+	if _, err := VerifyInstallationLockPath("install.lock"); err == nil {
+		t.Fatal("relative installation lock was accepted")
+	}
+	directory := filepath.Join(root, "directory-lock")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyInstallationLockPath(directory); err == nil {
+		t.Fatal("directory installation lock was accepted")
+	}
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyInstallationLockPath(link); err == nil {
+		t.Fatal("symlink installation lock was accepted")
+	}
+}
+
 func TestLoadEnvironmentRequiresFiveDistinctRoleCredentials(t *testing.T) {
 	root := t.TempDir()
 	passwordFiles := make(map[string]string)

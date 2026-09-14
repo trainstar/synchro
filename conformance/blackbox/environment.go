@@ -93,14 +93,15 @@ type EnvironmentConfig struct {
 	JWTSecretFile          string
 	InstallationLock       string
 
-	jwtSecret       []byte
-	jwtDigest       string
-	adapterSHA256   string
-	adapterIdentity adapterArtifactIdentity
-	postgresVersion string
-	extension       extensionBundle
-	attachLifecycle attachLifecycleConfig
-	verified        bool
+	jwtSecret        []byte
+	jwtDigest        string
+	adapterSHA256    string
+	adapterIdentity  adapterArtifactIdentity
+	installationLock string
+	postgresVersion  string
+	extension        extensionBundle
+	attachLifecycle  attachLifecycleConfig
+	verified         bool
 }
 
 type attachLifecycleConfig struct {
@@ -335,6 +336,7 @@ func loadEnvironmentForPostgreSQLVersion(lookup func(string) (string, bool), req
 		jwtDigest:              jwtDigest,
 		adapterSHA256:          adapterIdentity.sha256,
 		adapterIdentity:        adapterIdentity,
+		installationLock:       installationLock,
 		postgresVersion:        version,
 		extension:              extension,
 		attachLifecycle:        attachLifecycle,
@@ -826,22 +828,90 @@ func validSHA256(value string) bool {
 	return err == nil && value == hex.EncodeToString(decoded)
 }
 
-func verifyInstallationLock(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK path is invalid")
+// PostgreSQLInstallationLockPath returns the shared lock for one destination pair.
+func PostgreSQLInstallationLockPath(ctx context.Context, pg18BinDir string) (string, error) {
+	if ctx == nil || strings.TrimSpace(pg18BinDir) != pg18BinDir {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
 	}
-	parent := filepath.Dir(absolute)
+	binDir, err := filepath.Abs(pg18BinDir)
+	if err != nil {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
+	}
+	binDir, err = filepath.EvalSymlinks(binDir)
+	if err != nil {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
+	}
+	info, err := os.Lstat(binDir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
+	}
+	canonicalDirectory := func(path string) (string, error) {
+		value, resolveErr := filepath.EvalSymlinks(path)
+		if resolveErr != nil || !filepath.IsAbs(value) {
+			return "", errors.New("PostgreSQL installation directory is invalid")
+		}
+		valueInfo, statErr := os.Lstat(value)
+		if statErr != nil || valueInfo.Mode()&os.ModeSymlink != 0 || !valueInfo.IsDir() {
+			return "", errors.New("PostgreSQL installation directory is invalid")
+		}
+		return value, nil
+	}
+	pgConfig := filepath.Join(binDir, "pg_config")
+	pkglibdir, err := pgConfigValue(ctx, pgConfig, "--pkglibdir")
+	if err != nil {
+		return "", errors.New("resolve PostgreSQL installation library directory failed")
+	}
+	pkglibdir, err = canonicalDirectory(pkglibdir)
+	if err != nil {
+		return "", err
+	}
+	sharedir, err := pgConfigValue(ctx, pgConfig, "--sharedir")
+	if err != nil {
+		return "", errors.New("resolve PostgreSQL installation shared directory failed")
+	}
+	sharedir, err = canonicalDirectory(sharedir)
+	if err != nil {
+		return "", err
+	}
+	lockParent, err := canonicalDirectory(os.TempDir())
+	if err != nil {
+		return "", errors.New("PostgreSQL installation lock parent is invalid")
+	}
+	identity := sha256.Sum256([]byte(pkglibdir + "\x00" + sharedir))
+	return VerifyInstallationLockPath(filepath.Join(
+		lockParent,
+		"synchro-conformance-pg18-"+hex.EncodeToString(identity[:])+".lock",
+	))
+}
+
+// VerifyInstallationLockPath returns one canonical installation-scoped lock path.
+func VerifyInstallationLockPath(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", errors.New("installation lock path is invalid")
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil || !filepath.IsAbs(parent) {
+		return "", errors.New("installation lock parent is invalid")
+	}
 	parentInfo, err := os.Lstat(parent)
 	if err != nil || parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
-		return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK parent is invalid")
+		return "", errors.New("installation lock parent is invalid")
 	}
-	if info, err := os.Lstat(absolute); err == nil {
+	canonical := filepath.Join(parent, filepath.Base(path))
+	if info, err := os.Lstat(canonical); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK must be a regular file")
+			return "", errors.New("installation lock must be a regular file")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK is unavailable")
+		return "", errors.New("installation lock is unavailable")
 	}
-	return absolute, nil
+	return canonical, nil
+}
+
+func verifyInstallationLock(path string) (string, error) {
+	canonical, err := VerifyInstallationLockPath(path)
+	if err != nil {
+		return "", fmt.Errorf("SYNCHRO_CONFORMANCE_INSTALL_LOCK is invalid: %w", err)
+	}
+	return canonical, nil
 }

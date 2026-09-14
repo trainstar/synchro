@@ -42,9 +42,10 @@ const (
 var lifecycleRunIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type lifecycleState struct {
-	RunID          string `json:"run_id"`
-	ControlAddress string `json:"control_address"`
-	Destroyed      bool   `json:"destroyed"`
+	RunID            string `json:"run_id"`
+	ControlAddress   string `json:"control_address"`
+	InstallationLock string `json:"installation_lock"`
+	Destroyed        bool   `json:"destroyed"`
 }
 
 type lifecycleRequest struct {
@@ -93,6 +94,7 @@ func runStart(ctx context.Context, args []string) error {
 	pg18BinDir := flags.String("pg18-bin-dir", "", "PostgreSQL 18 binary directory")
 	extensionArtifact := flags.String("extension-artifact", "", "verified PostgreSQL extension bundle")
 	adapterArtifact := flags.String("adapter-artifact", "", "verified adapter artifact")
+	installationLock := flags.String("installation-lock", "", "shared PostgreSQL installation lock")
 	stateDir := flags.String("state-dir", "", "private state directory")
 	tempParent := flags.String("temp-parent", "", "private temporary directory parent")
 	urlFile := flags.String("url-file", "", "administrator URL output file")
@@ -104,6 +106,10 @@ func runStart(ctx context.Context, args []string) error {
 	}
 	if flags.NArg() != 0 || *pg18BinDir == "" || *extensionArtifact == "" || *adapterArtifact == "" || *stateDir == "" || *tempParent == "" || *urlFile == "" || *attachEnvironmentFile == "" {
 		return errors.New("start requires --pg18-bin-dir, --extension-artifact, --adapter-artifact, --state-dir, --temp-parent, --url-file, and --attach-environment-file")
+	}
+	resolvedInstallationLock, err := resolveInstallationLockPath(ctx, *pg18BinDir, *installationLock)
+	if err != nil {
+		return err
 	}
 	if err := ensurePrivateDirectory(*stateDir); err != nil {
 		return err
@@ -126,7 +132,13 @@ func runStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return errors.New("resolve local provisioner executable failed")
 	}
-	lifecycleCommand, err := startLifecycleCommand(*lifecycleCommandJSON, lifecycleCommandSet, executable, stateRoot)
+	lifecycleCommand, err := startLifecycleCommand(
+		*lifecycleCommandJSON,
+		lifecycleCommandSet,
+		executable,
+		stateRoot,
+		resolvedInstallationLock,
+	)
 	if err != nil {
 		return err
 	}
@@ -150,7 +162,7 @@ func runStart(ctx context.Context, args []string) error {
 		"SYNCHRO_CONFORMANCE_OPERATOR_USER":          credentials.operatorUser,
 		"SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE": credentials.operatorPassword,
 		"SYNCHRO_CONFORMANCE_JWT_SECRET_FILE":        credentials.jwtSecret,
-		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":           filepath.Join(*stateDir, "install.lock"),
+		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":           resolvedInstallationLock,
 	})
 	defer restoreEnvironment()
 	environment, err := blackbox.LoadLocalEnvironment()
@@ -181,7 +193,11 @@ func runStart(ctx context.Context, args []string) error {
 	defer func() {
 		_ = listener.Close()
 	}()
-	if err := writeLifecycleState(stateRoot, lifecycleState{RunID: runID, ControlAddress: listener.Addr().String()}); err != nil {
+	if err := writeLifecycleState(stateRoot, lifecycleState{
+		RunID:            runID,
+		ControlAddress:   listener.Addr().String(),
+		InstallationLock: resolvedInstallationLock,
+	}); err != nil {
 		_ = harness.Close(context.Background())
 		return err
 	}
@@ -203,14 +219,18 @@ func runStart(ctx context.Context, args []string) error {
 		_ = harness.Close(context.Background())
 		return fmt.Errorf("write attach environment: %w", err)
 	}
-	destroyed, serveErr := serveLifecycle(ctx, listener, stateRoot, runID, harness)
+	destroyed, serveErr := serveLifecycle(ctx, listener, stateRoot, runID, resolvedInstallationLock, harness)
 	var closeErr error
 	if !destroyed {
 		closeContext, cancel := context.WithTimeout(context.Background(), localShutdownTimeout)
 		closeErr = harness.Close(closeContext)
 		cancel()
 		if closeErr == nil {
-			closeErr = writeLifecycleState(stateRoot, lifecycleState{RunID: runID, Destroyed: true})
+			closeErr = writeLifecycleState(stateRoot, lifecycleState{
+				RunID:            runID,
+				InstallationLock: resolvedInstallationLock,
+				Destroyed:        true,
+			})
 		}
 	}
 	credentials.remove()
@@ -225,12 +245,41 @@ func runStart(ctx context.Context, args []string) error {
 	return nil
 }
 
-func startLifecycleCommand(value string, overrideSet bool, executable, stateDir string) ([]string, error) {
+func resolveInstallationLockPath(ctx context.Context, pg18BinDir, requested string) (string, error) {
+	if strings.TrimSpace(pg18BinDir) != pg18BinDir || strings.TrimSpace(requested) != requested {
+		return "", errors.New("local provisioner installation lock is invalid")
+	}
+	expected, err := blackbox.PostgreSQLInstallationLockPath(ctx, pg18BinDir)
+	if err != nil {
+		return "", errors.New("local provisioner installation lock is invalid")
+	}
+	if requested == "" {
+		return expected, nil
+	}
+	actual, err := blackbox.VerifyInstallationLockPath(requested)
+	if err != nil || actual != expected {
+		return "", errors.New("local provisioner installation lock does not match the PostgreSQL installation")
+	}
+	return expected, nil
+}
+
+func startLifecycleCommand(value string, overrideSet bool, executable, stateDir, installationLock string) ([]string, error) {
 	if !filepath.IsAbs(stateDir) {
 		return nil, errors.New("lifecycle command state directory must be absolute")
 	}
+	verifiedLock, err := blackbox.VerifyInstallationLockPath(installationLock)
+	if err != nil || verifiedLock != installationLock {
+		return nil, errors.New("lifecycle command installation lock must be canonical")
+	}
 	if !overrideSet {
-		encoded, err := json.Marshal([]string{executable, "lifecycle", "--state-dir", stateDir})
+		encoded, err := json.Marshal([]string{
+			executable,
+			"lifecycle",
+			"--state-dir",
+			stateDir,
+			"--installation-lock",
+			installationLock,
+		})
 		if err != nil {
 			return nil, errors.New("encode default lifecycle command failed")
 		}
@@ -240,8 +289,19 @@ func startLifecycleCommand(value string, overrideSet bool, executable, stateDir 
 	if err != nil {
 		return nil, fmt.Errorf("start lifecycle command is invalid: %w", err)
 	}
-	if len(command) < 4 || command[len(command)-3] != "lifecycle" ||
-		command[len(command)-2] != "--state-dir" || command[len(command)-1] != stateDir {
+	switch {
+	case len(command) >= 6 &&
+		command[len(command)-5] == "lifecycle" &&
+		command[len(command)-4] == "--state-dir" &&
+		command[len(command)-3] == stateDir &&
+		command[len(command)-2] == "--installation-lock" &&
+		command[len(command)-1] == installationLock:
+	case len(command) >= 4 &&
+		command[len(command)-3] == "lifecycle" &&
+		command[len(command)-2] == "--state-dir" &&
+		command[len(command)-1] == stateDir:
+		command = append(command, "--installation-lock", installationLock)
+	default:
 		return nil, errors.New("start lifecycle command does not identify the owned lifecycle state")
 	}
 	return command, nil
@@ -304,7 +364,7 @@ func lifecycleAttachDatabaseURL(value string) (string, error) {
 	return result.String(), nil
 }
 
-func serveLifecycle(ctx context.Context, listener *net.TCPListener, stateDir, runID string, harness *blackbox.Harness) (bool, error) {
+func serveLifecycle(ctx context.Context, listener *net.TCPListener, stateDir, runID, installationLock string, harness *blackbox.Harness) (bool, error) {
 	if ctx == nil || listener == nil || harness == nil || !lifecycleRunIDPattern.MatchString(runID) {
 		return false, errors.New("local provisioner lifecycle server is invalid")
 	}
@@ -326,7 +386,7 @@ func serveLifecycle(ctx context.Context, listener *net.TCPListener, stateDir, ru
 			_ = connection.Close()
 			return false, errors.New("bound local provisioner lifecycle request failed")
 		}
-		destroyed, err := handleLifecycleConnection(connection, stateDir, runID, harness)
+		destroyed, err := handleLifecycleConnection(connection, stateDir, runID, installationLock, harness)
 		_ = connection.Close()
 		if err != nil {
 			return false, err
@@ -337,7 +397,7 @@ func serveLifecycle(ctx context.Context, listener *net.TCPListener, stateDir, ru
 	}
 }
 
-func handleLifecycleConnection(connection *net.TCPConn, stateDir, runID string, harness *blackbox.Harness) (bool, error) {
+func handleLifecycleConnection(connection *net.TCPConn, stateDir, runID, installationLock string, harness *blackbox.Harness) (bool, error) {
 	data, err := io.ReadAll(io.LimitReader(connection, lifecycleMessageBytes+1))
 	if err != nil || len(data) > lifecycleMessageBytes {
 		return false, writeLifecycleWireResponse(connection, lifecycleResponse{Error: "lifecycle request is invalid"})
@@ -374,7 +434,11 @@ func handleLifecycleConnection(connection *net.TCPConn, stateDir, runID string, 
 			}
 			return false, nil
 		}
-		if err := writeLifecycleState(stateDir, lifecycleState{RunID: runID, Destroyed: true}); err != nil {
+		if err := writeLifecycleState(stateDir, lifecycleState{
+			RunID:            runID,
+			InstallationLock: installationLock,
+			Destroyed:        true,
+		}); err != nil {
 			_ = writeLifecycleWireResponse(connection, lifecycleResponse{RunID: runID, Error: "lifecycle state update failed"})
 			return false, errors.New("persist destroyed lifecycle state failed")
 		}
@@ -396,7 +460,7 @@ func writeLifecycleWireResponse(connection io.Writer, response lifecycleResponse
 }
 
 func writeLifecycleState(stateDir string, state lifecycleState) error {
-	if !lifecycleRunIDPattern.MatchString(state.RunID) || (!state.Destroyed && !validLifecycleControlAddress(state.ControlAddress)) || (state.Destroyed && state.ControlAddress != "") {
+	if !validLifecycleState(state) {
 		return errors.New("local provisioner lifecycle state is invalid")
 	}
 	path := filepath.Join(stateDir, lifecycleStateName)
@@ -437,11 +501,18 @@ func readLifecycleState(stateDir string) (lifecycleState, error) {
 		return lifecycleState{}, errors.New("local provisioner lifecycle state is unavailable")
 	}
 	var state lifecycleState
-	if err := decodeStrictJSON(data, &state); err != nil || !lifecycleRunIDPattern.MatchString(state.RunID) ||
-		(!state.Destroyed && !validLifecycleControlAddress(state.ControlAddress)) || (state.Destroyed && state.ControlAddress != "") {
+	if err := decodeStrictJSON(data, &state); err != nil || !validLifecycleState(state) {
 		return lifecycleState{}, errors.New("local provisioner lifecycle state is invalid")
 	}
 	return state, nil
+}
+
+func validLifecycleState(state lifecycleState) bool {
+	lock, err := blackbox.VerifyInstallationLockPath(state.InstallationLock)
+	return err == nil && lock == state.InstallationLock &&
+		lifecycleRunIDPattern.MatchString(state.RunID) &&
+		((!state.Destroyed && validLifecycleControlAddress(state.ControlAddress)) ||
+			(state.Destroyed && state.ControlAddress == ""))
 }
 
 func validLifecycleControlAddress(value string) bool {
@@ -467,6 +538,7 @@ func runLifecycle(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("lifecycle", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	stateDir := flags.String("state-dir", "", "private lifecycle state directory")
+	installationLock := flags.String("installation-lock", "", "shared PostgreSQL installation lock")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("lifecycle flags are invalid")
 	}
@@ -484,6 +556,18 @@ func runLifecycle(ctx context.Context, args []string) error {
 	state, err := readLifecycleState(stateRoot)
 	if err != nil {
 		return err
+	}
+	installationLockSet := false
+	flags.Visit(func(value *flag.Flag) {
+		if value.Name == "installation-lock" {
+			installationLockSet = true
+		}
+	})
+	if installationLockSet {
+		lock, lockErr := blackbox.VerifyInstallationLockPath(*installationLock)
+		if lockErr != nil || lock != state.InstallationLock {
+			return errors.New("lifecycle installation lock does not match the owned run")
+		}
 	}
 	if state.RunID != runID {
 		return errors.New("lifecycle run identity does not match the owned run")

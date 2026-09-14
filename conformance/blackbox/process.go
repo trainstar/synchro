@@ -42,6 +42,7 @@ const (
 	defaultProcessLogBytes                  = 1 << 20
 	maximumProcessLogBytes                  = 4 << 20
 	maximumLifecycleResponseBytes           = 64 << 10
+	maximumPostgreSQLSocketPathBytes        = 103
 	processPollInterval                     = 50 * time.Millisecond
 	maxWorkerHeartbeatAge                   = 30
 	maxWALLagBytes                          = 64 * 1024 * 1024
@@ -604,7 +605,10 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 	if !config.Environment.verified {
 		return HarnessConfig{}, errors.New("verified harness environment is required")
 	}
-	if config.Environment.AttachDatabaseURL == "" && (config.Environment.PG18BinDir == "" || config.Environment.extension.root == "") {
+	if config.Environment.AttachDatabaseURL == "" &&
+		(config.Environment.PG18BinDir == "" || config.Environment.extension.root == "" ||
+			config.Environment.InstallationLock == "" ||
+			config.Environment.InstallationLock != config.Environment.installationLock) {
 		return HarnessConfig{}, errors.New("verified harness environment is required")
 	}
 	if config.Environment.AttachDatabaseURL != "" && !sameAttachLifecycleConfig(config.Environment) {
@@ -696,10 +700,11 @@ func (h *Harness) createRunDirectories() error {
 		return nil
 	}
 	h.dataDir = filepath.Join(root, "postgres")
-	h.socketDir = filepath.Join(root, "socket")
-	if err := os.Mkdir(h.socketDir, 0o700); err != nil {
-		return errors.New("create private PostgreSQL socket directory failed")
+	socketDir, err := createPostgreSQLSocketDirectory()
+	if err != nil {
+		return err
 	}
+	h.socketDir = socketDir
 	port, err := allocateLoopbackPort()
 	if err != nil {
 		return errors.New("allocate PostgreSQL loopback port failed")
@@ -712,6 +717,31 @@ func (h *Harness) createRunDirectories() error {
 	h.adapterPort = adapterPort
 	h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
 	return nil
+}
+
+func createPostgreSQLSocketDirectory() (string, error) {
+	parents := []string{os.TempDir()}
+	if filepath.Clean(parents[0]) != "/tmp" {
+		parents = append(parents, "/tmp")
+	}
+	for _, parent := range parents {
+		directory, err := os.MkdirTemp(parent, "synchro-pg-")
+		if err != nil {
+			continue
+		}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			_ = os.RemoveAll(directory)
+			continue
+		}
+		info, err := os.Lstat(directory)
+		socketPath := filepath.Join(directory, ".s.PGSQL.65535")
+		if err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() &&
+			info.Mode().Perm() == 0o700 && len(socketPath) <= maximumPostgreSQLSocketPathBytes {
+			return directory, nil
+		}
+		_ = os.RemoveAll(directory)
+	}
+	return "", errors.New("create short private PostgreSQL socket directory failed")
 }
 
 func (h *Harness) configureAttachedDatabase() error {
@@ -6354,17 +6384,22 @@ func (h *Harness) stopPostgres(ctx context.Context) error {
 }
 
 func (h *Harness) removeCluster() error {
+	var failures []error
 	if h.dataDir != "" {
 		if err := os.RemoveAll(h.dataDir); err != nil {
-			return errors.New("remove isolated PostgreSQL cluster failed")
+			failures = append(failures, errors.New("remove isolated PostgreSQL cluster failed"))
+		} else {
+			h.dataDir = ""
 		}
 	}
 	if h.socketDir != "" {
 		if err := os.RemoveAll(h.socketDir); err != nil {
-			return errors.New("remove isolated PostgreSQL socket directory failed")
+			failures = append(failures, errors.New("remove isolated PostgreSQL socket directory failed"))
+		} else {
+			h.socketDir = ""
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (h *Harness) removeRunRoot() error {
@@ -6380,6 +6415,7 @@ func (h *Harness) removeRunRoot() error {
 
 type installationLock struct {
 	file     *os.File
+	path     string
 	mu       sync.Mutex
 	released bool
 }
@@ -6388,14 +6424,26 @@ func acquireInstallationLock(ctx context.Context, path string) (*installationLoc
 	if ctx == nil {
 		return nil, errors.New("installation lock context is required")
 	}
+	canonical, err := VerifyInstallationLockPath(path)
+	if err != nil {
+		return nil, errors.New("installation lock path is invalid")
+	}
+	path = canonical
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, errors.New("open installation lock failed")
 	}
+	pathInfo, pathErr := os.Lstat(path)
+	fileInfo, fileErr := file.Stat()
+	if pathErr != nil || fileErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 ||
+		!pathInfo.Mode().IsRegular() || !os.SameFile(pathInfo, fileInfo) {
+		_ = file.Close()
+		return nil, errors.New("installation lock path changed during open")
+	}
 	for {
 		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			return &installationLock{file: file}, nil
+			return &installationLock{file: file, path: path}, nil
 		}
 		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
 			_ = file.Close()

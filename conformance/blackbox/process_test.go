@@ -175,6 +175,111 @@ func TestCleanupAcceptsUnchangedCandidateArtifacts(t *testing.T) {
 	}
 }
 
+func TestInstallationLockSerializesOneSharedPath(t *testing.T) {
+	path, err := VerifyInstallationLockPath(filepath.Join(t.TempDir(), "installation.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireInstallationLock(context.Background(), path)
+	if err != nil {
+		t.Fatalf("acquire first installation lock: %v", err)
+	}
+	if lock.path != path {
+		t.Fatalf("acquired installation lock path = %q, want %q", lock.path, path)
+	}
+	contender, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer contender.Close()
+	err = syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		t.Fatalf("shared installation lock did not exclude a contender: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release first installation lock: %v", err)
+	}
+	if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("released installation lock still excluded a contender: %v", err)
+	}
+	if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("release contender lock: %v", err)
+	}
+}
+
+func TestNormalizeHarnessConfigRejectsChangedInstallationLock(t *testing.T) {
+	installationLock, err := VerifyInstallationLockPath(filepath.Join(t.TempDir(), "installation.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := EnvironmentConfig{
+		PG18BinDir:       "/verified/postgresql/bin",
+		InstallationLock: installationLock,
+		installationLock: installationLock,
+		extension:        extensionBundle{root: "/verified/extension"},
+		verified:         true,
+	}
+	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: environment}); err != nil {
+		t.Fatalf("verified installation lock binding was rejected: %v", err)
+	}
+	environment.InstallationLock = filepath.Join(t.TempDir(), "changed.lock")
+	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: environment}); err == nil {
+		t.Fatal("changed public installation lock was accepted")
+	}
+}
+
+func TestCreateRunDirectoriesUsesShortExternalSocketAndCleansExactly(t *testing.T) {
+	longParent := filepath.Join(t.TempDir(), strings.Repeat("long-root-", 12))
+	if err := os.Mkdir(longParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{config: HarnessConfig{TempParent: longParent}}
+	if err := harness.createRunDirectories(); err != nil {
+		t.Fatalf("create run directories: %v", err)
+	}
+	runRoot := harness.runRoot
+	socketDir := harness.socketDir
+	t.Cleanup(func() {
+		_ = os.RemoveAll(socketDir)
+		_ = os.RemoveAll(runRoot)
+	})
+	if withinPath(socketDir, runRoot) {
+		t.Fatalf("PostgreSQL socket directory %q is inside long run root %q", socketDir, runRoot)
+	}
+	if path := filepath.Join(socketDir, ".s.PGSQL.65535"); len(path) > maximumPostgreSQLSocketPathBytes {
+		t.Fatalf("PostgreSQL socket path has %d bytes: %q", len(path), path)
+	}
+	info, err := os.Lstat(socketDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("PostgreSQL socket directory mode = %v", info.Mode())
+	}
+	unownedSibling := socketDir + "-unowned"
+	if err := os.Mkdir(unownedSibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(unownedSibling)
+	})
+	if err := harness.removeCluster(); err != nil {
+		t.Fatalf("remove cluster directories: %v", err)
+	}
+	if err := harness.removeRunRoot(); err != nil {
+		t.Fatalf("remove run root: %v", err)
+	}
+	if _, err := os.Stat(socketDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket directory remains after cleanup: %v", err)
+	}
+	if _, err := os.Stat(runRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("run root remains after cleanup: %v", err)
+	}
+	if _, err := os.Stat(unownedSibling); err != nil {
+		t.Fatalf("cleanup removed an unowned socket sibling: %v", err)
+	}
+}
+
 func TestAttachedLifecycleCommandUsesExactArgvAndOwnedIdentity(t *testing.T) {
 	root := t.TempDir()
 	argumentsPath := filepath.Join(root, "arguments")
