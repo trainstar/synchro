@@ -1846,7 +1846,7 @@ local-postgres-start: build-local-postgres
 		chmod 700 "$$state"; \
 		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ] && kill -0 "$$(cat "$(LOCAL_POSTGRES_PID_FILE)")" 2>/dev/null; then \
 			echo "local PostgreSQL provisioner already running"; \
-			cat "$(LOCAL_POSTGRES_URL_FILE)"; \
+			test -s "$(LOCAL_POSTGRES_URL_FILE)"; \
 			exit 0; \
 		fi; \
 		rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_LOG_FILE)"; \
@@ -1862,7 +1862,7 @@ local-postgres-start: build-local-postgres
 			>"$(LOCAL_POSTGRES_LOG_FILE)" 2>&1 </dev/null & \
 		echo $$! >"$(LOCAL_POSTGRES_PID_FILE)"; \
 		for attempt in $$(seq 1 180); do \
-			if [ -s "$(LOCAL_POSTGRES_URL_FILE)" ]; then cat "$(LOCAL_POSTGRES_URL_FILE)"; exit 0; fi; \
+			if [ -s "$(LOCAL_POSTGRES_URL_FILE)" ]; then echo "local PostgreSQL provisioner ready"; exit 0; fi; \
 			if ! kill -0 "$$(cat "$(LOCAL_POSTGRES_PID_FILE)")" 2>/dev/null; then \
 				cat "$(LOCAL_POSTGRES_LOG_FILE)" >&2 || true; \
 				rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
