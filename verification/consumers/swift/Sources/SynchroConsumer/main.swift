@@ -61,6 +61,32 @@ private func writeNewPhaseResult(_ result: PackagedSmokePhaseResult, to path: St
     }
 }
 
+private func runAndWaitForScheduledRetry(
+    _ client: SynchroClient,
+    operation: () async throws -> Void
+) async throws {
+    do {
+        try await operation()
+        return
+    } catch {
+        guard client.getSyncStatus() == .backoff else {
+            throw error
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            switch client.getSyncStatus() {
+            case .ready:
+                return
+            case .error, .stopped, .uninitialized:
+                throw error
+            default:
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        throw error
+    }
+}
+
 private func runPackagedSmoke(
     configPath: String,
     databasePath: String,
@@ -95,11 +121,15 @@ private func runPackagedSmoke(
     )
 
     if phase == "initial" {
-        try await client.start()
+        try await runAndWaitForScheduledRetry(client) {
+            try await client.start()
+        }
         // start() returns after local recovery and runs the first cycle in
         // the background, so the server schema is not applied yet. The
         // customers insert requires that schema.
-        try await client.syncNow()
+        try await runAndWaitForScheduledRetry(client) {
+            try await client.syncNow()
+        }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         _ = try client.execute(
             "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
@@ -116,7 +146,9 @@ private func runPackagedSmoke(
                 timestamp,
             ]
         )
-        try await client.syncNow()
+        try await runAndWaitForScheduledRetry(client) {
+            try await client.syncNow()
+        }
         guard try client.pendingChangeCount() == 0 else {
             throw CocoaError(.fileWriteUnknown)
         }
@@ -166,8 +198,12 @@ private func runPackagedSmoke(
     guard durable == #"{"street":"Packaged Durable"}"#, pendingBeforeResume > 0 else {
         throw CocoaError(.fileReadCorruptFile)
     }
-    try await client.start()
-    try await client.syncNow()
+    try await runAndWaitForScheduledRetry(client) {
+        try await client.start()
+    }
+    try await runAndWaitForScheduledRetry(client) {
+        try await client.syncNow()
+    }
     let pendingAfterResume = try client.pendingChangeCount()
     guard pendingAfterResume == 0 else {
         throw CocoaError(.fileWriteUnknown)

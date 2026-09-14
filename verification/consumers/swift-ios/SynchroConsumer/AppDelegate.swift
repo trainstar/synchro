@@ -111,19 +111,29 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
-    // A transient transport drop surfaces as a retryable sync error, and a
-    // real client retries it. The bound keeps a persistent failure fatal.
-    private func syncNowWithRetry(_ client: SynchroClient) async throws {
-        var attempt = 1
-        while true {
-            do {
-                try await client.syncNow()
-                return
-            } catch {
-                guard attempt < 3 else { throw error }
-                attempt += 1
-                try await Task.sleep(nanoseconds: 5_000_000_000)
+    private func runAndWaitForScheduledRetry(
+        _ client: SynchroClient,
+        operation: () async throws -> Void
+    ) async throws {
+        do {
+            try await operation()
+            return
+        } catch {
+            guard client.getSyncStatus() == .backoff else {
+                throw error
             }
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline {
+                switch client.getSyncStatus() {
+                case .ready:
+                    return
+                case .error, .stopped, .uninitialized:
+                    throw error
+                default:
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+            throw error
         }
     }
 
@@ -157,11 +167,15 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         self.client = client
 
         if smoke.phase == "initial" {
-            try await client.start()
+            try await runAndWaitForScheduledRetry(client) {
+                try await client.start()
+            }
             // start() returns after local recovery and runs the first cycle
             // in the background, so the server schema is not applied yet.
             // The customers insert requires that schema.
-            try await syncNowWithRetry(client)
+            try await runAndWaitForScheduledRetry(client) {
+                try await client.syncNow()
+            }
             let timestamp = ISO8601DateFormatter().string(from: Date())
             _ = try client.execute(
                 "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
@@ -178,7 +192,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                     timestamp,
                 ]
             )
-            try await syncNowWithRetry(client)
+            try await runAndWaitForScheduledRetry(client) {
+                try await client.syncNow()
+            }
             guard try client.pendingChangeCount() == 0 else {
                 throw CocoaError(.fileWriteUnknown)
             }
@@ -219,8 +235,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         guard durable == #"{"street":"Packaged Durable"}"#, pendingBeforeResume > 0 else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        try await client.start()
-        try await syncNowWithRetry(client)
+        try await runAndWaitForScheduledRetry(client) {
+            try await client.start()
+        }
+        try await runAndWaitForScheduledRetry(client) {
+            try await client.syncNow()
+        }
         let pendingAfterResume = try client.pendingChangeCount()
         guard pendingAfterResume == 0 else {
             throw CocoaError(.fileWriteUnknown)

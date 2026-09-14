@@ -21,6 +21,53 @@ const inspection = new SynchroInspection(client, {
   transportObservationCapacity: 256,
 });
 
+async function waitForCondition(
+  condition: () => Promise<boolean>,
+  timeoutMs = 15000,
+  intervalMs = 250
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await condition()) {
+      return true;
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
+async function runAndWaitForScheduledPullRetry(
+  operation: () => Promise<void>
+) {
+  try {
+    await operation();
+    return;
+  } catch (error) {
+    const status = await client.getSyncStatus();
+    if (status.status !== 'backoff' || status.operation !== 'pulling') {
+      throw error;
+    }
+    const retryCompleted = await waitForCondition(async () => {
+      const current = await client.getSyncStatus();
+      if (current.status === 'error' || current.status === 'stopped') {
+        throw error;
+      }
+      return current.status === 'ready';
+    });
+    if (!retryCompleted) {
+      throw new Error('scheduled pull retry did not return to ready state');
+    }
+  }
+}
+
+async function startAndWaitForScheduledPullRetry() {
+  await runAndWaitForScheduledPullRetry(() => client.start());
+}
+
+async function syncAndWaitForScheduledPullRetry() {
+  await runAndWaitForScheduledPullRetry(() => client.syncNow());
+}
+
 export default function App(): React.JSX.Element {
   const [status, setStatus] = useState('running');
 
@@ -37,8 +84,8 @@ export default function App(): React.JSX.Element {
           if (durable?.ship_address !== '{"street":"Packaged Durable"}') {
             throw new Error('durable packaged row was not restored');
           }
-          await client.start();
-          await client.syncNow();
+          await startAndWaitForScheduledPullRetry();
+          await syncAndWaitForScheduledPullRetry();
           if ((await client.pendingChangeCount()) !== 0) {
             throw new Error('durable packaged work was not drained');
           }
@@ -48,11 +95,11 @@ export default function App(): React.JSX.Element {
           return;
         }
 
-        await client.start();
+        await startAndWaitForScheduledPullRetry();
         // start() returns after local recovery and runs the first cycle in
         // the background, so the server schema is not applied yet. The
         // customers insert requires that schema.
-        await client.syncNow();
+        await syncAndWaitForScheduledPullRetry();
         const timestamp = new Date().toISOString();
         await client.execute(
           'INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)',
@@ -75,7 +122,7 @@ export default function App(): React.JSX.Element {
             timestamp,
           ]
         );
-        await client.syncNow();
+        await syncAndWaitForScheduledPullRetry();
         if ((await client.pendingChangeCount()) !== 0) {
           throw new Error('initial packaged work was not pushed');
         }
