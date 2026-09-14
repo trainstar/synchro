@@ -1007,12 +1007,31 @@ jobs:
           deployment_id="$(jq -r '.deployment_id // empty' "$RUNNER_TEMP/central-selected.json")"
           deployment_state="$(jq -r '.deployment_state // empty' "$RUNNER_TEMP/central-selected.json")"
           public_maven="$(jq -r '.maven' "$RUNNER_TEMP/public-github-classification.json")"
+          if [ -n "$deployment_id" ] && { [ "$deployment_state" = PENDING ] || [ "$deployment_state" = VALIDATING ]; }; then
+            for _ in $(seq 1 120); do
+              doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-status --deployment-id $deployment_id --output $RUNNER_TEMP/central-status.json"
+              deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
+              case "$deployment_state" in
+                VALIDATED|FAILED|PUBLISHING|PUBLISHED) break ;;
+                PENDING|VALIDATING) sleep 15 ;;
+                *) echo "Central returned an unsupported deployment state" >&2; exit 1 ;;
+              esac
+            done
+          fi
+          if [ -n "$deployment_id" ] && { [ "$deployment_state" = VALIDATED ] || [ "$deployment_state" = FAILED ]; }; then
+            doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-drop --deployment-id $deployment_id"
+            deployment_id=
+            deployment_state=
+          fi
           if [ -z "$deployment_id" ]; then
-            test "$public_maven" != published || { echo "published Maven deployment identity is unavailable" >&2; exit 1; }
-            doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-upload --bundle $bundle --name $name --output $RUNNER_TEMP/central-upload.json"
-            deployment_id="$(jq -r '.deployment_id' "$RUNNER_TEMP/central-upload.json")"
-            test -n "$deployment_id"
-            deployment_state=PENDING
+            if [ "$public_maven" = published ]; then
+              deployment_state=PUBLIC
+            else
+              doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-upload --bundle $bundle --name $name --output $RUNNER_TEMP/central-upload.json"
+              deployment_id="$(jq -r '.deployment_id' "$RUNNER_TEMP/central-upload.json")"
+              test -n "$deployment_id"
+              deployment_state=PENDING
+            fi
           fi
           jq -n --arg deployment_id "$deployment_id" --arg deployment_name "$name" --arg bundle_sha256 "$(shasum -a 256 "$bundle" | cut -d ' ' -f 1)" '{deployment_id:$deployment_id,deployment_name:$deployment_name,bundle_sha256:$bundle_sha256}' > "$RUNNER_TEMP/maven-operation.json"
           if [ "$deployment_state" = PENDING ] || [ "$deployment_state" = VALIDATING ]; then
@@ -1027,13 +1046,10 @@ jobs:
               esac
             done
           fi
-          if [ "$deployment_state" = VALIDATED ]; then
-            doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-verify --deployment-id $deployment_id --bundle $bundle --output-dir $RUNNER_TEMP/central-content"
-          elif [ "$deployment_state" = PUBLISHED ]; then
-            :
-          else
-            test "$deployment_state" = PUBLISHING || { echo "Central deployment did not reach a recoverable state" >&2; exit 1; }
-          fi
+          case "$deployment_state" in
+            VALIDATED|PUBLISHING|PUBLISHED|PUBLIC) ;;
+            *) echo "Central deployment did not reach a recoverable state" >&2; exit 1 ;;
+          esac
           echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
           echo "deployment_state=$deployment_state" >> "$GITHUB_OUTPUT"
 
@@ -1052,19 +1068,24 @@ jobs:
           set -euo pipefail
           release="$GITHUB_WORKSPACE/dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           deployment_state="$DEPLOYMENT_STATE"
+          if [ "$deployment_state" = PUBLIC ]; then
+            deployment_state=PUBLISHED
+          fi
           if [ "$deployment_state" = VALIDATED ]; then
             doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-publish --deployment-id $DEPLOYMENT_ID"
           fi
-          for _ in $(seq 1 120); do
-            doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-status --deployment-id $DEPLOYMENT_ID --output $RUNNER_TEMP/central-status.json"
-            deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
-            case "$deployment_state" in
-              PUBLISHED) break ;;
-              FAILED) echo "Central publication failed" >&2; exit 1 ;;
-              PUBLISHING|VALIDATED) sleep 15 ;;
-              *) echo "Central returned an unsupported publication state" >&2; exit 1 ;;
-            esac
-          done
+          if [ "$deployment_state" != PUBLISHED ]; then
+            for _ in $(seq 1 120); do
+              doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-status --deployment-id $DEPLOYMENT_ID --output $RUNNER_TEMP/central-status.json"
+              deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
+              case "$deployment_state" in
+                PUBLISHED) break ;;
+                FAILED) echo "Central publication failed" >&2; exit 1 ;;
+                PUBLISHING|VALIDATED) sleep 15 ;;
+                *) echo "Central returned an unsupported publication state" >&2; exit 1 ;;
+              esac
+            done
+          fi
           test "$deployment_state" = PUBLISHED
           for _ in $(seq 1 120); do
             if env -u GITHUB_TOKEN python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-maven.json"; then

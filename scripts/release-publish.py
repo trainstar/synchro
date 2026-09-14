@@ -336,19 +336,6 @@ def central_upload(bundle: Path, name: str) -> str:
     return identifier
 
 
-def central_verify(deployment_id: str, bundle: Path, output_dir: Path) -> None:
-    expected = maven_entries(bundle)
-    output_dir.mkdir(parents=True, exist_ok=False)
-    for relative, digest in expected.items():
-        encoded = urllib.parse.quote(relative, safe="/.-")
-        data = central_request(f"/deployment/{urllib.parse.quote(deployment_id, safe='')}/download/{encoded}", method="GET")
-        if sha256_bytes(data) != digest:
-            raise PublicationError(f"Central deployment content differs: {relative}")
-        destination = output_dir / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
-
-
 def observe_public(identity: dict[str, Any], repository: str, token: str | None) -> dict[str, Any]:
     if repository != "trainstar/synchro":
         raise PublicationError("publication repository is invalid")
@@ -445,13 +432,6 @@ def select_central(value: Any, name: str) -> dict[str, Any] | None:
     return matches[0] if matches else None
 
 
-def compare_maven(expected: Path, actual: Path) -> None:
-    expected_entries = maven_entries(expected)
-    actual_entries = maven_entries(actual)
-    if actual_entries != expected_entries:
-        raise PublicationError("Central deployment content differs from the sealed Maven bundle")
-
-
 def identity_for_directory(release_dir: Path) -> dict[str, Any]:
     identity = release_identity(release_dir)
     identity["maven_entries"] = maven_entries(release_dir / identity["maven_bundle"]["path"])
@@ -477,9 +457,6 @@ def main() -> int:
     select_parser.add_argument("--input", type=Path, required=True)
     select_parser.add_argument("--name", required=True)
     select_parser.add_argument("--output", type=Path, required=True)
-    compare_parser = subparsers.add_parser("compare-maven")
-    compare_parser.add_argument("--expected", type=Path, required=True)
-    compare_parser.add_argument("--actual", type=Path, required=True)
     central_list_parser = subparsers.add_parser("central-list")
     central_list_parser.add_argument("--name", required=True)
     central_list_parser.add_argument("--output", type=Path, required=True)
@@ -492,10 +469,8 @@ def main() -> int:
     central_upload_parser.add_argument("--output", type=Path, required=True)
     central_publish_parser = subparsers.add_parser("central-publish")
     central_publish_parser.add_argument("--deployment-id", required=True)
-    central_verify_parser = subparsers.add_parser("central-verify")
-    central_verify_parser.add_argument("--deployment-id", required=True)
-    central_verify_parser.add_argument("--bundle", type=Path, required=True)
-    central_verify_parser.add_argument("--output-dir", type=Path, required=True)
+    central_drop_parser = subparsers.add_parser("central-drop")
+    central_drop_parser.add_argument("--deployment-id", required=True)
     args = parser.parse_args()
     try:
         if args.command == "identity":
@@ -511,8 +486,6 @@ def main() -> int:
             write_json(args.output.with_name(args.output.stem + "-classification.json"), classify_publication(identity, state))
         elif args.command == "central-select":
             write_json(args.output, select_central(load_json(args.input, "Central deployments"), args.name))
-        elif args.command == "compare-maven":
-            compare_maven(args.expected.resolve(), args.actual.resolve())
         elif args.command == "central-list":
             query = urllib.parse.urlencode({"deploymentName": args.name, "pageSize": 100})
             write_json(args.output, central_json(f"/deployments?{query}", method="GET"))
@@ -524,8 +497,11 @@ def main() -> int:
             write_json(args.output, {"deployment_id": identifier})
         elif args.command == "central-publish":
             central_request(f"/deployment/{urllib.parse.quote(args.deployment_id, safe='')}")
-        elif args.command == "central-verify":
-            central_verify(args.deployment_id, args.bundle.resolve(), args.output_dir.resolve())
+        elif args.command == "central-drop":
+            central_request(
+                f"/deployment/{urllib.parse.quote(args.deployment_id, safe='')}",
+                method="DELETE",
+            )
         else:
             raise PublicationError(f"unsupported command {args.command}")
     except PublicationError as error:
