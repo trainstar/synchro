@@ -51,7 +51,7 @@ case "$remote_root" in /*) ;; *) printf '%s\n' "remote root must be absolute" >&
 case "$remote_root" in *[!A-Za-z0-9_./-]*|*/../*|*/..|*//*|/) printf '%s\n' "remote root is unsafe" >&2; exit 1 ;; esac
 case "$pg18_bin_dir" in /*) ;; *) printf '%s\n' "PostgreSQL bindir must be absolute" >&2; exit 1 ;; esac
 case "$pg18_bin_dir" in *[!A-Za-z0-9_./-]*|*/../*|*/..|*//*) printf '%s\n' "PostgreSQL bindir is unsafe" >&2; exit 1 ;; esac
-case "$cell" in SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-RN-IOS-CURRENT-001) ;; *) printf '%s\n' "fixture cell is invalid" >&2; exit 1 ;; esac
+case "$cell" in CI-SWIFT|CI-RN-IOS|SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-RN-IOS-CURRENT-001) ;; *) printf '%s\n' "fixture cell is invalid" >&2; exit 1 ;; esac
 
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
@@ -281,4 +281,16 @@ export SYNCHRO_TEST_URL="http://127.0.0.1:$local_http_port"
 export SYNCHRO_CONFORMANCE_JWT_SECRET_FILE="$work_dir/attach/jwt-secret"
 SYNCHRO_TEST_JWT_SECRET=$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")
 export SYNCHRO_TEST_JWT_SECRET
+admin_password=$(cat "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")
+ADAPTER_TEST_URL=$(python3 - "$local_database_url" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$admin_password" <<'PY'
+import sys, urllib.parse
+value = urllib.parse.urlsplit(sys.argv[1])
+auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(sys.argv[3], safe="")
+print(urllib.parse.urlunsplit((value.scheme, auth + "@" + value.netloc, value.path, value.query, "")))
+PY
+)
+unset admin_password
+REPLICATION_URL=$ADAPTER_TEST_URL
+WARM_CONNECT_ENV_FILE="$work_dir/attach/attach.env"
+export ADAPTER_TEST_URL REPLICATION_URL WARM_CONNECT_ENV_FILE
 "$@"

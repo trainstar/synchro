@@ -205,10 +205,39 @@ jobs:
       - name: Run curated integration mutants
         run: make test-integration-mutants
 
+      - name: Stage Linux fixture payload
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("conformance/support-matrix.json"))["release"])')
+          mkdir -p dist/candidate-fixture/artifacts
+          python3 scripts/release-artifacts.py archive-extension \
+            --source dist/conformance/synchro-pg-pg18 \
+            --output "dist/candidate-fixture/artifacts/synchro-pg-pg18-ubuntu24.04-linux-x64-${VERSION}.tar.gz"
+          install -m 0755 dist/conformance/synchrod-pg-adapter/synchrod-pg \
+            "dist/candidate-fixture/artifacts/synchrod-pg-linux-x64-${VERSION}"
+          install -m 0755 dist/conformance/synchro-seed/synchro-seed \
+            "dist/candidate-fixture/artifacts/synchro-seed-linux-x64-${VERSION}"
+          make build-local-postgres \
+            LOCAL_POSTGRES_BINARY=dist/candidate-fixture/synchro-local-postgres
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: candidate-linux-fixture
+          path: dist/candidate-fixture
+          if-no-files-found: error
+
   candidate-swift:
     name: candidate Swift
     if: github.event_name == 'push'
+    needs: candidate-server
     runs-on: macos-15
+    environment: release-fixtures
+    env:
+      RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
+      RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
+      RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
+      RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
+      RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
+      RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -217,34 +246,23 @@ jobs:
           go-version-file: api/go/go.mod
           cache-dependency-path: api/go/go.sum
 
-      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          workspaces: |
-            extensions -> target
-
-      - uses: ./.github/actions/setup-pgrx-pg18
-        with:
-          runtime-source: brew
-
-      - uses: ./.github/actions/setup-conformance-pg18
-        with:
-          jwt-secret-file-name: jwt-password
+          name: candidate-linux-fixture
+          path: dist/candidate-fixture
 
       - name: Ensure CocoaPods is available
         run: command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
 
-      - name: Start local PostgreSQL
+      - name: Run Swift checks against Linux PostgreSQL
         run: |
-          make local-postgres-start
-          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
-
-      - name: Run full Swift semantics
-        run: make test-swift
-
-      - name: Run Swift source consumer
-        run: make test-consumer-swift
+          VERSION=$(python3 -c 'import json; print(json.load(open("conformance/support-matrix.json"))["release"])')
+          scripts/ci/release-linux-fixture.sh \
+            --release-dir dist/candidate-fixture \
+            --version "$VERSION" \
+            --provisioner dist/candidate-fixture/synchro-local-postgres \
+            --cell CI-SWIFT \
+            -- make test-swift test-consumer-swift
 
   candidate-kotlin:
     name: candidate Kotlin
@@ -330,7 +348,16 @@ jobs:
   candidate-rn-ios:
     name: candidate React Native iOS
     if: github.event_name == 'push'
+    needs: candidate-server
     runs-on: macos-15
+    environment: release-fixtures
+    env:
+      RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
+      RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
+      RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
+      RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
+      RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
+      RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -351,13 +378,10 @@ jobs:
             clients/react-native/.yarn/install-state.gz
           key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
 
-      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
-
-      - uses: ./.github/actions/setup-pgrx-pg18
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          runtime-source: brew
-
-      - uses: ./.github/actions/setup-conformance-pg18
+          name: candidate-linux-fixture
+          path: dist/candidate-fixture
 
       - name: Install React Native dependencies
         working-directory: clients/react-native
@@ -373,16 +397,15 @@ jobs:
             brew install applesimutils
           fi
 
-      - name: Start local PostgreSQL
+      - name: Run React Native iOS checks against Linux PostgreSQL
         run: |
-          make local-postgres-start
-          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
-
-      - name: Run full React Native iOS semantics
-        run: make test-rn-e2e-ios
-
-      - name: Run React Native iOS source consumer
-        run: make test-consumer-rn-ios
+          VERSION=$(python3 -c 'import json; print(json.load(open("conformance/support-matrix.json"))["release"])')
+          scripts/ci/release-linux-fixture.sh \
+            --release-dir dist/candidate-fixture \
+            --version "$VERSION" \
+            --provisioner dist/candidate-fixture/synchro-local-postgres \
+            --cell CI-RN-IOS \
+            -- make test-rn-e2e-ios test-consumer-rn-ios
 
   candidate-rn-android:
     name: candidate React Native Android
