@@ -208,6 +208,114 @@ func TestLoadLocalEnvironmentRequiresRuntimeMatchingExtensionArtifact(t *testing
 	}
 }
 
+func TestLoadEnvironmentRequiresStrictAttachLifecycleConfiguration(t *testing.T) {
+	values := attachEnvironmentValuesFixture(t)
+	lookup := func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	}
+	config, err := loadEnvironment(lookup)
+	if err != nil {
+		t.Fatalf("valid attach lifecycle configuration rejected: %v", err)
+	}
+	if config.AttachRunID != strings.Repeat("a", 32) || len(config.AttachLifecycleCommand) != 3 || config.AttachLifecycleCommand[0] != "ssh" {
+		t.Fatalf("loaded attach lifecycle configuration = %#v", config)
+	}
+	if config.AttachDestroyOnClose {
+		t.Fatal("attach destroy ownership defaulted to true")
+	}
+	values["SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE"] = "true"
+	config, err = loadEnvironment(lookup)
+	if err != nil || !config.AttachDestroyOnClose {
+		t.Fatalf("explicit attach destroy ownership was rejected: config=%#v error=%v", config, err)
+	}
+	values["SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE"] = "false"
+	config, err = loadEnvironment(lookup)
+	if err != nil || config.AttachDestroyOnClose {
+		t.Fatalf("explicit false attach destroy ownership was rejected: config=%#v error=%v", config, err)
+	}
+	delete(values, "SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE")
+
+	for _, value := range []string{"", "TRUE", "1", " false "} {
+		values["SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE"] = value
+		if _, err := loadEnvironment(lookup); err == nil {
+			t.Fatalf("invalid attach destroy ownership %q was accepted", value)
+		}
+	}
+	delete(values, "SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE")
+
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "missing run identity", key: "SYNCHRO_CONFORMANCE_ATTACH_RUN_ID"},
+		{name: "malformed run identity", key: "SYNCHRO_CONFORMANCE_ATTACH_RUN_ID", value: "changed"},
+		{name: "shell command string", key: "SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND", value: `"ssh fixture restart"`},
+		{name: "shell argv", key: "SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND", value: `["/bin/sh","-c","fixture-control"]`},
+		{name: "empty argv member", key: "SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND", value: `["ssh",""]`},
+		{name: "NUL argv member", key: "SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND", value: `["ssh","\u0000"]`},
+		{name: "oversized argv member", key: "SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND", value: `["ssh","` + strings.Repeat("x", maximumLifecycleArgumentBytes+1) + `"]`},
+		{name: "trailing JSON", key: "SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND", value: `["ssh"] []`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			original, present := values[test.key]
+			if test.value == "" {
+				delete(values, test.key)
+			} else {
+				values[test.key] = test.value
+			}
+			if _, err := loadEnvironment(lookup); err == nil {
+				t.Fatal("invalid attach lifecycle configuration was accepted")
+			}
+			if present {
+				values[test.key] = original
+			} else {
+				delete(values, test.key)
+			}
+		})
+	}
+}
+
+func attachEnvironmentValuesFixture(t *testing.T) map[string]string {
+	t.Helper()
+	root := t.TempDir()
+	values := map[string]string{
+		"SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL":      "postgres://cf_admin@127.0.0.1:55432/synchro_conformance_fixture",
+		"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID":            strings.Repeat("a", 32),
+		"SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND": `["ssh","fixture","fixture-control"]`,
+		"SYNCHRO_CONFORMANCE_ADAPTER_USER":             "cf_adapter",
+		"SYNCHRO_CONFORMANCE_ADMIN_USER":               "cf_admin",
+		"SYNCHRO_CONFORMANCE_OBSERVER_USER":            "cf_observer",
+		"SYNCHRO_CONFORMANCE_WORKER_USER":              "cf_worker",
+		"SYNCHRO_CONFORMANCE_OPERATOR_USER":            "cf_operator",
+	}
+	for _, role := range []string{"ADMIN", "ADAPTER", "OBSERVER", "WORKER", "OPERATOR"} {
+		path := filepath.Join(root, strings.ToLower(role)+"-password")
+		if err := os.WriteFile(path, []byte(strings.ToLower(role)+"-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		values["SYNCHRO_CONFORMANCE_"+role+"_PASSWORD_FILE"] = path
+	}
+	jwtPath := filepath.Join(root, "jwt-secret")
+	if err := os.WriteFile(jwtPath, []byte("jwt-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	values["SYNCHRO_CONFORMANCE_JWT_SECRET_FILE"] = jwtPath
+	adapterPath := filepath.Join(root, "synchrod-pg")
+	adapterData := []byte("adapter")
+	if err := os.WriteFile(adapterPath, adapterData, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(adapterData)
+	if err := os.WriteFile(adapterPath+".sha256", []byte(hex.EncodeToString(digest[:])), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	values["SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT"] = adapterPath
+	return values
+}
+
 func TestVerifyExtensionBundleRejectsTamperingAndWrongDestinations(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		if _, err := verifyExtensionBundle(writeExtensionBundleFixture(t)); err != nil {

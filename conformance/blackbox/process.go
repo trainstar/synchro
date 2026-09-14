@@ -41,6 +41,7 @@ const (
 	defaultShutdownTimeout                  = 30 * time.Second
 	defaultProcessLogBytes                  = 1 << 20
 	maximumProcessLogBytes                  = 4 << 20
+	maximumLifecycleResponseBytes           = 64 << 10
 	processPollInterval                     = 50 * time.Millisecond
 	maxWorkerHeartbeatAge                   = 30
 	maxWALLagBytes                          = 64 * 1024 * 1024
@@ -142,6 +143,12 @@ type Harness struct {
 
 	databaseMu      sync.Mutex
 	databaseHandles []*sql.DB
+}
+
+type attachLifecycleResponse struct {
+	RunID             string `json:"run_id"`
+	AttachDatabaseURL string `json:"attach_database_url"`
+	Destroyed         *bool  `json:"destroyed"`
 }
 
 // ExtensionReinstallResult identifies the worker replaced by an extension reinstall.
@@ -600,6 +607,9 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 	if config.Environment.AttachDatabaseURL == "" && (config.Environment.PG18BinDir == "" || config.Environment.extension.root == "") {
 		return HarnessConfig{}, errors.New("verified harness environment is required")
 	}
+	if config.Environment.AttachDatabaseURL != "" && !sameAttachLifecycleConfig(config.Environment) {
+		return HarnessConfig{}, errors.New("verified attach lifecycle configuration is required")
+	}
 	if config.StartupTimeout == 0 {
 		config.StartupTimeout = defaultStartupTimeout
 	}
@@ -627,6 +637,20 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 		config.TempParent = parent
 	}
 	return config, nil
+}
+
+func sameAttachLifecycleConfig(environment EnvironmentConfig) bool {
+	if environment.AttachRunID == "" || environment.AttachRunID != environment.attachLifecycle.runID ||
+		environment.AttachDestroyOnClose != environment.attachLifecycle.destroyOnClose ||
+		len(environment.AttachLifecycleCommand) == 0 || len(environment.AttachLifecycleCommand) != len(environment.attachLifecycle.argv) {
+		return false
+	}
+	for index := range environment.AttachLifecycleCommand {
+		if environment.AttachLifecycleCommand[index] != environment.attachLifecycle.argv[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validListenAddress(value string) bool {
@@ -691,15 +715,23 @@ func (h *Harness) createRunDirectories() error {
 }
 
 func (h *Harness) configureAttachedDatabase() error {
-	config, err := pgconn.ParseConfig(h.env.AttachDatabaseURL)
-	if err != nil || config.Host == "" || filepath.IsAbs(config.Host) || config.Port == 0 || config.Database == "" {
-		return errors.New("attached PostgreSQL database URL is invalid")
+	config, err := parseAttachedDatabaseURL(h.env.AttachDatabaseURL)
+	if err != nil {
+		return err
 	}
 	h.attached = true
 	h.attachHost = config.Host
 	h.port = int(config.Port)
 	h.names.Database = config.Database
 	return nil
+}
+
+func parseAttachedDatabaseURL(value string) (*pgconn.Config, error) {
+	config, err := pgconn.ParseConfig(value)
+	if err != nil || config.Host == "" || filepath.IsAbs(config.Host) || config.Port == 0 || config.Database == "" {
+		return nil, errors.New("attached PostgreSQL database URL is invalid")
+	}
+	return config, nil
 }
 
 func allocateLoopbackPort() (int, error) {
@@ -1177,7 +1209,7 @@ func (h *Harness) waitForPostgres(ctx context.Context, database string) error {
 		if h.postgres != nil && h.postgres.Exited() {
 			return false, errors.New("PostgreSQL exited before readiness")
 		}
-		if !h.pgIsReady(attemptContext, database) {
+		if !h.attached && !h.pgIsReady(attemptContext, database) {
 			return false, nil
 		}
 		databaseHandle, err := h.openDatabase(attemptContext, database, h.env.Admin, false)
@@ -1467,7 +1499,7 @@ func (h *Harness) grantExtensionRolesOnDatabase(ctx context.Context, database *s
 
 func (h *Harness) restartPostgres(ctx context.Context) error {
 	if h.attached {
-		return errors.New("attached PostgreSQL restart is unavailable")
+		return h.restartAttachedPostgres(ctx)
 	}
 	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
 	defer cancel()
@@ -1483,6 +1515,92 @@ func (h *Harness) restartPostgres(ctx context.Context) error {
 	}
 	h.restartCount++
 	return nil
+}
+
+func (h *Harness) restartAttachedPostgres(ctx context.Context) error {
+	if !sameAttachLifecycleConfig(h.env) {
+		return errors.New("attached PostgreSQL lifecycle configuration changed")
+	}
+	if err := h.stopAdapter(ctx); err != nil {
+		return err
+	}
+	if err := h.closeDatabaseHandles(ctx); err != nil {
+		return err
+	}
+	response, err := h.runAttachLifecycleCommand(ctx, "restart")
+	if err != nil {
+		return err
+	}
+	if response.Destroyed == nil || *response.Destroyed || response.AttachDatabaseURL == "" {
+		return errors.New("attached PostgreSQL restart response is invalid")
+	}
+	config, err := parseAttachedDatabaseURL(response.AttachDatabaseURL)
+	if err != nil || config.Database != h.names.Database {
+		return errors.New("attached PostgreSQL restart changed the owned database")
+	}
+	h.env.AttachDatabaseURL = response.AttachDatabaseURL
+	h.config.Environment.AttachDatabaseURL = response.AttachDatabaseURL
+	h.attachHost = config.Host
+	h.port = int(config.Port)
+	if err := h.waitForPostgres(ctx, h.names.Database); err != nil {
+		return fmt.Errorf("wait for attached PostgreSQL readiness: %w", err)
+	}
+	if err := h.verifyAttachedCluster(ctx); err != nil {
+		return err
+	}
+	if err := h.waitForWorker(ctx); err != nil {
+		return err
+	}
+	if err := h.verifyCaptureReadiness(ctx); err != nil {
+		return err
+	}
+	if !h.config.SkipAdapter {
+		if err := h.startAdapter(ctx); err != nil {
+			return err
+		}
+	}
+	h.restartCount++
+	return nil
+}
+
+func (h *Harness) runAttachLifecycleCommand(ctx context.Context, operation string) (attachLifecycleResponse, error) {
+	if ctx == nil || (operation != "restart" && operation != "destroy") || !sameAttachLifecycleConfig(h.env) {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle command configuration is invalid")
+	}
+	argv := append([]string(nil), h.env.attachLifecycle.argv...)
+	arguments := append(argv[1:], operation, h.env.attachLifecycle.runID)
+	stdout := newBoundedLog(maximumLifecycleResponseBytes, nil)
+	redactions := [][]byte{h.env.Admin.password, h.env.Adapter.password, h.env.Observer.password, h.worker.password, h.env.Operator.password, h.env.jwtSecret, []byte(h.env.AttachDatabaseURL)}
+	stderr := newBoundedLog(h.config.ProcessLogBytes, redactions)
+	command := exec.CommandContext(ctx, argv[0], arguments...)
+	configureProcessGroup(command)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil || ctx.Err() != nil {
+		detail := strings.TrimSpace(string(stderr.sanitizedBytes()))
+		detail = strings.ReplaceAll(strings.ReplaceAll(detail, "\r", " "), "\n", " ")
+		if len(detail) > 512 {
+			detail = detail[:512]
+		}
+		if detail != "" {
+			return attachLifecycleResponse{}, fmt.Errorf("attached lifecycle %s command failed: %s", operation, detail)
+		}
+		return attachLifecycleResponse{}, fmt.Errorf("attached lifecycle %s command failed", operation)
+	}
+	if stdout.isTruncated() {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle response is too large")
+	}
+	var response attachLifecycleResponse
+	data := bytes.TrimSpace(stdout.sanitizedBytes())
+	if err := jsonstrict.ValidateValue(data); err != nil {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle response is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&response); err != nil || response.RunID != h.env.attachLifecycle.runID || response.Destroyed == nil {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle response identity is invalid")
+	}
+	return response, nil
 }
 
 func (h *Harness) verifyPostmasterSettings(ctx context.Context) error {
@@ -2076,7 +2194,7 @@ func (h *Harness) RestartCount() int {
 
 // RestartPostgres restarts the isolated postmaster for a process-fault test.
 func (h *Harness) RestartPostgres(ctx context.Context) error {
-	if h == nil || ctx == nil || !h.sourceReady || h.attached {
+	if h == nil || ctx == nil || !h.sourceReady {
 		return errors.New("isolated PostgreSQL restart is unavailable")
 	}
 	return h.restartPostgres(ctx)
@@ -5880,12 +5998,14 @@ func (h *Harness) Close(ctx context.Context) error {
 
 func (h *Harness) cleanup(ctx context.Context) error {
 	if h.attached {
-		failures := runCleanupLifecycle(
-			ctx,
-			processCleanupStageTimeout(h.config.ShutdownTimeout),
+		operations := []func(context.Context) error{
 			h.stopAdapter,
 			h.closeDatabaseHandles,
-		)
+		}
+		if h.env.attachLifecycle.destroyOnClose {
+			operations = append(operations, h.destroyAttachedRun)
+		}
+		failures := runCleanupLifecycle(ctx, processCleanupStageTimeout(h.config.ShutdownTimeout), operations...)
 		if h.env.verified {
 			if err := verifyEnvironmentArtifactIdentity(h.env); err != nil {
 				failures = append(failures, err)
@@ -5956,6 +6076,17 @@ func (h *Harness) cleanup(ctx context.Context) error {
 	}
 	if len(failures) != 0 {
 		return errors.Join(failures...)
+	}
+	return nil
+}
+
+func (h *Harness) destroyAttachedRun(ctx context.Context) error {
+	response, err := h.runAttachLifecycleCommand(ctx, "destroy")
+	if err != nil {
+		return err
+	}
+	if response.Destroyed == nil || !*response.Destroyed || response.AttachDatabaseURL != "" {
+		return errors.New("attached PostgreSQL destroy response is invalid")
 	}
 	return nil
 }

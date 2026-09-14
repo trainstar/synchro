@@ -3,30 +3,61 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 )
 
 const (
-	localStartupTimeout  = 90 * time.Second
-	localShutdownTimeout = 15 * time.Second
-	localPollInterval    = 250 * time.Millisecond
+	localStartupTimeout   = 90 * time.Second
+	localShutdownTimeout  = 15 * time.Second
+	localPollInterval     = 250 * time.Millisecond
+	lifecycleMessageBytes = 64 << 10
+	lifecycleStateName    = "lifecycle-state.json"
 )
+
+var lifecycleRunIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+type lifecycleState struct {
+	RunID          string `json:"run_id"`
+	ControlAddress string `json:"control_address"`
+	Destroyed      bool   `json:"destroyed"`
+}
+
+type lifecycleRequest struct {
+	Operation string `json:"operation"`
+	RunID     string `json:"run_id"`
+}
+
+type lifecycleResponse struct {
+	RunID             string `json:"run_id"`
+	AttachDatabaseURL string `json:"attach_database_url"`
+	Destroyed         bool   `json:"destroyed"`
+	Error             string `json:"error,omitempty"`
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -49,6 +80,8 @@ func run(ctx context.Context, args []string) error {
 		return runStart(ctx, args[1:])
 	case "prepare":
 		return runPrepare(ctx, args[1:])
+	case "lifecycle":
+		return runLifecycle(ctx, args[1:])
 	default:
 		return errors.New("unknown command")
 	}
@@ -64,6 +97,7 @@ func runStart(ctx context.Context, args []string) error {
 	tempParent := flags.String("temp-parent", "", "private temporary directory parent")
 	urlFile := flags.String("url-file", "", "administrator URL output file")
 	attachEnvironmentFile := flags.String("attach-environment-file", "", "attach-mode environment output file")
+	lifecycleCommandJSON := flags.String("lifecycle-command-json", "", "JSON argv prefix for lifecycle commands")
 	listen := flags.String("listen", "127.0.0.1", "PostgreSQL listen address")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("start flags are invalid")
@@ -74,10 +108,33 @@ func runStart(ctx context.Context, args []string) error {
 	if err := ensurePrivateDirectory(*stateDir); err != nil {
 		return err
 	}
+	stateRoot, err := filepath.Abs(*stateDir)
+	if err != nil {
+		return errors.New("local provisioner state directory is invalid")
+	}
+	lifecycleCommandSet := false
+	flags.Visit(func(value *flag.Flag) {
+		if value.Name == "lifecycle-command-json" {
+			lifecycleCommandSet = true
+		}
+	})
+	executable, err := os.Executable()
+	if err != nil {
+		return errors.New("resolve local provisioner executable failed")
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return errors.New("resolve local provisioner executable failed")
+	}
+	lifecycleCommand, err := startLifecycleCommand(*lifecycleCommandJSON, lifecycleCommandSet, executable, stateRoot)
+	if err != nil {
+		return err
+	}
 	credentials, err := createCredentials(*stateDir)
 	if err != nil {
 		return err
 	}
+	defer credentials.remove()
 	restoreEnvironment := setEnvironment(map[string]string{
 		"SYNCHRO_CONFORMANCE_PG18_BINDIR":            *pg18BinDir,
 		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT":     *extensionArtifact,
@@ -111,6 +168,23 @@ func runStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("provision local PostgreSQL: %w", err)
 	}
+	runID, err := createRunID()
+	if err != nil {
+		_ = harness.Close(context.Background())
+		return err
+	}
+	listener, err := openLifecycleListener()
+	if err != nil {
+		_ = harness.Close(context.Background())
+		return err
+	}
+	defer func() {
+		_ = listener.Close()
+	}()
+	if err := writeLifecycleState(stateRoot, lifecycleState{RunID: runID, ControlAddress: listener.Addr().String()}); err != nil {
+		_ = harness.Close(context.Background())
+		return err
+	}
 	url := harness.DatabaseURL()
 	if url == "" {
 		_ = harness.Close(context.Background())
@@ -120,26 +194,71 @@ func runStart(ctx context.Context, args []string) error {
 		_ = harness.Close(context.Background())
 		return fmt.Errorf("write local PostgreSQL URL: %w", err)
 	}
-	if err := writePrivateFile(*attachEnvironmentFile, []byte(attachEnvironment(url, credentials))); err != nil {
+	attachURL, err := lifecycleAttachDatabaseURL(url)
+	if err != nil {
+		_ = harness.Close(context.Background())
+		return err
+	}
+	if err := writePrivateFile(*attachEnvironmentFile, []byte(attachEnvironment(attachURL, runID, lifecycleCommand, credentials))); err != nil {
 		_ = harness.Close(context.Background())
 		return fmt.Errorf("write attach environment: %w", err)
 	}
-	<-ctx.Done()
-	closeContext, cancel := context.WithTimeout(context.Background(), localShutdownTimeout)
-	defer cancel()
-	if err := harness.Close(closeContext); err != nil {
-		return fmt.Errorf("close local PostgreSQL: %w", err)
+	destroyed, serveErr := serveLifecycle(ctx, listener, stateRoot, runID, harness)
+	var closeErr error
+	if !destroyed {
+		closeContext, cancel := context.WithTimeout(context.Background(), localShutdownTimeout)
+		closeErr = harness.Close(closeContext)
+		cancel()
+		if closeErr == nil {
+			closeErr = writeLifecycleState(stateRoot, lifecycleState{RunID: runID, Destroyed: true})
+		}
 	}
 	credentials.remove()
+	_ = os.Remove(*urlFile)
 	_ = os.Remove(*attachEnvironmentFile)
+	if serveErr != nil {
+		return serveErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close local PostgreSQL: %w", closeErr)
+	}
 	return nil
+}
+
+func startLifecycleCommand(value string, overrideSet bool, executable, stateDir string) ([]string, error) {
+	if !filepath.IsAbs(stateDir) {
+		return nil, errors.New("lifecycle command state directory must be absolute")
+	}
+	if !overrideSet {
+		encoded, err := json.Marshal([]string{executable, "lifecycle", "--state-dir", stateDir})
+		if err != nil {
+			return nil, errors.New("encode default lifecycle command failed")
+		}
+		value = string(encoded)
+	}
+	command, err := blackbox.ParseAttachLifecycleCommand(value)
+	if err != nil {
+		return nil, fmt.Errorf("start lifecycle command is invalid: %w", err)
+	}
+	if len(command) < 4 || command[len(command)-3] != "lifecycle" ||
+		command[len(command)-2] != "--state-dir" || command[len(command)-1] != stateDir {
+		return nil, errors.New("start lifecycle command does not identify the owned lifecycle state")
+	}
+	return command, nil
 }
 
 // attachEnvironment references credential files through SYNCHRO_ATTACH_DIR,
 // so a copied attach bundle works from any consumer directory.
-func attachEnvironment(url string, credentials localCredentials) string {
+func attachEnvironment(url, runID string, lifecycleCommand []string, credentials localCredentials) string {
+	commandJSON, err := json.Marshal(lifecycleCommand)
+	if err != nil {
+		panic("marshal fixed lifecycle command: " + err.Error())
+	}
 	return strings.Join([]string{
 		environmentAssignment("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL", url),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ATTACH_RUN_ID", runID),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND", string(commandJSON)),
+		environmentAssignment("SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE", "false"),
 		environmentAssignment("SYNCHRO_CONFORMANCE_ADMIN_USER", credentials.adminUser),
 		attachDirAssignment("SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE", credentials.adminPassword),
 		environmentAssignment("SYNCHRO_CONFORMANCE_ADAPTER_USER", credentials.adapterUser),
@@ -153,6 +272,274 @@ func attachEnvironment(url string, credentials localCredentials) string {
 		attachDirAssignment("SYNCHRO_CONFORMANCE_JWT_SECRET_FILE", credentials.jwtSecret),
 		"",
 	}, "\n")
+}
+
+func createRunID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", errors.New("generate local provisioner run identity failed")
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+func openLifecycleListener() (*net.TCPListener, error) {
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		return nil, errors.New("listen for local provisioner lifecycle commands failed")
+	}
+	return listener, nil
+}
+
+func lifecycleAttachDatabaseURL(value string) (string, error) {
+	config, err := pgconn.ParseConfig(value)
+	if err != nil || config.Host == "" || config.Port == 0 || config.Database == "" {
+		return "", errors.New("local provisioner attach URL is invalid")
+	}
+	result := url.URL{
+		Scheme:   "postgres",
+		Host:     net.JoinHostPort(config.Host, strconv.Itoa(int(config.Port))),
+		Path:     "/" + config.Database,
+		RawQuery: "sslmode=disable",
+	}
+	return result.String(), nil
+}
+
+func serveLifecycle(ctx context.Context, listener *net.TCPListener, stateDir, runID string, harness *blackbox.Harness) (bool, error) {
+	if ctx == nil || listener == nil || harness == nil || !lifecycleRunIDPattern.MatchString(runID) {
+		return false, errors.New("local provisioner lifecycle server is invalid")
+	}
+	for {
+		if err := listener.SetDeadline(time.Now().Add(localPollInterval)); err != nil {
+			return false, errors.New("set local provisioner lifecycle deadline failed")
+		}
+		connection, err := listener.AcceptTCP()
+		if err != nil {
+			if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
+				if ctx.Err() != nil {
+					return false, nil
+				}
+				continue
+			}
+			return false, errors.New("accept local provisioner lifecycle command failed")
+		}
+		if err := connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			_ = connection.Close()
+			return false, errors.New("bound local provisioner lifecycle request failed")
+		}
+		destroyed, err := handleLifecycleConnection(connection, stateDir, runID, harness)
+		_ = connection.Close()
+		if err != nil {
+			return false, err
+		}
+		if destroyed {
+			return true, nil
+		}
+	}
+}
+
+func handleLifecycleConnection(connection *net.TCPConn, stateDir, runID string, harness *blackbox.Harness) (bool, error) {
+	data, err := io.ReadAll(io.LimitReader(connection, lifecycleMessageBytes+1))
+	if err != nil || len(data) > lifecycleMessageBytes {
+		return false, writeLifecycleWireResponse(connection, lifecycleResponse{Error: "lifecycle request is invalid"})
+	}
+	var request lifecycleRequest
+	if err := decodeStrictJSON(data, &request); err != nil || request.RunID != runID || !lifecycleRunIDPattern.MatchString(request.RunID) {
+		return false, writeLifecycleWireResponse(connection, lifecycleResponse{Error: "lifecycle run identity is invalid"})
+	}
+	operationContext, cancel := context.WithTimeout(context.Background(), localStartupTimeout+localShutdownTimeout)
+	defer cancel()
+	switch request.Operation {
+	case "restart":
+		if err := harness.RestartPostgres(operationContext); err != nil {
+			if writeErr := writeLifecycleWireResponse(connection, lifecycleResponse{RunID: runID, Error: "lifecycle restart failed"}); writeErr != nil {
+				return false, writeErr
+			}
+			return false, nil
+		}
+		lifecycleURL, err := lifecycleAttachDatabaseURL(harness.DatabaseURL())
+		if err != nil {
+			if writeErr := writeLifecycleWireResponse(connection, lifecycleResponse{RunID: runID, Error: "lifecycle restart URL failed"}); writeErr != nil {
+				return false, writeErr
+			}
+			return false, nil
+		}
+		return false, writeLifecycleWireResponse(connection, lifecycleResponse{
+			RunID:             runID,
+			AttachDatabaseURL: lifecycleURL,
+		})
+	case "destroy":
+		if err := harness.Close(operationContext); err != nil {
+			if writeErr := writeLifecycleWireResponse(connection, lifecycleResponse{RunID: runID, Error: "lifecycle destroy failed"}); writeErr != nil {
+				return false, writeErr
+			}
+			return false, nil
+		}
+		if err := writeLifecycleState(stateDir, lifecycleState{RunID: runID, Destroyed: true}); err != nil {
+			_ = writeLifecycleWireResponse(connection, lifecycleResponse{RunID: runID, Error: "lifecycle state update failed"})
+			return false, errors.New("persist destroyed lifecycle state failed")
+		}
+		return true, writeLifecycleWireResponse(connection, lifecycleResponse{RunID: runID, Destroyed: true})
+	default:
+		return false, writeLifecycleWireResponse(connection, lifecycleResponse{RunID: runID, Error: "lifecycle operation is invalid"})
+	}
+}
+
+func writeLifecycleWireResponse(connection io.Writer, response lifecycleResponse) error {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return errors.New("encode local provisioner lifecycle response failed")
+	}
+	if _, err := connection.Write(append(data, '\n')); err != nil {
+		return errors.New("write local provisioner lifecycle response failed")
+	}
+	return nil
+}
+
+func writeLifecycleState(stateDir string, state lifecycleState) error {
+	if !lifecycleRunIDPattern.MatchString(state.RunID) || (!state.Destroyed && !validLifecycleControlAddress(state.ControlAddress)) || (state.Destroyed && state.ControlAddress != "") {
+		return errors.New("local provisioner lifecycle state is invalid")
+	}
+	path := filepath.Join(stateDir, lifecycleStateName)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("local provisioner lifecycle state path is unsafe")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("inspect local provisioner lifecycle state failed")
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return errors.New("encode local provisioner lifecycle state failed")
+	}
+	if err := writePrivateFile(path, append(data, '\n')); err != nil {
+		return errors.New("write local provisioner lifecycle state failed")
+	}
+	return nil
+}
+
+func readLifecycleState(stateDir string) (lifecycleState, error) {
+	directoryInfo, err := os.Lstat(stateDir)
+	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() || directoryInfo.Mode().Perm()&0o077 != 0 {
+		return lifecycleState{}, errors.New("local provisioner lifecycle state directory is unsafe")
+	}
+	path := filepath.Join(stateDir, lifecycleStateName)
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return lifecycleState{}, errors.New("local provisioner lifecycle state is unavailable")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return lifecycleState{}, errors.New("local provisioner lifecycle state is unavailable")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, lifecycleMessageBytes+1))
+	if err != nil || len(data) > lifecycleMessageBytes {
+		return lifecycleState{}, errors.New("local provisioner lifecycle state is unavailable")
+	}
+	var state lifecycleState
+	if err := decodeStrictJSON(data, &state); err != nil || !lifecycleRunIDPattern.MatchString(state.RunID) ||
+		(!state.Destroyed && !validLifecycleControlAddress(state.ControlAddress)) || (state.Destroyed && state.ControlAddress != "") {
+		return lifecycleState{}, errors.New("local provisioner lifecycle state is invalid")
+	}
+	return state, nil
+}
+
+func validLifecycleControlAddress(value string) bool {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || host != "127.0.0.1" {
+		return false
+	}
+	number, err := strconv.Atoi(port)
+	return err == nil && number > 0 && number <= 65535
+}
+
+func decodeStrictJSON(data []byte, destination any) error {
+	data = bytes.TrimSpace(data)
+	if err := jsonstrict.ValidateValue(data); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(destination)
+}
+
+func runLifecycle(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("lifecycle", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	stateDir := flags.String("state-dir", "", "private lifecycle state directory")
+	if err := flags.Parse(args); err != nil {
+		return errors.New("lifecycle flags are invalid")
+	}
+	if *stateDir == "" || flags.NArg() != 2 {
+		return errors.New("lifecycle requires --state-dir, an operation, and a run identity")
+	}
+	operation, runID := flags.Arg(0), flags.Arg(1)
+	if (operation != "restart" && operation != "destroy") || !lifecycleRunIDPattern.MatchString(runID) {
+		return errors.New("lifecycle operation or run identity is invalid")
+	}
+	stateRoot, err := filepath.Abs(*stateDir)
+	if err != nil {
+		return errors.New("lifecycle state directory is invalid")
+	}
+	state, err := readLifecycleState(stateRoot)
+	if err != nil {
+		return err
+	}
+	if state.RunID != runID {
+		return errors.New("lifecycle run identity does not match the owned run")
+	}
+	if state.Destroyed {
+		if operation != "destroy" {
+			return errors.New("destroyed lifecycle run cannot restart")
+		}
+		return writeLifecycleCommandResponse(lifecycleResponse{RunID: runID, Destroyed: true})
+	}
+	dialer := net.Dialer{}
+	connection, err := dialer.DialContext(ctx, "tcp4", state.ControlAddress)
+	if err != nil {
+		return errors.New("connect to owned lifecycle run failed")
+	}
+	defer connection.Close()
+	request, err := json.Marshal(lifecycleRequest{Operation: operation, RunID: runID})
+	if err != nil {
+		return errors.New("encode lifecycle command failed")
+	}
+	if _, err := connection.Write(append(request, '\n')); err != nil {
+		return errors.New("send lifecycle command failed")
+	}
+	if tcpConnection, ok := connection.(*net.TCPConn); ok {
+		_ = tcpConnection.CloseWrite()
+	}
+	data, err := io.ReadAll(io.LimitReader(connection, lifecycleMessageBytes+1))
+	if err != nil || len(data) > lifecycleMessageBytes {
+		return errors.New("read lifecycle response failed")
+	}
+	var response lifecycleResponse
+	if err := decodeStrictJSON(data, &response); err != nil || response.RunID != runID {
+		return errors.New("lifecycle response identity is invalid")
+	}
+	if response.Error != "" {
+		return errors.New(response.Error)
+	}
+	if operation == "restart" && (response.Destroyed || response.AttachDatabaseURL == "") {
+		return errors.New("lifecycle restart response is invalid")
+	}
+	if operation == "destroy" && (!response.Destroyed || response.AttachDatabaseURL != "") {
+		return errors.New("lifecycle destroy response is invalid")
+	}
+	return writeLifecycleCommandResponse(response)
+}
+
+func writeLifecycleCommandResponse(response lifecycleResponse) error {
+	response.Error = ""
+	data, err := json.Marshal(response)
+	if err != nil {
+		return errors.New("encode lifecycle response failed")
+	}
+	if _, err := fmt.Fprintln(os.Stdout, string(data)); err != nil {
+		return errors.New("write lifecycle response failed")
+	}
+	return nil
 }
 
 func attachDirAssignment(name, path string) string {

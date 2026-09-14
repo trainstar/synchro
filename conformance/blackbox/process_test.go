@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -171,6 +172,149 @@ func TestCleanupAcceptsUnchangedCandidateArtifacts(t *testing.T) {
 	}
 	if err := harness.cleanup(context.Background()); err != nil {
 		t.Fatalf("cleanup rejected unchanged candidate artifacts: %v", err)
+	}
+}
+
+func TestAttachedLifecycleCommandUsesExactArgvAndOwnedIdentity(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	runID := strings.Repeat("b", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$ARGUMENTS_PATH\"\nprintf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"postgres://admin@127.0.0.1:55433/synchro_conformance_owned\",\"destroyed\":false}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	harness := attachedLifecycleHarnessFixture(script, runID)
+	response, err := harness.runAttachLifecycleCommand(context.Background(), "restart")
+	if err != nil {
+		t.Fatalf("valid attached lifecycle command failed: %v", err)
+	}
+	if response.RunID != runID || response.Destroyed == nil || *response.Destroyed || response.AttachDatabaseURL == "" {
+		t.Fatalf("attached lifecycle response = %#v", response)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arguments) != "fixed restart "+runID+"\n" {
+		t.Fatalf("lifecycle argv = %q", arguments)
+	}
+
+	harness.env.AttachRunID = strings.Repeat("c", 32)
+	if _, err := harness.runAttachLifecycleCommand(context.Background(), "restart"); err == nil {
+		t.Fatal("changed lifecycle identity was accepted")
+	}
+}
+
+func TestAttachedLifecycleCommandRejectsMismatchedResponseAndRedactsFailure(t *testing.T) {
+	root := t.TempDir()
+	runID := strings.Repeat("e", 32)
+	mismatched := filepath.Join(root, "mismatched")
+	if err := os.WriteFile(mismatched, []byte("#!/bin/sh\nprintf '%s\\n' '{\"run_id\":\""+strings.Repeat("f", 32)+"\",\"attach_database_url\":\"postgres://127.0.0.1/owned\",\"destroyed\":false}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attachedLifecycleHarnessFixture(mismatched, runID).runAttachLifecycleCommand(context.Background(), "restart"); err == nil {
+		t.Fatal("mismatched lifecycle response identity was accepted")
+	}
+
+	secret := "lifecycle-secret-value"
+	failing := filepath.Join(root, "failing")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\nprintf '%s\\n' '"+secret+"' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := attachedLifecycleHarnessFixture(failing, runID)
+	harness.env.Admin.password = []byte(secret)
+	_, err := harness.runAttachLifecycleCommand(context.Background(), "restart")
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("lifecycle failure was not safely surfaced: %v", err)
+	}
+}
+
+func TestAttachedDefaultClosePreservesRepeatedHarnessReuse(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	destroyedPath := filepath.Join(root, "destroyed")
+	runID := strings.Repeat("c", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nif [ -e \"$DESTROYED_PATH\" ]; then exit 1; fi\nprintf '%s\\n' \"$*\" >> \"$ARGUMENTS_PATH\"\nif [ \"$2\" = destroy ]; then touch \"$DESTROYED_PATH\"; printf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"\",\"destroyed\":true}'; else printf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"postgres://admin@127.0.0.1:55433/synchro_conformance_owned\",\"destroyed\":false}'; fi\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	t.Setenv("DESTROYED_PATH", destroyedPath)
+	for scenario := 0; scenario < 2; scenario++ {
+		harness := attachedLifecycleHarnessFixture(script, runID)
+		harness.attached = true
+		harness.runRoot = filepath.Join(root, fmt.Sprintf("run-root-%d", scenario))
+		if err := os.Mkdir(harness.runRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := harness.runAttachLifecycleCommand(context.Background(), "restart"); err != nil {
+			t.Fatalf("scenario %d could not reuse attached lifecycle: %v", scenario, err)
+		}
+		if err := harness.Close(context.Background()); err != nil {
+			t.Fatalf("scenario %d close failed: %v", scenario, err)
+		}
+	}
+	if _, err := os.Stat(destroyedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("default attached close destroyed the outer lifecycle: %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "fixed restart " + runID + "\nfixed restart " + runID + "\n"
+	if string(arguments) != want {
+		t.Fatalf("reused lifecycle argv = %q", arguments)
+	}
+}
+
+func TestAttachedOwnedCloseRunsDestroyExactlyOnce(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	runID := strings.Repeat("d", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$ARGUMENTS_PATH\"\nprintf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"\",\"destroyed\":true}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	harness := attachedLifecycleHarnessFixture(script, runID)
+	harness.env.AttachDestroyOnClose = true
+	harness.env.attachLifecycle.destroyOnClose = true
+	harness.attached = true
+	harness.runRoot = filepath.Join(root, "run-root")
+	if err := os.Mkdir(harness.runRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.Close(context.Background()); err != nil {
+		t.Fatalf("attached cleanup failed: %v", err)
+	}
+	if err := harness.Close(context.Background()); err != nil {
+		t.Fatalf("repeated attached cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(harness.runRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attached cleanup retained local run root: %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arguments) != "fixed destroy "+runID+"\n" {
+		t.Fatalf("destroy argv = %q", arguments)
+	}
+}
+
+func attachedLifecycleHarnessFixture(executable, runID string) *Harness {
+	command := []string{executable, "fixed"}
+	return &Harness{
+		config: HarnessConfig{ProcessLogBytes: 1024, ShutdownTimeout: time.Second},
+		env: EnvironmentConfig{
+			AttachRunID:            runID,
+			AttachLifecycleCommand: append([]string(nil), command...),
+			attachLifecycle:        attachLifecycleConfig{runID: runID, argv: append([]string(nil), command...)},
+		},
 	}
 }
 

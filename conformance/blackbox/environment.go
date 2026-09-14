@@ -22,9 +22,12 @@ import (
 )
 
 const (
-	environmentCommandTimeout = 5 * time.Second
-	maximumSecretFileBytes    = int64(64 << 10)
-	maximumManifestBytes      = int64(1 << 20)
+	environmentCommandTimeout     = 5 * time.Second
+	maximumSecretFileBytes        = int64(64 << 10)
+	maximumManifestBytes          = int64(1 << 20)
+	maximumLifecycleCommandBytes  = 16 << 10
+	maximumLifecycleCommandArgs   = 64
+	maximumLifecycleArgumentBytes = 4096
 
 	extensionBundleManifestName   = "artifact-manifest.json"
 	extensionBundleManifestFormat = "synchro-pg18-extension-bundle-v1"
@@ -35,11 +38,16 @@ var (
 	postgresVersionPattern     = regexp.MustCompile(`(?i)postgresql\)?\s*([0-9]+(?:\.[0-9]+)*)`)
 	postgresql18VersionPattern = regexp.MustCompile(`^18\.[0-9]+$`)
 	roleNamePattern            = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+	attachRunIDPattern         = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // RequiredEnvironmentVariables lists the complete conformance environment contract.
 // LoadEnvironment reads no other SYNCHRO_CONFORMANCE_ variable.
 var RequiredEnvironmentVariables = []string{
+	"SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL",
+	"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID",
+	"SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND",
+	"SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE",
 	"SYNCHRO_CONFORMANCE_PG18_BINDIR",
 	"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT",
 	"SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT",
@@ -70,17 +78,20 @@ type RoleCredential struct {
 // EnvironmentConfig contains the complete verified external harness input.
 // Its unexported fields prevent unchecked configuration construction.
 type EnvironmentConfig struct {
-	AttachDatabaseURL string
-	PG18BinDir        string
-	ExtensionArtifact string
-	AdapterArtifact   string
-	Admin             RoleCredential
-	Adapter           RoleCredential
-	Observer          RoleCredential
-	Worker            RoleCredential
-	Operator          RoleCredential
-	JWTSecretFile     string
-	InstallationLock  string
+	AttachDatabaseURL      string
+	AttachRunID            string
+	AttachLifecycleCommand []string
+	AttachDestroyOnClose   bool
+	PG18BinDir             string
+	ExtensionArtifact      string
+	AdapterArtifact        string
+	Admin                  RoleCredential
+	Adapter                RoleCredential
+	Observer               RoleCredential
+	Worker                 RoleCredential
+	Operator               RoleCredential
+	JWTSecretFile          string
+	InstallationLock       string
 
 	jwtSecret       []byte
 	jwtDigest       string
@@ -88,7 +99,14 @@ type EnvironmentConfig struct {
 	adapterIdentity adapterArtifactIdentity
 	postgresVersion string
 	extension       extensionBundle
+	attachLifecycle attachLifecycleConfig
 	verified        bool
+}
+
+type attachLifecycleConfig struct {
+	runID          string
+	argv           []string
+	destroyOnClose bool
 }
 
 type adapterArtifactIdentity struct {
@@ -149,12 +167,21 @@ func loadEnvironmentForPostgreSQLVersion(lookup func(string) (string, bool), req
 	}
 	attachURL, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
 	attachURL = strings.TrimSpace(attachURL)
-	// Attach mode owns no cluster lifecycle, so it needs no PostgreSQL
-	// binaries, extension artifact, or installation lock on the consumer.
+	attachRunID, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_RUN_ID")
+	attachRunID = strings.TrimSpace(attachRunID)
+	attachCommandJSON, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND")
+	attachCommandJSON = strings.TrimSpace(attachCommandJSON)
+	attachDestroyValue, attachDestroyPresent := lookup("SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE")
+	// Attach mode delegates cluster lifecycle, so the consumer needs no
+	// PostgreSQL binaries, extension artifact, or installation lock.
 	attachOptional := map[string]bool{
-		"SYNCHRO_CONFORMANCE_PG18_BINDIR":        attachURL != "",
-		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT": attachURL != "",
-		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":       attachURL != "",
+		"SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL":      attachURL == "",
+		"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID":            attachURL == "",
+		"SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND": attachURL == "",
+		"SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE":  true,
+		"SYNCHRO_CONFORMANCE_PG18_BINDIR":              attachURL != "",
+		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT":       attachURL != "",
+		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":             attachURL != "",
 	}
 	values := make(map[string]string, len(RequiredEnvironmentVariables))
 	var failures []error
@@ -171,6 +198,30 @@ func loadEnvironmentForPostgreSQLVersion(lookup func(string) (string, bool), req
 	}
 	if len(failures) != 0 {
 		return EnvironmentConfig{}, errors.Join(failures...)
+	}
+	attachDestroyOnClose := false
+	if attachDestroyPresent {
+		switch attachDestroyValue {
+		case "true":
+			attachDestroyOnClose = true
+		case "false":
+		default:
+			return EnvironmentConfig{}, errors.New("SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE must be true or false")
+		}
+	}
+	if attachURL == "" && (attachRunID != "" || attachCommandJSON != "" || attachDestroyPresent) {
+		return EnvironmentConfig{}, errors.New("attach lifecycle configuration requires SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
+	}
+	var attachLifecycle attachLifecycleConfig
+	if attachURL != "" {
+		if !attachRunIDPattern.MatchString(attachRunID) {
+			return EnvironmentConfig{}, errors.New("SYNCHRO_CONFORMANCE_ATTACH_RUN_ID is invalid")
+		}
+		command, err := ParseAttachLifecycleCommand(attachCommandJSON)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
+		attachLifecycle = attachLifecycleConfig{runID: attachRunID, argv: command, destroyOnClose: attachDestroyOnClose}
 	}
 
 	var pgBinDir, version string
@@ -266,25 +317,59 @@ func loadEnvironmentForPostgreSQLVersion(lookup func(string) (string, bool), req
 	}
 
 	return EnvironmentConfig{
-		AttachDatabaseURL: attachURL,
-		PG18BinDir:        pgBinDir,
-		ExtensionArtifact: extension.root,
-		AdapterArtifact:   adapterIdentity.path,
-		Admin:             admin,
-		Adapter:           adapter,
-		Observer:          observer,
-		Worker:            worker,
-		Operator:          operator,
-		JWTSecretFile:     jwtPath,
-		InstallationLock:  installationLock,
-		jwtSecret:         jwtSecret,
-		jwtDigest:         jwtDigest,
-		adapterSHA256:     adapterIdentity.sha256,
-		adapterIdentity:   adapterIdentity,
-		postgresVersion:   version,
-		extension:         extension,
-		verified:          true,
+		AttachDatabaseURL:      attachURL,
+		AttachRunID:            attachRunID,
+		AttachLifecycleCommand: append([]string(nil), attachLifecycle.argv...),
+		AttachDestroyOnClose:   attachDestroyOnClose,
+		PG18BinDir:             pgBinDir,
+		ExtensionArtifact:      extension.root,
+		AdapterArtifact:        adapterIdentity.path,
+		Admin:                  admin,
+		Adapter:                adapter,
+		Observer:               observer,
+		Worker:                 worker,
+		Operator:               operator,
+		JWTSecretFile:          jwtPath,
+		InstallationLock:       installationLock,
+		jwtSecret:              jwtSecret,
+		jwtDigest:              jwtDigest,
+		adapterSHA256:          adapterIdentity.sha256,
+		adapterIdentity:        adapterIdentity,
+		postgresVersion:        version,
+		extension:              extension,
+		attachLifecycle:        attachLifecycle,
+		verified:               true,
 	}, nil
+}
+
+// ParseAttachLifecycleCommand parses one bounded argv command without shell evaluation.
+func ParseAttachLifecycleCommand(value string) ([]string, error) {
+	if value == "" || len(value) > maximumLifecycleCommandBytes {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+	}
+	decoder := json.NewDecoder(strings.NewReader(value))
+	var command []string
+	if err := decoder.Decode(&command); err != nil {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND must be a JSON argv array")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF || len(command) == 0 || len(command) > maximumLifecycleCommandArgs {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+	}
+	total := 0
+	for _, argument := range command {
+		total += len(argument)
+		if argument == "" || len(argument) > maximumLifecycleArgumentBytes || strings.ContainsRune(argument, 0) {
+			return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+		}
+		switch strings.ToLower(filepath.Base(argument)) {
+		case "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "cmd", "powershell", "pwsh":
+			return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND must not execute a shell")
+		}
+	}
+	if total > maximumLifecycleCommandBytes {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+	}
+	return append([]string(nil), command...), nil
 }
 
 func loadRoleCredential(username, passwordFile, variablePrefix string) (RoleCredential, error) {

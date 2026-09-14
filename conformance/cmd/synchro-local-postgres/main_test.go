@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,8 @@ func TestRunArgumentValidation(t *testing.T) {
 		{"start invalid flag", []string{"start", "--not-a-flag"}, "start flags are invalid"},
 		{"prepare missing root", []string{"prepare", "--database-url", "postgres://example"}, "prepare requires"},
 		{"prepare blank URL", []string{"prepare", "--repo-root", ".", "--database-url", "  "}, "prepare requires"},
+		{"lifecycle missing state", []string{"lifecycle", "restart", strings.Repeat("a", 32)}, "lifecycle requires"},
+		{"lifecycle malformed identity", []string{"lifecycle", "--state-dir", ".", "restart", "changed"}, "operation or run identity"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -33,6 +37,177 @@ func TestRunArgumentValidation(t *testing.T) {
 	if err := run(nil, []string{"start"}); err == nil || err.Error() != "context is required" {
 		t.Fatalf("run with nil context error = %v", err)
 	}
+}
+
+func TestAttachEnvironmentIncludesOwnedLifecycleFields(t *testing.T) {
+	runID := strings.Repeat("a", 32)
+	command := []string{"verified-ssh-wrapper", "fixture", "synchro-local-postgres", "lifecycle", "--state-dir", "/owned/state"}
+	environment := attachEnvironment("postgres://fixture", runID, command, localCredentials{})
+	for _, wanted := range []string{
+		"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID='" + runID + "'",
+		`SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND='["verified-ssh-wrapper","fixture","synchro-local-postgres","lifecycle","--state-dir","/owned/state"]'`,
+		"SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE='false'",
+	} {
+		if !strings.Contains(environment, wanted) {
+			t.Fatalf("attach environment omits %q: %s", wanted, environment)
+		}
+	}
+}
+
+func TestStartLifecycleCommandDefaultAndRemoteOverride(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "owned-state")
+	executable := filepath.Join(t.TempDir(), "synchro-local-postgres")
+	defaultCommand, err := startLifecycleCommand("", false, executable, stateDir)
+	if err != nil {
+		t.Fatalf("default lifecycle command rejected: %v", err)
+	}
+	wantDefault := []string{executable, "lifecycle", "--state-dir", stateDir}
+	if strings.Join(defaultCommand, "\x00") != strings.Join(wantDefault, "\x00") {
+		t.Fatalf("default lifecycle command = %#v", defaultCommand)
+	}
+
+	remote := []string{
+		"/controller/verified-ssh-wrapper",
+		"fixture.example",
+		"/remote/bin/synchro-local-postgres",
+		"lifecycle",
+		"--state-dir",
+		stateDir,
+	}
+	remoteJSON, err := json.Marshal(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := startLifecycleCommand(string(remoteJSON), true, executable, stateDir)
+	if err != nil {
+		t.Fatalf("valid remote lifecycle command rejected: %v", err)
+	}
+	if strings.Join(command, "\x00") != strings.Join(remote, "\x00") {
+		t.Fatalf("remote lifecycle command = %#v", command)
+	}
+}
+
+func TestStartLifecycleCommandRejectsWrongStateAndShell(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "owned-state")
+	executable := filepath.Join(t.TempDir(), "synchro-local-postgres")
+	tests := []struct {
+		name    string
+		command []string
+	}{
+		{
+			name:    "wrong state directory",
+			command: []string{"verified-ssh-wrapper", "fixture", "synchro-local-postgres", "lifecycle", "--state-dir", filepath.Join(t.TempDir(), "other-state")},
+		},
+		{
+			name:    "shell",
+			command: []string{"verified-ssh-wrapper", "fixture", "/bin/sh", "lifecycle", "--state-dir", stateDir},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := json.Marshal(test.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := startLifecycleCommand(string(data), true, executable, stateDir); err == nil {
+				t.Fatal("invalid lifecycle command was accepted")
+			}
+		})
+	}
+	if _, err := startLifecycleCommand("", true, executable, stateDir); err == nil {
+		t.Fatal("explicit empty lifecycle command was accepted")
+	}
+}
+
+func TestRunLifecycleUsesOwnedControlProtocolAndSameRunDestroyIsIdempotent(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDirectory(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	runID := strings.Repeat("b", 32)
+	listener, err := openLifecycleListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := writeLifecycleState(stateDir, lifecycleState{RunID: runID, ControlAddress: listener.Addr().String()}); err != nil {
+		t.Fatal(err)
+	}
+	requestResult := make(chan lifecycleRequest, 1)
+	go func() {
+		connection, acceptErr := listener.AcceptTCP()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		data, _ := io.ReadAll(connection)
+		var request lifecycleRequest
+		_ = json.Unmarshal(data, &request)
+		requestResult <- request
+		_ = writeLifecycleWireResponse(connection, lifecycleResponse{
+			RunID:             runID,
+			AttachDatabaseURL: "postgres://admin@127.0.0.1:55432/synchro_conformance_owned",
+		})
+	}()
+	output := captureStandardOutput(t, func() error {
+		return runLifecycle(context.Background(), []string{"--state-dir", stateDir, "restart", runID})
+	})
+	request := <-requestResult
+	if request.Operation != "restart" || request.RunID != runID {
+		t.Fatalf("lifecycle request = %#v", request)
+	}
+	if !strings.Contains(output, `"run_id":"`+runID+`"`) || !strings.Contains(output, `"destroyed":false`) {
+		t.Fatalf("lifecycle output = %q", output)
+	}
+
+	if err := writeLifecycleState(stateDir, lifecycleState{RunID: runID, Destroyed: true}); err != nil {
+		t.Fatal(err)
+	}
+	output = captureStandardOutput(t, func() error {
+		return runLifecycle(context.Background(), []string{"--state-dir", stateDir, "destroy", runID})
+	})
+	if !strings.Contains(output, `"destroyed":true`) {
+		t.Fatalf("idempotent destroy output = %q", output)
+	}
+	if err := runLifecycle(context.Background(), []string{"--state-dir", stateDir, "destroy", strings.Repeat("c", 32)}); err == nil {
+		t.Fatal("destroy accepted a mismatched run identity")
+	}
+	if err := runLifecycle(context.Background(), []string{"--state-dir", stateDir, "restart", runID}); err == nil {
+		t.Fatal("restart accepted a destroyed run")
+	}
+}
+
+func TestLifecycleAttachDatabaseURLContainsNoCredential(t *testing.T) {
+	result, err := lifecycleAttachDatabaseURL("postgres://admin:private-value@127.0.0.1:55432/synchro_conformance_owned?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result, "admin") || strings.Contains(result, "private-value") || result != "postgres://127.0.0.1:55432/synchro_conformance_owned?sslmode=disable" {
+		t.Fatalf("sanitized lifecycle attach URL = %q", result)
+	}
+}
+
+func captureStandardOutput(t *testing.T, operation func() error) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	err = operation()
+	_ = writer.Close()
+	os.Stdout = original
+	if err != nil {
+		_ = reader.Close()
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestEnvironmentAssignmentQuotesShellValues(t *testing.T) {
