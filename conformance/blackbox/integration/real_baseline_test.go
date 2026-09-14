@@ -106,16 +106,13 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	}
 	barrierContext, barrierCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer barrierCancel()
-	if err := barrierControl.QueueBarrier(barrierContext); err != nil {
+	if err := barrierControl.AcquireBarrier(barrierContext); err != nil {
 		select {
 		case outcome := <-completed:
 			t.Fatalf("queue projection bootstrap barrier: %v; bootstrap result: %v", err, outcome.err)
 		default:
 			t.Fatalf("queue projection bootstrap barrier: %v", err)
 		}
-	}
-	if err := barrierControl.WaitForBarrier(ctx); err != nil {
-		t.Fatalf("wait for projection bootstrap barrier: %v", err)
 	}
 	if err := harness.Source().ExecContext(
 		ctx,
@@ -288,7 +285,7 @@ func TestRealWALPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load real harness environment: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	harness, err := blackbox.Provision(ctx, blackbox.HarnessConfig{Environment: environment})
 	if err != nil {
@@ -347,6 +344,101 @@ func TestRealWALPipeline(t *testing.T) {
 		if !uuidPattern.MatchString(record.RowVersion) {
 			t.Fatalf("WAL row version is not opaque UUID: %q", record.RowVersion)
 		}
+	}
+
+	restartID := "00000000-0000-0000-0000-000000009103"
+	restart, err := harness.Operator().RunWALReplayRestartControl(ctx, restartID)
+	if err != nil {
+		t.Fatalf("restart WAL worker before acknowledgement: %v; %s", err, harness.FailureDiagnostics())
+	}
+	if !restart.WorkerExitedBeforeAcknowledgement || !restart.WorkerRestarted || !restart.PriorProgress.SlotMatchesProgress {
+		t.Fatalf("WAL replay restart boundary is invalid: %#v", restart)
+	}
+	if len(restart.BeforeRestart.Records) != 1 ||
+		restart.BeforeRestart.BlockingPoison || restart.BeforeRestart.ContiguousAcknowledged ||
+		restart.BeforeRestart.AcknowledgedEndLSN != restart.PriorProgress.AcknowledgedEndLSN ||
+		restart.BeforeRestart.SlotConfirmedFlushLSN != restart.PriorProgress.SlotConfirmedFlushLSN {
+		t.Fatalf("WAL replay advanced before worker restart: %#v", restart.BeforeRestart)
+	}
+	restartRecord := restart.BeforeRestart.Records[0]
+	if restartRecord.RecordID != restartID || restartRecord.CommitLSN == "" || restartRecord.EndLSN == "" ||
+		restartRecord.CommitLSN == restartRecord.EndLSN || restartRecord.FenceCoverage != "materialized" ||
+		!uuidPattern.MatchString(restartRecord.RowVersion) || restartRecord.ReplayCount != 0 {
+		t.Fatalf("WAL replay materialization is incomplete: %#v", restartRecord)
+	}
+	wantStages := blackbox.WALRecordStageObservation{
+		FenceCount: 1, EventCount: 1, ProjectionCount: 1,
+		CapturedCount: 1, EdgeCount: 1, ChangeCount: 1,
+	}
+	if restart.BeforeStages != wantStages {
+		t.Fatalf("WAL replay materialization stages = %#v, want %#v", restart.BeforeStages, wantStages)
+	}
+	if len(restart.AfterRestart.Records) != 1 {
+		t.Fatalf("WAL replay after worker restart is missing: %#v", restart)
+	}
+	replayedRecord := restart.AfterRestart.Records[0]
+	replayedRecord.ReplayCount = restartRecord.ReplayCount
+	if replayedRecord != restartRecord || restart.AfterRestart.Records[0].ReplayCount != 1 ||
+		restart.AfterStages != restart.BeforeStages || !restart.AfterRestart.WorkerRunning ||
+		restart.AfterRestart.BlockingPoison || !restart.AfterRestart.ContiguousAcknowledged ||
+		!restart.AfterRestart.AcknowledgementMatchesObservedEnd || !restart.AfterRestart.SlotMatchesObservedEnd ||
+		restart.AfterRestart.AcknowledgedEndLSN != restartRecord.EndLSN ||
+		restart.AfterRestart.SlotConfirmedFlushLSN != restartRecord.EndLSN {
+		t.Fatalf("WAL replay after worker restart is not idempotent: %#v", restart)
+	}
+
+	repeatedID := "00000000-0000-0000-0000-000000009104"
+	repeated, err := harness.Source().BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("begin repeated-row source transaction: %v", err)
+	}
+	if _, err := repeated.ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		repeatedID, "diagnostic-user", "repeated-insert",
+	); err != nil {
+		_ = repeated.Rollback()
+		t.Fatalf("insert repeated-row source transaction: %v", err)
+	}
+	for _, value := range []string{"repeated-first-update", "repeated-final-update"} {
+		if _, err := repeated.ExecContext(
+			ctx,
+			"UPDATE cf_items SET value = $1, updated_at = clock_timestamp() WHERE id = $2",
+			value, repeatedID,
+		); err != nil {
+			_ = repeated.Rollback()
+			t.Fatalf("update repeated-row source transaction: %v", err)
+		}
+	}
+	if err := repeated.Commit(); err != nil {
+		t.Fatalf("commit repeated-row source transaction: %v", err)
+	}
+
+	var repeatedObservation blackbox.WALPipelineObservation
+	var repeatedStages blackbox.WALRecordStageObservation
+	wantRepeatedStages := blackbox.WALRecordStageObservation{
+		FenceCount: 3, EventCount: 3, ProjectionCount: 5,
+		CapturedCount: 1, EdgeCount: 1, ChangeCount: 1,
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		repeatedObservation, err = harness.Operator().ObserveWALRecords(ctx, []string{repeatedID})
+		if err == nil {
+			repeatedStages, err = harness.Operator().ObserveWALRecordStages(ctx, "cf_items", []string{repeatedID})
+		}
+		if err == nil && len(repeatedObservation.Records) == 1 && repeatedObservation.ContiguousAcknowledged && repeatedStages == wantRepeatedStages {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil || len(repeatedObservation.Records) != 1 || !repeatedObservation.ContiguousAcknowledged {
+		t.Fatalf("repeated-row WAL transaction did not materialize: %#v, %v; %s", repeatedObservation, err, harness.FailureDiagnostics())
+	}
+	if repeatedStages != wantRepeatedStages {
+		t.Fatalf("repeated-row WAL stages = %#v, want %#v", repeatedStages, wantRepeatedStages)
+	}
+	if repeatedObservation.Records[0].EventOrdinal != 2 || repeatedObservation.Records[0].EffectOrdinal != 0 {
+		t.Fatalf("repeated-row final effect is invalid: %#v", repeatedObservation.Records[0])
 	}
 
 	documentID := "00000000-0000-0000-0000-000000009201"
@@ -943,7 +1035,7 @@ func TestRealHTTPHarness(t *testing.T) {
 			t.Errorf("close real harness: %v", err)
 		}
 	})
-	if harness.RestartCount() < 1 {
+	if environment.AttachDatabaseURL == "" && harness.RestartCount() < 1 {
 		t.Fatal("real harness did not restart PostgreSQL after extension installation")
 	}
 	observerDatabase, err := harness.OpenObserver(ctx)
@@ -964,18 +1056,18 @@ func TestRealHTTPHarness(t *testing.T) {
 		"client_id":         "blackbox-http-client",
 		"platform":          "conformance",
 		"app_version":       "0.3.0",
-		"protocol_version":  2,
+		"protocol_version":  99,
 		"schema":            map[string]any{"version": 0, "hash": ""},
 		"scope_set_version": 0,
 		"known_scopes":      map[string]any{},
 	}
 	status, response := postConnect(t, ctx, harness.AdapterURL(), token, request)
 	if status != http.StatusUpgradeRequired {
-		t.Fatalf("protocol 2 connect status = %d, want 426: %#v", status, response)
+		t.Fatalf("unsupported protocol connect status = %d, want 426: %#v", status, response)
 	}
 	errorBody, ok := response["error"].(map[string]any)
 	if !ok || errorBody["code"] != "upgrade_required" {
-		t.Fatalf("protocol 2 connect error is invalid: %#v", response)
+		t.Fatalf("unsupported protocol connect error is invalid: %#v", response)
 	}
 
 	request["protocol_version"] = 3
@@ -1334,7 +1426,7 @@ func provisionRealProofHarness(t *testing.T, ctx context.Context) (*blackbox.Har
 	return harness, token
 }
 
-func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *blackbox.Harness, token, clientID string) *realProtocolClient {
+func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *blackbox.Harness, token, clientID string, expectedScopes ...string) *realProtocolClient {
 	t.Helper()
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/connect", map[string]any{
 		"client_id":         clientID,
@@ -1348,6 +1440,11 @@ func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *black
 	if status != http.StatusOK {
 		t.Fatalf("real protocol client connect status = %d, want 200", status)
 	}
+	return parseRealProtocolClient(t, response, clientID, expectedScopes...)
+}
+
+func parseRealProtocolClient(t *testing.T, response map[string]any, clientID string, expectedScopes ...string) *realProtocolClient {
+	t.Helper()
 	generation, ok := response["client_generation"].(float64)
 	if !ok || generation <= 0 {
 		t.Fatal("real protocol client generation is invalid")
@@ -1395,8 +1492,12 @@ func connectRealProtocolClient(t *testing.T, ctx context.Context, harness *black
 		assigned = append(assigned, scopeID)
 	}
 	slices.Sort(assigned)
-	if !slices.Equal(assigned, []string{"cf:global", "user:diagnostic-user"}) {
-		t.Fatal("real protocol client did not receive both diagnostic scopes")
+	if len(expectedScopes) == 0 {
+		expectedScopes = []string{"cf:global", "user:diagnostic-user"}
+	}
+	slices.Sort(expectedScopes)
+	if !slices.Equal(assigned, expectedScopes) {
+		t.Fatalf("real protocol client scopes = %#v, want %#v", assigned, expectedScopes)
 	}
 	return &realProtocolClient{
 		ID:              clientID,
@@ -1421,9 +1522,6 @@ func parseRealProtocolTables(t *testing.T, definition map[string]any) map[string
 			t.Fatal("real protocol manifest table is invalid")
 		}
 		name, _ := tableObject["name"].(string)
-		if name != "cf_items" && name != "cf_global_items" {
-			continue
-		}
 		table := realProtocolTable{}
 		table.ID, _ = tableObject["table_id"].(string)
 		table.PrimaryKeyField, _ = tableObject["primary_key_field_id"].(string)
@@ -1440,7 +1538,7 @@ func parseRealProtocolTables(t *testing.T, definition map[string]any) map[string
 				table.ValueField, _ = field["field_id"].(string)
 			}
 		}
-		if !uuidPattern.MatchString(table.ID) || !uuidPattern.MatchString(table.PrimaryKeyField) || !uuidPattern.MatchString(table.ValueField) {
+		if name == "" || !uuidPattern.MatchString(table.ID) || !uuidPattern.MatchString(table.PrimaryKeyField) || table.ValueField != "" && !uuidPattern.MatchString(table.ValueField) {
 			t.Fatal("real protocol manifest identity is invalid")
 		}
 		tables[name] = table

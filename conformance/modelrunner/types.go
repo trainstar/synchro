@@ -68,15 +68,29 @@ func (e *RunError) Unwrap() error {
 // snapshots. Error values are retained for diagnostics and are not replay
 // inputs.
 type OperationExecution struct {
-	StepID       scenarios.StepID
-	Operation    scenarios.Operation
-	OperationKey string
-	Result       reference.StepResult
-	Err          error
-	Before       reference.StateSnapshot
-	After        reference.StateSnapshot
-	Expanded     []scenarios.Operation
-	Samples      []WorkloadSampleExecution
+	StepID                    scenarios.StepID
+	Operation                 scenarios.Operation
+	OperationKey              string
+	Result                    reference.StepResult
+	Err                       error
+	Before                    reference.StateSnapshot
+	After                     reference.StateSnapshot
+	Expanded                  []scenarios.Operation
+	Samples                   []WorkloadSampleExecution
+	SchemaDispatchMeasurement *SchemaDispatchMeasurementSampleExecution
+}
+
+// SchemaDispatchMeasurementSampleExecution contains the semantic and request
+// observations derived from one executed schema-dispatch connect operation.
+type SchemaDispatchMeasurementSampleExecution struct {
+	Binding        scenarios.MeasurementSample
+	RequestCount   uint64
+	HTTPStatus     int
+	Source         reference.SchemaRef
+	Target         reference.SchemaRef
+	Action         reference.SchemaAction
+	Reason         reference.ReasonCode
+	AffectedScopes []reference.ScopeID
 }
 
 // WorkloadSampleFamily identifies one configured-limit family.

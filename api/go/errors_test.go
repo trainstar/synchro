@@ -59,6 +59,33 @@ func TestMapPGErrorUsesProtocolThreeStatusDispatch(t *testing.T) {
 	}
 }
 
+func TestMapPGErrorFailsClosedOnUnclassifiableEnvelope(t *testing.T) {
+	const canary = "private extension error detail"
+	response := httptest.NewRecorder()
+	raw := []byte(`{"error":{"message":"` + canary + `","retryable":false}}`)
+
+	if !mapPGError(response, raw) {
+		t.Fatal("unclassifiable extension error was not mapped")
+	}
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	var envelope protocolErrorEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error != (protocolError{
+		Code:      "sync_integrity_failure",
+		Message:   "sync operation failed",
+		Retryable: false,
+	}) {
+		t.Fatalf("error = %#v, want bounded sync_integrity_failure", envelope.Error)
+	}
+	if strings.Contains(response.Body.String(), canary) {
+		t.Fatal("public error contains extension error details")
+	}
+}
+
 func TestMapSQLErrorDoesNotInferServerSemantics(t *testing.T) {
 	const canary = "secret relation value"
 	response := httptest.NewRecorder()

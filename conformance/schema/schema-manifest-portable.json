@@ -9,7 +9,7 @@
   ],
   "manifest": {
     "schema_version": 1,
-    "schema_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "schema_hash": "4673a91e5bbe7de19ed8ea3459915c207297ef58ae991c21aa1c3e3964f8bf9c",
     "parent_schema": null,
     "transition_class": "initial",
     "compatibility_floor": 1,

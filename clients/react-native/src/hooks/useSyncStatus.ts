@@ -4,8 +4,10 @@ import type { SyncStatus } from '../types';
 
 export function useSyncStatus(client: SynchroClient): SyncStatus {
   const [status, setStatus] = useState<SyncStatus>({
-    status: 'idle',
+    status: 'uninitialized',
     retryAt: null,
+    operation: null,
+    failure: null,
   });
 
   useEffect(() => {

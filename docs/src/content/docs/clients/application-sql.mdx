@@ -1,0 +1,45 @@
+---
+title: Application SQL limits
+description: SQL statements and transaction controls supported by the client SDKs.
+---
+
+The client SQL API accepts application reads and writes, but it is not an unrestricted SQLite connection. The SDK must preserve change capture and its internal synchronization state.
+
+## Supported statement shape
+
+Use one statement per `query`, `queryOne`, `execute`, or transaction operation.
+
+- Reads use `SELECT`, including read-only common table expressions.
+- Writes use ordinary `INSERT`, `UPDATE`, and `DELETE` statements.
+- Writes to Synchro metadata, queue tables, capture triggers, and synced-table DDL are rejected.
+- Application writes to a synced table require its generated capture triggers to remain installed.
+- Use the SDK transaction method to group multiple application writes. Do not send a transaction-control statement through the application SQL API.
+
+## Conflict handling
+
+Do not use `INSERT OR REPLACE` or `INSERT OR IGNORE` for synced application writes.
+
+Kotlin rejects the `OR` conflict-clause form before SQLite compiles the statement. Swift passes statement parsing to SQLite, but `OR REPLACE` has SQLite replacement semantics: a conflicting row can invoke delete handling and then insert handling. That operation is not a Synchro update and can produce multiple change-capture effects instead of one update.
+
+The same restriction applies to `UPDATE OR ...` on Kotlin. The client APIs do not provide a cross-platform guarantee for SQLite conflict algorithms. Use ordinary `INSERT`, `UPDATE`, or `DELETE` statements and handle uniqueness errors in application code.
+
+SQLite UPSERT syntax with `ON CONFLICT ... DO UPDATE` or `ON CONFLICT ... DO NOTHING` is not a portable Synchro application-write contract. The Kotlin parser does not reject every trailing `ON CONFLICT` form, and Swift relies on SQLite compilation. Do not use these forms when the same SQL must run on both SDKs with defined change-capture behavior.
+
+The `ON CONFLICT DO UPDATE` statements visible in the client implementation maintain Synchro-owned queue and metadata tables. They are internal implementation details, not application SQL examples.
+
+## Savepoints and transaction control
+
+The Kotlin application SQL parser rejects `SAVEPOINT`, `RELEASE`, `ROLLBACK`, `BEGIN`, and `COMMIT` statements. The Swift application transaction surface does not expose a nested transaction API, and its writes already run inside the SDK-managed GRDB transaction.
+
+Use `client.transaction { ... }` on Kotlin or `client.writeTransaction { ... }` on Swift for an atomic group of application statements. If the closure throws, the SDK rolls back the managed transaction. Do not issue `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, `BEGIN`, or `COMMIT` through application SQL.
+
+These limits apply to the public client SQL surfaces, including the React Native bridge. React Native forwards SQL to the native SDK and does not add a separate SQL engine.
+
+## Source evidence
+
+- Kotlin statement parsing: `clients/kotlin/synchro/src/main/kotlin/com/trainstar/synchro/ApplicationSql.kt:172-237,290-324`
+- Kotlin managed application transaction: `clients/kotlin/synchro/src/main/kotlin/com/trainstar/synchro/SynchroDatabase.kt:793-835,1110-1154`
+- Swift application authorizer and transaction surface: `clients/swift/Sources/Synchro/ApplicationDatabase.swift:71-170,242-272`
+- Swift managed application writes: `clients/swift/Sources/Synchro/Database.swift:118-139,170-185`
+- Swift synced-table capture triggers: `clients/swift/Sources/Synchro/SQLiteSchema.swift:201-258`
+- React Native client boundary: `docs/src/content/docs/clients/overview.mdx:28-39`

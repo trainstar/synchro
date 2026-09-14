@@ -22,9 +22,12 @@ import (
 )
 
 const (
-	environmentCommandTimeout = 5 * time.Second
-	maximumSecretFileBytes    = int64(64 << 10)
-	maximumManifestBytes      = int64(1 << 20)
+	environmentCommandTimeout     = 5 * time.Second
+	maximumSecretFileBytes        = int64(64 << 10)
+	maximumManifestBytes          = int64(1 << 20)
+	maximumLifecycleCommandBytes  = 16 << 10
+	maximumLifecycleCommandArgs   = 64
+	maximumLifecycleArgumentBytes = 4096
 
 	extensionBundleManifestName   = "artifact-manifest.json"
 	extensionBundleManifestFormat = "synchro-pg18-extension-bundle-v1"
@@ -32,13 +35,19 @@ const (
 )
 
 var (
-	postgresVersionPattern = regexp.MustCompile(`(?i)postgresql\)?\s*([0-9]+(?:\.[0-9]+)*)`)
-	roleNamePattern        = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+	postgresVersionPattern     = regexp.MustCompile(`(?i)postgresql\)?\s*([0-9]+(?:\.[0-9]+)*)`)
+	postgresql18VersionPattern = regexp.MustCompile(`^18\.[0-9]+$`)
+	roleNamePattern            = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+	attachRunIDPattern         = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // RequiredEnvironmentVariables lists the complete conformance environment contract.
 // LoadEnvironment reads no other SYNCHRO_CONFORMANCE_ variable.
 var RequiredEnvironmentVariables = []string{
+	"SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL",
+	"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID",
+	"SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND",
+	"SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE",
 	"SYNCHRO_CONFORMANCE_PG18_BINDIR",
 	"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT",
 	"SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT",
@@ -69,24 +78,36 @@ type RoleCredential struct {
 // EnvironmentConfig contains the complete verified external harness input.
 // Its unexported fields prevent unchecked configuration construction.
 type EnvironmentConfig struct {
-	PG18BinDir        string
-	ExtensionArtifact string
-	AdapterArtifact   string
-	Admin             RoleCredential
-	Adapter           RoleCredential
-	Observer          RoleCredential
-	Worker            RoleCredential
-	Operator          RoleCredential
-	JWTSecretFile     string
-	InstallationLock  string
+	AttachDatabaseURL      string
+	AttachRunID            string
+	AttachLifecycleCommand []string
+	AttachDestroyOnClose   bool
+	PG18BinDir             string
+	ExtensionArtifact      string
+	AdapterArtifact        string
+	Admin                  RoleCredential
+	Adapter                RoleCredential
+	Observer               RoleCredential
+	Worker                 RoleCredential
+	Operator               RoleCredential
+	JWTSecretFile          string
+	InstallationLock       string
 
-	jwtSecret       []byte
-	jwtDigest       string
-	adapterSHA256   string
-	adapterIdentity adapterArtifactIdentity
-	postgresVersion string
-	extension       extensionBundle
-	verified        bool
+	jwtSecret        []byte
+	jwtDigest        string
+	adapterSHA256    string
+	adapterIdentity  adapterArtifactIdentity
+	installationLock string
+	postgresVersion  string
+	extension        extensionBundle
+	attachLifecycle  attachLifecycleConfig
+	verified         bool
+}
+
+type attachLifecycleConfig struct {
+	runID          string
+	argv           []string
+	destroyOnClose bool
 }
 
 type adapterArtifactIdentity struct {
@@ -128,15 +149,49 @@ func LoadEnvironment() (EnvironmentConfig, error) {
 	return loadEnvironment(os.LookupEnv)
 }
 
+// LoadLocalEnvironment verifies a local PostgreSQL 18 runtime and its extension bundle.
+func LoadLocalEnvironment() (EnvironmentConfig, error) {
+	return loadLocalEnvironment(os.LookupEnv)
+}
+
 func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, error) {
+	return loadEnvironmentForPostgreSQLVersion(lookup, postgresqlRuntimeVersion)
+}
+
+func loadLocalEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, error) {
+	return loadEnvironmentForPostgreSQLVersion(lookup, "")
+}
+
+func loadEnvironmentForPostgreSQLVersion(lookup func(string) (string, bool), requiredVersion string) (EnvironmentConfig, error) {
 	if lookup == nil {
 		return EnvironmentConfig{}, errors.New("conformance environment lookup is required")
+	}
+	attachURL, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
+	attachURL = strings.TrimSpace(attachURL)
+	attachRunID, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_RUN_ID")
+	attachRunID = strings.TrimSpace(attachRunID)
+	attachCommandJSON, _ := lookup("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND")
+	attachCommandJSON = strings.TrimSpace(attachCommandJSON)
+	attachDestroyValue, attachDestroyPresent := lookup("SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE")
+	// Attach mode delegates cluster lifecycle, so the consumer needs no
+	// PostgreSQL binaries, extension artifact, or installation lock.
+	attachOptional := map[string]bool{
+		"SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL":      attachURL == "",
+		"SYNCHRO_CONFORMANCE_ATTACH_RUN_ID":            attachURL == "",
+		"SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND": attachURL == "",
+		"SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE":  true,
+		"SYNCHRO_CONFORMANCE_PG18_BINDIR":              attachURL != "",
+		"SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT":       attachURL != "",
+		"SYNCHRO_CONFORMANCE_INSTALL_LOCK":             attachURL != "",
 	}
 	values := make(map[string]string, len(RequiredEnvironmentVariables))
 	var failures []error
 	for _, key := range RequiredEnvironmentVariables {
 		value, present := lookup(key)
 		if !present || strings.TrimSpace(value) == "" {
+			if attachOptional[key] {
+				continue
+			}
 			failures = append(failures, fmt.Errorf("%s is required", key))
 			continue
 		}
@@ -145,14 +200,56 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	if len(failures) != 0 {
 		return EnvironmentConfig{}, errors.Join(failures...)
 	}
-
-	pgBinDir, version, err := verifyPG18Binaries(values["SYNCHRO_CONFORMANCE_PG18_BINDIR"])
-	if err != nil {
-		return EnvironmentConfig{}, err
+	attachDestroyOnClose := false
+	if attachDestroyPresent {
+		switch attachDestroyValue {
+		case "true":
+			attachDestroyOnClose = true
+		case "false":
+		default:
+			return EnvironmentConfig{}, errors.New("SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE must be true or false")
+		}
 	}
-	extension, err := verifyExtensionBundle(values["SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT"])
-	if err != nil {
-		return EnvironmentConfig{}, err
+	if attachURL == "" && (attachRunID != "" || attachCommandJSON != "" || attachDestroyPresent) {
+		return EnvironmentConfig{}, errors.New("attach lifecycle configuration requires SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
+	}
+	var attachLifecycle attachLifecycleConfig
+	if attachURL != "" {
+		if !attachRunIDPattern.MatchString(attachRunID) {
+			return EnvironmentConfig{}, errors.New("SYNCHRO_CONFORMANCE_ATTACH_RUN_ID is invalid")
+		}
+		command, err := ParseAttachLifecycleCommand(attachCommandJSON)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
+		attachLifecycle = attachLifecycleConfig{runID: attachRunID, argv: command, destroyOnClose: attachDestroyOnClose}
+	}
+
+	var pgBinDir, version string
+	if value := values["SYNCHRO_CONFORMANCE_PG18_BINDIR"]; value != "" {
+		var err error
+		pgBinDir, version, err = verifyPG18BinariesForPostgreSQLVersion(value, requiredVersion)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
+	}
+	var extension extensionBundle
+	if value := values["SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT"]; value != "" {
+		extensionVersion := requiredVersion
+		if extensionVersion == "" {
+			extensionVersion = version
+		}
+		if extensionVersion == "" {
+			return EnvironmentConfig{}, errors.New("PostgreSQL runtime version is required for the extension artifact")
+		}
+		var err error
+		extension, err = verifyExtensionBundleForPostgreSQLVersion(value, extensionVersion)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
+		if version == "" {
+			version = extensionVersion
+		}
 	}
 	adapterIdentity, err := loadAdapterArtifactIdentity(values["SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT"])
 	if err != nil {
@@ -212,30 +309,69 @@ func loadEnvironment(lookup func(string) (string, bool)) (EnvironmentConfig, err
 	if err != nil {
 		return EnvironmentConfig{}, err
 	}
-	installationLock, err := verifyInstallationLock(values["SYNCHRO_CONFORMANCE_INSTALL_LOCK"])
-	if err != nil {
-		return EnvironmentConfig{}, err
+	var installationLock string
+	if value := values["SYNCHRO_CONFORMANCE_INSTALL_LOCK"]; value != "" {
+		installationLock, err = verifyInstallationLock(value)
+		if err != nil {
+			return EnvironmentConfig{}, err
+		}
 	}
 
 	return EnvironmentConfig{
-		PG18BinDir:        pgBinDir,
-		ExtensionArtifact: extension.root,
-		AdapterArtifact:   adapterIdentity.path,
-		Admin:             admin,
-		Adapter:           adapter,
-		Observer:          observer,
-		Worker:            worker,
-		Operator:          operator,
-		JWTSecretFile:     jwtPath,
-		InstallationLock:  installationLock,
-		jwtSecret:         jwtSecret,
-		jwtDigest:         jwtDigest,
-		adapterSHA256:     adapterIdentity.sha256,
-		adapterIdentity:   adapterIdentity,
-		postgresVersion:   version,
-		extension:         extension,
-		verified:          true,
+		AttachDatabaseURL:      attachURL,
+		AttachRunID:            attachRunID,
+		AttachLifecycleCommand: append([]string(nil), attachLifecycle.argv...),
+		AttachDestroyOnClose:   attachDestroyOnClose,
+		PG18BinDir:             pgBinDir,
+		ExtensionArtifact:      extension.root,
+		AdapterArtifact:        adapterIdentity.path,
+		Admin:                  admin,
+		Adapter:                adapter,
+		Observer:               observer,
+		Worker:                 worker,
+		Operator:               operator,
+		JWTSecretFile:          jwtPath,
+		InstallationLock:       installationLock,
+		jwtSecret:              jwtSecret,
+		jwtDigest:              jwtDigest,
+		adapterSHA256:          adapterIdentity.sha256,
+		adapterIdentity:        adapterIdentity,
+		installationLock:       installationLock,
+		postgresVersion:        version,
+		extension:              extension,
+		attachLifecycle:        attachLifecycle,
+		verified:               true,
 	}, nil
+}
+
+// ParseAttachLifecycleCommand parses one bounded argv command without shell evaluation.
+func ParseAttachLifecycleCommand(value string) ([]string, error) {
+	if value == "" || len(value) > maximumLifecycleCommandBytes {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+	}
+	decoder := json.NewDecoder(strings.NewReader(value))
+	var command []string
+	if err := decoder.Decode(&command); err != nil {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND must be a JSON argv array")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF || len(command) == 0 || len(command) > maximumLifecycleCommandArgs {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+	}
+	total := 0
+	for _, argument := range command {
+		total += len(argument)
+		if argument == "" || len(argument) > maximumLifecycleArgumentBytes || strings.ContainsRune(argument, 0) {
+			return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+		}
+		switch strings.ToLower(filepath.Base(argument)) {
+		case "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "cmd", "powershell", "pwsh":
+			return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND must not execute a shell")
+		}
+	}
+	if total > maximumLifecycleCommandBytes {
+		return nil, errors.New("SYNCHRO_CONFORMANCE_ATTACH_LIFECYCLE_COMMAND is invalid")
+	}
+	return append([]string(nil), command...), nil
 }
 
 func loadRoleCredential(username, passwordFile, variablePrefix string) (RoleCredential, error) {
@@ -284,6 +420,10 @@ func loadSecretFile(path, variable string) ([]byte, string, string, error) {
 }
 
 func verifyPG18Binaries(path string) (string, string, error) {
+	return verifyPG18BinariesForPostgreSQLVersion(path, postgresqlRuntimeVersion)
+}
+
+func verifyPG18BinariesForPostgreSQLVersion(path, requiredVersion string) (string, string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", "", errors.New("SYNCHRO_CONFORMANCE_PG18_BINDIR path is invalid")
@@ -299,9 +439,12 @@ func verifyPG18Binaries(path string) (string, string, error) {
 		if err := verifyExecutable(candidate); err != nil {
 			return "", "", fmt.Errorf("PostgreSQL binary %s is unavailable", program)
 		}
-		version, err := postgresBinaryVersion(candidate)
+		version, err := postgresBinaryVersionForPostgreSQLVersion(candidate, requiredVersion)
 		if err != nil {
-			return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL %s", program, postgresqlRuntimeVersion)
+			if requiredVersion == "" {
+				return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL 18", program)
+			}
+			return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL %s", program, requiredVersion)
 		}
 		versions[program] = version
 	}
@@ -326,6 +469,10 @@ func verifyExecutable(path string) error {
 }
 
 func postgresBinaryVersion(path string) (string, error) {
+	return postgresBinaryVersionForPostgreSQLVersion(path, postgresqlRuntimeVersion)
+}
+
+func postgresBinaryVersionForPostgreSQLVersion(path, requiredVersion string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), environmentCommandTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, path, "--version")
@@ -337,8 +484,11 @@ func postgresBinaryVersion(path string) (string, error) {
 	if len(match) != 2 {
 		return "", errors.New("version output is invalid")
 	}
-	if match[1] != postgresqlRuntimeVersion {
-		return "", fmt.Errorf("PostgreSQL version is not %s", postgresqlRuntimeVersion)
+	if requiredVersion != "" && match[1] != requiredVersion {
+		return "", fmt.Errorf("PostgreSQL version is not %s", requiredVersion)
+	}
+	if requiredVersion == "" && !postgresql18VersionPattern.MatchString(match[1]) {
+		return "", errors.New("PostgreSQL version is not PostgreSQL 18")
 	}
 	return match[1], nil
 }
@@ -420,6 +570,10 @@ func readAdapterDigest(path string) (string, error) {
 }
 
 func verifyExtensionBundle(path string) (extensionBundle, error) {
+	return verifyExtensionBundleForPostgreSQLVersion(path, postgresqlRuntimeVersion)
+}
+
+func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion string) (extensionBundle, error) {
 	root, err := filepath.Abs(path)
 	if err != nil {
 		return extensionBundle{}, errors.New("SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT path is invalid")
@@ -456,7 +610,7 @@ func verifyExtensionBundle(path string) (extensionBundle, error) {
 	if err := decodeStrictManifest(manifestData, &manifest); err != nil {
 		return extensionBundle{}, errors.New("extension artifact manifest is invalid")
 	}
-	if manifest.Format != extensionBundleManifestFormat || manifest.PostgreSQLMajor != 18 || manifest.PostgreSQLVersion != postgresqlRuntimeVersion || len(manifest.Files) != 3 {
+	if !postgresql18VersionPattern.MatchString(requiredVersion) || manifest.Format != extensionBundleManifestFormat || manifest.PostgreSQLMajor != 18 || manifest.PostgreSQLVersion != requiredVersion || len(manifest.Files) != 3 {
 		return extensionBundle{}, errors.New("extension artifact manifest is invalid")
 	}
 	files := append([]extensionBundleFile(nil), manifest.Files...)
@@ -564,9 +718,11 @@ func sameAdapterArtifactIdentity(left, right adapterArtifactIdentity) bool {
 }
 
 func verifyEnvironmentArtifactIdentity(environment EnvironmentConfig) error {
-	extension, err := verifyExtensionBundle(environment.ExtensionArtifact)
-	if err != nil || !sameExtensionBundleIdentity(environment.extension, extension) {
-		return errors.New("candidate extension artifact identity changed after execution")
+	if environment.ExtensionArtifact != "" {
+		extension, err := verifyExtensionBundleForPostgreSQLVersion(environment.ExtensionArtifact, environment.postgresVersion)
+		if err != nil || !sameExtensionBundleIdentity(environment.extension, extension) {
+			return errors.New("candidate extension artifact identity changed after execution")
+		}
 	}
 	adapter, err := loadAdapterArtifactIdentity(environment.AdapterArtifact)
 	if err != nil || !sameAdapterArtifactIdentity(environment.adapterIdentity, adapter) {
@@ -672,22 +828,90 @@ func validSHA256(value string) bool {
 	return err == nil && value == hex.EncodeToString(decoded)
 }
 
-func verifyInstallationLock(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK path is invalid")
+// PostgreSQLInstallationLockPath returns the shared lock for one destination pair.
+func PostgreSQLInstallationLockPath(ctx context.Context, pg18BinDir string) (string, error) {
+	if ctx == nil || strings.TrimSpace(pg18BinDir) != pg18BinDir {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
 	}
-	parent := filepath.Dir(absolute)
+	binDir, err := filepath.Abs(pg18BinDir)
+	if err != nil {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
+	}
+	binDir, err = filepath.EvalSymlinks(binDir)
+	if err != nil {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
+	}
+	info, err := os.Lstat(binDir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("PostgreSQL installation lock input is invalid")
+	}
+	canonicalDirectory := func(path string) (string, error) {
+		value, resolveErr := filepath.EvalSymlinks(path)
+		if resolveErr != nil || !filepath.IsAbs(value) {
+			return "", errors.New("PostgreSQL installation directory is invalid")
+		}
+		valueInfo, statErr := os.Lstat(value)
+		if statErr != nil || valueInfo.Mode()&os.ModeSymlink != 0 || !valueInfo.IsDir() {
+			return "", errors.New("PostgreSQL installation directory is invalid")
+		}
+		return value, nil
+	}
+	pgConfig := filepath.Join(binDir, "pg_config")
+	pkglibdir, err := pgConfigValue(ctx, pgConfig, "--pkglibdir")
+	if err != nil {
+		return "", errors.New("resolve PostgreSQL installation library directory failed")
+	}
+	pkglibdir, err = canonicalDirectory(pkglibdir)
+	if err != nil {
+		return "", err
+	}
+	sharedir, err := pgConfigValue(ctx, pgConfig, "--sharedir")
+	if err != nil {
+		return "", errors.New("resolve PostgreSQL installation shared directory failed")
+	}
+	sharedir, err = canonicalDirectory(sharedir)
+	if err != nil {
+		return "", err
+	}
+	lockParent, err := canonicalDirectory("/tmp")
+	if err != nil {
+		return "", errors.New("PostgreSQL installation lock parent is invalid")
+	}
+	identity := sha256.Sum256([]byte(pkglibdir + "\x00" + sharedir))
+	return VerifyInstallationLockPath(filepath.Join(
+		lockParent,
+		"synchro-conformance-pg18-"+hex.EncodeToString(identity[:])+".lock",
+	))
+}
+
+// VerifyInstallationLockPath returns one canonical installation-scoped lock path.
+func VerifyInstallationLockPath(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", errors.New("installation lock path is invalid")
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil || !filepath.IsAbs(parent) {
+		return "", errors.New("installation lock parent is invalid")
+	}
 	parentInfo, err := os.Lstat(parent)
 	if err != nil || parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
-		return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK parent is invalid")
+		return "", errors.New("installation lock parent is invalid")
 	}
-	if info, err := os.Lstat(absolute); err == nil {
+	canonical := filepath.Join(parent, filepath.Base(path))
+	if info, err := os.Lstat(canonical); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK must be a regular file")
+			return "", errors.New("installation lock must be a regular file")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", errors.New("SYNCHRO_CONFORMANCE_INSTALL_LOCK is unavailable")
+		return "", errors.New("installation lock is unavailable")
 	}
-	return absolute, nil
+	return canonical, nil
+}
+
+func verifyInstallationLock(path string) (string, error) {
+	canonical, err := VerifyInstallationLockPath(path)
+	if err != nil {
+		return "", fmt.Errorf("SYNCHRO_CONFORMANCE_INSTALL_LOCK is invalid: %w", err)
+	}
+	return canonical, nil
 }

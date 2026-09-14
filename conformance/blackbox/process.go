@@ -30,23 +30,34 @@ import (
 )
 
 const (
-	defaultStartupTimeout                  = 45 * time.Second
-	defaultShutdownTimeout                 = 10 * time.Second
-	defaultProcessLogBytes                 = 1 << 20
-	maximumProcessLogBytes                 = 4 << 20
-	processPollInterval                    = 50 * time.Millisecond
-	maxWorkerHeartbeatAge                  = 30
-	maxWALLagBytes                         = 64 * 1024 * 1024
-	maxWALLagSeconds                       = 30
-	streamResetOperatorLockKey       int64 = 0x7273_746f
-	streamResetOperationKind               = "stream_reset"
-	projectionBootstrapOperationKind       = "projection_bootstrap"
+	// The WAL worker retries preparation for 30 seconds, and PostgreSQL
+	// restarts a failed worker after 5 more, so a healthy start under
+	// load can cross one full retry cycle. The bound covers that
+	// designed envelope with room for a second preparation pass.
+	defaultStartupTimeout = 90 * time.Second
+	// Fast shutdown includes a final checkpoint. Accumulated filesystem
+	// writeback across many serial provisions makes a tight bound flake,
+	// so the bound stays generous while still catching a real hang.
+	defaultShutdownTimeout                  = 30 * time.Second
+	defaultProcessLogBytes                  = 1 << 20
+	maximumProcessLogBytes                  = 4 << 20
+	maximumLifecycleResponseBytes           = 64 << 10
+	maximumPostgreSQLSocketPathBytes        = 103
+	processPollInterval                     = 50 * time.Millisecond
+	maxWorkerHeartbeatAge                   = 30
+	maxWALLagBytes                          = 64 * 1024 * 1024
+	maxWALLagSeconds                        = 30
+	streamResetOperatorLockKey        int64 = 0x7273_746f
+	walWorkerGateLockKey              int64 = 0x7761_6c72
+	streamResetOperationKind                = "stream_reset"
+	projectionBootstrapOperationKind        = "projection_bootstrap"
+	diagnosticSourceRestoreSchemaName       = "synchro_conformance_restore"
 )
 
 //go:embed testdata/schema.sql
 var diagnosticSchemaSQL string
 
-//go:embed testdata/register-diagnostic-v2.sql
+//go:embed testdata/register-diagnostic.sql
 var diagnosticRegistrationSQL string
 
 var diagnosticUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -54,6 +65,7 @@ var diagnosticUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f
 var diagnosticSourceTables = []string{
 	"cf_global_items",
 	"cf_items",
+	"cf_item_impacts",
 	"cf_documents",
 	"cf_document_members",
 	"cf_document_access",
@@ -69,6 +81,7 @@ var diagnosticLegacyInternalTables = []string{
 	"sync_clients",
 	"sync_shared_scopes",
 	"sync_bucket_edges",
+	"sync_scope_digest_cache",
 	"sync_rule_failures",
 	"sync_schema_manifest",
 	"sync_client_checkpoints",
@@ -79,10 +92,12 @@ var diagnosticLegacyInternalTables = []string{
 type HarnessConfig struct {
 	Environment                         EnvironmentConfig
 	TempParent                          string
+	ListenAddress                       string
 	StartupTimeout                      time.Duration
 	ShutdownTimeout                     time.Duration
 	ProcessLogBytes                     int
 	AllowInitialCaptureReadinessFailure bool
+	SkipAdapter                         bool
 }
 
 // HarnessNames are the nonsecret isolated PostgreSQL object names.
@@ -106,6 +121,9 @@ type Harness struct {
 	adapterURL  string
 	sourceRole  string
 	worker      RoleCredential
+	listen      string
+	attached    bool
+	attachHost  string
 
 	lock      *installationLock
 	installed *installedExtension
@@ -123,6 +141,40 @@ type Harness struct {
 	closeDone    chan struct{}
 	closeErr     error
 	closeStarted bool
+
+	databaseMu      sync.Mutex
+	databaseHandles []*sql.DB
+}
+
+type attachLifecycleResponse struct {
+	RunID             string `json:"run_id"`
+	AttachDatabaseURL string `json:"attach_database_url"`
+	Destroyed         *bool  `json:"destroyed"`
+}
+
+// ExtensionReinstallResult identifies the worker replaced by an extension reinstall.
+type ExtensionReinstallResult struct {
+	PriorWorkerPID int
+	ReinstallLSN   string
+}
+
+// ExtensionReinstallObservation contains bounded post-reinstall worker facts.
+type ExtensionReinstallObservation struct {
+	WorkerPID                      int
+	ActiveSlotName                 string
+	RestartLSN                     string
+	SlotActive                     bool
+	RestartLSNAtOrAfterReinstall   bool
+	ActiveRegistryGeneration       int64
+	WorkerRegistryGeneration       int64
+	PendingRegistryGenerationCount int64
+	NoValidationFailurePoison      bool
+}
+
+type walWorkerGate struct {
+	database   *sql.DB
+	connection *sql.Conn
+	released   bool
 }
 
 // SourceExecutor permits source-table DML through one restricted NOLOGIN role.
@@ -133,6 +185,40 @@ type SourceExecutor struct {
 // OperatorExecutor exposes only the fixed administrative controls used by diagnostics.
 type OperatorExecutor struct {
 	harness *Harness
+}
+
+// RegisterDefaultSharedScope restores the default shared assignment for native fixtures.
+func (executor *OperatorExecutor) RegisterDefaultSharedScope(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("native shared scope context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native shared scope context expired")
+	}
+	if err := executor.exec(ctx, "SELECT synchro.synchro_register_shared_scope('cf:global', false)"); err != nil {
+		return errors.New("register default native shared scope failed")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native shared scope context expired")
+	}
+	return nil
+}
+
+// UnregisterDefaultSharedScope removes the default shared assignment from native fixtures.
+func (executor *OperatorExecutor) UnregisterDefaultSharedScope(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("native shared scope context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native shared scope context expired")
+	}
+	if err := executor.exec(ctx, "SELECT synchro.synchro_unregister_shared_scope('cf:global')"); err != nil {
+		return errors.New("unregister default native shared scope failed")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("native shared scope context expired")
+	}
+	return nil
 }
 
 // SourceTransaction owns one source-DML transaction.
@@ -148,9 +234,7 @@ type ProjectionBootstrapBarrierControl struct {
 	harness      *Harness
 	database     *sql.DB
 	tx           *sql.Tx
-	acquired     chan error
 	mu           sync.Mutex
-	queued       bool
 	lockAcquired bool
 	released     bool
 }
@@ -194,6 +278,7 @@ type WALRecordObservation struct {
 	EffectOrdinal int32
 	FenceCoverage string
 	RowVersion    string
+	ReplayCount   int64
 }
 
 // WALPipelineObservation is bounded operational evidence for the WAL pipeline.
@@ -210,7 +295,31 @@ type WALPipelineObservation struct {
 
 // WALProgressObservation is bounded durable acknowledgement state.
 type WALProgressObservation struct {
-	AcknowledgedEndLSN string
+	AcknowledgedEndLSN    string
+	SlotConfirmedFlushLSN string
+	SlotMatchesProgress   bool
+}
+
+// WALReplayRestartObservation contains bounded state around one worker restart.
+type WALReplayRestartObservation struct {
+	PriorProgress                     WALProgressObservation
+	BeforeRestart                     WALPipelineObservation
+	AfterRestart                      WALPipelineObservation
+	BeforeStages                      WALRecordStageObservation
+	AfterStages                       WALRecordStageObservation
+	WorkerExitedBeforeAcknowledgement bool
+	WorkerRestarted                   bool
+}
+
+// WALProgressOrderObservation is bounded evidence for one persisted ordering violation.
+type WALProgressOrderObservation struct {
+	PoisonActive              bool
+	FailureClass              string
+	RelationIDMatchesRegistry bool
+	SourceRowPresent          bool
+	ProgressCommitAtOrAhead   bool
+	RecordMaterialized        bool
+	WorkerBlocked             bool
 }
 
 // WALPoisonObservation is bounded evidence for one blocking source transaction.
@@ -373,13 +482,21 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 		env:    config.Environment,
 		names:  names,
 		worker: config.Environment.Worker,
+		listen: config.ListenAddress,
 	}
-	harness.sourceRole = "synchro_source_" + strings.TrimPrefix(names.Database, "synchro_conformance_")
-	lock, err := acquireInstallationLock(ctx, config.Environment.InstallationLock)
-	if err != nil {
-		return nil, err
+	if config.Environment.AttachDatabaseURL != "" {
+		if err := harness.configureAttachedDatabase(); err != nil {
+			return nil, err
+		}
 	}
-	harness.lock = lock
+	harness.sourceRole = "synchro_source_" + strings.TrimPrefix(harness.names.Database, "synchro_conformance_")
+	if !harness.attached {
+		lock, err := acquireInstallationLock(ctx, config.Environment.InstallationLock)
+		if err != nil {
+			return nil, err
+		}
+		harness.lock = lock
+	}
 	defer func() {
 		if returnedErr == nil {
 			return
@@ -397,38 +514,62 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	if err := harness.createRunDirectories(); err != nil {
 		return nil, err
 	}
-	if err := harness.installExtension(ctx); err != nil {
-		return nil, err
-	}
-	if err := harness.initializeCluster(ctx); err != nil {
-		return nil, err
-	}
-	if err := harness.writeHBAConfiguration(); err != nil {
-		return nil, err
-	}
-	if err := harness.writePostmasterConfiguration(); err != nil {
-		return nil, err
-	}
-	if err := harness.startPostgres(ctx); err != nil {
-		return nil, err
+	if !harness.attached {
+		if err := harness.installExtension(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.initializeCluster(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.writeHBAConfiguration(); err != nil {
+			return nil, err
+		}
+		if err := harness.writePostmasterConfiguration(); err != nil {
+			return nil, err
+		}
+		if err := harness.startPostgres(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := harness.createRolesAndDatabase(ctx); err != nil {
 		return nil, err
 	}
+	if harness.attached {
+		if err := harness.verifyAttachedCluster(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.grantExtensionRoles(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if err := harness.verifyWorkerAuthenticationBoundary(ctx); err != nil {
 		return nil, err
 	}
-	if err := harness.installExtensionTopology(ctx); err != nil {
+	if !harness.attached {
+		if err := harness.installExtensionTopology(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.enableWorkerAutoStart(); err != nil {
+			return nil, err
+		}
+		if err := harness.restartPostgres(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if err := harness.waitForWorker(ctx); err != nil {
 		return nil, err
 	}
-	if err := harness.applyIndependentSourceSetup(ctx); err != nil {
+	existingSource, err := harness.applyIndependentSourceSetup(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := harness.restartPostgres(ctx); err != nil {
-		return nil, err
-	}
-	if err := harness.verifyPostmasterSettings(ctx); err != nil {
-		return nil, err
+	if !harness.attached {
+		if err := harness.restartPostgres(ctx); err != nil {
+			return nil, err
+		}
+		if err := harness.verifyPostmasterSettings(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if err := harness.waitForWorker(ctx); err != nil {
 		return nil, err
@@ -436,21 +577,48 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	if err := harness.verifyCaptureReadiness(ctx); err != nil && !config.AllowInitialCaptureReadinessFailure {
 		return nil, err
 	}
-	if err := harness.grantRunRoles(ctx); err != nil {
+	if existingSource {
+		database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
+		if err != nil {
+			return nil, errors.New("connect for existing run role verification failed")
+		}
+		err = harness.verifyRunRoleSeparation(ctx, database)
+		closeErr := database.Close()
+		if err != nil {
+			return nil, err
+		}
+		if closeErr != nil {
+			return nil, errors.New("close existing run role verification failed")
+		}
+	} else if err := harness.grantRunRoles(ctx); err != nil {
 		return nil, err
 	}
-	if err := harness.startAdapter(ctx); err != nil {
-		return nil, err
+	if !config.SkipAdapter {
+		if err := harness.startAdapter(ctx); err != nil {
+			return nil, err
+		}
 	}
 	return harness, nil
 }
 
 func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
-	if !config.Environment.verified || config.Environment.PG18BinDir == "" || config.Environment.extension.root == "" {
+	if !config.Environment.verified {
 		return HarnessConfig{}, errors.New("verified harness environment is required")
+	}
+	if config.Environment.AttachDatabaseURL == "" &&
+		(config.Environment.PG18BinDir == "" || config.Environment.extension.root == "" ||
+			config.Environment.InstallationLock == "" ||
+			config.Environment.InstallationLock != config.Environment.installationLock) {
+		return HarnessConfig{}, errors.New("verified harness environment is required")
+	}
+	if config.Environment.AttachDatabaseURL != "" && !sameAttachLifecycleConfig(config.Environment) {
+		return HarnessConfig{}, errors.New("verified attach lifecycle configuration is required")
 	}
 	if config.StartupTimeout == 0 {
 		config.StartupTimeout = defaultStartupTimeout
+	}
+	if config.ListenAddress == "" {
+		config.ListenAddress = "127.0.0.1"
 	}
 	if config.ShutdownTimeout == 0 {
 		config.ShutdownTimeout = defaultShutdownTimeout
@@ -458,7 +626,7 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 	if config.ProcessLogBytes == 0 {
 		config.ProcessLogBytes = defaultProcessLogBytes
 	}
-	if config.StartupTimeout <= 0 || config.ShutdownTimeout <= 0 || config.ProcessLogBytes < 1 || config.ProcessLogBytes > maximumProcessLogBytes {
+	if config.StartupTimeout <= 0 || config.ShutdownTimeout <= 0 || config.ProcessLogBytes < 1 || config.ProcessLogBytes > maximumProcessLogBytes || !validListenAddress(config.ListenAddress) {
 		return HarnessConfig{}, errors.New("harness configuration is invalid")
 	}
 	if config.TempParent != "" {
@@ -473,6 +641,34 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 		config.TempParent = parent
 	}
 	return config, nil
+}
+
+func sameAttachLifecycleConfig(environment EnvironmentConfig) bool {
+	if environment.AttachRunID == "" || environment.AttachRunID != environment.attachLifecycle.runID ||
+		environment.AttachDestroyOnClose != environment.attachLifecycle.destroyOnClose ||
+		len(environment.AttachLifecycleCommand) == 0 || len(environment.AttachLifecycleCommand) != len(environment.attachLifecycle.argv) {
+		return false
+	}
+	for index := range environment.AttachLifecycleCommand {
+		if environment.AttachLifecycleCommand[index] != environment.attachLifecycle.argv[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validListenAddress(value string) bool {
+	return value != "" && !strings.ContainsAny(value, "\x00\r\n'")
+}
+
+// postmasterListenAddresses keeps loopback listening so local readiness
+// probes work when the harness also listens on an external address.
+func postmasterListenAddresses(listen string) string {
+	switch listen {
+	case "localhost", "127.0.0.1", "::1":
+		return "localhost"
+	}
+	return "localhost," + listen
 }
 
 func newHarnessNames() (HarnessNames, error) {
@@ -494,11 +690,21 @@ func (h *Harness) createRunDirectories() error {
 		return errors.New("create isolated harness directory failed")
 	}
 	h.runRoot = root
-	h.dataDir = filepath.Join(root, "postgres")
-	h.socketDir = filepath.Join(root, "socket")
-	if err := os.Mkdir(h.socketDir, 0o700); err != nil {
-		return errors.New("create private PostgreSQL socket directory failed")
+	if h.attached {
+		adapterPort, err := allocateLoopbackPort()
+		if err != nil {
+			return errors.New("allocate adapter loopback port failed")
+		}
+		h.adapterPort = adapterPort
+		h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
+		return nil
 	}
+	h.dataDir = filepath.Join(root, "postgres")
+	socketDir, err := createPostgreSQLSocketDirectory()
+	if err != nil {
+		return err
+	}
+	h.socketDir = socketDir
 	port, err := allocateLoopbackPort()
 	if err != nil {
 		return errors.New("allocate PostgreSQL loopback port failed")
@@ -511,6 +717,51 @@ func (h *Harness) createRunDirectories() error {
 	h.adapterPort = adapterPort
 	h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
 	return nil
+}
+
+func createPostgreSQLSocketDirectory() (string, error) {
+	parents := []string{os.TempDir()}
+	if filepath.Clean(parents[0]) != "/tmp" {
+		parents = append(parents, "/tmp")
+	}
+	for _, parent := range parents {
+		directory, err := os.MkdirTemp(parent, "synchro-pg-")
+		if err != nil {
+			continue
+		}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			_ = os.RemoveAll(directory)
+			continue
+		}
+		info, err := os.Lstat(directory)
+		socketPath := filepath.Join(directory, ".s.PGSQL.65535")
+		if err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() &&
+			info.Mode().Perm() == 0o700 && len(socketPath) <= maximumPostgreSQLSocketPathBytes {
+			return directory, nil
+		}
+		_ = os.RemoveAll(directory)
+	}
+	return "", errors.New("create short private PostgreSQL socket directory failed")
+}
+
+func (h *Harness) configureAttachedDatabase() error {
+	config, err := parseAttachedDatabaseURL(h.env.AttachDatabaseURL)
+	if err != nil {
+		return err
+	}
+	h.attached = true
+	h.attachHost = config.Host
+	h.port = int(config.Port)
+	h.names.Database = config.Database
+	return nil
+}
+
+func parseAttachedDatabaseURL(value string) (*pgconn.Config, error) {
+	config, err := pgconn.ParseConfig(value)
+	if err != nil || config.Host == "" || filepath.IsAbs(config.Host) || config.Port == 0 || config.Database == "" {
+		return nil, errors.New("attached PostgreSQL database URL is invalid")
+	}
+	return config, nil
 }
 
 func allocateLoopbackPort() (int, error) {
@@ -527,7 +778,7 @@ func allocateLoopbackPort() (int, error) {
 }
 
 func (h *Harness) installExtension(ctx context.Context) error {
-	bundle, err := verifyExtensionBundle(h.env.ExtensionArtifact)
+	bundle, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
 	if err != nil {
 		return err
 	}
@@ -584,7 +835,7 @@ func (h *Harness) installExtension(ctx context.Context) error {
 			return errors.New("install extension file failed")
 		}
 	}
-	verifiedAfterInstall, err := verifyExtensionBundle(h.env.ExtensionArtifact)
+	verifiedAfterInstall, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
 	if err != nil || !sameExtensionBundleIdentity(bundle, verifiedAfterInstall) {
 		return errors.New("extension bundle identity changed during installation")
 	}
@@ -772,7 +1023,7 @@ func (extension *installedExtension) restore() error {
 		}
 		actual, err := fileSHA256(file.destination)
 		if err != nil || actual != file.installedDigest {
-			failures = append(failures, errors.New("extension restoration refused changed destination"))
+			failures = append(failures, fmt.Errorf("extension restoration refused changed destination %s: expected digest %s, observed digest %s", filepath.Base(file.destination), file.installedDigest, actual))
 			continue
 		}
 		if file.hadOriginal {
@@ -825,7 +1076,7 @@ func (h *Harness) initializeCluster(ctx context.Context) error {
 		"--no-instructions",
 	}
 	if err := runBoundedCommand(ctx, filepath.Join(h.env.PG18BinDir, "initdb"), arguments, nil, h.config.ProcessLogBytes, [][]byte{h.env.Admin.password}); err != nil {
-		return errors.New("initialize PostgreSQL cluster failed")
+		return fmt.Errorf("initialize PostgreSQL cluster failed: %w", err)
 	}
 	if err := os.Remove(passwordFile); err != nil {
 		return errors.New("remove PostgreSQL initialization credential failed")
@@ -835,7 +1086,13 @@ func (h *Harness) initializeCluster(ctx context.Context) error {
 }
 
 func (h *Harness) writeHBAConfiguration() error {
-	configuration := workerHBAConfiguration(h.names.Database, h.worker.Username)
+	configuration := provisionedHBAConfiguration(h.names.Database, []string{
+		h.env.Admin.Username,
+		h.env.Adapter.Username,
+		h.env.Observer.Username,
+		h.worker.Username,
+		h.env.Operator.Username,
+	})
 	file, err := os.OpenFile(filepath.Join(h.dataDir, "pg_hba.conf"), os.O_TRUNC|os.O_WRONLY, 0)
 	if err != nil {
 		return errors.New("open PostgreSQL HBA configuration failed")
@@ -852,6 +1109,29 @@ func (h *Harness) writeHBAConfiguration() error {
 		return errors.New("close PostgreSQL HBA configuration failed")
 	}
 	return nil
+}
+
+func provisionedHBAConfiguration(database string, roles []string) string {
+	database = quoteHBAName(database)
+	quotedRoles := make([]string, 0, len(roles))
+	for _, role := range roles {
+		quotedRoles = append(quotedRoles, quoteHBAName(role))
+	}
+	users := strings.Join(quotedRoles, ",")
+	admin := quotedRoles[0]
+	return strings.Join([]string{
+		"# Synchro conformance authentication boundary",
+		"local \"postgres\" " + admin + " scram-sha-256",
+		"local " + database + " " + users + " scram-sha-256",
+		"local all all reject",
+		"host \"postgres\" " + admin + " 0.0.0.0/0 scram-sha-256",
+		"host " + database + " " + users + " 0.0.0.0/0 scram-sha-256",
+		"host all all 0.0.0.0/0 reject",
+		"host \"postgres\" " + admin + " ::0/0 scram-sha-256",
+		"host " + database + " " + users + " ::0/0 scram-sha-256",
+		"host all all ::0/0 reject",
+		"",
+	}, "\n")
 }
 
 func workerHBAConfiguration(database, worker string) string {
@@ -876,14 +1156,14 @@ func quoteHBAName(value string) string {
 
 func (h *Harness) writePostmasterConfiguration() error {
 	configuration := strings.Join([]string{
-		"listen_addresses = '127.0.0.1'",
+		"listen_addresses = " + quotePostgresLiteral(postmasterListenAddresses(h.listen)),
 		"port = " + strconv.Itoa(h.port),
 		"unix_socket_directories = " + quotePostgresLiteral(h.socketDir),
 		"wal_level = logical",
 		"max_replication_slots = 2",
 		"max_wal_senders = 1",
 		"shared_preload_libraries = 'synchro_pg'",
-		"synchro.auto_start = on",
+		"synchro.auto_start = off",
 		"synchro.database = " + quotePostgresLiteral(h.names.Database),
 		"synchro.replication_slot = " + quotePostgresLiteral(h.names.ReplicationSlot),
 		"synchro.publication_name = " + quotePostgresLiteral(h.names.Publication),
@@ -893,13 +1173,30 @@ func (h *Harness) writePostmasterConfiguration() error {
 		"synchro.max_wal_lag_seconds = " + strconv.Itoa(maxWALLagSeconds),
 		"fsync = on",
 		"synchronous_commit = on",
+		// The provisioner surfaces postmaster output only when it fails to
+		// start, so a background worker that crashes later leaves no readable
+		// record. Persist the server log inside the cluster instead.
+		"logging_collector = on",
+		"log_directory = 'log'",
+		"log_filename = 'postgresql.log'",
+		"log_rotation_size = 0",
+		"log_rotation_age = 0",
+		"log_truncate_on_rotation = off",
 		"",
 	}, "\n")
+	return h.appendPostmasterConfiguration("\n# Synchro conformance isolated settings\n" + configuration)
+}
+
+func (h *Harness) enableWorkerAutoStart() error {
+	return h.appendPostmasterConfiguration("\n# Synchro conformance worker activation\nsynchro.auto_start = on\n")
+}
+
+func (h *Harness) appendPostmasterConfiguration(configuration string) error {
 	file, err := os.OpenFile(filepath.Join(h.dataDir, "postgresql.conf"), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		return errors.New("open PostgreSQL configuration failed")
 	}
-	if _, err := file.WriteString("\n# Synchro conformance isolated settings\n" + configuration); err != nil {
+	if _, err := file.WriteString(configuration); err != nil {
 		_ = file.Close()
 		return errors.New("write PostgreSQL configuration failed")
 	}
@@ -942,7 +1239,7 @@ func (h *Harness) waitForPostgres(ctx context.Context, database string) error {
 		if h.postgres != nil && h.postgres.Exited() {
 			return false, errors.New("PostgreSQL exited before readiness")
 		}
-		if !h.pgIsReady(attemptContext, database) {
+		if !h.attached && !h.pgIsReady(attemptContext, database) {
 			return false, nil
 		}
 		databaseHandle, err := h.openDatabase(attemptContext, database, h.env.Admin, false)
@@ -999,7 +1296,11 @@ func waitUntil(ctx context.Context, condition func(context.Context) (bool, error
 }
 
 func (h *Harness) createRolesAndDatabase(ctx context.Context) error {
-	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
+	databaseName := "postgres"
+	if h.attached {
+		databaseName = h.names.Database
+	}
+	database, err := h.openDatabase(ctx, databaseName, h.env.Admin, false)
 	if err != nil {
 		return errors.New("connect PostgreSQL administrator failed")
 	}
@@ -1008,19 +1309,20 @@ func (h *Harness) createRolesAndDatabase(ctx context.Context) error {
 		return errors.New("configure PostgreSQL administrator failed")
 	}
 	for _, role := range []RoleCredential{h.env.Adapter, h.env.Observer, h.env.Operator} {
-		statement := "CREATE ROLE " + quoteIdentifier(role.Username) + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD $1"
-		if err := execRolePassword(ctx, database, statement, role.password); err != nil {
+		if err := ensureRolePassword(ctx, database, role, "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
 			return errors.New("create isolated PostgreSQL role failed")
 		}
 	}
-	workerStatement := "CREATE ROLE " + quoteIdentifier(h.worker.Username) + " LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD $1"
-	if err := execRolePassword(ctx, database, workerStatement, h.worker.password); err != nil {
+	if err := ensureRolePassword(ctx, database, h.worker, "LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"); err != nil {
 		return fmt.Errorf("provision isolated worker role failed: %w", err)
 	}
-	if _, err := database.ExecContext(ctx, "CREATE ROLE "+quoteIdentifier(h.sourceRole)+" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
+	if err := ensureRole(ctx, database, h.sourceRole, "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"); err != nil {
 		return errors.New("create isolated source role failed")
 	}
 	h.rolesCreated = true
+	if h.attached {
+		return nil
+	}
 	statement := "CREATE DATABASE " + quoteIdentifier(h.names.Database) + " OWNER " + quoteIdentifier(h.env.Admin.Username)
 	if _, err := database.ExecContext(ctx, statement); err != nil {
 		return errors.New("create isolated PostgreSQL database failed")
@@ -1029,7 +1331,57 @@ func (h *Harness) createRolesAndDatabase(ctx context.Context) error {
 	return nil
 }
 
+func ensureRolePassword(ctx context.Context, database *sql.DB, role RoleCredential, attributes string) error {
+	exists, err := roleExists(ctx, database, role.Username)
+	if err != nil {
+		return err
+	}
+	verb := "CREATE ROLE "
+	if exists {
+		verb = "ALTER ROLE "
+	}
+	return execRolePassword(ctx, database, verb+quoteIdentifier(role.Username)+" "+attributes+" PASSWORD $1", role.password)
+}
+
+func ensureRole(ctx context.Context, database *sql.DB, role, attributes string) error {
+	exists, err := roleExists(ctx, database, role)
+	if err != nil {
+		return err
+	}
+	verb := "CREATE ROLE "
+	if exists {
+		verb = "ALTER ROLE "
+	}
+	_, err = database.ExecContext(ctx, verb+quoteIdentifier(role)+" "+attributes)
+	return err
+}
+
+func roleExists(ctx context.Context, database *sql.DB, role string) (bool, error) {
+	var exists bool
+	err := database.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1)", role).Scan(&exists)
+	return exists, err
+}
+
 func (h *Harness) verifyWorkerAuthenticationBoundary(ctx context.Context) error {
+	if h.attached {
+		workerDatabase, err := h.openDatabase(ctx, h.names.Database, h.worker, true)
+		if err != nil {
+			return errors.New("open authenticated attached worker connection failed")
+		}
+		if err := workerDatabase.PingContext(ctx); err != nil {
+			_ = workerDatabase.Close()
+			return errors.New("attached worker credential authentication failed")
+		}
+		if err := workerDatabase.Close(); err != nil {
+			return errors.New("close authenticated attached worker connection failed")
+		}
+		wrongCredential := h.worker
+		wrongCredential.password = []byte("invalid-conformance-worker-password")
+		if pingDatabase(ctx, h, h.names.Database, wrongCredential, true) == nil {
+			return errors.New("attached PostgreSQL accepted an invalid worker credential")
+		}
+		return nil
+	}
 	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
 	if err != nil {
 		return errors.New("connect for PostgreSQL HBA verification failed")
@@ -1039,16 +1391,16 @@ func (h *Harness) verifyWorkerAuthenticationBoundary(ctx context.Context) error 
 	if err := database.QueryRowContext(ctx, "SELECT count(*) FROM pg_catalog.pg_hba_file_rules WHERE error IS NOT NULL").Scan(&invalidRules); err != nil || invalidRules != 0 {
 		return errors.New("PostgreSQL HBA configuration is invalid")
 	}
-	var exactWorkerRule bool
+	var workerRule bool
 	if err := database.QueryRowContext(ctx, `
 		SELECT count(*) = 1
 		FROM pg_catalog.pg_hba_file_rules
 		WHERE type = 'host'
 		  AND $1 = ANY(database)
 		  AND $2 = ANY(user_name)
-		  AND address = '127.0.0.1'
-		  AND netmask = '255.255.255.255'
-		  AND auth_method = 'scram-sha-256'`, h.names.Database, h.worker.Username).Scan(&exactWorkerRule); err != nil || !exactWorkerRule {
+		  AND address = '0.0.0.0'
+		  AND netmask = '0.0.0.0'
+	  AND auth_method = 'scram-sha-256'`, h.names.Database, h.worker.Username).Scan(&workerRule); err != nil || !workerRule {
 		return errors.New("PostgreSQL worker HBA rule is invalid")
 	}
 
@@ -1079,7 +1431,27 @@ func (h *Harness) verifyWorkerAuthenticationBoundary(ctx context.Context) error 
 }
 
 func pingDatabase(ctx context.Context, harness *Harness, database string, role RoleCredential, withPassword bool) error {
-	handle, err := harness.openDatabase(ctx, database, role, withPassword)
+	var handle *sql.DB
+	var err error
+	if withPassword {
+		handle, err = harness.openDatabase(ctx, database, role, true)
+	} else {
+		host := harness.listen
+		if harness.attached {
+			if database != harness.names.Database {
+				return errors.New("attached PostgreSQL database is not configured")
+			}
+			host = harness.attachHost
+		}
+		handle, err = sql.Open("pgx", postgresDSN(host, harness.port, database, role, false))
+		if err == nil {
+			handle.SetMaxOpenConns(4)
+			handle.SetMaxIdleConns(1)
+			harness.databaseMu.Lock()
+			harness.databaseHandles = append(harness.databaseHandles, handle)
+			harness.databaseMu.Unlock()
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -1103,10 +1475,48 @@ func (h *Harness) installExtensionTopology(ctx context.Context) error {
 	}
 	defer database.Close()
 	if _, err := database.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
-		return errors.New("install synchro_pg extension failed")
+		return fmt.Errorf("install synchro_pg extension failed: %w", err)
 	}
+	if err := h.grantExtensionRolesOnDatabase(ctx, database); err != nil {
+		return err
+	}
+	var slotName string
+	if err := database.QueryRowContext(ctx, "SELECT slot_name FROM pg_create_logical_replication_slot($1, 'pgoutput')", h.names.ReplicationSlot).Scan(&slotName); err != nil || slotName != h.names.ReplicationSlot {
+		return errors.New("create isolated replication slot failed")
+	}
+	h.slotCreated = true
+	var publicationExists bool
+	if err := database.QueryRowContext(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)",
+		h.names.Publication,
+	).Scan(&publicationExists); err != nil {
+		return errors.New("check isolated publication failed")
+	}
+	if !publicationExists {
+		if _, err := database.ExecContext(ctx, "CREATE PUBLICATION "+quoteIdentifier(h.names.Publication)); err != nil {
+			return errors.New("create isolated publication failed")
+		}
+	}
+	h.publicationCreated = true
+	return nil
+}
+
+func (h *Harness) grantExtensionRoles(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect attached PostgreSQL database failed")
+	}
+	defer database.Close()
+	return h.grantExtensionRolesOnDatabase(ctx, database)
+}
+
+func (h *Harness) grantExtensionRolesOnDatabase(ctx context.Context, database *sql.DB) error {
 	if _, err := database.ExecContext(ctx, "GRANT synchro_adapter TO "+quoteIdentifier(h.env.Adapter.Username)); err != nil {
 		return errors.New("grant isolated adapter group failed")
+	}
+	if _, err := database.ExecContext(ctx, "GRANT synchro_monitor TO "+quoteIdentifier(h.env.Observer.Username)); err != nil {
+		return errors.New("grant isolated observer group failed")
 	}
 	if _, err := database.ExecContext(ctx, "GRANT synchro_worker TO "+quoteIdentifier(h.worker.Username)); err != nil {
 		return errors.New("grant isolated worker group failed")
@@ -1114,19 +1524,13 @@ func (h *Harness) installExtensionTopology(ctx context.Context) error {
 	if _, err := database.ExecContext(ctx, "GRANT synchro_operator TO "+quoteIdentifier(h.env.Operator.Username)); err != nil {
 		return errors.New("grant isolated operator group failed")
 	}
-	var slotName string
-	if err := database.QueryRowContext(ctx, "SELECT slot_name FROM pg_create_logical_replication_slot($1, 'pgoutput')", h.names.ReplicationSlot).Scan(&slotName); err != nil || slotName != h.names.ReplicationSlot {
-		return errors.New("create isolated replication slot failed")
-	}
-	h.slotCreated = true
-	if _, err := database.ExecContext(ctx, "CREATE PUBLICATION "+quoteIdentifier(h.names.Publication)); err != nil {
-		return errors.New("create isolated publication failed")
-	}
-	h.publicationCreated = true
 	return nil
 }
 
 func (h *Harness) restartPostgres(ctx context.Context) error {
+	if h.attached {
+		return h.restartAttachedPostgres(ctx)
+	}
 	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
 	defer cancel()
 	if h.postgres == nil {
@@ -1143,6 +1547,92 @@ func (h *Harness) restartPostgres(ctx context.Context) error {
 	return nil
 }
 
+func (h *Harness) restartAttachedPostgres(ctx context.Context) error {
+	if !sameAttachLifecycleConfig(h.env) {
+		return errors.New("attached PostgreSQL lifecycle configuration changed")
+	}
+	if err := h.stopAdapter(ctx); err != nil {
+		return err
+	}
+	if err := h.closeDatabaseHandles(ctx); err != nil {
+		return err
+	}
+	response, err := h.runAttachLifecycleCommand(ctx, "restart")
+	if err != nil {
+		return err
+	}
+	if response.Destroyed == nil || *response.Destroyed || response.AttachDatabaseURL == "" {
+		return errors.New("attached PostgreSQL restart response is invalid")
+	}
+	config, err := parseAttachedDatabaseURL(response.AttachDatabaseURL)
+	if err != nil || config.Database != h.names.Database {
+		return errors.New("attached PostgreSQL restart changed the owned database")
+	}
+	h.env.AttachDatabaseURL = response.AttachDatabaseURL
+	h.config.Environment.AttachDatabaseURL = response.AttachDatabaseURL
+	h.attachHost = config.Host
+	h.port = int(config.Port)
+	if err := h.waitForPostgres(ctx, h.names.Database); err != nil {
+		return fmt.Errorf("wait for attached PostgreSQL readiness: %w", err)
+	}
+	if err := h.verifyAttachedCluster(ctx); err != nil {
+		return err
+	}
+	if err := h.waitForWorker(ctx); err != nil {
+		return err
+	}
+	if err := h.verifyCaptureReadiness(ctx); err != nil {
+		return err
+	}
+	if !h.config.SkipAdapter {
+		if err := h.startAdapter(ctx); err != nil {
+			return err
+		}
+	}
+	h.restartCount++
+	return nil
+}
+
+func (h *Harness) runAttachLifecycleCommand(ctx context.Context, operation string) (attachLifecycleResponse, error) {
+	if ctx == nil || (operation != "restart" && operation != "destroy") || !sameAttachLifecycleConfig(h.env) {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle command configuration is invalid")
+	}
+	argv := append([]string(nil), h.env.attachLifecycle.argv...)
+	arguments := append(argv[1:], operation, h.env.attachLifecycle.runID)
+	stdout := newBoundedLog(maximumLifecycleResponseBytes, nil)
+	redactions := [][]byte{h.env.Admin.password, h.env.Adapter.password, h.env.Observer.password, h.worker.password, h.env.Operator.password, h.env.jwtSecret, []byte(h.env.AttachDatabaseURL)}
+	stderr := newBoundedLog(h.config.ProcessLogBytes, redactions)
+	command := exec.CommandContext(ctx, argv[0], arguments...)
+	configureProcessGroup(command)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil || ctx.Err() != nil {
+		detail := strings.TrimSpace(string(stderr.sanitizedBytes()))
+		detail = strings.ReplaceAll(strings.ReplaceAll(detail, "\r", " "), "\n", " ")
+		if len(detail) > 512 {
+			detail = detail[:512]
+		}
+		if detail != "" {
+			return attachLifecycleResponse{}, fmt.Errorf("attached lifecycle %s command failed: %s", operation, detail)
+		}
+		return attachLifecycleResponse{}, fmt.Errorf("attached lifecycle %s command failed", operation)
+	}
+	if stdout.isTruncated() {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle response is too large")
+	}
+	var response attachLifecycleResponse
+	data := bytes.TrimSpace(stdout.sanitizedBytes())
+	if err := jsonstrict.ValidateValue(data); err != nil {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle response is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&response); err != nil || response.RunID != h.env.attachLifecycle.runID || response.Destroyed == nil {
+		return attachLifecycleResponse{}, errors.New("attached lifecycle response identity is invalid")
+	}
+	return response, nil
+}
+
 func (h *Harness) verifyPostmasterSettings(ctx context.Context) error {
 	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
 	if err != nil {
@@ -1150,7 +1640,7 @@ func (h *Harness) verifyPostmasterSettings(ctx context.Context) error {
 	}
 	defer database.Close()
 	expected := map[string]string{
-		"listen_addresses":                         "127.0.0.1",
+		"listen_addresses":                         postmasterListenAddresses(h.listen),
 		"port":                                     strconv.Itoa(h.port),
 		"unix_socket_directories":                  h.socketDir,
 		"wal_level":                                "logical",
@@ -1185,6 +1675,57 @@ func (h *Harness) verifyPostmasterSettings(ctx context.Context) error {
 	return nil
 }
 
+func (h *Harness) verifyAttachedCluster(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect attached PostgreSQL database failed")
+	}
+	defer database.Close()
+	settings := map[string]string{}
+	for _, name := range []string{
+		"wal_level", "shared_preload_libraries", "synchro.auto_start", "synchro.database",
+		"synchro.replication_slot", "synchro.publication_name", "synchro.worker_login",
+		"synchro.max_worker_heartbeat_age_seconds", "synchro.max_wal_lag_bytes", "synchro.max_wal_lag_seconds",
+	} {
+		var value string
+		if err := database.QueryRowContext(ctx, "SELECT current_setting($1)", name).Scan(&value); err != nil {
+			return errors.New("attached PostgreSQL setting verification failed")
+		}
+		settings[name] = value
+	}
+	if settings["wal_level"] != "logical" || settings["synchro.auto_start"] != "on" ||
+		settings["synchro.database"] != h.names.Database || settings["synchro.worker_login"] != h.worker.Username ||
+		!containsPostgresListValue(settings["shared_preload_libraries"], "synchro_pg") ||
+		settings["synchro.replication_slot"] == "" || settings["synchro.publication_name"] == "" {
+		return errors.New("attached PostgreSQL configuration is invalid")
+	}
+	for _, name := range []string{"synchro.max_worker_heartbeat_age_seconds", "synchro.max_wal_lag_bytes", "synchro.max_wal_lag_seconds"} {
+		value, err := strconv.Atoi(settings[name])
+		if err != nil || value <= 0 {
+			return errors.New("attached PostgreSQL health limit is invalid")
+		}
+	}
+	h.names.ReplicationSlot = settings["synchro.replication_slot"]
+	h.names.Publication = settings["synchro.publication_name"]
+	var fingerprintsCurrent bool
+	if err := database.QueryRowContext(ctx, `
+		SELECT health #>> '{observations,extension_objects,library_fingerprint}' =
+		       health #>> '{observations,extension_objects,installed_fingerprint}'
+		FROM (SELECT synchro.synchro_health_detail() AS health) state`).Scan(&fingerprintsCurrent); err != nil || !fingerprintsCurrent {
+		return errors.New("attached extension build fingerprint is invalid")
+	}
+	return nil
+}
+
+func containsPostgresListValue(value, wanted string) bool {
+	for _, candidate := range strings.Split(value, ",") {
+		if strings.Trim(strings.TrimSpace(candidate), `"`) == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Harness) waitForWorker(ctx context.Context) error {
 	deadline, cancel := context.WithTimeout(ctx, h.config.StartupTimeout)
 	defer cancel()
@@ -1195,11 +1736,25 @@ func (h *Harness) waitForWorker(ctx context.Context) error {
 		}
 		defer database.Close()
 		var present bool
+		// Registration must not commit before the worker binds its slot.
+		// A registration that commits first leaves its activation message
+		// behind the fresh slot boundary, and the worker then idles on the
+		// old registry forever. The wait therefore requires the bound
+		// runtime, not only the worker backend.
 		err = database.QueryRowContext(attemptContext, `
 			SELECT EXISTS (
 				SELECT 1
 				FROM pg_catalog.pg_stat_activity
 				WHERE datname = $1 AND backend_type = 'synchro WAL consumer'
+			) AND EXISTS (
+				SELECT 1
+				FROM synchro.sync_runtime_state runtime
+				JOIN synchro.sync_wal_progress progress
+				  ON progress.singleton
+				 AND progress.stream_generation = runtime.stream_generation
+				WHERE runtime.singleton
+				  AND runtime.active_slot_name IS NOT NULL
+				  AND progress.generation_start_lsn IS NOT NULL
 			)`, h.names.Database).Scan(&present)
 		if err != nil {
 			return false, nil
@@ -1220,11 +1775,14 @@ func (h *Harness) verifyCaptureReadiness(ctx context.Context) error {
 	defer database.Close()
 	deadline, cancel := context.WithTimeout(ctx, h.config.StartupTimeout)
 	defer cancel()
-	var failedNames string
+	failedNames := "unavailable"
+	lastObservedState := "unavailable"
 	var queryErr error
 	err = waitUntil(deadline, func(attemptContext context.Context) (bool, error) {
 		var ready bool
 		var failedChecks int
+		var observedFailedNames string
+		var observedState string
 		queryErr = database.QueryRowContext(attemptContext, `
 			SELECT (health->>'ready')::boolean,
 			       (SELECT count(*) FROM jsonb_each(health->'checks') entry
@@ -1233,35 +1791,72 @@ func (h *Harness) verifyCaptureReadiness(ctx context.Context) error {
 			           SELECT string_agg(entry.key, ',' ORDER BY entry.key)
 			           FROM jsonb_each(health->'checks') entry
 			           WHERE entry.value->>'state' <> 'ok'
-			       ), '')
+			       ), ''),
+			       health::text
 			FROM (SELECT synchro.synchro_health_detail() AS health) state`,
-		).Scan(&ready, &failedChecks, &failedNames)
+		).Scan(&ready, &failedChecks, &observedFailedNames, &observedState)
 		if queryErr != nil {
 			return false, nil
 		}
+		failedNames = observedFailedNames
+		lastObservedState = observedState
 		return ready && failedChecks == 0, nil
 	})
 	if err != nil {
-		if queryErr != nil {
-			return fmt.Errorf("capture readiness verification failed: %w", queryErr)
-		}
-		return fmt.Errorf("capture readiness verification failed: %s", failedNames)
+		return captureReadinessFailure(failedNames, lastObservedState, queryErr)
 	}
 	return nil
 }
 
-func (h *Harness) applyIndependentSourceSetup(ctx context.Context) error {
+func captureReadinessFailure(failedNames, lastObservedState string, queryErr error) error {
+	if queryErr == nil {
+		return fmt.Errorf("capture readiness verification failed: checks=%s; last_state=%s", failedNames, lastObservedState)
+	}
+	return fmt.Errorf("capture readiness verification failed: checks=%s; last_state=%s; query_error=%w", failedNames, lastObservedState, queryErr)
+}
+
+func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error) {
+	existing, err := h.diagnosticSourceSchemaExists(ctx)
+	if err != nil {
+		return false, err
+	}
+	if existing {
+		h.sourceReady = true
+		return true, nil
+	}
 	if err := h.executeSourceScript(ctx, "schema.sql", diagnosticSchemaSQL); err != nil {
-		return err
+		return false, err
 	}
 	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
-		return err
+		return false, err
 	}
-	if err := h.executeSourceScript(ctx, "register-diagnostic-v2.sql", diagnosticRegistrationSQL); err != nil {
-		return err
+	if err := h.executeSourceScript(ctx, "register-diagnostic.sql", diagnosticRegistrationSQL); err != nil {
+		return false, err
 	}
 	h.sourceReady = true
-	return nil
+	return false, nil
+}
+
+func (h *Harness) diagnosticSourceSchemaExists(ctx context.Context) (bool, error) {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return false, errors.New("connect for diagnostic source schema inspection failed")
+	}
+	defer database.Close()
+	var count int
+	if err := database.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM pg_catalog.pg_class relation
+		JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = 'public'
+		  AND relation.relkind = 'r'
+		  AND relation.relname = ANY($1)`, diagnosticSourceTables).Scan(&count); err != nil {
+		return false, errors.New("inspect diagnostic source schema failed")
+	}
+	if count != 0 && count != len(diagnosticSourceTables) {
+		return false, errors.New("attached diagnostic source schema is incomplete")
+	}
+	return count == len(diagnosticSourceTables), nil
 }
 
 func (h *Harness) grantWorkerReplicationSourceAccess(ctx context.Context) error {
@@ -1285,21 +1880,23 @@ func (h *Harness) grantWorkerReplicationSourceAccess(ctx context.Context) error 
 }
 
 func (h *Harness) executeSourceScript(ctx context.Context, name, body string) error {
-	path := filepath.Join(h.runRoot, name)
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		return errors.New("write independent source setup failed")
+	host := h.socketDir
+	if h.attached {
+		host = h.attachHost
 	}
-	arguments := []string{
-		"-X",
-		"-v", "ON_ERROR_STOP=1",
-		"-h", h.socketDir,
-		"-p", strconv.Itoa(h.port),
-		"-U", h.env.Admin.Username,
-		"-d", h.names.Database,
-		"-f", path,
+	configuration, err := pgconn.ParseConfig(postgresDSN(host, h.port, h.names.Database, h.env.Admin, true))
+	if err != nil {
+		return errors.New("parse independent source setup connection failed")
 	}
-	if err := runBoundedCommand(ctx, filepath.Join(h.env.PG18BinDir, "psql"), arguments, scrubPostgresEnvironment(os.Environ()), h.config.ProcessLogBytes, nil); err != nil {
-		return fmt.Errorf("apply independent source setup failed: %w", err)
+	connection, err := pgconn.ConnectConfig(ctx, configuration)
+	if err != nil {
+		return errors.New("connect independent source setup failed")
+	}
+	defer connection.Close(context.Background())
+	// The simple query protocol executes the complete multi-statement
+	// script and stops at the first error.
+	if err := connection.Exec(ctx, body).Close(); err != nil {
+		return fmt.Errorf("apply independent source setup %s failed: %w", name, err)
 	}
 	return nil
 }
@@ -1378,6 +1975,7 @@ func (h *Harness) verifyRunRoleSeparation(ctx context.Context, database *sql.DB)
 	}
 	for role, expectedGroup := range map[string]string{
 		h.env.Adapter.Username:  "synchro_adapter",
+		h.env.Observer.Username: "synchro_monitor",
 		h.worker.Username:       "synchro_worker",
 		h.env.Operator.Username: "synchro_operator",
 	} {
@@ -1539,7 +2137,10 @@ func scrubPostgresEnvironment(source []string) []string {
 }
 
 func (h *Harness) databaseURL(role RoleCredential) string {
-	return postgresDSN("127.0.0.1", h.port, h.names.Database, role, true)
+	if h.attached {
+		return postgresDSN(h.attachHost, h.port, h.names.Database, role, true)
+	}
+	return postgresDSN(h.listen, h.port, h.names.Database, role, true)
 }
 
 func (h *Harness) openDatabase(ctx context.Context, database string, role RoleCredential, withPassword bool) (*sql.DB, error) {
@@ -1547,15 +2148,23 @@ func (h *Harness) openDatabase(ctx context.Context, database string, role RoleCr
 		return nil, errors.New("database context is required")
 	}
 	host := h.socketDir
-	if withPassword {
-		host = "127.0.0.1"
+	if h.attached {
+		if database != h.names.Database {
+			return nil, errors.New("attached PostgreSQL database is not configured")
+		}
+		host = h.attachHost
+	} else if withPassword {
+		host = h.listen
 	}
-	databaseHandle, err := sql.Open("pgx", postgresDSN(host, h.port, database, role, withPassword))
+	databaseHandle, err := sql.Open("pgx", postgresDSN(host, h.port, database, role, true))
 	if err != nil {
 		return nil, err
 	}
 	databaseHandle.SetMaxOpenConns(4)
 	databaseHandle.SetMaxIdleConns(1)
+	h.databaseMu.Lock()
+	h.databaseHandles = append(h.databaseHandles, databaseHandle)
+	h.databaseMu.Unlock()
 	return databaseHandle, nil
 }
 
@@ -1597,6 +2206,14 @@ func (h *Harness) AdapterURL() string {
 	return h.adapterURL
 }
 
+// DatabaseURL returns the administrator connection string for this isolated run.
+func (h *Harness) DatabaseURL() string {
+	if h == nil || !h.sourceReady {
+		return ""
+	}
+	return h.databaseURL(h.env.Admin)
+}
+
 // RestartCount reports the required post-extension PostgreSQL restart count.
 func (h *Harness) RestartCount() int {
 	if h == nil {
@@ -1613,16 +2230,225 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 	return h.restartPostgres(ctx)
 }
 
+// ReinstallExtension replaces the extension atomically without restarting the postmaster.
+func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReinstallResult, returnedErr error) {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall context expired")
+	}
+	gate, err := h.acquireWALWorkerGate(ctx)
+	if err != nil {
+		return ExtensionReinstallResult{}, fmt.Errorf("fence WAL worker for extension reinstall: %w", err)
+	}
+	defer func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		returnedErr = errors.Join(returnedErr, gate.release(cleanupContext))
+	}()
+	var workerCount int
+	if err := gate.connection.QueryRowContext(ctx, `
+		SELECT count(*), COALESCE(min(pid), 0)
+		FROM pg_catalog.pg_stat_activity
+		WHERE datname = current_database()
+		  AND backend_type = 'synchro WAL consumer'`).Scan(&workerCount, &result.PriorWorkerPID); err != nil || workerCount != 1 || result.PriorWorkerPID <= 0 {
+		return ExtensionReinstallResult{}, errors.New("unique WAL worker is unavailable before extension reinstall")
+	}
+	tx, err := gate.connection.BeginTx(ctx, nil)
+	if err != nil {
+		return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
+	}
+	if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE"); err != nil {
+		_ = tx.Rollback()
+		return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
+		return ExtensionReinstallResult{}, fmt.Errorf("create synchro_pg extension failed: %w", err)
+	}
+	var publicationExists bool
+	if err := tx.QueryRowContext(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)",
+		h.names.Publication,
+	).Scan(&publicationExists); err != nil {
+		return ExtensionReinstallResult{}, errors.New("check isolated publication failed")
+	}
+	if !publicationExists {
+		if _, err := tx.ExecContext(ctx, "CREATE PUBLICATION "+quoteIdentifier(h.names.Publication)); err != nil {
+			return ExtensionReinstallResult{}, errors.New("recreate isolated publication failed")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return ExtensionReinstallResult{}, errors.New("commit extension reinstall transaction failed")
+	}
+	if err := gate.connection.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&result.ReinstallLSN); err != nil || result.ReinstallLSN == "" {
+		return ExtensionReinstallResult{}, errors.New("read extension reinstall WAL position failed")
+	}
+	return result, nil
+}
+
+func (h *Harness) acquireWALWorkerGate(ctx context.Context) (*walWorkerGate, error) {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return nil, errors.New("open WAL worker gate database failed")
+	}
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		_ = database.Close()
+		return nil, errors.New("open WAL worker gate session failed")
+	}
+	if _, err := connection.ExecContext(ctx, "SELECT pg_catalog.pg_advisory_lock($1::bigint)", walWorkerGateLockKey); err != nil {
+		_ = connection.Close()
+		_ = database.Close()
+		return nil, errors.New("acquire WAL worker gate failed")
+	}
+	gate := &walWorkerGate{database: database, connection: connection}
+	releaseAfterFailure := func() error {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return gate.release(cleanupContext)
+	}
+	for {
+		var workerBlocked bool
+		err := connection.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_stat_activity worker
+				WHERE worker.datname = current_database()
+				  AND worker.backend_type = 'synchro WAL consumer'
+				  AND pg_catalog.pg_backend_pid() = ANY(pg_catalog.pg_blocking_pids(worker.pid)))`).Scan(&workerBlocked)
+		if err != nil {
+			return nil, errors.Join(errors.New("observe blocked WAL worker failed"), releaseAfterFailure())
+		}
+		if workerBlocked {
+			return gate, nil
+		}
+		timer := time.NewTimer(processPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, errors.Join(errors.New("wait for blocked WAL worker failed"), releaseAfterFailure())
+		case <-timer.C:
+		}
+	}
+}
+
+func (gate *walWorkerGate) release(ctx context.Context) error {
+	if gate == nil || gate.released {
+		return nil
+	}
+	gate.released = true
+	var cleanupErrors []error
+	var unlocked bool
+	if err := gate.connection.QueryRowContext(
+		ctx,
+		"SELECT pg_catalog.pg_advisory_unlock($1::bigint)",
+		walWorkerGateLockKey,
+	).Scan(&unlocked); err != nil || !unlocked {
+		cleanupErrors = append(cleanupErrors, errors.New("release WAL worker gate failed"))
+	}
+	if err := gate.connection.Close(); err != nil {
+		cleanupErrors = append(cleanupErrors, errors.New("close WAL worker gate session failed"))
+	}
+	if err := gate.database.Close(); err != nil {
+		cleanupErrors = append(cleanupErrors, errors.New("close WAL worker gate database failed"))
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+// RestoreDiagnosticRegistrations restores the fixed source registrations after an extension reinstall.
+func (h *Harness) RestoreDiagnosticRegistrations(ctx context.Context) error {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return errors.New("isolated diagnostic registration restore is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("isolated diagnostic registration restore context expired")
+	}
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("open diagnostic registration restore connection failed")
+	}
+	for _, table := range diagnosticSourceTables {
+		if _, err := database.ExecContext(ctx, "DROP POLICY IF EXISTS synchro_owner_all ON public."+quoteIdentifier(table)); err != nil {
+			_ = database.Close()
+			return errors.New("reset diagnostic owner policy failed")
+		}
+	}
+	if err := database.Close(); err != nil {
+		return errors.New("close diagnostic registration restore connection failed")
+	}
+	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
+		return err
+	}
+	if err := h.executeSourceScript(ctx, "register-diagnostic-reinstall.sql", diagnosticRegistrationSQL); err != nil {
+		return err
+	}
+	return nil
+}
+
+// StopAdapterAndObserveLogDisclosure checks raw logs without returning protected values.
+// Stopping the adapter drains its output before the final observation.
+func (h *Harness) StopAdapterAndObserveLogDisclosure(ctx context.Context, canaries []string) (bool, error) {
+	if ctx == nil || h == nil || h.adapter == nil || h.postgres == nil || len(canaries) == 0 {
+		return false, errors.New("operational log observation is unavailable")
+	}
+	for _, canary := range canaries {
+		if canary == "" {
+			return false, errors.New("operational log canary is empty")
+		}
+	}
+	if err := h.adapter.Stop(ctx, h.config.ShutdownTimeout); err != nil {
+		return false, errors.New("stop adapter for operational log observation failed")
+	}
+	disclosed := false
+	observe := func(data []byte) {
+		for _, canary := range canaries {
+			if bytes.Contains(data, []byte(canary)) {
+				disclosed = true
+			}
+		}
+	}
+	for _, log := range []*boundedLog{h.adapter.log, h.postgres.log} {
+		if log == nil {
+			return false, errors.New("operational process log is unavailable")
+		}
+		log.mu.Lock()
+		truncated := log.truncated
+		observe(log.data)
+		log.mu.Unlock()
+		if truncated {
+			return false, errors.New("operational process log is truncated")
+		}
+	}
+	file, err := os.Open(filepath.Join(h.dataDir, "log", "postgresql.log"))
+	if err != nil {
+		return false, errors.New("open operational PostgreSQL log failed")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, int64(h.config.ProcessLogBytes)+1))
+	if err != nil || len(data) > h.config.ProcessLogBytes {
+		return false, errors.New("operational PostgreSQL log is incomplete")
+	}
+	observe(data)
+	return disclosed, nil
+}
+
 // FailureDiagnostics returns bounded, sanitized process output for a failed run.
 func (h *Harness) FailureDiagnostics() string {
 	if h == nil {
 		return ""
 	}
+	h.capturePostgresFileLog()
 	var diagnostics []string
 	if text := h.postgres.diagnosticTextMatching(
 		"synchro WAL",
 		"stream reset",
 		"projection bootstrap",
+		"rebuild staging snapshot failed",
 		"background worker",
 		"PANIC:",
 		"FATAL:",
@@ -1634,6 +2460,18 @@ func (h *Harness) FailureDiagnostics() string {
 		diagnostics = append(diagnostics, "adapter: "+text)
 	}
 	return strings.Join(diagnostics, " | ")
+}
+
+func (h *Harness) capturePostgresFileLog() {
+	if h.postgres == nil || h.postgres.log == nil || h.dataDir == "" {
+		return
+	}
+	file, err := os.Open(filepath.Join(h.dataDir, "log", "postgresql.log"))
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = io.Copy(h.postgres.log, io.LimitReader(file, int64(h.config.ProcessLogBytes)))
 }
 
 // Source returns a source-DML-only executor for this isolated run.
@@ -1713,7 +2551,7 @@ func (executor *SourceExecutor) ExecContext(ctx context.Context, statement strin
 		return errors.New("activate source role failed")
 	}
 	if _, err := tx.ExecContext(ctx, statement, arguments...); err != nil {
-		return errors.New("source mutation failed")
+		return sourceMutationError("source mutation failed", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("commit source mutation failed")
@@ -1826,9 +2664,38 @@ func (transaction *SourceTransaction) ExecContext(ctx context.Context, statement
 	}
 	result, err := transaction.tx.ExecContext(ctx, statement, arguments...)
 	if err != nil {
-		return nil, errors.New("source transaction mutation failed")
+		return nil, sourceMutationError("source transaction mutation failed", err)
 	}
 	return result, nil
+}
+
+// EmitCommitMarker emits a non-DML logical message for an event-free source transaction.
+func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) (uint64, error) {
+	if transaction == nil || transaction.tx == nil {
+		return 0, errors.New("source transaction is unavailable")
+	}
+	transaction.mu.Lock()
+	defer transaction.mu.Unlock()
+	if transaction.done {
+		return 0, errors.New("source transaction is complete")
+	}
+	var sourceXID uint64
+	var markerLSN string
+	if err := transaction.tx.QueryRowContext(ctx, `
+		SELECT (pg_catalog.txid_current() % 4294967296)::bigint,
+		       pg_catalog.pg_logical_emit_message(true, 'synchro_conformance_marker', '')::text
+	`).Scan(&sourceXID, &markerLSN); err != nil || sourceXID == 0 || markerLSN == "" {
+		return 0, errors.New("emit source transaction marker failed")
+	}
+	return sourceXID, nil
+}
+
+func sourceMutationError(message string, err error) error {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) && len(postgresError.Code) == 5 {
+		return fmt.Errorf("%s (SQLSTATE %s)", message, postgresError.Code)
+	}
+	return errors.New(message)
 }
 
 // Commit commits the source transaction and closes its database handle.
@@ -1872,13 +2739,13 @@ func (executor *OperatorExecutor) NewProjectionBootstrapBarrier() (*ProjectionBo
 	return &ProjectionBootstrapBarrierControl{harness: executor.harness}, nil
 }
 
-// QueueBarrier queues a reset-state lock behind active baseline staging.
-func (control *ProjectionBootstrapBarrierControl) QueueBarrier(ctx context.Context) error {
+// AcquireBarrier holds reset state only after baseline staging commits.
+func (control *ProjectionBootstrapBarrierControl) AcquireBarrier(ctx context.Context) error {
 	if control == nil || control.harness == nil {
 		return errors.New("projection bootstrap barrier control is unavailable")
 	}
 	control.mu.Lock()
-	if control.queued || control.released {
+	if control.lockAcquired || control.released {
 		control.mu.Unlock()
 		return errors.New("projection bootstrap barrier control state is invalid")
 	}
@@ -1890,11 +2757,35 @@ func (control *ProjectionBootstrapBarrierControl) QueueBarrier(ctx context.Conte
 			return err
 		}
 		if !acquiredEarly {
+			select {
+			case lockErr := <-acquired:
+				if lockErr != nil {
+					_ = tx.Rollback()
+					_ = database.Close()
+					return errors.New("acquire projection bootstrap barrier failed")
+				}
+			case <-ctx.Done():
+				_ = tx.Rollback()
+				_ = database.Close()
+				return errors.New("acquire projection bootstrap barrier timed out")
+			}
+		}
+		var baselineStaged bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM synchro.sync_stream_resets
+				WHERE operation_kind = 'projection_bootstrap'
+				  AND lifecycle = 'baseline_staged'
+			)`).Scan(&baselineStaged); err != nil {
+			_ = tx.Rollback()
+			_ = database.Close()
+			return errors.New("observe projection bootstrap barrier phase failed")
+		}
+		if baselineStaged {
 			control.mu.Lock()
 			control.database = database
 			control.tx = tx
-			control.acquired = acquired
-			control.queued = true
+			control.lockAcquired = true
 			control.mu.Unlock()
 			return nil
 		}
@@ -1993,37 +2884,6 @@ func beginProjectionBootstrapBarrierAttempt(
 	}
 }
 
-// WaitForBarrier waits until baseline staging commits and the queued lock is held.
-func (control *ProjectionBootstrapBarrierControl) WaitForBarrier(ctx context.Context) error {
-	if control == nil {
-		return errors.New("projection bootstrap barrier control is unavailable")
-	}
-	control.mu.Lock()
-	if control.lockAcquired {
-		control.mu.Unlock()
-		return nil
-	}
-	if !control.queued || control.released {
-		control.mu.Unlock()
-		return errors.New("projection bootstrap barrier control state is invalid")
-	}
-	acquired := control.acquired
-	control.mu.Unlock()
-
-	select {
-	case err := <-acquired:
-		if err != nil {
-			return errors.New("acquire projection bootstrap queued barrier failed")
-		}
-		control.mu.Lock()
-		control.lockAcquired = true
-		control.mu.Unlock()
-		return nil
-	case <-ctx.Done():
-		return errors.New("acquire projection bootstrap queued barrier timed out")
-	}
-}
-
 // ReleaseBarrier lets the production coordinator emit its activation barrier.
 func (control *ProjectionBootstrapBarrierControl) ReleaseBarrier() error {
 	if control == nil {
@@ -2040,10 +2900,10 @@ func (control *ProjectionBootstrapBarrierControl) ReleaseBarrier() error {
 	control.released = true
 	if err := control.tx.Rollback(); err != nil {
 		_ = control.database.Close()
-		return errors.New("release projection bootstrap queued barrier failed")
+		return fmt.Errorf("release projection bootstrap queued barrier rollback failed: %w", err)
 	}
 	if err := control.database.Close(); err != nil {
-		return errors.New("release projection bootstrap queued barrier failed")
+		return fmt.Errorf("release projection bootstrap queued barrier close failed: %w", err)
 	}
 	return nil
 }
@@ -2206,6 +3066,195 @@ func (executor *OperatorExecutor) DropHydrationColumn(ctx context.Context) error
 // RestoreHydrationColumn restores the fixed diagnostic column.
 func (executor *OperatorExecutor) RestoreHydrationColumn(ctx context.Context) error {
 	return executor.exec(ctx, "ALTER TABLE public.cf_schema_queue ADD COLUMN legacy_value TEXT NOT NULL DEFAULT 'restored'")
+}
+
+// RestoreDiagnosticSourceTableShapes returns every diagnostic source table to
+// the column shape schema.sql declares. It builds an isolated reference schema
+// from the authored contract, so it never derives an expected shape from a
+// transitioned source table.
+//
+// Call this only where no registry generation exists. A generation records the
+// column set it was registered against, and changing a live table shape makes
+// the WAL consumer reject the registration.
+func (executor *OperatorExecutor) RestoreDiagnosticSourceTableShapes(ctx context.Context) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil {
+		return errors.New("operator executor is unavailable")
+	}
+	if err := executor.harness.executeSourceScript(ctx, "restore-diagnostic-source-table-shapes.sql", diagnosticSourceTableShapeRestoreSQL()); err != nil {
+		return fmt.Errorf("restore diagnostic source table shapes failed: %w", err)
+	}
+	return nil
+}
+
+func diagnosticSourceTableShapeRestoreSQL() string {
+	tables := make([]string, 0, len(diagnosticSourceTables))
+	for _, table := range diagnosticSourceTables {
+		tables = append(tables, quotePostgresLiteral(table))
+	}
+	return "BEGIN;\nCREATE SCHEMA " + diagnosticSourceRestoreSchemaName + ";\nSET LOCAL search_path TO " + diagnosticSourceRestoreSchemaName + ";\n" + diagnosticSchemaSQL + `
+DO $restore$
+DECLARE
+	source_table text;
+	source_relation pg_catalog.regclass;
+	authored_relation pg_catalog.regclass;
+	authored_column record;
+	obsolete_column record;
+BEGIN
+	FOR source_table IN
+		SELECT table_name
+		FROM pg_catalog.unnest(ARRAY[` + strings.Join(tables, ", ") + `]::text[]) AS tables(table_name)
+	LOOP
+		source_relation := pg_catalog.format('public.%I', source_table)::pg_catalog.regclass;
+		authored_relation := pg_catalog.format('` + diagnosticSourceRestoreSchemaName + `.%I', source_table)::pg_catalog.regclass;
+		FOR authored_column IN
+			SELECT expected.attname,
+			       expected.atttypid,
+			       expected.atttypmod,
+			       pg_catalog.format_type(expected.atttypid, expected.atttypmod) AS type_name,
+			       expected.attnotnull,
+			       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
+			FROM pg_catalog.pg_attribute AS expected
+			LEFT JOIN pg_catalog.pg_attrdef AS default_value
+			  ON default_value.adrelid = expected.attrelid
+			 AND default_value.adnum = expected.attnum
+			WHERE expected.attrelid = authored_relation
+			  AND expected.attnum > 0
+			  AND NOT expected.attisdropped
+			ORDER BY expected.attnum
+		LOOP
+			IF NOT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_attribute AS actual
+				WHERE actual.attrelid = source_relation
+				  AND actual.attname = authored_column.attname
+				  AND actual.attnum > 0
+				  AND NOT actual.attisdropped
+			) THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ADD COLUMN %I %s',
+					source_table, authored_column.attname, authored_column.type_name
+				);
+			ELSIF EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_attribute AS actual
+				WHERE actual.attrelid = source_relation
+				  AND actual.attname = authored_column.attname
+				  AND actual.attnum > 0
+				  AND NOT actual.attisdropped
+				  AND (actual.atttypid <> authored_column.atttypid OR actual.atttypmod <> authored_column.atttypmod)
+			) THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I TYPE %s USING %I::%s',
+					source_table, authored_column.attname, authored_column.type_name,
+					authored_column.attname, authored_column.type_name
+				);
+			END IF;
+
+			IF authored_column.default_expression IS NULL THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I DROP DEFAULT',
+					source_table, authored_column.attname
+				);
+			ELSE
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I SET DEFAULT %s',
+					source_table, authored_column.attname, authored_column.default_expression
+				);
+			END IF;
+
+			IF authored_column.attnotnull THEN
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I SET NOT NULL',
+					source_table, authored_column.attname
+				);
+			ELSE
+				EXECUTE pg_catalog.format(
+					'ALTER TABLE public.%I ALTER COLUMN %I DROP NOT NULL',
+					source_table, authored_column.attname
+				);
+			END IF;
+		END LOOP;
+
+		FOR obsolete_column IN
+			SELECT actual.attname
+			FROM pg_catalog.pg_attribute AS actual
+			WHERE actual.attrelid = source_relation
+			  AND actual.attnum > 0
+			  AND NOT actual.attisdropped
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_attribute AS expected
+				WHERE expected.attrelid = authored_relation
+				  AND expected.attname = actual.attname
+				  AND expected.attnum > 0
+				  AND NOT expected.attisdropped
+			)
+		LOOP
+			EXECUTE pg_catalog.format(
+				'ALTER TABLE public.%I DROP COLUMN %I', source_table, obsolete_column.attname
+			);
+		END LOOP;
+	END LOOP;
+END
+$restore$;
+DROP SCHEMA ` + diagnosticSourceRestoreSchemaName + ` CASCADE;
+COMMIT;`
+}
+
+// RestoreSchemaQueueFixture returns the schema-queue fixture to the column
+// shape schema.sql declares. A scenario transitions the fixture field with a
+// data definition change, and no extension reinstall reverses that change, so
+// a later scenario that binds the authored field finds it absent.
+//
+// Call this only where no registry generation exists. A generation records the
+// column set it was registered against, and dropping a column that a live
+// generation names makes the WAL consumer reject the registration.
+func (executor *OperatorExecutor) RestoreSchemaQueueFixture(ctx context.Context) error {
+	return executor.exec(ctx, `DO $$
+DECLARE
+	obsolete text;
+BEGIN
+	FOR obsolete IN
+		SELECT attname
+		FROM pg_catalog.pg_attribute
+		WHERE attrelid = 'public.cf_schema_queue'::regclass
+		  AND attnum > 0 AND NOT attisdropped
+		  AND attname LIKE 'queue\_value\_%'
+	LOOP
+		EXECUTE format('ALTER TABLE public.cf_schema_queue DROP COLUMN %I', obsolete);
+	END LOOP;
+	IF NOT EXISTS (
+		SELECT 1
+		FROM pg_catalog.pg_attribute
+		WHERE attrelid = 'public.cf_schema_queue'::regclass
+		  AND attnum > 0 AND NOT attisdropped
+		  AND attname = 'legacy_value'
+	) THEN
+		ALTER TABLE public.cf_schema_queue ADD COLUMN legacy_value TEXT NOT NULL DEFAULT '';
+	END IF;
+END $$`)
+}
+
+// GrantUserScope grants one scope to one user.
+func (executor *OperatorExecutor) GrantUserScope(ctx context.Context, userID, scopeID string) error {
+	if ctx == nil {
+		return errors.New("native user scope context is required")
+	}
+	if userID == "" || scopeID == "" {
+		return errors.New("native user scope identity is incomplete")
+	}
+	return executor.exec(ctx, "SELECT synchro.synchro_grant_user_scope($1, $2)", userID, scopeID)
+}
+
+// RevokeUserScope revokes one scope from one user.
+func (executor *OperatorExecutor) RevokeUserScope(ctx context.Context, userID, scopeID string) error {
+	if ctx == nil {
+		return errors.New("native user scope context is required")
+	}
+	if userID == "" || scopeID == "" {
+		return errors.New("native user scope identity is incomplete")
+	}
+	return executor.exec(ctx, "SELECT synchro.synchro_revoke_user_scope($1, $2)", userID, scopeID)
 }
 
 // RegisterSchemaQueue refreshes the fixed schema-queue registration.
@@ -3353,6 +4402,204 @@ func (executor *OperatorExecutor) RestoreCrossScopeTable(ctx context.Context) er
 	return executor.ReloadRegistry(ctx)
 }
 
+// ConfigureTypedKeyCollisionTables installs text and integer key tables for pull deduplication proof.
+func (executor *OperatorExecutor) ConfigureTypedKeyCollisionTables(ctx context.Context) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return errors.New("operator executor is unavailable")
+	}
+	sourceRole := quoteIdentifier(executor.harness.sourceRole)
+	for step, statement := range []string{
+		`CREATE TABLE public.cf_string_keys (
+            id text PRIMARY KEY,
+            owner_id text NOT NULL,
+            value text NOT NULL,
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            deleted_at timestamptz,
+            enabled boolean NOT NULL DEFAULT true
+        )`,
+		`CREATE TABLE public.cf_int_keys (
+            id integer PRIMARY KEY,
+            owner_id text NOT NULL,
+            value text NOT NULL,
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            deleted_at timestamptz,
+            enabled boolean NOT NULL DEFAULT true
+        )`,
+		"GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_string_keys, public.cf_int_keys TO synchro_owner",
+		"GRANT SELECT ON TABLE public.cf_string_keys, public.cf_int_keys TO synchro_worker",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.cf_string_keys, public.cf_int_keys TO " + sourceRole,
+		"ALTER TABLE public.cf_string_keys ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE public.cf_int_keys ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY synchro_owner_all ON public.cf_string_keys AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)",
+		"CREATE POLICY synchro_owner_all ON public.cf_int_keys AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)",
+		"CREATE POLICY synchro_source_all ON public.cf_string_keys AS PERMISSIVE FOR ALL TO " + sourceRole + " USING (true) WITH CHECK (true)",
+		"CREATE POLICY synchro_source_all ON public.cf_int_keys AS PERMISSIVE FOR ALL TO " + sourceRole + " USING (true) WITH CHECK (true)",
+		"SELECT synchro.synchro_prepare_projection_view('public.cf_string_keys', 'cf_string_keys', ARRAY['owner_id'])",
+		"SELECT synchro.synchro_prepare_projection_view('public.cf_int_keys', 'cf_int_keys', ARRAY['owner_id'])",
+		`CREATE FUNCTION public.cf_string_keys_membership(p_id text)
+        RETURNS SETOF text
+        LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+        BEGIN ATOMIC
+            SELECT 'user:' || (p.owner_id #>> '{}')
+            FROM synchro_projection.cf_string_keys AS p
+            WHERE p.record_id = p_id AND NOT p.deleted;
+        END`,
+		`CREATE FUNCTION public.cf_int_keys_membership(p_id integer)
+        RETURNS SETOF text
+        LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+        BEGIN ATOMIC
+            SELECT 'user:' || (p.owner_id #>> '{}')
+            FROM synchro_projection.cf_int_keys AS p
+            WHERE p.record_id = p_id::text AND NOT p.deleted;
+        END`,
+		"REVOKE ALL ON FUNCTION public.cf_string_keys_membership(text), public.cf_int_keys_membership(integer) FROM PUBLIC",
+		"GRANT EXECUTE ON FUNCTION public.cf_string_keys_membership(text), public.cf_int_keys_membership(integer) TO synchro_owner, synchro_worker",
+		`SELECT synchro.synchro_register_table(
+            'public.cf_string_keys', 'public.cf_string_keys_membership', 'single_scope',
+            'id', 'updated_at', 'deleted_at', 'enabled'
+        )`,
+		`SELECT synchro.synchro_register_table(
+            'public.cf_int_keys', 'public.cf_int_keys_membership', 'single_scope',
+            'id', 'updated_at', 'deleted_at', 'enabled'
+        )`,
+	} {
+		if err := executor.exec(ctx, statement); err != nil {
+			return fmt.Errorf("configure typed key collision tables step %d failed: %w", step+1, err)
+		}
+	}
+	return executor.ReloadRegistry(ctx)
+}
+
+// ConfigureClass1MembershipTransition installs the fixed Class 1 rule change.
+func (executor *OperatorExecutor) ConfigureClass1MembershipTransition(ctx context.Context, affectedScope string) (int64, int64, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || affectedScope == "" {
+		return 0, 0, errors.New("Class 1 membership control is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return 0, 0, errors.New("open Class 1 membership control connection failed")
+	}
+	defer database.Close()
+	transaction, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, errors.New("begin Class 1 membership control failed")
+	}
+	defer transaction.Rollback()
+
+	var priorMembershipGeneration int64
+	if err := transaction.QueryRowContext(ctx, `
+		SELECT membership_generation
+		FROM synchro.sync_scope_state
+		WHERE scope_id = $1`, affectedScope).Scan(&priorMembershipGeneration); err != nil || priorMembershipGeneration <= 0 {
+		return 0, 0, errors.New("Class 1 affected scope is not authoritative")
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		CREATE OR REPLACE FUNCTION public.cf_items_membership(p_id uuid)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC
+			SELECT 'user:' || (p.owner_id #>> '{}')
+			FROM synchro_projection.cf_items AS p
+			WHERE p.record_id = p_id::text
+			  AND NOT p.deleted
+			  AND pg_catalog.length(p.owner_id #>> '{}') > 0;
+		END`); err != nil {
+		return 0, 0, errors.New("replace Class 1 membership rule failed")
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		SELECT synchro.synchro_register_table(
+			'public.cf_items',
+			'public.cf_items_membership',
+			'single_scope',
+			'id', 'updated_at', 'deleted_at', 'enabled',
+			p_affected_scopes => ARRAY[$1]::text[]
+		)`, affectedScope); err != nil {
+		return 0, 0, errors.New("stage Class 1 membership rule failed")
+	}
+	var runtimeRegistryGeneration int64
+	var affectedScopesJSON string
+	if err := transaction.QueryRowContext(ctx, `
+		SELECT stage.registry_generation, pg_catalog.array_to_json(stage.affected_scopes)::text
+		FROM synchro.sync_registry_membership_stages stage
+		JOIN synchro.sync_registry registry
+		  ON registry.registry_generation = stage.registry_generation
+		 AND registry.relation_id = ANY(stage.target_relation_ids)
+		WHERE stage.state = 'pending'
+		  AND registry.physical_schema = 'public'
+		  AND registry.physical_relation = 'cf_items'
+		ORDER BY stage.registry_generation DESC
+		LIMIT 1`).Scan(&runtimeRegistryGeneration, &affectedScopesJSON); err != nil || runtimeRegistryGeneration <= 0 {
+		return 0, 0, errors.New("observe staged Class 1 membership rule failed")
+	}
+	var persistedScopes []string
+	if json.Unmarshal([]byte(affectedScopesJSON), &persistedScopes) != nil || len(persistedScopes) != 1 || persistedScopes[0] != affectedScope {
+		return 0, 0, errors.New("staged Class 1 affected scopes are invalid")
+	}
+	if err := transaction.Commit(); err != nil {
+		return 0, 0, errors.New("commit Class 1 membership rule failed")
+	}
+	return runtimeRegistryGeneration, priorMembershipGeneration, nil
+}
+
+// WaitForClass1MembershipActivation verifies the fixed durable Class 1 result.
+func (executor *OperatorExecutor) WaitForClass1MembershipActivation(ctx context.Context, registryGeneration int64, affectedScope string, priorMembershipGeneration int64, timeout time.Duration) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || registryGeneration <= 0 || affectedScope == "" || priorMembershipGeneration <= 0 || timeout <= 0 {
+		return errors.New("Class 1 membership activation observation is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return errors.New("open Class 1 membership activation connection failed")
+	}
+	defer database.Close()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		var state, affectedScopesJSON string
+		var membershipGeneration int64
+		err := database.QueryRowContext(ctx, `
+			SELECT stage.state,
+			       COALESCE(pg_catalog.array_to_json(stage.affected_scopes)::text, 'null'),
+			       scope.membership_generation
+			FROM synchro.sync_registry_membership_stages stage
+			JOIN synchro.sync_scope_state scope ON scope.scope_id = $2
+			WHERE stage.registry_generation = $1`, registryGeneration, affectedScope).Scan(
+			&state,
+			&affectedScopesJSON,
+			&membershipGeneration,
+		)
+		if err != nil {
+			return errors.New("read Class 1 membership activation failed")
+		}
+		if state == "activated" {
+			var affectedScopes []string
+			if json.Unmarshal([]byte(affectedScopesJSON), &affectedScopes) != nil || len(affectedScopes) != 1 || affectedScopes[0] != affectedScope {
+				return errors.New("activated Class 1 affected scopes are invalid")
+			}
+			if membershipGeneration != priorMembershipGeneration+1 {
+				return errors.New("Class 1 membership generation did not advance exactly once")
+			}
+			return nil
+		}
+		if state != "pending" {
+			return errors.New("Class 1 membership activation state is invalid")
+		}
+		timer := time.NewTimer(processPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("Class 1 membership activation wait was canceled")
+		case <-deadline.C:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("Class 1 membership activation wait expired")
+		case <-timer.C:
+		}
+	}
+}
+
 // ReloadRegistry requests one PostgreSQL configuration reload.
 func (executor *OperatorExecutor) ReloadRegistry(ctx context.Context) error {
 	return executor.exec(ctx, "SELECT pg_reload_conf()")
@@ -3450,6 +4697,133 @@ func (executor *OperatorExecutor) WorkerPeekDiagnostics(ctx context.Context) (st
 	return fmt.Sprintf("message_count=%d", count), nil
 }
 
+// CreateWALProgressOrderViolation commits one source row behind persisted progress.
+func (executor *OperatorExecutor) CreateWALProgressOrderViolation(ctx context.Context, recordID string) error {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+		return errors.New("WAL progress order control identity is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return errors.New("open WAL progress order control connection failed")
+	}
+	defer database.Close()
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.New("begin WAL progress order control failed")
+	}
+	defer tx.Rollback()
+	var clean bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT NOT EXISTS (
+			       SELECT 1 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
+		       )
+		   AND NOT EXISTS (
+			       SELECT 1 FROM cf_items WHERE id = $1
+		       )`, recordID).Scan(&clean); err != nil || !clean {
+		return errors.New("WAL progress order control precondition failed")
+	}
+	if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE "+quoteIdentifier(executor.harness.sourceRole)); err != nil {
+		return errors.New("activate WAL progress order source role failed")
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		recordID,
+		"diagnostic-user",
+		"mutation-progress-order",
+	); err != nil {
+		return errors.New("create WAL progress order source row failed")
+	}
+	if _, err := tx.ExecContext(ctx, "RESET ROLE"); err != nil {
+		return errors.New("restore WAL progress order operator role failed")
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE synchro.sync_wal_progress
+		SET materialized_commit_lsn = 'FFFFFFFF/FFFFFFFF'::pg_lsn,
+		    materialized_end_lsn = 'FFFFFFFF/FFFFFFFF'::pg_lsn,
+		    updated_at = now()
+		WHERE singleton`); err != nil {
+		return errors.New("persist WAL progress order violation failed")
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("commit WAL progress order control failed")
+	}
+	return nil
+}
+
+// ObserveWALProgressOrder returns durable ordering-violation handling evidence.
+func (executor *OperatorExecutor) ObserveWALProgressOrder(ctx context.Context, recordID string) (WALProgressOrderObservation, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return WALProgressOrderObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+		return WALProgressOrderObservation{}, errors.New("WAL progress order observation identity is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return WALProgressOrderObservation{}, errors.New("open WAL progress order observation connection failed")
+	}
+	defer database.Close()
+	var observation WALProgressOrderObservation
+	err = database.QueryRowContext(ctx, `
+		WITH poison AS (
+			SELECT commit_lsn, failure_class, relation_id
+			FROM synchro.sync_wal_poison
+			WHERE lifecycle = 'active'
+		)
+		SELECT EXISTS (
+			       SELECT 1 FROM poison
+		       ),
+		       COALESCE((
+			       SELECT failure_class FROM poison LIMIT 1
+		       ), ''),
+		       EXISTS (
+			       SELECT 1
+			       FROM poison
+			       JOIN synchro.sync_registry registry
+			         ON registry.relation_id::uuid = poison.relation_id
+			       JOIN synchro.sync_registry_generations generation
+			         ON generation.generation = registry.registry_generation
+			       WHERE registry.table_name = 'cf_items'
+			         AND generation.state = 'active'
+		       ),
+		       EXISTS (
+			       SELECT 1 FROM cf_items
+			       WHERE id = $1
+			         AND owner_id = 'diagnostic-user'
+			         AND value = 'mutation-progress-order'
+		       ),
+		       COALESCE((
+			       SELECT progress.materialized_commit_lsn >= poison.commit_lsn
+			       FROM poison
+			       CROSS JOIN synchro.sync_wal_progress progress
+			       WHERE progress.singleton
+		       ), false),
+		       EXISTS (
+			       SELECT 1 FROM synchro.sync_changelog
+			       WHERE table_name = 'cf_items' AND record_id = $2
+		       ),
+		       COALESCE((
+			       SELECT state = 'blocked' FROM synchro.sync_wal_worker_state
+			       WHERE worker_id = 'synchro_wal_consumer'
+		       ), false)`, recordID, recordID).Scan(
+		&observation.PoisonActive,
+		&observation.FailureClass,
+		&observation.RelationIDMatchesRegistry,
+		&observation.SourceRowPresent,
+		&observation.ProgressCommitAtOrAhead,
+		&observation.RecordMaterialized,
+		&observation.WorkerBlocked,
+	)
+	if err != nil {
+		return WALProgressOrderObservation{}, errors.New("read WAL progress order observation failed")
+	}
+	return observation, nil
+}
+
 // ObserveWALProgress returns the durable replication acknowledgement position.
 func (executor *OperatorExecutor) ObserveWALProgress(ctx context.Context) (WALProgressObservation, error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
@@ -3462,10 +4836,325 @@ func (executor *OperatorExecutor) ObserveWALProgress(ctx context.Context) (WALPr
 	defer database.Close()
 	var observation WALProgressObservation
 	if err := database.QueryRowContext(ctx, `
-		SELECT COALESCE(acknowledged_end_lsn::text, '')
-		FROM synchro.sync_wal_progress
-		WHERE singleton`).Scan(&observation.AcknowledgedEndLSN); err != nil {
+		SELECT COALESCE(progress.acknowledged_end_lsn::text, ''),
+		       COALESCE(slot.confirmed_flush_lsn::text, ''),
+		       COALESCE(progress.acknowledged_end_lsn = slot.confirmed_flush_lsn, false)
+		FROM synchro.sync_wal_progress progress
+		JOIN synchro.sync_runtime_state runtime ON runtime.singleton
+		JOIN pg_catalog.pg_replication_slots slot
+		  ON slot.slot_name = runtime.active_slot_name
+		WHERE progress.singleton`).Scan(
+		&observation.AcknowledgedEndLSN,
+		&observation.SlotConfirmedFlushLSN,
+		&observation.SlotMatchesProgress,
+	); err != nil {
 		return WALProgressObservation{}, errors.New("read WAL progress observation failed")
+	}
+	return observation, nil
+}
+
+// CurrentWALWorkerPID returns the unique current WAL consumer process ID.
+func (executor *OperatorExecutor) CurrentWALWorkerPID(ctx context.Context) (int, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return 0, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil {
+		return 0, errors.New("WAL worker process context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, errors.New("WAL worker process context expired")
+	}
+	observationContext, cancel := context.WithTimeout(ctx, environmentCommandTimeout)
+	defer cancel()
+	database, err := executor.harness.openDatabase(observationContext, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return 0, errors.New("open WAL worker process observation connection failed")
+	}
+	defer database.Close()
+	var count int
+	var pid int
+	if err := database.QueryRowContext(observationContext, `
+		SELECT count(*), COALESCE(min(pid), 0)
+		FROM pg_catalog.pg_stat_activity
+		WHERE datname = current_database()
+		  AND backend_type = 'synchro WAL consumer'`).Scan(&count, &pid); err != nil {
+		return 0, errors.New("read WAL worker process observation failed")
+	}
+	if count != 1 || pid <= 0 {
+		return 0, errors.New("unique WAL worker process is unavailable")
+	}
+	return pid, nil
+}
+
+// ObserveExtensionReinstall returns worker and registry state after an extension reinstall.
+func (executor *OperatorExecutor) ObserveExtensionReinstall(ctx context.Context, reinstallLSN string) (ExtensionReinstallObservation, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return ExtensionReinstallObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || reinstallLSN == "" {
+		return ExtensionReinstallObservation{}, errors.New("extension reinstall observation is invalid")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return ExtensionReinstallObservation{}, errors.New("open extension reinstall observation connection failed")
+	}
+	defer database.Close()
+	observation := ExtensionReinstallObservation{}
+	if err := database.QueryRowContext(ctx, `
+		WITH worker AS (
+			SELECT count(*) AS worker_count, COALESCE(min(pid), 0) AS worker_pid
+			FROM pg_catalog.pg_stat_activity
+			WHERE datname = current_database()
+			  AND backend_type = 'synchro WAL consumer'
+		), active_registry AS (
+			SELECT generation
+			FROM synchro.sync_registry_generations
+			WHERE state = 'active' AND validated
+		), active_slot AS (
+			SELECT slot.slot_name::text, slot.restart_lsn::text, slot.active,
+			       slot.restart_lsn >= $1::pg_lsn AS restart_lsn_is_fresh
+			FROM synchro.sync_runtime_state runtime
+			JOIN pg_catalog.pg_replication_slots slot
+			  ON slot.slot_name = runtime.active_slot_name
+			WHERE runtime.singleton
+		)
+		SELECT CASE WHEN worker.worker_count = 1 THEN worker.worker_pid ELSE 0 END,
+		       COALESCE(active_slot.slot_name, ''),
+		       COALESCE(active_slot.restart_lsn, ''),
+		       COALESCE(active_slot.active, false),
+		       COALESCE(active_slot.restart_lsn_is_fresh, false),
+		       COALESCE(active_registry.generation, 0),
+		       COALESCE((
+			   SELECT registry_generation
+			   FROM synchro.sync_wal_worker_state
+			   WHERE worker_id = 'synchro_wal_consumer'
+		       ), 0),
+		       (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'),
+		       NOT EXISTS (
+			   SELECT 1
+			   FROM synchro.sync_wal_poison
+			   WHERE lifecycle = 'active' AND failure_class = 'validation_failed'
+		       )
+		FROM worker
+		LEFT JOIN active_slot ON true
+		LEFT JOIN active_registry ON true`, reinstallLSN).Scan(
+		&observation.WorkerPID,
+		&observation.ActiveSlotName,
+		&observation.RestartLSN,
+		&observation.SlotActive,
+		&observation.RestartLSNAtOrAfterReinstall,
+		&observation.ActiveRegistryGeneration,
+		&observation.WorkerRegistryGeneration,
+		&observation.PendingRegistryGenerationCount,
+		&observation.NoValidationFailurePoison,
+	); err != nil {
+		return ExtensionReinstallObservation{}, errors.New("read extension reinstall observation failed")
+	}
+	return observation, nil
+}
+
+// RunWALReplayRestartControl forces a worker exit after durable materialization and before acknowledgement.
+func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context, recordID string) (observation WALReplayRestartObservation, returnedErr error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return WALReplayRestartObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+		return WALReplayRestartObservation{}, errors.New("WAL replay restart identity is invalid")
+	}
+	harness := executor.harness
+	database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("open WAL replay restart connection failed")
+	}
+	defer database.Close()
+
+	observation.PriorProgress, err = executor.ObserveWALProgress(ctx)
+	if err != nil || observation.PriorProgress.AcknowledgedEndLSN == "" ||
+		observation.PriorProgress.SlotConfirmedFlushLSN == "" ||
+		!observation.PriorProgress.SlotMatchesProgress {
+		return WALReplayRestartObservation{}, errors.New("WAL replay restart precondition failed")
+	}
+
+	var lockTransaction *sql.Tx
+	var replicationConnection *pgconn.PgConn
+	defer func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var cleanupErrors []error
+		if replicationConnection != nil {
+			if err := replicationConnection.Close(cleanupContext); err != nil {
+				cleanupErrors = append(cleanupErrors, errors.New("close WAL replay restart replication connection failed"))
+			}
+		}
+		if lockTransaction != nil {
+			if err := lockTransaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+				cleanupErrors = append(cleanupErrors, errors.New("rollback WAL replay restart lock failed"))
+			}
+		}
+		returnedErr = errors.Join(returnedErr, errors.Join(cleanupErrors...))
+	}()
+
+	lockTransaction, err = database.BeginTx(ctx, nil)
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("begin WAL replay restart lock failed")
+	}
+	if _, err := lockTransaction.ExecContext(ctx, "LOCK TABLE synchro.sync_wal_transactions IN ACCESS EXCLUSIVE MODE"); err != nil {
+		return WALReplayRestartObservation{}, errors.New("lock WAL replay materialization failed")
+	}
+	if err := (&SourceExecutor{harness: harness}).ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		recordID,
+		"diagnostic-user",
+		"restart-before-acknowledgement",
+	); err != nil {
+		return WALReplayRestartObservation{}, errors.New("commit WAL replay restart source row failed")
+	}
+
+	var workerPID int64
+	blockedContext, blockedCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(blockedContext, func(attemptContext context.Context) (bool, error) {
+		err := database.QueryRowContext(attemptContext, `
+			SELECT activity.pid
+			FROM pg_catalog.pg_stat_activity activity
+			JOIN pg_catalog.pg_locks waiting
+			  ON waiting.pid = activity.pid AND NOT waiting.granted
+			WHERE activity.datname = current_database()
+			  AND activity.backend_type = 'synchro WAL consumer'
+			  AND waiting.relation = 'synchro.sync_wal_transactions'::regclass
+			LIMIT 1`).Scan(&workerPID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil && workerPID > 0, err
+	})
+	blockedCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for blocked WAL materialization failed")
+	}
+
+	replicationDSN := postgresDSN("127.0.0.1", harness.port, harness.names.Database, harness.worker, true) + " replication=database"
+	replicationConnection, err = pgconn.Connect(ctx, replicationDSN)
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("open WAL replay restart replication connection failed")
+	}
+	replicationCommand := "START_REPLICATION SLOT " + quoteIdentifier(harness.names.ReplicationSlot) +
+		" LOGICAL " + observation.PriorProgress.SlotConfirmedFlushLSN +
+		" (proto_version '1', publication_names " + quotePostgresLiteral(harness.names.Publication) + ", messages 'true')"
+	// Slot ownership prevents acknowledgement while the worker commits materialization.
+	replicationConnection.Exec(ctx, replicationCommand)
+	replicationPID := int64(replicationConnection.PID())
+	slotContext, slotCancel := context.WithTimeout(ctx, 10*time.Second)
+	err = waitUntil(slotContext, func(attemptContext context.Context) (bool, error) {
+		var activePID sql.NullInt64
+		if err := database.QueryRowContext(attemptContext, `
+			SELECT active_pid
+			FROM pg_catalog.pg_replication_slots
+			WHERE slot_name = $1`, harness.names.ReplicationSlot).Scan(&activePID); err != nil {
+			return false, err
+		}
+		return activePID.Valid && activePID.Int64 == replicationPID, nil
+	})
+	slotCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("hold WAL slot before acknowledgement failed")
+	}
+
+	if err := lockTransaction.Commit(); err != nil {
+		return WALReplayRestartObservation{}, errors.New("release WAL replay materialization failed")
+	}
+	lockTransaction = nil
+
+	materializedContext, materializedCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(materializedContext, func(attemptContext context.Context) (bool, error) {
+		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		observation.BeforeRestart = pipeline
+		observation.BeforeStages = stages
+		return len(pipeline.Records) == 1 &&
+			pipeline.Records[0].FenceCoverage == "materialized" &&
+			!pipeline.ContiguousAcknowledged &&
+			pipeline.AcknowledgedEndLSN == observation.PriorProgress.AcknowledgedEndLSN &&
+			pipeline.SlotConfirmedFlushLSN == observation.PriorProgress.SlotConfirmedFlushLSN &&
+			stages.PendingFences == 0 && stages.EventCount > 0 && stages.ChangeCount > 0, nil
+	})
+	materializedCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for unacknowledged WAL materialization failed")
+	}
+	workerExitContext, workerExitCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(workerExitContext, func(attemptContext context.Context) (bool, error) {
+		var workerPresent bool
+		if err := database.QueryRowContext(attemptContext, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_stat_activity
+				WHERE datname = current_database()
+				  AND backend_type = 'synchro WAL consumer'
+				  AND pid = $1
+			)`, workerPID).Scan(&workerPresent); err != nil {
+			return false, err
+		}
+		return !workerPresent, nil
+	})
+	workerExitCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for WAL worker exit before acknowledgement failed")
+	}
+	observation.WorkerExitedBeforeAcknowledgement = true
+
+	if err := replicationConnection.Close(ctx); err != nil {
+		return WALReplayRestartObservation{}, errors.New("release WAL replay restart slot failed")
+	}
+	replicationConnection = nil
+
+	workerContext, workerCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(workerContext, func(attemptContext context.Context) (bool, error) {
+		var replacementPID int64
+		err := database.QueryRowContext(attemptContext, `
+			SELECT pid
+			FROM pg_catalog.pg_stat_activity
+			WHERE datname = current_database()
+			  AND backend_type = 'synchro WAL consumer'
+			  AND pid <> $1`, workerPID).Scan(&replacementPID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		observation.WorkerRestarted = replacementPID > 0
+		return observation.WorkerRestarted, nil
+	})
+	workerCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for WAL worker restart failed")
+	}
+
+	replayedContext, replayedCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = waitUntil(replayedContext, func(attemptContext context.Context) (bool, error) {
+		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		if err != nil {
+			return false, err
+		}
+		observation.AfterRestart = pipeline
+		observation.AfterStages = stages
+		return len(pipeline.Records) == 1 && pipeline.ContiguousAcknowledged &&
+			pipeline.AcknowledgementMatchesObservedEnd && pipeline.SlotMatchesObservedEnd, nil
+	})
+	replayedCancel()
+	if err != nil {
+		return WALReplayRestartObservation{}, errors.New("wait for WAL replay after worker restart failed")
 	}
 	return observation, nil
 }
@@ -3495,7 +5184,8 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 		       c.event_ordinal,
 		       c.effect_ordinal,
 		       fence.coverage,
-		       c.row_version::text
+		       c.row_version::text,
+		       transaction.replay_count
 		FROM synchro.sync_changelog c
 		JOIN synchro.sync_wal_transactions transaction
 		  ON transaction.stream_generation = c.stream_generation
@@ -3504,6 +5194,7 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 		  ON event.stream_generation = c.stream_generation
 		 AND event.commit_lsn = c.commit_lsn
 		 AND event.event_ordinal = c.event_ordinal
+		 AND event.relation_id = c.relation_id
 		JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
 		WHERE c.table_name = 'cf_items'
 		  AND c.record_id = ANY($1)
@@ -3523,6 +5214,7 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 			&record.EffectOrdinal,
 			&record.FenceCoverage,
 			&record.RowVersion,
+			&record.ReplayCount,
 		); err != nil {
 			return WALPipelineObservation{}, errors.New("scan WAL record observation failed")
 		}
@@ -4291,6 +5983,9 @@ func validateSourceDML(statement string) error {
 			break
 		}
 	}
+	if table == "cf_string_keys" || table == "cf_int_keys" {
+		allowed = true
+	}
 	if !allowed {
 		return errors.New("source mutation must target an independent source table")
 	}
@@ -4332,13 +6027,40 @@ func (h *Harness) Close(ctx context.Context) error {
 }
 
 func (h *Harness) cleanup(ctx context.Context) error {
-	var failures []error
-	if err := runCleanupStage(ctx, processCleanupStageTimeout(h.config.ShutdownTimeout), h.stopAdapter); err != nil {
-		failures = append(failures, err)
+	if h.attached {
+		operations := []func(context.Context) error{
+			h.stopAdapter,
+			h.closeDatabaseHandles,
+		}
+		if h.env.attachLifecycle.destroyOnClose {
+			operations = append(operations, h.destroyAttachedRun)
+		}
+		failures := runCleanupLifecycle(ctx, processCleanupStageTimeout(h.config.ShutdownTimeout), operations...)
+		if h.env.verified {
+			if err := verifyEnvironmentArtifactIdentity(h.env); err != nil {
+				failures = append(failures, err)
+			}
+		}
+		if err := h.removeRunRoot(); err != nil {
+			failures = append(failures, err)
+		}
+		if h.lock != nil {
+			if err := h.lock.Release(); err != nil {
+				failures = append(failures, err)
+			} else {
+				h.lock = nil
+			}
+		}
+		return errors.Join(failures...)
 	}
-	if err := h.dropRunTopology(ctx); err != nil {
-		failures = append(failures, err)
-	}
+	failures := runCleanupLifecycle(
+		ctx,
+		processCleanupStageTimeout(h.config.ShutdownTimeout),
+		h.stopAdapter,
+		h.closeDatabaseHandles,
+		h.detachWorker,
+		h.dropRunTopology,
+	)
 	postmasterStopped := true
 	if err := runCleanupStage(ctx, processCleanupStageTimeout(h.config.ShutdownTimeout), h.stopPostgres); err != nil {
 		postmasterStopped = false
@@ -4386,6 +6108,27 @@ func (h *Harness) cleanup(ctx context.Context) error {
 		return errors.Join(failures...)
 	}
 	return nil
+}
+
+func (h *Harness) destroyAttachedRun(ctx context.Context) error {
+	response, err := h.runAttachLifecycleCommand(ctx, "destroy")
+	if err != nil {
+		return err
+	}
+	if response.Destroyed == nil || !*response.Destroyed || response.AttachDatabaseURL != "" {
+		return errors.New("attached PostgreSQL destroy response is invalid")
+	}
+	return nil
+}
+
+func runCleanupLifecycle(parent context.Context, timeout time.Duration, operations ...func(context.Context) error) []error {
+	var failures []error
+	for _, operation := range operations {
+		if err := runCleanupStage(parent, timeout, operation); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return failures
 }
 
 func (h *Harness) stopAdapter(ctx context.Context) error {
@@ -4466,6 +6209,47 @@ func (h *Harness) terminateRunConnections(ctx context.Context) error {
 	return nil
 }
 
+func (h *Harness) closeDatabaseHandles(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("database handle cleanup context is required")
+	}
+	h.databaseMu.Lock()
+	handles := h.databaseHandles
+	h.databaseHandles = nil
+	h.databaseMu.Unlock()
+	var failures []error
+	for _, handle := range handles {
+		if err := handle.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("close harness database handle failed: %w", err))
+		}
+	}
+	if len(failures) != 0 {
+		return errors.Join(failures...)
+	}
+	return nil
+}
+
+func (h *Harness) detachWorker(ctx context.Context) error {
+	if h.postgres == nil || h.postgres.Exited() {
+		return nil
+	}
+	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect for worker detachment failed")
+	}
+	if _, err := database.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'off'"); err != nil {
+		_ = database.Close()
+		return fmt.Errorf("disable synchro WAL worker auto-start failed: %w", err)
+	}
+	if err := database.Close(); err != nil {
+		return fmt.Errorf("close worker detachment connection failed: %w", err)
+	}
+	if err := h.restartPostgres(ctx); err != nil {
+		return fmt.Errorf("restart PostgreSQL without synchro WAL worker failed: %w", err)
+	}
+	return nil
+}
+
 func (h *Harness) dropPublication(ctx context.Context) error {
 	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
 	if err != nil {
@@ -4534,14 +6318,39 @@ func (h *Harness) dropReplicationSlot(ctx context.Context) error {
 func (h *Harness) dropDatabase(ctx context.Context) error {
 	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
 	if err != nil {
-		return errors.New("connect for database cleanup failed")
+		return fmt.Errorf("connect for database cleanup failed: %w", err)
 	}
 	defer database.Close()
-	if _, err := database.ExecContext(ctx, "DROP DATABASE "+quoteIdentifier(h.names.Database)+" WITH (FORCE)"); err != nil {
-		return errors.New("drop isolated PostgreSQL database failed")
+	if _, err := database.ExecContext(ctx, "DROP DATABASE "+quoteIdentifier(h.names.Database)); err != nil {
+		if !isActiveDatabaseError(err) {
+			return databaseDropError(err)
+		}
+		// FORCE is a last resort for sessions outside the harness pools that
+		// remain after the worker and every harness connection have stopped.
+		if _, forceErr := database.ExecContext(ctx, "DROP DATABASE "+quoteIdentifier(h.names.Database)+" WITH (FORCE)"); forceErr != nil {
+			return errors.Join(databaseDropError(err), databaseDropError(forceErr))
+		}
 	}
 	h.databaseCreated = false
 	return nil
+}
+
+func isActiveDatabaseError(err error) bool {
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError) && postgresError.Code == "55006"
+}
+
+func databaseDropError(err error) error {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		return fmt.Errorf(
+			"drop isolated PostgreSQL database failed: PostgreSQL error (SQLSTATE %s): %s: %w",
+			postgresError.Code,
+			postgresError.Message,
+			err,
+		)
+	}
+	return fmt.Errorf("drop isolated PostgreSQL database failed: %w", err)
 }
 
 func (h *Harness) dropRoles(ctx context.Context) error {
@@ -4575,17 +6384,22 @@ func (h *Harness) stopPostgres(ctx context.Context) error {
 }
 
 func (h *Harness) removeCluster() error {
+	var failures []error
 	if h.dataDir != "" {
 		if err := os.RemoveAll(h.dataDir); err != nil {
-			return errors.New("remove isolated PostgreSQL cluster failed")
+			failures = append(failures, errors.New("remove isolated PostgreSQL cluster failed"))
+		} else {
+			h.dataDir = ""
 		}
 	}
 	if h.socketDir != "" {
 		if err := os.RemoveAll(h.socketDir); err != nil {
-			return errors.New("remove isolated PostgreSQL socket directory failed")
+			failures = append(failures, errors.New("remove isolated PostgreSQL socket directory failed"))
+		} else {
+			h.socketDir = ""
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (h *Harness) removeRunRoot() error {
@@ -4601,6 +6415,7 @@ func (h *Harness) removeRunRoot() error {
 
 type installationLock struct {
 	file     *os.File
+	path     string
 	mu       sync.Mutex
 	released bool
 }
@@ -4609,14 +6424,26 @@ func acquireInstallationLock(ctx context.Context, path string) (*installationLoc
 	if ctx == nil {
 		return nil, errors.New("installation lock context is required")
 	}
+	canonical, err := VerifyInstallationLockPath(path)
+	if err != nil {
+		return nil, errors.New("installation lock path is invalid")
+	}
+	path = canonical
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, errors.New("open installation lock failed")
 	}
+	pathInfo, pathErr := os.Lstat(path)
+	fileInfo, fileErr := file.Stat()
+	if pathErr != nil || fileErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 ||
+		!pathInfo.Mode().IsRegular() || !os.SameFile(pathInfo, fileInfo) {
+		_ = file.Close()
+		return nil, errors.New("installation lock path changed during open")
+	}
 	for {
 		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			return &installationLock{file: file}, nil
+			return &installationLock{file: file, path: path}, nil
 		}
 		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
 			_ = file.Close()
@@ -4628,11 +6455,49 @@ func acquireInstallationLock(ctx context.Context, path string) (*installationLoc
 			if !timer.Stop() {
 				<-timer.C
 			}
+			holder := lockHolderDescription(file)
 			_ = file.Close()
+			if holder != "" {
+				return nil, fmt.Errorf("bounded installation lock wait expired: held by %s", holder)
+			}
 			return nil, errors.New("bounded installation lock wait expired")
 		case <-timer.C:
 		}
 	}
+}
+
+// lockHolderDescription names the process that holds the lock through
+// /proc/locks, which exists only on Linux. Other platforms report nothing.
+func lockHolderDescription(file *os.File) string {
+	info, err := file.Stat()
+	if err != nil {
+		return ""
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	locks, err := os.ReadFile("/proc/locks")
+	if err != nil {
+		return ""
+	}
+	inode := fmt.Sprintf(":%d ", stat.Ino)
+	for _, line := range strings.Split(string(locks), "\n") {
+		if !strings.Contains(line, "FLOCK") || !strings.Contains(line, inode) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		pid := fields[4]
+		command, err := os.ReadFile("/proc/" + pid + "/cmdline")
+		if err != nil {
+			return "pid " + pid
+		}
+		return "pid " + pid + " (" + strings.TrimRight(strings.ReplaceAll(string(command), "\x00", " "), " ") + ")"
+	}
+	return ""
 }
 
 func (lock *installationLock) Release() error {
@@ -4969,4 +6834,36 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 func processGroupAlive(pid int) bool {
 	err := syscall.Kill(-pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// SealedPushRequest returns the canonical request the server sealed for one
+// completed push batch. A replay with equal identity and equal fingerprint
+// resends exactly these bytes.
+func (executor *OperatorExecutor) SealedPushRequest(ctx context.Context, batchID string) ([]byte, error) {
+	if executor == nil || executor.harness == nil {
+		return nil, errors.New("operator executor is unavailable")
+	}
+	if !executor.harness.sourceReady {
+		return nil, errors.New("operator executor is unavailable")
+	}
+	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	if err != nil {
+		return nil, errors.New("open operator connection failed")
+	}
+	defer database.Close()
+	var sealed []byte
+	row := database.QueryRowContext(ctx,
+		"SELECT sealed_canonical_request FROM synchro.sync_push_batches WHERE batch_id = $1::uuid",
+		batchID)
+	if err := row.Scan(&sealed); err != nil {
+		return nil, errors.New("read sealed push request failed")
+	}
+	return sealed, nil
+}
+
+// DiagnosticSourceTables lists every independent source table a scenario may
+// write. A reset empties all of them, because a capture dependency
+// registration stays pending while its source table holds rows.
+func DiagnosticSourceTables() []string {
+	return append([]string(nil), diagnosticSourceTables...)
 }

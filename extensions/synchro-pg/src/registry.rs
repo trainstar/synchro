@@ -62,7 +62,7 @@ impl PushPolicy {
 ///
 /// `table_name` remains the client-visible logical table name. Physical SQL and
 /// catalog work must use the schema-qualified physical identity fields.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRegistration {
     pub registry_generation: i64,
     pub relation_id: String,
@@ -76,6 +76,7 @@ pub struct TableRegistration {
     pub replica_identity: String,
     pub composition: CompositionClass,
     pub membership_function: RegisteredFunction,
+    pub membership_function_fingerprint: Vec<u8>,
     pub max_scope_fanout: i32,
     pub pk_column: String,
     pub pk_type: String,
@@ -129,6 +130,7 @@ pub struct FieldRegistration {
     pub field_id: String,
     pub physical_column: String,
     pub portable_type: String,
+    pub native_json: bool,
     pub decimal_precision: Option<i32>,
     pub decimal_scale: Option<i32>,
     pub nullable: bool,
@@ -171,15 +173,10 @@ struct BaseGeneration {
 struct ExistingRegistration {
     relation_id: String,
     table_id: String,
-    table_name: String,
     physical_schema: String,
     physical_relation: String,
     physical_relation_oid: u32,
-    replica_identity: String,
     pk_column: String,
-    pk_type: String,
-    pk_portable_type: String,
-    fields: Vec<FieldRegistration>,
 }
 
 #[pg_extern]
@@ -349,6 +346,7 @@ fn synchro_register_table(
     p_exclude_columns: default!(Vec<String>, "'{}'"),
     p_sync_columns: default!(Vec<String>, "'{}'"),
     p_max_scope_fanout: default!(i32, "8"),
+    p_affected_scopes: default!(Vec<String>, "'{}'"),
 ) {
     let actor = unsafe { pg_sys::GetOuterUserId() };
     let policy = PushPolicy::parse(p_push_policy).unwrap_or_else(|| {
@@ -379,6 +377,7 @@ fn synchro_register_table(
     Spi::connect_mut(|client| {
         acquire_registry_write_lock(client)?;
         acquire_source_write_gate(client)?;
+        let affected_scopes = validate_declared_affected_scopes(client, &p_affected_scopes)?;
         let base = latest_complete_generation(client)?;
         let physical = resolve_physical_relation(client, p_table_name)?;
         let logical_table_name = physical.relation.clone();
@@ -416,6 +415,9 @@ fn synchro_register_table(
 
         let existing =
             active_registration_for_logical_name(client, base.generation, &logical_table_name)?;
+        if let Some(registration) = existing.as_ref() {
+            validate_persisted_registration_metadata(client, registration)?;
+        }
         reject_physical_registration_collision(
             client,
             base.generation,
@@ -423,7 +425,6 @@ fn synchro_register_table(
             physical.oid,
         )?;
 
-        let next_generation = create_next_generation(client, &base)?;
         let retained = existing.as_ref().filter(|registration| {
             registration.physical_schema == physical.schema
                 && registration.physical_relation == physical.relation
@@ -433,6 +434,11 @@ fn synchro_register_table(
                 && registration.pk_type == primary_key.sql_type
                 && registration.pk_portable_type == primary_key.portable_type
         });
+        let prepared_generation = if retained.is_none() {
+            Some(create_next_generation(client, &base)?)
+        } else {
+            None
+        };
         let relation_id = retained
             .map(|registration| registration.relation_id.clone())
             .unwrap_or_else(|| new_logical_id(client, "relation"));
@@ -453,20 +459,67 @@ fn synchro_register_table(
             .find(|field| field.primary_key)
             .map(|field| field.field_id.clone())
             .unwrap_or_else(|| pgrx::error!("registered primary key has no field identity"));
+        let mut registration = TableRegistration {
+            registry_generation: base.generation,
+            relation_id,
+            registration_kind: RegistrationKind::Synced,
+            table_id,
+            primary_key_field_id,
+            table_name: logical_table_name,
+            physical_schema: physical.schema.clone(),
+            physical_relation: physical.relation.clone(),
+            physical_relation_oid: physical.oid,
+            replica_identity: physical.replica_identity.clone(),
+            composition,
+            membership_function,
+            membership_function_fingerprint,
+            max_scope_fanout,
+            pk_column: primary_key.column,
+            pk_type: primary_key.sql_type,
+            pk_portable_type: primary_key.portable_type,
+            capture_key_columns: vec![p_pk_column.to_string()],
+            updated_at_col: p_updated_at_col.to_string(),
+            deleted_at_col: p_deleted_at_col.to_string(),
+            push_policy: policy,
+            sync_columns,
+            exclude_columns,
+            has_updated_at,
+            has_deleted_at,
+            fields,
+            capture_fields: Vec::new(),
+        };
+        if retained.is_some_and(|active| same_registration_content(active, &registration)) {
+            if !affected_scopes.is_empty() {
+                pgrx::error!("affected scopes require a membership rule transition");
+            }
+            return Ok(());
+        }
+
+        let next_generation = match prepared_generation {
+            Some(generation) => generation,
+            None => create_next_generation(client, &base)?,
+        };
+        registration.registry_generation = next_generation;
 
         if retained.is_some() {
             client.update(
                 "DELETE FROM synchro.sync_registry_fields
                  WHERE registry_generation = $1 AND relation_id = $2::uuid",
                 None,
-                &[next_generation.into(), relation_id.as_str().into()],
+                &[
+                    registration.registry_generation.into(),
+                    registration.relation_id.as_str().into(),
+                ],
             )?;
         } else {
             client.update(
                 "DELETE FROM synchro.sync_registry
                  WHERE registry_generation = $1 AND table_name = $2",
                 None,
-                &[next_generation.into(), logical_table_name.as_str().into()],
+                &[
+                    registration.registry_generation.into(),
+                    registration.table_name.as_str().into(),
+                ],
             )?;
         }
         client.update(
@@ -534,70 +587,47 @@ fn synchro_register_table(
                   updated_at = EXCLUDED.updated_at",
             None,
             &[
-                next_generation.into(),
-                relation_id.as_str().into(),
-                table_id.as_str().into(),
-                primary_key_field_id.as_str().into(),
-                logical_table_name.as_str().into(),
-                physical.schema.as_str().into(),
-                physical.relation.as_str().into(),
-                i64::from(physical.oid).into(),
-                physical.replica_identity.as_str().into(),
+                registration.registry_generation.into(),
+                registration.relation_id.as_str().into(),
+                registration.table_id.as_str().into(),
+                registration.primary_key_field_id.as_str().into(),
+                registration.table_name.as_str().into(),
+                registration.physical_schema.as_str().into(),
+                registration.physical_relation.as_str().into(),
+                i64::from(registration.physical_relation_oid).into(),
+                registration.replica_identity.as_str().into(),
                 p_composition.into(),
-                i64::from(membership_function.oid).into(),
-                membership_function.schema.as_str().into(),
-                membership_function.name.as_str().into(),
-                max_scope_fanout.into(),
-                p_pk_column.into(),
-                primary_key.sql_type.as_str().into(),
-                primary_key.portable_type.as_str().into(),
-                vec![p_pk_column.to_string()].into(),
-                p_updated_at_col.into(),
-                p_deleted_at_col.into(),
-                policy.as_str().into(),
-                sync_columns.clone().into(),
-                exclude_columns.clone().into(),
-                has_updated_at.into(),
-                has_deleted_at.into(),
-                membership_function_fingerprint.into(),
+                i64::from(registration.membership_function.oid).into(),
+                registration.membership_function.schema.as_str().into(),
+                registration.membership_function.name.as_str().into(),
+                registration.max_scope_fanout.into(),
+                registration.pk_column.as_str().into(),
+                registration.pk_type.as_str().into(),
+                registration.pk_portable_type.as_str().into(),
+                registration.capture_key_columns.clone().into(),
+                registration.updated_at_col.as_str().into(),
+                registration.deleted_at_col.as_str().into(),
+                registration.push_policy.as_str().into(),
+                registration.sync_columns.clone().into(),
+                registration.exclude_columns.clone().into(),
+                registration.has_updated_at.into(),
+                registration.has_deleted_at.into(),
+                registration.membership_function_fingerprint.clone().into(),
             ],
         )?;
-        insert_field_registrations(client, next_generation, &relation_id, &fields)?;
+        insert_field_registrations(
+            client,
+            registration.registry_generation,
+            &registration.relation_id,
+            &registration.fields,
+        )?;
         stage_membership_replacement_if_changed(
             client,
             base.generation,
-            next_generation,
-            &relation_id,
+            registration.registry_generation,
+            &registration.relation_id,
+            &affected_scopes,
         )?;
-
-        let registration = TableRegistration {
-            registry_generation: next_generation,
-            relation_id,
-            registration_kind: RegistrationKind::Synced,
-            table_id,
-            primary_key_field_id,
-            table_name: logical_table_name,
-            physical_schema: physical.schema.clone(),
-            physical_relation: physical.relation.clone(),
-            physical_relation_oid: physical.oid,
-            replica_identity: physical.replica_identity.clone(),
-            composition,
-            membership_function,
-            max_scope_fanout,
-            pk_column: primary_key.column,
-            pk_type: primary_key.sql_type,
-            pk_portable_type: primary_key.portable_type,
-            capture_key_columns: vec![p_pk_column.to_string()],
-            updated_at_col: p_updated_at_col.to_string(),
-            deleted_at_col: p_deleted_at_col.to_string(),
-            push_policy: policy,
-            sync_columns,
-            exclude_columns,
-            has_updated_at,
-            has_deleted_at,
-            fields,
-            capture_fields: Vec::new(),
-        };
 
         with_registration_actor_ddl(
             actor,
@@ -606,9 +636,9 @@ fn synchro_register_table(
                 install_capture_triggers(client, &registration)
             }),
         )?;
-        validate_generation_entries(client, next_generation)?;
-        mark_generation_validated(client, next_generation)?;
-        emit_registry_activation_when_ready(client, next_generation)?;
+        validate_generation_entries(client, registration.registry_generation)?;
+        mark_generation_validated(client, registration.registry_generation)?;
+        emit_registry_activation_when_ready(client, registration.registry_generation)?;
         Ok::<_, spi::Error>(())
     })
     .unwrap_or_else(|error| pgrx::error!("registering table {:?}: {}", p_table_name, error));
@@ -665,51 +695,129 @@ fn synchro_register_capture_dependency(
 
         let existing = client
             .select(
-                "SELECT relation_id::text AS relation_id, registration_kind
+                "SELECT registry_generation,
+                        relation_id::text AS relation_id,
+                        registration_kind,
+                        table_id::text AS table_id,
+                        primary_key_field_id::text AS primary_key_field_id,
+                        table_name,
+                        physical_schema::text AS physical_schema,
+                        physical_relation::text AS physical_relation,
+                        physical_relation_oid::bigint AS physical_relation_oid,
+                        replica_identity::text AS replica_identity,
+                        composition,
+                        membership_function_oid::bigint AS membership_function_oid,
+                        membership_function_schema::text AS membership_function_schema,
+                        membership_function_name::text AS membership_function_name,
+                        membership_function_fingerprint,
+                        max_scope_fanout,
+                        pk_column,
+                        pk_type,
+                        pk_portable_type,
+                        capture_key_columns,
+                        updated_at_col,
+                        deleted_at_col,
+                        push_policy,
+                        sync_columns,
+                        exclude_columns,
+                        has_updated_at,
+                        has_deleted_at
                  FROM synchro.sync_registry
                  WHERE registry_generation = $1
                    AND physical_relation_oid = $2::oid",
                 None,
                 &[base.generation.into(), i64::from(physical.oid).into()],
             )?
-            .next();
+            .next()
+            .map(|row| {
+                let mut registration = registration_from_row(&row)?;
+                registration.fields =
+                    load_field_registrations(client, base.generation, &registration.relation_id)?;
+                registration.capture_fields = load_capture_field_registrations(
+                    client,
+                    base.generation,
+                    &registration.relation_id,
+                )?;
+                Ok::<_, spi::Error>(registration)
+            })
+            .transpose()?;
         if let Some(existing) = &existing {
-            let kind = existing
-                .get_by_name::<String, &str>("registration_kind")?
-                .unwrap_or_default();
-            if kind != RegistrationKind::CaptureDependency.as_str() {
+            validate_persisted_registration_metadata(client, existing)?;
+            if !existing.is_capture_dependency() {
                 pgrx::error!("physical relation is already registered under a synced table");
             }
         }
-        let relation_id = if let Some(relation_id) = existing.as_ref().and_then(|row| {
-            row.get_by_name::<String, &str>("relation_id")
-                .ok()
-                .flatten()
-        }) {
-            relation_id
-        } else {
-            client
-                .update(
-                    "INSERT INTO synchro.sync_logical_ids (logical_id, kind)
-                     VALUES (gen_random_uuid(), 'relation')
-                     RETURNING logical_id::text AS logical_id",
-                    None,
-                    &[],
-                )?
-                .first()
-                .get_by_name::<String, &str>("logical_id")?
-                .unwrap_or_else(|| pgrx::error!("creating relation ID returned no value"))
-        };
+        let relation_id = existing
+            .as_ref()
+            .map(|registration| registration.relation_id.clone())
+            .unwrap_or_else(|| {
+                client
+                    .update(
+                        "INSERT INTO synchro.sync_logical_ids (logical_id, kind)
+                         VALUES (gen_random_uuid(), 'relation')
+                         RETURNING logical_id::text AS logical_id",
+                        None,
+                        &[],
+                    )
+                    .unwrap_or_else(|error| pgrx::error!("creating relation ID: {error}"))
+                    .first()
+                    .get_by_name::<String, &str>("logical_id")
+                    .unwrap_or_else(|error| pgrx::error!("reading relation ID: {error}"))
+                    .unwrap_or_else(|| pgrx::error!("creating relation ID returned no value"))
+            });
         let registration_name = format!(
             "capture_dependency:{}.{}",
             physical.schema, physical.relation
         );
+        let mut registration = TableRegistration {
+            registry_generation: base.generation,
+            relation_id,
+            registration_kind: RegistrationKind::CaptureDependency,
+            table_id: String::new(),
+            primary_key_field_id: String::new(),
+            table_name: registration_name,
+            physical_schema: physical.schema.clone(),
+            physical_relation: physical.relation.clone(),
+            physical_relation_oid: physical.oid,
+            replica_identity: physical.replica_identity.clone(),
+            composition: CompositionClass::SingleScope,
+            membership_function: RegisteredFunction {
+                oid: 0,
+                schema: String::new(),
+                name: String::new(),
+            },
+            membership_function_fingerprint: Vec::new(),
+            max_scope_fanout: 0,
+            pk_column: primary_key.column,
+            pk_type: primary_key.sql_type,
+            pk_portable_type: primary_key.portable_type,
+            capture_key_columns: p_capture_key_columns,
+            updated_at_col: String::new(),
+            deleted_at_col: String::new(),
+            push_policy: PushPolicy::ReadOnly,
+            sync_columns: Vec::new(),
+            exclude_columns: Vec::new(),
+            has_updated_at: false,
+            has_deleted_at: false,
+            fields: Vec::new(),
+            capture_fields,
+        };
+        if existing
+            .as_ref()
+            .is_some_and(|active| same_registration_content(active, &registration))
+        {
+            return Ok(());
+        }
         let next_generation = create_next_generation(client, &base)?;
+        registration.registry_generation = next_generation;
         client.update(
             "DELETE FROM synchro.sync_registry
              WHERE registry_generation = $1 AND physical_relation_oid = $2::oid",
             None,
-            &[next_generation.into(), i64::from(physical.oid).into()],
+            &[
+                registration.registry_generation.into(),
+                i64::from(registration.physical_relation_oid).into(),
+            ],
         )?;
         client.update(
             "INSERT INTO synchro.sync_registry (
@@ -729,53 +837,25 @@ fn synchro_register_capture_dependency(
              )",
             None,
             &[
-                next_generation.into(),
-                relation_id.as_str().into(),
-                registration_name.as_str().into(),
-                physical.schema.as_str().into(),
-                physical.relation.as_str().into(),
-                i64::from(physical.oid).into(),
-                physical.replica_identity.as_str().into(),
-                primary_key.column.as_str().into(),
-                primary_key.sql_type.as_str().into(),
-                primary_key.portable_type.as_str().into(),
-                p_capture_key_columns.clone().into(),
+                registration.registry_generation.into(),
+                registration.relation_id.as_str().into(),
+                registration.table_name.as_str().into(),
+                registration.physical_schema.as_str().into(),
+                registration.physical_relation.as_str().into(),
+                i64::from(registration.physical_relation_oid).into(),
+                registration.replica_identity.as_str().into(),
+                registration.pk_column.as_str().into(),
+                registration.pk_type.as_str().into(),
+                registration.pk_portable_type.as_str().into(),
+                registration.capture_key_columns.clone().into(),
             ],
         )?;
-        insert_capture_field_registrations(client, next_generation, &relation_id, &capture_fields)?;
-
-        let registration = TableRegistration {
-            registry_generation: next_generation,
-            relation_id,
-            registration_kind: RegistrationKind::CaptureDependency,
-            table_id: String::new(),
-            primary_key_field_id: String::new(),
-            table_name: registration_name,
-            physical_schema: physical.schema.clone(),
-            physical_relation: physical.relation.clone(),
-            physical_relation_oid: physical.oid,
-            replica_identity: physical.replica_identity.clone(),
-            composition: CompositionClass::SingleScope,
-            membership_function: RegisteredFunction {
-                oid: 0,
-                schema: String::new(),
-                name: String::new(),
-            },
-            max_scope_fanout: 0,
-            pk_column: primary_key.column,
-            pk_type: primary_key.sql_type,
-            pk_portable_type: primary_key.portable_type,
-            capture_key_columns: p_capture_key_columns,
-            updated_at_col: String::new(),
-            deleted_at_col: String::new(),
-            push_policy: PushPolicy::ReadOnly,
-            sync_columns: Vec::new(),
-            exclude_columns: Vec::new(),
-            has_updated_at: false,
-            has_deleted_at: false,
-            fields: Vec::new(),
-            capture_fields,
-        };
+        insert_capture_field_registrations(
+            client,
+            registration.registry_generation,
+            &registration.relation_id,
+            &registration.capture_fields,
+        )?;
 
         with_registration_actor_ddl(
             actor,
@@ -784,9 +864,9 @@ fn synchro_register_capture_dependency(
                 install_capture_triggers(client, &registration)
             }),
         )?;
-        validate_generation_entries(client, next_generation)?;
-        mark_generation_validated(client, next_generation)?;
-        emit_registry_activation_when_ready(client, next_generation)?;
+        validate_generation_entries(client, registration.registry_generation)?;
+        mark_generation_validated(client, registration.registry_generation)?;
+        emit_registry_activation_when_ready(client, registration.registry_generation)?;
         Ok::<_, spi::Error>(())
     })
     .unwrap_or_else(|error| {
@@ -915,6 +995,45 @@ fn synchro_register_membership_dependency(
         )?;
         let max_impact_rows = validate_impact_row_limit(client, p_max_impact_rows)?;
 
+        let matches = client
+            .select(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM synchro.sync_membership_dependencies
+                     WHERE registry_generation = $1
+                       AND dependency_relation_id = $2::uuid
+                       AND dependency_registration_kind = $3
+                       AND target_relation_id = $4::uuid
+                       AND impact_function_oid = $5::oid
+                       AND impact_function_schema = $6::name
+                       AND impact_function_name = $7::name
+                       AND impact_function_fingerprint = $8::bytea
+                       AND max_impact_rows = $9
+                       AND dependency_field_ids = $10::text[]
+                       AND dependency_columns = $11::text[]
+                 ) AS matches",
+                None,
+                &[
+                    base.generation.into(),
+                    dependency.relation_id.as_str().into(),
+                    dependency.registration_kind.as_str().into(),
+                    target.relation_id.as_str().into(),
+                    i64::from(impact_function.oid).into(),
+                    impact_function.schema.as_str().into(),
+                    impact_function.name.as_str().into(),
+                    impact_function_fingerprint.clone().into(),
+                    max_impact_rows.into(),
+                    dependency_field_ids.clone().into(),
+                    dependency_columns.clone().into(),
+                ],
+            )?
+            .first()
+            .get_by_name::<bool, &str>("matches")?
+            .unwrap_or(false);
+        if matches {
+            return Ok(());
+        }
+
         let next_generation = create_next_generation(client, &base)?;
         client.update(
             "DELETE FROM synchro.sync_membership_dependencies
@@ -960,18 +1079,6 @@ fn synchro_register_membership_dependency(
                     .collect::<Vec<_>>()
                     .into(),
                 impact_function_fingerprint.into(),
-            ],
-        )?;
-        client.update(
-            "INSERT INTO synchro.sync_registry_membership_stages (
-                 registry_generation, source_registry_generation,
-                 target_relation_ids, state
-             ) VALUES ($1, $2, ARRAY[$3::uuid], 'pending')",
-            None,
-            &[
-                next_generation.into(),
-                base.generation.into(),
-                target.relation_id.as_str().into(),
             ],
         )?;
         validate_generation_entries(client, next_generation)?;
@@ -1063,13 +1170,16 @@ fn stage_membership_replacement_if_changed(
     source_generation: i64,
     target_generation: i64,
     relation_id: &str,
+    affected_scopes: &[String],
 ) -> Result<(), spi::Error> {
-    client.update(
+    let staged = client
+        .update(
         "INSERT INTO synchro.sync_registry_membership_stages (
              registry_generation, source_registry_generation,
-             target_relation_ids, state
+             target_relation_ids, affected_scopes, state
          )
-         SELECT $2, $1, ARRAY[target.relation_id], 'pending'
+         SELECT $2, $1, ARRAY[target.relation_id],
+                NULLIF($4::text[], '{}'::text[]), 'pending'
          FROM synchro.sync_registry target
          JOIN synchro.sync_registry source
            ON source.registry_generation = $1
@@ -1090,9 +1200,45 @@ fn stage_membership_replacement_if_changed(
                 source_generation.into(),
                 target_generation.into(),
                 relation_id.into(),
+                affected_scopes.to_vec().into(),
             ],
-        )?;
+        )?
+        .len();
+    if !affected_scopes.is_empty() && staged != 1 {
+        pgrx::error!("affected scopes require a membership rule transition");
+    }
     Ok(())
+}
+
+fn validate_declared_affected_scopes(
+    client: &SpiClient<'_>,
+    affected_scopes: &[String],
+) -> Result<Vec<String>, spi::Error> {
+    if affected_scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut normalized = affected_scopes.to_vec();
+    normalized.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    if normalized.iter().any(String::is_empty)
+        || normalized.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        pgrx::error!("affected scopes are invalid");
+    }
+    let authoritative = client
+        .select(
+            "SELECT count(*) AS scope_count
+             FROM synchro.sync_scope_state
+             WHERE scope_id = ANY($1)",
+            None,
+            &[normalized.clone().into()],
+        )?
+        .first()
+        .get_by_name::<i64, &str>("scope_count")?
+        .unwrap_or(0);
+    if authoritative != i64::try_from(normalized.len()).unwrap_or(i64::MAX) {
+        pgrx::error!("affected scopes must be authoritative");
+    }
+    Ok(normalized)
 }
 
 fn validate_capture_application_ownership(
@@ -2368,11 +2514,11 @@ fn create_next_generation(
     client.update(
         "INSERT INTO synchro.sync_registry_fields (
              registry_generation, relation_id, field_id, physical_column,
-             portable_type, decimal_precision, decimal_scale,
+             portable_type, native_json, decimal_precision, decimal_scale,
              nullable, writable, primary_key
          )
          SELECT $1, relation_id, field_id, physical_column,
-                portable_type, decimal_precision, decimal_scale,
+                 portable_type, native_json, decimal_precision, decimal_scale,
                 nullable, writable, primary_key
           FROM synchro.sync_registry_fields
          WHERE registry_generation = $2",
@@ -2432,7 +2578,28 @@ fn mark_generation_validated(
     Ok(())
 }
 
-fn emit_registry_activation(client: &SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
+/// Preserve the activation when a replacement slot can start after this transaction commits.
+fn queue_registry_activation_if_unbound(
+    client: &mut SpiClient<'_>,
+    generation: i64,
+) -> Result<(), spi::Error> {
+    client.update(
+        "WITH unbound AS (
+             SELECT singleton
+             FROM synchro.sync_runtime_state
+             WHERE singleton AND active_slot_name IS NULL
+             FOR UPDATE
+         )
+         INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
+         SELECT $1 FROM unbound
+         ON CONFLICT (registry_generation) DO NOTHING",
+        None,
+        &[generation.into()],
+    )?;
+    Ok(())
+}
+
+fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
     if generation <= 0 {
         pgrx::error!("registry generation is invalid");
     }
@@ -2453,31 +2620,49 @@ fn emit_registry_activation(client: &SpiClient<'_>, generation: i64) -> Result<(
 /// verified an exported-snapshot projection bootstrap. Other generations keep
 /// the normal commit-ordered WAL activation path.
 fn emit_registry_activation_when_ready(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
     if crate::schema::generation_requires_projection_bootstrap(client, generation)? {
         return Ok(());
     }
+    queue_registry_activation_if_unbound(client, generation)?;
     emit_registry_activation(client, generation)
 }
 
-fn active_registration_for_logical_name(
+pub(crate) fn active_registration_for_logical_name(
     client: &SpiClient<'_>,
     generation: i64,
     table_name: &str,
-) -> Result<Option<ExistingRegistration>, spi::Error> {
+) -> Result<Option<TableRegistration>, spi::Error> {
     let rows = client.select(
-        "SELECT relation_id::text AS relation_id,
+        "SELECT registry_generation,
+                relation_id::text AS relation_id,
+                registration_kind,
                 table_id::text AS table_id,
+                primary_key_field_id::text AS primary_key_field_id,
                 table_name,
                 physical_schema::text AS physical_schema,
                 physical_relation::text AS physical_relation,
                 physical_relation_oid::bigint AS physical_relation_oid,
                 replica_identity::text AS replica_identity,
+                composition,
+                membership_function_oid::bigint AS membership_function_oid,
+                membership_function_schema::text AS membership_function_schema,
+                membership_function_name::text AS membership_function_name,
+                membership_function_fingerprint,
+                max_scope_fanout,
                 pk_column,
                 pk_type,
-                pk_portable_type
+                pk_portable_type,
+                capture_key_columns,
+                updated_at_col,
+                deleted_at_col,
+                push_policy,
+                sync_columns,
+                exclude_columns,
+                has_updated_at,
+                has_deleted_at
           FROM synchro.sync_registry
          WHERE registry_generation = $1
            AND table_name = $2
@@ -2488,58 +2673,18 @@ fn active_registration_for_logical_name(
     let Some(row) = rows.into_iter().next() else {
         return Ok(None);
     };
-    let relation_id = row
-        .get_by_name::<String, &str>("relation_id")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no relation ID"));
-    let table_id = row
-        .get_by_name::<String, &str>("table_id")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no table ID"));
-    let table_name = row
-        .get_by_name::<String, &str>("table_name")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no logical table name"));
-    let physical_schema = row
-        .get_by_name::<String, &str>("physical_schema")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no physical schema"));
-    let physical_relation = row
-        .get_by_name::<String, &str>("physical_relation")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no physical relation"));
-    let physical_relation_oid = row
-        .get_by_name::<i64, &str>("physical_relation_oid")?
-        .map(checked_oid)
-        .unwrap_or_else(|| pgrx::error!("registry entry has no physical relation OID"));
-    let replica_identity = row
-        .get_by_name::<String, &str>("replica_identity")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no replica identity"));
-    let pk_column = row
-        .get_by_name::<String, &str>("pk_column")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no primary key column"));
-    let pk_type = row
-        .get_by_name::<String, &str>("pk_type")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no primary key type"));
-    let pk_portable_type = row
-        .get_by_name::<String, &str>("pk_portable_type")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no portable primary key type"));
-    let fields = load_field_registrations(client, generation, &relation_id)?;
-    Ok(Some(ExistingRegistration {
-        relation_id,
-        table_id,
-        table_name,
-        physical_schema,
-        physical_relation,
-        physical_relation_oid,
-        replica_identity,
-        pk_column,
-        pk_type,
-        pk_portable_type,
-        fields,
-    }))
+    let mut registration = registration_from_row(&row)?;
+    registration.fields = load_field_registrations(client, generation, &registration.relation_id)?;
+    registration.capture_fields =
+        load_capture_field_registrations(client, generation, &registration.relation_id)?;
+    Ok(Some(registration))
 }
 
 fn active_registration_for_unregister(
     client: &SpiClient<'_>,
     generation: i64,
     table_name: &str,
-) -> Result<Option<ExistingRegistration>, spi::Error> {
+) -> Result<Option<TableRegistration>, spi::Error> {
     let direct = active_registration_for_logical_name(client, generation, table_name)?;
     if direct.is_some() {
         return Ok(direct);
@@ -2561,16 +2706,33 @@ fn active_registration_for_unregister(
     }
 
     let rows = client.select(
-        "SELECT relation_id::text AS relation_id,
+        "SELECT registry_generation,
+                relation_id::text AS relation_id,
+                registration_kind,
                 table_id::text AS table_id,
+                primary_key_field_id::text AS primary_key_field_id,
                 table_name,
                 physical_schema::text AS physical_schema,
                 physical_relation::text AS physical_relation,
                 physical_relation_oid::bigint AS physical_relation_oid,
                 replica_identity::text AS replica_identity,
+                composition,
+                membership_function_oid::bigint AS membership_function_oid,
+                membership_function_schema::text AS membership_function_schema,
+                membership_function_name::text AS membership_function_name,
+                membership_function_fingerprint,
+                max_scope_fanout,
                 pk_column,
                 pk_type,
-                pk_portable_type
+                pk_portable_type,
+                capture_key_columns,
+                updated_at_col,
+                deleted_at_col,
+                push_policy,
+                sync_columns,
+                exclude_columns,
+                has_updated_at,
+                has_deleted_at
           FROM synchro.sync_registry
           WHERE registry_generation = $1
             AND physical_schema = $2::name
@@ -2586,51 +2748,11 @@ fn active_registration_for_unregister(
     let Some(row) = rows.into_iter().next() else {
         return Ok(None);
     };
-    let relation_id = row
-        .get_by_name::<String, &str>("relation_id")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no relation ID"));
-    let table_id = row
-        .get_by_name::<String, &str>("table_id")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no table ID"));
-    let logical_table_name = row
-        .get_by_name::<String, &str>("table_name")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no logical table name"));
-    let physical_schema = row
-        .get_by_name::<String, &str>("physical_schema")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no physical schema"));
-    let physical_relation = row
-        .get_by_name::<String, &str>("physical_relation")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no physical relation"));
-    let physical_relation_oid = row
-        .get_by_name::<i64, &str>("physical_relation_oid")?
-        .map(checked_oid)
-        .unwrap_or_else(|| pgrx::error!("registry entry has no physical relation OID"));
-    let replica_identity = row
-        .get_by_name::<String, &str>("replica_identity")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no replica identity"));
-    let pk_column = row
-        .get_by_name::<String, &str>("pk_column")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no primary key column"));
-    let pk_type = row
-        .get_by_name::<String, &str>("pk_type")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no primary key type"));
-    let pk_portable_type = row
-        .get_by_name::<String, &str>("pk_portable_type")?
-        .unwrap_or_else(|| pgrx::error!("registry entry has no portable primary key type"));
-    let fields = load_field_registrations(client, generation, &relation_id)?;
-    Ok(Some(ExistingRegistration {
-        relation_id,
-        table_id,
-        table_name: logical_table_name,
-        physical_schema,
-        physical_relation,
-        physical_relation_oid,
-        replica_identity,
-        pk_column,
-        pk_type,
-        pk_portable_type,
-        fields,
-    }))
+    let mut registration = registration_from_row(&row)?;
+    registration.fields = load_field_registrations(client, generation, &registration.relation_id)?;
+    registration.capture_fields =
+        load_capture_field_registrations(client, generation, &registration.relation_id)?;
+    Ok(Some(registration))
 }
 
 fn reject_physical_registration_collision(
@@ -2751,6 +2873,7 @@ fn build_field_registrations(
                 .unwrap_or_else(|| new_logical_id(client, "field")),
             physical_column,
             portable_type,
+            native_json: matches!(sql_type.as_str(), "json" | "jsonb"),
             decimal_precision,
             decimal_scale,
             nullable,
@@ -2842,9 +2965,9 @@ fn insert_field_registrations(
         client.update(
             "INSERT INTO synchro.sync_registry_fields (
                  registry_generation, relation_id, field_id, physical_column,
-                 portable_type, decimal_precision, decimal_scale,
+                 portable_type, native_json, decimal_precision, decimal_scale,
                  nullable, writable, primary_key
-             ) VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10)",
+             ) VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11)",
             None,
             &[
                 generation.into(),
@@ -2852,6 +2975,7 @@ fn insert_field_registrations(
                 field.field_id.as_str().into(),
                 field.physical_column.as_str().into(),
                 field.portable_type.as_str().into(),
+                field.native_json.into(),
                 field.decimal_precision.into(),
                 field.decimal_scale.into(),
                 field.nullable.into(),
@@ -2897,7 +3021,7 @@ fn load_field_registrations(
     let rows = client.select(
         "SELECT field_id::text AS field_id,
                 physical_column::text AS physical_column,
-                portable_type, decimal_precision, decimal_scale,
+                portable_type, native_json, decimal_precision, decimal_scale,
                 nullable, writable, primary_key
          FROM synchro.sync_registry_fields
          WHERE registry_generation = $1 AND relation_id = $2::uuid
@@ -2907,30 +3031,68 @@ fn load_field_registrations(
     )?;
     let mut fields = Vec::new();
     for row in rows {
-        fields.push(FieldRegistration {
-            field_id: row
-                .get_by_name::<String, &str>("field_id")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no field ID")),
-            physical_column: row
-                .get_by_name::<String, &str>("physical_column")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no physical column")),
-            portable_type: row
-                .get_by_name::<String, &str>("portable_type")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no portable type")),
-            decimal_precision: row.get_by_name::<i32, &str>("decimal_precision")?,
-            decimal_scale: row.get_by_name::<i32, &str>("decimal_scale")?,
-            nullable: row
-                .get_by_name::<bool, &str>("nullable")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no nullability")),
-            writable: row
-                .get_by_name::<bool, &str>("writable")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no writable state")),
-            primary_key: row
-                .get_by_name::<bool, &str>("primary_key")?
-                .unwrap_or_else(|| pgrx::error!("registry field has no primary-key state")),
-        });
+        fields.push(field_registration_from_row(&row)?);
     }
     Ok(fields)
+}
+
+fn load_field_registrations_for_generation(
+    client: &SpiClient<'_>,
+    generation: i64,
+) -> Result<std::collections::HashMap<String, Vec<FieldRegistration>>, spi::Error> {
+    let rows = client.select(
+        "SELECT relation_id::text AS relation_id,
+                field_id::text AS field_id,
+                physical_column::text AS physical_column,
+                portable_type, native_json, decimal_precision, decimal_scale,
+                nullable, writable, primary_key
+         FROM synchro.sync_registry_fields
+         WHERE registry_generation = $1
+         ORDER BY relation_id, field_id",
+        None,
+        &[generation.into()],
+    )?;
+    let mut fields = std::collections::HashMap::new();
+    for row in rows {
+        let relation_id = row
+            .get_by_name::<String, &str>("relation_id")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no relation ID"));
+        fields
+            .entry(relation_id)
+            .or_insert_with(Vec::new)
+            .push(field_registration_from_row(&row)?);
+    }
+    Ok(fields)
+}
+
+fn field_registration_from_row(
+    row: &SpiHeapTupleData<'_>,
+) -> Result<FieldRegistration, spi::Error> {
+    Ok(FieldRegistration {
+        field_id: row
+            .get_by_name::<String, &str>("field_id")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no field ID")),
+        physical_column: row
+            .get_by_name::<String, &str>("physical_column")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no physical column")),
+        portable_type: row
+            .get_by_name::<String, &str>("portable_type")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no portable type")),
+        native_json: row
+            .get_by_name::<bool, &str>("native_json")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no native JSON state")),
+        decimal_precision: row.get_by_name::<i32, &str>("decimal_precision")?,
+        decimal_scale: row.get_by_name::<i32, &str>("decimal_scale")?,
+        nullable: row
+            .get_by_name::<bool, &str>("nullable")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no nullability")),
+        writable: row
+            .get_by_name::<bool, &str>("writable")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no writable state")),
+        primary_key: row
+            .get_by_name::<bool, &str>("primary_key")?
+            .unwrap_or_else(|| pgrx::error!("registry field has no primary-key state")),
+    })
 }
 
 fn load_capture_field_registrations(
@@ -2949,22 +3111,55 @@ fn load_capture_field_registrations(
     )?;
     let mut fields = Vec::new();
     for row in rows {
-        fields.push(CaptureFieldRegistration {
-            physical_column: row
-                .get_by_name::<String, &str>("physical_column")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no column")),
-            portable_type: row
-                .get_by_name::<String, &str>("portable_type")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no type")),
-            nullable: row
-                .get_by_name::<bool, &str>("nullable")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no nullability")),
-            capture_key: row
-                .get_by_name::<bool, &str>("capture_key")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no key state")),
-        });
+        fields.push(capture_field_registration_from_row(&row)?);
     }
     Ok(fields)
+}
+
+fn load_capture_field_registrations_for_generation(
+    client: &SpiClient<'_>,
+    generation: i64,
+) -> Result<std::collections::HashMap<String, Vec<CaptureFieldRegistration>>, spi::Error> {
+    let rows = client.select(
+        "SELECT relation_id::text AS relation_id,
+                physical_column::text AS physical_column,
+                portable_type, nullable, capture_key
+         FROM synchro.sync_capture_dependency_fields
+         WHERE registry_generation = $1
+         ORDER BY relation_id, physical_column",
+        None,
+        &[generation.into()],
+    )?;
+    let mut fields = std::collections::HashMap::new();
+    for row in rows {
+        let relation_id = row
+            .get_by_name::<String, &str>("relation_id")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no relation ID"));
+        fields
+            .entry(relation_id)
+            .or_insert_with(Vec::new)
+            .push(capture_field_registration_from_row(&row)?);
+    }
+    Ok(fields)
+}
+
+fn capture_field_registration_from_row(
+    row: &SpiHeapTupleData<'_>,
+) -> Result<CaptureFieldRegistration, spi::Error> {
+    Ok(CaptureFieldRegistration {
+        physical_column: row
+            .get_by_name::<String, &str>("physical_column")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no column")),
+        portable_type: row
+            .get_by_name::<String, &str>("portable_type")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no type")),
+        nullable: row
+            .get_by_name::<bool, &str>("nullable")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no nullability")),
+        capture_key: row
+            .get_by_name::<bool, &str>("capture_key")?
+            .unwrap_or_else(|| pgrx::error!("capture dependency field has no key state")),
+    })
 }
 
 fn parse_decimal_metadata(sql_type: &str) -> Option<(Option<i32>, Option<i32>)> {
@@ -3105,12 +3300,10 @@ pub(crate) fn remove_retired_capture_configuration(
     let rows = client.select(
         "SELECT source.relation_id::text AS relation_id,
                 source.table_id::text AS table_id,
-                source.table_name,
                 source.physical_schema::text AS physical_schema,
                 source.physical_relation::text AS physical_relation,
                 source.physical_relation_oid::bigint AS physical_relation_oid,
-                source.replica_identity::text AS replica_identity,
-                source.pk_column, source.pk_type, source.pk_portable_type,
+                source.pk_column,
                 relation.relowner::bigint AS relation_owner
          FROM synchro.sync_registry source
          LEFT JOIN pg_catalog.pg_class relation
@@ -3136,9 +3329,6 @@ pub(crate) fn remove_retired_capture_configuration(
             table_id: row
                 .get_by_name::<String, &str>("table_id")?
                 .unwrap_or_else(|| pgrx::error!("retired registration has no table identity")),
-            table_name: row
-                .get_by_name::<String, &str>("table_name")?
-                .unwrap_or_else(|| pgrx::error!("retired registration has no table name")),
             physical_schema: row
                 .get_by_name::<String, &str>("physical_schema")?
                 .unwrap_or_else(|| pgrx::error!("retired registration has no physical schema")),
@@ -3149,21 +3339,9 @@ pub(crate) fn remove_retired_capture_configuration(
                 .get_by_name::<i64, &str>("physical_relation_oid")?
                 .map(checked_oid)
                 .unwrap_or_else(|| pgrx::error!("retired registration has no relation OID")),
-            replica_identity: row
-                .get_by_name::<String, &str>("replica_identity")?
-                .unwrap_or_else(|| pgrx::error!("retired registration has no replica identity")),
             pk_column: row
                 .get_by_name::<String, &str>("pk_column")?
                 .unwrap_or_else(|| pgrx::error!("retired registration has no primary key")),
-            pk_type: row
-                .get_by_name::<String, &str>("pk_type")?
-                .unwrap_or_else(|| pgrx::error!("retired registration has no primary key type")),
-            pk_portable_type: row
-                .get_by_name::<String, &str>("pk_portable_type")?
-                .unwrap_or_else(|| {
-                    pgrx::error!("retired registration has no portable primary key type")
-                }),
-            fields: Vec::new(),
         };
         let owner = row
             .get_by_name::<i64, &str>("relation_owner")?
@@ -3466,10 +3644,11 @@ fn validate_generation_entries(
                 physical_relation_oid::bigint AS physical_relation_oid,
                 replica_identity::text AS replica_identity,
                 composition,
-                membership_function_oid::bigint AS membership_function_oid,
-                membership_function_schema::text AS membership_function_schema,
-                membership_function_name::text AS membership_function_name,
-                max_scope_fanout,
+                 membership_function_oid::bigint AS membership_function_oid,
+                 membership_function_schema::text AS membership_function_schema,
+                 membership_function_name::text AS membership_function_name,
+                 membership_function_fingerprint,
+                 max_scope_fanout,
                  pk_column,
                  pk_type,
                  pk_portable_type,
@@ -3487,19 +3666,15 @@ fn validate_generation_entries(
         None,
         &[generation.into()],
     )?;
+    let mut fields = load_field_registrations_for_generation(client, generation)?;
+    let mut capture_fields = load_capture_field_registrations_for_generation(client, generation)?;
     let mut registrations = Vec::new();
     for row in rows {
         let mut registration = registration_from_row(&row)?;
-        registration.fields = load_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
-        registration.capture_fields = load_capture_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
+        registration.fields = fields.remove(&registration.relation_id).unwrap_or_default();
+        registration.capture_fields = capture_fields
+            .remove(&registration.relation_id)
+            .unwrap_or_default();
         if registration.registry_generation != generation {
             pgrx::error!("registry generation contains an invalid entry");
         }
@@ -3519,31 +3694,46 @@ fn carry_pending_membership_stage(
              SELECT parent_generation
              FROM synchro.sync_registry_generations
              WHERE generation = $1 AND state = 'pending'
-         ), candidate_targets AS (
-             SELECT DISTINCT target_relation_id
+         ), candidate_stages AS (
+             SELECT stage.target_relation_ids, stage.affected_scopes
              FROM lineage
              JOIN synchro.sync_registry_membership_stages stage
                ON stage.registry_generation IN ($1, lineage.parent_generation)
               AND stage.state = 'pending'
+         ), candidate_targets AS (
+             SELECT DISTINCT target_relation_id
+             FROM candidate_stages stage
              CROSS JOIN LATERAL unnest(stage.target_relation_ids) target(target_relation_id)
              JOIN synchro.sync_registry registry
                ON registry.registry_generation = $1
-              AND registry.relation_id = target.target_relation_id
-              AND registry.registration_kind = 'synced'
+               AND registry.relation_id = target.target_relation_id
+               AND registry.registration_kind = 'synced'
+         ), candidate_affected_scopes AS (
+             SELECT CASE WHEN count(*) = 0 THEN NULL::text[]
+                         ELSE array_agg(scope_id ORDER BY scope_id) END AS affected_scopes
+             FROM (
+                 SELECT DISTINCT scope_id
+                 FROM candidate_stages stage
+                 CROSS JOIN LATERAL unnest(
+                     COALESCE(stage.affected_scopes, '{}'::text[])
+                 ) affected(scope_id)
+             ) scopes
          )
          INSERT INTO synchro.sync_registry_membership_stages (
              registry_generation, source_registry_generation,
-             target_relation_ids, state
+             target_relation_ids, affected_scopes, state
          )
          SELECT $1, lineage.parent_generation,
-                array_agg(candidate_targets.target_relation_id ORDER BY candidate_targets.target_relation_id),
-                'pending'
+                 array_agg(candidate_targets.target_relation_id ORDER BY candidate_targets.target_relation_id),
+                 candidate_affected_scopes.affected_scopes, 'pending'
          FROM lineage
          JOIN candidate_targets ON true
-         GROUP BY lineage.parent_generation
+         CROSS JOIN candidate_affected_scopes
+         GROUP BY lineage.parent_generation, candidate_affected_scopes.affected_scopes
          ON CONFLICT (registry_generation) DO UPDATE
          SET source_registry_generation = EXCLUDED.source_registry_generation,
-             target_relation_ids = EXCLUDED.target_relation_ids
+             target_relation_ids = EXCLUDED.target_relation_ids,
+             affected_scopes = EXCLUDED.affected_scopes
          WHERE synchro.sync_registry_membership_stages.state = 'pending'",
         None,
         &[generation.into()],
@@ -3654,10 +3844,11 @@ fn load_registry_generation_entries(
                 physical_relation_oid::bigint AS physical_relation_oid,
                 replica_identity::text AS replica_identity,
                 composition,
-                membership_function_oid::bigint AS membership_function_oid,
-                membership_function_schema::text AS membership_function_schema,
-                membership_function_name::text AS membership_function_name,
-                max_scope_fanout,
+                 membership_function_oid::bigint AS membership_function_oid,
+                 membership_function_schema::text AS membership_function_schema,
+                 membership_function_name::text AS membership_function_name,
+                 membership_function_fingerprint,
+                 max_scope_fanout,
                  pk_column,
                  pk_type,
                  pk_portable_type,
@@ -3675,19 +3866,15 @@ fn load_registry_generation_entries(
         None,
         &[generation.into()],
     )?;
+    let mut fields = load_field_registrations_for_generation(client, generation)?;
+    let mut capture_fields = load_capture_field_registrations_for_generation(client, generation)?;
     let mut registrations = Vec::new();
     for row in rows {
         let mut registration = registration_from_row(&row)?;
-        registration.fields = load_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
-        registration.capture_fields = load_capture_field_registrations(
-            client,
-            registration.registry_generation,
-            &registration.relation_id,
-        )?;
+        registration.fields = fields.remove(&registration.relation_id).unwrap_or_default();
+        registration.capture_fields = capture_fields
+            .remove(&registration.relation_id)
+            .unwrap_or_default();
         if registration.registry_generation != generation {
             pgrx::error!("registry entry belongs to another generation");
         }
@@ -3698,9 +3885,9 @@ fn load_registry_generation_entries(
         }
         registrations.push(registration);
     }
-    let dependencies =
-        load_membership_dependencies_from_client(client, generation, &registrations)?;
     if validate_capture_controls {
+        let dependencies =
+            load_membership_dependencies_from_client(client, generation, &registrations)?;
         validate_generation_function_projections(client, &registrations, &dependencies)?;
     }
     Ok(registrations)
@@ -4206,6 +4393,54 @@ pub(crate) fn active_generation_for_load(client: &SpiClient<'_>) -> Result<i64, 
     Ok(generation)
 }
 
+fn same_registration_content(left: &TableRegistration, right: &TableRegistration) -> bool {
+    left.relation_id == right.relation_id
+        && left.registration_kind == right.registration_kind
+        && left.table_id == right.table_id
+        && left.primary_key_field_id == right.primary_key_field_id
+        && left.table_name == right.table_name
+        && left.physical_schema == right.physical_schema
+        && left.physical_relation == right.physical_relation
+        && left.physical_relation_oid == right.physical_relation_oid
+        && left.replica_identity == right.replica_identity
+        && left.composition == right.composition
+        && left.membership_function == right.membership_function
+        && left.membership_function_fingerprint == right.membership_function_fingerprint
+        && left.max_scope_fanout == right.max_scope_fanout
+        && left.pk_column == right.pk_column
+        && left.pk_type == right.pk_type
+        && left.pk_portable_type == right.pk_portable_type
+        && left.capture_key_columns == right.capture_key_columns
+        && left.updated_at_col == right.updated_at_col
+        && left.deleted_at_col == right.deleted_at_col
+        && left.push_policy == right.push_policy
+        && left.sync_columns == right.sync_columns
+        && left.exclude_columns == right.exclude_columns
+        && left.has_updated_at == right.has_updated_at
+        && left.has_deleted_at == right.has_deleted_at
+        && same_field_content(&left.fields, &right.fields)
+        && same_capture_field_content(&left.capture_fields, &right.capture_fields)
+}
+
+fn same_field_content(left: &[FieldRegistration], right: &[FieldRegistration]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    right.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    left == right
+}
+
+fn same_capture_field_content(
+    left: &[CaptureFieldRegistration],
+    right: &[CaptureFieldRegistration],
+) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    right.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
+    left == right
+}
+
 fn registration_from_row(row: &SpiHeapTupleData<'_>) -> Result<TableRegistration, spi::Error> {
     let registry_generation = row
         .get_by_name::<i64, &str>("registry_generation")?
@@ -4277,6 +4512,9 @@ fn registration_from_row(row: &SpiHeapTupleData<'_>) -> Result<TableRegistration
                 }
             }),
     };
+    let membership_function_fingerprint = row
+        .get_by_name::<Vec<u8>, &str>("membership_function_fingerprint")?
+        .unwrap_or_default();
     let max_scope_fanout = row
         .get_by_name::<i32, &str>("max_scope_fanout")?
         .unwrap_or_else(|| {
@@ -4335,6 +4573,7 @@ fn registration_from_row(row: &SpiHeapTupleData<'_>) -> Result<TableRegistration
         replica_identity,
         composition,
         membership_function,
+        membership_function_fingerprint,
         max_scope_fanout,
         pk_column,
         pk_type,
@@ -4583,14 +4822,65 @@ fn validate_logical_id_kinds(
     Ok(())
 }
 
-fn validate_loaded_registration(
+pub(crate) fn validate_loaded_registration(
     client: &SpiClient<'_>,
     registration: &TableRegistration,
 ) -> Result<(), spi::Error> {
+    if staged_reconfiguration_owns_live_catalog(client, registration)? {
+        // A pending validated generation staged this relation's live shape,
+        // so the loaded registration mismatches the catalog by design until
+        // activation. True drift stays detectable because tolerance requires
+        // the staged shape to match the catalog exactly. Issue #43.
+        return Ok(());
+    }
     validate_registration_metadata(client, registration)?;
     validate_capture_triggers(client, registration)?;
     validate_publication_membership(client, registration.physical_relation_oid)?;
     Ok(())
+}
+
+fn staged_reconfiguration_owns_live_catalog(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+) -> Result<bool, spi::Error> {
+    let rows = client.select(
+        "SELECT reg.sync_columns, reg.exclude_columns
+         FROM synchro.sync_registry reg
+         JOIN synchro.sync_registry_generations gen
+           ON gen.generation = reg.registry_generation
+         WHERE gen.state = 'pending'
+           AND gen.validated
+           AND reg.registry_generation > $1
+           AND reg.relation_id = $2::uuid
+         ORDER BY reg.registry_generation DESC
+         LIMIT 1",
+        None,
+        &[
+            registration.registry_generation.into(),
+            registration.relation_id.as_str().into(),
+        ],
+    )?;
+    let Some(staged) = rows.into_iter().next() else {
+        return Ok(false);
+    };
+    let staged_sync = staged
+        .get_by_name::<Vec<String>, &str>("sync_columns")?
+        .unwrap_or_default();
+    let staged_exclude = staged
+        .get_by_name::<Vec<String>, &str>("exclude_columns")?
+        .unwrap_or_default();
+    if staged_sync.is_empty() {
+        return Ok(false);
+    }
+    let actual =
+        ordered_table_columns_for_oid_in_client(client, registration.physical_relation_oid)?;
+    let actual: std::collections::HashSet<&str> = actual.iter().map(String::as_str).collect();
+    let staged: std::collections::HashSet<&str> = staged_sync
+        .iter()
+        .chain(staged_exclude.iter())
+        .map(String::as_str)
+        .collect();
+    Ok(staged == actual)
 }
 
 pub(crate) fn validate_capture_triggers(

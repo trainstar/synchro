@@ -22,12 +22,14 @@ beforeEach(() => {
 });
 
 describe('useSyncStatus', () => {
-  it('starts with idle status', () => {
+  it('starts with the exact uninitialized status', () => {
     const client = makeClient();
     const { result } = renderHook(() => useSyncStatus(client));
 
-    expect(result.current.status).toBe('idle');
+    expect(result.current.status).toBe('uninitialized');
     expect(result.current.retryAt).toBeNull();
+    expect(result.current.operation).toBeNull();
+    expect(result.current.failure).toBeNull();
   });
 
   it('updates when status changes', () => {
@@ -35,10 +37,15 @@ describe('useSyncStatus', () => {
     const { result } = renderHook(() => useSyncStatus(client));
 
     act(() => {
-      emitNativeEvent('onStatusChange', { status: 'syncing', retryAt: null });
+      emitNativeEvent('onStatusChange', {
+        status: 'pushing',
+        retryAt: null,
+        operation: null,
+        failure: null,
+      });
     });
 
-    expect(result.current.status).toBe('syncing');
+    expect(result.current.status).toBe('pushing');
   });
 
   it('cleans up subscription on unmount', () => {
@@ -54,8 +61,23 @@ describe('useSyncStatus', () => {
     expect(remove).toBeDefined();
     expect(remove).toHaveBeenCalledTimes(1);
 
+    let notified = -1;
     act(() => {
-      emitNativeEvent('onStatusChange', { status: 'error', retryAt: null });
+      notified = emitNativeEvent('onStatusChange', {
+        status: 'error',
+        retryAt: null,
+        operation: null,
+        failure: {
+          operation: 'database',
+          code: 'local_database',
+          retryable: false,
+          message: 'local failure',
+          recoveryAction: 'retry',
+          metadata: {},
+        },
+      });
     });
+
+    expect(notified).toBe(0);
   });
 });

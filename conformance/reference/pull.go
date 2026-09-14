@@ -53,18 +53,19 @@ type localPullCursorPlan struct {
 }
 
 type pullScopeRuntime struct {
-	scope        ScopeID
-	assignment   ScopeAssignment
-	state        ScopeState
-	hasState     bool
-	cursor       StreamPosition
-	hasCursor    bool
-	acknowledged bool
-	rebuild      bool
-	candidates   []pullCandidate
-	selected     []pullCandidate
-	issue        StreamPosition
-	hasIssue     bool
+	scope            ScopeID
+	assignment       ScopeAssignment
+	state            ScopeState
+	hasState         bool
+	cursor           StreamPosition
+	hasCursor        bool
+	acknowledged     bool
+	completedRebuild bool
+	rebuild          bool
+	candidates       []pullCandidate
+	selected         []pullCandidate
+	issue            StreamPosition
+	hasIssue         bool
 }
 
 type pullCandidate struct {
@@ -158,7 +159,11 @@ func pullRequestPage(_ context.Context, model *Model, payload json.RawMessage) (
 			return pullEndpointError(400, "invalid_request", false), nil
 		}
 		if assignment.RebuildRequired {
-			runtime.rebuild = true
+			if completedRebuildFinalCursor(model, client, assignment, scopeState, scope, token, now) {
+				runtime.completedRebuild = true
+			} else {
+				runtime.rebuild = true
+			}
 		}
 		runtimes[scope] = runtime
 	}
@@ -289,6 +294,12 @@ func pullRequestPage(_ context.Context, model *Model, payload json.RawMessage) (
 			continue
 		}
 		runtime.acknowledged = acknowledgeServerCursor(&clientState, scope, runtime.cursor, now)
+		if runtime.completedRebuild {
+			if !clearAcknowledgedRebuildRequirement(&clientState, scope) {
+				return pullEndpointError(500, "sync_integrity_failure", false), nil
+			}
+			runtime.acknowledged = true
+		}
 	}
 	for _, plan := range plans {
 		storeIssuedServerCursor(&clientState, plan.runtime.scope, plan.token)
@@ -1088,6 +1099,26 @@ func acknowledgeServerCursor(client *ClientState, scope ScopeID, position Stream
 			break
 		}
 	}
+	return true
+}
+
+func completedRebuildFinalCursor(model *Model, client ClientKey, assignment ScopeAssignment, scopeState ScopeState, scope ScopeID, token OpaqueToken, now time.Time) bool {
+	for key, session := range model.state.Rebuilds {
+		if key.Client != client || key.Scope != scope || session.Status != RebuildStatusComplete || !session.HasFinalCursor || session.FinalCursor != token {
+			continue
+		}
+		clientState, found := model.state.Clients[client]
+		return found && rebuildSessionCurrent(model.state, clientState, assignment, scopeState, session, now)
+	}
+	return false
+}
+
+func clearAcknowledgedRebuildRequirement(client *ClientState, scope ScopeID) bool {
+	index, found := findScopeAssignment(client.ScopeAssignments, scope)
+	if !found || !client.ScopeAssignments[index].Assigned || !client.ScopeAssignments[index].RebuildRequired {
+		return false
+	}
+	client.ScopeAssignments[index].RebuildRequired = false
 	return true
 }
 

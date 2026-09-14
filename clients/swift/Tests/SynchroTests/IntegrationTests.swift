@@ -3,7 +3,7 @@ import Foundation
 #if canImport(CommonCrypto)
 import CommonCrypto
 #endif
-@testable import Synchro
+@testable @_spi(Inspection) import Synchro
 
 final class IntegrationTests: XCTestCase {
     private var serverURL: URL!
@@ -65,15 +65,36 @@ final class IntegrationTests: XCTestCase {
         NSTemporaryDirectory() + UUID().uuidString.lowercased() + ".sqlite"
     }
 
-    private func makeConfig(userID: String, clientID: String = UUID().uuidString.lowercased(), dbPath: String) -> SynchroConfig {
+    private func makeConfig(
+        userID: String,
+        clientID: String = UUID().uuidString.lowercased(),
+        dbPath: String,
+        syncInterval: TimeInterval = 999,
+        pushDebounce: TimeInterval = 0.5,
+        transportObservationCollector: TransportObservationCollector? = nil
+    ) -> SynchroConfig {
         let token = signTestJWT(userID: userID)
+        if let transportObservationCollector {
+            return SynchroConfig(
+                dbPath: dbPath,
+                serverURL: serverURL,
+                authProvider: { token },
+                clientID: clientID,
+                appVersion: "1.0.0",
+                syncInterval: syncInterval,
+                pushDebounce: pushDebounce,
+                maxRetryAttempts: 1,
+                transportObservationCollector: transportObservationCollector
+            )
+        }
         return SynchroConfig(
             dbPath: dbPath,
             serverURL: serverURL,
             authProvider: { token },
             clientID: clientID,
             appVersion: "1.0.0",
-            syncInterval: 999,
+            syncInterval: syncInterval,
+            pushDebounce: pushDebounce,
             maxRetryAttempts: 1
         )
     }
@@ -95,7 +116,7 @@ final class IntegrationTests: XCTestCase {
             clientID: clientID,
             platform: "ios",
             appVersion: "1.0.0",
-            protocolVersion: 2,
+            protocolVersion: 3,
             schema: .init(version: 0, hash: ""),
             scopeSetVersion: 0,
             knownScopes: [:]
@@ -108,15 +129,25 @@ final class IntegrationTests: XCTestCase {
             params: [customerID, userID, "Integration Customer", updatedAt, updatedAt]
         )
         _ = try client.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            params: [orderID, customerID, shipAddress, updatedAt, updatedAt]
+            "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            params: [orderID, customerID, userID, shipAddress, updatedAt, updatedAt]
         )
     }
 
 
-    private func stopAndClose(_ client: SynchroClient?) {
-        client?.stop()
-        try? client?.close()
+    private func stopAndClose(_ client: SynchroClient?) async {
+        await client?.stop()
+        try? await client?.close()
+    }
+
+    private func syncAndWaitForScheduledRetry(_ client: SynchroClient) async throws {
+        do {
+            try await client.syncNow()
+        } catch is RetryableError {
+            try await waitForCondition(timeoutNanoseconds: 15_000_000_000) {
+                client.getSyncStatus() == .ready
+            }
+        }
     }
 
     private func waitForCondition(
@@ -146,95 +177,96 @@ final class IntegrationTests: XCTestCase {
             XCTFail("Expected auth failure")
         } catch let error as SynchroError {
             switch error {
-            case .serverError(let status, _):
+            case .protocolError(let status, let code, _):
                 XCTAssertEqual(status, 401)
+                XCTAssertEqual(code, .authRequired)
             default:
-                XCTFail("Expected serverError(401), got \(error)")
+                XCTFail("Expected authRequired protocol error, got \(error)")
             }
         }
     }
 
     func testPushPullBetweenTwoClients() async throws {
         let userID = UUID().uuidString.lowercased()
-        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath())
+        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath(), syncInterval: 0.1)
         let clientBConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let customerID = UUID().uuidString.lowercased()
         let orderID = UUID().uuidString.lowercased()
 
         let clientA = try SynchroClient(config: clientAConfig)
         let clientB = try SynchroClient(config: clientBConfig)
-        defer {
-            stopAndClose(clientA)
-            stopAndClose(clientB)
+        addTeardownBlock {
+            await self.stopAndClose(clientA)
+            await self.stopAndClose(clientB)
         }
 
         try await clientA.start()
-        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: "123 Main St", updatedAt: "2026-01-01T00:00:00.000Z")
-        try await clientA.syncNow()
+        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"123 Main St"}"#, updatedAt: "2026-01-01T00:00:00.000Z")
+        try await syncAndWaitForScheduledRetry(clientA)
 
         try await clientB.start()
         try await waitForCondition {
             try await clientB.syncNow()
             let row = try clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
-            return (row?["ship_address"] as? String) == "123 Main St"
+            return (row?["ship_address"] as? String) == #"{"street":"123 Main St"}"#
         }
     }
 
     func testFreshClientBootstrapsExistingServerState() async throws {
         let userID = UUID().uuidString.lowercased()
-        let writerConfig = makeConfig(userID: userID, dbPath: tempDBPath())
+        let writerConfig = makeConfig(userID: userID, dbPath: tempDBPath(), syncInterval: 0.1)
         let readerConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let customerID = UUID().uuidString.lowercased()
         let orderID = UUID().uuidString.lowercased()
 
         let writer = try SynchroClient(config: writerConfig)
-        defer { stopAndClose(writer) }
+        addTeardownBlock { await self.stopAndClose(writer) }
 
         try await writer.start()
-        try seedOrder(writer, userID: userID, customerID: customerID, orderID: orderID, shipAddress: "Bootstrap Ave", updatedAt: "2026-01-02T00:00:00.000Z")
-        try await writer.syncNow()
-        writer.stop()
-        try writer.close()
+        try seedOrder(writer, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"Bootstrap Ave"}"#, updatedAt: "2026-01-02T00:00:00.000Z")
+        try await syncAndWaitForScheduledRetry(writer)
+        await writer.stop()
+        try await writer.close()
 
         let reader = try SynchroClient(config: readerConfig)
-        defer { stopAndClose(reader) }
+        addTeardownBlock { await self.stopAndClose(reader) }
         try await reader.start()
         try await waitForCondition {
             try await reader.syncNow()
             let row = try reader.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
-            return (row?["ship_address"] as? String) == "Bootstrap Ave"
+            return (row?["ship_address"] as? String) == #"{"street":"Bootstrap Ave"}"#
         }
     }
 
     func testSoftDeletePropagatesBetweenClients() async throws {
         let userID = UUID().uuidString.lowercased()
-        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath())
+        let clientAConfig = makeConfig(userID: userID, dbPath: tempDBPath(), syncInterval: 0.1)
         let clientBConfig = makeConfig(userID: userID, dbPath: tempDBPath())
         let customerID = UUID().uuidString.lowercased()
         let orderID = UUID().uuidString.lowercased()
 
         let clientA = try SynchroClient(config: clientAConfig)
         let clientB = try SynchroClient(config: clientBConfig)
-        defer {
-            stopAndClose(clientA)
-            stopAndClose(clientB)
+        addTeardownBlock {
+            await self.stopAndClose(clientA)
+            await self.stopAndClose(clientB)
         }
 
         try await clientA.start()
-        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: "Delete Me", updatedAt: "2026-01-03T00:00:00.000Z")
-        try await clientA.syncNow()
+        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"Delete Me"}"#, updatedAt: "2026-01-03T00:00:00.000Z")
+        try await syncAndWaitForScheduledRetry(clientA)
 
         try await clientB.start()
         try await waitForCondition {
             let row = try clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
-            return (row?["ship_address"] as? String) == "Delete Me"
+            return (row?["ship_address"] as? String) == #"{"street":"Delete Me"}"#
         }
 
         _ = try clientA.execute(
             "UPDATE orders SET deleted_at = ?, updated_at = ? WHERE id = ?",
             params: ["2026-01-04T00:00:00.000Z", "2026-01-04T00:00:00.000Z", orderID]
         )
-        try await clientA.syncNow()
+        try await syncAndWaitForScheduledRetry(clientA)
         let expectedDeletedAt = try clientA.queryOne(
             "SELECT deleted_at FROM orders WHERE id = ?",
             params: [orderID]
@@ -245,6 +277,212 @@ final class IntegrationTests: XCTestCase {
             let row = try clientB.queryOne("SELECT deleted_at FROM orders WHERE id = ?", params: [orderID])
             return (row?["deleted_at"] as? String) == expectedDeletedAt
         }
+    }
+
+    func testConcurrentSyncNowCallersEachCompleteTheirOwnCycleAgainstExtension() async throws {
+        let collector = TransportObservationCollector()
+        let config = makeConfig(
+            userID: UUID().uuidString.lowercased(),
+            dbPath: tempDBPath(),
+            transportObservationCollector: collector
+        )
+        let client = try SynchroClient(config: config)
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try await client.start()
+        let checkpoint = collector.snapshot().sequenceCheckpoint
+        try collector.armPause(for: .pull)
+        let first = Task { try await client.syncNow() }
+        try await collector.awaitPause(for: .pull, timeout: 5)
+        try collector.armPause(for: .pull)
+        let second = Task { try await client.syncNow() }
+        try collector.resumePause()
+        try await collector.awaitPause(for: .pull, timeout: 5)
+        try collector.resumePause()
+        try await first.value
+        try await second.value
+
+        XCTAssertEqual(
+            collector.snapshot(after: checkpoint).observations.filter { $0.operationClass == .pull }.count,
+            2
+        )
+    }
+
+    func testStopCancelsInFlightCycleWorkAgainstExtension() async throws {
+        let collector = TransportObservationCollector()
+        let config = makeConfig(
+            userID: UUID().uuidString.lowercased(),
+            dbPath: tempDBPath(),
+            transportObservationCollector: collector
+        )
+        let client = try SynchroClient(config: config)
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try await client.start()
+        let checkpoint = collector.snapshot().sequenceCheckpoint
+        try collector.armPause(for: .pull)
+        let cycle = Task { try await client.syncNow() }
+        try await collector.awaitPause(for: .pull, timeout: 5)
+        await client.stop()
+
+        if case .success = await cycle.result {
+            XCTFail("stopped cycle completed")
+        }
+        XCTAssertEqual(client.getSyncStatus(), .stopped)
+        XCTAssertEqual(
+            collector.snapshot(after: checkpoint).observations.filter { $0.operationClass == .pull }.count,
+            1
+        )
+    }
+
+    func testDebouncedPushSharesCycleGateWithExplicitSyncAgainstExtension() async throws {
+        let collector = TransportObservationCollector()
+        let userID = UUID().uuidString.lowercased()
+        let config = makeConfig(
+            userID: userID,
+            dbPath: tempDBPath(),
+            pushDebounce: 0.01,
+            transportObservationCollector: collector
+        )
+        let client = try SynchroClient(config: config)
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try await client.start()
+        let checkpoint = collector.snapshot().sequenceCheckpoint
+        try collector.armPause(for: .push)
+        try seedOrder(
+            client,
+            userID: userID,
+            customerID: UUID().uuidString.lowercased(),
+            orderID: UUID().uuidString.lowercased(),
+            shipAddress: #"{"street":"Debounced"}"#,
+            updatedAt: "2026-01-05T00:00:00.000Z"
+        )
+        try await collector.awaitPause(for: .push, timeout: 5)
+        let explicitSync = Task { try await client.syncNow() }
+        try collector.resumePause()
+        try await explicitSync.value
+        try await waitForCondition {
+            try client.pendingChangeCount() == 0
+        }
+
+        let pushes = collector.snapshot(after: checkpoint).observations.filter { $0.operationClass == .push }
+        XCTAssertEqual(pushes.count, 1)
+        XCTAssertEqual(pushes.first?.statusCode, 200)
+        XCTAssertEqual(pushes.first?.requestFacts?.mutationCount, 2)
+    }
+
+    func testBackgroundStopsNetworkAndForegroundResumesDurableWorkAgainstExtension() async throws {
+        let collector = TransportObservationCollector()
+        let userID = UUID().uuidString.lowercased()
+        let config = makeConfig(
+            userID: userID,
+            dbPath: tempDBPath(),
+            transportObservationCollector: collector
+        )
+        let client = try SynchroClient(config: config)
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try await client.start()
+        await client.enterBackground()
+        XCTAssertEqual(client.getSyncStatus(), .stopped)
+        let checkpoint = collector.snapshot().sequenceCheckpoint
+        try seedOrder(
+            client,
+            userID: userID,
+            customerID: UUID().uuidString.lowercased(),
+            orderID: UUID().uuidString.lowercased(),
+            shipAddress: #"{"street":"Foreground"}"#,
+            updatedAt: "2026-01-06T00:00:00.000Z"
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(collector.snapshot(after: checkpoint).observations.isEmpty)
+
+        try collector.armPause(for: .connect)
+        let foreground = Task { try await client.enterForeground() }
+        try await collector.awaitPause(for: .connect, timeout: 5)
+        let paused = collector.snapshot(after: checkpoint).observations
+        XCTAssertEqual(paused.map(\.operationClass), [.connect])
+        try collector.resumePause()
+        try await foreground.value
+        try await waitForCondition {
+            try client.pendingChangeCount() == 0
+        }
+
+        XCTAssertEqual(client.getSyncStatus(), .ready)
+        XCTAssertEqual(
+            collector.snapshot(after: checkpoint).observations.filter { $0.operationClass == .push }.count,
+            1
+        )
+    }
+
+    func testRealRebuildObservationProvidesBoundedFacts() async throws {
+        let collector = TransportObservationCollector()
+        let config = makeConfig(
+            userID: UUID().uuidString.lowercased(),
+            dbPath: tempDBPath(),
+            transportObservationCollector: collector
+        )
+        let client = try SynchroClient(config: config)
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try collector.armPause(for: .rebuild)
+        let start = Task { try await client.start() }
+        try await collector.awaitPause(for: .rebuild, timeout: 5)
+        let observation = try XCTUnwrap(
+            collector.snapshot().observations.last(where: { $0.operationClass == .rebuild })
+        )
+        XCTAssertEqual(observation.statusCode, 200)
+        XCTAssertNotNil(observation.requestFacts?.scopeFingerprint)
+        XCTAssertNotNil(observation.requestFacts?.rebuildIDFingerprint)
+        XCTAssertNotNil(observation.rebuildResponseFacts)
+        XCTAssertNil(observation.pullResponseFacts)
+        try collector.resumePause()
+        try await start.value
+    }
+
+    func testRealConnectResponsePauseResumesUnchanged() async throws {
+        let collector = TransportObservationCollector()
+        let config = makeConfig(
+            userID: UUID().uuidString.lowercased(),
+            dbPath: tempDBPath(),
+            transportObservationCollector: collector
+        )
+        let client = try SynchroClient(config: config)
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try collector.armPause(for: .connect)
+        let start = Task { try await client.start() }
+        try await collector.awaitPause(for: .connect, timeout: 5)
+        let paused = collector.snapshot().observations
+        XCTAssertEqual(paused.count, 1)
+        XCTAssertEqual(paused.first?.operationClass, .connect)
+        XCTAssertEqual(paused.first?.statusCode, 200)
+        XCTAssertEqual(paused.first?.requestFacts?.protocolVersion, 3)
+        XCTAssertNil(paused.first?.pullResponseFacts)
+        XCTAssertNil(paused.first?.rebuildResponseFacts)
+        try collector.resumePause()
+        try await start.value
+    }
+
+    func testRealConnectPauseCancellationReleasesResponse() async throws {
+        let collector = TransportObservationCollector()
+        let config = makeConfig(
+            userID: UUID().uuidString.lowercased(),
+            dbPath: tempDBPath(),
+            transportObservationCollector: collector
+        )
+        let client = try SynchroClient(config: config)
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try collector.armPause(for: .connect)
+        let start = Task { try await client.start() }
+        try await collector.awaitPause(for: .connect, timeout: 5)
+        collector.cancelPauseBarrier()
+        if case .success = await start.result {
+            XCTFail("cancelled connect completed")
+        }
+        XCTAssertEqual(collector.snapshot().observations.count, 1)
     }
 
 }

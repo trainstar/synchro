@@ -5,28 +5,77 @@
   "title": "Durable mutation queue restart and replay performance scenario",
   "description": "Each stratum creates the exact durable mutation count, restarts the client, loses one response, and replays one terminal rejection.",
   "requirement_ids": [
-    "SYNC-OUTCOME-001"
+    "SYNC-OUTCOME-001",
+    "SYNC-MUTATION-001",
+    "SYNC-MUTATION-003",
+    "SYNC-QUEUE-001",
+    "SYNC-QUEUE-002",
+    "SYNC-QUEUE-003",
+    "SYNC-FAILURE-001",
+    "SYNC-STATE-001",
+    "SYNC-QUEUE-004"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#complete-mutation-outcome-partition"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#no-silent-mutation-loss"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#no-duplicate-local-intent"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#durable-queue-invariant"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#offline-writes-before-first-connect"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#successor-mutation-preservation"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#retryable-failures-do-not-corrupt-state"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#legal-client-state-transitions"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#pre-wire-mutation-dependency-resolution"
     }
   ],
   "proof_types": [
     "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
     {
       "obligation_id": "OBL-PERF-QUEUE-REPLAY-RM-001",
       "requirement_ids": [
-        "SYNC-OUTCOME-001"
+        "SYNC-OUTCOME-001",
+        "SYNC-MUTATION-001",
+        "SYNC-MUTATION-003",
+        "SYNC-STATE-001",
+        "SYNC-QUEUE-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
+        "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -45,7 +94,7 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-001",
+      "obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-LINUX-X64-001",
       "requirement_ids": [
         "SYNC-OUTCOME-001"
       ],
@@ -54,7 +103,7 @@
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -73,12 +122,54 @@
       "control_id": null
     },
     {
+      "obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-OUTCOME-001",
+        "SYNC-MUTATION-001",
+        "SYNC-MUTATION-003",
+        "SYNC-QUEUE-001",
+        "SYNC-QUEUE-002",
+        "SYNC-QUEUE-003",
+        "SYNC-FAILURE-001",
+        "SYNC-STATE-001",
+        "SYNC-QUEUE-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-002",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-003",
+        "ASSERT-PERF-QUEUE-REPLAY-FAILURE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
       "obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-MIN-001",
       "requirement_ids": [
         "SYNC-OUTCOME-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -108,71 +199,10 @@
         "SYNC-OUTCOME-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -198,7 +228,6 @@
         "SYNC-OUTCOME-001"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
         "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -224,11 +253,27 @@
     {
       "obligation_id": "OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-OUTCOME-001"
+        "SYNC-OUTCOME-001",
+        "SYNC-MUTATION-001",
+        "SYNC-MUTATION-003",
+        "SYNC-QUEUE-001",
+        "SYNC-QUEUE-002",
+        "SYNC-QUEUE-003",
+        "SYNC-FAILURE-001",
+        "SYNC-STATE-001",
+        "SYNC-QUEUE-004"
       ],
       "assertion_ids": [
         "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
+        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-002",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-003",
+        "ASSERT-PERF-QUEUE-REPLAY-FAILURE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -251,44 +296,29 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-OUTCOME-001"
+        "SYNC-OUTCOME-001",
+        "SYNC-MUTATION-001",
+        "SYNC-MUTATION-003",
+        "SYNC-QUEUE-001",
+        "SYNC-QUEUE-002",
+        "SYNC-QUEUE-003",
+        "SYNC-FAILURE-001",
+        "SYNC-STATE-001",
+        "SYNC-QUEUE-004"
       ],
       "assertion_ids": [
         "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
+        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-002",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-003",
+        "ASSERT-PERF-QUEUE-REPLAY-FAILURE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -313,43 +343,29 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-OUTCOME-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-QUEUE-REPLAY-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-OUTCOME-001"
+        "SYNC-OUTCOME-001",
+        "SYNC-MUTATION-001",
+        "SYNC-MUTATION-003",
+        "SYNC-QUEUE-001",
+        "SYNC-QUEUE-002",
+        "SYNC-QUEUE-003",
+        "SYNC-FAILURE-001",
+        "SYNC-STATE-001",
+        "SYNC-QUEUE-004"
       ],
       "assertion_ids": [
         "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001"
+        "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-001",
+        "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-002",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-003",
+        "ASSERT-PERF-QUEUE-REPLAY-FAILURE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+        "ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -401,7 +417,22 @@
       ],
       "fault_plan_id": "FPL-PERF-QUEUE-REPLAY-001",
       "control_id": "CTRL-OUTCOME-001"
-    }
+    },
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-001-FAULT-001","requirement_ids":["SYNC-MUTATION-001"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-001"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-MUTATION-001","control_id":"CTRL-MUTATION-001"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-003-FAULT-001","requirement_ids":["SYNC-MUTATION-003"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-003"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-MUTATION-003","control_id":"CTRL-MUTATION-003"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-001-FAULT-001","requirement_ids":["SYNC-QUEUE-001"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-001"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-001","control_id":"CTRL-QUEUE-001"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-002-FAULT-001","requirement_ids":["SYNC-QUEUE-002"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-002"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-002","control_id":"CTRL-QUEUE-002"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-003-FAULT-001","requirement_ids":["SYNC-QUEUE-003"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-003"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-003","control_id":"CTRL-QUEUE-003"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-FAILURE-001-FAULT-001","requirement_ids":["SYNC-FAILURE-001"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-FAILURE-001"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-FAILURE-001","control_id":"CTRL-FAILURE-001"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-004-FAULT-001","requirement_ids":["SYNC-QUEUE-004"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-004","control_id":"CTRL-QUEUE-004"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-001-CONTROL-001","requirement_ids":["SYNC-MUTATION-001"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-MUTATION-001","control_id":"CTRL-MUTATION-001"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-003-CONTROL-001","requirement_ids":["SYNC-MUTATION-003"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-MUTATION-003","control_id":"CTRL-MUTATION-003"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-001-CONTROL-001","requirement_ids":["SYNC-QUEUE-001"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-001","control_id":"CTRL-QUEUE-001"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-002-CONTROL-001","requirement_ids":["SYNC-QUEUE-002"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-002","control_id":"CTRL-QUEUE-002"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-003-CONTROL-001","requirement_ids":["SYNC-QUEUE-003"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-003","control_id":"CTRL-QUEUE-003"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-FAILURE-001-CONTROL-001","requirement_ids":["SYNC-FAILURE-001"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-FAILURE-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-FAILURE-001","control_id":"CTRL-FAILURE-001"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-STATE-001-CONTROL-001","requirement_ids":["SYNC-STATE-001"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-STATE-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-STATE-001","control_id":"CTRL-STATE-001"},
+    {"obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-004-CONTROL-001","requirement_ids":["SYNC-QUEUE-004"],"assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-QUEUE-REPLAY-QUEUE-004","control_id":"CTRL-QUEUE-004"}
   ],
   "ownership": [
     {
@@ -415,26 +446,26 @@
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
@@ -448,57 +479,9 @@
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
       "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
@@ -527,22 +510,6 @@
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
       "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -555,22 +522,6 @@
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
-      "requirement_id": "SYNC-OUTCOME-001",
-      "proof_obligation_id": "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
@@ -595,7 +546,58 @@
       "assertion_id": "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RM-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RM-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-STATE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RM-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-STATE-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-004","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RM-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-002","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-FAILURE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-STATE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-STATE-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-004","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-002","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-FAILURE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-STATE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-STATE-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-004","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-002","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-FAILURE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-STATE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-STATE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-004","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-002","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-FAILURE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-STATE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-STATE-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-004","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-003-FAULT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-003-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-001-FAULT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-003-FAULT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-001-FAULT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-002","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-002-FAULT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-FAILURE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-FAILURE-001-FAULT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-004","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-004-FAULT-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-001-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-MUTATION-003","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-MUTATION-003-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-001-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-002","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-002-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-FAILURE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-FAILURE-001-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-STATE-001","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-STATE-001-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-STATE-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-QUEUE-REPLAY-001","requirement_id":"SYNC-QUEUE-004","proof_obligation_id":"OBL-PERF-QUEUE-REPLAY-QUEUE-004-CONTROL-001","assertion_id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -809,6 +811,143 @@
       }
     ]
   },
+  "native_identity_aliases": [
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-one",
+      "value": {
+        "version": 1,
+        "hash": "5d50ccf5bfc84302b63c450bd63b6be412373070586e2d3891d76429cb7e9168"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-two",
+      "value": {
+        "version": 2,
+        "hash": "51d53afcdc08fafd4d7a8259a2fca75cf81a1a791c7bacd2e882d97395b7fc4e"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-three",
+      "value": {
+        "version": 3,
+        "hash": "f25b3f1c01d45ac70bae786c4b68f5f05e49276d7c05a055fc5aff766cb35cd4"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-four",
+      "value": {
+        "version": 4,
+        "hash": "7a8b07fcd818e41c669390d23ba6d38150a8fe47c38f54894bbc136df014f5b5"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-five",
+      "value": {
+        "version": 5,
+        "hash": "28f8545a3f271cd2758eaaedff462a440042584a3c0e9ea8db9566b2baa21fd2"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-six",
+      "value": {
+        "version": 6,
+        "hash": "4cf955f728ff6d0fb3de983c4c7d933c6f97be49c127c96d629d6e5ef2160667"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-seven",
+      "value": {
+        "version": 7,
+        "hash": "ef3b6091844ad1fa84f853fc6c3943eabcd11c7eb3d3537c0201f1b9762b103e"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-eight",
+      "value": {
+        "version": 8,
+        "hash": "6f7ff6b970f81c03dd370ba9ef3d088e3346076af777b99319422cf5e02d505d"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "queue-schema-nine",
+      "value": {
+        "version": 9,
+        "hash": "5411483dda2f137159dab37b9efc4599c6f04bdb16b32f3339e49b0c2fd88265"
+      },
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [],
+      "expectation_ids": [
+        "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"
+      ]
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -841,7 +980,15 @@
           "defect": "omit, duplicate, cross-list, reorder, or assign an unspecified status to a requested mutation"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-QUEUE-REPLAY-MUTATION-001","requirement_id":"SYNC-MUTATION-001","fault_id":"FAULT-MUTATION-001","control_id":"CTRL-MUTATION-001","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-001"],"injection":{"mechanism":"state-fault","target":"durable mutation queue terminalization","operator":"omit","parameters":{"scenario":"capture a local mutation and force queue processing to stop before send","defect":"remove the intent without pending, accepted, rejected, superseded, cancelled, or blocked outcome linkage"}}},
+    {"id":"FPL-PERF-QUEUE-REPLAY-MUTATION-003","requirement_id":"SYNC-MUTATION-003","fault_id":"FAULT-MUTATION-003","control_id":"CTRL-MUTATION-003","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-003"],"injection":{"mechanism":"source-mutant","target":"local action replay and echo deduplication","operator":"duplicate","parameters":{"scenario":"replay a sealed response and then deliver the authoritative row echo","defect":"enqueue or apply the same logical local action a second time"}}},
+    {"id":"FPL-PERF-QUEUE-REPLAY-QUEUE-001","requirement_id":"SYNC-QUEUE-001","fault_id":"FAULT-QUEUE-001","control_id":"CTRL-QUEUE-001","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-001"],"injection":{"mechanism":"process-fault","target":"durable queue commit before first transmission","operator":"crash","parameters":{"scenario":"kill the client after queue persistence and before network transmission","defect":"regenerate mutation identity or lose authored content and local ordering on restart"}}},
+    {"id":"FPL-PERF-QUEUE-REPLAY-QUEUE-002","requirement_id":"SYNC-QUEUE-002","fault_id":"FAULT-QUEUE-002","control_id":"CTRL-QUEUE-002","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-002"],"injection":{"mechanism":"state-fault","target":"pre-connect manifest, seed base, and mutation queue","operator":"replace","parameters":{"scenario":"write offline with a verified manifest, then use a seed receipt that is unassigned or stale","defect":"fabricate a base version, lose authored intent, or expose writes without a verified table and field manifest"}}},
+    {"id":"FPL-PERF-QUEUE-REPLAY-QUEUE-003","requirement_id":"SYNC-QUEUE-003","fault_id":"FAULT-QUEUE-003","control_id":"CTRL-QUEUE-003","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-003"],"injection":{"mechanism":"state-fault","target":"successor mutation normalization","operator":"replace","parameters":{"scenario":"change a queued mutation after schema or application reconciliation and separately leave one unchanged","defect":"reuse the original UUID for changed intent or remove unchanged UUID and authored content"}}},
+    {"id":"FPL-PERF-QUEUE-REPLAY-FAILURE-001","requirement_id":"SYNC-FAILURE-001","fault_id":"FAULT-FAILURE-001","control_id":"CTRL-FAILURE-001","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-FAILURE-001"],"injection":{"mechanism":"wire-fault","target":"pull or push transport response","operator":"crash","parameters":{"scenario":"drop a request after transmission and before a retryable response","defect":"commit queue, cursor, schema, rebuild, or partial-page state beyond retry bookkeeping"}}},
+    {"id":"FPL-PERF-QUEUE-REPLAY-STATE-001","requirement_id":"SYNC-STATE-001","fault_id":"FAULT-STATE-001","control_id":"CTRL-STATE-001","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-STATE-001"],"injection":{"mechanism":"state-fault","target":"client state adjacency dispatcher","operator":"inject","parameters":{"scenario":"attempt stopped-to-pulling, error-to-ready, and an unknown state transition","defect":"accept the unlisted transition or mutate durable state before returning a non-retryable local contract error"}}},
+    {"id":"FPL-PERF-QUEUE-REPLAY-QUEUE-004","requirement_id":"SYNC-QUEUE-004","fault_id":"FAULT-QUEUE-004","control_id":"CTRL-QUEUE-004","barrier_id":"BAR-PERF-QUEUE-REPLAY-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"],"injection":{"mechanism":"state-fault","target":"same-row pre-wire mutation dependency resolver","operator":"replace","parameters":{"scenario":"queue insert-update-delete chains before sealing and update/delete after a sealed predecessor","defect":"send fabricated base_version, drop predecessor linkage, or create a transient server row for unsealed insert-delete"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -864,7 +1011,15 @@
       "detected_by": [
         "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-MUTATION-001","requirement_id":"SYNC-MUTATION-001","fault_id":"FAULT-MUTATION-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-001"]},
+    {"control_id":"CTRL-MUTATION-003","requirement_id":"SYNC-MUTATION-003","fault_id":"FAULT-MUTATION-003","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-MUTATION-003"]},
+    {"control_id":"CTRL-QUEUE-001","requirement_id":"SYNC-QUEUE-001","fault_id":"FAULT-QUEUE-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-001"]},
+    {"control_id":"CTRL-QUEUE-002","requirement_id":"SYNC-QUEUE-002","fault_id":"FAULT-QUEUE-002","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-002"]},
+    {"control_id":"CTRL-QUEUE-003","requirement_id":"SYNC-QUEUE-003","fault_id":"FAULT-QUEUE-003","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-003"]},
+    {"control_id":"CTRL-FAILURE-001","requirement_id":"SYNC-FAILURE-001","fault_id":"FAULT-FAILURE-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-FAILURE-001"]},
+    {"control_id":"CTRL-STATE-001","requirement_id":"SYNC-STATE-001","fault_id":"FAULT-STATE-001","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-STATE-001"]},
+    {"control_id":"CTRL-QUEUE-004","requirement_id":"SYNC-QUEUE-004","fault_id":"FAULT-QUEUE-004","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-QUEUE-REPLAY-QUEUE-004"]}
   ],
   "steps": [
     {
@@ -872,6 +1027,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create two durable mutations and replay one terminal rejection after restart and response loss.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 2,
+          "batch_size": 2,
+          "seed": 1001,
+          "authored_schema": {
+            "version": 1,
+            "hash": "5d50ccf5bfc84302b63c450bd63b6be412373070586e2d3891d76429cb7e9168"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "obsolete_value",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 2,
+            "batch_count": 1,
+            "operation_digest": "6aa7e09f287a214ff71d923d5c59d75ab0f497cf2a5e930155f33d391bb96945",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 2
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-SMALL-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-001",
+        "parameters": {
+          "pending_mutation_count": 2,
+          "accepted_count": 1,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-SMALL-001",
+          "family": "queue-replay",
+          "boundary": "small",
+          "value": {
+            "pending_mutation_count": 2,
+            "accepted_count": 1,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -893,6 +1118,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 2,
+          "batch_size": 2,
+          "seed": 1002,
+          "authored_schema": {
+            "version": 2,
+            "hash": "51d53afcdc08fafd4d7a8259a2fca75cf81a1a791c7bacd2e882d97395b7fc4e"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_2",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 2,
+            "batch_count": 1,
+            "operation_digest": "6fbe530d355e8a3f308708a92e14694dcb0665f81dbb5277d0bb396d3d120a61",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 2
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-SMALL-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-002",
+        "parameters": {
+          "pending_mutation_count": 2,
+          "accepted_count": 1,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-SMALL-002",
+          "family": "queue-replay",
+          "boundary": "small",
+          "value": {
+            "pending_mutation_count": 2,
+            "accepted_count": 1,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -914,6 +1209,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the two-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 2,
+          "batch_size": 2,
+          "seed": 1003,
+          "authored_schema": {
+            "version": 3,
+            "hash": "f25b3f1c01d45ac70bae786c4b68f5f05e49276d7c05a055fc5aff766cb35cd4"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_3",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 2,
+            "batch_count": 1,
+            "operation_digest": "2f2484884132711b57cadd624dade43d29f8611cba0c3e475221a82c15a1366a",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 2
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-SMALL-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-SMALL-003",
+        "parameters": {
+          "pending_mutation_count": 2,
+          "accepted_count": 1,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-SMALL-003",
+          "family": "queue-replay",
+          "boundary": "small",
+          "value": {
+            "pending_mutation_count": 2,
+            "accepted_count": 1,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -935,6 +1300,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 100 durable mutations and replay one terminal rejection after restart and response loss.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 100,
+          "batch_size": 100,
+          "seed": 1004,
+          "authored_schema": {
+            "version": 4,
+            "hash": "7a8b07fcd818e41c669390d23ba6d38150a8fe47c38f54894bbc136df014f5b5"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 99,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_4",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 100,
+            "batch_count": 1,
+            "operation_digest": "b6059566b633c00d34ea73a9ac616a5fca244c665728419c4f681a5135cd0c19",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 100
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-MEDIUM-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-001",
+        "parameters": {
+          "pending_mutation_count": 100,
+          "accepted_count": 99,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-MEDIUM-001",
+          "family": "queue-replay",
+          "boundary": "medium",
+          "value": {
+            "pending_mutation_count": 100,
+            "accepted_count": 99,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -956,6 +1391,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 100,
+          "batch_size": 100,
+          "seed": 1005,
+          "authored_schema": {
+            "version": 5,
+            "hash": "28f8545a3f271cd2758eaaedff462a440042584a3c0e9ea8db9566b2baa21fd2"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 99,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_5",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 100,
+            "batch_count": 1,
+            "operation_digest": "50c6326ae080889dcfcf3a8892dbd045aef5e7e4c957dad9fafd0b91780ce38b",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 100
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-MEDIUM-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-002",
+        "parameters": {
+          "pending_mutation_count": 100,
+          "accepted_count": 99,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-MEDIUM-002",
+          "family": "queue-replay",
+          "boundary": "medium",
+          "value": {
+            "pending_mutation_count": 100,
+            "accepted_count": 99,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -977,6 +1482,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 100-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 100,
+          "batch_size": 100,
+          "seed": 1006,
+          "authored_schema": {
+            "version": 6,
+            "hash": "4cf955f728ff6d0fb3de983c4c7d933c6f97be49c127c96d629d6e5ef2160667"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 99,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_6",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 100,
+            "batch_count": 1,
+            "operation_digest": "ef8af5fdffda7d0f1f0a584319b1dbb7dc6cbe8c1e7804fe4e1e231f8c22b612",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 100
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-MEDIUM-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-MEDIUM-003",
+        "parameters": {
+          "pending_mutation_count": 100,
+          "accepted_count": 99,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-MEDIUM-003",
+          "family": "queue-replay",
+          "boundary": "medium",
+          "value": {
+            "pending_mutation_count": 100,
+            "accepted_count": 99,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -998,6 +1573,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Create 1000 durable mutations and replay one terminal rejection after restart and response loss.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 1007,
+          "authored_schema": {
+            "version": 7,
+            "hash": "ef3b6091844ad1fa84f853fc6c3943eabcd11c7eb3d3537c0201f1b9762b103e"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 999,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_7",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "5f274e3896e5920d1b2afb67cd4866cc5ea5ca3985f369b4093f26fd86d5cfe2",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-LARGE-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-001",
+        "parameters": {
+          "pending_mutation_count": 1000,
+          "accepted_count": 999,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-LARGE-001",
+          "family": "queue-replay",
+          "boundary": "large",
+          "value": {
+            "pending_mutation_count": 1000,
+            "accepted_count": 999,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1019,6 +1664,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 1008,
+          "authored_schema": {
+            "version": 8,
+            "hash": "6f7ff6b970f81c03dd370ba9ef3d088e3346076af777b99319422cf5e02d505d"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 999,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_8",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "23017604191a51e3c4842649469ce09ebd370698a97d485be188b903a3f93963",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-LARGE-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-002",
+        "parameters": {
+          "pending_mutation_count": 1000,
+          "accepted_count": 999,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-LARGE-002",
+          "family": "queue-replay",
+          "boundary": "large",
+          "value": {
+            "pending_mutation_count": 1000,
+            "accepted_count": 999,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1040,6 +1755,76 @@
       "phase": "exercise",
       "transport": "model",
       "description": "Repeat the 1000-mutation restart and replay sample.",
+      "native_binding": {
+        "kind": "workload",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "workload": {
+          "record_count": 1000,
+          "batch_size": 1000,
+          "seed": 1009,
+          "authored_schema": {
+            "version": 9,
+            "hash": "5411483dda2f137159dab37b9efc4599c6f04bdb16b32f3339e49b0c2fd88265"
+          },
+          "client_version": "2026-08-11T00:00:00.000000Z",
+          "targets": [
+            {
+              "scope_id": "scope-a",
+              "table_id": "items",
+              "primary_key_field_id": "id"
+            }
+          ],
+          "mutation_kinds": [
+            {
+              "operation": "insert",
+              "count": 999,
+              "field_ids": [
+                "value"
+              ]
+            },
+            {
+              "operation": "insert",
+              "count": 1,
+              "field_ids": [
+                "queue_value_9",
+                "value"
+              ]
+            }
+          ],
+          "expectation": {
+            "operation_count": 1000,
+            "batch_count": 1,
+            "operation_digest": "b323d834660497f71cac03776fbe55fdcd13a6da3de55f9717f4666b2a513eb8",
+            "per_scope_cardinalities": [
+              {
+                "scope_id": "scope-a",
+                "cardinality": 1000
+              }
+            ]
+          }
+        }
+      },
+      "measurement_sample": {
+        "measurement_id": "MEAS-QUEUE-REPLAY-001",
+        "stratum_id": "STR-QUEUE-LARGE-001",
+        "sample_id": "SAMPLE-QUEUE-REPLAY-LARGE-003",
+        "parameters": {
+          "pending_mutation_count": 1000,
+          "accepted_count": 999,
+          "rejected_count": 1
+        },
+        "operation": {
+          "id": "MOP-QUEUE-REPLAY-LARGE-003",
+          "family": "queue-replay",
+          "boundary": "large",
+          "value": {
+            "pending_mutation_count": 1000,
+            "accepted_count": 999,
+            "rejected_count": 1
+          }
+        }
+      },
       "operation": {
         "contract_operation": "workload",
         "name": "prepare",
@@ -1102,6 +1887,14 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001","requirement_ids":["SYNC-MUTATION-001"],"description":"Native queue inspection proves that each authored mutation retains one linked pending or terminal outcome.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-MUTATION-001"]},
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003","requirement_ids":["SYNC-MUTATION-003"],"description":"Response replay and authoritative echo leave one local action and one durable outcome.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-MUTATION-003"]},
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001","requirement_ids":["SYNC-QUEUE-001"],"description":"Native queue inspection preserves stable mutation identifiers, authored content, and order across process restart.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-QUEUE-001"]},
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002","requirement_ids":["SYNC-QUEUE-002"],"description":"Verified offline schema metadata permits writes before first connect and preserves their durable queue identities.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-QUEUE-002"]},
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003","requirement_ids":["SYNC-QUEUE-003"],"description":"Unchanged queued intent retains its identity and authored content across restart, while changed intent creates one linked successor and preserves its original.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-QUEUE-003"]},
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001","requirement_ids":["SYNC-FAILURE-001"],"description":"A retryable lost response changes only retry bookkeeping before the exact queued mutation resumes.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-FAILURE-001"]},
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-STATE-001","requirement_ids":["SYNC-STATE-001"],"description":"The native state trace follows only declared adjacency edges and rejects unknown or unlisted transitions.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-STATE-001"]},
+    {"id":"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004","requirement_ids":["SYNC-QUEUE-004"],"description":"Same-row intent resolves before transmission without fabricated versions or an unsealed transient server row.","expectation_ids":["EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"],"predicate":{"contract_predicate":"state-equality","name":"state-equals-authored-model","payload":{}},"oracle":{"kind":"model-state-equality","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-QUEUE-004"]}
   ]
 }

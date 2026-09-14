@@ -27,12 +27,8 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 		{"missing mode", []string{"catalog", "--repo-root", "."}, "catalog requires exactly one"},
 		{"both modes", []string{"catalog", "--repo-root", ".", "--write", "--check"}, "catalog requires exactly one"},
 		{"positional extra", []string{"catalog", "--repo-root", ".", "--check", "extra"}, "does not accept positional"},
-		{"model missing root", []string{"model"}, "model requires --repo-root PATH"},
-		{"model malformed flag", []string{"model", "--unknown"}, "model flags are invalid"},
 		{"blackbox missing mode", []string{"blackbox", "--repo-root", "."}, "blackbox requires --mode"},
 		{"blackbox invalid mode", []string{"blackbox", "--repo-root", ".", "--mode", "other"}, "blackbox requires --mode"},
-		{"baseline missing root", []string{"baseline", "--output", "baseline-test"}, "baseline requires --repo-root PATH"},
-		{"baseline missing output", []string{"baseline", "--repo-root", "."}, "baseline requires --output PATH"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -41,15 +37,6 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 				t.Fatalf("run error = %v, want %q", err, test.want)
 			}
 		})
-	}
-}
-
-func TestRunModelExecutesSelectedAuthoredScenario(t *testing.T) {
-	err := run(context.Background(), []string{
-		"model", "--repo-root", repositoryRoot(t), "--scenario", "SCN-WAL-ORDER-001",
-	})
-	if err != nil {
-		t.Fatalf("run selected authored scenario: %v", err)
 	}
 }
 

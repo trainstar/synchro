@@ -3,7 +3,7 @@ package com.trainstar.synchro
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.fail
@@ -91,7 +91,7 @@ class IntegrationTests {
             clientID = clientID,
             platform = "android",
             appVersion = "1.0.0",
-            protocolVersion = 2,
+            protocolVersion = 3,
             schema = SchemaRef(version = 0, hash = ""),
             scopeSetVersion = 0,
             knownScopes = emptyMap()
@@ -111,8 +111,8 @@ class IntegrationTests {
             arrayOf(customerID, userID, "Integration Customer", updatedAt, updatedAt)
         )
         client.execute(
-            "INSERT INTO orders (id, customer_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-            arrayOf(orderID, customerID, shipAddress, updatedAt, updatedAt)
+            "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+            arrayOf(orderID, customerID, userID, shipAddress, updatedAt, updatedAt)
         )
     }
 
@@ -131,7 +131,7 @@ class IntegrationTests {
     }
 
     @Test
-    fun testAuthFailure() = runTest {
+    fun testAuthFailure() = runBlocking {
         val config = makeBadTokenConfig()
         val http = HttpClient(config)
 
@@ -144,7 +144,7 @@ class IntegrationTests {
     }
 
     @Test
-    fun testPushPullBetweenTwoClients() = runTest {
+    fun testPushPullBetweenTwoClients() = runBlocking {
         val userID = UUID.randomUUID().toString()
         val clientA = SynchroClient(makeConfig(userID = userID), context)
         val clientB = SynchroClient(makeConfig(userID = userID), context)
@@ -153,14 +153,14 @@ class IntegrationTests {
 
         try {
             clientA.start()
-            seedOrder(clientA, userID, customerID, orderID, "123 Main St", "2026-01-01T00:00:00.000Z")
+            seedOrder(clientA, userID, customerID, orderID, """{"street":"123 Main St"}""", "2026-01-01T00:00:00.000Z")
             clientA.syncNow()
 
             clientB.start()
             waitForCondition {
                 clientB.syncNow()
                 val row = clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
-                row?.get("ship_address") == "123 Main St"
+                row?.get("ship_address") == """{"street":"123 Main St"}"""
             }
         } finally {
             clientA.stop()
@@ -171,7 +171,7 @@ class IntegrationTests {
     }
 
     @Test
-    fun testFreshClientBootstrapsExistingServerState() = runTest {
+    fun testFreshClientBootstrapsExistingServerState() = runBlocking {
         val userID = UUID.randomUUID().toString()
         val writer = SynchroClient(makeConfig(userID = userID), context)
         val reader = SynchroClient(makeConfig(userID = userID), context)
@@ -180,7 +180,7 @@ class IntegrationTests {
 
         try {
             writer.start()
-            seedOrder(writer, userID, customerID, orderID, "Bootstrap Ave", "2026-01-02T00:00:00.000Z")
+            seedOrder(writer, userID, customerID, orderID, """{"street":"Bootstrap Ave"}""", "2026-01-02T00:00:00.000Z")
             writer.syncNow()
             writer.stop()
             writer.close()
@@ -189,7 +189,7 @@ class IntegrationTests {
             waitForCondition {
                 reader.syncNow()
                 val row = reader.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
-                row?.get("ship_address") == "Bootstrap Ave"
+                row?.get("ship_address") == """{"street":"Bootstrap Ave"}"""
             }
         } finally {
             reader.stop()
@@ -198,7 +198,7 @@ class IntegrationTests {
     }
 
     @Test
-    fun testSoftDeletePropagatesBetweenClients() = runTest {
+    fun testSoftDeletePropagatesBetweenClients() = runBlocking {
         val userID = UUID.randomUUID().toString()
         val clientA = SynchroClient(makeConfig(userID = userID), context)
         val clientB = SynchroClient(makeConfig(userID = userID), context)
@@ -207,13 +207,13 @@ class IntegrationTests {
 
         try {
             clientA.start()
-            seedOrder(clientA, userID, customerID, orderID, "Delete Me", "2026-01-03T00:00:00.000Z")
+            seedOrder(clientA, userID, customerID, orderID, """{"street":"Delete Me"}""", "2026-01-03T00:00:00.000Z")
             clientA.syncNow()
 
             clientB.start()
             waitForCondition {
                 val row = clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
-                row?.get("ship_address") == "Delete Me"
+                row?.get("ship_address") == """{"street":"Delete Me"}"""
             }
 
             clientA.execute(

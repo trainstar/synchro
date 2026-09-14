@@ -321,8 +321,12 @@ func TestRebuildUsesImmutablePagesAndDispatchesContinuationFailures(t *testing.T
 	local.Rows = []LocalRow{{Identity: canonicalStringRowIdentity(tableB, fieldA, "scope-b-row")}}
 	local.LocalOnlyRows = []LocalOnlyRow{{Key: LocalOnlyRowKey{Table: tableA, Row: "local-only"}}}
 	local.Provenance = []LocalProvenance{{Row: local.Rows[0].Identity, Scopes: []ScopeID{scopeB}}}
+	localScopeA := localScopeAssignmentIndex(local.ScopeAssignments, scopeA)
+	local.ScopeAssignments[localScopeA].RebuildRequired = true
 	state.ClientLocal[client] = local
 	clientState := state.Clients[client]
+	serverScopeA, _ := findScopeAssignment(clientState.ScopeAssignments, scopeA)
+	clientState.ScopeAssignments[serverScopeA].RebuildRequired = true
 	clientState.Checkpoints = []ClientCheckpoint{{Scope: scopeB, Position: StreamPosition{StreamGeneration: generation, Kind: PositionKindGenerationStart}}}
 	state.Clients[client] = clientState
 
@@ -396,6 +400,11 @@ func TestRebuildUsesImmutablePagesAndDispatchesContinuationFailures(t *testing.T
 	if finalPage.HTTP.Status != 200 || finalPage.Rebuild == nil || !finalPage.Rebuild.HasFinalCursor || !finalPage.Rebuild.HasChecksum || finalPage.Rebuild.HasContinuation || len(finalPage.Rebuild.Records) != 1 || finalPage.Rebuild.Records[0].Version != "snapshot-c" {
 		t.Fatalf("final rebuild page = %#v", finalPage)
 	}
+	serverAfterFinalPage := model.state.Clients[client]
+	serverScopeA, _ = findScopeAssignment(serverAfterFinalPage.ScopeAssignments, scopeA)
+	if !serverAfterFinalPage.ScopeAssignments[serverScopeA].RebuildRequired {
+		t.Fatal("rebuild endpoint cleared the server assignment before cursor acknowledgement")
+	}
 	finalReplay := applyTestOperation(t, model, "rebuild", "request-page", testRebuildRequest(client, schema, scopeA, rebuildA, tokenSourceLocalRebuildContinuation, 1))
 	wantFinalReplay := *finalPage.Rebuild
 	wantFinalReplay.Replayed = true
@@ -425,6 +434,11 @@ func TestRebuildUsesImmutablePagesAndDispatchesContinuationFailures(t *testing.T
 	pull := applyTestOperation(t, model, "pull", "request-page", testPullRequest(client, schema, []pullScopePayload{{ScopeID: string(scopeA), CursorSource: tokenSourceLocalCheckpoint}}, 1))
 	if pull.HTTP.Status != 200 || pull.Pull == nil || len(pull.Pull.Changes) != 1 || pull.Pull.Changes[0].Row != fourth {
 		t.Fatalf("post-boundary pull = %#v, want isolated incremental effect", pull)
+	}
+	serverAfterPull := model.state.Clients[client]
+	serverScopeA, _ = findScopeAssignment(serverAfterPull.ScopeAssignments, scopeA)
+	if serverAfterPull.ScopeAssignments[serverScopeA].RebuildRequired {
+		t.Fatal("successful final-cursor pull did not acknowledge the rebuild assignment")
 	}
 }
 

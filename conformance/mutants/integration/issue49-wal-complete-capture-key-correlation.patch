@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -3907,8 +3907,6 @@ fn validate_fence_row(
+             AND fence.operation = $9
+             AND fence.old_record_id IS NOT DISTINCT FROM $10
+             AND fence.new_record_id IS NOT DISTINCT FROM $11
+-            AND fence.old_capture_key IS NOT DISTINCT FROM $12
+-            AND fence.new_capture_key IS NOT DISTINCT FROM $13
+             AND fence.row_version = $14::uuid
+             AND (fence.transaction_xid::text::numeric % 4294967296) = $15
+             AND {coverage_predicate}"

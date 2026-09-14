@@ -50,6 +50,8 @@
 - (void)emitEvent:(NSString *)name body:(NSDictionary *)body {
     if ([name isEqualToString:@"onStatusChange"]) {
         [self emitOnStatusChange:body];
+    } else if ([name isEqualToString:@"onSyncEvent"]) {
+        [self emitOnSyncEvent:body];
     } else if ([name isEqualToString:@"onConflict"]) {
         [self emitOnConflict:body];
     } else if ([name isEqualToString:@"onAuthRequest"]) {
@@ -77,6 +79,8 @@
         @"maxRetryAttempts": @(config.maxRetryAttempts()),
         @"pullPageSize": @(config.pullPageSize()),
         @"pushBatchSize": @(config.pushBatchSize()),
+        @"transportObservationCapacity": @(config.transportObservationCapacity()),
+        @"requireNewDatabase": @(config.requireNewDatabase()),
     } mutableCopy];
     NSString *seedPath = config.seedDatabasePath();
     if (seedPath) {
@@ -114,6 +118,16 @@
         resolve:(RCTPromiseResolveBlock)resolve
          reject:(RCTPromiseRejectBlock)reject {
     [self.impl execute:sql params:params resolve:resolve reject:reject];
+}
+
+- (void)executeAuthoredWrite:(NSString *)tableName
+                    operation:(NSString *)operation
+                  columnNames:(NSArray<NSString *> *)columnNames
+                          sql:(NSString *)sql
+                       values:(NSArray *)values
+                      resolve:(RCTPromiseResolveBlock)resolve
+                       reject:(RCTPromiseRejectBlock)reject {
+    [self.impl executeAuthoredWrite:tableName operation:operation columnNames:columnNames sql:sql values:values resolve:resolve reject:reject];
 }
 
 - (void)executeBatch:(NSArray *)statements
@@ -219,18 +233,103 @@
 }
 
 - (void)stop:(RCTPromiseResolveBlock)resolve
-      reject:(RCTPromiseRejectBlock)reject {
+       reject:(RCTPromiseRejectBlock)reject {
     [self.impl stop:resolve reject:reject];
 }
 
+- (void)enterBackground:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject {
+    [self.impl enterBackground:resolve reject:reject];
+}
+
+- (void)enterForeground:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject {
+    [self.impl enterForeground:resolve reject:reject];
+}
+
+- (void)retryAfterError:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject {
+    [self.impl retryAfterError:resolve reject:reject];
+}
+
+- (void)resetSchemaAndStart:(RCTPromiseResolveBlock)resolve
+                     reject:(RCTPromiseRejectBlock)reject {
+    [self.impl resetSchemaAndStart:resolve reject:reject];
+}
+
 - (void)syncNow:(RCTPromiseResolveBlock)resolve
-         reject:(RCTPromiseRejectBlock)reject {
+          reject:(RCTPromiseRejectBlock)reject {
     [self.impl syncNow:resolve reject:reject];
 }
 
 - (void)pendingChangeCount:(RCTPromiseResolveBlock)resolve
                     reject:(RCTPromiseRejectBlock)reject {
     [self.impl pendingChangeCount:resolve reject:reject];
+}
+
+- (void)getSyncStatus:(RCTPromiseResolveBlock)resolve
+                reject:(RCTPromiseRejectBlock)reject {
+    [self.impl getSyncStatus:resolve reject:reject];
+}
+
+- (void)inspectPendingMutations:(RCTPromiseResolveBlock)resolve
+                         reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectPendingMutations:resolve reject:reject];
+}
+
+- (void)inspectRetainedMutations:(RCTPromiseResolveBlock)resolve
+                          reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectRetainedMutations:resolve reject:reject];
+}
+
+- (void)inspectRejectedMutations:(RCTPromiseResolveBlock)resolve
+                          reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectRejectedMutations:resolve reject:reject];
+}
+
+- (void)inspectClientState:(RCTPromiseResolveBlock)resolve
+                    reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectClientState:resolve reject:reject];
+}
+
+- (void)inspectDurableState:(NSString *)tableName
+                       recordID:(NSString *)recordID
+                        resolve:(RCTPromiseResolveBlock)resolve
+                         reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectDurableState:tableName recordID:recordID resolve:resolve reject:reject];
+}
+
+- (void)inspectTransportObservations:(RCTPromiseResolveBlock)resolve
+                              reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectTransportObservations:resolve reject:reject];
+}
+
+- (void)armTransportPause:(NSString *)operationClass
+                   resolve:(RCTPromiseResolveBlock)resolve
+                    reject:(RCTPromiseRejectBlock)reject {
+    [self.impl armTransportPause:operationClass resolve:resolve reject:reject];
+}
+
+- (void)awaitTransportPause:(NSString *)operationClass
+                  timeoutMs:(double)timeoutMs
+                    resolve:(RCTPromiseResolveBlock)resolve
+                     reject:(RCTPromiseRejectBlock)reject {
+    [self.impl awaitTransportPause:operationClass timeoutMs:timeoutMs resolve:resolve reject:reject];
+}
+
+- (void)resumeTransportPause:(RCTPromiseResolveBlock)resolve
+                       reject:(RCTPromiseRejectBlock)reject {
+    [self.impl resumeTransportPause:resolve reject:reject];
+}
+
+- (void)getProcessIdentity:(RCTPromiseResolveBlock)resolve
+                     reject:(RCTPromiseRejectBlock)reject {
+    [self.impl getProcessIdentity:resolve reject:reject];
+}
+
+- (void)clearRejectedMutations:(RCTPromiseResolveBlock)resolve
+                        reject:(RCTPromiseRejectBlock)reject {
+    [self.impl clearRejectedMutations:resolve reject:reject];
 }
 
 - (void)resolveAuthRequest:(NSString *)requestID
@@ -278,6 +377,13 @@ RCT_EXTERN_METHOD(queryOne:(NSString *)sql
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(execute:(NSString *)sql
                   params:(NSArray *)params
+                 resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(executeAuthoredWrite:(NSString *)tableID
+                  operation:(NSString *)operation
+                  fieldIDs:(NSArray<NSString *> *)fieldIDs
+                  sql:(NSString *)sql
+                  values:(NSArray *)values
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(executeBatch:(NSArray *)statements
@@ -338,10 +444,47 @@ RCT_EXTERN_METHOD(removeObserver:(NSString *)observerID
 RCT_EXTERN_METHOD(start:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(stop:(RCTPromiseResolveBlock)resolve
-                  reject:(RCTPromiseRejectBlock)reject)
+                   reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(enterBackground:(RCTPromiseResolveBlock)resolve
+                   reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(enterForeground:(RCTPromiseResolveBlock)resolve
+                   reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(retryAfterError:(RCTPromiseResolveBlock)resolve
+                   reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(resetSchemaAndStart:(RCTPromiseResolveBlock)resolve
+                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(syncNow:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(pendingChangeCount:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(getSyncStatus:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectPendingMutations:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectRetainedMutations:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectRejectedMutations:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectClientState:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectDurableState:(NSString *)tableName
+                  recordID:(NSString *)recordID
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(inspectTransportObservations:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(armTransportPause:(NSString *)operationClass
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(awaitTransportPause:(NSString *)operationClass
+                  timeoutMs:(double)timeoutMs
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(resumeTransportPause:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(getProcessIdentity:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(clearRejectedMutations:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(resolveAuthRequest:(NSString *)requestID
                   token:(NSString *)token)

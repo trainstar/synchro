@@ -17,6 +17,8 @@ public struct SynchroConfig: Sendable {
     /// Path to a pre-built seed database for offline-first bootstrap.
     /// If set and no database exists at `dbPath`, the seed file is copied before opening.
     public let seedDatabasePath: String?
+    @_spi(Inspection)
+    public let transportObservationCollector: TransportObservationCollector?
 
     public init(
         dbPath: String,
@@ -32,6 +34,39 @@ public struct SynchroConfig: Sendable {
         pushBatchSize: Int = 100,
         seedDatabasePath: String? = nil
     ) {
+        self.init(
+            dbPath: dbPath,
+            serverURL: serverURL,
+            authProvider: authProvider,
+            clientID: clientID,
+            platform: platform,
+            appVersion: appVersion,
+            syncInterval: syncInterval,
+            pushDebounce: pushDebounce,
+            maxRetryAttempts: maxRetryAttempts,
+            pullPageSize: pullPageSize,
+            pushBatchSize: pushBatchSize,
+            seedDatabasePath: seedDatabasePath,
+            transportObservationCollector: nil
+        )
+    }
+
+    @_spi(Inspection)
+    public init(
+        dbPath: String,
+        serverURL: URL,
+        authProvider: @escaping @Sendable () async throws -> String,
+        clientID: String,
+        platform: String = "ios",
+        appVersion: String,
+        syncInterval: TimeInterval = 30,
+        pushDebounce: TimeInterval = 0.5,
+        maxRetryAttempts: Int = 5,
+        pullPageSize: Int = 100,
+        pushBatchSize: Int = 100,
+        seedDatabasePath: String? = nil,
+        transportObservationCollector: TransportObservationCollector?
+    ) {
         self.dbPath = dbPath
         self.serverURL = serverURL
         self.authProvider = authProvider
@@ -44,5 +79,6 @@ public struct SynchroConfig: Sendable {
         self.pullPageSize = min(pullPageSize, 1000)
         self.pushBatchSize = pushBatchSize
         self.seedDatabasePath = seedDatabasePath
+        self.transportObservationCollector = transportObservationCollector
     }
 }

@@ -7,7 +7,8 @@ hierarchical patterns for full sync testing coverage.
 
 - `schema.sql`: DDL for PostgreSQL (table creation, indexes, constraints)
 - `register.sql`: synchro_register_table calls for all tables
-- `seed.sql`: test data (3 users, ~2000 rows across all tables)
+- `canonical-seed.sql`: six deterministic rows for client seed artifacts
+- `seed.sql`: generated test data (3 users, ~2000 rows across all tables)
 
 ## Tables
 
@@ -63,3 +64,6 @@ hierarchical patterns for full sync testing coverage.
 -- Load test data
 \i seed.sql
 ```
+
+The adapter and client integration gates load `canonical-seed.sql`.
+Run `make ext-seed` only when the full generated data set is required.

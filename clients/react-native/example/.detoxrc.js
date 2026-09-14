@@ -3,6 +3,7 @@ module.exports = {
   testRunner: {
     args: {
       $0: 'jest',
+      _: ['e2e/conformance.test.ts', 'e2e/sync.test.ts'],
       config: 'e2e/jest.config.js',
     },
     jest: {
@@ -49,7 +50,10 @@ module.exports = {
         avdName: 'Pixel_7_API_34',
       },
       bootArgs: '-no-snapshot-load -no-snapshot-save',
-      gpuMode: 'host',
+      // The emulator's Qt GUI layer crashes under host GPU rendering in
+      // unattended runs. Headless software rendering is stable.
+      headless: true,
+      gpuMode: 'swiftshader_indirect',
     },
   },
   configurations: {

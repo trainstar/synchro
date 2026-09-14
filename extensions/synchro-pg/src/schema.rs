@@ -146,7 +146,7 @@ fn synchro_tables() -> pgrx::JsonB {
 /// and changelog statistics.
 #[pg_extern]
 fn synchro_debug(p_user_id: &str, p_client_id: &str) -> pgrx::JsonB {
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         // Load client info.
         let client_info = load_client_debug(client, p_user_id, p_client_id);
 
@@ -246,6 +246,14 @@ pub(crate) fn publish_schema_manifest(client: &mut SpiClient<'_>) -> Result<(), 
     });
     let transition_class =
         classify_transition(client, registry_generation, parent.as_ref(), &tables)?;
+    if transition_class == SchemaTransitionClass::Class4 {
+        validate_class_4_projection_transition(
+            client,
+            registry_generation,
+            parent.as_ref(),
+            &tables,
+        )?;
+    }
     let affected_scopes = if transition_class == SchemaTransitionClass::Class3 {
         load_current_scope_ids(client)?
     } else {
@@ -296,9 +304,12 @@ pub(crate) fn publish_schema_manifest(client: &mut SpiClient<'_>) -> Result<(), 
             affected_scopes.into(),
         ],
     )?;
-    if transition_class == SchemaTransitionClass::Class2 {
-        crate::materialize::migrate_class_2_schema_digests(client, registry_generation)
-            .unwrap_or_else(|error| pgrx::error!("migrating class 2 schema digests: {}", error));
+    if matches!(
+        transition_class,
+        SchemaTransitionClass::Class2 | SchemaTransitionClass::Class4
+    ) {
+        crate::materialize::migrate_schema_digests(client, registry_generation)
+            .unwrap_or_else(|error| pgrx::error!("migrating schema digests: {}", error));
     }
     Ok(())
 }
@@ -326,11 +337,6 @@ pub(crate) fn prepare_pending_manifest(
     let transition_class =
         classify_transition(client, registry_generation, parent.as_ref(), &tables)
             .map_err(|_| "classifying pending schema manifest failed".to_string())?;
-    if transition_class == SchemaTransitionClass::Class4 {
-        return Err(
-            "pending registry generation has an incompatible schema transition".to_string(),
-        );
-    }
     let compatibility_floor = if transition_class == SchemaTransitionClass::Class2 {
         parent
             .as_ref()
@@ -393,7 +399,6 @@ pub(crate) fn publish_pending_manifest(
     };
     if canonical != canonical_body.as_bytes()
         || body.schema_version != version
-        || transition_class == SchemaTransitionClass::Class4
         || body.transition_class != transition_class
         || body.compatibility_floor != compatibility_floor
         || body.parent_schema.as_ref().map(|value| value.version)
@@ -470,9 +475,11 @@ pub(crate) fn generation_requires_projection_bootstrap(
              ORDER BY generation DESC
              LIMIT 1
          )
-         SELECT target.registration_kind,
-                target.physical_schema::text AS physical_schema,
-                target.physical_relation::text AS physical_relation
+          SELECT target.registration_kind,
+                 target.relation_id::text AS relation_id,
+                 target.physical_schema::text AS physical_schema,
+                 target.physical_relation::text AS physical_relation,
+                 target.physical_relation_oid::bigint AS physical_relation_oid
          FROM synchro.sync_registry target
          CROSS JOIN active
          LEFT JOIN synchro.sync_registry source
@@ -485,28 +492,28 @@ pub(crate) fn generation_requires_projection_bootstrap(
                OR source.sync_columns IS DISTINCT FROM target.sync_columns
                OR source.capture_key_columns IS DISTINCT FROM target.capture_key_columns
                OR EXISTS (
-                   (SELECT field_id, physical_column, portable_type,
+                   (SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
                     WHERE registry_generation = $1
                       AND relation_id = target.relation_id
                     EXCEPT
-                    SELECT field_id, physical_column, portable_type,
+                     SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
                     WHERE registry_generation = active.generation
                       AND relation_id = target.relation_id)
                    UNION ALL
-                   (SELECT field_id, physical_column, portable_type,
+                    (SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
                     WHERE registry_generation = active.generation
                       AND relation_id = target.relation_id
                     EXCEPT
-                    SELECT field_id, physical_column, portable_type,
+                     SELECT field_id, physical_column, portable_type, native_json,
                            decimal_precision, decimal_scale, nullable,
                            writable, primary_key
                     FROM synchro.sync_registry_fields
@@ -539,17 +546,49 @@ pub(crate) fn generation_requires_projection_bootstrap(
         None,
         &[registry_generation.into()],
     )?;
+    let parent_tables: std::collections::HashMap<&str, &TableSchema> = parent
+        .as_ref()
+        .map(|stored| {
+            stored
+                .body
+                .tables
+                .iter()
+                .map(|table| (table.table_id.as_str(), table))
+                .collect()
+        })
+        .unwrap_or_default();
     for row in rows {
         let registration_kind = row
             .get_by_name::<String, &str>("registration_kind")?
             .unwrap_or_else(|| pgrx::error!("projection bootstrap registration kind is missing"));
-        if registration_kind == "synced"
-            && !matches!(
-                schema_transition,
-                Some(SchemaTransitionClass::Initial | SchemaTransitionClass::Class3)
-            )
-        {
-            continue;
+        if registration_kind == "synced" {
+            match schema_transition {
+                Some(SchemaTransitionClass::Initial | SchemaTransitionClass::Class3) => {}
+                Some(SchemaTransitionClass::Class4) => {
+                    // Manifest publication refuses a class 4 reshape over
+                    // retained rows, so the same predicate must route the
+                    // generation to the operator bootstrap. Issue #43.
+                    let relation_id = row
+                        .get_by_name::<String, &str>("relation_id")?
+                        .unwrap_or_else(|| {
+                            pgrx::error!("projection bootstrap relation identity is missing")
+                        });
+                    let Some(table) = tables.iter().find(|table| table.relation_id == relation_id)
+                    else {
+                        continue;
+                    };
+                    if class_4_table_requires_bootstrap(
+                        client,
+                        registry_generation,
+                        parent_tables.get(table.table_id.as_str()).copied(),
+                        table,
+                    )? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
         }
         let schema = row
             .get_by_name::<String, &str>("physical_schema")?
@@ -557,7 +596,17 @@ pub(crate) fn generation_requires_projection_bootstrap(
         let relation = row
             .get_by_name::<String, &str>("physical_relation")?
             .unwrap_or_else(|| pgrx::error!("projection bootstrap source relation is missing"));
-        if relation_is_nonempty(client, &schema, &relation)? {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(|value| {
+                u32::try_from(value).unwrap_or_else(|_| {
+                    pgrx::error!("projection bootstrap source relation has an invalid OID")
+                })
+            })
+            .unwrap_or_else(|| {
+                pgrx::error!("projection bootstrap source relation has no physical OID")
+            });
+        if relation_is_nonempty(client, &schema, &relation, relation_oid)? {
             return Ok(true);
         }
     }
@@ -898,6 +947,87 @@ fn classify_transition(
     }
 }
 
+fn validate_class_4_projection_transition(
+    client: &SpiClient<'_>,
+    registry_generation: i64,
+    parent: Option<&StoredManifest>,
+    tables: &[TableSchema],
+) -> Result<(), spi::Error> {
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    let parent_tables: std::collections::HashMap<&str, &TableSchema> = parent
+        .body
+        .tables
+        .iter()
+        .map(|table| (table.table_id.as_str(), table))
+        .collect();
+    for table in tables {
+        if class_4_table_requires_bootstrap(
+            client,
+            registry_generation,
+            parent_tables.get(table.table_id.as_str()).copied(),
+            table,
+        )? {
+            pgrx::error!("class 4 transition requires projection bootstrap");
+        }
+    }
+    Ok(())
+}
+
+/// A class 4 transition that changes more than field removal cannot replay
+/// retained rows through the reshaped projection. Over a nonempty or retained
+/// relation it completes only through the operator projection bootstrap, and
+/// manifest publication and bootstrap preparation share this one predicate.
+fn class_4_table_requires_bootstrap(
+    client: &SpiClient<'_>,
+    registry_generation: i64,
+    prior: Option<&TableSchema>,
+    table: &TableSchema,
+) -> Result<bool, spi::Error> {
+    let requires_baseline =
+        prior.is_none_or(|prior| prior != table && !is_field_removal_only(prior, table));
+    Ok(requires_baseline
+        && (manifest_relation_is_nonempty(client, registry_generation, &table.relation_id)?
+            || relation_has_retained_projection(client, &table.relation_id)?))
+}
+
+fn is_field_removal_only(parent: &TableSchema, child: &TableSchema) -> bool {
+    parent.table_id == child.table_id
+        && parent.relation_id == child.relation_id
+        && parent.name == child.name
+        && parent.primary_key_field_id == child.primary_key_field_id
+        && parent.lifecycle == child.lifecycle
+        && parent.composition == child.composition
+        && parent.indexes == child.indexes
+        && child.fields.len() < parent.fields.len()
+        && child
+            .fields
+            .iter()
+            .all(|field| parent.fields.contains(field))
+}
+
+fn relation_has_retained_projection(
+    client: &SpiClient<'_>,
+    relation_id: &str,
+) -> Result<bool, spi::Error> {
+    client
+        .select(
+            "SELECT EXISTS (
+                 SELECT relation_id FROM synchro.sync_captured_rows
+                 WHERE relation_id = $1::uuid
+                 UNION ALL
+                 SELECT relation_id FROM synchro.sync_captured_projections
+                 WHERE relation_id = $1::uuid
+             ) AS present",
+            None,
+            &[relation_id.into()],
+        )?
+        .first()
+        .get_by_name::<bool, &str>("present")
+        .map(|value| value.unwrap_or(false))
+}
+
 fn manifest_relation_is_nonempty(
     client: &SpiClient<'_>,
     registry_generation: i64,
@@ -906,10 +1036,11 @@ fn manifest_relation_is_nonempty(
     let relation = client
         .select(
             "SELECT physical_schema::text AS physical_schema,
-                    physical_relation::text AS physical_relation
-             FROM synchro.sync_registry
-             WHERE registry_generation = $1
-               AND relation_id = $2::uuid
+                    physical_relation::text AS physical_relation,
+                    physical_relation_oid::bigint AS physical_relation_oid
+              FROM synchro.sync_registry
+              WHERE registry_generation = $1
+                AND relation_id = $2::uuid
                AND registration_kind = 'synced'",
             None,
             &[registry_generation.into(), relation_id.into()],
@@ -918,25 +1049,47 @@ fn manifest_relation_is_nonempty(
     let schema = relation
         .get_by_name::<String, &str>("physical_schema")?
         .unwrap_or_else(|| pgrx::error!("schema manifest relation has no physical schema"));
-    let relation = relation
+    let physical_relation = relation
         .get_by_name::<String, &str>("physical_relation")?
         .unwrap_or_else(|| pgrx::error!("schema manifest relation has no physical name"));
-    relation_is_nonempty(client, &schema, &relation)
+    let relation_oid = relation
+        .get_by_name::<i64, &str>("physical_relation_oid")?
+        .map(|value| {
+            u32::try_from(value)
+                .unwrap_or_else(|_| pgrx::error!("schema manifest relation has an invalid OID"))
+        })
+        .unwrap_or_else(|| pgrx::error!("schema manifest relation has no physical OID"));
+    relation_is_nonempty(client, &schema, &physical_relation, relation_oid)
 }
 
 fn relation_is_nonempty(
     client: &SpiClient<'_>,
     schema: &str,
     relation: &str,
+    expected_oid: u32,
 ) -> Result<bool, spi::Error> {
     let qualified = crate::registry::qualified_relation_name(schema, relation);
-    client
+    let result = client
         .select(
-            &format!("SELECT EXISTS (SELECT 1 FROM {qualified} LIMIT 1) AS nonempty"),
+            &format!(
+                "SELECT pg_catalog.to_regclass($1::text)::oid::bigint AS resolved_relation_oid,
+                        EXISTS (SELECT 1 FROM {qualified} LIMIT 1) AS nonempty"
+            ),
             None,
-            &[],
+            &[qualified.as_str().into()],
         )?
-        .first()
+        .first();
+    let resolved_oid = result
+        .get_by_name::<i64, &str>("resolved_relation_oid")?
+        .map(|value| {
+            u32::try_from(value)
+                .unwrap_or_else(|_| pgrx::error!("schema manifest relation has an invalid OID"))
+        })
+        .unwrap_or_else(|| pgrx::error!("schema manifest relation no longer exists"));
+    if resolved_oid != expected_oid {
+        pgrx::error!("schema manifest relation identity changed");
+    }
+    result
         .get_by_name::<bool, &str>("nonempty")
         .map(|value| value.unwrap_or(false))
 }
@@ -1041,7 +1194,7 @@ fn load_client_debug(client: &SpiClient<'_>, user_id: &str, client_id: &str) -> 
 }
 
 fn load_bucket_details(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     user_id: &str,
     client_id: &str,
     bucket_subs: &[String],

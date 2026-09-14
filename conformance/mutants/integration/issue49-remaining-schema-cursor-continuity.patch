@@ -1,0 +1,11 @@
+diff --git a/extensions/synchro-pg/src/client.rs b/extensions/synchro-pg/src/client.rs
+--- a/extensions/synchro-pg/src/client.rs
++++ b/extensions/synchro-pg/src/client.rs
+@@ -1071,6 +1071,6 @@ fn build_scope_cursor_updates(
+                     input.client_generation,
+                     scope_id,
+-                    input.current_schema_hash,
++                    &input.request.schema.hash,
+                 )
+                 .unwrap_or_else(|err| pgrx::error!("building replacement cursor: {}", err));
+                 let replacement = crate::cursor_token::issue_scope_cursor(

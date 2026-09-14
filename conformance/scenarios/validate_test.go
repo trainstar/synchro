@@ -22,6 +22,337 @@ func TestValidateAuthoredTimeScenario(t *testing.T) {
 	}
 }
 
+func TestValidateNativeStepBindingsGroupOnePublicCall(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	base := groupedBoundNativeTimeScenario()
+	if err := Validate(base, bundle); err != nil {
+		t.Fatalf("validate grouped native step bindings: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(*Scenario)
+		category string
+	}{
+		{"missing binding", func(s *Scenario) {
+			s.Steps[1].NativeBinding = nil
+		}, "native bindings on every step"},
+		{"missing identity aliases", func(s *Scenario) {
+			s.NativeIdentityAliases = nil
+		}, "require native identity aliases"},
+		{"unknown identity kind", func(s *Scenario) {
+			s.NativeIdentityAliases[0].Kind = "unknown"
+		}, "unknown native identity kind"},
+		{"unbound identity alias", func(s *Scenario) {
+			s.NativeIdentityAliases[0].StepIDs = nil
+			s.NativeIdentityAliases[0].ExpectationIDs = nil
+		}, "must bind at least one step or expectation"},
+		{"unsafe identity integer", func(s *Scenario) {
+			s.NativeIdentityAliases[0].Value = json.RawMessage(`9007199254740992`)
+		}, "exact JSON range"},
+		{"collapsed identity aliases", func(s *Scenario) {
+			s.NativeIdentityAliases = append(s.NativeIdentityAliases, NativeIdentityAlias{Kind: "scope", Alias: "scope-b", Value: json.RawMessage(`"scope-a"`), StepIDs: []StepID{"STEP-TIME-001"}})
+		}, "share one authored value"},
+		{"unknown kind", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Kind = "unknown"
+		}, "unknown native binding kind"},
+		{"wrong transport", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Kind = "artifact"
+		}, "cannot own transport"},
+		{"client mismatch", func(s *Scenario) {
+			s.Steps[0].NativeBinding.ClientID = "client-b"
+		}, "client identity does not match"},
+		{"inconsistent call", func(s *Scenario) {
+			s.Steps[1].NativeBinding.ClientID = "client-b"
+		}, "inconsistent client, method, completion, or phase"},
+		{"synchronous call crosses phase", func(s *Scenario) {
+			s.Steps[1].Phase = "setup"
+		}, "synchronous native call"},
+		{"terminal completion mismatch", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Completion = "blocked"
+			s.Steps[1].NativeBinding.Completion = "blocked"
+		}, "does not match terminal step"},
+		{"unsupported action completion mismatch", func(s *Scenario) {
+			s.Steps[1].Operation = Operation{ContractOperation: "connect", Name: "send", Payload: json.RawMessage(`{"user_id":"user-a","client_id":"client-a","runtime_version":3,"protocol_version":3,"schema_reset":false,"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"scope_set_version":1,"known_scopes":[]}`)}
+			s.WireExpectations[1].ContractCase = "connect_success"
+			s.WireExpectations[1].Action = "unsupported"
+		}, "does not match terminal step"},
+		{"action requires connect success", func(s *Scenario) {
+			s.WireExpectations[1].Action = "unsupported"
+		}, "requires a connect_success connect outcome"},
+		{"terminal local failure", func(s *Scenario) {
+			errorCode := "source_transaction_poison_blocked"
+			s.Steps[1].Transport = "local"
+			s.Steps[1].Operation = Operation{ContractOperation: "local", Name: "apply-pull-page", Payload: json.RawMessage(`{"user_id":"user-a","client_id":"client-a","source_step_id":"STEP-TIME-001"}`)}
+			s.Steps[1].ExpectedOutcome = ExpectedOutcome{Disposition: "error", ErrorCode: &errorCode}
+			s.WireExpectations = s.WireExpectations[:1]
+		}, "does not match terminal step"},
+		{"effect after terminal response", func(s *Scenario) {
+			errorCode := "temporary_unavailable"
+			s.WireExpectations[0].ContractCase = "temporary_unavailable"
+			s.WireExpectations[0].HTTPStatus = 503
+			s.WireExpectations[0].ErrorCode = &errorCode
+			s.WireExpectations[0].Retryable = true
+			s.Steps[0].NativeBinding.Completion = "blocked"
+			s.Steps[1].NativeBinding.Completion = "blocked"
+		}, "after terminal step"},
+		{"controller splits public call", func(s *Scenario) {
+			controller := Step{
+				ID:              "STEP-TIME-CONTROLLER-001",
+				Phase:           "exercise",
+				Transport:       "model",
+				NativeBinding:   &NativeStepBinding{Kind: "controller"},
+				Operation:       Operation{ContractOperation: "model", Name: "set-client-assignments", Payload: json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[]}`)},
+				ExpectedOutcome: ExpectedOutcome{Disposition: "success"},
+			}
+			s.Steps = append(s.Steps[:1], append([]Step{controller}, s.Steps[1:]...)...)
+		}, "resumes after another call or binding"},
+		{"server process as client lifecycle", func(s *Scenario) {
+			s.Steps[0].Transport = "process"
+			s.Steps[0].Operation = Operation{ContractOperation: "process", Name: "materialize-source-transaction", Payload: json.RawMessage(`{"stream_generation":"stream-1","commit_lsn":"1"}`)}
+			s.Steps[0].NativeBinding = &NativeStepBinding{Kind: "process", UserID: "user-a", ClientID: "client-a"}
+			s.WireExpectations = s.WireExpectations[1:]
+		}, "cannot own operation"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mutant := cloneScenario(base)
+			test.mutate(&mutant)
+			if err := requireErrorCategory(Validate(mutant, bundle), test.category); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateNativeStepBindingsRejectResumedCallAndWorkloadMacro(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+
+	resumed := groupedBoundNativeTimeScenario()
+	secondCall := NativeCallID("time_second")
+	resumed.Steps[1].NativeBinding.CallID = &secondCall
+	third := resumed.Steps[0]
+	third.ID = "STEP-TIME-003"
+	thirdCall := NativeCallID("time_sync")
+	third.NativeBinding = &NativeStepBinding{Kind: "public-call", UserID: "user-a", ClientID: "client-a", CallID: &thirdCall, Stage: "synchronous", Method: "start", Completion: "idle"}
+	resumed.Steps = append(resumed.Steps, third)
+	thirdWire := resumed.WireExpectations[0]
+	thirdWire.StepID = third.ID
+	resumed.WireExpectations = append(resumed.WireExpectations, thirdWire)
+	if err := requireErrorCategory(Validate(resumed, bundle), "resumes after another call"); err != nil {
+		t.Fatal(err)
+	}
+
+	workload := authoredTimeScenario()
+	workload.Steps[0].Transport = "model"
+	workload.Steps[0].Operation = Operation{ContractOperation: "workload", Name: "prepare", Payload: json.RawMessage(`{}`)}
+	workload.Steps[0].NativeBinding = &NativeStepBinding{Kind: "controller"}
+	workload.WireExpectations = nil
+	if err := requireErrorCategory(Validate(workload, bundle), "cannot execute a workload macro"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateNativeWorkloadBindingRejectsBoundAndNondeterministicParameters(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	base := boundNativeWorkloadScenario()
+	if err := Validate(base, bundle); err != nil {
+		t.Fatalf("validate native workload binding: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(*Scenario)
+		category string
+	}{
+		{"over-bound record count", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Workload.RecordCount = maxNativeWorkloadRecords + 1
+		}, "record_count must be between"},
+		{"nondeterministic seed", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Workload.Seed = 0
+		}, "seed must be nonzero and deterministic"},
+		{"inexact JSON seed", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Workload.Seed = maxNativeWorkloadSeed + 1
+		}, "seed must be nonzero and deterministic"},
+		{"generated row alias", func(s *Scenario) {
+			s.NativeIdentityAliases[0].StepIDs = []StepID{s.Steps[0].ID}
+			s.NativeIdentityAliases[0].ExpectationIDs = nil
+		}, "must not bind generated workload step"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := cloneScenario(base)
+			test.mutate(&scenario)
+			if err := requireErrorCategory(Validate(scenario, bundle), test.category); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNativeWorkloadSchemaRejectsOutOfBoundAndNondeterministicParameters(t *testing.T) {
+	base, err := LoadFile(
+		context.Background(),
+		"../../",
+		"conformance/scenarios/performance/queue-replay-001.json",
+	)
+	if err != nil {
+		t.Fatalf("load schema-valid workload source: %v", err)
+	}
+	workloadSource := boundNativeWorkloadScenario()
+	base.NativeIdentityAliases = workloadSource.NativeIdentityAliases
+	base.NativeIdentityAliases[0].StepIDs = []StepID{}
+	for index := range base.Steps {
+		base.Steps[index].NativeBinding = &NativeStepBinding{Kind: "controller"}
+	}
+	base.Steps[0].NativeBinding = workloadSource.Steps[0].NativeBinding
+	encode := func(s Scenario) []byte {
+		t.Helper()
+		data, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("encode native workload scenario: %v", err)
+		}
+		return data
+	}
+	path := "conformance/scenarios/testing/native-workload.json"
+	if _, err := LoadBytes(context.Background(), "../../", path, encode(base)); err != nil {
+		t.Fatalf("load schema-valid native workload: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Scenario)
+	}{
+		{"over-bound count", func(s *Scenario) { s.Steps[0].NativeBinding.Workload.RecordCount = maxNativeWorkloadRecords + 1 }},
+		{"nondeterministic seed", func(s *Scenario) { s.Steps[0].NativeBinding.Workload.Seed = 0 }},
+		{"inexact JSON seed", func(s *Scenario) { s.Steps[0].NativeBinding.Workload.Seed = maxNativeWorkloadSeed + 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := cloneScenario(base)
+			test.mutate(&scenario)
+			if _, err := LoadBytes(context.Background(), "../../", path, encode(scenario)); err == nil {
+				t.Fatal("schema accepted invalid native workload parameters")
+			}
+		})
+	}
+}
+
+func TestValidateNativeStepBindingsPermitStagedCallAroundControllerOperations(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	base := groupedBoundNativeTimeScenario()
+	base.Steps[0].Phase = "setup"
+	base.Steps[0].NativeBinding.Stage = "begin"
+	base.Steps[0].NativeBinding.Completion = ""
+	base.Steps[1].NativeBinding.Stage = "await-call"
+	base.Steps[1].NativeBinding.Method = ""
+	controller := Step{
+		ID:              "STEP-TIME-CONTROLLER-001",
+		Phase:           "setup",
+		Transport:       "model",
+		NativeBinding:   &NativeStepBinding{Kind: "controller"},
+		Operation:       Operation{ContractOperation: "model", Name: "set-client-assignments", Payload: json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[]}`)},
+		ExpectedOutcome: ExpectedOutcome{Disposition: "success"},
+	}
+	base.Steps = append(base.Steps[:1], append([]Step{controller}, base.Steps[1:]...)...)
+	if err := Validate(base, bundle); err != nil {
+		t.Fatalf("validate noncontiguous staged call: %v", err)
+	}
+	continued := cloneScenario(base)
+	errorCode := "temporary_unavailable"
+	continued.WireExpectations[0].ContractCase = errorCode
+	continued.WireExpectations[0].HTTPStatus = 503
+	continued.WireExpectations[0].ErrorCode = &errorCode
+	continued.WireExpectations[0].Retryable = true
+	if err := Validate(continued, bundle); err != nil {
+		t.Fatalf("validate staged call after intermediate response: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(*Scenario)
+		category string
+	}{
+		{"duplicate begin", func(s *Scenario) {
+			s.Steps[2].NativeBinding.Stage = "begin"
+			s.Steps[2].NativeBinding.Method = "start"
+			s.Steps[2].NativeBinding.Completion = ""
+		}, "terminal await-call"},
+		{"missing begin", func(s *Scenario) {
+			s.Steps[0].NativeBinding.Stage = "await-step"
+			s.Steps[0].NativeBinding.Method = ""
+		}, "must begin"},
+		{"binding interrupts active call", func(s *Scenario) {
+			s.Steps[1].NativeBinding = &NativeStepBinding{Kind: "local-write", UserID: "user-a", ClientID: "client-a"}
+			s.Steps[1].Transport = "local"
+			s.Steps[1].Operation = Operation{ContractOperation: "local", Name: "write", Payload: json.RawMessage(`{"authenticated_user_id":"user-a","client_id":"client-a","mutation_id":"00000000-0000-4000-8000-000000000001","table_id":"items","pk":{"id":"a"},"authored_schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"operation":"insert","columns":[],"client_version":"2024-01-01T00:00:00.000000Z"}`)}
+		}, "interrupted by binding"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mutant := cloneScenario(base)
+			test.mutate(&mutant)
+			if err := requireErrorCategory(Validate(mutant, bundle), test.category); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateNativeControllerBindingOwnsRawHTTP(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	scenario := authoredTimeScenario()
+	scenario.Steps[0].NativeBinding = &NativeStepBinding{Kind: "controller"}
+	if err := Validate(scenario, bundle); err != nil {
+		t.Fatalf("validate controller-owned HTTP step: %v", err)
+	}
+
+	scenario.Steps[0].NativeBinding.UserID = "user-a"
+	if err := requireErrorCategory(Validate(scenario, bundle), "must not contain client call fields"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateNativeLifecycleBoundaryFollowsTerminalPublicCallStep(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	base := groupedBoundNativeTimeScenario()
+	base.NativeLifecycleBoundaries = []NativeLifecycleBoundary{{
+		ID:          "time_stop",
+		Phase:       "exercise",
+		AfterStepID: "STEP-TIME-002",
+		UserID:      "user-a",
+		ClientID:    "client-a",
+		Method:      "stop",
+	}}
+	if err := Validate(base, bundle); err != nil {
+		t.Fatalf("validate native lifecycle boundary: %v", err)
+	}
+
+	mutant := cloneScenario(base)
+	mutant.NativeLifecycleBoundaries[0].AfterStepID = "STEP-TIME-001"
+	if err := requireErrorCategory(Validate(mutant, bundle), "must follow the terminal step"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateUsesTargetsCapturedFromMakefile(t *testing.T) {
 	path := "conformance/scenarios/valid.json"
 	root := scenarioRepository(t, map[string][]byte{path: scenarioFixture("SCN-TARGETS-001", "Target source")})
@@ -40,6 +371,78 @@ func TestValidateUsesTargetsCapturedFromMakefile(t *testing.T) {
 	}
 	delete(scenario.makeTargets, "test-blackbox")
 	if err := requireErrorCategory(Validate(scenario, bundle), "not defined by the repository Makefile"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateNegativeControlsAreIndependentOfRequiredProofTypes(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	for _, requirement := range bundle.Requirements.Requirements {
+		if contains(requirement.RequiredProofTypes, "negative-control") {
+			t.Fatalf("requirement %s retains negative-control metadata", requirement.ID)
+		}
+	}
+	validationBundle := cloneBundle(bundle)
+	validationBundle.Performance.Budgets = nil
+	validationBundle.Performance.RequiredMeasurements = nil
+
+	base := authoredTimeScenario()
+	if err := Validate(base, validationBundle); err != nil {
+		t.Fatalf("validate independently authored negative control: %v", err)
+	}
+	if err := ValidateAll([]Scenario{base}, validationBundle); err != nil {
+		t.Fatalf("validate global negative-control ownership: %v", err)
+	}
+
+	legacyBundle := cloneBundle(validationBundle)
+	for index := range legacyBundle.Requirements.Requirements {
+		if legacyBundle.Requirements.Requirements[index].ID == "SYNC-TIME-001" {
+			proofTypes := append([]string(nil), legacyBundle.Requirements.Requirements[index].RequiredProofTypes...)
+			legacyBundle.Requirements.Requirements[index].RequiredProofTypes = append(
+				proofTypes,
+				"negative-control",
+			)
+		}
+	}
+	if err := ValidateAll([]Scenario{base}, legacyBundle); err != nil {
+		t.Fatalf("negative-control validation depends on requirement proof metadata: %v", err)
+	}
+
+	missing := cloneScenario(base)
+	var obligations []ProofObligation
+	for _, obligation := range missing.ProofObligations {
+		if obligation.ProofType != "negative-control" {
+			obligations = append(obligations, obligation)
+		}
+	}
+	missing.ProofObligations = obligations
+	var ownership []Ownership
+	for _, owner := range missing.Ownership {
+		if owner.ProofType != "negative-control" {
+			ownership = append(ownership, owner)
+		}
+	}
+	missing.Ownership = ownership
+	var proofTypes []string
+	for _, proofType := range missing.ProofTypes {
+		if proofType != "negative-control" {
+			proofTypes = append(proofTypes, proofType)
+		}
+	}
+	missing.ProofTypes = proofTypes
+	if err := requireErrorCategory(ValidateAll([]Scenario{missing}, validationBundle), "selected requirement SYNC-TIME-001 does not have exactly one negative-control obligation"); err != nil {
+		t.Fatal(err)
+	}
+
+	duplicate := cloneScenario(base)
+	duplicate.ID = "SCN-TIME-002"
+	for index := range duplicate.Ownership {
+		duplicate.Ownership[index].ScenarioID = duplicate.ID
+	}
+	if err := requireErrorCategory(ValidateAll([]Scenario{base, duplicate}, validationBundle), "negative control CTRL-TIMESTAMP-001 is reused by 2 obligations"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -104,7 +507,7 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 			s.ProofObligations[0].RequiredVectorSetIDs = []contract.VectorSetID{"VSET-TASK4-001"}
 		}, "vector"},
 		{"missing required proof cell", authoredTimeScenario, func(s *Scenario) {
-			s.ProofObligations = append(s.ProofObligations[:1], s.ProofObligations[2:]...)
+			s.ProofObligations = append(s.ProofObligations[:2], s.ProofObligations[3:]...)
 		}, "requires exactly one native-e2e proof obligation"},
 		{"duplicate proof key", authoredTimeScenario, func(s *Scenario) {
 			duplicate := s.ProofObligations[1]
@@ -118,12 +521,12 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 			s.ProofObligations = append(s.ProofObligations, obligation)
 			s.Ownership = append(s.Ownership, Ownership{ScenarioID: s.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: obligation.ObligationID, AssertionID: "ASSERT-TIME-PG-001", ProofType: obligation.ProofType, SupportCellID: nil})
 		}, "non-required proof type reference-model"},
-		{"multiple optional fault-injection obligations", authoredTimeScenarioWithFaultInjection, func(s *Scenario) {
+		{"incomplete optional PostgreSQL fault-injection architecture coverage", authoredTimeScenarioWithFaultInjection, func(s *Scenario) {
 			duplicate := s.ProofObligations[len(s.ProofObligations)-1]
 			duplicate.ObligationID = "OBL-TIME-FI-002"
 			s.ProofObligations = append(s.ProofObligations, duplicate)
 			s.Ownership = append(s.Ownership, Ownership{ScenarioID: s.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: duplicate.ObligationID, AssertionID: duplicate.AssertionIDs[0], ProofType: duplicate.ProofType, SupportCellID: duplicate.SupportCellID})
-		}, "multiple optional fault-injection"},
+		}, "required extension architecture cells"},
 		{"non-singleton fault requirement", authoredTimeScenarioWithFaultInjection, func(s *Scenario) {
 			index := len(s.ProofObligations) - 1
 			s.ProofObligations[index].RequirementIDs = append(s.ProofObligations[index].RequirementIDs, "SYNC-CURSOR-001")
@@ -166,6 +569,7 @@ func TestValidateTransportFailureWireCaseIsClosed(t *testing.T) {
 		ErrorCode:    nil,
 		Retryable:    true,
 	}
+	base.Steps[0].NativeBinding.Completion = "blocked"
 	if err := Validate(base, bundle); err != nil {
 		t.Fatalf("validate transport failure wire case: %v", err)
 	}
@@ -197,6 +601,60 @@ func TestValidateTransportFailureWireCaseIsClosed(t *testing.T) {
 	}
 }
 
+func TestValidateWireFaultRequiresMatchingTemporaryUnavailableExpectation(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	scenario, err := LoadFile(context.Background(), "../../", "conformance/scenarios/server/retention-reconnect-001.json")
+	if err != nil {
+		t.Fatalf("load retention reconnect scenario: %v", err)
+	}
+	if err := Validate(scenario, bundle); err != nil {
+		t.Fatalf("validate retention reconnect wire fault: %v", err)
+	}
+	mutant := cloneScenario(scenario)
+	mutant.WireExpectations[0].ContractCase = "push_success"
+	mutant.WireExpectations[0].HTTPStatus = 200
+	mutant.WireExpectations[0].ErrorCode = nil
+	mutant.WireExpectations[0].Retryable = false
+	if err := requireErrorCategory(Validate(mutant, bundle), "wire fault requires temporary_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateSealedRetryWireFaultRequiresMatchingIdempotencyConflictExpectation(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	vectorCatalog, err := vectors.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored vector catalog: %v", err)
+	}
+	scenario, err := LoadFile(context.Background(), "../../", "conformance/scenarios/server/push-response-loss-001.json")
+	if err != nil {
+		t.Fatalf("load push response-loss scenario: %v", err)
+	}
+	if err := ValidateWithVectors(scenario, bundle, vectorCatalog); err != nil {
+		t.Fatalf("validate push response-loss sealed retry: %v", err)
+	}
+	mutant := cloneScenario(scenario)
+	for index := range mutant.WireExpectations {
+		wire := &mutant.WireExpectations[index]
+		if wire.StepID != "STEP-PUSH-RESPONSE-LOSS-004" {
+			continue
+		}
+		wire.ContractCase = "push_success"
+		wire.HTTPStatus = 200
+		wire.ErrorCode = nil
+		wire.Retryable = false
+	}
+	if err := requireErrorCategory(ValidateWithVectors(mutant, bundle, vectorCatalog), "wire fault requires idempotency_conflict"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidatePerformanceClosureAndValidateAll(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {
@@ -217,13 +675,15 @@ func TestValidatePerformanceClosureAndValidateAll(t *testing.T) {
 	budget := bundle.Performance.Budgets[0]
 	budget.ID = "BUD-TIME-001"
 	budget.ScenarioID = base.ID
-	budget.SupportCellIDs = []contract.SupportCellID{"SUP-PG-018"}
+	budget.SupportCellIDs = []contract.SupportCellID{"SUP-PG-LINUX-X64-001"}
 	budget.ArtifactInventoryIDs = []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}
 	measurement := bundle.Performance.RequiredMeasurements[0]
 	measurement.ID = "MEAS-TIME-001"
 	measurement.ScenarioID = base.ID
-	measurement.SupportCellIDs = []contract.SupportCellID{"SUP-PG-018"}
+	measurement.SupportCellIDs = []contract.SupportCellID{"SUP-PG-LINUX-X64-001"}
 	measurement.ArtifactInventoryIDs = []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}
+	measurement.Strata = measurement.Strata[:1]
+	measurement.MinimumSampleCountPerStratum = json.Number("1")
 	positiveBundle.Performance.Budgets = []contract.PerformanceBudget{budget}
 	positiveBundle.Performance.RequiredMeasurements = []contract.RequiredMeasurement{measurement}
 	positiveScenario := cloneScenario(base)
@@ -233,6 +693,19 @@ func TestValidatePerformanceClosureAndValidateAll(t *testing.T) {
 	positiveScenario.ProofObligations[0].PerformanceBudgetIDs = []contract.BudgetID{budget.ID}
 	positiveScenario.ProofObligations[0].RequiredMeasurementIDs = []contract.MeasurementID{measurement.ID}
 	positiveScenario.Ownership = append(positiveScenario.Ownership, Ownership{ScenarioID: positiveScenario.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: positiveScenario.ProofObligations[0].ObligationID, AssertionID: performanceAssertion.ID, ProofType: positiveScenario.ProofObligations[0].ProofType, SupportCellID: positiveScenario.ProofObligations[0].SupportCellID})
+	parameters := append(json.RawMessage(nil), measurement.Strata[0].Parameters...)
+	positiveScenario.Steps[0].MeasurementSample = &MeasurementSample{
+		MeasurementID: measurement.ID,
+		StratumID:     measurement.Strata[0].StratumID,
+		SampleID:      "SAMPLE-TIME-001",
+		Parameters:    parameters,
+		Operation: MeasurementOperationTarget{
+			ID:       "MOP-TIME-001",
+			Family:   "time",
+			Boundary: "single",
+			Value:    append(json.RawMessage(nil), parameters...),
+		},
+	}
 	if err := Validate(positiveScenario, positiveBundle); err != nil {
 		t.Fatalf("validate populated performance ownership: %v", err)
 	}
@@ -392,19 +865,14 @@ func requireErrorCategory(err error, category string) error {
 func authoredTimeScenario() Scenario {
 	const scenarioID contract.ScenarioID = "SCN-TIME-001"
 	const requirementID contract.RequirementID = "SYNC-TIME-001"
+	callID := NativeCallID("time_sync")
 	clientCells := []struct {
 		id     contract.SupportCellID
 		target string
 	}{
-		{"SUP-IOS-MIN-001", "test-swift"},
-		{"SUP-IOS-CURRENT-001", "test-swift"},
-		{"SUP-MACOS-MIN-001", "test-swift"},
 		{"SUP-MACOS-CURRENT-001", "test-swift"},
-		{"SUP-ANDROID-MIN-001", "test-kotlin"},
 		{"SUP-ANDROID-CURRENT-001", "test-kotlin"},
-		{"SUP-RN-IOS-MIN-001", "test-rn-e2e-ios"},
 		{"SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios"},
-		{"SUP-RN-ANDROID-MIN-001", "test-rn-e2e-android"},
 		{"SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android"},
 	}
 	s := Scenario{
@@ -425,13 +893,15 @@ func authoredTimeScenario() Scenario {
 			ID:              "STEP-TIME-001",
 			Phase:           "exercise",
 			Transport:       "http",
+			NativeBinding:   &NativeStepBinding{Kind: "public-call", UserID: "user-a", ClientID: "client-a", CallID: &callID, Stage: "synchronous", Method: "start", Completion: "idle"},
 			Operation:       Operation{ContractOperation: "pull", Name: "request-page", Payload: []byte(`{"user_id":"user-a","client_id":"client-a","client_generation":1,"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"scope_set_version":1,"scopes":[],"limit":1}`)},
 			ExpectedOutcome: ExpectedOutcome{Disposition: "success"},
 		}},
-		makeTargets: validationMakeTargets(),
+		NativeIdentityAliases: []NativeIdentityAlias{{Kind: "scope", Alias: "scope-a", Value: json.RawMessage(`"scope-a"`), StepIDs: []StepID{"STEP-TIME-001"}}},
+		makeTargets:           validationMakeTargets(),
 	}
 
-	assertionIDs := make([]contract.AssertionID, 0, 11)
+	assertionIDs := make([]contract.AssertionID, 0, 9)
 	addAssertion := func(id contract.AssertionID, kind, predicate, expectation string, detects []contract.ControlID) {
 		assertionIDs = append(assertionIDs, id)
 		s.Assertions = append(s.Assertions, Assertion{ID: id, RequirementIDs: []contract.RequirementID{requirementID}, Description: "assertion", ExpectationIDs: []ExpectationID{ExpectationID(expectation)}, Predicate: Predicate{ContractPredicate: predicate, Name: predicateName(predicate, kind)}, Oracle: Oracle{Kind: kind, ExpectedSource: "authored-model", ObservedSource: "system-under-test"}, DetectsControlIDs: detects})
@@ -445,7 +915,7 @@ func authoredTimeScenario() Scenario {
 		s.ProofObligations = append(s.ProofObligations, ProofObligation{ObligationID: id, RequirementIDs: []contract.RequirementID{requirementID}, AssertionIDs: []contract.AssertionID{assertion}, ProofType: proof, SupportCellID: support, ArtifactInventoryIDs: artifacts, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: target, Argv: []string{"make", target}, FaultPlanID: plan, ControlID: control})
 		s.Ownership = append(s.Ownership, Ownership{ScenarioID: scenarioID, RequirementID: requirementID, ProofObligationID: id, AssertionID: assertion, ProofType: proof, SupportCellID: support})
 	}
-	addObligation("OBL-TIME-PG-001", "server-black-box", ptrSupport("SUP-PG-018"), "test-blackbox", []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, assertionIDs[0], nil, nil)
+	addObligation("OBL-TIME-PG-LINUX-X64-001", "server-black-box", ptrSupport("SUP-PG-LINUX-X64-001"), "test-blackbox", []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, assertionIDs[0], nil, nil)
 	for index, cell := range clientCells {
 		artifacts := []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}
 		if cell.target == "test-swift" {
@@ -467,6 +937,67 @@ func authoredTimeScenario() Scenario {
 	s.NegativeControls = []NegativeControl{{ControlID: controlID, RequirementID: requirementID, FaultID: "FAULT-TIME-001", SubjectArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-ADAPTER-001"}, DetectedBy: []contract.AssertionID{assertionIDs[0]}}}
 	s.WireExpectations = []WireExpectation{{StepID: "STEP-TIME-001", AssertionID: assertionIDs[0], ContractCase: "pull_success", HTTPStatus: 200, ErrorCode: nil, Retryable: false}}
 	return s
+}
+
+func boundNativeWorkloadScenario() Scenario {
+	scenario := authoredTimeScenario()
+	workload := &NativeWorkloadParameters{
+		RecordCount:    2,
+		BatchSize:      2,
+		Seed:           101,
+		AuthoredSchema: SchemaFact{Version: 1, Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		ClientVersion:  "2026-08-11T00:00:00.000000Z",
+		Targets: []NativeWorkloadTarget{{
+			ScopeID:           "scope-a",
+			TableID:           "items",
+			PrimaryKeyFieldID: "id",
+		}},
+		MutationKinds: []NativeWorkloadMutationKind{
+			{Operation: "insert", Count: 1, FieldIDs: []string{"value"}},
+			{Operation: "insert", Count: 1, FieldIDs: []string{"obsolete_value"}},
+		},
+		Expectation: NativeWorkloadExpectation{
+			OperationCount:  2,
+			BatchCount:      1,
+			OperationDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			PerScopeCardinalities: []NativeWorkloadScopeCardinality{{
+				ScopeID:     "scope-a",
+				Cardinality: 2,
+			}},
+		},
+	}
+	scenario.Steps[0].Transport = "model"
+	scenario.Steps[0].Operation = Operation{ContractOperation: "workload", Name: "prepare", Payload: json.RawMessage(`{"profile":"pending_mutations","user_id":"user-a","client_id":"client-a","table_id":"items","accepted_count":1,"rejected_count":1}`)}
+	scenario.Steps[0].NativeBinding = &NativeStepBinding{Kind: "workload", UserID: "user-a", ClientID: "client-a", Workload: workload}
+	scenario.WireExpectations = nil
+	scenario.NativeIdentityAliases = []NativeIdentityAlias{{
+		Kind:           "schema",
+		Alias:          "schema-a",
+		Value:          json.RawMessage(`{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
+		ExpectationIDs: []ExpectationID{"EXPECT-TIME-001"},
+	}}
+	return scenario
+}
+
+func groupedBoundNativeTimeScenario() Scenario {
+	scenario := authoredTimeScenario()
+	second := scenario.Steps[0]
+	second.ID = "STEP-TIME-002"
+	callID := *scenario.Steps[0].NativeBinding.CallID
+	second.NativeBinding = &NativeStepBinding{
+		Kind:       "public-call",
+		UserID:     "user-a",
+		ClientID:   "client-a",
+		CallID:     &callID,
+		Stage:      "synchronous",
+		Method:     "start",
+		Completion: "idle",
+	}
+	scenario.Steps = append(scenario.Steps, second)
+	secondWire := scenario.WireExpectations[0]
+	secondWire.StepID = second.ID
+	scenario.WireExpectations = append(scenario.WireExpectations, secondWire)
+	return scenario
 }
 
 const minimalInstallPayload = `{
@@ -537,9 +1068,16 @@ func authoredTimeScenarioWithFaultInjection() Scenario {
 	scenario := authoredTimeScenario()
 	scenario.ProofTypes = append(scenario.ProofTypes, "fault-injection")
 	plan := scenario.FaultPlans[0]
-	supportID := contract.SupportCellID("SUP-PG-018")
-	obligation := ProofObligation{ObligationID: "OBL-TIME-FI-001", RequirementIDs: []contract.RequirementID{"SYNC-TIME-001"}, AssertionIDs: []contract.AssertionID{"ASSERT-TIME-PG-001"}, ProofType: "fault-injection", SupportCellID: &supportID, ArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: "test-blackbox", Argv: []string{"make", "test-blackbox"}, FaultPlanID: &plan.ID, ControlID: &plan.ControlID}
-	scenario.ProofObligations = append(scenario.ProofObligations, obligation)
-	scenario.Ownership = append(scenario.Ownership, Ownership{ScenarioID: scenario.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: obligation.ObligationID, AssertionID: "ASSERT-TIME-PG-001", ProofType: obligation.ProofType, SupportCellID: obligation.SupportCellID})
+	for _, fixture := range []struct {
+		obligationID contract.ObligationID
+		supportID    contract.SupportCellID
+	}{
+		{"OBL-TIME-FI-LINUX-X64-001", "SUP-PG-LINUX-X64-001"},
+	} {
+		supportID := fixture.supportID
+		obligation := ProofObligation{ObligationID: fixture.obligationID, RequirementIDs: []contract.RequirementID{"SYNC-TIME-001"}, AssertionIDs: []contract.AssertionID{"ASSERT-TIME-PG-001"}, ProofType: "fault-injection", SupportCellID: &supportID, ArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-PG-EXTENSION-001", "ARTDEF-ADAPTER-001"}, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: "test-blackbox", Argv: []string{"make", "test-blackbox"}, FaultPlanID: &plan.ID, ControlID: &plan.ControlID}
+		scenario.ProofObligations = append(scenario.ProofObligations, obligation)
+		scenario.Ownership = append(scenario.Ownership, Ownership{ScenarioID: scenario.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: obligation.ObligationID, AssertionID: "ASSERT-TIME-PG-001", ProofType: obligation.ProofType, SupportCellID: obligation.SupportCellID})
+	}
 	return scenario
 }

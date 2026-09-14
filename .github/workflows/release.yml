@@ -1,950 +1,1212 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      resume_run_id:
+        description: Earlier Release run that owns the sealed candidate artifact.
+        required: false
+        type: string
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-publication
   cancel-in-progress: false
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  GOWORK: 'off'
+  POSTGRESQL_VERSION: '18.3'
+  PGRX_VERSION: '0.17.0'
+  RELEASE_ATTESTATION_PREDICATE_TYPE: https://trainstar.fit/synchro/attestations/release/v1
+  RUST_TOOLCHAIN: '1.92.0'
 
 jobs:
-  validate-metadata:
+  candidate:
+    name: resolve immutable candidate
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      source_commit: ${{ steps.resolve.outputs.source_commit }}
+      version: ${{ steps.resolve.outputs.version }}
+      candidate_ci_run_id: ${{ steps.resolve.outputs.candidate_ci_run_id }}
+      candidate_ci_run_attempt: ${{ steps.resolve.outputs.candidate_ci_run_attempt }}
+      artifact_run_id: ${{ steps.resolve.outputs.artifact_run_id }}
+      release_dir_name: ${{ steps.resolve.outputs.release_dir_name }}
     steps:
-      - uses: actions/checkout@v6.0.2
+      - name: Require dispatch from dev
+        run: test "$GITHUB_REF" = refs/heads/dev
 
-      - uses: actions/setup-go@v6.3.0
+      - name: Checkout dispatch source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
+          fetch-depth: 0
 
-      - uses: actions/setup-node@v6.3.0
+      - name: Download recovery candidate
+        if: inputs.resume_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+        run: |
+          set -euo pipefail
+          case "$RESUME_RUN_ID" in ''|*[!0-9]*|0) echo "resume_run_id must be a positive run ID" >&2; exit 1 ;; esac
+          test "$RESUME_RUN_ID" != "$GITHUB_RUN_ID"
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN_ID")"
+          jq -e --arg repository "$GITHUB_REPOSITORY" \
+            '.path == ".github/workflows/release.yml" and .event == "workflow_dispatch" and .status == "completed" and .head_repository.full_name == $repository' \
+            <<<"$run_json" >/dev/null || { echo "recovery requires a completed Release workflow run" >&2; exit 1; }
+          artifacts="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN_ID/artifacts?per_page=100")"
+          receipt_count="$(jq '[.artifacts[] | select(.name == "publication-sealed-candidate" and .expired == false)] | length' <<<"$artifacts")"
+          test "$receipt_count" = 1 || { echo "recovery requires the sealed candidate receipt" >&2; exit 1; }
+          receipt_id="$(jq -r '.artifacts[] | select(.name == "publication-sealed-candidate" and .expired == false) | .id' <<<"$artifacts")"
+          mkdir -p "$RUNNER_TEMP/recovery-receipt"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$receipt_id/zip" > "$RUNNER_TEMP/recovery-receipt.zip"
+          unzip -q "$RUNNER_TEMP/recovery-receipt.zip" -d "$RUNNER_TEMP/recovery-receipt"
+          test -f "$RUNNER_TEMP/recovery-receipt/sealed-release-receipt.json"
+          sealed_id="$(jq -r '.artifact_id' "$RUNNER_TEMP/recovery-receipt/sealed-release-receipt.json")"
+          case "$sealed_id" in ''|*[!0-9]*|0) echo "sealed artifact receipt has an invalid artifact ID" >&2; exit 1 ;; esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$sealed_id" > "$RUNNER_TEMP/recovery-artifact.json"
+          mkdir -p "$RUNNER_TEMP/recovery"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$sealed_id/zip" > "$RUNNER_TEMP/recovery.zip"
+          unzip -q "$RUNNER_TEMP/recovery.zip" -d "$RUNNER_TEMP/recovery"
+          test -f "$RUNNER_TEMP/recovery/release-manifest.json"
+          python3 scripts/release-publish.py verify-receipt \
+            --receipt "$RUNNER_TEMP/recovery-receipt/sealed-release-receipt.json" \
+            --artifact "$RUNNER_TEMP/recovery-artifact.json" \
+            --release-manifest "$RUNNER_TEMP/recovery/release-manifest.json" \
+            --expected-run-id "$RESUME_RUN_ID" \
+            --output "$RUNNER_TEMP/verified-sealed-receipt.json"
+
+      - name: Resolve and verify candidate identity
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RESUME_RUN_ID" ]; then
+            mode=recovery
+            source_commit="$(jq -r '.source.commit' "$RUNNER_TEMP/recovery/release-manifest.json")"
+            version="$(jq -r '.release_version' "$RUNNER_TEMP/recovery/release-manifest.json")"
+            build_run_id="$(jq -r '.build.run_id' "$RUNNER_TEMP/recovery/release-manifest.json")"
+            test "$build_run_id" = "$RESUME_RUN_ID" || { echo "sealed candidate belongs to another Release run" >&2; exit 1; }
+            artifact_run_id="$RESUME_RUN_ID"
+          else
+            mode=normal
+            git fetch --no-tags origin dev
+            source_commit="$(git rev-parse --verify HEAD)"
+            test "$source_commit" = "$(git rev-parse --verify origin/dev)" || { echo "normal release must select the current dev head" >&2; exit 1; }
+            version="$(tr -d '\n' < VERSION)"
+            artifact_run_id="$GITHUB_RUN_ID"
+          fi
+          case "$source_commit" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo "candidate source commit is invalid" >&2; exit 1 ;; esac
+          case "$version" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "VERSION must match X.Y.Z" >&2; exit 1 ;; esac
+          git checkout --detach "$source_commit"
+          test "$(tr -d '\n' < VERSION)" = "$version"
+          make version-check
+
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=dev&event=push&status=completed&head_sha=$source_commit&per_page=100")"
+          candidate="$(jq -c --arg sha "$source_commit" '[.workflow_runs[] | select(.head_sha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")] | sort_by(.run_attempt) | last // empty' <<<"$runs")"
+          test -n "$candidate" || { echo "exact candidate commit has no successful completed CI push run" >&2; exit 1; }
+          candidate_ci_run_id="$(jq -r '.id' <<<"$candidate")"
+          candidate_ci_run_attempt="$(jq -r '.run_attempt' <<<"$candidate")"
+
+          milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"
+          milestone_count="$(jq --arg title "v$version" '[.[] | select(.title == $title)] | length' <<<"$milestones")"
+          test "$milestone_count" = 1 || { echo "one matching release milestone is required" >&2; exit 1; }
+          open_issues="$(jq --arg title "v$version" '[.[] | select(.title == $title)][0].open_issues' <<<"$milestones")"
+          test "$open_issues" = 0 || { echo "release milestone contains open issues" >&2; exit 1; }
+
+          release_dir_name="release-$version-$source_commit"
+          if [ "$mode" = recovery ]; then
+            mv "$RUNNER_TEMP/recovery" "$RUNNER_TEMP/$release_dir_name"
+            make release-verify VERSION="$version" RELEASE_DIR="$RUNNER_TEMP/$release_dir_name"
+            GITHUB_TOKEN="$GH_TOKEN" python3 scripts/release-publish.py observe-public \
+              --release-dir "$RUNNER_TEMP/$release_dir_name" \
+              --output "$RUNNER_TEMP/recovery-public-state.json"
+          else
+            for tag in "v$version" "api/go/v$version"; do
+              test -z "$(git ls-remote --tags origin "refs/tags/$tag")" || { echo "source tag already exists: $tag" >&2; exit 1; }
+            done
+            github_error="$RUNNER_TEMP/github-release-error"
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" >/dev/null 2>"$github_error"; then
+              echo "GitHub release version already exists" >&2
+              exit 1
+            else
+              grep -F 'HTTP 404' "$github_error" >/dev/null || { echo "GitHub release query failed" >&2; exit 1; }
+            fi
+            curl --fail --silent --show-error \
+              https://registry.npmjs.org/@trainstar%2fsynchro-react-native \
+              --output "$RUNNER_TEMP/npm-package.json"
+            jq -e --arg version "$version" '.versions[$version] == null' \
+              "$RUNNER_TEMP/npm-package.json" >/dev/null || { echo "npm version already exists" >&2; exit 1; }
+            maven_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              "https://repo1.maven.org/maven2/fit/trainstar/synchro/$version/synchro-$version.pom")"
+            test "$maven_status" = 404 || { echo "Maven version exists or repository query failed: HTTP $maven_status" >&2; exit 1; }
+          fi
+          {
+            echo "mode=$mode"
+            echo "source_commit=$source_commit"
+            echo "version=$version"
+            echo "candidate_ci_run_id=$candidate_ci_run_id"
+            echo "candidate_ci_run_attempt=$candidate_ci_run_attempt"
+            echo "artifact_run_id=$artifact_run_id"
+            echo "release_dir_name=$release_dir_name"
+          } >> "$GITHUB_OUTPUT"
+
+  build-server:
+    name: build sealed Linux components
+    if: needs.candidate.outputs.mode == 'normal'
+    needs: candidate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      PGRX_TARGET_DIR: ${{ github.workspace }}/.pgrx-target
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.candidate.outputs.source_commit }}
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - name: Install certified PostgreSQL build runtime
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades \
+            build-essential clang flex bison libclang-dev libreadline-dev libssl-dev libxml2-dev libxml2-utils libxslt-dev pkg-config xsltproc zlib1g-dev \
+            postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1 postgresql-server-dev-18=18.3-1.pgdg24.04+1
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
+          cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
+          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+
+      - name: Build exact server payloads and provisioner
+        run: |
+          make release-stage-server VERSION="${{ needs.candidate.outputs.version }}" PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+          make build-local-postgres LOCAL_POSTGRES_BINARY=dist/release-provisioner/synchro-local-postgres
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-server-components
+          path: dist/release-components/server
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-provisioner
+          path: dist/release-provisioner/synchro-local-postgres
+          if-no-files-found: error
+          retention-days: 90
+
+  build-packages:
+    name: build signed package payloads
+    if: needs.candidate.outputs.mode == 'normal'
+    needs: candidate
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    permissions:
+      contents: read
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.candidate.outputs.source_commit }}
+
+      - id: java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Export Android Java home
+        run: echo "ANDROID_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+
+      - name: Install Android build components
+        run: |
+          set -euo pipefail
+          sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
+          "$sdkmanager" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "platforms;android-36" \
+            "build-tools;34.0.0" \
+            "build-tools;36.0.0"
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: '22'
 
-      - name: Validate release metadata alignment
+      - name: Build exact signed Maven bundle and npm tarball
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
         run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            make version-check EXPECTED_TAG="${GITHUB_REF_NAME}"
-          else
-            make version-check
-          fi
+          set -euo pipefail
+          : "${GPG_PRIVATE_KEY:?GPG_PRIVATE_KEY is required}"
+          : "${GPG_PASSPHRASE:?GPG_PASSPHRASE is required}"
+          export ORG_GRADLE_PROJECT_signingInMemoryKey="$GPG_PRIVATE_KEY"
+          export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword="$GPG_PASSPHRASE"
+          make release-stage-packages VERSION="$RELEASE_VERSION"
 
-      - name: Validate React Native package packing
-        run: make release-npm-dry-run
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-package-components
+          path: dist/release-components/packages
+          if-no-files-found: error
 
-  validate-quality:
-    needs: validate-metadata
+  seal:
+    name: seal or restore candidate
+    if: ${{ always() && needs.candidate.result == 'success' && (needs.candidate.outputs.mode == 'recovery' || (needs.build-server.result == 'success' && needs.build-packages.result == 'success')) }}
+    needs: [candidate, build-server, build-packages]
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_run_id: ${{ needs.candidate.outputs.artifact_run_id }}
     steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
+          ref: ${{ needs.candidate.outputs.source_commit }}
 
-      - uses: actions/setup-node@v6.3.0
+      - name: Download server components
+        if: needs.candidate.outputs.mode == 'normal'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          node-version: '22'
+          name: release-server-components
+          path: dist/release-components/server
 
-      - uses: actions/cache@v5.0.4
+      - name: Download package components
+        if: needs.candidate.outputs.mode == 'normal'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: |
-            clients/react-native/node_modules
-            clients/react-native/example/node_modules
-            clients/react-native/.yarn/install-state.gz
-          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
-          restore-keys: |
-            rn-deps-${{ runner.os }}-
+          name: release-package-components
+          path: dist/release-components/packages
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore sealed candidate
+        if: needs.candidate.outputs.mode == 'recovery'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          components: rustfmt, clippy
+          name: sealed-release
+          run-id: ${{ needs.candidate.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
-
-      - name: Install PostgreSQL extension build dependencies
+      - name: Write exact support resolution
+        if: needs.candidate.outputs.mode == 'normal'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
+          mkdir -p dist/release-inputs
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          cells = [
+              {"id": "SUP-PG-LINUX-X64-001", "environment": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"}},
+              {"id": "SUP-IOS-MIN-001", "environment": {"ios": "16.4", "swift": "6.0", "xcode": "16.4"}},
+              {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "26.6", "xcode": "26.6"}},
+              {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04"}},
+              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04"}},
+              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "26.6", "react_native": "0.83.0", "xcode": "26.6"}},
+              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04", "react_native": "0.83.0"}},
+          ]
+          Path("dist/release-inputs/support-environments.json").write_text(json.dumps(cells, indent=2, sort_keys=True) + "\n")
+          PY
 
-      - name: Install React Native dependencies
-        working-directory: clients/react-native
-        run: |
-          corepack enable
-          yarn install --immutable
-
-      - name: Run Go lint checks
-        run: make lint-go
-
-      - name: Run Rust lint checks
-        run: make lint-rust-core
-
-      - name: Run React Native lint checks
-        run: make lint-rn
-
-      - name: Run React Native unit tests
-        run: make test-rn-unit
-
-  linux-pgrx-runtime:
-    needs: validate-metadata
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install PostgreSQL extension build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - uses: actions/cache@v5.0.4
+      - name: Generate SPDX JSON SBOM
+        if: needs.candidate.outputs.mode == 'normal'
+        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+        env:
+          SYFT_FILE_METADATA_SELECTION: all
         with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
+          path: dist/release-components
+          format: spdx-json
+          output-file: dist/release-inputs/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          syft-version: v1.33.0
 
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
+      - name: Assemble and verify sealed release
+        if: needs.candidate.outputs.mode == 'normal'
         run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
+          make release-stage \
+            VERSION="${{ needs.candidate.outputs.version }}" \
+            RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
+            RELEASE_SBOM=dist/release-inputs/sbom.spdx.json \
+            RELEASE_SUPPORT_ENVIRONMENTS=dist/release-inputs/support-environments.json \
+            RELEASE_CANDIDATE_CI_RUN_ID="${{ needs.candidate.outputs.candidate_ci_run_id }}" \
+            RELEASE_CANDIDATE_CI_RUN_ATTEMPT="${{ needs.candidate.outputs.candidate_ci_run_attempt }}"
 
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: |
-          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
-            echo "Using cached PG18 pgrx runtime"
-          else
-            cargo pgrx init --pg18 download
-          fi
+      - name: Verify sealed release
+        run: make release-verify VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
 
-      - name: Archive PG18 pgrx runtime
-        run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
-
-      - uses: actions/upload-artifact@v7.0.0
+      - name: Upload sealed release
+        if: needs.candidate.outputs.mode == 'normal'
+        id: upload
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: pgrx-pg18-linux
-          path: ${{ runner.temp }}/pgrx-pg18-linux.tar
+          name: sealed-release
+          path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
+          if-no-files-found: error
+          retention-days: 90
           compression-level: 0
 
-  validate-server:
-    runs-on: ubuntu-24.04
-    needs: [validate-metadata, linux-pgrx-runtime]
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
-        with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
-
-      - name: Install PostgreSQL extension build dependencies
+      - name: Record sealed artifact identity
+        if: needs.candidate.outputs.mode == 'normal'
         run: |
+          expires_at="$(date -u -d '+90 days' '+%Y-%m-%dT%H:%M:%SZ')"
+          jq -n \
+            --arg artifact_id '${{ steps.upload.outputs.artifact-id }}' \
+            --arg artifact_digest '${{ steps.upload.outputs.artifact-digest }}' \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg expires_at "$expires_at" \
+            '{artifact_id:$artifact_id, artifact_digest:$artifact_digest, run_id:$run_id, run_attempt:$run_attempt, expires_at:$expires_at}' \
+            > "$RUNNER_TEMP/sealed-release-receipt.json"
+
+      - name: Persist sealed artifact receipt
+        if: needs.candidate.outputs.mode == 'normal'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: publication-sealed-candidate
+          path: ${{ runner.temp }}/sealed-release-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  package-server:
+    name: package server Ubuntu 24.04 x64
+    needs: [candidate, seal]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.candidate.outputs.source_commit }}
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - name: Download sealed release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sealed-release
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
+
+      - name: Download provisioner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-provisioner
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/release-provisioner
+
+      - name: Install certified PostgreSQL runtime
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list >/dev/null
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
+          sudo apt-get install -y --allow-downgrades postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
+          chmod 700 dist/release-provisioner/synchro-local-postgres
 
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
+      - name: Run sealed server package cell
         run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
+          make release-run-support-cell \
+            VERSION="${{ needs.candidate.outputs.version }}" \
+            RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
+            RELEASE_PG18_BIN_DIR=/usr/lib/postgresql/18/bin \
+            RELEASE_PROVISIONER=dist/release-provisioner/synchro-local-postgres \
+            RELEASE_EVIDENCE_DIR=dist/package-evidence \
+            SUPPORT_CELL_ID=SUP-PG-LINUX-X64-001
 
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: pgrx-pg18-linux
-          path: ${{ runner.temp }}/pgrx-pg18-linux
+          name: package-evidence-server
+          path: dist/package-evidence/cells
+          if-no-files-found: error
 
-      - name: Restore PostgreSQL 18 pgrx runtime
-        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
-
-      - name: Verify PostgreSQL 18 for pgrx
-        run: |
-          test -f "$HOME/.pgrx/config.toml"
-          grep -q '^pg18' "$HOME/.pgrx/config.toml"
-
-      - name: Validate Rust core
-        run: make test-rust-core
-
-      - name: Validate PostgreSQL extension lint
-        run: make lint-rust-pg
-
-      - name: Validate PostgreSQL extension
-        run: make test-rust-pg
-
-      - name: Validate Go adapter
-        run: make test-adapter
-
-  validate-swift:
-    needs: validate-metadata
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
-        with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install PostgreSQL 18 and extension build dependencies on macOS
-        if: runner.os == 'macOS'
-        run: |
-          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
-            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
-          done
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
-
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: |
-          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
-            echo "Using cached PG18 pgrx runtime"
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
-          else
-            cargo pgrx init --pg18 download
-          fi
-
-      - name: Ensure CocoaPods is available
-        run: |
-          if ! command -v pod >/dev/null 2>&1; then
-            sudo gem install cocoapods
-          fi
-
-      - name: Validate Apple package metadata
-        run: make release-pods-check
-
-      - name: Validate Swift SDK
-        run: make test-swift
-
-  validate-rn-ios:
-    needs: validate-metadata
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
-        with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
-
-      - uses: actions/setup-node@v6.3.0
-        with:
-          node-version: '22'
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            clients/react-native/node_modules
-            clients/react-native/example/node_modules
-            clients/react-native/.yarn/install-state.gz
-          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
-          restore-keys: |
-            rn-deps-${{ runner.os }}-
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/Library/Caches/CocoaPods
-            clients/react-native/example/ios/Pods
-          key: cocoapods-${{ runner.os }}-${{ hashFiles('clients/react-native/example/ios/Podfile.lock', 'Synchro.podspec', 'clients/react-native/SynchroReactNative.podspec') }}
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install PostgreSQL 18 and extension build dependencies on macOS
-        run: |
-          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
-            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
-          done
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
-
-      - name: Initialize PostgreSQL 18 for pgrx
-        run: |
-          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
-            echo "Using cached PG18 pgrx runtime"
-          else
-            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
-          fi
-
-      - name: Install React Native dependencies
-        working-directory: clients/react-native
-        run: |
-          corepack enable
-          yarn install --immutable
-
-      - name: Ensure CocoaPods is available
-        run: |
-          if ! command -v pod >/dev/null 2>&1; then
-            sudo gem install cocoapods
-          fi
-
-      - name: Ensure Detox iOS utilities are available
-        run: |
-          if ! command -v applesimutils >/dev/null 2>&1; then
-            brew tap wix/brew
-            brew install applesimutils
-          fi
-
-      - name: Reset Watchman state
-        run: |
-          if command -v watchman >/dev/null 2>&1; then
-            watchman watch-del "$GITHUB_WORKSPACE/clients/react-native" || true
-            watchman watch-project "$GITHUB_WORKSPACE/clients/react-native"
-          fi
-
-      - name: Build React Native iOS Detox app
-        run: make test-rn-e2e-ios-build
-
-      - name: Validate React Native iOS bridge
-        run: make test-rn-e2e-ios-run
-
-  validate-kotlin:
+  package-android:
+    name: package ${{ matrix.cell }}
+    needs: [candidate, seal]
     runs-on: ubuntu-24.04
-    needs: [validate-metadata, linux-pgrx-runtime]
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell: SUP-ANDROID-MIN-001
+            api: 24
+          - cell: SUP-ANDROID-CURRENT-001
+            api: 36
+          - cell: SUP-RN-ANDROID-CURRENT-001
+            api: 36
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GRADLE_TEST_ARGS: ""
+      KOTLIN_ANDROID_SERIAL: emulator-5554
     steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
+          ref: ${{ needs.candidate.outputs.source_commit }}
 
-      - uses: actions/setup-java@v5.2.0
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - id: java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
-
-      - name: Install PostgreSQL extension build dependencies
+      - name: Install Android build components
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
-
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: pgrx-pg18-linux
-          path: ${{ runner.temp }}/pgrx-pg18-linux
-
-      - name: Restore PostgreSQL 18 pgrx runtime
-        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
-
-      - name: Verify PostgreSQL 18 for pgrx
-        run: |
-          test -f "$HOME/.pgrx/config.toml"
-          grep -q '^pg18' "$HOME/.pgrx/config.toml"
-
-      - name: Verify Android SDK tooling
-        run: |
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
-          test -x "$SDKMANAGER"
-          "$SDKMANAGER" --version
-
-      - name: Accept Android SDK licenses
-        run: |
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
-          yes | "$SDKMANAGER" --licenses > /dev/null
-
-      - name: Install Android SDK components
-        run: |
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
-          "$SDKMANAGER" \
+          set -euo pipefail
+          sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
+          "$sdkmanager" \
             "platform-tools" \
             "platforms;android-34" \
-            "build-tools;34.0.0"
-
-      - name: Set Android Java home
-        run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
-
-      - name: Validate Kotlin SDK
-        run: make test-kotlin
-
-  validate-rn-android:
-    runs-on: ubuntu-24.04
-    needs: [validate-metadata, linux-pgrx-runtime]
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GRADLE_TEST_ARGS: ""
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
-        with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
-
-      - uses: actions/setup-java@v5.2.0
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-
-      - uses: actions/setup-node@v6.3.0
-        with:
-          node-version: '22'
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            clients/react-native/node_modules
-            clients/react-native/example/node_modules
-            clients/react-native/.yarn/install-state.gz
-          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
-          restore-keys: |
-            rn-deps-${{ runner.os }}-
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
-
-      - name: Install PostgreSQL extension build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
-          fi
-
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: pgrx-pg18-linux
-          path: ${{ runner.temp }}/pgrx-pg18-linux
-
-      - name: Restore PostgreSQL 18 pgrx runtime
-        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
-
-      - name: Verify PostgreSQL 18 for pgrx
-        run: |
-          test -f "$HOME/.pgrx/config.toml"
-          grep -q '^pg18' "$HOME/.pgrx/config.toml"
-
-      - name: Verify Android SDK tooling
-        run: |
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
-          test -x "$SDKMANAGER"
-          "$SDKMANAGER" --version
-
-      - name: Accept Android SDK licenses
-        run: |
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
-          yes | "$SDKMANAGER" --licenses > /dev/null
-
-      - name: Install Android SDK components
-        run: |
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-34" \
+            "platforms;android-36" \
             "build-tools;34.0.0" \
-            "emulator" \
-            "system-images;android-34;google_apis;x86_64"
+            "build-tools;36.0.0"
 
-      - name: Set Android Java home
-        run: echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
 
-      - name: Enable KVM permissions
+      - name: Download sealed release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sealed-release
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
+
+      - name: Download provisioner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-provisioner
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/release-provisioner
+
+      - name: Install certified PostgreSQL runtime
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
+          chmod 700 dist/release-provisioner/synchro-local-postgres
 
-      - name: Install React Native dependencies
-        working-directory: clients/react-native
+      - name: Start sealed Linux fixture
         run: |
-          corepack enable
-          yarn install --immutable
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          work="$RUNNER_TEMP/local-fixture"
+          mkdir -m 700 "$work" "$work/unpacked" "$work/adapter"
+          tar -xzf "$release/artifacts/synchro-pg-pg18-ubuntu24.04-linux-x64-${{ needs.candidate.outputs.version }}.tar.gz" -C "$work/unpacked"
+          cp "$release/artifacts/synchrod-pg-linux-x64-${{ needs.candidate.outputs.version }}" "$work/adapter/synchrod-pg"
+          shasum -a 256 "$work/adapter/synchrod-pg" | cut -d ' ' -f 1 > "$work/adapter/synchrod-pg.sha256"
+          chmod 700 "$work/adapter/synchrod-pg"
+          nohup dist/release-provisioner/synchro-local-postgres start \
+            --pg18-bin-dir /usr/lib/postgresql/18/bin \
+            --extension-artifact "$work/unpacked/extension" \
+            --adapter-artifact "$work/adapter/synchrod-pg" \
+            --state-dir "$work/state" --temp-parent "$work" \
+            --url-file "$work/admin.url" --attach-environment-file "$work/attach.env" \
+            > "$work/provisioner.log" 2>&1 &
+          echo "$!" > "$work/provisioner.pid"
+          for _ in $(seq 1 120); do test -f "$work/attach.env" && break; sleep 1; done
+          test -f "$work/attach.env"
+          SYNCHRO_ATTACH_DIR="$work/state"; export SYNCHRO_ATTACH_DIR
+          set -a; . "$work/attach.env"; set +a
+          admin_url="$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE" <<'PY'
+          import sys, urllib.parse
+          with open(sys.argv[3], encoding="utf-8") as stream:
+              password = stream.read().rstrip("\n")
+          value = urllib.parse.urlsplit(sys.argv[1])
+          auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(password, safe="")
+          print(urllib.parse.urlunsplit((value.scheme, auth + "@" + value.netloc, value.path, value.query, "")))
+          PY
+          )"
+          adapter_url="$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE" <<'PY'
+          import sys, urllib.parse
+          with open(sys.argv[3], encoding="utf-8") as stream:
+              password = stream.read().rstrip("\n")
+          value = urllib.parse.urlsplit(sys.argv[1])
+          auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(password, safe="")
+          print(urllib.parse.urlunsplit((value.scheme, auth + "@" + value.netloc, value.path, value.query, "")))
+          PY
+          )"
+          DATABASE_URL="$admin_url" dist/release-provisioner/synchro-local-postgres prepare --repo-root "$GITHUB_WORKSPACE"
+          DATABASE_URL="$adapter_url" JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")" LISTEN_ADDR=127.0.0.1:8091 \
+            nohup "$work/adapter/synchrod-pg" > "$work/adapter.log" 2>&1 &
+          echo "$!" > "$work/adapter.pid"
+          for _ in $(seq 1 60); do curl --fail --silent http://127.0.0.1:8091/ready >/dev/null && break; sleep 1; done
+          curl --fail --silent http://127.0.0.1:8091/ready >/dev/null
+          jwt_secret="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
+          echo "::add-mask::$jwt_secret"
+          {
+            echo "SYNCHRO_TEST_URL=http://127.0.0.1:8091"
+            echo "SYNCHRO_TEST_JWT_SECRET=$jwt_secret"
+            echo "ANDROID_JAVA_HOME=$JAVA_HOME"
+          } >> "$GITHUB_ENV"
 
-      - name: Build React Native Android Detox app
-        run: make test-rn-e2e-android-build
-
-      - name: Cache Android AVD
-        id: rn-android-avd-cache
-        uses: actions/cache@v5.0.4
+      - name: Run Android package cell
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          key: rn-android-avd-${{ runner.os }}-api34-google-apis-x86_64-pixel_7
-
-      - name: Generate Android AVD snapshot
-        if: steps.rn-android-avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
+          api-level: ${{ matrix.api }}
           arch: x86_64
-          avd-name: Pixel_7_API_34
-          profile: pixel_7
           target: google_apis
-          force-avd-creation: false
-          disable-linux-hw-accel: false
-          disable-animations: false
-          emulator-boot-timeout: 900
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: echo "Generated Android AVD snapshot"
-
-      - name: Validate React Native Android bridge
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          avd-name: Pixel_7_API_34
-          profile: pixel_7
-          target: google_apis
-          force-avd-creation: false
+          profile: pixel_2
+          avd-name: Synchro_Release_API_${{ matrix.api }}
+          force-avd-creation: true
           disable-linux-hw-accel: false
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-rn-e2e-android-run
+          script: make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.api }}"
 
-  validate-docs:
-    needs: validate-metadata
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6.0.2
+      - name: Stop local fixture
+        if: always()
+        run: |
+          work="$RUNNER_TEMP/local-fixture"
+          if [ -f "$work/adapter.pid" ]; then kill "$(cat "$work/adapter.pid")" >/dev/null 2>&1 || true; fi
+          if [ -f "$work/attach.env" ]; then
+            SYNCHRO_ATTACH_DIR="$work/state"; export SYNCHRO_ATTACH_DIR
+            . "$work/attach.env"
+            dist/release-provisioner/synchro-local-postgres lifecycle --state-dir "$work/state" destroy "$SYNCHRO_CONFORMANCE_ATTACH_RUN_ID" >/dev/null 2>&1 || true
+          fi
 
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
         with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: docs/package-lock.json
+          name: package-evidence-${{ matrix.cell }}
+          path: dist/package-evidence/cells
+          if-no-files-found: error
 
-      - name: Validate docs build
-        run: make docs-build
-
-  release-gates:
-    runs-on: ubuntu-24.04
-    outputs:
-      publish_kotlin: ${{ steps.gates.outputs.publish_kotlin }}
-      publish_npm: ${{ steps.gates.outputs.publish_npm }}
-    steps:
-      - name: Block uncertified v0.3 publication
-        if: startsWith(github.ref, 'refs/tags/v0.3.')
-        run: |
-          echo "v0.3 publication is disabled until immutable RC evidence and exact-artifact promotion are implemented."
-          exit 1
-
-      - id: gates
-        env:
-          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -n "$MAVEN_CENTRAL_USERNAME" ] && [ -n "$MAVEN_CENTRAL_PASSWORD" ] && [ -n "$GPG_PRIVATE_KEY" ] && [ -n "$GPG_PASSPHRASE" ]; then
-            echo "publish_kotlin=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish_kotlin=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          if [ -n "$NPM_TOKEN" ]; then
-            echo "publish_npm=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish_npm=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  build-adapter-binaries:
-    needs:
-      - validate-quality
-      - validate-server
-      - validate-swift
-      - validate-rn-ios
-      - validate-kotlin
-      - validate-rn-android
-      - validate-docs
-    runs-on: ubuntu-24.04
+  package-apple:
+    name: package ${{ matrix.cell }}
+    needs: [candidate, seal]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    permissions:
+      actions: read
+      contents: read
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
+          - cell: SUP-IOS-MIN-001
+            ios: '16.4'
+            support: '16'
+            xcode: '16.4'
+            runner: macos-15
+          - cell: SUP-IOS-CURRENT-001
+            ios: '26.6'
+            support: '26.6'
+            xcode: '26.6'
+            runner: macos-26
+          - cell: SUP-RN-IOS-CURRENT-001
+            ios: '26.6'
+            support: '26.6'
+            xcode: '26.6'
+            runner: macos-26
     steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6.3.0
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          go-version-file: api/go/go.mod
+          ref: ${{ needs.candidate.outputs.source_commit }}
 
-      - name: Build Go release binaries
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: brew
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Download sealed release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sealed-release
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
+
+      - name: Select required Xcode and simulator
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '0'
+          IOS_VERSION: ${{ matrix.ios }}
+          XCODE_VERSION: ${{ matrix.xcode }}
         run: |
-          mkdir -p dist
-          cd api/go
-          GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchrod-pg
-          GOWORK=off go build -ldflags="-s -w" -o "../../dist/synchro-seed-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/synchro-seed
-
-      - uses: actions/upload-artifact@v7.0.0
-        with:
-          name: go-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            dist/synchrod-pg-${{ matrix.goos }}-${{ matrix.goarch }}
-            dist/synchro-seed-${{ matrix.goos }}-${{ matrix.goarch }}
-
-  package-extension:
-    needs: validate-server
-    strategy:
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            extensions -> target
-
-      - name: Install PostgreSQL extension build dependencies on Linux
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            bison \
-            libclang-dev \
-            libreadline-dev \
-            libssl-dev \
-            libxml2-dev \
-            libxml2-utils \
-            libxslt-dev \
-            pkg-config \
-            xsltproc \
-            zlib1g-dev
-
-      - name: Install PostgreSQL 18 and extension build dependencies on macOS
-        if: runner.os == 'macOS'
-        run: |
-          for formula in postgresql@18 pkgconf openssl@3 libxml2 libxslt; do
-            brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
-          done
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: ~/.pgrx
-          key: pgrx-${{ runner.os }}-0.17.0-pg18
-
-      - uses: actions/cache@v5.0.4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-pgrx
-            ~/.cargo/.crates.toml
-            ~/.cargo/.crates2.json
-          key: cargo-pgrx-${{ runner.os }}-0.17.0
-
-      - name: Install cargo-pgrx
-        run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || [ "$(cargo pgrx --version | awk '{print $2}')" != "0.17.0" ]; then
-            cargo install --locked cargo-pgrx --version 0.17.0
+          set -euo pipefail
+          test -d "/Applications/Xcode_$XCODE_VERSION.app" || { echo "Xcode $XCODE_VERSION is required" >&2; exit 1; }
+          sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "$XCODE_VERSION"
+          swift --version | grep -E 'Swift version 6[.]' >/dev/null
+          if ! xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); exit(JSON.parse(STDIN.read).fetch("runtimes").any? { |r| r["version"] == wanted } ? 0 : 1)' "$IOS_VERSION"; then
+            sudo xcodebuild -downloadPlatform iOS -buildVersion "$IOS_VERSION"
           fi
+          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == wanted }; abort "required iOS runtime is unavailable" unless r; puts r.fetch("identifier")' "$IOS_VERSION")"
+          device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'd=JSON.parse(STDIN.read).fetch("devicetypes"); x=d.find { |i| i["name"] == "iPhone 14" } || d.find { |i| i["name"].start_with?("iPhone") }; abort "no iPhone simulator type" unless x; puts x.fetch("identifier")')"
+          udid="$(xcrun simctl create "Synchro_${{ matrix.cell }}" "$device" "$runtime")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
 
-      - name: Initialize PostgreSQL 18 for pgrx
+      - name: Start local Apple fixture
         run: |
-          if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
-            echo "Using cached PG18 pgrx runtime"
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config"
-          else
-            cargo pgrx init --pg18 download
-          fi
+          set -euo pipefail
+          make local-postgres-start
+          attach="$GITHUB_WORKSPACE/.ignore/r2/tmp/local-postgres/attach.env"
+          SYNCHRO_ATTACH_DIR="$(dirname "$attach")"
+          export SYNCHRO_ATTACH_DIR
+          set -a
+          # shellcheck disable=SC1090
+          . "$attach"
+          set +a
+          ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          SYNCHRO_TEST_JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
+          SYNCHRO_TEST_URL=http://127.0.0.1:8091
+          WARM_CONNECT_ENV_FILE="$attach"
+          export ADAPTER_TEST_URL SYNCHRO_TEST_JWT_SECRET SYNCHRO_TEST_URL WARM_CONNECT_ENV_FILE
+          echo "::add-mask::$ADAPTER_TEST_URL"
+          echo "::add-mask::$SYNCHRO_TEST_JWT_SECRET"
+          {
+            echo "ADAPTER_TEST_URL=$ADAPTER_TEST_URL"
+            echo "SYNCHRO_TEST_JWT_SECRET=$SYNCHRO_TEST_JWT_SECRET"
+            echo "SYNCHRO_TEST_URL=$SYNCHRO_TEST_URL"
+            echo "WARM_CONNECT_ENV_FILE=$WARM_CONNECT_ENV_FILE"
+          } >> "$GITHUB_ENV"
+          make synchrod-pg-test-start
 
-      - name: Package PG 18 extension
+      - name: Run Apple package lifecycle
         run: |
-          mkdir -p dist
-          cd extensions/synchro-pg
-          PG_CONFIG_PATH="$(awk -F'\"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
-          CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/.pgrx-target" cargo pgrx package --pg-config "$PG_CONFIG_PATH" --out-dir "${GITHUB_WORKSPACE}/dist/synchro-pg-pg18"
-          cd "${GITHUB_WORKSPACE}/dist"
-          tar -czf "synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz" synchro-pg-pg18
+          make release-run-support-cell \
+            VERSION="${{ needs.candidate.outputs.version }}" \
+            RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
+            RELEASE_EVIDENCE_DIR=dist/package-evidence \
+            RELEASE_CONSUMER_DIR=dist/release-consumer \
+            SUPPORT_CELL_ID="${{ matrix.cell }}" \
+            SUPPORT_PLATFORM_VERSION="${{ matrix.support }}"
 
-      - uses: actions/upload-artifact@v7.0.0
+      - name: Stop local Apple fixture
+        if: always()
+        run: |
+          make synchrod-pg-test-stop
+          make local-postgres-stop
+
+      - name: Delete simulator
+        if: always() && env.IOS_SIMULATOR_UDID != ''
+        run: |
+          xcrun simctl shutdown "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
+          xcrun simctl delete "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
         with:
-          name: synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}
-          path: dist/synchro-pg-pg18-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          name: package-evidence-${{ matrix.cell }}
+          path: dist/package-evidence/cells
+          if-no-files-found: error
 
-  publish-kotlin:
-    needs: [validate-kotlin, release-gates]
+  package-gate:
+    name: package gate
+    if: always()
+    needs: [candidate, seal, package-server, package-android, package-apple]
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.release-gates.outputs.publish_kotlin == 'true' }}
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - uses: actions/checkout@v6.0.2
+      - name: Require package jobs
+        run: |
+          test "${{ needs.candidate.result }}" = success
+          test "${{ needs.seal.result }}" = success
+          test "${{ needs.package-server.result }}" = success
+          test "${{ needs.package-android.result }}" = success
+          test "${{ needs.package-apple.result }}" = success
 
-      - uses: actions/setup-java@v5.2.0
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.candidate.outputs.source_commit }}
+
+      - name: Download sealed release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sealed-release
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
+
+      - name: Download package evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: package-evidence-*
+          path: dist/package-evidence/cells
+          merge-multiple: true
+
+      - name: Aggregate exact support obligations
+        run: |
+          make release-verify VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          python3 verification/packaged_smoke.py collect \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --cells-dir dist/package-evidence/cells \
+            --output dist/package-evidence/summary.json
+          python3 verification/packaged_smoke.py verify-summary \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --summary dist/package-evidence/summary.json
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: package-gate-evidence
+          path: dist/package-evidence/summary.json
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: approve, publish, verify, and promote
+    needs: [candidate, seal, package-gate]
+    runs-on: macos-26
+    environment: release
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+      issues: read
+    env:
+      ANDROID_HOME: /Users/runner/Library/Android/sdk
+      ANDROID_SDK_ROOT: /Users/runner/Library/Android/sdk
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.candidate.outputs.source_commit }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - id: java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
 
-      - name: Publish Kotlin package
-        working-directory: clients/kotlin
-        env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_PRIVATE_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
-        run: ./gradlew publishAndReleaseToMavenCentral
+      - name: Export Android Java home
+        run: echo "ANDROID_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
 
-  publish-npm:
-    needs: [validate-rn-ios, validate-rn-android, release-gates]
-    runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.release-gates.outputs.publish_npm == 'true' }}
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-node@v6.3.0
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
 
-      - uses: actions/cache@v5.0.4
+      - name: Download exact sealed release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: |
-            clients/react-native/node_modules
-            clients/react-native/example/node_modules
-            clients/react-native/.yarn/install-state.gz
-          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
-          restore-keys: |
-            rn-deps-${{ runner.os }}-
+          name: sealed-release
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
 
-      - name: Install and build React Native package
-        working-directory: clients/react-native
-        run: |
-          corepack enable
-          yarn install --immutable
-          yarn prepare
-
-      - name: Publish React Native package
-        working-directory: clients/react-native
+      - name: Recheck approved candidate and sealed identity
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
-
-  create-release:
-    needs: [build-adapter-binaries, package-extension, release-gates]
-    runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          path: artifacts
-
-      - name: Generate checksums
+          GH_TOKEN: ${{ github.token }}
         run: |
-          find artifacts -type f -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS.txt
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          version="${{ needs.candidate.outputs.version }}"
+          commit="${{ needs.candidate.outputs.source_commit }}"
+          test "$(git rev-parse HEAD)" = "$commit"
+          test "$(tr -d '\n' < VERSION)" = "$version"
+          make version-check
+          make release-verify VERSION="$version" RELEASE_DIR="$release"
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=dev&event=push&status=completed&head_sha=$commit&per_page=100")"
+          jq -e --arg sha "$commit" --argjson id '${{ needs.candidate.outputs.candidate_ci_run_id }}' --argjson attempt '${{ needs.candidate.outputs.candidate_ci_run_attempt }}' \
+            'any(.workflow_runs[]; .head_sha == $sha and .id == $id and .run_attempt == $attempt and .status == "completed" and .conclusion == "success")' <<<"$runs" >/dev/null
+          milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"
+          jq -e --arg title "v$version" '([.[] | select(.title == $title)] | length) == 1 and ([.[] | select(.title == $title)][0].open_issues == 0)' <<<"$milestones" >/dev/null
+          GITHUB_TOKEN="$GH_TOKEN" python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-before.json"
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Check sealed file attestations
+        id: sealed_attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          required=false
+          while read -r digest relative; do
+            if ! gh attestation verify "$release/$relative" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --predicate-type "$RELEASE_ATTESTATION_PREDICATE_TYPE" \
+              --format json > "$RUNNER_TEMP/release-attestation.json" 2>/dev/null; then
+              required=true
+              break
+            fi
+            if ! jq -e --slurpfile manifest "$release/release-manifest.json" \
+              'any(.[]; .verificationResult.statement.predicate == $manifest[0])' \
+              "$RUNNER_TEMP/release-attestation.json" >/dev/null; then
+              required=true
+              break
+            fi
+            test "$(shasum -a 256 "$release/$relative" | cut -d ' ' -f 1)" = "$digest"
+          done < "$release/SHA256SUMS"
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+
+      - name: Attest sealed file subjects
+        if: steps.sealed_attestations.outputs.required == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          generate_release_notes: true
-          files: |
-            artifacts/**/*
-            SHA256SUMS.txt
+          subject-checksums: dist/releases/${{ needs.candidate.outputs.release_dir_name }}/SHA256SUMS
+          predicate-type: ${{ env.RELEASE_ATTESTATION_PREDICATE_TYPE }}
+          predicate-path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}/release-manifest.json
+
+      - name: Verify sealed file attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          while read -r digest relative; do
+            gh attestation verify "$release/$relative" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --predicate-type "$RELEASE_ATTESTATION_PREDICATE_TYPE" \
+              --format json > "$RUNNER_TEMP/release-attestation.json"
+            jq -e --slurpfile manifest "$release/release-manifest.json" \
+              'any(.[]; .verificationResult.statement.predicate == $manifest[0])' \
+              "$RUNNER_TEMP/release-attestation.json" >/dev/null
+            test "$(shasum -a 256 "$release/$relative" | cut -d ' ' -f 1)" = "$digest"
+          done < "$release/SHA256SUMS"
+
+      - name: Create or verify immutable source tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit="${{ needs.candidate.outputs.source_commit }}"
+          version="${{ needs.candidate.outputs.version }}"
+          for tag in "v$version" "api/go/v$version"; do
+            remote="$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)"
+            if [ -n "$remote" ]; then
+              test "$remote" = "$commit" || { echo "tag source mismatch: $tag" >&2; exit 1; }
+            else
+              git tag "$tag" "$commit"
+              git push origin "refs/tags/$tag"
+            fi
+          done
+
+      - name: Create or recover draft and publish GitHub assets
+        id: github_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          tag="v${{ needs.candidate.outputs.version }}"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes --latest=false
+          fi
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          test -n "$release_id"
+          for path in "$release/release-manifest.json" "$release/SHA256SUMS" "$release/sbom.spdx.json" "$release"/artifacts/*; do
+            name="$(basename "$path")"
+            count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' <<<"$release_json")"
+            if [ "$count" = 0 ]; then
+              gh release upload "$tag" "$path" --repo "$GITHUB_REPOSITORY"
+            elif [ "$count" = 1 ]; then
+              mkdir -p "$RUNNER_TEMP/github-existing"
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$RUNNER_TEMP/github-existing"
+              test "$(shasum -a 256 "$RUNNER_TEMP/github-existing/$name" | cut -d ' ' -f 1)" = "$(shasum -a 256 "$path" | cut -d ' ' -f 1)" || { echo "GitHub asset byte mismatch: $name" >&2; exit 1; }
+            else
+              echo "GitHub release repeats asset: $name" >&2
+              exit 1
+            fi
+          done
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          jq -n --arg release_id "$release_id" --arg tag "$tag" --arg commit '${{ needs.candidate.outputs.source_commit }}' '{release_id:$release_id,tag:$tag,source_commit:$commit}' > "$RUNNER_TEMP/github-operation.json"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: publication-github
+          path: ${{ runner.temp }}/github-operation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Verify anonymous GitHub and source consumers
+        env:
+          GITHUB_TOKEN: ''
+          GOPROXY: https://proxy.golang.org,direct
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          version="${{ needs.candidate.outputs.version }}"
+          expected_commit="${{ needs.candidate.outputs.source_commit }}"
+          python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-github.json"
+          jq -e '.source_tags == "complete" and .github == "public"' "$RUNNER_TEMP/public-github-classification.json" >/dev/null
+          SYNCHRO_GO_CONSUMER_MODE=public make test-consumer-go
+          git clone --quiet --depth 1 --branch "v$version" https://github.com/trainstar/synchro.git "$RUNNER_TEMP/public-swift"
+          test "$(git -C "$RUNNER_TEMP/public-swift" rev-parse HEAD)" = "$expected_commit"
+          swift package --package-path "$RUNNER_TEMP/public-swift" --disable-dependency-cache resolve
+          swift build --package-path "$RUNNER_TEMP/public-swift" --disable-dependency-cache
+          command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
+          curl --fail --silent --show-error \
+            "https://raw.githubusercontent.com/trainstar/synchro/v$version/Synchro.podspec" \
+            --output "$RUNNER_TEMP/Synchro.podspec"
+          pod ipc spec "$RUNNER_TEMP/Synchro.podspec" >/dev/null
+
+      - name: Resolve or upload and validate Maven deployment
+        id: maven
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${MAVEN_CENTRAL_USERNAME:?MAVEN_CENTRAL_USERNAME is required}"
+          : "${MAVEN_CENTRAL_PASSWORD:?MAVEN_CENTRAL_PASSWORD is required}"
+          release="$GITHUB_WORKSPACE/dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          identity="$RUNNER_TEMP/release-identity.json"
+          python3 scripts/release-publish.py identity --release-dir "$release" --output "$identity"
+          bundle="$release/$(jq -r '.maven_bundle.path' "$identity")"
+          name="$(jq -r '.maven_bundle.deployment_name' "$identity")"
+          python3 scripts/release-publish.py central-list --name "$name" --output "$RUNNER_TEMP/central-list.json"
+          python3 scripts/release-publish.py central-select --input "$RUNNER_TEMP/central-list.json" --name "$name" --output "$RUNNER_TEMP/central-selected.json"
+          deployment_id="$(jq -r '.deployment_id // empty' "$RUNNER_TEMP/central-selected.json")"
+          deployment_state="$(jq -r '.deployment_state // empty' "$RUNNER_TEMP/central-selected.json")"
+          public_maven="$(jq -r '.maven' "$RUNNER_TEMP/public-github-classification.json")"
+          if [ -n "$deployment_id" ] && { [ "$deployment_state" = PENDING ] || [ "$deployment_state" = VALIDATING ]; }; then
+            for _ in $(seq 1 120); do
+              python3 scripts/release-publish.py central-status --deployment-id "$deployment_id" --output "$RUNNER_TEMP/central-status.json"
+              deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
+              case "$deployment_state" in
+                VALIDATED|FAILED|PUBLISHING|PUBLISHED) break ;;
+                PENDING|VALIDATING) sleep 15 ;;
+                *) echo "Central returned an unsupported deployment state" >&2; exit 1 ;;
+              esac
+            done
+          fi
+          if [ -n "$deployment_id" ] && { [ "$deployment_state" = VALIDATED ] || [ "$deployment_state" = FAILED ]; }; then
+            python3 scripts/release-publish.py central-drop --deployment-id "$deployment_id"
+            deployment_id=
+            deployment_state=
+          fi
+          if [ -z "$deployment_id" ]; then
+            if [ "$public_maven" = published ]; then
+              deployment_state=PUBLIC
+            else
+              python3 scripts/release-publish.py central-upload --bundle "$bundle" --name "$name" --output "$RUNNER_TEMP/central-upload.json"
+              deployment_id="$(jq -r '.deployment_id' "$RUNNER_TEMP/central-upload.json")"
+              test -n "$deployment_id"
+              deployment_state=PENDING
+            fi
+          fi
+          jq -n --arg deployment_id "$deployment_id" --arg deployment_name "$name" --arg bundle_sha256 "$(shasum -a 256 "$bundle" | cut -d ' ' -f 1)" '{deployment_id:$deployment_id,deployment_name:$deployment_name,bundle_sha256:$bundle_sha256}' > "$RUNNER_TEMP/maven-operation.json"
+          if [ "$deployment_state" = PENDING ] || [ "$deployment_state" = VALIDATING ]; then
+            for _ in $(seq 1 120); do
+              python3 scripts/release-publish.py central-status --deployment-id "$deployment_id" --output "$RUNNER_TEMP/central-status.json"
+              deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
+              case "$deployment_state" in
+                VALIDATED|PUBLISHING|PUBLISHED) break ;;
+                FAILED) echo "Central validation failed" >&2; exit 1 ;;
+                PENDING|VALIDATING) sleep 15 ;;
+                *) echo "Central returned an unsupported deployment state" >&2; exit 1 ;;
+              esac
+            done
+          fi
+          case "$deployment_state" in
+            VALIDATED|PUBLISHING|PUBLISHED|PUBLIC) ;;
+            *) echo "Central deployment did not reach a recoverable state" >&2; exit 1 ;;
+          esac
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "deployment_state=$deployment_state" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: publication-maven
+          path: ${{ runner.temp }}/maven-operation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish and verify Maven deployment
+        env:
+          DEPLOYMENT_ID: ${{ steps.maven.outputs.deployment_id }}
+          DEPLOYMENT_STATE: ${{ steps.maven.outputs.deployment_state }}
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${MAVEN_CENTRAL_USERNAME:?MAVEN_CENTRAL_USERNAME is required}"
+          : "${MAVEN_CENTRAL_PASSWORD:?MAVEN_CENTRAL_PASSWORD is required}"
+          release="$GITHUB_WORKSPACE/dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          deployment_state="$DEPLOYMENT_STATE"
+          if [ "$deployment_state" = PUBLIC ]; then
+            deployment_state=PUBLISHED
+          fi
+          if [ "$deployment_state" = VALIDATED ]; then
+            python3 scripts/release-publish.py central-publish --deployment-id "$DEPLOYMENT_ID"
+          fi
+          if [ "$deployment_state" != PUBLISHED ]; then
+            for _ in $(seq 1 120); do
+              python3 scripts/release-publish.py central-status --deployment-id "$DEPLOYMENT_ID" --output "$RUNNER_TEMP/central-status.json"
+              deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
+              case "$deployment_state" in
+                PUBLISHED) break ;;
+                FAILED) echo "Central publication failed" >&2; exit 1 ;;
+                PUBLISHING|VALIDATED) sleep 15 ;;
+                *) echo "Central returned an unsupported publication state" >&2; exit 1 ;;
+              esac
+            done
+          fi
+          test "$deployment_state" = PUBLISHED
+          for _ in $(seq 1 120); do
+            if env -u GITHUB_TOKEN python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-maven.json"; then
+              [ "$(jq -r '.maven' "$RUNNER_TEMP/public-maven-classification.json")" = published ] && break
+            fi
+            sleep 15
+          done
+          test "$(jq -r '.maven' "$RUNNER_TEMP/public-maven-classification.json")" = published
+
+      - name: Verify public Maven consumer
+        run: |
+          set -euo pipefail
+          sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
+          "$sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          export SYNCHRO_CONSUMER_MAVEN_REPOSITORY=https://repo1.maven.org/maven2
+          export JAVA_HOME="$ANDROID_JAVA_HOME"
+          export PATH="$ANDROID_JAVA_HOME/bin:$PATH"
+          clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
+            -PsynchroVersion="${{ needs.candidate.outputs.version }}" :app:assembleRelease
+
+      - name: Publish or verify exact npm release through trusted OIDC
+        env:
+          GITHUB_TOKEN: ''
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          version="${{ needs.candidate.outputs.version }}"
+          tarball="$release/artifacts/trainstar-synchro-react-native-$version.tgz"
+          package='@trainstar/synchro-react-native'
+          npm install --global npm@11.6.2
+          python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-before-npm.json"
+          npm_state="$(jq -r '.npm' "$RUNNER_TEMP/public-before-npm-classification.json")"
+          if [ "$npm_state" = absent ]; then
+            test "$(jq -r '.github' "$RUNNER_TEMP/public-before-npm-classification.json")" = public
+            test "$(jq -r '.maven' "$RUNNER_TEMP/public-before-npm-classification.json")" = published
+            test -z "${NODE_AUTH_TOKEN:-}"
+            test -z "${NPM_TOKEN:-}"
+            env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$tarball" --access public --provenance --tag latest
+          else
+            test "$npm_state" = published-latest
+          fi
+          for _ in $(seq 1 40); do
+            if python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-npm.json"; then
+              npm_state="$(jq -r '.npm' "$RUNNER_TEMP/public-npm-classification.json")"
+              [ "$npm_state" = published-latest ] && break
+            fi
+            sleep 15
+          done
+          test "$npm_state" = published-latest
+          test "$(npm view "$package@$version" version)" = "$version"
+          mkdir -p "$RUNNER_TEMP/npm-provenance"
+          (
+            cd "$RUNNER_TEMP/npm-provenance"
+            npm init --yes >/dev/null
+            npm install --ignore-scripts --save-exact "$package@$version"
+            npm audit signatures --json > "$RUNNER_TEMP/npm-provenance.json"
+          )
+          jq -e '(.invalid // []) == [] and (.missing // []) == []' "$RUNNER_TEMP/npm-provenance.json" >/dev/null
+          jq -n --arg package "$package" --arg version "$version" --arg sha256 "$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)" \
+            '{package:$package,version:$version,sha256:$sha256,dist_tag:"latest",provenance:"verified"}' > "$RUNNER_TEMP/npm-operation.json"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: publication-npm
+          path: ${{ runner.temp }}/npm-operation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Verify public React Native iOS and Android consumers
+        env:
+          SYNCHRO_CONSUMER_RESOLUTION: public
+          PACKAGED_SMOKE_TMP_ROOT: ${{ runner.temp }}/public-rn
+          SUPPORT_PLATFORM_VERSION: '26.6'
+        run: |
+          set -euo pipefail
+          test -d /Applications/Xcode_26.6.app || { echo "Xcode 26.6 is required" >&2; exit 1; }
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
+          "$sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          mkdir -p "$RUNNER_TEMP/public-rn" "$RUNNER_TEMP/empty-artifacts"
+          sh verification/consumers/react-native/test-consumer.sh ios "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
+          sh verification/consumers/react-native/test-consumer.sh android "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
+
+      - name: Mark GitHub latest only after public checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/${{ steps.github_release.outputs.release_id }}" -f make_latest=true >/dev/null
+          env -u GITHUB_TOKEN python3 scripts/release-publish.py observe-public \
+            --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
+            --output "$RUNNER_TEMP/public-final.json"
+          jq -e '.complete == true and .next_operation == "complete"' "$RUNNER_TEMP/public-final-classification.json" >/dev/null

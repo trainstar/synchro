@@ -1,0 +1,16 @@
+diff --git a/extensions/synchro-pg/src/registry.rs b/extensions/synchro-pg/src/registry.rs
+--- a/extensions/synchro-pg/src/registry.rs
++++ b/extensions/synchro-pg/src/registry.rs
+@@ -1204,6 +1204,12 @@ fn stage_membership_replacement_if_changed(
+             ],
+         )?
+         .len();
++    if staged == 1 {
++        crate::materialize::invalidate_affected_membership_generation(
++            client, affected_scopes, target_generation,
++        )
++        .unwrap_or_else(|error| pgrx::error!("invalidating staged membership early: {error}"));
++    }
+     if !affected_scopes.is_empty() && staged != 1 {
+         pgrx::error!("affected scopes require a membership rule transition");
+     }

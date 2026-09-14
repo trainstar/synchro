@@ -44,6 +44,7 @@ android.iml
 # Cocoapods
 #
 example/ios/Pods
+example/ios/.synchro-pods.stamp
 
 # Ruby
 example/vendor/

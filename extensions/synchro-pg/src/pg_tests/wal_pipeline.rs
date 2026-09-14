@@ -22,8 +22,7 @@
                 client_id,
                 label,
                 vec![push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     label,
                     "test_orders",
                     "insert",
@@ -73,6 +72,7 @@
             Spi::get_one("SELECT synchro_backfill_bucket_edges()").unwrap();
         let resp = resp.unwrap().0;
         assert!(resp["edges"].as_i64().unwrap_or(0) > 0);
+        assert_eq!(resp["batch_size"], 1_000);
 
         let edge_count: Option<i64> = Spi::get_one(
             "SELECT count(*) FROM sync_bucket_edges
@@ -92,6 +92,187 @@
         )
         .unwrap();
         assert!(row_version.is_some());
+    }
+
+    #[pg_test]
+    fn test_backfill_bucket_edges_enforces_batch_boundaries() {
+        setup_test_tables();
+        for (record_id, sequence) in [
+            ("14141414-1414-1414-1414-141414141414", 1),
+            ("15151515-1515-1515-1515-151515151515", 2),
+        ] {
+            Spi::run_with_args(
+                "INSERT INTO test_products (id, name, price)
+                 VALUES ($1::uuid, 'Backfill Boundary Product', $2)",
+                &[record_id.into(), sequence.into()],
+            )
+            .unwrap();
+            insert_changelog("global", "test_products", record_id, sequence);
+        }
+
+        let lower: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro_backfill_bucket_edges('test_products', 1)",
+        )
+        .unwrap()
+        .expect("lower backfill boundary response");
+        assert_eq!(lower.0["batch_size"], 1);
+        assert_eq!(lower.0["batch_count"], 2);
+
+        let upper: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro_backfill_bucket_edges('test_products', 1000)",
+        )
+        .unwrap()
+        .expect("upper backfill boundary response");
+        assert_eq!(upper.0["batch_size"], 1_000);
+        assert_eq!(upper.0["batch_count"], 1);
+
+        let accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<pgrx::JsonB>(
+                "SELECT synchro_backfill_bucket_edges('test_products', 1001)",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        assert!(!accepted, "batch size above 1000 must be rejected");
+    }
+
+    #[pg_test]
+    fn test_reevaluation_projection_batch_boundary() {
+        setup_test_tables();
+        let projections: pgrx::JsonB = Spi::get_one(
+            "WITH context AS (
+                 SELECT runtime.stream_generation, registry.relation_id,
+                        registry.registry_generation
+                 FROM sync_runtime_state runtime
+                 JOIN sync_registry_generations generation
+                   ON generation.stream_generation = runtime.stream_generation
+                  AND generation.state = 'active'
+                 JOIN sync_registry registry
+                   ON registry.registry_generation = generation.generation
+                  AND registry.table_name = 'test_orders'
+                 WHERE runtime.singleton
+             ), inserted AS (
+                 INSERT INTO sync_captured_rows (
+                     relation_id, record_id, row_data, row_version, checksum, deleted,
+                     source_stream_generation, source_commit_lsn, source_event_ordinal,
+                     registry_generation
+                 )
+                 SELECT context.relation_id,
+                        '00000000-0000-4000-8001-' || lpad(series::text, 12, '0'),
+                        jsonb_build_object('sequence', series),
+                        ('00000000-0000-4000-8002-' || lpad(series::text, 12, '0'))::uuid,
+                        decode(lpad(to_hex(series), 64, '0'), 'hex'), false,
+                        context.stream_generation, '0/10'::pg_lsn, 0,
+                        context.registry_generation
+                 FROM context
+                 CROSS JOIN generate_series(1, 501) AS series
+                 RETURNING relation_id, record_id, registry_generation,
+                           row_version, checksum, deleted
+             )
+             SELECT jsonb_agg(jsonb_build_object(
+                        'event_ordinal', 7,
+                        'relation_id', relation_id,
+                        'registry_generation', registry_generation,
+                        'record_id', record_id,
+                        'row_version', row_version,
+                        'checksum_hex', encode(checksum, 'hex'),
+                        'deleted', deleted
+                    ) ORDER BY record_id)
+             FROM inserted",
+        )
+        .unwrap()
+        .expect("reevaluation projection batch inputs");
+        let mut projections = projections
+            .0
+            .as_array()
+            .expect("projection input array")
+            .clone();
+        let stream_generation: String = Spi::get_one(
+            "SELECT stream_generation FROM sync_runtime_state WHERE singleton",
+        )
+        .unwrap()
+        .expect("stream generation");
+
+        Spi::connect_mut(|client| {
+            for (field, value) in [
+                ("registry_generation", json!(-1)),
+                (
+                    "row_version",
+                    json!("ffffffff-ffff-4fff-8fff-ffffffffffff"),
+                ),
+                ("checksum_hex", json!("f".repeat(64))),
+                ("deleted", json!(true)),
+            ] {
+                let mut invalid = projections[..2].to_vec();
+                invalid[1][field] = value;
+                assert!(crate::bgworker::persist_reevaluation_projection_batch(
+                    client,
+                    &stream_generation,
+                    0x20,
+                    invalid,
+                )
+                .is_err());
+            }
+            assert!(crate::bgworker::persist_reevaluation_projection_batch(
+                client,
+                &stream_generation,
+                0x20,
+                projections.clone(),
+            )
+            .is_err());
+            let inserted_before_valid_batches = client
+                .select(
+                    "SELECT count(*)::bigint AS count
+                     FROM sync_captured_projections
+                     WHERE commit_lsn = '0/20'::pg_lsn AND event_ordinal = 7",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get_by_name::<i64, &str>("count")?;
+            assert_eq!(inserted_before_valid_batches, Some(0));
+            let final_batch = projections.split_off(500);
+            crate::bgworker::persist_reevaluation_projection_batch(
+                client,
+                &stream_generation,
+                0x20,
+                projections,
+            )
+            .expect("first reevaluation projection batch");
+            crate::bgworker::persist_reevaluation_projection_batch(
+                client,
+                &stream_generation,
+                0x20,
+                final_batch,
+            )
+            .expect("second reevaluation projection batch");
+            Ok::<_, pgrx::spi::Error>(())
+        })
+        .unwrap();
+
+        let counts: pgrx::JsonB = Spi::get_one(
+            "SELECT jsonb_build_object(
+                 'rows', count(*),
+                 'matches', bool_and(
+                     projection.row_data = captured.row_data
+                     AND projection.row_version = captured.row_version
+                     AND projection.checksum = captured.checksum
+                     AND projection.deleted = captured.deleted
+                     AND projection.registry_generation = captured.registry_generation
+                 )
+             )
+             FROM sync_captured_projections projection
+             JOIN sync_captured_rows captured
+               ON captured.relation_id = projection.relation_id
+              AND captured.record_id = projection.record_id
+             WHERE projection.commit_lsn = '0/20'::pg_lsn
+               AND projection.event_ordinal = 7",
+        )
+        .unwrap()
+        .expect("reevaluation projection batch counts");
+        assert_eq!(counts.0["rows"], json!(501));
+        assert_eq!(counts.0["matches"], json!(true));
     }
 
     #[pg_test]
@@ -314,6 +495,39 @@
     }
 
     #[pg_test]
+    fn test_pull_ignores_malformed_effect_beyond_boundary() {
+        setup_pull_fixtures();
+        Spi::run(
+            "INSERT INTO sync_changelog (
+                 bucket_id, table_name, record_id, operation, stream_generation,
+                 commit_lsn, event_ordinal, effect_ordinal, relation_id, row_version
+             )
+             SELECT 'user:u1', 'test_orders',
+                    'f0000000-0000-4000-8000-000000000001', 1,
+                    runtime.stream_generation, 'FFFFFFFF/FFFFFFFE'::pg_lsn,
+                    NULL, 0, registry.relation_id, gen_random_uuid()
+             FROM sync_runtime_state runtime
+             JOIN sync_registry registry ON registry.table_name = 'test_orders'
+             JOIN sync_registry_generations generation
+               ON generation.generation = registry.registry_generation
+              AND generation.state = 'active'
+             WHERE runtime.singleton",
+        )
+        .unwrap();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
+            100,
+        );
+
+        assert!(response.get("error").is_none());
+        assert!(!response["changes"].as_array().unwrap().is_empty());
+    }
+
+    #[pg_test]
     fn test_direct_write_advances_opaque_version() {
         setup_test_tables();
         register_client("u1", "c1");
@@ -337,6 +551,241 @@
         assert_ne!(second_version, first_version);
     }
 
+    #[pg_test]
+    fn worker_runtime_identity_rejects_recreated_state() {
+        setup_test_tables();
+        let original = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT stream_generation, active_slot_name::text AS active_slot_name
+                     FROM synchro.sync_runtime_state WHERE singleton",
+                    None,
+                    &[],
+                )?
+                .first();
+            Ok::<_, pgrx::spi::Error>(
+                (
+                    row.get_by_name::<String, &str>("stream_generation")?,
+                    row.get_by_name::<String, &str>("active_slot_name")?,
+                ),
+            )
+        })
+        .expect("load original runtime identity");
+        let original_generation = original.0.expect("original stream generation");
+        let original_slot = original.1;
+        let expected_slot = "synchro_worker_identity";
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET active_slot_name = $1, updated_at = now()
+             WHERE singleton",
+            &[expected_slot.into()],
+        )
+        .expect("set worker identity slot");
+
+        let (identity, _) = Spi::connect(|client| {
+            crate::bgworker::capture_worker_runtime_identity(client, "unused")
+        })
+        .expect("capture worker runtime identity");
+        let unchanged = Spi::connect(|client| {
+            crate::bgworker::validate_worker_runtime_identity(client, &identity)
+        });
+        assert!(unchanged.is_ok(), "unchanged runtime identity must validate");
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, updated_at = now()
+             WHERE singleton",
+            &["recreated-worker-runtime".into()],
+        )
+        .expect("replace runtime stream generation");
+        let recreated = Spi::connect(|client| {
+            crate::bgworker::validate_worker_runtime_identity(client, &identity)
+        });
+        assert!(recreated.is_err(), "recreated runtime state must invalidate identity");
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, active_slot_name = NULL, updated_at = now()
+             WHERE singleton",
+            &[original_generation.clone().into()],
+        )
+        .expect("prepare unbound worker runtime");
+        let startup_identity = Spi::connect(|client| {
+            crate::bgworker::capture_worker_startup_identity(client, expected_slot)
+        })
+        .expect("capture startup worker runtime identity");
+        let startup_unchanged = Spi::connect(|client| {
+            crate::bgworker::validate_worker_startup_identity(client, &startup_identity)
+        });
+        assert!(
+            startup_unchanged.is_ok(),
+            "unbound startup runtime identity must validate"
+        );
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, updated_at = now()
+             WHERE singleton",
+            &["recreated-startup-runtime".into()],
+        )
+        .expect("replace startup runtime stream generation");
+        let startup_recreated = Spi::connect(|client| {
+            crate::bgworker::validate_worker_startup_identity(client, &startup_identity)
+        });
+        assert!(
+            startup_recreated.is_err(),
+            "recreated startup runtime state must invalidate identity"
+        );
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET stream_generation = $1, active_slot_name = $2, updated_at = now()
+             WHERE singleton",
+            &[original_generation.into(), original_slot.into()],
+        )
+        .expect("restore runtime identity");
+    }
+
+    #[pg_test]
+    fn worker_slot_binding_selects_reuse_replace_or_fail() {
+        let unbound = crate::bgworker::WorkerStartupIdentity {
+            runtime: crate::bgworker::WorkerRuntimeIdentity {
+                stream_generation: "unbound-generation".to_string(),
+                slot_name: "unbound-slot".to_string(),
+            },
+            active_slot_is_unbound: true,
+        };
+        let bound = crate::bgworker::WorkerStartupIdentity {
+            runtime: crate::bgworker::WorkerRuntimeIdentity {
+                stream_generation: "bound-generation".to_string(),
+                slot_name: "bound-slot".to_string(),
+            },
+            active_slot_is_unbound: false,
+        };
+
+        assert_eq!(
+            crate::bgworker::slot_binding_decision(
+                &unbound,
+                crate::bgworker::ExistingWorkerSlot::Inactive,
+            ),
+            crate::bgworker::SlotBindingDecision::Replace,
+        );
+        assert_eq!(
+            crate::bgworker::slot_binding_decision(
+                &bound,
+                crate::bgworker::ExistingWorkerSlot::Inactive,
+            ),
+            crate::bgworker::SlotBindingDecision::Reuse,
+        );
+        assert_eq!(
+            crate::bgworker::slot_binding_decision(
+                &unbound,
+                crate::bgworker::ExistingWorkerSlot::Active,
+            ),
+            crate::bgworker::SlotBindingDecision::Fail,
+        );
+    }
+
+    fn reset_runtime_for_unbound_registration_test() {
+        Spi::run(
+            "UPDATE synchro.sync_runtime_state
+             SET active_slot_name = NULL,
+                 active_publication_name = NULL,
+                 active_publication_oid = NULL,
+                 updated_at = now()
+             WHERE singleton;
+             UPDATE synchro.sync_wal_progress
+             SET generation_start_lsn = NULL,
+                 materialized_commit_lsn = NULL,
+                 materialized_end_lsn = NULL,
+                 acknowledged_end_lsn = NULL,
+                 updated_at = now()
+             WHERE singleton",
+        )
+        .expect("reset runtime for unbound registration test");
+    }
+
+    fn bind_test_runtime_after_registration(slot: &str) -> i64 {
+        Spi::run_with_args(
+            "UPDATE synchro.sync_runtime_state
+             SET active_slot_name = $1,
+                  updated_at = now()
+             WHERE singleton",
+            &[slot.into()],
+        )
+        .expect("bind unbound registration test runtime");
+        Spi::get_one_with_args(
+            "SELECT count(*)
+             FROM synchro.sync_registry_activation_requests request
+             JOIN synchro.sync_registry_generations generation
+               ON generation.generation = request.registry_generation
+              AND generation.state = 'pending'
+             WHERE request.emitted_at IS NOT NULL",
+            &[],
+        )
+        .expect("read unbound registration activation requests")
+        .expect("unbound registration activation message count")
+    }
+
+    fn create_and_register_unbound_test_table(table: &str) {
+        Spi::run(&format!(
+            "CREATE TABLE {table} (
+                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                 user_id TEXT NOT NULL,
+                 title TEXT NOT NULL DEFAULT '',
+                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                 deleted_at TIMESTAMPTZ
+             )"
+        ))
+        .expect("create unbound registration test table");
+        Spi::run(&format!(
+            "SELECT tests.register_legacy_test_table(
+                 '{table}',
+                 $$SELECT ARRAY['user:' || user_id] FROM {table} WHERE id = $1::uuid$$,
+                 'single_scope'
+             )"
+        ))
+        .expect("register unbound registration test table");
+    }
+
+    #[pg_test]
+    fn registration_committed_before_initial_slot_binding_is_replayed() {
+        setup_test_tables();
+        reset_runtime_for_unbound_registration_test();
+        create_and_register_unbound_test_table("test_prebound_registration");
+
+        let activation_messages = bind_test_runtime_after_registration("synchro_prebound_test");
+        reset_runtime_for_unbound_registration_test();
+
+        assert_eq!(
+            activation_messages, 1,
+            "registration activation was lost before initial slot binding"
+        );
+    }
+
+    #[pg_test]
+    fn repeated_unbound_reinstalls_replay_every_pending_registration() {
+        setup_test_tables();
+        for (index, table) in [
+            "test_reinstall_registration_one",
+            "test_reinstall_registration_two",
+            "test_reinstall_registration_three",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reset_runtime_for_unbound_registration_test();
+            create_and_register_unbound_test_table(table);
+            let slot = format!("synchro_reinstall_test_{index}");
+            let activation_messages = bind_test_runtime_after_registration(&slot);
+            assert_eq!(
+                activation_messages,
+                i64::try_from(index + 1).expect("activation count fits"),
+                "pending registration {table} was lost during repeated reinstall"
+            );
+        }
+        reset_runtime_for_unbound_registration_test();
+    }
+
     fn backfill_scope_generation(scope_id: &str) -> i64 {
         Spi::get_one_with_args(
             "SELECT membership_generation
@@ -357,4 +806,51 @@
         )
         .unwrap()
         .expect("backfill edge count")
+    }
+
+    #[pg_test]
+    fn backfill_membership_spi_query_is_batched() {
+        setup_test_tables();
+        let record_ids = vec![
+            "1a1a1a1a-1a1a-1a1a-1a1a-1a1a1a1a1a1a".to_string(),
+            "1b1b1b1b-1b1b-1b1b-1b1b-1b1b1b1b1b1b".to_string(),
+        ];
+        for record_id in &record_ids {
+            Spi::run_with_args(
+                "INSERT INTO test_products (id, name, price)
+                 VALUES ($1::uuid, 'Bounded membership', 12)",
+                &[record_id.as_str().into()],
+            )
+            .expect("insert bounded membership product");
+            insert_changelog("global", "test_products", record_id, 1);
+        }
+
+        let registration = Spi::connect(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            Ok::<_, pgrx::spi::Error>(
+                registry
+                    .into_iter()
+                    .find(|registration| registration.table_name == "test_products")
+                    .expect("product membership registration"),
+            )
+        })
+        .expect("load product membership registration");
+        let query = crate::materialize::membership_batch_query(&registration)
+            .expect("build bounded membership query");
+        let memberships = Spi::connect(|client| {
+            crate::materialize::resolve_membership_batch(client, &registration, &record_ids)
+        })
+        .expect("resolve bounded membership batch");
+        let response: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro_backfill_bucket_edges('test_products', 1000)",
+        )
+        .expect("run bounded membership backfill")
+        .expect("bounded membership backfill response");
+
+        assert_eq!(query.matches("jsonb_to_recordset").count(), 1);
+        assert_eq!(query.matches("CROSS JOIN LATERAL").count(), 1);
+        assert_eq!(memberships.len(), 2);
+        assert!(memberships.values().all(|scopes| scopes == &["global"]));
+        assert_eq!(response.0["records"], json!(2));
+        assert_eq!(response.0["edges"], json!(2));
     }

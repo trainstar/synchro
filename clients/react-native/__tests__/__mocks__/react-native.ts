@@ -26,6 +26,7 @@ export const mockNativeModule: Record<string, jest.Mock> = {
   query: jest.fn().mockResolvedValue([]),
   queryOne: jest.fn().mockResolvedValue(null),
   execute: jest.fn().mockResolvedValue({ rowsAffected: 0 }),
+  executeAuthoredWrite: jest.fn().mockResolvedValue({ rowsAffected: 0 }),
   executeBatch: jest.fn().mockResolvedValue({ totalRowsAffected: 0 }),
   beginWriteTransaction: jest.fn().mockResolvedValue('tx-1'),
   beginReadTransaction: jest.fn().mockResolvedValue('tx-1'),
@@ -42,14 +43,36 @@ export const mockNativeModule: Record<string, jest.Mock> = {
   removeObserver: jest.fn().mockResolvedValue(undefined),
   start: jest.fn().mockResolvedValue(undefined),
   stop: jest.fn().mockResolvedValue(undefined),
+  enterBackground: jest.fn().mockResolvedValue(undefined),
+  enterForeground: jest.fn().mockResolvedValue(undefined),
+  retryAfterError: jest.fn().mockResolvedValue(undefined),
+  resetSchemaAndStart: jest.fn().mockResolvedValue(undefined),
   syncNow: jest.fn().mockResolvedValue(undefined),
   pendingChangeCount: jest.fn().mockResolvedValue(0),
+  getSyncStatus: jest.fn().mockResolvedValue(
+    '{"status":"stopped","retryAt":null,"operation":null,"failure":null}'
+  ),
+  inspectPendingMutations: jest.fn().mockResolvedValue('[]'),
+  inspectRetainedMutations: jest.fn().mockResolvedValue('[]'),
+  inspectRejectedMutations: jest.fn().mockResolvedValue('[]'),
+  inspectClientState: jest.fn().mockResolvedValue(
+    '{"schema":null,"scope_states":[],"scope_rows":[],"rebuild_attempts":[],"application_row_count":0,"mutation_ledger_count":0,"mutation_outcome_count":0,"sealed_batch_count":0,"rejected_mutation_count":0,"scope_state_count":0,"scope_row_count":0,"provenance_count":0,"row_metadata_count":0,"rebuild_attempt_count":0,"rebuild_receipt_count":0,"provenance_maintenance_work_cursor":"0"}'
+  ),
+  inspectDurableState: jest.fn().mockResolvedValue(
+    '{"row_metadata":null,"rebuild_receipts":[]}'
+  ),
+  inspectTransportObservations: jest.fn().mockResolvedValue(
+    '{"observations":[],"overflowed":false,"sequence_checkpoint":0}'
+  ),
+  getProcessIdentity: jest.fn().mockResolvedValue('ios-app:1234'),
+  clearRejectedMutations: jest.fn().mockResolvedValue(undefined),
   resolveAuthRequest: jest.fn(),
   rejectAuthRequest: jest.fn(),
   addListener: jest.fn(),
   removeListeners: jest.fn(),
   // Codegen EventEmitter pattern
   onStatusChange: createEventEmitter('onStatusChange'),
+  onSyncEvent: createEventEmitter('onSyncEvent'),
   onConflict: createEventEmitter('onConflict'),
   onAuthRequest: createEventEmitter('onAuthRequest'),
   onChange: createEventEmitter('onChange'),
@@ -78,5 +101,7 @@ export function resetNativeModuleMockState() {
 
 // Helper: emit a native event to all JS listeners
 export function emitNativeEvent(eventName: string, data: unknown) {
-  listeners[eventName]?.forEach((cb) => cb(data));
+  const callbacks = [...(listeners[eventName] ?? [])];
+  callbacks.forEach((callback) => callback(data));
+  return callbacks.length;
 }

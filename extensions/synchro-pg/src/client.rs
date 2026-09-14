@@ -51,15 +51,24 @@ struct ContractInfo {
     extension_version: &'static str,
     sql_contract_version: i32,
     protocol_version: u32,
+    library_build_fingerprint: &'static str,
+    installed_build_fingerprint: Option<String>,
+    extension_objects_current: bool,
 }
 
 #[pg_extern]
 fn synchro_contract_info() -> pgrx::JsonB {
+    let installed_build_fingerprint = crate::build_fingerprint::installed_fingerprint();
     pgrx::JsonB(
         serde_json::to_value(ContractInfo {
             extension_version: env!("CARGO_PKG_VERSION"),
             sql_contract_version: SQL_CONTRACT_VERSION,
             protocol_version: PROTOCOL_VERSION,
+            library_build_fingerprint: crate::build_fingerprint::library_fingerprint(),
+            extension_objects_current: installed_build_fingerprint.as_deref().is_some_and(
+                |installed| installed == crate::build_fingerprint::library_fingerprint(),
+            ),
+            installed_build_fingerprint,
         })
         .unwrap(),
     )
@@ -227,7 +236,7 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             return response;
         }
         let seed_positions = match request.seed_receipts.as_ref() {
-            Some(receipts) if request.schema.is_fresh_sentinel() && prior.is_none() => {
+            Some(receipts) if prior.is_none() && request.client_generation.is_none() => {
                 match crate::portable_seed::validate_seed_receipts(
                     client,
                     receipts,
@@ -276,24 +285,36 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
         let assigned_scopes = &ensured.state.bucket_subs;
 
         let mut scopes = build_scope_delta(&request.known_scopes, assigned_scopes);
+        // The wire contract places a receipted but unassigned scope in
+        // scopes.remove, so the client discards its stored receipt.
+        if let Some(receipts) = request.seed_receipts.as_ref() {
+            for scope_id in receipts.keys() {
+                if !assigned_scopes.contains(scope_id)
+                    && !request.known_scopes.contains_key(scope_id)
+                    && !scopes.remove.contains(scope_id)
+                {
+                    scopes.remove.push(scope_id.clone());
+                }
+            }
+            scopes
+                .remove
+                .sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        }
         for scope in &mut scopes.add {
             let Some(position) = seed_positions.get(&scope.id) else {
                 continue;
             };
-            let context = crate::cursor_token::ScopeCursorContext::new(
+            scope.cursor = Some(issue_seed_scope_cursor(
+                client,
                 p_user_id,
                 &request.client_id,
                 ensured.state.client_generation,
                 &scope.id,
                 &current_manifest.schema_hash,
-            )
-            .unwrap_or_else(|error| pgrx::error!("building seed scope cursor: {}", error));
-            scope.cursor = Some(
-                crate::cursor_token::issue_scope_cursor(client, &context, position)
-                    .unwrap_or_else(|error| pgrx::error!("issuing seed scope cursor: {}", error)),
-            );
+                position,
+            ));
         }
-        let scope_cursor_updates = match build_scope_cursor_updates(
+        let mut scope_cursor_updates = match build_scope_cursor_updates(
             client,
             ScopeCursorUpdateInput {
                 user_id: p_user_id,
@@ -310,6 +331,35 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             Ok(updates) => updates,
             Err(response) => return response,
         };
+        for (scope_id, position) in &seed_positions {
+            if !request.known_scopes.contains_key(scope_id) || !assigned_scopes.contains(scope_id) {
+                continue;
+            }
+            scope_cursor_updates.insert(
+                scope_id.clone(),
+                Some(issue_seed_scope_cursor(
+                    client,
+                    p_user_id,
+                    &request.client_id,
+                    ensured.state.client_generation,
+                    scope_id,
+                    &current_manifest.schema_hash,
+                    position,
+                )),
+            );
+        }
+        // A receipted assigned scope without a validated seed position gets a
+        // null cursor, so the client discards the receipt and rebuilds.
+        if let Some(receipts) = request.seed_receipts.as_ref() {
+            for scope_id in receipts.keys() {
+                if request.known_scopes.contains_key(scope_id)
+                    && assigned_scopes.contains(scope_id)
+                    && !seed_positions.contains_key(scope_id)
+                {
+                    scope_cursor_updates.entry(scope_id.clone()).or_insert(None);
+                }
+            }
+        }
 
         let response = ConnectResponse {
             server_time: canonical_server_time(),
@@ -336,6 +386,27 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
 
         pgrx::JsonB(canonical_connect_response_value(&response).unwrap())
     })
+}
+
+fn issue_seed_scope_cursor(
+    client: &SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+    client_generation: i64,
+    scope_id: &str,
+    schema_hash: &str,
+    position: &crate::stream_position::StreamPosition,
+) -> String {
+    let context = crate::cursor_token::ScopeCursorContext::new(
+        user_id,
+        client_id,
+        client_generation,
+        scope_id,
+        schema_hash,
+    )
+    .unwrap_or_else(|error| pgrx::error!("building seed scope cursor: {}", error));
+    crate::cursor_token::issue_scope_cursor(client, &context, position)
+        .unwrap_or_else(|error| pgrx::error!("issuing seed scope cursor: {}", error))
 }
 
 fn canonical_server_time() -> chrono::DateTime<Utc> {
@@ -606,13 +677,54 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
     let rows = client
         .select("SELECT scope_id FROM sync_shared_scopes", None, &[])
         .unwrap_or_else(|err| pgrx::error!("loading authoritative client scopes: {}", err));
-    let mut scopes = vec![format!("user:{user_id}")];
+    // A user holds its own private scope unless that scope has been revoked.
+    // The scope is a default, not a permanent property of the user.
+    let identity_scope = format!("user:{user_id}");
+    let identity_revoked = client
+        .select(
+            "SELECT count(*) AS revoked
+             FROM sync_user_scopes
+             WHERE user_id = $1 AND scope_id = $2 AND NOT assigned",
+            None,
+            &[user_id.into(), identity_scope.as_str().into()],
+        )
+        .unwrap_or_else(|err| pgrx::error!("loading revoked identity scope: {}", err))
+        .first()
+        .get_one::<i64>()
+        .unwrap_or_else(|err| pgrx::error!("reading revoked identity scope: {}", err))
+        .unwrap_or(0)
+        > 0;
+    let mut scopes = if identity_revoked {
+        Vec::new()
+    } else {
+        vec![identity_scope]
+    };
     for row in rows {
         let scope_id = row
             .get_by_name::<String, &str>("scope_id")
             .unwrap_or_else(|err| pgrx::error!("reading authoritative client scope: {}", err))
             .unwrap_or_else(|| pgrx::error!("authoritative client scope is missing"));
         scopes.push(scope_id);
+    }
+    // A granted scope is the only assignment a user can gain and lose. The
+    // identity scope is unconditional and a shared scope belongs to every user.
+    let granted = client
+        .select(
+            "SELECT scope_id FROM sync_user_scopes
+             WHERE user_id = $1 AND assigned
+             ORDER BY scope_id",
+            None,
+            &[user_id.into()],
+        )
+        .unwrap_or_else(|err| pgrx::error!("loading granted user scopes: {}", err));
+    for row in granted {
+        let scope_id = row
+            .get_by_name::<String, &str>("scope_id")
+            .unwrap_or_else(|err| pgrx::error!("reading granted user scope: {}", err))
+            .unwrap_or_else(|| pgrx::error!("granted user scope is missing"));
+        if !scopes.iter().any(|existing| existing == &scope_id) {
+            scopes.push(scope_id);
+        }
     }
     sort_scope_ids(&mut scopes);
     scopes
@@ -835,8 +947,13 @@ fn persist_scope_history(
                  membership_generation, retention_generation
              )
              SELECT $1, $2, $3, scope.scope_id, $4, $5,
-                    CASE WHEN scope.scope_id = 'user:' || $1
-                         THEN 'identity' ELSE 'shared' END,
+                    CASE WHEN scope.scope_id = 'user:' || $1 THEN 'identity'
+                         WHEN EXISTS (
+                             SELECT 1 FROM sync_user_scopes granted
+                             WHERE granted.user_id = $1
+                               AND granted.scope_id = scope.scope_id
+                         ) THEN 'assignment_rule'
+                         ELSE 'shared' END,
                     state.membership_generation, state.retention_generation
              FROM unnest($6::text[]) AS scope(scope_id)
              JOIN sync_scope_state state ON state.scope_id = scope.scope_id",

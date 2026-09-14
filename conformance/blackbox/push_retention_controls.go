@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 const diagnosticRetentionClientID = "s12-retention-client"
@@ -91,10 +92,15 @@ func (executor *OperatorExecutor) ObserveDiagnosticPush(ctx context.Context, cli
 	return observation, nil
 }
 
-// AgeDiagnosticRetentionClient ages only the fixed S-12 diagnostic client.
-func (executor *OperatorExecutor) AgeDiagnosticRetentionClient(ctx context.Context) error {
+// ExpireRetentionClient marks one client for retention expiry. The identity is
+// a parameter because the extension entry point serves any registered client,
+// and an authored scenario names the client it expires.
+func (executor *OperatorExecutor) ExpireRetentionClient(ctx context.Context, userID, clientID string) error {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil {
 		return errors.New("operator executor is unavailable")
+	}
+	if userID == "" || clientID == "" {
+		return errors.New("retention client identity is incomplete")
 	}
 	harness := executor.harness
 	database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
@@ -103,28 +109,18 @@ func (executor *OperatorExecutor) AgeDiagnosticRetentionClient(ctx context.Conte
 	}
 	defer database.Close()
 
-	result, err := database.ExecContext(ctx, `
-		WITH fixed_age AS (
-			SELECT clock_timestamp() - interval '31 days' AS value
-		)
-		UPDATE synchro.sync_clients client
-		SET generation_created_at = fixed_age.value,
-			generation_expires_at = NULL,
-			last_acknowledged_at = fixed_age.value,
-			last_sync_at = fixed_age.value,
-			last_pull_at = fixed_age.value,
-			last_push_at = fixed_age.value,
-			created_at = fixed_age.value,
-			updated_at = fixed_age.value
-		FROM fixed_age
-		WHERE client.user_id = 'diagnostic-user'
-		  AND client.client_id = $1`, diagnosticRetentionClientID)
+	var expired bool
+	err = database.QueryRowContext(
+		ctx,
+		"SELECT synchro.synchro_inject_client_retention_expiry($1, $2)",
+		userID,
+		clientID,
+	).Scan(&expired)
 	if err != nil {
-		return errors.New("age diagnostic retention client failed")
+		return fmt.Errorf("expire retention client: %w", err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil || rows != 1 {
-		return errors.New("retention age control did not select one client")
+	if !expired {
+		return errors.New("retention client was not active")
 	}
 	return nil
 }
@@ -142,8 +138,13 @@ func (executor *OperatorExecutor) RunDiagnosticRetentionCompaction(ctx context.C
 	defer database.Close()
 
 	var raw []byte
-	if err := database.QueryRowContext(ctx, "SELECT synchro.synchro_compact('30 days', 10000)").Scan(&raw); err != nil {
-		return DiagnosticCompactionResult{}, errors.New("run diagnostic retention compaction failed")
+	if err := database.QueryRowContext(
+		ctx,
+		"SELECT synchro.synchro_compact($1, $2)",
+		"30 days",
+		10000,
+	).Scan(&raw); err != nil {
+		return DiagnosticCompactionResult{}, fmt.Errorf("run diagnostic retention compaction failed: %w", err)
 	}
 	var result DiagnosticCompactionResult
 	if err := json.Unmarshal(raw, &result); err != nil {

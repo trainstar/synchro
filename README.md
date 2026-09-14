@@ -38,14 +38,18 @@ Synchro is not the right fit when:
 
 ## Requirements
 
-### Runtime Support
+### Supported Release Scope
 
-- PostgreSQL 18
-- iOS 16 and current stable iOS
-- macOS 13 and current stable macOS
-- Android API 24 and current stable Android API
-- React Native 0.83.x on iOS 16 and current stable iOS
-- React Native 0.83.x on Android API 24 and current stable Android API
+- PostgreSQL 18 on Ubuntu 24.04 Linux x64
+- Swift on iOS 16 and current stable iOS
+- Kotlin on Android API 24 and current stable Android API
+- React Native 0.83.x on current stable iOS and current stable Android
+
+### Validation Host Scope
+
+- macOS hosts Apple toolchain and Swift validation.
+
+The macOS host role does not make macOS a PostgreSQL support cell.
 
 ### Local Validation and Development
 
@@ -66,7 +70,7 @@ The `Makefile` is the supported entry point for validation. Android targets expe
 - issue tracker: [github.com/trainstar/synchro/issues](https://github.com/trainstar/synchro/issues)
 - license: [LICENSE](LICENSE)
 
-The v0.3.0 support matrix is required policy, not a claim that candidate evidence already exists. Release certification will come from generated, immutable evidence tied to exact artifacts. The current test inventory is not certification. See [Release verification](https://trainstar.github.io/synchro/verification/overview/) and [Support policy](https://trainstar.github.io/synchro/reference/support-policy/).
+The support matrix states policy. Testing evidence records executed checks. See [Testing evidence](https://trainstar.github.io/synchro/verification/overview/) and [Support policy](https://trainstar.github.io/synchro/reference/support-policy/).
 
 ## What This Repository Contains
 
@@ -156,7 +160,7 @@ Start here if you are evaluating the system:
 - [Client contract](https://trainstar.github.io/synchro/spec/02-client-contract/)
 - [State machines](https://trainstar.github.io/synchro/spec/03-state-machines/)
 - [Schema evolution](https://trainstar.github.io/synchro/spec/05-schema-evolution/)
-- [Release verification](https://trainstar.github.io/synchro/spec/07-release-verification/)
+- [Testing evidence](https://trainstar.github.io/synchro/spec/07-release-verification/)
 - [Support policy](https://trainstar.github.io/synchro/reference/support-policy/)
 - [Conformance fixtures](conformance/)
 

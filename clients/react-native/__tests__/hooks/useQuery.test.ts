@@ -47,10 +47,12 @@ describe('useQuery', () => {
   it('uses watch mode when tables provided', async () => {
     const client = makeClient();
     const unsubscribe = jest.fn();
-    jest.spyOn(client, 'watch').mockImplementation((_sql, _params, _tables, callback) => {
+    jest.spyOn(client, 'watch').mockImplementation(async (_sql, _params, _tables, callback) => {
       // Simulate initial result
       setTimeout(() => callback([{ id: '1' }]), 0);
-      return unsubscribe;
+      return async () => {
+        unsubscribe();
+      };
     });
 
     const { result, unmount } = renderHook(() =>
@@ -91,13 +93,17 @@ describe('useQuery', () => {
 
     jest
       .spyOn(client, 'watch')
-      .mockImplementationOnce((_sql, _params, _tables, callback) => {
+      .mockImplementationOnce(async (_sql, _params, _tables, callback) => {
         callback([{ id: '1' }]);
-        return unsubscribeA;
+        return async () => {
+          unsubscribeA();
+        };
       })
-      .mockImplementationOnce((_sql, _params, _tables, callback) => {
+      .mockImplementationOnce(async (_sql, _params, _tables, callback) => {
         callback([{ id: '2' }]);
-        return unsubscribeB;
+        return async () => {
+          unsubscribeB();
+        };
       });
 
     const { result, rerender, unmount } = renderHook(

@@ -1,16 +1,16 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
+use synchro_core::checksum::SchemaHash;
 
-use crate::bucketing::resolve_membership;
 use crate::pull::{canonicalize_synced_row_data, synced_row_digest, typed_primary_key_bytes};
 use crate::registry::{
     load_registry_from_client, load_registry_generation_for_activation,
     load_registry_generation_from_client, TableRegistration,
 };
+use crate::spi_helpers::required_text;
 
-// The administrative entry point does not expose an unbounded scan.  Keep the
-// batch positive and bounded while preserving the existing SQL signature.
-const BACKFILL_BATCH_SIZE: i64 = 1_000;
+const DEFAULT_BACKFILL_BATCH_SIZE: i64 = 1_000;
+const MAX_BACKFILL_BATCH_SIZE: i64 = 1_000;
 
 #[derive(Debug)]
 struct CapturedRecord {
@@ -45,7 +45,16 @@ struct CapturedProjectionRecord {
 }
 
 #[pg_extern]
-fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -> pgrx::JsonB {
+fn synchro_backfill_bucket_edges(
+    p_table_name: default!(Option<&str>, "NULL"),
+    p_batch_size: default!(i64, "1000"),
+) -> pgrx::JsonB {
+    if !(1..=MAX_BACKFILL_BATCH_SIZE).contains(&p_batch_size) {
+        pgrx::error!(
+            "backfill batch size must be between 1 and {}",
+            MAX_BACKFILL_BATCH_SIZE
+        );
+    }
     Spi::connect_mut(|client| {
         lock_backfill_state(client)
             .unwrap_or_else(|error| pgrx::error!("locking membership backfill state: {error}"));
@@ -73,7 +82,7 @@ fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -
                 "records": 0,
                 "edges": 0,
                 "affected_scopes": [],
-                "batch_size": BACKFILL_BATCH_SIZE,
+                "batch_size": p_batch_size,
                 "batch_count": 0,
             }));
         }
@@ -87,7 +96,7 @@ fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -
         let mut edge_count = 0i64;
         let mut batch_count = 0i64;
         for table in &tables {
-            let (records, edges, batches) = stage_table_edges(client, table, BACKFILL_BATCH_SIZE)
+            let (records, edges, batches) = stage_table_edges(client, table, p_batch_size)
                 .unwrap_or_else(|error| {
                     pgrx::error!("staging membership edges for {}: {error}", table.table_name)
                 });
@@ -124,11 +133,92 @@ fn synchro_backfill_bucket_edges(p_table_name: default!(Option<&str>, "NULL")) -
             "records": record_count,
             "edges": edge_count,
             "affected_scopes": affected_scopes,
-            "batch_size": BACKFILL_BATCH_SIZE,
+            "batch_size": p_batch_size,
             "batch_count": batch_count,
             "boundary": boundary,
         }))
     })
+}
+
+pub(crate) fn membership_batch_query(registration: &TableRegistration) -> Result<String, String> {
+    if registration.max_scope_fanout <= 0 {
+        return Err("registered membership evaluation metadata is invalid".to_string());
+    }
+    let result_limit = registration
+        .max_scope_fanout
+        .checked_add(1)
+        .ok_or_else(|| "registered scope fanout limit overflowed".to_string())?;
+    Ok(format!(
+        "SELECT input.record_id, membership.scope_id
+         FROM jsonb_to_recordset($1::jsonb) AS input(record_id text)
+         CROSS JOIN LATERAL (
+             SELECT membership.scope_id
+             FROM {}(input.record_id::{}) AS membership(scope_id)
+             LIMIT {}
+         ) membership",
+        crate::bucketing::qualified_function_name(&registration.membership_function),
+        registration.pk_type,
+        result_limit,
+    ))
+}
+
+/// Resolve one relation's bounded key batch through one SPI query.
+pub(crate) fn resolve_membership_batch(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+    record_ids: &[String],
+) -> Result<std::collections::HashMap<String, Vec<String>>, pgrx::spi::Error> {
+    let maximum = usize::try_from(registration.max_scope_fanout)
+        .unwrap_or_else(|_| pgrx::error!("registered scope fanout limit is invalid"));
+    let query =
+        membership_batch_query(registration).unwrap_or_else(|error| pgrx::error!("{error}"));
+    let mut memberships = std::collections::HashMap::with_capacity(record_ids.len());
+    let mut seen_records = std::collections::HashSet::with_capacity(record_ids.len());
+    for record_id in record_ids {
+        if !seen_records.insert(record_id) {
+            pgrx::error!("membership batch contains a duplicate record identity");
+        }
+        memberships.insert(record_id.clone(), Vec::new());
+    }
+    if memberships.is_empty() {
+        return Ok(memberships);
+    }
+
+    let input = record_ids
+        .iter()
+        .map(|record_id| serde_json::json!({ "record_id": record_id }))
+        .collect::<Vec<_>>();
+    let rows = client.select(
+        &query,
+        None,
+        &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+    )?;
+    for row in rows {
+        let record_id = row
+            .get_by_name::<String, &str>("record_id")?
+            .unwrap_or_else(|| pgrx::error!("membership batch record identity is missing"));
+        let scopes = memberships.get_mut(&record_id).unwrap_or_else(|| {
+            pgrx::error!("membership batch returned an unknown record identity")
+        });
+        if scopes.len() >= maximum {
+            pgrx::error!("membership function exceeded its registered scope fanout bound");
+        }
+        let scope_id = row
+            .get_by_name::<String, &str>("scope_id")?
+            .unwrap_or_else(|| pgrx::error!("membership function returned a null scope ID"));
+        if scope_id.is_empty()
+            || scope_id.as_bytes().contains(&0)
+            || scope_id.chars().any(char::is_control)
+        {
+            pgrx::error!("membership function returned an invalid scope ID");
+        }
+        scopes.push(scope_id);
+    }
+    for scopes in memberships.values_mut() {
+        scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        scopes.dedup();
+    }
+    Ok(memberships)
 }
 
 pub(crate) fn activate_staged_membership_generation(
@@ -141,7 +231,7 @@ pub(crate) fn activate_staged_membership_generation(
 ) -> Result<(), String> {
     let rows = client
         .select(
-            "SELECT source_registry_generation, state
+            "SELECT source_registry_generation, state, affected_scopes
              FROM synchro.sync_registry_membership_stages
              WHERE registry_generation = $1",
             None,
@@ -155,7 +245,10 @@ pub(crate) fn activate_staged_membership_generation(
         .get_by_name::<i64, &str>("source_registry_generation")
         .map_err(|error| format!("reading membership activation source: {error}"))?
         .ok_or_else(|| "membership activation source is missing".to_string())?;
-    let state = required_text(&stage, "state")?;
+    let state = required_text(&stage, "state", "")?;
+    let declared_affected_scopes = stage
+        .get_by_name::<Vec<String>, &str>("affected_scopes")
+        .map_err(|error| format!("reading declared affected scopes: {error}"))?;
     if staged_source != source_generation || state != "pending" {
         return Err("membership activation stage binding is invalid".to_string());
     }
@@ -176,7 +269,7 @@ pub(crate) fn activate_staged_membership_generation(
         .map_err(|error| format!("loading membership activation targets: {error}"))?;
     let mut target_relation_ids = Vec::with_capacity(target_rows.len());
     for row in target_rows {
-        target_relation_ids.push(required_text(&row, "relation_id")?);
+        target_relation_ids.push(required_text(&row, "relation_id", "")?);
     }
     let tables: Vec<&TableRegistration> = registry
         .iter()
@@ -197,7 +290,7 @@ pub(crate) fn activate_staged_membership_generation(
     let mut record_count = 0i64;
     let mut edge_count = 0i64;
     for table in &tables {
-        let (records, edges, _) = stage_table_edges(client, table, BACKFILL_BATCH_SIZE)?;
+        let (records, edges, _) = stage_table_edges(client, table, DEFAULT_BACKFILL_BATCH_SIZE)?;
         record_count = record_count
             .checked_add(records)
             .ok_or_else(|| "membership activation record count overflowed".to_string())?;
@@ -206,7 +299,29 @@ pub(crate) fn activate_staged_membership_generation(
             .ok_or_else(|| "membership activation edge count overflowed".to_string())?;
     }
     verify_staging(client, &tables)?;
-    let affected_scopes = changed_scopes(client, &table_names)?;
+    let changed_scopes = changed_scopes(client, &table_names)?;
+    let affected_scopes = match declared_affected_scopes {
+        Some(declared) => {
+            if declared.is_empty()
+                || declared
+                    .windows(2)
+                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+            {
+                return Err("declared affected scopes are invalid".to_string());
+            }
+            if changed_scopes
+                .iter()
+                .any(|scope| declared.binary_search(scope).is_err())
+            {
+                return Err("declared affected scopes omit a changed scope".to_string());
+            }
+            declared
+        }
+        None if changed_scopes.is_empty() => {
+            return Err("membership activation requires exact affected scopes".to_string());
+        }
+        None => changed_scopes,
+    };
     install_staged_edges(client, &table_names)?;
     advance_affected_generations(client, &affected_scopes, Some(target_generation))?;
 
@@ -239,12 +354,12 @@ pub(crate) fn activate_staged_membership_generation(
     Ok(())
 }
 
-pub(crate) fn migrate_class_2_schema_digests(
+pub(crate) fn migrate_schema_digests(
     client: &mut SpiClient<'_>,
     target_generation: i64,
 ) -> Result<(), String> {
     if target_generation <= 0 {
-        return Err("class 2 target registry generation is invalid".to_string());
+        return Err("target registry generation is invalid".to_string());
     }
 
     // Public readers must observe the child manifest and its migrated digest
@@ -260,11 +375,12 @@ pub(crate) fn migrate_class_2_schema_digests(
                 None,
                 &[],
             )
-            .map_err(|error| format!("locking {table} for class 2 migration: {error}"))?;
+            .map_err(|error| format!("locking {table} for schema migration: {error}"))?;
     }
 
     let target_registry = load_registry_generation_from_client(client, target_generation)
-        .map_err(|error| format!("loading class 2 target registry: {error}"))?;
+        .map_err(|error| format!("loading target registry for schema migration: {error}"))?;
+    retire_removed_schema_rows(client, target_generation)?;
     let rows = client
         .select(
             "SELECT captured.relation_id::text AS relation_id,
@@ -274,24 +390,23 @@ pub(crate) fn migrate_class_2_schema_digests(
              FROM synchro.sync_captured_rows captured
              JOIN synchro.sync_registry target
                ON target.registry_generation = $1
-              AND target.relation_id = captured.relation_id
-              AND target.registration_kind = 'synced'
-             ORDER BY captured.relation_id, captured.record_id
-             FOR UPDATE OF captured",
+               AND target.relation_id = captured.relation_id
+               AND target.registration_kind = 'synced'
+             ORDER BY captured.relation_id, captured.record_id",
             None,
             &[target_generation.into()],
         )
-        .map_err(|error| format!("loading retained class 2 rows: {error}"))?;
+        .map_err(|error| format!("loading retained schema rows: {error}"))?;
     let mut records = Vec::with_capacity(rows.len());
     for row in rows {
         records.push(SchemaDigestRecord {
-            relation_id: required_text(&row, "relation_id")?,
-            record_id: required_text(&row, "record_id")?,
+            relation_id: required_text(&row, "relation_id", "")?,
+            record_id: required_text(&row, "record_id", "")?,
             row_data: row
                 .get_by_name::<pgrx::JsonB, &str>("row_data")
                 .map_err(|error| format!("reading retained row data: {error}"))?
                 .ok_or_else(|| "retained row data is missing".to_string())?,
-            row_version: required_text(&row, "row_version")?,
+            row_version: required_text(&row, "row_version", "")?,
             checksum: required_bytes(&row, "checksum")?,
             registry_generation: row
                 .get_by_name::<i64, &str>("registry_generation")
@@ -311,7 +426,7 @@ pub(crate) fn migrate_class_2_schema_digests(
                 record.registry_generation,
                 target_generation,
             )
-            .map_err(|error| format!("loading class 2 source registry: {error}"))?;
+            .map_err(|error| format!("loading source registry for schema migration: {error}"))?;
             entry.insert(registry);
         }
         let source = source_registries
@@ -331,7 +446,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             || typed_primary_key_bytes(source, &record.record_id)?
                 != typed_primary_key_bytes(target, &record.record_id)?
         {
-            return Err("class 2 migration changed row identity".to_string());
+            return Err("schema migration changed row identity".to_string());
         }
 
         let source_digest = synced_row_digest(
@@ -345,7 +460,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             return Err("retained row source checksum does not match".to_string());
         }
 
-        let (child_row, child_digest) = migrate_class_2_row(
+        let (child_row, child_digest) = migrate_schema_row(
             client,
             source,
             target,
@@ -375,10 +490,10 @@ pub(crate) fn migrate_class_2_schema_digests(
                     record.registry_generation.into(),
                 ],
             )
-            .map_err(|error| format!("migrating retained class 2 row: {error}"))?
+            .map_err(|error| format!("migrating retained schema row: {error}"))?
             .len();
         if updated != 1 {
-            return Err("retained row changed during class 2 migration".to_string());
+            return Err("retained row changed during schema migration".to_string());
         }
         client
             .update(
@@ -396,7 +511,7 @@ pub(crate) fn migrate_class_2_schema_digests(
                     record.row_version.as_str().into(),
                 ],
             )
-            .map_err(|error| format!("migrating retained class 2 edges: {error}"))?;
+            .map_err(|error| format!("migrating retained schema edges: {error}"))?;
     }
 
     let projection_rows = client
@@ -414,34 +529,33 @@ pub(crate) fn migrate_class_2_schema_digests(
              FROM synchro.sync_captured_projections projection
              JOIN synchro.sync_registry target
                ON target.registry_generation = $1
-              AND target.relation_id = projection.relation_id
-              AND target.registration_kind = 'synced'
+               AND target.relation_id = projection.relation_id
+               AND target.registration_kind = 'synced'
              ORDER BY projection.relation_id, projection.record_id,
-                      projection.commit_lsn, projection.event_ordinal,
-                      projection.image_kind
-             FOR UPDATE OF projection",
+                       projection.commit_lsn, projection.event_ordinal,
+                       projection.image_kind",
             None,
             &[target_generation.into()],
         )
-        .map_err(|error| format!("loading retained class 2 projections: {error}"))?;
+        .map_err(|error| format!("loading retained schema projections: {error}"))?;
     let mut projections = Vec::with_capacity(projection_rows.len());
     for row in projection_rows {
         projections.push(CapturedProjectionRecord {
-            stream_generation: required_text(&row, "stream_generation")?,
-            commit_lsn: required_text(&row, "commit_lsn")?,
+            stream_generation: required_text(&row, "stream_generation", "")?,
+            commit_lsn: required_text(&row, "commit_lsn", "")?,
             event_ordinal: row
                 .get_by_name::<i64, &str>("event_ordinal")
                 .map_err(|error| format!("reading retained projection ordinal: {error}"))?
                 .filter(|ordinal| *ordinal >= 0)
                 .ok_or_else(|| "retained projection ordinal is invalid".to_string())?,
-            relation_id: required_text(&row, "relation_id")?,
-            image_kind: required_text(&row, "image_kind")?,
-            record_id: required_text(&row, "record_id")?,
+            relation_id: required_text(&row, "relation_id", "")?,
+            image_kind: required_text(&row, "image_kind", "")?,
+            record_id: required_text(&row, "record_id", "")?,
             row_data: row
                 .get_by_name::<pgrx::JsonB, &str>("row_data")
                 .map_err(|error| format!("reading retained projection row data: {error}"))?
                 .ok_or_else(|| "retained projection row data is missing".to_string())?,
-            row_version: required_text(&row, "row_version")?,
+            row_version: required_text(&row, "row_version", "")?,
             checksum: required_bytes(&row, "checksum")?,
             registry_generation: row
                 .get_by_name::<i64, &str>("registry_generation")
@@ -459,7 +573,7 @@ pub(crate) fn migrate_class_2_schema_digests(
                 projection.registry_generation,
                 target_generation,
             )
-            .map_err(|error| format!("loading class 2 projection source registry: {error}"))?;
+            .map_err(|error| format!("loading projection source registry: {error}"))?;
             entry.insert(registry);
         }
         let source = source_registries
@@ -474,7 +588,7 @@ pub(crate) fn migrate_class_2_schema_digests(
             .iter()
             .find(|table| table.relation_id == projection.relation_id && table.is_synced())
             .ok_or_else(|| "retained projection target registration is missing".to_string())?;
-        let (child_row, child_digest) = migrate_class_2_row(
+        let (child_row, child_digest) = migrate_schema_row(
             client,
             source,
             target,
@@ -513,10 +627,10 @@ pub(crate) fn migrate_class_2_schema_digests(
                     projection.registry_generation.into(),
                 ],
             )
-            .map_err(|error| format!("migrating retained class 2 projection: {error}"))?
+            .map_err(|error| format!("migrating retained schema projection: {error}"))?
             .len();
         if updated != 1 {
-            return Err("retained projection changed during class 2 migration".to_string());
+            return Err("retained projection changed during schema migration".to_string());
         }
     }
 
@@ -542,18 +656,53 @@ pub(crate) fn migrate_class_2_schema_digests(
             None,
             &[target_generation.into()],
         )
-        .map_err(|error| format!("verifying class 2 digest migration: {error}"))?
+        .map_err(|error| format!("verifying schema digest migration: {error}"))?
         .first()
         .get_by_name::<bool, &str>("invalid")
-        .map_err(|error| format!("reading class 2 digest verification: {error}"))?
+        .map_err(|error| format!("reading schema digest verification: {error}"))?
         .unwrap_or(true);
     if invalid {
-        return Err("class 2 digest migration left invalid retained edges".to_string());
+        return Err("schema digest migration left invalid retained edges".to_string());
     }
     Ok(())
 }
 
-fn migrate_class_2_row(
+fn retire_removed_schema_rows(
+    client: &mut SpiClient<'_>,
+    target_generation: i64,
+) -> Result<(), String> {
+    client
+        .update(
+            "DELETE FROM synchro.sync_bucket_edges edge
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM synchro.sync_registry target
+                 WHERE target.registry_generation = $1
+                   AND target.relation_id = edge.relation_id
+                   AND target.registration_kind = 'synced'
+             )",
+            None,
+            &[target_generation.into()],
+        )
+        .map_err(|error| format!("retiring removed schema edges: {error}"))?;
+    client
+        .update(
+            "DELETE FROM synchro.sync_captured_rows captured
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM synchro.sync_registry target
+                 WHERE target.registry_generation = $1
+                   AND target.relation_id = captured.relation_id
+                   AND target.registration_kind = 'synced'
+             )",
+            None,
+            &[target_generation.into()],
+        )
+        .map_err(|error| format!("retiring removed schema rows: {error}"))?;
+    Ok(())
+}
+
+fn migrate_schema_row(
     client: &SpiClient<'_>,
     source: &TableRegistration,
     target: &TableRegistration,
@@ -567,7 +716,7 @@ fn migrate_class_2_row(
         || typed_primary_key_bytes(source, record_id)?
             != typed_primary_key_bytes(target, record_id)?
     {
-        return Err("class 2 migration changed row identity".to_string());
+        return Err("schema migration changed row identity".to_string());
     }
 
     let source_digest = synced_row_digest(client, source, &row_data, record_id, row_version)?;
@@ -579,6 +728,12 @@ fn migrate_class_2_row(
     let child_fields = row_data
         .as_object_mut()
         .ok_or_else(|| "retained row is not an object".to_string())?;
+    child_fields.retain(|field_id, _| {
+        target
+            .fields
+            .iter()
+            .any(|field| field.field_id == field_id.as_str())
+    });
     for field in &target.fields {
         if child_fields.contains_key(&field.field_id) {
             continue;
@@ -589,7 +744,7 @@ fn migrate_class_2_row(
             .any(|source_field| source_field.field_id == field.field_id)
             || !field.nullable
         {
-            return Err("class 2 child row omits a retained field".to_string());
+            return Err("child schema row omits a retained field".to_string());
         }
         child_fields.insert(field.field_id.clone(), serde_json::Value::Null);
     }
@@ -598,16 +753,35 @@ fn migrate_class_2_row(
 }
 
 fn lock_backfill_state(client: &mut SpiClient<'_>) -> Result<(), String> {
+    client
+        .update(
+            "SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)",
+            None,
+            &[crate::WAL_WORKER_GATE_LOCK_KEY.into()],
+        )
+        .map_err(|error| format!("locking WAL worker for membership backfill: {error}"))?;
+    client
+        .update(
+            "SELECT 1 FROM synchro.sync_wal_progress WHERE singleton FOR UPDATE",
+            None,
+            &[],
+        )
+        .map_err(|error| format!("locking materialization progress row: {error}"))?;
+    client
+        .update(
+            "LOCK TABLE synchro.sync_wal_progress IN SHARE ROW EXCLUSIVE MODE",
+            None,
+            &[],
+        )
+        .map_err(|error| format!("locking materialization progress table: {error}"))?;
     acquire_backfill_lock(client)?;
-    // Keep this order aligned with the worker: projections, current rows,
-    // edges, scope state, checkpoints, then WAL progress.
+    // Progress serializes the worker and blocks new pulls before these locks.
     for table in [
         "synchro.sync_captured_projections",
         "synchro.sync_captured_rows",
         "synchro.sync_bucket_edges",
         "synchro.sync_scope_state",
         "synchro.sync_client_checkpoints",
-        "synchro.sync_wal_progress",
     ] {
         client
             .update(
@@ -620,9 +794,9 @@ fn lock_backfill_state(client: &mut SpiClient<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn acquire_backfill_lock(client: &SpiClient<'_>) -> Result<(), String> {
+fn acquire_backfill_lock(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
-        .select(
+        .update(
             "SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)",
             None,
             &[crate::MEMBERSHIP_BACKFILL_LOCK_KEY.into()],
@@ -680,12 +854,12 @@ fn validate_existing_edges(
         .map_err(|error| format!("querying existing edges: {error}"))?;
 
     for row in rows {
-        let table_name = required_text(&row, "table_name")?;
+        let table_name = required_text(&row, "table_name", "")?;
         let table = tables
             .iter()
             .find(|table| table.table_name == table_name)
             .ok_or_else(|| format!("edge references unknown table {table_name:?}"))?;
-        let relation_id = required_text(&row, "relation_id")?;
+        let relation_id = required_text(&row, "relation_id", "")?;
         if relation_id != table.relation_id {
             return Err(format!(
                 "edge for {table_name:?} has relation identity {relation_id:?}"
@@ -712,6 +886,7 @@ fn stage_table_edges(
     let mut record_count = 0i64;
     let mut edge_count = 0i64;
     let mut batch_count = 0i64;
+    let mut cached_schema_hash = None;
 
     loop {
         let rows = client
@@ -742,7 +917,7 @@ fn stage_table_edges(
         let mut records = Vec::with_capacity(rows.len());
         for row in rows {
             records.push(CapturedRecord {
-                record_id: required_text(&row, "record_id")?,
+                record_id: required_text(&row, "record_id", "")?,
                 row_data: row
                     .get_by_name::<pgrx::JsonB, &str>("row_data")
                     .map_err(|error| format!("reading captured row data: {error}"))?
@@ -756,19 +931,29 @@ fn stage_table_edges(
             });
         }
 
-        for record in records {
+        let schema_hash = match cached_schema_hash {
+            Some(schema_hash) => schema_hash,
+            None => {
+                let loaded =
+                    crate::pull::schema_hash_for_generation(client, table.registry_generation)?;
+                cached_schema_hash = Some(loaded);
+                loaded
+            }
+        };
+        let mut computed_digests = std::collections::HashMap::with_capacity(records.len());
+        for record in &records {
             if record.checksum.len() != 32 {
                 return Err(format!(
                     "captured row {}.{} has an invalid checksum",
                     table.table_name, record.record_id
                 ));
             }
-            let computed = synced_row_digest(
-                client,
+            let computed = synced_row_digest_with_schema_hash(
                 table,
                 &record.row_data.0,
                 &record.record_id,
                 &record.row_version,
+                schema_hash,
             )
             .map_err(|error| {
                 format!(
@@ -782,49 +967,103 @@ fn stage_table_edges(
                     table.table_name, record.record_id
                 ));
             }
+            computed_digests.insert(record.record_id.clone(), computed);
+        }
 
-            let desired =
-                resolve_membership(client, table, &record.record_id).map_err(|error| {
-                    format!(
-                        "resolving membership for {}.{}: {error}",
-                        table.table_name, record.record_id
-                    )
-                })?;
-            for bucket_id in desired {
-                client
-                    .update(
-                        "INSERT INTO pg_temp.synchro_backfill_edges (
-                             relation_id, table_name, record_id, bucket_id,
-                             checksum, row_version
-                         ) VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid)",
-                        None,
-                        &[
-                            table.relation_id.as_str().into(),
-                            table.table_name.as_str().into(),
-                            record.record_id.as_str().into(),
-                            bucket_id.as_str().into(),
-                            computed.as_bytes().to_vec().into(),
-                            record.row_version.as_str().into(),
-                        ],
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "staging edge for {}.{}: {error}",
-                            table.table_name, record.record_id
-                        )
-                    })?;
-                edge_count = edge_count
-                    .checked_add(1)
-                    .ok_or_else(|| "membership backfill edge count overflowed".to_string())?;
+        let record_ids = records
+            .iter()
+            .map(|record| record.record_id.clone())
+            .collect::<Vec<_>>();
+        let memberships = resolve_membership_batch(client, table, &record_ids)
+            .map_err(|error| format!("resolving membership for {}: {error}", table.table_name))?;
+        let mut edge_rows = Vec::new();
+        for record in &records {
+            let digest = computed_digests
+                .get(&record.record_id)
+                .ok_or_else(|| "computed membership digest is missing".to_string())?;
+            let scopes = memberships
+                .get(&record.record_id)
+                .ok_or_else(|| "resolved membership is missing a captured row".to_string())?;
+            for bucket_id in scopes {
+                edge_rows.push(serde_json::json!({
+                    "record_id": record.record_id,
+                    "bucket_id": bucket_id,
+                    "checksum_hex": lower_hex(digest.as_bytes()),
+                    "row_version": record.row_version,
+                }));
             }
             record_count = record_count
                 .checked_add(1)
                 .ok_or_else(|| "membership backfill record count overflowed".to_string())?;
-            last_record_id = record.record_id;
         }
+        if !edge_rows.is_empty() {
+            let expected_edges = edge_rows.len();
+            let inserted = client
+                .update(
+                    "INSERT INTO pg_temp.synchro_backfill_edges (
+                         relation_id, table_name, record_id, bucket_id,
+                         checksum, row_version
+                     )
+                     SELECT $2::uuid, $3, input.record_id, input.bucket_id,
+                            decode(input.checksum_hex, 'hex'), input.row_version::uuid
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         record_id text, bucket_id text, checksum_hex text, row_version text
+                     )
+                     RETURNING record_id",
+                    None,
+                    &[
+                        pgrx::JsonB(serde_json::Value::Array(edge_rows)).into(),
+                        table.relation_id.as_str().into(),
+                        table.table_name.as_str().into(),
+                    ],
+                )
+                .map_err(|error| {
+                    format!("staging membership edges for {}: {error}", table.table_name)
+                })?
+                .len();
+            if inserted != expected_edges {
+                return Err("membership backfill did not stage every edge".to_string());
+            }
+            edge_count =
+                edge_count
+                    .checked_add(i64::try_from(inserted).map_err(|_| {
+                        "membership backfill edge count is out of range".to_string()
+                    })?)
+                    .ok_or_else(|| "membership backfill edge count overflowed".to_string())?;
+        }
+        last_record_id = records
+            .last()
+            .map(|record| record.record_id.clone())
+            .ok_or_else(|| "membership backfill batch is empty".to_string())?;
     }
 
     Ok((record_count, edge_count, batch_count))
+}
+
+fn synced_row_digest_with_schema_hash(
+    table: &TableRegistration,
+    data: &serde_json::Value,
+    record_id: &str,
+    server_version: &str,
+    schema_hash: SchemaHash,
+) -> Result<synchro_core::checksum::Sha256Digest, String> {
+    let mut canonical = data.clone();
+    canonicalize_synced_row_data(table, &mut canonical)?;
+    let canonical_table = crate::pull::canonical_table(table)?;
+    let primary_key = crate::pull::row_primary_key_json(table, record_id)?;
+    let row = synchro_core::checksum::CanonicalRow::from_json(
+        serde_json::to_string(&primary_key)
+            .map_err(|error| format!("encoding primary key: {error}"))?,
+        &serde_json::to_string(&canonical)
+            .map_err(|error| format!("encoding wire row: {error}"))?,
+    )
+    .map_err(|error| format!("canonical row is invalid: {error}"))?;
+    synchro_core::checksum::row_digest(schema_hash, &canonical_table, &row, server_version)
+        .map_err(|error| format!("computing row digest: {error}"))
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn verify_staging(client: &SpiClient<'_>, tables: &[&TableRegistration]) -> Result<(), String> {
@@ -887,7 +1126,7 @@ fn changed_scopes(client: &SpiClient<'_>, table_names: &[String]) -> Result<Vec<
         .map_err(|error| format!("querying changed scopes: {error}"))?;
     let mut scopes = Vec::with_capacity(rows.len());
     for row in rows {
-        scopes.push(required_text(&row, "scope_id")?);
+        scopes.push(required_text(&row, "scope_id", "")?);
     }
     scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     scopes.dedup();
@@ -1041,13 +1280,6 @@ fn load_materialization_boundary(client: &SpiClient<'_>) -> Result<serde_json::V
 }
 
 fn required_table_text(row: &pgrx::spi::SpiTupleTable<'_>, column: &str) -> Result<String, String> {
-    row.get_by_name::<String, &str>(column)
-        .map_err(|error| format!("reading {column}: {error}"))?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{column} is missing"))
-}
-
-fn required_text(row: &pgrx::spi::SpiHeapTupleData<'_>, column: &str) -> Result<String, String> {
     row.get_by_name::<String, &str>(column)
         .map_err(|error| format!("reading {column}: {error}"))?
         .filter(|value| !value.is_empty())

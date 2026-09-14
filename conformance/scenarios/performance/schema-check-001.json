@@ -5,28 +5,58 @@
   "title": "Deterministic schema class dispatch performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-SCHEMA-004"
+    "SYNC-SCHEMA-004",
+    "SYNC-SCHEMA-005",
+    "SYNC-SCHEMA-006",
+    "SYNC-SCHEMA-007",
+    "SYNC-OUTCOME-002"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#deterministic-schema-class-dispatch"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#causally-bound-class-3-projection-bootstrap"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#crash-safe-client-schema-migration"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#schema-cursor-continuity"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#mutation-outcome-schema-binding"
     }
   ],
   "proof_types": [
     "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-RM-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-005",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001"
+        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "reference-model",
       "support_cell_id": null,
@@ -45,16 +75,22 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-001",
+      "obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-005",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
+        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+        "ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -73,12 +109,45 @@
       "control_id": null
     },
     {
+      "obligation_id": "OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-IOS-MIN-001",
       "requirement_ids": [
         "SYNC-SCHEMA-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
         "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -108,71 +177,10 @@
         "SYNC-SCHEMA-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
         "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SCHEMA-CHECK-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-SCHEMA-CHECK-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-004"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SCHEMA-CHECK-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-004"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -198,7 +206,6 @@
         "SYNC-SCHEMA-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
         "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -224,11 +231,18 @@
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
+        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -251,44 +265,20 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-004"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SCHEMA-CHECK-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
+        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -313,43 +303,20 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-004"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [
-        "MEAS-SCHEMA-CHECK-001"
-      ],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-SCHEMA-004"
+        "SYNC-SCHEMA-004",
+        "SYNC-SCHEMA-006",
+        "SYNC-SCHEMA-007",
+        "SYNC-OUTCOME-002"
       ],
       "assertion_ids": [
         "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001"
+        "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
+        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
+        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -378,7 +345,7 @@
         "SYNC-SCHEMA-004"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
       ],
       "proof_type": "negative-control",
       "support_cell_id": null,
@@ -401,7 +368,13 @@
       ],
       "fault_plan_id": "FPL-PERF-SCHEMA-CHECK-001",
       "control_id": "CTRL-SCHEMA-004"
-    }
+    },
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-FAULT-001","requirement_ids":["SYNC-SCHEMA-005"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-PROJECTION-001","control_id":"CTRL-SCHEMA-005"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-FAULT-001","requirement_ids":["SYNC-SCHEMA-006"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"],"proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-swift","argv":["make","test-swift"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-MIGRATION-001","control_id":"CTRL-SCHEMA-006"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-CONTROL-001","requirement_ids":["SYNC-SCHEMA-005"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-PROJECTION-001","control_id":"CTRL-SCHEMA-005"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-CONTROL-001","requirement_ids":["SYNC-SCHEMA-006"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-MIGRATION-001","control_id":"CTRL-SCHEMA-006"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-CURSOR-CONTROL-001","requirement_ids":["SYNC-SCHEMA-007"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-CURSOR-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-CURSOR-001","control_id":"CTRL-SCHEMA-007"},
+    {"obligation_id":"OBL-PERF-SCHEMA-CHECK-OUTCOME-CONTROL-001","requirement_ids":["SYNC-OUTCOME-002"],"assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SCHEMA-CHECK-OUTCOME-001","control_id":"CTRL-OUTCOME-002"}
   ],
   "ownership": [
     {
@@ -415,66 +388,26 @@
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-001",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RM-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
+      "requirement_id": "SYNC-SCHEMA-004",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-001",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
@@ -488,17 +421,25 @@
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
       "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-IOS-MIN-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
+      "support_cell_id": "SUP-IOS-MIN-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
+      "requirement_id": "SYNC-SCHEMA-004",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-IOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
@@ -527,18 +468,10 @@
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
@@ -559,18 +492,10 @@
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
@@ -585,6 +510,14 @@
       "requirement_id": "SYNC-SCHEMA-004",
       "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
+      "requirement_id": "SYNC-SCHEMA-004",
+      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
     },
@@ -592,10 +525,35 @@
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
       "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-CONTROL-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
       "proof_type": "negative-control",
       "support_cell_id": null
-    }
+    },
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"reference-model","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-FAULT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-FAULT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"fault-injection","support_cell_id":"SUP-MACOS-CURRENT-001"},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PROJECTION-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-MIGRATION-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-CURSOR-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"negative-control","support_cell_id":null},
+    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-OUTCOME-CONTROL-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"negative-control","support_cell_id":null}
   ],
   "model": {
     "setup": [
@@ -719,12 +677,12 @@
           },
           "empty_scopes": [
             {
-              "scope_id": "scope-a",
+              "scope_id": "user:user-a",
               "membership_generation": 1,
               "retention_generation": 1
             },
             {
-              "scope_id": "scope-b",
+              "scope_id": "user:user-b",
               "membership_generation": 1,
               "retention_generation": 1
             }
@@ -732,13 +690,285 @@
           "clients": [
             {
               "user_id": "user-a",
-              "client_id": "client-a",
+              "client_id": "client-schema-current-1",
               "client_generation": 1,
               "scope_set_version": 1,
               "accepted_write_epoch": 0,
               "last_cursor_acknowledged_at": null,
               "assigned_scope_ids": [
-                "scope-a"
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-current-2",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-current-3",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class1-1",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class1-2",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class1-3",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class2-1",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class2-2",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class2-3",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class3-affected-1",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class3-affected-2",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-a",
+              "client_id": "client-schema-class3-affected-3",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-a"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-b",
+              "client_id": "client-schema-class3-unaffected-1",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-b",
+              "client_id": "client-schema-class3-unaffected-2",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-b",
+              "client_id": "client-schema-class3-unaffected-3",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-b",
+              "client_id": "client-schema-class4-1",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-b",
+              "client_id": "client-schema-class4-2",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+              },
+              "local_lifecycle": "local_ready"
+            },
+            {
+              "user_id": "user-b",
+              "client_id": "client-schema-class4-3",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "user:user-b"
               ],
               "local_schema": {
                 "version": 1,
@@ -775,15 +1005,416 @@
         }
       },
       {
+        "id": "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001",
+        "predicate": {
+          "contract_predicate": "state-transition",
+          "name": "schema-dispatch-observations-satisfied",
+          "payload": {
+            "measurement_id": "MEAS-SCHEMA-CHECK-001",
+            "minimum_sample_count_per_stratum": 3,
+            "strata": [
+              {
+                "stratum_id": "STR-SCHEMA-CURRENT-001",
+                "schema_case": "current"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-1-001",
+                "schema_case": "class_1"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-2-001",
+                "schema_case": "class_2"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-3-AFFECTED-001",
+                "schema_case": "class_3_affected"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-3-UNAFFECTED-001",
+                "schema_case": "class_3_unaffected"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-4-001",
+                "schema_case": "class_4"
+              }
+            ]
+          }
+        }
+      },
+      {
         "id": "EXPECT-PERF-SCHEMA-CHECK-PERFORMANCE-001",
         "predicate": {
           "contract_predicate": "performance-measurement",
-          "name": "performance-contract-satisfied",
-          "payload": {}
+          "name": "schema-dispatch-measurement-satisfied",
+          "payload": {
+            "measurement_id": "MEAS-SCHEMA-CHECK-001",
+            "minimum_sample_count_per_stratum": 3,
+            "strata": [
+              {
+                "stratum_id": "STR-SCHEMA-CURRENT-001",
+                "schema_case": "current"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-1-001",
+                "schema_case": "class_1"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-2-001",
+                "schema_case": "class_2"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-3-AFFECTED-001",
+                "schema_case": "class_3_affected"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-3-UNAFFECTED-001",
+                "schema_case": "class_3_unaffected"
+              },
+              {
+                "stratum_id": "STR-SCHEMA-CLASS-4-001",
+                "schema_case": "class_4"
+              }
+            ]
+          }
         }
       }
     ]
   },
+  "native_identity_aliases": [
+    {
+      "kind": "schema",
+      "alias": "schema-v1",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+      },
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-001",
+        "STEP-PERF-SCHEMA-CHECK-002",
+        "STEP-PERF-SCHEMA-CHECK-003",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-001",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-002",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-003",
+        "STEP-PERF-SCHEMA-CHECK-004",
+        "STEP-PERF-SCHEMA-CHECK-005",
+        "STEP-PERF-SCHEMA-CHECK-006",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-001",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-002",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-003",
+        "STEP-PERF-SCHEMA-CHECK-007",
+        "STEP-PERF-SCHEMA-CHECK-008",
+        "STEP-PERF-SCHEMA-CHECK-009",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-001",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-002",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-003",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-002",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-003",
+        "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
+        "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
+        "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "schema-v2",
+      "value": {
+        "version": 2,
+        "hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-CLASS2-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-007",
+        "STEP-PERF-SCHEMA-CHECK-008",
+        "STEP-PERF-SCHEMA-CHECK-009",
+        "STEP-PERF-SCHEMA-CHECK-010",
+        "STEP-PERF-SCHEMA-CHECK-011",
+        "STEP-PERF-SCHEMA-CHECK-012",
+        "STEP-PERF-SCHEMA-CHECK-013",
+        "STEP-PERF-SCHEMA-CHECK-014",
+        "STEP-PERF-SCHEMA-CHECK-015",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-002",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-003"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "schema-v3",
+      "value": {
+        "version": 3,
+        "hash": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-CLASS3-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-016",
+        "STEP-PERF-SCHEMA-CHECK-017",
+        "STEP-PERF-SCHEMA-CHECK-018"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "schema",
+      "alias": "schema-v4",
+      "value": {
+        "version": 4,
+        "hash": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-CLASS4-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-016",
+        "STEP-PERF-SCHEMA-CHECK-017",
+        "STEP-PERF-SCHEMA-CHECK-018"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-user-a",
+      "value": "user:user-a",
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-001",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-001",
+        "STEP-PERF-SCHEMA-CHECK-CLASS1-STAGE-001",
+        "STEP-PERF-SCHEMA-CHECK-004",
+        "STEP-PERF-SCHEMA-CHECK-007",
+        "STEP-PERF-SCHEMA-CHECK-CLASS3-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-010"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-user-b",
+      "value": "user:user-b",
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
+        "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
+        "STEP-PERF-SCHEMA-CHECK-013",
+        "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
+        "STEP-PERF-SCHEMA-CHECK-016"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-001",
+        "STEP-PERF-SCHEMA-CHECK-004",
+        "STEP-PERF-SCHEMA-CHECK-007",
+        "STEP-PERF-SCHEMA-CHECK-010",
+        "STEP-PERF-SCHEMA-CHECK-013",
+        "STEP-PERF-SCHEMA-CHECK-016"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "scope-set-version",
+      "alias": "scope-set-version-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-001",
+        "STEP-PERF-SCHEMA-CHECK-004",
+        "STEP-PERF-SCHEMA-CHECK-007",
+        "STEP-PERF-SCHEMA-CHECK-010",
+        "STEP-PERF-SCHEMA-CHECK-013",
+        "STEP-PERF-SCHEMA-CHECK-016"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-CLASS2-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-CLASS3-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-CLASS4-PUBLISH-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    },
+    {
+      "kind": "primary-key",
+      "alias": "items-primary-key",
+      "value": "id",
+      "step_ids": [
+        "STEP-PERF-SCHEMA-CHECK-CLASS2-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-CLASS3-PUBLISH-001",
+        "STEP-PERF-SCHEMA-CHECK-CLASS4-PUBLISH-001"
+      ],
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ]
+    }
+  ],
+  "native_lifecycle_boundaries": [
+    {
+      "id": "schema_stop_prewarm_class1_1",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-001",
+      "user_id": "user-a",
+      "client_id": "client-schema-class1-1",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class1_2",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-002",
+      "user_id": "user-a",
+      "client_id": "client-schema-class1-2",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class1_3",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-003",
+      "user_id": "user-a",
+      "client_id": "client-schema-class1-3",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class2_1",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-001",
+      "user_id": "user-a",
+      "client_id": "client-schema-class2-1",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class2_2",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-002",
+      "user_id": "user-a",
+      "client_id": "client-schema-class2-2",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class2_3",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-003",
+      "user_id": "user-a",
+      "client_id": "client-schema-class2-3",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class3_affected_1",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-001",
+      "user_id": "user-a",
+      "client_id": "client-schema-class3-affected-1",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class3_affected_2",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-002",
+      "user_id": "user-a",
+      "client_id": "client-schema-class3-affected-2",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class3_affected_3",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-003",
+      "user_id": "user-a",
+      "client_id": "client-schema-class3-affected-3",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class3_unaffected_1",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
+      "user_id": "user-b",
+      "client_id": "client-schema-class3-unaffected-1",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class3_unaffected_2",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-002",
+      "user_id": "user-b",
+      "client_id": "client-schema-class3-unaffected-2",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class3_unaffected_3",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-003",
+      "user_id": "user-b",
+      "client_id": "client-schema-class3-unaffected-3",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_baseline_class4_1",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
+      "user_id": "user-b",
+      "client_id": "client-schema-class4-1",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_baseline_class4_2",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
+      "user_id": "user-b",
+      "client_id": "client-schema-class4-2",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_baseline_class4_3",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003",
+      "user_id": "user-b",
+      "client_id": "client-schema-class4-3",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class4_1",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
+      "user_id": "user-b",
+      "client_id": "client-schema-class4-1",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class4_2",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-002",
+      "user_id": "user-b",
+      "client_id": "client-schema-class4-2",
+      "method": "stop"
+    },
+    {
+      "id": "schema_stop_prewarm_class4_3",
+      "phase": "setup",
+      "after_step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-003",
+      "user_id": "user-b",
+      "client_id": "client-schema-class4-3",
+      "method": "stop"
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -805,7 +1436,7 @@
       "control_id": "CTRL-SCHEMA-004",
       "barrier_id": "BAR-PERF-SCHEMA-CHECK-CONTROL-001",
       "expected_assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
       ],
       "injection": {
         "mechanism": "wire-fault",
@@ -816,7 +1447,11 @@
           "defect": "emit fetch, omit replace or rebuild, destroy queue, continue partial work, or accept a non-current manifest"
         }
       }
-    }
+    },
+    {"id":"FPL-PERF-SCHEMA-CHECK-PROJECTION-001","requirement_id":"SYNC-SCHEMA-005","fault_id":"FAULT-SCHEMA-005","control_id":"CTRL-SCHEMA-005","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"],"injection":{"mechanism":"process-fault","target":"Class 3 candidate-slot projection bootstrap","operator":"reroute","parameters":{"scenario":"bootstrap absent source, dependency, membership, version, and integrity projections while writes continue","defect":"use independent live snapshot, temporary or mismatched slot, omit catch-up, expose manifest early, or partially activate after crash"}}},
+    {"id":"FPL-PERF-SCHEMA-CHECK-MIGRATION-001","requirement_id":"SYNC-SCHEMA-006","fault_id":"FAULT-SCHEMA-006","control_id":"CTRL-SCHEMA-006","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"],"injection":{"mechanism":"process-fault","target":"client schema migration journal and DDL phases","operator":"crash","parameters":{"scenario":"kill before and after each target DDL phase, then alter target manifest, plan, physical schema, or phase marker","defect":"repeat committed DDL, fetch schema on restart, use raw unverified SQL, lose queues, or claim mixed state complete"}}},
+    {"id":"FPL-PERF-SCHEMA-CHECK-CURSOR-001","requirement_id":"SYNC-SCHEMA-007","fault_id":"FAULT-SCHEMA-007","control_id":"CTRL-SCHEMA-007","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-CURSOR-001"],"injection":{"mechanism":"source-mutant","target":"connect historical cursor schema-continuity dispatch","operator":"replace","parameters":{"scenario":"connect with a valid historical cursor under a compatible schema lineage, separating an unaffected scope from affected or stale scopes","defect":"relabel the old token, carry the old cursor into an affected scope, or request needless rebuild instead of issuing a same-position current-schema replacement only for the valid unaffected scope"}}},
+    {"id":"FPL-PERF-SCHEMA-CHECK-OUTCOME-001","requirement_id":"SYNC-OUTCOME-002","fault_id":"FAULT-OUTCOME-002","control_id":"CTRL-OUTCOME-002","barrier_id":"BAR-PERF-SCHEMA-CHECK-CONTROL-001","expected_assertion_ids":["ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"],"injection":{"mechanism":"wire-fault","target":"historical mutation outcome manifest binding","operator":"misbind","parameters":{"scenario":"replay an outcome created under an older manifest after current local schema changes","defect":"verify or project with current manifest, discard unsafe outcome, or lose later local intent"}}}
   ],
   "replay": {
     "mode": "deterministic",
@@ -837,22 +1472,51 @@
         "ARTDEF-RN-NPM-001"
       ],
       "detected_by": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001"
+        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001"
       ]
-    }
+    },
+    {"control_id":"CTRL-SCHEMA-005","requirement_id":"SYNC-SCHEMA-005","fault_id":"FAULT-SCHEMA-005","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001"]},
+    {"control_id":"CTRL-SCHEMA-006","requirement_id":"SYNC-SCHEMA-006","fault_id":"FAULT-SCHEMA-006","subject_artifact_inventory_ids":["ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001"]},
+    {"control_id":"CTRL-SCHEMA-007","requirement_id":"SYNC-SCHEMA-007","fault_id":"FAULT-SCHEMA-007","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-CURSOR-001"]},
+    {"control_id":"CTRL-OUTCOME-002","requirement_id":"SYNC-OUTCOME-002","fault_id":"FAULT-OUTCOME-002","subject_artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"detected_by":["ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"]}
   ],
   "steps": [
     {
       "id": "STEP-PERF-SCHEMA-CHECK-001",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-current-1",
+        "call_id": "schema_current_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Observe exact-current schema dispatch for an independent client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CURRENT-001",
+        "sample_id": "SAMPLE-SCHEMA-CURRENT-001",
+        "parameters": {
+          "schema_case": "current"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CURRENT-001",
+          "family": "schema-check",
+          "boundary": "current",
+          "value": {
+            "schema_case": "current"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-current-1",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -864,7 +1528,7 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -877,13 +1541,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-002",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-current-2",
+        "call_id": "schema_current_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat exact-current schema dispatch for another client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CURRENT-001",
+        "sample_id": "SAMPLE-SCHEMA-CURRENT-002",
+        "parameters": {
+          "schema_case": "current"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CURRENT-002",
+          "family": "schema-check",
+          "boundary": "current",
+          "value": {
+            "schema_case": "current"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-current-2",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -895,7 +1584,7 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -908,13 +1597,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-003",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-current-3",
+        "call_id": "schema_current_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat exact-current schema dispatch for a third client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CURRENT-001",
+        "sample_id": "SAMPLE-SCHEMA-CURRENT-003",
+        "parameters": {
+          "schema_case": "current"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CURRENT-003",
+          "family": "schema-check",
+          "boundary": "current",
+          "value": {
+            "schema_case": "current"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-current-3",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -926,9 +1640,229 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-001",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class1-1",
+        "call_id": "schema_prewarm_class1_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Establish baseline scope membership for the first Class 1 client.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class1-1",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-002",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class1-2",
+        "call_id": "schema_prewarm_class1_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Establish baseline scope membership for the second Class 1 client.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class1-2",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-003",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class1-3",
+        "call_id": "schema_prewarm_class1_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Establish baseline scope membership for the third Class 1 client.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class1-3",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-CLASS1-COMMIT-001",
+      "phase": "setup",
+      "transport": "model",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "description": "Materialize an empty transaction before the Class 1 membership generation.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": []
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-CLASS1-MATERIALIZE-001",
+      "phase": "setup",
+      "transport": "process",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "description": "Advance the durable materialization boundary for the Class 1 generation.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-CLASS1-STAGE-001",
+      "phase": "setup",
+      "transport": "model",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "description": "Stage a server-only membership generation without a schema manifest change.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "stage-registry-membership-generation",
+        "payload": {
+          "registry_generation": 2,
+          "membership_generation": 2,
+          "batch_size": 1,
+          "activation_boundary": {
+            "stream_generation": "stream-1",
+            "kind": "transaction_end",
+            "commit_lsn": "10"
+          },
+          "affected_scopes": [
+            "user:user-a"
+          ],
+          "scope_rules": [
+            {
+              "scope_rule_id": "items-schema-check-class-1",
+              "relation": "public.items",
+              "membership_function": "synchro.scope_items",
+              "positive_fanout_bound": 8,
+              "evaluations": []
+            }
+          ],
+          "dependency_impacts": []
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-CLASS1-ACTIVATE-001",
+      "phase": "setup",
+      "transport": "model",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "description": "Activate the server-only membership generation for scope A.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "activate-registry-membership-generation",
+        "payload": {
+          "registry_generation": 2
         }
       },
       "expected_outcome": {
@@ -939,13 +1873,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-004",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class1-1",
+        "call_id": "schema_class1_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Observe Class 1 membership dispatch after its active generation changes.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-1-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-1-001",
+        "parameters": {
+          "schema_case": "class_1"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-1-001",
+          "family": "schema-check",
+          "boundary": "class-1",
+          "value": {
+            "schema_case": "class_1"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class1-1",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -957,7 +1916,7 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -970,13 +1929,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-005",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class1-2",
+        "call_id": "schema_class1_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat Class 1 membership dispatch for another affected client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-1-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-1-002",
+        "parameters": {
+          "schema_case": "class_1"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-1-002",
+          "family": "schema-check",
+          "boundary": "class-1",
+          "value": {
+            "schema_case": "class_1"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class1-2",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -988,7 +1972,7 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -1001,13 +1985,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-006",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class1-3",
+        "call_id": "schema_class1_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat Class 1 membership dispatch for a third affected client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-1-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-1-003",
+        "parameters": {
+          "schema_case": "class_1"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-1-003",
+          "family": "schema-check",
+          "boundary": "class-1",
+          "value": {
+            "schema_case": "class_1"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class1-3",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1019,9 +2028,212 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-001",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class2-1",
+        "call_id": "schema_prewarm_class2_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the first Class 2 client at schema version 1.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class2-1",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-002",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class2-2",
+        "call_id": "schema_prewarm_class2_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the second Class 2 client at schema version 1.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class2-2",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-003",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class2-3",
+        "call_id": "schema_prewarm_class2_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the third Class 2 client at schema version 1.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class2-3",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-CLASS2-PUBLISH-001",
+      "phase": "setup",
+      "transport": "model",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "description": "Publish an additive nullable field as a compatible Class 2 manifest.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "publish-schema",
+        "payload": {
+          "schema": {
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "body": "class-2-add-nullable-note",
+          "transition_class": "class_2",
+          "compatibility_floor": 1,
+          "tables": [
+            {
+              "table_id": "items",
+              "relation_id": "public.items",
+              "name": "items",
+              "composition": "multi_scope",
+              "primary_key_field_id": "id",
+              "created_at_field_id": null,
+              "updated_at_field_id": null,
+              "deleted_at_field_id": null,
+              "fields": [
+                {
+                  "field_id": "id",
+                  "name": "id",
+                  "type": "string",
+                  "primary_key": true,
+                  "nullable": false,
+                  "writable": false,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                },
+                {
+                  "field_id": "value",
+                  "name": "value",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": false,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": "\"\""
+                },
+                {
+                  "field_id": "note",
+                  "name": "note",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": true,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                }
+              ],
+              "indexes": [
+                {
+                  "index_id": "items-pk",
+                  "name": "items_pk",
+                  "field_ids": [
+                    "id"
+                  ],
+                  "unique": true
+                }
+              ]
+            }
+          ],
+          "affected_scopes": []
         }
       },
       "expected_outcome": {
@@ -1032,13 +2244,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-007",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class2-1",
+        "call_id": "schema_class2_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Observe compatible Class 2 schema replacement.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-2-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-2-001",
+        "parameters": {
+          "schema_case": "class_2"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-2-001",
+          "family": "schema-check",
+          "boundary": "class-2",
+          "value": {
+            "schema_case": "class_2"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class2-1",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1050,7 +2287,7 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -1063,13 +2300,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-008",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class2-2",
+        "call_id": "schema_class2_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat compatible Class 2 schema replacement.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-2-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-2-002",
+        "parameters": {
+          "schema_case": "class_2"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-2-002",
+          "family": "schema-check",
+          "boundary": "class-2",
+          "value": {
+            "schema_case": "class_2"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class2-2",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1081,7 +2343,7 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -1094,13 +2356,38 @@
       "id": "STEP-PERF-SCHEMA-CHECK-009",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class2-3",
+        "call_id": "schema_class2_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat compatible Class 2 schema replacement for a third client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-2-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-2-003",
+        "parameters": {
+          "schema_case": "class_2"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-2-003",
+          "family": "schema-check",
+          "boundary": "class-2",
+          "value": {
+            "schema_case": "class_2"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class2-3",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
@@ -1112,8 +2399,464 @@
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-001",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class3-affected-1",
+        "call_id": "schema_prewarm_class3_affected_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the first affected Class 3 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class3-affected-1",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-002",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class3-affected-2",
+        "call_id": "schema_prewarm_class3_affected_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the second affected Class 3 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class3-affected-2",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-003",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class3-affected-3",
+        "call_id": "schema_prewarm_class3_affected_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the third affected Class 3 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-schema-class3-affected-3",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class3-unaffected-1",
+        "call_id": "schema_prewarm_class3_unaffected_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the first unaffected Class 3 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class3-unaffected-1",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-002",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class3-unaffected-2",
+        "call_id": "schema_prewarm_class3_unaffected_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the second unaffected Class 3 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class3-unaffected-2",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-003",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class3-unaffected-3",
+        "call_id": "schema_prewarm_class3_unaffected_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the third unaffected Class 3 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class3-unaffected-3",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-1",
+        "call_id": "schema_baseline_class4_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the first Class 4 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-1",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-2",
+        "call_id": "schema_baseline_class4_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the second Class 4 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-2",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-3",
+        "call_id": "schema_baseline_class4_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the third Class 4 client at schema version 2.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-3",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-CLASS3-PUBLISH-001",
+      "phase": "setup",
+      "transport": "model",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "description": "Publish a historical materialization field as a Class 3 manifest for scope A.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "publish-schema",
+        "payload": {
+          "schema": {
+            "version": 3,
+            "hash": "3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "body": "class-3-add-materialized-value",
+          "transition_class": "class_3",
+          "compatibility_floor": 3,
+          "tables": [
+            {
+              "table_id": "items",
+              "relation_id": "public.items",
+              "name": "items",
+              "composition": "multi_scope",
+              "primary_key_field_id": "id",
+              "created_at_field_id": null,
+              "updated_at_field_id": null,
+              "deleted_at_field_id": null,
+              "fields": [
+                {
+                  "field_id": "id",
+                  "name": "id",
+                  "type": "string",
+                  "primary_key": true,
+                  "nullable": false,
+                  "writable": false,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                },
+                {
+                  "field_id": "value",
+                  "name": "value",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": false,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": "\"\""
+                },
+                {
+                  "field_id": "note",
+                  "name": "note",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": true,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                },
+                {
+                  "field_id": "materialized_value",
+                  "name": "materialized_value",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": false,
+                  "writable": false,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": "\"\""
+                }
+              ],
+              "indexes": [
+                {
+                  "index_id": "items-pk",
+                  "name": "items_pk",
+                  "field_ids": [
+                    "id"
+                  ],
+                  "unique": true
+                }
+              ]
+            }
+          ],
+          "affected_scopes": [
+            "user:user-a"
           ]
         }
       },
@@ -1125,25 +2868,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-010",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class3-affected-1",
+        "call_id": "schema_class3_affected_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Observe Class 3 rebuild dispatch for an affected assigned scope.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-3-AFFECTED-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-3-AFFECTED-001",
+        "parameters": {
+          "schema_case": "class_3_affected"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-3-AFFECTED-001",
+          "family": "schema-check",
+          "boundary": "class-3-affected",
+          "value": {
+            "schema_case": "class_3_affected"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class3-affected-1",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -1156,25 +2924,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-011",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class3-affected-2",
+        "call_id": "schema_class3_affected_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat Class 3 rebuild dispatch for another affected client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-3-AFFECTED-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-3-AFFECTED-002",
+        "parameters": {
+          "schema_case": "class_3_affected"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-3-AFFECTED-002",
+          "family": "schema-check",
+          "boundary": "class-3-affected",
+          "value": {
+            "schema_case": "class_3_affected"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class3-affected-2",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -1187,25 +2980,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-012",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-schema-class3-affected-3",
+        "call_id": "schema_class3_affected_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat Class 3 rebuild dispatch for a third affected client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-3-AFFECTED-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-3-AFFECTED-003",
+        "parameters": {
+          "schema_case": "class_3_affected"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-3-AFFECTED-003",
+          "family": "schema-check",
+          "boundary": "class-3-affected",
+          "value": {
+            "schema_case": "class_3_affected"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
           "user_id": "user-a",
-          "client_id": "client-a",
+          "client_id": "client-schema-class3-affected-3",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-a"
             }
           ]
         }
@@ -1218,25 +3036,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-013",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class3-unaffected-1",
+        "call_id": "schema_class3_unaffected_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Observe Class 3 replacement when no assigned scope is affected.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-3-UNAFFECTED-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-3-UNAFFECTED-001",
+        "parameters": {
+          "schema_case": "class_3_unaffected"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-3-UNAFFECTED-001",
+          "family": "schema-check",
+          "boundary": "class-3-unaffected",
+          "value": {
+            "schema_case": "class_3_unaffected"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
-          "user_id": "user-a",
-          "client_id": "client-a",
+          "user_id": "user-b",
+          "client_id": "client-schema-class3-unaffected-1",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-b"
             }
           ]
         }
@@ -1249,25 +3092,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-014",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class3-unaffected-2",
+        "call_id": "schema_class3_unaffected_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat unaffected Class 3 replacement for another client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-3-UNAFFECTED-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-3-UNAFFECTED-002",
+        "parameters": {
+          "schema_case": "class_3_unaffected"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-3-UNAFFECTED-002",
+          "family": "schema-check",
+          "boundary": "class-3-unaffected",
+          "value": {
+            "schema_case": "class_3_unaffected"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
-          "user_id": "user-a",
-          "client_id": "client-a",
+          "user_id": "user-b",
+          "client_id": "client-schema-class3-unaffected-2",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-b"
             }
           ]
         }
@@ -1280,27 +3148,266 @@
       "id": "STEP-PERF-SCHEMA-CHECK-015",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class3-unaffected-3",
+        "call_id": "schema_class3_unaffected_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Repeat unaffected Class 3 replacement for a third client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-3-UNAFFECTED-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-3-UNAFFECTED-003",
+        "parameters": {
+          "schema_case": "class_3_unaffected"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-3-UNAFFECTED-003",
+          "family": "schema-check",
+          "boundary": "class-3-unaffected",
+          "value": {
+            "schema_case": "class_3_unaffected"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
-          "user_id": "user-a",
-          "client_id": "client-a",
+          "user_id": "user-b",
+          "client_id": "client-schema-class3-unaffected-3",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-b"
             }
           ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-1",
+        "call_id": "schema_prewarm_class4_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the first Class 4 client at schema version 3.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-1",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-002",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-2",
+        "call_id": "schema_prewarm_class4_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the second Class 4 client at schema version 3.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-2",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-003",
+      "phase": "setup",
+      "transport": "http",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-3",
+        "call_id": "schema_prewarm_class4_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "description": "Start and warm the third Class 4 client at schema version 3.",
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-3",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 2,
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "user:user-b"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SCHEMA-CHECK-CLASS4-PUBLISH-001",
+      "phase": "setup",
+      "transport": "model",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "description": "Publish an incompatible value-type change as a Class 4 manifest.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "publish-schema",
+        "payload": {
+          "schema": {
+            "version": 4,
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444"
+          },
+          "body": "class-4-change-value-type",
+          "transition_class": "class_4",
+          "compatibility_floor": 4,
+          "tables": [
+            {
+              "table_id": "items",
+              "relation_id": "public.items",
+              "name": "items",
+              "composition": "multi_scope",
+              "primary_key_field_id": "id",
+              "created_at_field_id": null,
+              "updated_at_field_id": null,
+              "deleted_at_field_id": null,
+              "fields": [
+                {
+                  "field_id": "id",
+                  "name": "id",
+                  "type": "string",
+                  "primary_key": true,
+                  "nullable": false,
+                  "writable": false,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                },
+                {
+                  "field_id": "value",
+                  "name": "value",
+                  "type": "int",
+                  "primary_key": false,
+                  "nullable": false,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": "0"
+                },
+                {
+                  "field_id": "note",
+                  "name": "note",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": true,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                },
+                {
+                  "field_id": "materialized_value",
+                  "name": "materialized_value",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": false,
+                  "writable": false,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": "\"\""
+                }
+              ],
+              "indexes": [
+                {
+                  "index_id": "items-pk",
+                  "name": "items_pk",
+                  "field_ids": [
+                    "id"
+                  ],
+                  "unique": true
+                }
+              ]
+            }
+          ],
+          "affected_scopes": []
         }
       },
       "expected_outcome": {
@@ -1311,25 +3418,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-016",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-1",
+        "call_id": "schema_class4_1",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "error"
+      },
+      "description": "Observe Class 4 unsupported dispatch.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-4-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-4-001",
+        "parameters": {
+          "schema_case": "class_4"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-4-001",
+          "family": "schema-check",
+          "boundary": "class-4",
+          "value": {
+            "schema_case": "class_4"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
-          "user_id": "user-a",
-          "client_id": "client-a",
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-1",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 3,
+            "hash": "3333333333333333333333333333333333333333333333333333333333333333"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-b"
             }
           ]
         }
@@ -1342,25 +3474,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-017",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-2",
+        "call_id": "schema_class4_2",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "error"
+      },
+      "description": "Repeat Class 4 unsupported dispatch for another client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-4-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-4-002",
+        "parameters": {
+          "schema_case": "class_4"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-4-002",
+          "family": "schema-check",
+          "boundary": "class-4",
+          "value": {
+            "schema_case": "class_4"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
-          "user_id": "user-a",
-          "client_id": "client-a",
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-2",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 3,
+            "hash": "3333333333333333333333333333333333333333333333333333333333333333"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-b"
             }
           ]
         }
@@ -1373,25 +3530,50 @@
       "id": "STEP-PERF-SCHEMA-CHECK-018",
       "phase": "exercise",
       "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-b",
+        "client_id": "client-schema-class4-3",
+        "call_id": "schema_class4_3",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "error"
+      },
+      "description": "Repeat Class 4 unsupported dispatch for a third client.",
+      "measurement_sample": {
+        "measurement_id": "MEAS-SCHEMA-CHECK-001",
+        "stratum_id": "STR-SCHEMA-CLASS-4-001",
+        "sample_id": "SAMPLE-SCHEMA-CLASS-4-003",
+        "parameters": {
+          "schema_case": "class_4"
+        },
+        "operation": {
+          "id": "MOP-SCHEMA-CHECK-CLASS-4-003",
+          "family": "schema-check",
+          "boundary": "class-4",
+          "value": {
+            "schema_case": "class_4"
+          }
+        }
+      },
       "operation": {
         "contract_operation": "connect",
         "name": "send",
         "payload": {
-          "user_id": "user-a",
-          "client_id": "client-a",
+          "user_id": "user-b",
+          "client_id": "client-schema-class4-3",
           "runtime_version": 3,
           "protocol_version": 3,
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 3,
+            "hash": "3333333333333333333333333333333333333333333333333333333333333333"
           },
           "scope_set_version": 1,
           "known_scopes": [
             {
-              "scope_id": "scope-a"
+              "scope_id": "user:user-b"
             }
           ]
         }
@@ -1427,6 +3609,30 @@
       "retryable": false
     },
     {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-002",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-003",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
       "step_id": "STEP-PERF-SCHEMA-CHECK-004",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
@@ -1451,6 +3657,30 @@
       "retryable": false
     },
     {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-002",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-003",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
       "step_id": "STEP-PERF-SCHEMA-CHECK-007",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
@@ -1468,6 +3698,78 @@
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-009",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-002",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-003",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-002",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-003",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
       "http_status": 200,
@@ -1523,9 +3825,34 @@
       "retryable": false
     },
     {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-002",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-003",
+      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
       "step_id": "STEP-PERF-SCHEMA-CHECK-016",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
+      "action": "unsupported",
       "http_status": 200,
       "error_code": null,
       "retryable": false
@@ -1534,6 +3861,7 @@
       "step_id": "STEP-PERF-SCHEMA-CHECK-017",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
+      "action": "unsupported",
       "http_status": 200,
       "error_code": null,
       "retryable": false
@@ -1542,6 +3870,7 @@
       "step_id": "STEP-PERF-SCHEMA-CHECK-018",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
+      "action": "unsupported",
       "http_status": 200,
       "error_code": null,
       "retryable": false
@@ -1564,6 +3893,56 @@
       },
       "oracle": {
         "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
+      "requirement_ids": [
+        "SYNC-SCHEMA-004"
+      ],
+      "description": "Each bound sample records the required schema dispatch from its executed connect operation.",
+      "expectation_ids": [
+        "EXPECT-PERF-SCHEMA-CHECK-DISPATCH-001"
+      ],
+      "predicate": {
+        "contract_predicate": "state-transition",
+        "name": "schema-dispatch-observations-satisfied",
+        "payload": {
+          "measurement_id": "MEAS-SCHEMA-CHECK-001",
+          "minimum_sample_count_per_stratum": 3,
+          "strata": [
+            {
+              "stratum_id": "STR-SCHEMA-CURRENT-001",
+              "schema_case": "current"
+            },
+            {
+              "stratum_id": "STR-SCHEMA-CLASS-1-001",
+              "schema_case": "class_1"
+            },
+            {
+              "stratum_id": "STR-SCHEMA-CLASS-2-001",
+              "schema_case": "class_2"
+            },
+            {
+              "stratum_id": "STR-SCHEMA-CLASS-3-AFFECTED-001",
+              "schema_case": "class_3_affected"
+            },
+            {
+              "stratum_id": "STR-SCHEMA-CLASS-3-UNAFFECTED-001",
+              "schema_case": "class_3_unaffected"
+            },
+            {
+              "stratum_id": "STR-SCHEMA-CLASS-4-001",
+              "schema_case": "class_4"
+            }
+          ]
+        }
+      },
+      "oracle": {
+        "kind": "state-transition",
         "expected_source": "authored-model",
         "observed_source": "system-under-test"
       },
@@ -1591,6 +3970,10 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
-    }
+    },
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","requirement_ids":["SYNC-SCHEMA-005"],"description":"Class 3 projection bootstrap remains causally bound and atomically activated.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-005"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","requirement_ids":["SYNC-SCHEMA-006"],"description":"Each native client retains a verified schema migration state across interruption.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-006"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","requirement_ids":["SYNC-SCHEMA-007"],"description":"Compatible schema transitions retain only server-issued same-position cursors.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-007"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","requirement_ids":["SYNC-OUTCOME-002"],"description":"Schema transitions preserve immutable historical mutation outcome bindings.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-OUTCOME-002"]}
   ]
 }

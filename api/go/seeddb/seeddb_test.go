@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,11 +19,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/jackc/pgx/v5"
 	pgxstdlib "github.com/jackc/pgx/v5/stdlib"
+	"github.com/trainstar/synchro/api/go/internal/testsupport"
 )
 
 type manifestMutationConnector struct {
 	connector driver.Connector
 	mutate    func([]byte) ([]byte, error)
+	before    func(context.Context) error
 }
 
 func (c *manifestMutationConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -30,7 +33,7 @@ func (c *manifestMutationConnector) Connect(ctx context.Context) (driver.Conn, e
 	if err != nil {
 		return nil, err
 	}
-	return &manifestMutationConn{Conn: conn, mutate: c.mutate}, nil
+	return &manifestMutationConn{Conn: conn, mutate: c.mutate, before: c.before}, nil
 }
 
 func (c *manifestMutationConnector) Driver() driver.Driver {
@@ -40,6 +43,7 @@ func (c *manifestMutationConnector) Driver() driver.Driver {
 type manifestMutationConn struct {
 	driver.Conn
 	mutate func([]byte) ([]byte, error)
+	before func(context.Context) error
 }
 
 func (c *manifestMutationConn) QueryContext(
@@ -51,8 +55,14 @@ func (c *manifestMutationConn) QueryContext(
 	if !ok {
 		return nil, driver.ErrSkip
 	}
+	isPortableManifest := strings.Contains(query, "synchro_portable_seed_manifest")
+	if isPortableManifest && c.before != nil {
+		if err := c.before(ctx); err != nil {
+			return nil, err
+		}
+	}
 	rows, err := queryer.QueryContext(ctx, query, args)
-	if err != nil || !strings.Contains(query, "synchro_portable_seed_manifest") {
+	if err != nil || !isPortableManifest || c.mutate == nil {
 		return rows, err
 	}
 	return &manifestMutationRows{Rows: rows, mutate: c.mutate}, nil
@@ -146,23 +156,7 @@ func (r *manifestMutationRows) Next(values []driver.Value) error {
 
 func testPostgres(t *testing.T) *sql.DB {
 	t.Helper()
-
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-
-	db, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatalf("opening postgres database: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	if err := db.PingContext(context.Background()); err != nil {
-		t.Fatalf("pinging postgres database: %v", err)
-	}
-
-	return db
+	return testsupport.OpenPostgres(t)
 }
 
 func manifestMutatingPostgres(
@@ -170,9 +164,10 @@ func manifestMutatingPostgres(
 	mutate func([]byte) ([]byte, error),
 ) *sql.DB {
 	t.Helper()
+	testPostgres(t)
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 	config, err := pgx.ParseConfig(dbURL)
 	if err != nil {
@@ -207,28 +202,55 @@ func corruptSeedTokenMAC(token string) (string, error) {
 	return strings.Join(parts, "."), nil
 }
 
-func registerSeedTestTable(t *testing.T, db *sql.DB, tableName string) {
-	registerSeedTestTableForScope(t, db, tableName, "global")
+func registerSeedTestTable(t *testing.T, db *sql.DB, tableName string) (string, string) {
+	return registerSeedTestTableForScope(t, db, tableName, "global")
 }
 
-func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID string) {
+func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID string) (string, string) {
 	t.Helper()
 
 	ctx := context.Background()
-	functionName := tableName + "_membership"
+	actualTableName := testsupport.UniqueName(t, tableName)
+	actualScopeID := testsupport.UniqueName(t, scopeID)
+	functionName := testsupport.UniqueName(t, tableName+"_membership")
 	functionIdentity := "public." + quotePGIdent(functionName)
 	createSQL := fmt.Sprintf(`
-		CREATE TABLE %s (
+		CREATE TABLE public.%s (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			title TEXT NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			deleted_at TIMESTAMPTZ
 		)
-	`, quotePGIdent(tableName))
+	`, quotePGIdent(actualTableName))
 	if _, err := db.ExecContext(ctx, createSQL); err != nil {
 		t.Fatalf("creating test table: %v", err)
 	}
+
+	functionCreated := false
+	registered := false
+	t.Cleanup(func() {
+		if registered {
+			if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_unregister_table($1)", actualTableName); err != nil {
+				t.Errorf("unregistering synced table %s: %v", actualTableName, err)
+			} else if !waitForSeedTableState(ctx, db, actualTableName, false) {
+				t.Errorf("registered table %q did not deactivate", actualTableName)
+			}
+		}
+		if functionCreated {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text)", functionIdentity)); err != nil {
+				t.Errorf("dropping membership function %s: %v", functionName, err)
+			}
+		}
+		for _, policy := range []string{"synchro_owner_all", "synchro_worker_select"} {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP POLICY IF EXISTS %s ON public.%s", quotePGIdent(policy), quotePGIdent(actualTableName))); err != nil {
+				t.Errorf("dropping policy %s on %s: %v", policy, actualTableName, err)
+			}
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS public.%s", quotePGIdent(actualTableName))); err != nil {
+			t.Errorf("dropping test table %s: %v", actualTableName, err)
+		}
+	})
 
 	functionSQL := fmt.Sprintf(`
 		CREATE FUNCTION %s(p_id text)
@@ -250,46 +272,31 @@ func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID 
 			AS PERMISSIVE FOR SELECT TO synchro_worker USING (true)
 	`,
 		functionIdentity,
-		quotePGLiteral(scopeID),
+		quotePGLiteral(actualScopeID),
 		functionIdentity,
 		functionIdentity,
-		quotePGIdent(tableName),
-		quotePGIdent(tableName),
-		quotePGIdent(tableName),
-		quotePGIdent(tableName),
+		quotePGIdent(actualTableName),
+		quotePGIdent(actualTableName),
+		quotePGIdent(actualTableName),
+		quotePGIdent(actualTableName),
 	)
 	if _, err := db.ExecContext(ctx, functionSQL); err != nil {
 		t.Fatalf("creating membership function: %v", err)
 	}
-
+	functionCreated = true
 	if _, err := db.ExecContext(
 		ctx,
 		"SELECT synchro.synchro_register_table($1, $2, 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only')",
-		"public."+tableName,
+		"public."+actualTableName,
 		functionIdentity,
 	); err != nil {
-		t.Fatalf("registering synced table: %v", err)
+		t.Fatalf("registering synced table %s: %v", actualTableName, err)
 	}
-	if !waitForSeedTableState(ctx, db, tableName, true) {
-		t.Fatalf("registered table %q did not activate", tableName)
+	registered = true
+	if !waitForSeedTableState(ctx, db, actualTableName, true) {
+		t.Fatalf("registered table %q did not activate", actualTableName)
 	}
-
-	t.Cleanup(func() {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("SELECT synchro.synchro_unregister_table('%s')", tableName)); err != nil {
-			t.Errorf("unregistering synced table %s: %v", tableName, err)
-			return
-		}
-		if !waitForSeedTableState(ctx, db, tableName, false) {
-			t.Errorf("registered table %q did not deactivate", tableName)
-			return
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text)", functionIdentity)); err != nil {
-			t.Errorf("dropping membership function %s: %v", functionName, err)
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quotePGIdent(tableName))); err != nil {
-			t.Errorf("dropping test table %s: %v", tableName, err)
-		}
-	})
+	return actualTableName, actualScopeID
 }
 
 func waitForSeedTableState(ctx context.Context, db *sql.DB, tableName string, expected bool) bool {
@@ -312,8 +319,8 @@ func waitForSeedTableState(ctx context.Context, db *sql.DB, tableName string, ex
 	return false
 }
 
-func waitForPortableEdge(ctx context.Context, db *sql.DB, tableName, recordID string) bool {
-	return waitForPortableEdgeInScope(ctx, db, tableName, recordID, "global")
+func waitForPortableEdge(ctx context.Context, db *sql.DB, tableName, recordID, scopeID string) bool {
+	return waitForPortableEdgeInScope(ctx, db, tableName, recordID, scopeID)
 }
 
 func waitForPortableEdgeInScope(ctx context.Context, db *sql.DB, tableName, recordID, scopeID string) bool {
@@ -339,20 +346,25 @@ func registerSharedScope(t *testing.T, db *sql.DB, scopeID string, portable bool
 	t.Helper()
 
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_register_shared_scope($1, $2)", scopeID, portable); err != nil {
-		t.Fatalf("registering shared scope %s: %v", scopeID, err)
-	}
+	actualScopeID := scopeID
+	registered := false
 	t.Cleanup(func() {
-		if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_unregister_shared_scope($1)", scopeID); err != nil {
-			t.Errorf("unregistering shared scope %s: %v", scopeID, err)
+		if !registered {
+			return
+		}
+		if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_unregister_shared_scope($1)", actualScopeID); err != nil {
+			t.Errorf("unregistering shared scope %s: %v", actualScopeID, err)
 		}
 	})
+	if _, err := db.ExecContext(ctx, "SELECT synchro.synchro_register_shared_scope($1, $2)", actualScopeID, portable); err != nil {
+		t.Fatalf("registering shared scope %s: %v", scopeID, err)
+	}
+	registered = true
 }
 
 func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_orders"
-	registerSeedTestTable(t, db, tableName)
+	tableName, _ := registerSeedTestTable(t, db, "test_seed_orders")
 
 	outputPath := filepath.Join(t.TempDir(), "seed.db")
 	if err := Generate(context.Background(), db, GenerateOptions{
@@ -379,6 +391,14 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 	}
 	if schemaVersion == "" || schemaVersion == "0" {
 		t.Fatalf("expected non-zero schema_version, got %q", schemaVersion)
+	}
+
+	var userVersion int
+	if err := sqliteDB.QueryRow("PRAGMA user_version").Scan(&userVersion); err != nil {
+		t.Fatalf("reading sqlite user_version: %v", err)
+	}
+	if userVersion != sqliteUserVersion {
+		t.Fatalf("expected sqlite user_version=%d, got %d", sqliteUserVersion, userVersion)
 	}
 
 	var scopeSetVersion string
@@ -441,6 +461,13 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 	if pendingCount != 0 {
 		t.Fatalf("expected generated seed to start with an empty pending queue, got %d rows", pendingCount)
 	}
+	var pushBatchCount int
+	if err := sqliteDB.QueryRow("SELECT COUNT(*) FROM _synchro_push_batches").Scan(&pushBatchCount); err != nil {
+		t.Fatalf("reading sealed push batch count: %v", err)
+	}
+	if pushBatchCount != 0 {
+		t.Fatalf("expected generated seed to start with no sealed push batches, got %d rows", pushBatchCount)
+	}
 
 	_, err = sqliteDB.Exec(
 		fmt.Sprintf("INSERT INTO %s (id, user_id, title, updated_at, deleted_at) VALUES (?, ?, ?, ?, NULL)", quoteIdentifier(tableName)),
@@ -453,16 +480,19 @@ func TestGenerateCreatesClientCompatibleSeedDatabase(t *testing.T) {
 		t.Fatalf("inserting into generated table: %v", err)
 	}
 
-	var operation string
+	var operation, clientUpdatedAt string
 	if err := sqliteDB.QueryRow(
-		"SELECT operation FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?",
+		"SELECT operation, client_updated_at FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?",
 		tableName,
 		"00000000-0000-0000-0000-000000000001",
-	).Scan(&operation); err != nil {
+	).Scan(&operation, &clientUpdatedAt); err != nil {
 		t.Fatalf("reading pending change: %v", err)
 	}
 	if operation != "create" {
 		t.Fatalf("expected pending operation=create, got %q", operation)
+	}
+	if !regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$`).MatchString(clientUpdatedAt) {
+		t.Fatalf("expected canonical microsecond client_updated_at, got %q", clientUpdatedAt)
 	}
 }
 
@@ -523,12 +553,214 @@ func TestCDCTriggerSQLSupportsTablesWithoutDeletedAt(t *testing.T) {
 	if strings.Contains(statements[5], `SET "" =`) {
 		t.Fatalf("delete trigger should not reference an empty deleted_at column: %q", statements[5])
 	}
+	if !strings.Contains(statements[5], "_synchro_row_versions") {
+		t.Fatalf("delete trigger should capture the opaque server version: %q", statements[5])
+	}
+	if strings.Contains(statements[5], `OLD."updated_at"`) {
+		t.Fatalf("delete trigger should not capture the application updated_at value: %q", statements[5])
+	}
+	if !strings.Contains(statements[5], "local_revision = local_revision + 1") {
+		t.Fatalf("delete trigger should increment local_revision for an existing pending row: %q", statements[5])
+	}
+	for _, statement := range statements {
+		assertSQLite392CompatibleSQL(t, statement)
+	}
+}
+
+func TestEmittedSQLiteSchemaUsesSQLite392Syntax(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	table := localSchemaTable{
+		TableName:       "test_items",
+		UpdatedAtColumn: "updated_at",
+		DeletedAtColumn: "deleted_at",
+		PrimaryKey:      []string{"id"},
+		Columns: []localSchemaColumn{
+			{Name: "id", LogicalType: "string", IsPrimaryKey: true},
+			{Name: "title", LogicalType: "string"},
+			{Name: "updated_at", LogicalType: "datetime"},
+			{Name: "deleted_at", LogicalType: "datetime", Nullable: true},
+		},
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin sqlite transaction: %v", err)
+	}
+	if err := createInternalTables(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite internals: %v", err)
+	}
+	if err := createSyncedTables(ctx, tx, []localSchemaTable{table}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create synced table: %v", err)
+	}
+	if err := createSyncedTableTriggers(ctx, tx, []localSchemaTable{table}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create capture triggers: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit sqlite schema: %v", err)
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL")
+	if err != nil {
+		t.Fatalf("read emitted sqlite schema: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var statement string
+		if err := rows.Scan(&statement); err != nil {
+			t.Fatalf("scan emitted sqlite schema: %v", err)
+		}
+		assertSQLite392CompatibleSQL(t, statement)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate emitted sqlite schema: %v", err)
+	}
+}
+
+func assertSQLite392CompatibleSQL(t *testing.T, statement string) {
+	t.Helper()
+	upper := strings.ToUpper(statement)
+	unsupported := []string{
+		"ON CONFLICT",        // UPSERT, SQLite 3.24.0.
+		" RETURNING ",        // SQLite 3.35.0.
+		" GENERATED ALWAYS ", // SQLite 3.31.0.
+		" STRICT",            // SQLite 3.37.0.
+		" DROP COLUMN ",      // SQLite 3.35.0.
+		" RENAME COLUMN ",    // SQLite 3.25.0.
+		" UPDATE FROM ",      // SQLite 3.33.0.
+		" RIGHT JOIN ",       // SQLite 3.39.0.
+		" FULL OUTER JOIN ",  // SQLite 3.39.0.
+		" MATERIALIZED ",     // SQLite 3.35.0.
+		" NOT MATERIALIZED ", // SQLite 3.35.0.
+		" NULLS FIRST",       // SQLite 3.30.0.
+		" NULLS LAST",        // SQLite 3.30.0.
+		" FILTER (",          // SQLite 3.30.0.
+		" OVER (",            // SQLite 3.25.0.
+	}
+	for _, feature := range unsupported {
+		if strings.Contains(upper, feature) {
+			t.Fatalf("SQLite 3.9.2 does not support %q in emitted SQL: %q", feature, statement)
+		}
+	}
+}
+
+func TestCDCTriggersIncrementLocalRevisionAndCaptureOpaqueBaseVersion(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	softDeleteTable := localSchemaTable{
+		TableName:       "test_items",
+		UpdatedAtColumn: "updated_at",
+		DeletedAtColumn: "deleted_at",
+		PrimaryKey:      []string{"id"},
+		Columns: []localSchemaColumn{
+			{Name: "id", LogicalType: "string", IsPrimaryKey: true},
+			{Name: "title", LogicalType: "string"},
+			{Name: "updated_at", LogicalType: "datetime"},
+			{Name: "deleted_at", LogicalType: "datetime", Nullable: true},
+		},
+	}
+	hardDeleteTable := localSchemaTable{
+		TableName:  "test_hard_items",
+		PrimaryKey: []string{"id"},
+		Columns: []localSchemaColumn{
+			{Name: "id", LogicalType: "string", IsPrimaryKey: true},
+			{Name: "title", LogicalType: "string"},
+		},
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin sqlite schema transaction: %v", err)
+	}
+	if err := createInternalTables(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite internal schema: %v", err)
+	}
+	if err := createSyncedTables(ctx, tx, []localSchemaTable{softDeleteTable, hardDeleteTable}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite synced tables: %v", err)
+	}
+	if err := createSyncedTableTriggers(ctx, tx, []localSchemaTable{softDeleteTable, hardDeleteTable}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("create sqlite cdc triggers: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit sqlite schema transaction: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE _synchro_meta SET value = '1' WHERE key = 'sync_lock'`); err != nil {
+		t.Fatalf("lock cdc triggers: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO test_items (id, title, updated_at, deleted_at) VALUES (?, ?, ?, NULL)`, "item-1", "first", "application-v1"); err != nil {
+		t.Fatalf("insert soft-delete row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO test_hard_items (id, title) VALUES (?, ?)`, "hard-1", "first"); err != nil {
+		t.Fatalf("insert hard-delete row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO _synchro_row_versions (table_name, record_id, server_version) VALUES (?, ?, ?), (?, ?, ?)`, "test_items", "item-1", "opaque-soft-v1", "test_hard_items", "hard-1", "opaque-hard-v1"); err != nil {
+		t.Fatalf("insert opaque row versions: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE _synchro_meta SET value = '0' WHERE key = 'sync_lock'`); err != nil {
+		t.Fatalf("unlock cdc triggers: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE test_items SET title = ?, updated_at = ? WHERE id = ?`, "second", "application-v2", "item-1"); err != nil {
+		t.Fatalf("update soft-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_items", "item-1", "update", "opaque-soft-v1", 0)
+
+	if _, err := db.ExecContext(ctx, `UPDATE test_items SET title = ?, updated_at = ? WHERE id = ?`, "third", "application-v3", "item-1"); err != nil {
+		t.Fatalf("update soft-delete row again: %v", err)
+	}
+	assertPendingChange(t, db, "test_items", "item-1", "update", "opaque-soft-v1", 1)
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM test_items WHERE id = ?`, "item-1"); err != nil {
+		t.Fatalf("soft-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_items", "item-1", "delete", "opaque-soft-v1", 2)
+
+	if _, err := db.ExecContext(ctx, `UPDATE test_hard_items SET title = ? WHERE id = ?`, "second", "hard-1"); err != nil {
+		t.Fatalf("update hard-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_hard_items", "hard-1", "update", "opaque-hard-v1", 0)
+	if _, err := db.ExecContext(ctx, `DELETE FROM test_hard_items WHERE id = ?`, "hard-1"); err != nil {
+		t.Fatalf("hard-delete row: %v", err)
+	}
+	assertPendingChange(t, db, "test_hard_items", "hard-1", "delete", "opaque-hard-v1", 1)
+}
+
+func assertPendingChange(t *testing.T, db *sql.DB, tableName, recordID, operation, baseUpdatedAt string, localRevision int) {
+	t.Helper()
+	var gotOperation, gotBaseUpdatedAt string
+	var gotLocalRevision int
+	if err := db.QueryRow(
+		`SELECT operation, COALESCE(base_updated_at, ''), local_revision
+		 FROM _synchro_pending_changes WHERE table_name = ? AND record_id = ?`,
+		tableName,
+		recordID,
+	).Scan(&gotOperation, &gotBaseUpdatedAt, &gotLocalRevision); err != nil {
+		t.Fatalf("read pending change %s/%s: %v", tableName, recordID, err)
+	}
+	if gotOperation != operation || gotBaseUpdatedAt != baseUpdatedAt || gotLocalRevision != localRevision {
+		t.Fatalf("pending change %s/%s = operation %q, base %q, local_revision %d, want operation %q, base %q, local_revision %d", tableName, recordID, gotOperation, gotBaseUpdatedAt, gotLocalRevision, operation, baseUpdatedAt, localRevision)
+	}
 }
 
 func TestGenerateRejectsExistingOutputWithoutOverwrite(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_overwrite"
-	registerSeedTestTable(t, db, tableName)
+	registerSeedTestTable(t, db, "test_seed_overwrite")
 
 	outputPath := filepath.Join(t.TempDir(), "seed.db")
 	if err := Generate(context.Background(), db, GenerateOptions{
@@ -647,9 +879,10 @@ func TestPublishRechecksDestinationSidecars(t *testing.T) {
 }
 
 func TestVerificationFailureRollsBackExportTransaction(t *testing.T) {
+	testPostgres(t)
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		t.Fatal("TEST_DATABASE_URL is required")
 	}
 	config, err := pgx.ParseConfig(dbURL)
 	if err != nil {
@@ -683,9 +916,8 @@ func TestVerificationFailureRollsBackExportTransaction(t *testing.T) {
 
 func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_portable"
-	registerSeedTestTable(t, db, tableName)
-	registerSharedScope(t, db, "global", true)
+	tableName, scopeID := registerSeedTestTable(t, db, "test_seed_portable")
+	registerSharedScope(t, db, scopeID, true)
 
 	ctx := context.Background()
 	recordID := "00000000-0000-0000-0000-000000000099"
@@ -701,7 +933,7 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	); err != nil {
 		t.Fatalf("inserting portable row: %v", err)
 	}
-	if !waitForPortableEdge(ctx, db, tableName, recordID) {
+	if !waitForPortableEdge(ctx, db, tableName, recordID, scopeID) {
 		t.Fatal("portable row did not become WAL-materialized")
 	}
 
@@ -734,7 +966,8 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	var scopeChecksum string
 	var localChecksum string
 	if err := sqliteDB.QueryRow(
-		"SELECT cursor, checksum, local_checksum FROM _synchro_scopes WHERE scope_id = 'global'",
+		"SELECT cursor, checksum, local_checksum FROM _synchro_scopes WHERE scope_id = ?",
+		scopeID,
 	).Scan(&scopeCursor, &scopeChecksum, &localChecksum); err != nil {
 		t.Fatalf("reading portable scope state: %v", err)
 	}
@@ -752,32 +985,11 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 		t.Fatal("local scope checksum does not match the verified authoritative checksum")
 	}
 
-	var checkpointRows int64
-	if err := sqliteDB.QueryRow(
-		"SELECT COUNT(*) FROM _synchro_bucket_checkpoints WHERE bucket_id = 'global'",
-	).Scan(&checkpointRows); err != nil {
-		t.Fatalf("reading portable bucket checkpoint rows: %v", err)
-	}
-	if checkpointRows != 0 {
-		t.Fatalf("expected no portable bucket checkpoint rows, got %d", checkpointRows)
-	}
-
-	var memberRows int64
-	if err := sqliteDB.QueryRow(
-		"SELECT COUNT(*) FROM _synchro_bucket_members WHERE bucket_id = 'global' AND table_name = ? AND record_id = ?",
-		tableName,
-		recordID,
-	).Scan(&memberRows); err != nil {
-		t.Fatalf("reading portable bucket member rows: %v", err)
-	}
-	if memberRows != 0 {
-		t.Fatalf("expected no portable bucket member rows, got %d", memberRows)
-	}
-
 	var scopeRowCount int64
 	var scopeRowChecksum string
 	if err := sqliteDB.QueryRow(
-		"SELECT count(*), COALESCE(MAX(checksum), '') FROM _synchro_scope_rows WHERE scope_id = 'global' AND table_name = ? AND record_id = ?",
+		"SELECT count(*), COALESCE(MAX(checksum), '') FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+		scopeID,
 		tableName,
 		recordID,
 	).Scan(&scopeRowCount, &scopeRowChecksum); err != nil {
@@ -792,7 +1004,8 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 
 	var receipt string
 	if err := sqliteDB.QueryRow(
-		"SELECT receipt FROM _synchro_seed_receipts WHERE scope_id = 'global'",
+		"SELECT receipt FROM _synchro_seed_receipts WHERE scope_id = ?",
+		scopeID,
 	).Scan(&receipt); err != nil {
 		t.Fatalf("reading portable scope receipt: %v", err)
 	}
@@ -819,25 +1032,6 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 	if snapshotComplete != "1" {
 		t.Fatalf("expected snapshot_complete=1, got %q", snapshotComplete)
-	}
-
-	var knownBucketsRaw string
-	if err := sqliteDB.QueryRow("SELECT value FROM _synchro_meta WHERE key = 'known_buckets'").Scan(&knownBucketsRaw); err != nil {
-		t.Fatalf("reading known_buckets: %v", err)
-	}
-	var knownBuckets []string
-	if err := json.Unmarshal([]byte(knownBucketsRaw), &knownBuckets); err != nil {
-		t.Fatalf("decoding known_buckets: %v", err)
-	}
-	foundGlobal := false
-	for _, bucketID := range knownBuckets {
-		if bucketID == "global" {
-			foundGlobal = true
-			break
-		}
-	}
-	if !foundGlobal {
-		t.Fatalf("expected known_buckets to contain global, got %v", knownBuckets)
 	}
 
 	var pendingCount int
@@ -870,10 +1064,150 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 }
 
+func TestGenerateUsesOneSnapshotDuringConcurrentSourceWrites(t *testing.T) {
+	db := testPostgres(t)
+	tableName, scopeID := registerSeedTestTable(t, db, "test_seed_concurrent_snapshot")
+	registerSharedScope(t, db, scopeID, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialID := "00000000-0000-0000-0000-000000000101"
+	if _, err := db.ExecContext(
+		ctx,
+		fmt.Sprintf(
+			"INSERT INTO %s (id, user_id, title, updated_at, deleted_at) VALUES ($1, $2, $3, '2026-03-23T00:00:00Z'::timestamptz, NULL)",
+			quotePGIdent(tableName),
+		),
+		initialID,
+		"user-1",
+		"before snapshot",
+	); err != nil {
+		t.Fatalf("inserting initial portable row: %v", err)
+	}
+	if !waitForPortableEdge(ctx, db, tableName, initialID, scopeID) {
+		t.Fatal("initial portable row did not become WAL-materialized")
+	}
+
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	config, err := pgx.ParseConfig(dbURL)
+	if err != nil {
+		t.Fatalf("parsing postgres database URL: %v", err)
+	}
+	snapshotStarted := make(chan struct{})
+	continueExport := make(chan struct{})
+	released := false
+	exportDB := sql.OpenDB(&manifestMutationConnector{
+		connector: pgxstdlib.GetConnector(*config),
+		before: func(ctx context.Context) error {
+			close(snapshotStarted)
+			select {
+			case <-continueExport:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+	t.Cleanup(func() { _ = exportDB.Close() })
+
+	outputPath := filepath.Join(t.TempDir(), "concurrent-snapshot.db")
+	generateResult := make(chan error, 1)
+	go func() {
+		generateResult <- Generate(ctx, exportDB, GenerateOptions{OutputPath: outputPath})
+	}()
+	exportFinished := false
+	defer func() {
+		if !released {
+			close(continueExport)
+		}
+		cancel()
+		if !exportFinished {
+			select {
+			case <-generateResult:
+			case <-time.After(30 * time.Second):
+				t.Error("seed export did not stop during test cleanup")
+			}
+		}
+	}()
+
+	select {
+	case <-snapshotStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("seed export did not reach the portable manifest boundary")
+	}
+
+	concurrentID := "00000000-0000-0000-0000-000000000102"
+	if _, err := db.ExecContext(
+		ctx,
+		fmt.Sprintf(
+			"INSERT INTO %s (id, user_id, title, updated_at, deleted_at) VALUES ($1, $2, $3, '2026-03-23T00:00:01Z'::timestamptz, NULL)",
+			quotePGIdent(tableName),
+		),
+		concurrentID,
+		"user-1",
+		"after snapshot",
+	); err != nil {
+		t.Fatalf("inserting concurrent portable row: %v", err)
+	}
+	if !waitForPortableEdge(ctx, db, tableName, concurrentID, scopeID) {
+		t.Fatal("concurrent portable row did not become WAL-materialized")
+	}
+	close(continueExport)
+	released = true
+
+	select {
+	case err := <-generateResult:
+		exportFinished = true
+		if err != nil {
+			t.Fatalf("generate portable seed database: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("seed export did not complete")
+	}
+
+	sqliteDB, err := sql.Open("sqlite", outputPath)
+	if err != nil {
+		t.Fatalf("opening generated portable seed database: %v", err)
+	}
+	defer sqliteDB.Close()
+
+	var initialCount, concurrentCount, rowVersionCount, scopeRowCount int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", quoteIdentifier(tableName))
+	if err := sqliteDB.QueryRow(query, initialID).Scan(&initialCount); err != nil {
+		t.Fatalf("reading initial portable row: %v", err)
+	}
+	if err := sqliteDB.QueryRow(query, concurrentID).Scan(&concurrentCount); err != nil {
+		t.Fatalf("reading concurrent portable row: %v", err)
+	}
+	if err := sqliteDB.QueryRow(
+		"SELECT COUNT(*) FROM _synchro_row_versions WHERE table_name = ? AND record_id = ?",
+		tableName,
+		concurrentID,
+	).Scan(&rowVersionCount); err != nil {
+		t.Fatalf("reading concurrent row version: %v", err)
+	}
+	if err := sqliteDB.QueryRow(
+		"SELECT COUNT(*) FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ? AND record_id = ?",
+		scopeID,
+		tableName,
+		concurrentID,
+	).Scan(&scopeRowCount); err != nil {
+		t.Fatalf("reading concurrent scope row: %v", err)
+	}
+	if initialCount != 1 || concurrentCount != 0 || rowVersionCount != 0 || scopeRowCount != 0 {
+		t.Fatalf(
+			"portable snapshot row counts = initial %d, concurrent %d, version %d, scope %d; want 1, 0, 0, 0",
+			initialCount,
+			concurrentCount,
+			rowVersionCount,
+			scopeRowCount,
+		)
+	}
+}
+
 func TestSQLiteSnapshotCompletionVerifiesStagedAndFinalArtifacts(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_snapshot_completion"
-	registerSeedTestTable(t, db, tableName)
+	registerSeedTestTable(t, db, "test_seed_snapshot_completion")
 
 	directory := t.TempDir()
 	finalPath := filepath.Join(directory, "final.db")
@@ -905,9 +1239,7 @@ func TestSQLiteSnapshotCompletionVerifiesStagedAndFinalArtifacts(t *testing.T) {
 
 func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_mac_verification"
-	scopeID := "seed-mac-verification"
-	registerSeedTestTableForScope(t, db, tableName, scopeID)
+	_, scopeID := registerSeedTestTableForScope(t, db, "test_seed_mac_verification", "seed-mac-verification")
 	registerSharedScope(t, db, scopeID, true)
 
 	tests := []struct {
@@ -935,10 +1267,17 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 				if err := decodeJSON(raw, &manifest); err != nil {
 					return nil, err
 				}
-				if len(manifest.PortableScopes) != 1 {
-					return nil, fmt.Errorf("portable seed scope count = %d, want 1", len(manifest.PortableScopes))
+				var scope *portableSeedScope
+				for index := range manifest.PortableScopes {
+					if manifest.PortableScopes[index].ID == scopeID {
+						scope = &manifest.PortableScopes[index]
+						break
+					}
 				}
-				token := test.token(&manifest.PortableScopes[0])
+				if scope == nil {
+					return nil, fmt.Errorf("portable seed scope %q is missing", scopeID)
+				}
+				token := test.token(scope)
 				original := *token
 				corrupted, err := corruptSeedTokenMAC(original)
 				if err != nil {
@@ -997,9 +1336,7 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 
 func TestPublishVerifiedSQLiteOutputRejectsArtifactCorruption(t *testing.T) {
 	db := testPostgres(t)
-	tableName := "test_seed_verified_publication"
-	scopeID := "seed-verification"
-	registerSeedTestTableForScope(t, db, tableName, scopeID)
+	tableName, scopeID := registerSeedTestTableForScope(t, db, "test_seed_verified_publication", "seed-verification")
 	registerSharedScope(t, db, scopeID, true)
 
 	ctx := context.Background()
@@ -1106,7 +1443,7 @@ func TestPublishVerifiedSQLiteOutputRejectsArtifactCorruption(t *testing.T) {
 			test.mutate(t, temporaryPath)
 
 			destinationPath := filepath.Join(directory, strings.ReplaceAll(test.name, " ", "-")+"-published.db")
-			if err := publishVerifiedSQLiteOutput(ctx, temporaryPath, destinationPath, false, env, tables, portable); err == nil {
+			if err := verifySQLiteOutput(ctx, temporaryPath, env, tables, portable, seedSnapshotComplete); err == nil {
 				t.Fatal("published a corrupt seed artifact")
 			}
 			if _, err := os.Stat(destinationPath); !errors.Is(err, os.ErrNotExist) {

@@ -18,6 +18,10 @@ use crate::pull::{
 };
 use crate::registry::{load_registry_generation_from_client, TableRegistration};
 use crate::seed_token::{self, SeedContinuationPayload, SeedPagePayload, SeedSnapshotBoundary};
+use crate::spi_helpers::{
+    current_utc_timestamp, decode_digest, is_lower_hex, is_lower_uuid, required_positive_i64,
+    required_text,
+};
 use crate::stream_position::{parse_lsn, StreamPosition};
 use synchro_core::contract::ProtocolErrorCode;
 
@@ -152,7 +156,8 @@ fn synchro_register_shared_scope(p_scope_id: &str, p_portable: default!(bool, "f
                  VALUES ($1, $2)
                  ON CONFLICT (scope_id) DO UPDATE
                  SET portable = EXCLUDED.portable,
-                     updated_at = now()",
+                     updated_at = now()
+                  WHERE sync_shared_scopes.portable IS DISTINCT FROM EXCLUDED.portable",
                 None,
                 &[p_scope_id.into(), p_portable.into()],
             )
@@ -199,6 +204,84 @@ fn synchro_register_shared_scope(p_scope_id: &str, p_portable: default!(bool, "f
             )
             .unwrap_or_else(|err| pgrx::error!("seeding shared checkpoints: {}", err));
     });
+}
+
+/// Grants one scope to one user. A granted scope is the only assignment a user
+/// can gain and lose. Connect reconciles the change on the user's next connect,
+/// so this records the grant and nothing else.
+#[pg_extern]
+fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
+    validate_granted_scope_identity(p_user_id, p_scope_id);
+
+    Spi::connect_mut(|client| {
+        // A granted scope needs its own scope state, exactly as a shared scope
+        // does, so that membership and retention generations exist for it.
+        let _ = client
+            .update(
+                "INSERT INTO sync_scope_state (scope_id, stream_generation)
+                 SELECT $1, stream_generation
+                 FROM sync_runtime_state
+                 WHERE singleton = true
+                 ON CONFLICT (scope_id) DO NOTHING",
+                None,
+                &[p_scope_id.into()],
+            )
+            .unwrap_or_else(|err| pgrx::error!("registering granted scope state: {}", err));
+        let _ = client
+            .update(
+                "INSERT INTO sync_user_scopes (user_id, scope_id, assigned)
+                 VALUES ($1, $2, true)
+                 ON CONFLICT (user_id, scope_id) DO UPDATE SET assigned = true",
+                None,
+                &[p_user_id.into(), p_scope_id.into()],
+            )
+            .unwrap_or_else(|err| pgrx::error!("granting user scope: {}", err));
+    });
+}
+
+/// Revokes one granted scope from one user. Connect reconciles the change on
+/// the user's next connect and leaves the scope's own state for other users.
+#[pg_extern]
+fn synchro_revoke_user_scope(p_user_id: &str, p_scope_id: &str) {
+    validate_revoked_scope_identity(p_user_id, p_scope_id);
+
+    Spi::connect_mut(|client| {
+        // A revocation is recorded rather than deleted. A user holds its own
+        // private scope by default, so only an explicit revocation can remove
+        // it, and that fact has to survive.
+        let _ = client
+            .update(
+                "INSERT INTO sync_user_scopes (user_id, scope_id, assigned)
+                 VALUES ($1, $2, false)
+                 ON CONFLICT (user_id, scope_id) DO UPDATE SET assigned = false",
+                None,
+                &[p_user_id.into(), p_scope_id.into()],
+            )
+            .unwrap_or_else(|err| pgrx::error!("revoking user scope: {}", err));
+    });
+}
+
+fn validate_granted_scope_identity(user_id: &str, scope_id: &str) {
+    if user_id.trim().is_empty() {
+        pgrx::error!("granted scope user_id must not be empty");
+    }
+    validate_shared_scope_id(scope_id);
+}
+
+fn validate_revoked_scope_identity(user_id: &str, scope_id: &str) {
+    if user_id.trim().is_empty() {
+        pgrx::error!("revoked scope user_id must not be empty");
+    }
+    if scope_id.trim().is_empty() {
+        pgrx::error!("revoked scope_id must not be empty");
+    }
+    // A revocation may name the user's own private scope, which a grant never
+    // mints, so the reserved prefix is valid here for that user alone.
+    if let Some(owner) = scope_id.strip_prefix("user:") {
+        if owner != user_id {
+            pgrx::error!("revoked private scope belongs to another user");
+        }
+    }
 }
 
 #[pg_extern]
@@ -338,9 +421,10 @@ fn synchro_portable_seed_manifest(p_page_limit: default!(i32, "1000")) -> pgrx::
                     snapshot_boundary: boundary_wire.clone(),
                     cardinality: rows.len().to_string(),
                     checksum: *checksum,
-                    issued_at: current_utc_timestamp(client).unwrap_or_else(|error| {
-                        pgrx::error!("reading portable seed time: {error}")
-                    }),
+                    issued_at: current_utc_timestamp(client, "portable seed timestamp", "")
+                        .unwrap_or_else(|error| {
+                            pgrx::error!("reading portable seed time: {error}")
+                        }),
                 },
                 &continuation_key.secret,
             )
@@ -620,9 +704,9 @@ fn verify_export_transaction(client: &SpiClient<'_>) -> Result<(), String> {
         .map_err(|error| format!("reading transaction characteristics: {error}"))?
         .next()
         .ok_or_else(|| "transaction characteristics are unavailable".to_string())?;
-    let isolation = required_text(&row, "isolation")?;
-    let read_only = required_text(&row, "read_only")?;
-    let deferrable = required_text(&row, "deferrable")?;
+    let isolation = required_text(&row, "isolation", "")?;
+    let read_only = required_text(&row, "read_only", "")?;
+    let deferrable = required_text(&row, "deferrable", "")?;
     if isolation != "serializable" || read_only != "on" || deferrable != "on" {
         return Err("portable seed requires SERIALIZABLE READ ONLY DEFERRABLE".to_string());
     }
@@ -656,7 +740,7 @@ fn load_export_boundary(client: &SpiClient<'_>) -> Result<ExportBoundary, String
         .map_err(|error| format!("reading materialization progress: {error}"))?
         .next()
         .ok_or_else(|| "materialization progress is missing".to_string())?;
-    let stream_generation = required_text(&row, "stream_generation")?;
+    let stream_generation = required_text(&row, "stream_generation", "")?;
     let registry_generation = required_positive_i64(&row, "registry_generation")?;
     let commit_lsn = row
         .get_by_name::<String, &str>("materialized_commit_lsn")
@@ -690,11 +774,11 @@ fn load_export_schema(
         .next()
         .ok_or_else(|| "immutable schema manifest is missing".to_string())?;
     let schema_version = required_positive_i64(&row, "schema_version")?;
-    let schema_hash = required_text(&row, "schema_hash")?;
-    if !is_lower_sha256(&schema_hash) {
+    let schema_hash = required_text(&row, "schema_hash", "")?;
+    if !is_lower_hex(&schema_hash, 64) {
         return Err("immutable schema hash is invalid".to_string());
     }
-    let body = required_text(&row, "canonical_manifest_body")?;
+    let body = required_text(&row, "canonical_manifest_body", "")?;
     let parsed: serde_json::Value = serde_json::from_str(&body)
         .map_err(|_| "immutable schema manifest is invalid".to_string())?;
     let canonical = serde_json_canonicalizer::to_vec(&parsed)
@@ -732,11 +816,11 @@ fn load_export_scopes(
     let mut scopes = Vec::with_capacity(rows.len());
     let mut seen = HashSet::with_capacity(rows.len());
     for row in rows {
-        let id = required_text(&row, "scope_id")?;
+        let id = required_text(&row, "scope_id", "")?;
         if !seen.insert(id.clone()) {
             return Err("portable scope declarations contain a duplicate".to_string());
         }
-        let stream_generation = required_text(&row, "stream_generation")?;
+        let stream_generation = required_text(&row, "stream_generation", "")?;
         if stream_generation != boundary.stream_generation {
             return Err("portable scope has the wrong stream generation".to_string());
         }
@@ -795,13 +879,13 @@ fn load_seed_rows(
     let mut result = Vec::with_capacity(rows.len());
     let mut identities = HashSet::with_capacity(rows.len());
     for row in rows {
-        let relation_id = required_text(&row, "edge_relation_id")?;
-        let captured_relation_id = required_text(&row, "captured_relation_id")?;
+        let relation_id = required_text(&row, "edge_relation_id", "")?;
+        let captured_relation_id = required_text(&row, "captured_relation_id", "")?;
         if relation_id != captured_relation_id {
             return Err("portable scope edge and captured relation differ".to_string());
         }
-        let table_name = required_text(&row, "table_name")?;
-        let record_id = required_text(&row, "record_id")?;
+        let table_name = required_text(&row, "table_name", "")?;
+        let record_id = required_text(&row, "record_id", "")?;
         let table = registry
             .iter()
             .find(|table| table.relation_id == relation_id && table.table_name == table_name)
@@ -813,7 +897,7 @@ fn load_seed_rows(
         if captured_generation != scope.registry_generation {
             return Err("portable captured row has the wrong registry generation".to_string());
         }
-        let source_generation = required_text(&row, "source_stream_generation")?;
+        let source_generation = required_text(&row, "source_stream_generation", "")?;
         if source_generation != boundary.stream_generation {
             return Err("portable captured row has the wrong stream generation".to_string());
         }
@@ -821,8 +905,8 @@ fn load_seed_rows(
             .get_by_name::<String, &str>("source_reset_id")
             .map_err(|error| format!("reading portable reset provenance: {error}"))?;
         if source_reset_id.is_some() {
-            let reset_stream_generation = required_text(&row, "reset_stream_generation")?;
-            let reset_lifecycle = required_text(&row, "reset_lifecycle")?;
+            let reset_stream_generation = required_text(&row, "reset_stream_generation", "")?;
+            let reset_lifecycle = required_text(&row, "reset_lifecycle", "")?;
             let source_lsn = row
                 .get_by_name::<String, &str>("source_commit_lsn")
                 .map_err(|error| format!("reading portable source LSN: {error}"))?;
@@ -837,7 +921,7 @@ fn load_seed_rows(
                 return Err("portable reset baseline binding is invalid".to_string());
             }
         } else {
-            let source_lsn = required_text(&row, "source_commit_lsn")?;
+            let source_lsn = required_text(&row, "source_commit_lsn", "")?;
             let source_lsn_value = parse_lsn(&source_lsn)
                 .ok_or_else(|| "portable captured row has an invalid source LSN".to_string())?;
             if row
@@ -867,11 +951,13 @@ fn load_seed_rows(
             row.get_by_name::<Vec<u8>, &str>("edge_checksum")
                 .map_err(|error| format!("reading portable edge checksum: {error}"))?
                 .ok_or_else(|| "portable edge checksum is missing".to_string())?,
+            "portable seed checksum must contain 32 octets",
         )?;
         let captured_checksum = decode_digest(
             row.get_by_name::<Vec<u8>, &str>("captured_checksum")
                 .map_err(|error| format!("reading portable captured checksum: {error}"))?
                 .ok_or_else(|| "portable captured checksum is missing".to_string())?,
+            "portable seed checksum must contain 32 octets",
         )?;
         if edge_checksum != captured_checksum {
             return Err("portable edge and captured checksums differ".to_string());
@@ -1085,8 +1171,8 @@ fn load_export_session(client: &SpiClient<'_>) -> Result<ExportSessionState, Str
         || session.state.transaction_id != current_export_transaction_id(client)?
         || !is_lower_uuid(&session.state.export_id)
         || decode_nonce(&session.state.transaction_nonce).is_err()
-        || !is_lower_sha256(&session.state.export_manifest_hash)
-        || !is_lower_sha256(&session.state.schema_hash)
+        || !is_lower_hex(&session.state.export_manifest_hash, 64)
+        || !is_lower_hex(&session.state.schema_hash, 64)
         || session.state.stream_generation.is_empty()
         || session.state.page_limit <= 0
         || session.state.registry_generation <= 0
@@ -1159,53 +1245,64 @@ fn parse_and_verify_continuation(
     seed_token::verify_continuation(token, &key.secret)
 }
 
+/// Validate portable seed receipts for first authenticated connect.
+///
+/// A stale or unverifiable receipt set returns an empty position map, so
+/// every seeded scope degrades to a null cursor and a required rebuild.
+/// Only a server-side fault produces an error response.
 pub(crate) fn validate_seed_receipts(
     client: &SpiClient<'_>,
     receipts: &BTreeMap<String, String>,
     current_schema_hash: &str,
 ) -> Result<BTreeMap<String, StreamPosition>, pgrx::JsonB> {
-    validate_seed_receipts_inner(client, receipts, current_schema_hash).map_err(|_| {
-        protocol_error_response(
+    match validate_seed_receipts_inner(client, receipts, current_schema_hash) {
+        Ok(Some(positions)) => Ok(positions),
+        Ok(None) => Ok(BTreeMap::new()),
+        Err(_) => Err(protocol_error_response(
             ProtocolErrorCode::InvalidRequest,
             "invalid portable seed receipts",
             false,
-        )
-    })
+        )),
+    }
 }
 
 fn validate_seed_receipts_inner(
     client: &SpiClient<'_>,
     receipts: &BTreeMap<String, String>,
     current_schema_hash: &str,
-) -> Result<BTreeMap<String, StreamPosition>, String> {
+) -> Result<Option<BTreeMap<String, StreamPosition>>, String> {
     let rows = client
         .select(
             "SELECT shared.scope_id, state.stream_generation,
                     state.membership_generation, state.retention_generation,
-                    runtime.registry_generation
+                    progress.registry_generation
              FROM sync_shared_scopes shared
              JOIN sync_scope_state state ON state.scope_id = shared.scope_id
-             CROSS JOIN sync_runtime_state runtime
-             WHERE shared.portable = true AND runtime.singleton = true
+             JOIN sync_wal_progress progress
+               ON progress.singleton = true
+              AND progress.stream_generation = state.stream_generation
+             WHERE shared.portable = true
              ORDER BY shared.scope_id",
             None,
             &[],
         )
         .map_err(|error| format!("loading portable seed receipt scopes: {error}"))?;
     if rows.len() != receipts.len() {
-        return Err("portable seed receipt scope set differs from the server".to_string());
+        return Ok(None);
     }
 
     let materialized = crate::stream_position::load_materialized_boundary(client)?;
     let mut positions = BTreeMap::new();
     let mut export_binding: Option<(String, String, SeedSnapshotBoundary)> = None;
     for row in rows {
-        let scope_id = required_text(&row, "scope_id")?;
-        let receipt = receipts
-            .get(&scope_id)
-            .ok_or_else(|| "portable seed receipt is missing".to_string())?;
-        let payload = parse_and_verify_continuation(client, receipt)?;
-        let stream_generation = required_text(&row, "stream_generation")?;
+        let scope_id = required_text(&row, "scope_id", "")?;
+        let Some(receipt) = receipts.get(&scope_id) else {
+            return Ok(None);
+        };
+        let Ok(payload) = parse_and_verify_continuation(client, receipt) else {
+            return Ok(None);
+        };
+        let stream_generation = required_text(&row, "stream_generation", "")?;
         let membership_generation = required_positive_i64(&row, "membership_generation")?;
         let retention_generation = required_positive_i64(&row, "retention_generation")?;
         let registry_generation = required_positive_i64(&row, "registry_generation")?;
@@ -1217,7 +1314,7 @@ fn validate_seed_receipts_inner(
             || payload.membership_generation != membership_generation.to_string()
             || payload.retention_generation != retention_generation.to_string()
         {
-            return Err("portable seed receipt binding is stale".to_string());
+            return Ok(None);
         }
 
         let binding = (
@@ -1229,17 +1326,19 @@ fn validate_seed_receipts_inner(
             .as_ref()
             .is_some_and(|expected| expected != &binding)
         {
-            return Err("portable seed receipts belong to different exports".to_string());
+            return Ok(None);
         }
         export_binding.get_or_insert(binding);
 
-        let position = stream_position_from_wire(&payload.snapshot_boundary)?;
+        let Ok(position) = stream_position_from_wire(&payload.snapshot_boundary) else {
+            return Ok(None);
+        };
         if position > materialized.position {
-            return Err("portable seed receipt is ahead of materialization".to_string());
+            return Ok(None);
         }
         positions.insert(scope_id, position);
     }
-    Ok(positions)
+    Ok(Some(positions))
 }
 
 fn token_key_id(token: &str, name: &str) -> Result<String, String> {
@@ -1358,8 +1457,8 @@ fn load_seed_key(
         .into_iter()
         .next()
         .ok_or_else(|| "portable seed token key is unavailable".to_string())?;
-    let key_id = required_text(&row, "key_id")?;
-    let secret = required_text(&row, "secret")?;
+    let key_id = required_text(&row, "key_id", "")?;
+    let secret = required_text(&row, "secret", "")?;
     if secret.len() < 64 {
         return Err("portable seed token key is invalid".to_string());
     }
@@ -1376,7 +1475,7 @@ fn load_export_id(client: &SpiClient<'_>) -> Result<String, String> {
         .map_err(|error| format!("creating portable seed export ID: {error}"))?
         .next()
         .ok_or_else(|| "portable seed export ID is missing".to_string())?;
-    let export_id = required_text(&row, "export_id")?;
+    let export_id = required_text(&row, "export_id", "")?;
     if !is_lower_uuid(&export_id) {
         return Err("portable seed export ID is invalid".to_string());
     }
@@ -1401,19 +1500,6 @@ fn load_transaction_nonce(client: &SpiClient<'_>) -> Result<Vec<u8>, String> {
         return Err("portable seed transaction nonce is invalid".to_string());
     }
     Ok(nonce)
-}
-
-fn current_utc_timestamp(client: &SpiClient<'_>) -> Result<String, String> {
-    let row = client
-        .select(
-            "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS issued_at",
-            None,
-            &[],
-        )
-        .map_err(|error| format!("reading portable seed timestamp: {error}"))?
-        .next()
-        .ok_or_else(|| "portable seed timestamp is missing".to_string())?;
-    required_text(&row, "issued_at")
 }
 
 fn stream_position_from_wire(boundary: &SeedSnapshotBoundary) -> Result<StreamPosition, String> {
@@ -1449,27 +1535,6 @@ fn decode_nonce(value: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn decode_digest(value: Vec<u8>) -> Result<Sha256Digest, String> {
-    let bytes: [u8; 32] = value
-        .try_into()
-        .map_err(|_| "portable seed checksum must contain 32 octets".to_string())?;
-    Ok(Sha256Digest::from_bytes(bytes))
-}
-
-fn required_text(row: &pgrx::spi::SpiHeapTupleData<'_>, name: &str) -> Result<String, String> {
-    row.get_by_name::<String, &str>(name)
-        .map_err(|error| format!("reading {name}: {error}"))?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{name} is missing"))
-}
-
-fn required_positive_i64(row: &pgrx::spi::SpiHeapTupleData<'_>, name: &str) -> Result<i64, String> {
-    row.get_by_name::<i64, &str>(name)
-        .map_err(|error| format!("reading {name}: {error}"))?
-        .filter(|value| *value > 0)
-        .ok_or_else(|| format!("{name} is invalid"))
-}
-
 fn portable_shared_scope_exists(client: &SpiClient<'_>, scope_id: &str) -> bool {
     client
         .select(
@@ -1495,22 +1560,4 @@ fn validate_shared_scope_id(scope_id: &str) {
     if trimmed.starts_with("user:") {
         pgrx::error!("shared scope_id must not use the reserved user: prefix");
     }
-}
-
-fn is_lower_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn is_lower_uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.as_bytes().iter().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                *byte == b'-'
-            } else {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
-            }
-        })
 }

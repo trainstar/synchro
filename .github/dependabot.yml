@@ -1,13 +1,43 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directory: /api/go
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
     groups:
-      go-minor-patch:
+      go-api-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: /conformance
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      go-conformance-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /extensions
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      rust-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: swift
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      swift-root-minor-patch:
         update-types: [minor, patch]
 
   - package-ecosystem: swift
@@ -17,7 +47,7 @@ updates:
       day: monday
     open-pull-requests-limit: 3
     groups:
-      swift-minor-patch:
+      swift-client-minor-patch:
         update-types: [minor, patch]
 
   - package-ecosystem: gradle

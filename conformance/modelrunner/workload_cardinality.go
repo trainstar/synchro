@@ -41,6 +41,10 @@ type cardinalityFieldInfo struct {
 // expandScopeCardinalityWorkload expands one cardinality sample into source,
 // WAL, and immutable rebuild operations. It only reads the supplied snapshot.
 func expandScopeCardinalityWorkload(snapshot reference.StateSnapshot, payload map[string]json.RawMessage) ([]scenarios.Operation, error) {
+	return expandScopeCardinalityWorkloadForClient(snapshot, payload, nil)
+}
+
+func expandScopeCardinalityWorkloadForClient(snapshot reference.StateSnapshot, payload map[string]json.RawMessage, selectedClient *reference.ClientKey) ([]scenarios.Operation, error) {
 	if payload == nil {
 		return nil, errors.New("scope_cardinality workload payload is required")
 	}
@@ -80,7 +84,7 @@ func expandScopeCardinalityWorkload(snapshot reference.StateSnapshot, payload ma
 	if err != nil {
 		return nil, err
 	}
-	client, clientState, err := cardinalityAssignedClient(snapshot)
+	client, clientState, err := cardinalityAssignedClientFor(snapshot, selectedClient)
 	if err != nil {
 		return nil, err
 	}
@@ -316,12 +320,19 @@ func cardinalitySchemaManifest(snapshot reference.StateSnapshot, ref reference.S
 }
 
 func cardinalityAssignedClient(snapshot reference.StateSnapshot) (reference.ClientKey, reference.ClientState, error) {
+	return cardinalityAssignedClientFor(snapshot, nil)
+}
+
+func cardinalityAssignedClientFor(snapshot reference.StateSnapshot, selectedClient *reference.ClientKey) (reference.ClientKey, reference.ClientState, error) {
 	type candidate struct {
 		key   reference.ClientKey
 		value reference.ClientState
 	}
 	candidates := make([]candidate, 0)
 	for _, entry := range snapshot.Clients {
+		if selectedClient != nil && entry.Key != *selectedClient {
+			continue
+		}
 		for _, assignment := range entry.Value.ScopeAssignments {
 			if assignment.Scope == cardinalityScope && assignment.Assigned {
 				candidates = append(candidates, candidate{key: entry.Key, value: entry.Value})
@@ -330,6 +341,9 @@ func cardinalityAssignedClient(snapshot reference.StateSnapshot) (reference.Clie
 		}
 	}
 	if len(candidates) == 0 {
+		if selectedClient != nil {
+			return reference.ClientKey{}, reference.ClientState{}, fmt.Errorf("scope_cardinality bound client %q/%q is not assigned", selectedClient.UserID, selectedClient.ClientID)
+		}
 		return reference.ClientKey{}, reference.ClientState{}, errors.New("scope_cardinality requires an assigned client")
 	}
 	sort.Slice(candidates, func(left, right int) bool {

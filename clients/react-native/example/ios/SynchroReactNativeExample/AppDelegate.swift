@@ -23,9 +23,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     window = UIWindow(frame: UIScreen.main.bounds)
 
+    let arguments = ProcessInfo.processInfo.arguments
+    let conformanceDetox = arguments.indices.contains { index in
+      arguments[index] == "-synchroConformance"
+        && index + 1 < arguments.endIndex
+        && arguments[index + 1] == "1"
+    }
     factory.startReactNative(
       withModuleName: "SynchroReactNativeExample",
       in: window,
+      initialProperties: ["conformanceDetox": conformanceDetox],
       launchOptions: launchOptions
     )
 

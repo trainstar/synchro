@@ -70,25 +70,33 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		value any
 		tags  []string
 	}{
-		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions"}},
-		{Operation{}, []string{"contract_operation", "name", "payload"}},
+		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions", "native_identity_aliases,omitempty", "native_lifecycle_boundaries,omitempty", "measurement_bindings,omitempty"}},
+		{NativeClient{}, []string{"key", "user_id", "client_id", "database_key"}},
+		{NativeClientOpenParameters{}, []string{"client_key", "database_mode", "initialization", "seed_step_id"}},
+		{NativeClientParameters{}, []string{"client_key"}},
+		{NativeIdentityAlias{}, []string{"kind", "alias", "value", "step_ids", "expectation_ids"}},
+		{NativeLifecycleBoundary{}, []string{"id", "phase", "after_step_id", "user_id", "client_id", "method"}},
+		{Operation{}, []string{"contract_operation", "name", "payload", "wire_fault,omitempty"}},
+		{WireFaultControl{}, []string{"mode"}},
 		{ProofObligation{}, []string{"obligation_id", "requirement_ids", "assertion_ids", "proof_type", "support_cell_id", "artifact_inventory_ids", "performance_budget_ids", "required_measurement_ids", "required_vector_set_ids", "make_target", "argv", "fault_plan_id", "control_id"}},
 		{Ownership{}, []string{"scenario_id", "requirement_id", "proof_obligation_id", "assertion_id", "proof_type", "support_cell_id"}},
 		{ModelSpec{}, []string{"setup", "expected_state"}},
 		{ModelExpectation{}, []string{"id", "predicate", "state_facts,omitempty"}},
-		{StateFacts{}, []string{"transaction_count,omitempty", "row_count,omitempty", "scope_count,omitempty", "rebuild_count,omitempty", "batch_count,omitempty", "mutation_count,omitempty", "configured_limits,omitempty", "transactions,omitempty", "registry,omitempty", "stream,omitempty", "rows,omitempty", "scopes,omitempty", "poison,omitempty", "rebuilds,omitempty", "clients,omitempty"}},
+		{StateFacts{}, []string{"transaction_count,omitempty", "row_count,omitempty", "scope_count,omitempty", "rebuild_count,omitempty", "batch_count,omitempty", "mutation_count,omitempty", "configured_limits,omitempty", "transactions,omitempty", "registry,omitempty", "stream,omitempty", "rows,omitempty", "scopes,omitempty", "mutation_outcomes,omitempty", "row_scope_edges,omitempty", "poison,omitempty", "rebuilds,omitempty", "clients,omitempty"}},
 		{ConfiguredLimitsFact{}, []string{"max_scope_fanout", "max_impact_rows", "pull_maximum", "rebuild_maximum", "compaction_batch_maximum", "backfill_batch_maximum"}},
 		{TransactionFact{}, []string{"stream_generation", "commit_lsn", "end_lsn", "registry_generation", "lifecycle", "event_ordinals"}},
 		{RegistryFact{}, []string{"current_generation"}},
 		{StreamFact{}, []string{"materialized_stream_generation", "materialized_kind", "materialized_commit_lsn", "acknowledged_end_lsn"}},
 		{RowFact{}, []string{"table_id", "canonical_wire_json", "version", "checksum"}},
 		{ScopeFact{}, []string{"scope_id", "membership_generation", "cardinality", "effect_versions"}},
+		{MutationOutcomeIdentityFact{}, []string{"user_id", "client_id", "mutation_id"}},
+		{RowScopeEdgeFact{}, []string{"table_id", "canonical_wire_json", "scope_id"}},
 		{PoisonFact{}, []string{"stream_generation", "commit_lsn", "relation", "reason", "lifecycle"}},
 		{RebuildFact{}, []string{"user_id", "client_id", "scope_id", "rebuild_id", "page_limit", "staged_row_count", "page_count", "next_row_ordinal", "has_continuation", "has_final_cursor", "status"}},
 		{ClientDurabilityFact{}, []string{"user_id", "client_id", "current_schema,omitempty", "row_count,omitempty", "provenance_count,omitempty", "checkpoint_count,omitempty", "queue_count,omitempty", "outcome_count,omitempty", "sealed_batch_count,omitempty", "rebuild_attempt_count,omitempty", "provenance,omitempty", "checkpoints,omitempty", "queue,omitempty", "outcomes,omitempty"}},
 		{SchemaFact{}, []string{"version", "hash"}},
 		{ProvenanceFact{}, []string{"table_id", "canonical_wire_json", "scopes", "version"}},
-		{CheckpointFact{}, []string{"scope_id", "has_cursor", "has_checksum", "verified"}},
+		{CheckpointFact{}, []string{"scope_id", "has_cursor", "has_checksum", "checksum,omitempty", "verified"}},
 		{QueuedMutationFact{}, []string{"mutation_id", "table_id", "canonical_wire_json", "authored_schema", "operation", "base_version", "client_version", "authored_columns", "local_order", "status"}},
 		{FieldFact{}, []string{"field_id", "type", "wire_json"}},
 		{MutationOutcomeFact{}, []string{"mutation_id", "state", "reason"}},
@@ -100,9 +108,20 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		{InjectionParameters{}, []string{"scenario", "defect", "precondition,omitempty"}},
 		{ReplaySpec{}, []string{"mode", "seed_required", "barrier_trace_required"}},
 		{NegativeControl{}, []string{"control_id", "requirement_id", "fault_id", "subject_artifact_inventory_ids", "detected_by"}},
-		{Step{}, []string{"id", "phase", "transport", "description,omitempty", "operation", "expected_outcome"}},
+		{Step{}, []string{"id", "phase", "transport", "description,omitempty", "native_binding,omitempty", "measurement_sample,omitempty", "operation", "expected_outcome"}},
+		{NativeStepBinding{}, []string{"kind", "user_id,omitempty", "client_id,omitempty", "call_id,omitempty", "stage,omitempty", "method,omitempty", "completion,omitempty", "workload,omitempty"}},
+		{NativeWorkloadParameters{}, []string{"record_count", "batch_size", "seed", "authored_schema", "client_version", "targets", "mutation_kinds", "expectation"}},
+		{NativeWorkloadTarget{}, []string{"scope_id", "table_id", "primary_key_field_id"}},
+		{NativeWorkloadMutationKind{}, []string{"operation", "count", "field_ids"}},
+		{NativeWorkloadExpectation{}, []string{"operation_count", "batch_count", "operation_digest", "per_scope_cardinalities"}},
+		{NativeWorkloadScopeCardinality{}, []string{"scope_id", "cardinality"}},
+		{MeasurementOperationTarget{}, []string{"id", "family", "boundary", "value"}},
+		{MeasurementSample{}, []string{"measurement_id", "stratum_id", "sample_id", "parameters", "operation"}},
+		{MeasurementBinding{}, []string{"step_id", "measurement_sample"}},
+		{MeasurementMetricValue{}, []string{"metric_id", "value"}},
+		{MeasurementObservation{}, []string{"step_id", "operation", "measurement_id", "stratum_id", "sample_id", "metrics"}},
 		{ExpectedOutcome{}, []string{"disposition", "error_code,omitempty"}},
-		{WireExpectation{}, []string{"step_id", "assertion_id", "contract_case", "http_status", "error_code", "retryable"}},
+		{WireExpectation{}, []string{"step_id", "assertion_id", "contract_case", "action,omitempty", "http_status", "error_code", "retryable"}},
 		{Assertion{}, []string{"id", "requirement_ids", "description", "expectation_ids", "predicate", "oracle", "detects_control_ids"}},
 		{Oracle{}, []string{"kind", "expected_source", "observed_source"}},
 		{Catalog{}, []string{"schema_version", "scenarios"}},
@@ -186,6 +205,7 @@ func TestLoadRejectsMalformedDuplicateUnknownAndInvalidDocuments(t *testing.T) {
 		{"duplicate key", bytes.Replace(valid, []byte(`"title": "Strict scenario",`), []byte(`"title": "Strict scenario", "title": "Other",`), 1)},
 		{"trailing data", append(append([]byte(nil), valid...), []byte(` {}`)...)},
 		{"unknown field", bytes.Replace(valid, []byte(`"title": "Strict scenario",`), []byte(`"title": "Strict scenario", "unknown_field": true,`), 1)},
+		{"unknown wire action", bytes.Replace(valid, []byte(`"retryable": false`), []byte(`"retryable": false, "action": "unknown"`), 1)},
 		{"changed schema URI", bytes.Replace(valid, []byte(`https://synchro.dev/conformance/schemas/scenario-v2.schema.json`), []byte(`https://example.test/unknown.schema.json`), 1)},
 		{"invalid UTF-8", append(append([]byte(nil), valid[:len(valid)-2]...), 0xff, '}', '\n')},
 	}
@@ -198,6 +218,22 @@ func TestLoadRejectsMalformedDuplicateUnknownAndInvalidDocuments(t *testing.T) {
 				return err
 			})
 		})
+	}
+}
+
+func TestSchemaAndLoaderRejectNativeExecution(t *testing.T) {
+	path := "conformance/scenarios/native-execution.json"
+	valid := scenarioFixture("SCN-NATIVE-EXECUTION-001", "Native execution scenario")
+	data := append(append([]byte(nil), valid[:len(valid)-2]...), []byte(",\n  \"native_execution\": {}\n}\n")...)
+	root := scenarioRepository(t, map[string][]byte{path: data})
+
+	validator := schemavalidator.New(root)
+	defer validator.Close()
+	if err := validator.ValidateBytes(context.Background(), scenarioSchemaPath, data); err == nil {
+		t.Fatal("schema accepted native_execution")
+	}
+	if _, err := LoadBytes(context.Background(), root, path, data); err == nil {
+		t.Fatal("loader accepted native_execution")
 	}
 }
 

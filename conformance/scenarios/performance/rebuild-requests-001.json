@@ -5,31 +5,88 @@
   "title": "First sync uses rebuild semantics performance scenario",
   "description": "The ordered workload proves the authored semantic outcome and performance declaration.",
   "requirement_ids": [
-    "SYNC-REBUILD-003"
+    "SYNC-REBUILD-003",
+    "SYNC-REBUILD-004",
+    "SYNC-REBUILD-005",
+    "SYNC-REBUILD-008",
+    "SYNC-REBUILD-009",
+    "SYNC-REBUILD-010"
   ],
   "normative_references": [
     {
       "path": "docs/src/content/docs/spec/04-invariants.mdx",
       "anchor": "#first-sync-uses-rebuild-semantics"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#durable-rebuild-state-invariant"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#post-boundary-change-delivery"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#automatic-rebuild-default"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#rebuild-page-replay"
+    },
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#scope-local-rebuild-checkpoints"
     }
   ],
   "proof_types": [
+    "reference-model",
     "server-black-box",
     "native-e2e",
+    "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
     {
-      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-001",
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-RM-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-008"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
+      ],
+      "proof_type": "reference-model",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-008",
+        "SYNC-REBUILD-009",
+        "SYNC-REBUILD-010"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
       ],
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001"
@@ -52,12 +109,48 @@
       "control_id": null
     },
     {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
+        "SYNC-REBUILD-005",
+        "SYNC-REBUILD-008",
+        "SYNC-REBUILD-009",
+        "SYNC-REBUILD-010"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
+      ],
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-IOS-MIN-001",
       "requirement_ids": [
         "SYNC-REBUILD-003"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -91,79 +184,10 @@
         "SYNC-REBUILD-003"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-REBUILD-CONNECT-001",
-        "BUD-REBUILD-PULL-001",
-        "BUD-REBUILD-PAGE-001",
-        "BUD-REBUILD-SCHEMA-FETCH-001",
-        "BUD-REBUILD-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-REBUILD-CONNECT-001",
-        "BUD-REBUILD-PULL-001",
-        "BUD-REBUILD-PAGE-001",
-        "BUD-REBUILD-SCHEMA-FETCH-001",
-        "BUD-REBUILD-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-swift",
-      "argv": [
-        "make",
-        "test-swift"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
-      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001",
       "artifact_inventory_ids": [
         "ARTDEF-PG-EXTENSION-001",
         "ARTDEF-ADAPTER-001",
@@ -193,7 +217,6 @@
         "SYNC-REBUILD-003"
       ],
       "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
         "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
       ],
       "proof_type": "native-e2e",
@@ -223,11 +246,21 @@
     {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
+        "SYNC-REBUILD-005",
+        "SYNC-REBUILD-008",
+        "SYNC-REBUILD-009",
+        "SYNC-REBUILD-010"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-ANDROID-CURRENT-001",
@@ -254,48 +287,23 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-MIN-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-SWIFT-SPM-001",
-        "ARTDEF-COCOAPODS-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-REBUILD-CONNECT-001",
-        "BUD-REBUILD-PULL-001",
-        "BUD-REBUILD-PAGE-001",
-        "BUD-REBUILD-SCHEMA-FETCH-001",
-        "BUD-REBUILD-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-ios",
-      "argv": [
-        "make",
-        "test-rn-e2e-ios"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
+        "SYNC-REBUILD-005",
+        "SYNC-REBUILD-008",
+        "SYNC-REBUILD-009",
+        "SYNC-REBUILD-010"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001",
@@ -324,47 +332,23 @@
       "control_id": null
     },
     {
-      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-MIN-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
-      ],
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001",
-      "artifact_inventory_ids": [
-        "ARTDEF-PG-EXTENSION-001",
-        "ARTDEF-ADAPTER-001",
-        "ARTDEF-KOTLIN-MAVEN-001",
-        "ARTDEF-RN-NPM-001"
-      ],
-      "performance_budget_ids": [
-        "BUD-REBUILD-CONNECT-001",
-        "BUD-REBUILD-PULL-001",
-        "BUD-REBUILD-PAGE-001",
-        "BUD-REBUILD-SCHEMA-FETCH-001",
-        "BUD-REBUILD-UNEXPECTED-001"
-      ],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-rn-e2e-android",
-      "argv": [
-        "make",
-        "test-rn-e2e-android"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
-    {
       "obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
       "requirement_ids": [
-        "SYNC-REBUILD-003"
+        "SYNC-REBUILD-003",
+        "SYNC-REBUILD-004",
+        "SYNC-REBUILD-005",
+        "SYNC-REBUILD-008",
+        "SYNC-REBUILD-009",
+        "SYNC-REBUILD-010"
       ],
       "assertion_ids": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001"
+        "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
       ],
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-ANDROID-CURRENT-001",
@@ -420,32 +404,288 @@
       ],
       "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-001",
       "control_id": "CTRL-REBUILD-003"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-008"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "control_id": "CTRL-REBUILD-008"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-AUTOMATIC-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-005"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001",
+        "ARTDEF-KOTLIN-MAVEN-001",
+        "ARTDEF-RN-NPM-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "control_id": "CTRL-REBUILD-005"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-FAULT-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-MACOS-CURRENT-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-swift",
+      "argv": [
+        "make",
+        "test-swift"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "control_id": "CTRL-REBUILD-004"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-004"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001",
+        "ARTDEF-KOTLIN-MAVEN-001",
+        "ARTDEF-RN-NPM-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-conformance",
+      "argv": [
+        "make",
+        "test-conformance"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "control_id": "CTRL-REBUILD-004"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-FAULT-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-009"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-PAGE-REPLAY-001",
+      "control_id": "CTRL-REBUILD-009"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-009"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-PAGE-REPLAY-001",
+      "control_id": "CTRL-REBUILD-009"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-FAULT-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-010"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-SCOPE-ISOLATION-001",
+      "control_id": "CTRL-REBUILD-010"
+    },
+    {
+      "obligation_id": "OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-010"
+      ],
+      "assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-PERF-REBUILD-REQUESTS-SCOPE-ISOLATION-001",
+      "control_id": "CTRL-REBUILD-010"
     }
   ],
   "ownership": [
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-FAULT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-DURABLE-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-001",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-003",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
       "proof_type": "server-black-box",
-      "support_cell_id": "SUP-PG-018"
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-IOS-MIN-001",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
       "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-MIN-001"
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
@@ -459,57 +699,9 @@
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "requirement_id": "SYNC-REBUILD-003",
       "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-IOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-MACOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
@@ -538,22 +730,6 @@
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-IOS-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
       "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
       "proof_type": "native-e2e",
@@ -566,22 +742,6 @@
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
       "proof_type": "native-e2e",
       "support_cell_id": "SUP-RN-IOS-CURRENT-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
-      "requirement_id": "SYNC-REBUILD-003",
-      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-MIN-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-PERFORMANCE-001",
-      "proof_type": "native-e2e",
-      "support_cell_id": "SUP-RN-ANDROID-MIN-001"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
@@ -604,6 +764,214 @@
       "requirement_id": "SYNC-REBUILD-003",
       "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-CONTROL-001",
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-BOUNDARY-RM-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "reference-model",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-005",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-005",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-005",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-005",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-005",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-AUTOMATIC-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-MACOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-MACOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-IOS-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-IOS-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-RN-ANDROID-CURRENT-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+      "proof_type": "native-e2e",
+      "support_cell_id": "SUP-RN-ANDROID-CURRENT-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "proof_obligation_id": "OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-CONTROL-001",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
       "proof_type": "negative-control",
       "support_cell_id": null
     }
@@ -719,7 +1087,52 @@
               }
             ],
             "capture_dependencies": [],
-            "scope_rules": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items-rebuild-requests-001",
+                "relation": "public.items",
+                "membership_function": "synchro.scope_items",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-a\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  },
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-b",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-b\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  },
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-c",
+                      "table_id": "items",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-c\""
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
             "dependency_impacts": []
           },
           "stream": {
@@ -740,24 +1153,7 @@
               "retention_generation": 1
             }
           ],
-          "clients": [
-            {
-              "user_id": "user-a",
-              "client_id": "client-a",
-              "client_generation": 1,
-              "scope_set_version": 1,
-              "accepted_write_epoch": 0,
-              "last_cursor_acknowledged_at": null,
-              "assigned_scope_ids": [
-                "scope-a"
-              ],
-              "local_schema": {
-                "version": 1,
-                "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
-              },
-              "local_lifecycle": "local_ready"
-            }
-          ],
+          "clients": [],
           "write_policies": [
             {
               "user_id": "user-a",
@@ -795,6 +1191,111 @@
       }
     ]
   },
+  "native_identity_aliases": [
+    {
+      "kind": "schema",
+      "alias": "current-schema",
+      "value": {
+        "version": 1,
+        "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+      },
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-BEGIN-001",
+        "STEP-PERF-REBUILD-REQUESTS-003",
+        "STEP-PERF-REBUILD-REQUESTS-004",
+        "STEP-PERF-REBUILD-REQUESTS-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "client-generation",
+      "alias": "client-generation-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-BEGIN-001",
+        "STEP-PERF-REBUILD-REQUESTS-003",
+        "STEP-PERF-REBUILD-REQUESTS-004",
+        "STEP-PERF-REBUILD-REQUESTS-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope",
+      "alias": "scope-a",
+      "value": "scope-a",
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-ASSIGN-001",
+        "STEP-PERF-REBUILD-REQUESTS-BEGIN-001",
+        "STEP-PERF-REBUILD-REQUESTS-003",
+        "STEP-PERF-REBUILD-REQUESTS-APPLY-001",
+        "STEP-PERF-REBUILD-REQUESTS-004",
+        "STEP-PERF-REBUILD-REQUESTS-APPLY-002",
+        "STEP-PERF-REBUILD-REQUESTS-FINALIZE-001",
+        "STEP-PERF-REBUILD-REQUESTS-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "rebuild-id",
+      "alias": "rebuild-cycle",
+      "value": "00000000-0000-4000-8000-000000004003",
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-BEGIN-001",
+        "STEP-PERF-REBUILD-REQUESTS-003",
+        "STEP-PERF-REBUILD-REQUESTS-APPLY-001",
+        "STEP-PERF-REBUILD-REQUESTS-004",
+        "STEP-PERF-REBUILD-REQUESTS-APPLY-002",
+        "STEP-PERF-REBUILD-REQUESTS-FINALIZE-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "scope-set-version",
+      "alias": "scope-set-version-one",
+      "value": 1,
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-002"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "table",
+      "alias": "items-table",
+      "value": "items",
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-INITIAL-COMMIT-001",
+        "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "row-a-primary-key",
+      "value": "row-a",
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-INITIAL-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "row-b-primary-key",
+      "value": "row-b",
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-INITIAL-COMMIT-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "primary-key",
+      "alias": "row-c-primary-key",
+      "value": "row-c",
+      "step_ids": [
+        "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-COMMIT-001"
+      ],
+      "expectation_ids": []
+    }
+  ],
   "barrier_plan": {
     "barriers": [
       {
@@ -827,6 +1328,101 @@
           "defect": "use incremental resume or install unverified rows instead of authenticated snapshot-bound rebuild"
         }
       }
+    },
+    {
+      "id": "FPL-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "requirement_id": "SYNC-REBUILD-008",
+      "fault_id": "FAULT-REBUILD-008",
+      "control_id": "CTRL-REBUILD-008",
+      "barrier_id": "BAR-PERF-REBUILD-REQUESTS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "rebuild boundary candidate filter and post-final incremental pull",
+        "operator": "replace",
+        "parameters": {
+          "scenario": "write, delete, and change membership after boundary B before final cursor acknowledgement",
+          "defect": "include post-boundary effects in the snapshot or omit them from subsequent incremental delivery"
+        }
+      }
+    },
+    {
+      "id": "FPL-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "requirement_id": "SYNC-REBUILD-005",
+      "fault_id": "FAULT-REBUILD-005",
+      "control_id": "CTRL-REBUILD-005",
+      "barrier_id": "BAR-PERF-REBUILD-REQUESTS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "default server-required rebuild scheduler",
+        "operator": "delay",
+        "parameters": {
+          "scenario": "receive a scope rebuild request with default client configuration",
+          "defect": "wait indefinitely for application approval or app-owned orchestration"
+        }
+      }
+    },
+    {
+      "id": "FPL-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "requirement_id": "SYNC-REBUILD-004",
+      "fault_id": "FAULT-REBUILD-004",
+      "control_id": "CTRL-REBUILD-004",
+      "barrier_id": "BAR-PERF-REBUILD-REQUESTS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
+      ],
+      "injection": {
+        "mechanism": "process-fault",
+        "target": "rebuild page apply and verification journal",
+        "operator": "crash",
+        "parameters": {
+          "scenario": "kill the client between page apply and checksum or cursor commit",
+          "defect": "resume as completed without durable evidence for the partial state"
+        }
+      }
+    },
+    {
+      "id": "FPL-PERF-REBUILD-REQUESTS-PAGE-REPLAY-001",
+      "requirement_id": "SYNC-REBUILD-009",
+      "fault_id": "FAULT-REBUILD-009",
+      "control_id": "CTRL-REBUILD-009",
+      "barrier_id": "BAR-PERF-REBUILD-REQUESTS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001"
+      ],
+      "injection": {
+        "mechanism": "wire-fault",
+        "target": "stored first, intermediate, and final rebuild page replay",
+        "operator": "replay",
+        "parameters": {
+          "scenario": "repeat each valid rebuild page request with unchanged accepted-write epoch",
+          "defect": "create a new snapshot, query live state, alter ordinal or digest, or advance checkpoint on replay"
+        }
+      }
+    },
+    {
+      "id": "FPL-PERF-REBUILD-REQUESTS-SCOPE-ISOLATION-001",
+      "requirement_id": "SYNC-REBUILD-010",
+      "fault_id": "FAULT-REBUILD-010",
+      "control_id": "CTRL-REBUILD-010",
+      "barrier_id": "BAR-PERF-REBUILD-REQUESTS-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
+      ],
+      "injection": {
+        "mechanism": "state-fault",
+        "target": "rebuild session checkpoint writes",
+        "operator": "inject",
+        "parameters": {
+          "scenario": "page a rebuild for scope A while scope B has an incremental checkpoint and assignment version",
+          "defect": "change B state, A incremental checkpoint, or scope-set version before final-cursor pull acknowledgement"
+        }
+      }
     }
   ],
   "replay": {
@@ -850,30 +1446,196 @@
       "detected_by": [
         "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
       ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-008",
+      "requirement_id": "SYNC-REBUILD-008",
+      "fault_id": "FAULT-REBUILD-008",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-005",
+      "requirement_id": "SYNC-REBUILD-005",
+      "fault_id": "FAULT-REBUILD-005",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001",
+        "ARTDEF-KOTLIN-MAVEN-001",
+        "ARTDEF-RN-NPM-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-004",
+      "requirement_id": "SYNC-REBUILD-004",
+      "fault_id": "FAULT-REBUILD-004",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-SWIFT-SPM-001",
+        "ARTDEF-COCOAPODS-001",
+        "ARTDEF-KOTLIN-MAVEN-001",
+        "ARTDEF-RN-NPM-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-009",
+      "requirement_id": "SYNC-REBUILD-009",
+      "fault_id": "FAULT-REBUILD-009",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001"
+      ]
+    },
+    {
+      "control_id": "CTRL-REBUILD-010",
+      "requirement_id": "SYNC-REBUILD-010",
+      "fault_id": "FAULT-REBUILD-010",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001"
+      ]
     }
   ],
   "steps": [
     {
-      "id": "STEP-PERF-REBUILD-REQUESTS-001",
-      "phase": "exercise",
-      "transport": "http",
-      "description": "Execute the authored workload operation.",
+      "id": "STEP-PERF-REBUILD-REQUESTS-INITIAL-COMMIT-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit the two rows that form the immutable rebuild snapshot.",
+      "native_binding": {
+        "kind": "controller"
+      },
       "operation": {
-        "contract_operation": "connect",
-        "name": "send",
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-a",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-a\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-a\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"rebuild-snapshot-a\""
+                  }
+                ],
+                "version": "v1-a",
+                "checksum": "5abfa6424b69cac1bfb7b44c7d405e2644a804dff6a5a9ac331dacc042c65274",
+                "deleted": false
+              }
+            },
+            {
+              "event_ordinal": 2,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-b",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-b\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-b\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"rebuild-snapshot-b\""
+                  }
+                ],
+                "version": "v1-b",
+                "checksum": "f74abaf3f1613d591ea4881dcdd69c8ccfb867723c1515e98207526aef4ad9fb",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-INITIAL-MATERIALIZE-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the two snapshot rows before the first client request.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-ASSIGN-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Assign the authoritative scope before the fresh client connects.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "set-client-assignments",
         "payload": {
           "user_id": "user-a",
           "client_id": "client-a",
-          "runtime_version": 3,
-          "protocol_version": 3,
-          "client_generation": 1,
-          "schema_reset": false,
-          "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
-          },
-          "scope_set_version": 1,
-          "known_scopes": [
+          "assignments": [
             {
               "scope_id": "scope-a"
             }
@@ -885,10 +1647,310 @@
       }
     },
     {
-      "id": "STEP-PERF-REBUILD-REQUESTS-002",
+      "id": "STEP-PERF-REBUILD-REQUESTS-001",
       "phase": "exercise",
       "transport": "http",
       "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "begin",
+        "method": "start"
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": null,
+          "schema_reset": false,
+          "schema": {
+            "version": 0,
+            "hash": ""
+          },
+          "scope_set_version": 0,
+          "known_scopes": []
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-BEGIN-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Begin the first materialization rebuild before its first page request.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "await-step"
+      },
+      "operation": {
+        "contract_operation": "local",
+        "name": "begin-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "limit": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-003",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Execute the authored workload operation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "await-step"
+      },
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "cursor_source": "none",
+          "limit": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-COMMIT-001",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Commit one same-scope row after the first rebuild page.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20",
+          "end_lsn": "21",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005row-c",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"row-c\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"row-c\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"rebuild-concurrent-c\""
+                  }
+                ],
+                "version": "v2-c",
+                "checksum": "bb6ca0371f5ca2dabe23858f4fc8a548cc3d1e2b32880e4b9a4b11cd057af7eb",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-CONCURRENT-MATERIALIZE-001",
+      "phase": "exercise",
+      "transport": "process",
+      "description": "Materialize the concurrent row before requesting the final frozen page.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "20"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-APPLY-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the first immutable rebuild page after the concurrent source change materializes.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "await-step"
+      },
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "page_ordinal": 1,
+          "request_token_source": "none"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-004",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Request the final page through the staged continuation.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "await-step"
+      },
+      "operation": {
+        "contract_operation": "rebuild",
+        "name": "request-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "client_generation": 1,
+          "schema": {
+            "version": 1,
+            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+          },
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "cursor_source": "local_rebuild_continuation",
+          "limit": 1
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-APPLY-002",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Apply the final immutable rebuild page.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "await-step"
+      },
+      "operation": {
+        "contract_operation": "local",
+        "name": "apply-rebuild-page",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003",
+          "page_ordinal": 2,
+          "request_token_source": "local_rebuild_continuation"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-FINALIZE-001",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Finalize the verified two-page rebuild before incremental pull.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "await-step"
+      },
+      "operation": {
+        "contract_operation": "local",
+        "name": "finalize-rebuild",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "scope_id": "scope-a",
+          "rebuild_id": "00000000-0000-4000-8000-000000004003"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-REBUILD-REQUESTS-002",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Pull incremental changes after the first materialization rebuild completes.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "rebuild_cycle",
+        "stage": "await-call",
+        "completion": "idle"
+      },
       "operation": {
         "contract_operation": "pull",
         "name": "request-page",
@@ -904,36 +1966,10 @@
           "scopes": [
             {
               "scope_id": "scope-a",
-              "cursor_source": "none"
+              "cursor_source": "local_checkpoint"
             }
           ],
-          "limit": 100
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-REBUILD-REQUESTS-003",
-      "phase": "exercise",
-      "transport": "http",
-      "description": "Execute the authored workload operation.",
-      "operation": {
-        "contract_operation": "rebuild",
-        "name": "request-page",
-        "payload": {
-          "user_id": "user-a",
-          "client_id": "client-a",
-          "client_generation": 1,
-          "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
-          },
-          "scope_id": "scope-a",
-          "rebuild_id": "00000000-0000-4000-8000-000000004003",
-          "cursor_source": "none",
-          "limit": 100
+          "limit": 1
         }
       },
       "expected_outcome": {
@@ -960,6 +1996,14 @@
     },
     {
       "step_id": "STEP-PERF-REBUILD-REQUESTS-003",
+      "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
+      "contract_case": "rebuild_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-REBUILD-REQUESTS-004",
       "assertion_id": "ASSERT-PERF-REBUILD-REQUESTS-SEMANTIC-001",
       "contract_case": "rebuild_success",
       "http_status": 200,
@@ -1011,6 +2055,121 @@
         "observed_source": "system-under-test"
       },
       "detects_control_ids": []
+    },
+    {
+      "id": "ASSERT-PERF-REBUILD-REQUESTS-DURABLE-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-004"
+      ],
+      "description": "A restarted client preserves durable partial rebuild state, replays the terminal page, and avoids a false final state.",
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-004"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-REBUILD-REQUESTS-BOUNDARY-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-008"
+      ],
+      "description": "The rebuild-boundary control detects a post-boundary effect in the snapshot or missing from incremental delivery.",
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-008"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-REBUILD-REQUESTS-AUTOMATIC-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-005"
+      ],
+      "description": "A default client starts and completes the server-required rebuild without application approval or application-owned orchestration.",
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-005"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-REBUILD-REQUESTS-REPLAY-009-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-009"
+      ],
+      "description": "Repeated valid first, intermediate, and final requests return stored rebuild pages without new side effects.",
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-009"
+      ]
+    },
+    {
+      "id": "ASSERT-PERF-REBUILD-REQUESTS-ISOLATION-010-001",
+      "requirement_ids": [
+        "SYNC-REBUILD-010"
+      ],
+      "description": "Rebuild paging preserves incremental checkpoints, unrelated scope state, and the scope-set version before later pull acknowledgement.",
+      "expectation_ids": [
+        "EXPECT-PERF-REBUILD-REQUESTS-SEMANTIC-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-REBUILD-010"
+      ]
     }
   ]
 }

@@ -18,6 +18,7 @@ use crate::cursor_token::{
 };
 use crate::registry::qualified_relation_name;
 use crate::registry::TableRegistration;
+use crate::spi_helpers::decode_digest;
 use crate::stream_position::{load_materialized_boundary, StreamBoundary, StreamPosition};
 
 /// Pull scoped changes for a client using per-scope cursors.
@@ -66,6 +67,8 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
         );
 
         acquire_client_identity_lock(client, p_user_id, &request.client_id);
+        // The worker commits edges and this boundary together.
+        // The lock keeps terminal checksums at the selected boundary.
         client
             .update("LOCK TABLE sync_wal_progress IN SHARE MODE", None, &[])
             .unwrap_or_else(|error| pgrx::error!("locking materialization boundary: {}", error));
@@ -431,10 +434,10 @@ fn parse_scope_positions(
             }
             Ok(ParsedScopeCursor::Current(_)) => stale_scopes.push(scope_id.clone()),
             Ok(ParsedScopeCursor::Stale) => stale_scopes.push(scope_id.clone()),
-            Err(err) => {
+            Err(_) => {
                 return Err(protocol_error_response(
                     ProtocolErrorCode::InvalidRequest,
-                    format!("scope {scope_id} cursor is invalid: {err}"),
+                    "invalid scope cursor",
                     false,
                 ));
             }
@@ -545,7 +548,7 @@ fn acknowledge_scope_positions(
 }
 
 fn final_scope_checksums(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     scope_ids: &[String],
     has_more: bool,
 ) -> Result<Option<std::collections::BTreeMap<String, ChecksumObject>>, String> {
@@ -670,6 +673,7 @@ pub(crate) fn schema_hash_for_generation(
                  FROM synchro.sync_stream_resets
                  WHERE operation_kind = 'projection_bootstrap'
                    AND target_registry_generation = $1
+                   AND target_schema_hash IS NOT NULL
                    AND lifecycle IN ('preparing', 'baseline_staged', 'catching_up', 'activated')
              ) schema_reference
              ORDER BY registry_generation DESC, schema_version DESC
@@ -720,6 +724,17 @@ pub(crate) fn synced_row_digest(
     record_id: &str,
     server_version: &str,
 ) -> Result<Sha256Digest, String> {
+    let schema_hash = schema_hash_for_generation(client, table_reg.registry_generation)?;
+    synced_row_digest_with_schema_hash(table_reg, data, record_id, server_version, schema_hash)
+}
+
+fn synced_row_digest_with_schema_hash(
+    table_reg: &TableRegistration,
+    data: &serde_json::Value,
+    record_id: &str,
+    server_version: &str,
+    schema_hash: SchemaHash,
+) -> Result<Sha256Digest, String> {
     let mut canonical = data.clone();
     canonicalize_synced_row_data(table_reg, &mut canonical)?;
     let table = canonical_table(table_reg)?;
@@ -731,7 +746,6 @@ pub(crate) fn synced_row_digest(
             .map_err(|error| format!("encoding wire row: {error}"))?,
     )
     .map_err(|error| format!("canonical row is invalid: {error}"))?;
-    let schema_hash = schema_hash_for_generation(client, table_reg.registry_generation)?;
     row_digest(schema_hash, &table, &row, server_version)
         .map_err(|error| format!("computing row digest: {error}"))
 }
@@ -750,36 +764,72 @@ fn query_scope_candidates(
     boundary: &StreamBoundary,
     limit: i64,
 ) -> Result<Vec<PullCandidate>, String> {
+    let after_lsn = after.commit_lsn().unwrap_or_else(|| "0/0".to_string());
+    let boundary_lsn = boundary.position.commit_lsn();
     let malformed = client
         .select(
             "SELECT EXISTS (
                  SELECT 1
                  FROM sync_changelog
-                 WHERE bucket_id = $1
-                   AND (stream_generation IS NULL
-                        OR stream_generation = $2 AND (
-                            commit_lsn IS NULL
-                            OR event_ordinal IS NULL
-                            OR event_ordinal < 0
-                            OR effect_ordinal IS NULL
-                            OR effect_ordinal < 0
-                            OR relation_id IS NULL
-                            OR row_version IS NULL
-                            OR NOT EXISTS (
-                                SELECT 1
-                                FROM sync_wal_events event
-                                JOIN sync_wal_transactions transaction
-                                  ON transaction.stream_generation = event.stream_generation
-                                 AND transaction.commit_lsn = event.commit_lsn
-                                WHERE event.stream_generation = sync_changelog.stream_generation
-                                  AND event.commit_lsn = sync_changelog.commit_lsn
-                                  AND event.event_ordinal = sync_changelog.event_ordinal
-                                  AND event.relation_id = sync_changelog.relation_id
-                            )
-                        ))
-             ) AS malformed",
+                  WHERE bucket_id = $1
+                    AND (stream_generation IS NULL
+                         OR stream_generation = $2 AND (
+                             commit_lsn IS NULL
+                             OR (commit_lsn >= $3::pg_lsn
+                                 AND ($4::pg_lsn IS NULL OR commit_lsn <= $4::pg_lsn)
+                                 AND (event_ordinal IS NULL
+                                      OR event_ordinal < 0
+                                      OR effect_ordinal IS NULL
+                                      OR effect_ordinal < 0
+                                      OR relation_id IS NULL
+                                      OR row_version IS NULL
+                                      OR NOT EXISTS (
+                                          SELECT 1
+                                          FROM sync_wal_events event
+                                          JOIN sync_wal_transactions transaction
+                                            ON transaction.stream_generation = event.stream_generation
+                                           AND transaction.commit_lsn = event.commit_lsn
+                                           WHERE event.stream_generation = sync_changelog.stream_generation
+                                             AND event.commit_lsn = sync_changelog.commit_lsn
+                                             AND event.event_ordinal = sync_changelog.event_ordinal
+                                             AND (
+                                                 event.relation_id = sync_changelog.relation_id
+                                                  OR (
+                                                         EXISTS (
+                                                             SELECT 1
+                                                             FROM sync_captured_projections projection
+                                                             WHERE projection.stream_generation = sync_changelog.stream_generation
+                                                               AND projection.commit_lsn = sync_changelog.commit_lsn
+                                                               AND projection.event_ordinal = sync_changelog.event_ordinal
+                                                               AND projection.relation_id = sync_changelog.relation_id
+                                                               AND projection.record_id = sync_changelog.record_id
+                                                               AND projection.row_version = sync_changelog.row_version
+                                                               AND projection.image_kind = sync_changelog.projection_image
+                                                         )
+                                                         OR sync_changelog.projection_image IS NULL
+                                                            AND EXISTS (
+                                                                SELECT 1
+                                                                FROM sync_captured_rows captured
+                                                                WHERE captured.source_stream_generation = sync_changelog.stream_generation
+                                                                  AND captured.source_commit_lsn = sync_changelog.commit_lsn
+                                                                  AND captured.source_event_ordinal = sync_changelog.event_ordinal
+                                                                  AND captured.relation_id = sync_changelog.relation_id
+                                                                  AND captured.record_id = sync_changelog.record_id
+                                                                  AND captured.row_version = sync_changelog.row_version
+                                                                  AND NOT captured.deleted
+                                                            )
+                                                     )
+                                              )
+                                       )))
+                          ))
+               ) AS malformed",
             None,
-            &[scope_id.into(), boundary.stream_generation.as_str().into()],
+            &[
+                scope_id.into(),
+                boundary.stream_generation.as_str().into(),
+                after_lsn.as_str().into(),
+                boundary_lsn.as_deref().into(),
+            ],
         )
         .map_err(|error| format!("validating scope changelog: {error}"))?
         .first()
@@ -792,13 +842,10 @@ fn query_scope_candidates(
     let StreamPosition::TransactionEnd { .. } = boundary.position else {
         return Ok(Vec::new());
     };
-    let after_lsn = after.commit_lsn().unwrap_or_else(|| "0/0".to_string());
     let after_event = after.event_ordinal().unwrap_or(0);
     let after_effect = after.effect_ordinal().unwrap_or(0);
-    let boundary_lsn = boundary
-        .position
-        .commit_lsn()
-        .ok_or_else(|| "materialization boundary has no commit LSN".to_string())?;
+    let boundary_lsn =
+        boundary_lsn.ok_or_else(|| "materialization boundary has no commit LSN".to_string())?;
     let tup_table = client
         .select(
             "WITH eligible AS (
@@ -818,6 +865,7 @@ fn query_scope_candidates(
                   AND p.event_ordinal = c.event_ordinal
                   AND p.relation_id = c.relation_id
                   AND p.image_kind = c.projection_image
+                  AND p.record_id = c.record_id
                  WHERE c.bucket_id = $1
                    AND c.stream_generation = $2
                    AND c.commit_lsn IS NOT NULL
@@ -922,7 +970,12 @@ fn query_scope_candidates(
         let projection_checksum = row
             .get_by_name::<Vec<u8>, &str>("projection_checksum")
             .map_err(|_| "captured projection digest is malformed".to_string())?
-            .map(|bytes| decode_digest(bytes, "captured projection digest"))
+            .map(|bytes| {
+                decode_digest(
+                    bytes,
+                    "captured projection digest must contain exactly 32 octets",
+                )
+            })
             .transpose()?;
         let projection_row_version = row
             .get_by_name::<String, &str>("projection_row_version")
@@ -1023,6 +1076,9 @@ fn build_contract_changes(
     entries: &[RawChangelogEntry],
 ) -> Result<Vec<ChangeRecord>, String> {
     let mut changes = Vec::with_capacity(entries.len());
+    let mut registries_by_generation =
+        std::collections::HashMap::<i64, Vec<TableRegistration>>::new();
+    let mut schema_hashes_by_generation = std::collections::HashMap::<i64, SchemaHash>::new();
     for entry in entries {
         let table = registry
             .iter()
@@ -1057,20 +1113,40 @@ fn build_contract_changes(
                     entry.projection_registry_generation.ok_or_else(|| {
                         "pull upsert projection registry generation is missing".to_string()
                     })?;
-                let projection_table = crate::registry::load_registry_generation_from_client(
-                    client,
-                    projection_generation,
-                )
-                .map_err(|_| "pull upsert projection registry is unavailable".to_string())?
-                .into_iter()
-                .find(|candidate| candidate.table_name == entry.table_name)
-                .ok_or_else(|| "pull upsert projection table is unavailable".to_string())?;
-                let computed = synced_row_digest(
-                    client,
-                    &projection_table,
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    registries_by_generation.entry(projection_generation)
+                {
+                    entry.insert(
+                        crate::registry::load_registry_generation_from_client(
+                            client,
+                            projection_generation,
+                        )
+                        .map_err(|_| {
+                            "pull upsert projection registry is unavailable".to_string()
+                        })?,
+                    );
+                }
+                let projection_table = registries_by_generation
+                    .get(&projection_generation)
+                    .expect("projection registry generation was loaded")
+                    .iter()
+                    .find(|candidate| candidate.table_name == entry.table_name)
+                    .ok_or_else(|| "pull upsert projection table is unavailable".to_string())?;
+                let schema_hash = match schema_hashes_by_generation.get(&projection_generation) {
+                    Some(schema_hash) => *schema_hash,
+                    None => {
+                        let schema_hash =
+                            schema_hash_for_generation(client, projection_generation)?;
+                        schema_hashes_by_generation.insert(projection_generation, schema_hash);
+                        schema_hash
+                    }
+                };
+                let computed = synced_row_digest_with_schema_hash(
+                    projection_table,
                     &row,
                     &entry.record_id,
                     &server_version,
+                    schema_hash,
                 )?;
                 if computed != checksum {
                     return Err("pull upsert projection row digest does not match".to_string());
@@ -1104,20 +1180,41 @@ fn build_contract_changes(
                         entry.projection_registry_generation.ok_or_else(|| {
                             "pull delete projection registry generation is missing".to_string()
                         })?;
-                    let projection_table = crate::registry::load_registry_generation_from_client(
-                        client,
-                        projection_generation,
-                    )
-                    .map_err(|_| "pull delete projection registry is unavailable".to_string())?
-                    .into_iter()
-                    .find(|candidate| candidate.table_name == entry.table_name)
-                    .ok_or_else(|| "pull delete projection table is unavailable".to_string())?;
-                    let computed = synced_row_digest(
-                        client,
-                        &projection_table,
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        registries_by_generation.entry(projection_generation)
+                    {
+                        entry.insert(
+                            crate::registry::load_registry_generation_from_client(
+                                client,
+                                projection_generation,
+                            )
+                            .map_err(|_| {
+                                "pull delete projection registry is unavailable".to_string()
+                            })?,
+                        );
+                    }
+                    let projection_table = registries_by_generation
+                        .get(&projection_generation)
+                        .expect("projection registry generation was loaded")
+                        .iter()
+                        .find(|candidate| candidate.table_name == entry.table_name)
+                        .ok_or_else(|| "pull delete projection table is unavailable".to_string())?;
+                    let schema_hash = match schema_hashes_by_generation.get(&projection_generation)
+                    {
+                        Some(schema_hash) => *schema_hash,
+                        None => {
+                            let schema_hash =
+                                schema_hash_for_generation(client, projection_generation)?;
+                            schema_hashes_by_generation.insert(projection_generation, schema_hash);
+                            schema_hash
+                        }
+                    };
+                    let computed = synced_row_digest_with_schema_hash(
+                        projection_table,
                         &row,
                         &entry.record_id,
                         &server_version,
+                        schema_hash,
                     )?;
                     if computed != checksum {
                         return Err("pull delete projection row digest does not match".to_string());
@@ -1205,6 +1302,7 @@ pub(crate) fn hydrate_records(
         )
         .map_err(|error| format!("hydration failed for table {table_name}: {error}"))?;
 
+    let schema_hash = schema_hash_for_generation(client, table_reg.registry_generation)?;
     let mut records = Vec::new();
     for row in tup_table {
         let id: String = row
@@ -1232,8 +1330,9 @@ pub(crate) fn hydrate_records(
             .map_err(|error| format!("row {table_name}.{id} is invalid JSON: {error}"))?;
         canonicalize_synced_row_data(table_reg, &mut data)
             .map_err(|error| format!("row {table_name}.{id} is not canonical: {error}"))?;
-        let digest = synced_row_digest(client, table_reg, &data, &id, &row_version)
-            .map_err(|error| format!("row {table_name}.{id} digest failed: {error}"))?;
+        let digest =
+            synced_row_digest_with_schema_hash(table_reg, &data, &id, &row_version, schema_hash)
+                .map_err(|error| format!("row {table_name}.{id} digest failed: {error}"))?;
         let row_checksum = ChecksumObject::new(digest);
 
         let mut record = serde_json::json!({
@@ -1274,7 +1373,7 @@ pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias
                 ),
                 "date" => format!("to_jsonb(to_char({column}, 'YYYY-MM-DD'))"),
                 "time" => format!("to_jsonb(to_char({column}, 'HH24:MI:SS.US'))"),
-                "json" => format!("to_jsonb(({column})::text)"),
+                "json" => format!("to_jsonb(to_jsonb({column})::text)"),
                 "bytes" => format!(
                     "to_jsonb(translate(rtrim(replace(encode(({column})::bytea, 'base64'), E'\\n', ''), '='), '+/', '-_'))"
                 ),
@@ -1293,22 +1392,9 @@ pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias
 }
 
 pub(crate) fn compute_bucket_checksums(
-    client: &SpiClient<'_>,
+    client: &mut SpiClient<'_>,
     bucket_ids: &[String],
 ) -> Result<std::collections::HashMap<String, ChecksumObject>, String> {
-    let bucket_arr = bucket_ids.to_vec();
-    let tup_table = match client.select(
-        "SELECT bucket_id, relation_id::text AS relation_id, table_name, record_id, checksum \
-         FROM sync_bucket_edges \
-         WHERE bucket_id = ANY($1) \
-         ORDER BY bucket_id, table_name, record_id",
-        None,
-        &[bucket_arr.into()],
-    ) {
-        Ok(t) => t,
-        Err(_) => return Err("loading scope edges failed".to_string()),
-    };
-
     let registry = crate::registry::load_registry_from_client(client)
         .map_err(|_| "loading active registry for scope digest failed".to_string())?;
     let (schema_version, schema_hash) = get_latest_schema(client);
@@ -1317,64 +1403,201 @@ pub(crate) fn compute_bucket_checksums(
     }
     let schema_hash = SchemaHash::from_lower_hex(&schema_hash)
         .map_err(|error| format!("current immutable schema hash is invalid: {error}"))?;
-    let mut entries_by_scope: std::collections::BTreeMap<String, Vec<ScopeDigestEntry>> =
-        bucket_ids
-            .iter()
-            .cloned()
-            .map(|scope_id| (scope_id, Vec::new()))
-            .collect();
-    for row in tup_table {
-        let bid: String = row
-            .get_by_name::<String, &str>("bucket_id")
-            .map_err(|_| "scope edge bucket is malformed".to_string())?
-            .ok_or_else(|| "scope edge bucket is null".to_string())?;
-        let table_name = row
-            .get_by_name::<String, &str>("table_name")
-            .map_err(|_| "scope edge table is malformed".to_string())?
-            .ok_or_else(|| "scope edge table is null".to_string())?;
-        let relation_id = row
-            .get_by_name::<String, &str>("relation_id")
-            .map_err(|_| "scope edge relation identity is malformed".to_string())?
-            .ok_or_else(|| "scope edge relation identity is null".to_string())?;
-        let record_id = row
-            .get_by_name::<String, &str>("record_id")
-            .map_err(|_| "scope edge record identity is malformed".to_string())?
-            .ok_or_else(|| "scope edge record identity is null".to_string())?;
-        let digest = decode_digest(
-            row.get_by_name::<Vec<u8>, &str>("checksum")
-                .map_err(|_| "scope edge row digest is malformed".to_string())?
-                .ok_or_else(|| "scope edge row digest is null".to_string())?,
-            "scope edge row digest",
-        )?;
-        let table = registry
-            .iter()
-            .find(|table| table.relation_id == relation_id && table.table_name == table_name)
-            .ok_or_else(|| {
-                format!(
-                    "scope edge relation {relation_id:?} and table {table_name:?} are not registered together"
-                )
-            })?;
-        let primary_key_json = row_primary_key_json(table, &record_id)?;
-        let canonical_table = canonical_table(table)?;
-        let identity = row_identity(
-            &canonical_table,
-            &serde_json::to_string(&primary_key_json)
-                .map_err(|error| format!("encoding scope row identity: {error}"))?,
-        )
-        .map_err(|error| format!("computing scope row identity: {error}"))?;
-        entries_by_scope
-            .get_mut(&bid)
-            .ok_or_else(|| format!("scope edge belongs to an unknown scope {bid:?}"))?
-            .push(ScopeDigestEntry::new(identity, digest));
-    }
-    entries_by_scope
-        .into_iter()
-        .map(|(scope_id, entries)| {
+    let mut pending: std::collections::BTreeSet<String> = bucket_ids.iter().cloned().collect();
+    let mut checksums = std::collections::HashMap::with_capacity(pending.len());
+    let mut fill_attempts = 0;
+
+    while !pending.is_empty() {
+        let pending_ids = pending.iter().cloned().collect::<Vec<_>>();
+        let cache_rows = client
+            .select(
+                "SELECT scope_id, edge_change_xid::text AS edge_change_xid, schema_hash, digest
+                 FROM synchro.sync_scope_digest_cache
+                 WHERE scope_id = ANY($1)",
+                None,
+                &[pending_ids.into()],
+            )
+            .map_err(|_| "loading scope digest cache failed".to_string())?;
+        let mut cache_by_scope = std::collections::HashMap::with_capacity(cache_rows.len());
+        for row in cache_rows {
+            let scope_id = row
+                .get_by_name::<String, &str>("scope_id")
+                .map_err(|_| "scope digest cache scope is malformed".to_string())?
+                .ok_or_else(|| "scope digest cache scope is null".to_string())?;
+            let edge_change_xid = row
+                .get_by_name::<String, &str>("edge_change_xid")
+                .map_err(|_| "scope digest cache change identity is malformed".to_string())?
+                .ok_or_else(|| "scope digest cache change identity is null".to_string())?;
+            let cached_schema_hash = row
+                .get_by_name::<Vec<u8>, &str>("schema_hash")
+                .map_err(|_| "scope digest cache schema hash is malformed".to_string())?;
+            let cached_digest = row
+                .get_by_name::<Vec<u8>, &str>("digest")
+                .map_err(|_| "scope digest cache value is malformed".to_string())?;
+            cache_by_scope.insert(
+                scope_id,
+                (edge_change_xid, cached_schema_hash, cached_digest),
+            );
+        }
+
+        let mut misses = std::collections::BTreeMap::new();
+        for scope_id in &pending {
+            match cache_by_scope.get(scope_id) {
+                Some((_, Some(cached_schema_hash), Some(cached_digest)))
+                    if cached_schema_hash.as_slice() == schema_hash.as_bytes() =>
+                {
+                    let digest = decode_digest(
+                        cached_digest.clone(),
+                        "cached scope digest must contain exactly 32 octets",
+                    )?;
+                    checksums.insert(scope_id.clone(), ChecksumObject::new(digest));
+                }
+                Some((edge_change_xid, _, _)) => {
+                    misses.insert(scope_id.clone(), Some(edge_change_xid.clone()));
+                }
+                None => {
+                    misses.insert(scope_id.clone(), None);
+                }
+            }
+        }
+        if misses.is_empty() {
+            break;
+        }
+        if fill_attempts == 2 {
+            return Err("scope edges changed while computing digests".to_string());
+        }
+        fill_attempts += 1;
+
+        let miss_ids = misses.keys().cloned().collect::<Vec<_>>();
+        let edge_rows = client
+            .select(
+                "SELECT bucket_id, relation_id::text AS relation_id, table_name, record_id, checksum
+                 FROM synchro.sync_bucket_edges
+                 WHERE bucket_id = ANY($1)
+                 ORDER BY bucket_id, table_name, record_id",
+                None,
+                &[miss_ids.into()],
+            )
+            .map_err(|_| "loading scope edges failed".to_string())?;
+        let mut entries_by_scope: std::collections::BTreeMap<String, Vec<ScopeDigestEntry>> =
+            misses
+                .keys()
+                .cloned()
+                .map(|scope_id| (scope_id, Vec::new()))
+                .collect();
+        for row in edge_rows {
+            let scope_id = row
+                .get_by_name::<String, &str>("bucket_id")
+                .map_err(|_| "scope edge bucket is malformed".to_string())?
+                .ok_or_else(|| "scope edge bucket is null".to_string())?;
+            let table_name = row
+                .get_by_name::<String, &str>("table_name")
+                .map_err(|_| "scope edge table is malformed".to_string())?
+                .ok_or_else(|| "scope edge table is null".to_string())?;
+            let relation_id = row
+                .get_by_name::<String, &str>("relation_id")
+                .map_err(|_| "scope edge relation identity is malformed".to_string())?
+                .ok_or_else(|| "scope edge relation identity is null".to_string())?;
+            let record_id = row
+                .get_by_name::<String, &str>("record_id")
+                .map_err(|_| "scope edge record identity is malformed".to_string())?
+                .ok_or_else(|| "scope edge record identity is null".to_string())?;
+            let digest = decode_digest(
+                row.get_by_name::<Vec<u8>, &str>("checksum")
+                    .map_err(|_| "scope edge row digest is malformed".to_string())?
+                    .ok_or_else(|| "scope edge row digest is null".to_string())?,
+                "scope edge row digest must contain exactly 32 octets",
+            )?;
+            let table = registry
+                .iter()
+                .find(|table| table.relation_id == relation_id && table.table_name == table_name)
+                .ok_or_else(|| {
+                    format!(
+                        "scope edge relation {relation_id:?} and table {table_name:?} are not registered together"
+                    )
+                })?;
+            let primary_key_json = row_primary_key_json(table, &record_id)?;
+            let canonical_table = canonical_table(table)?;
+            let identity = row_identity(
+                &canonical_table,
+                &serde_json::to_string(&primary_key_json)
+                    .map_err(|error| format!("encoding scope row identity: {error}"))?,
+            )
+            .map_err(|error| format!("computing scope row identity: {error}"))?;
+            entries_by_scope
+                .get_mut(&scope_id)
+                .ok_or_else(|| format!("scope edge belongs to an unknown scope {scope_id:?}"))?
+                .push(ScopeDigestEntry::new(identity, digest));
+        }
+
+        let mut computed = std::collections::HashMap::with_capacity(misses.len());
+        let mut fills = Vec::with_capacity(misses.len());
+        for (scope_id, entries) in entries_by_scope {
             let digest = synchro_core::checksum::scope_digest(schema_hash, &scope_id, &entries)
                 .map_err(|error| format!("computing scope {scope_id:?} digest: {error}"))?;
-            Ok((scope_id, ChecksumObject::new(digest)))
-        })
-        .collect()
+            fills.push(serde_json::json!({
+                "scope_id": scope_id.as_str(),
+                "edge_change_xid": misses.get(&scope_id).expect("cache miss scope"),
+                "schema_hash": schema_hash.to_lower_hex(),
+                "digest": digest.to_lower_hex(),
+            }));
+            computed.insert(scope_id, ChecksumObject::new(digest));
+        }
+        let installed = client
+            .update(
+                "WITH input AS (
+                     SELECT scope_id, edge_change_xid, schema_hash, digest
+                     FROM jsonb_to_recordset($1::jsonb) AS fill(
+                         scope_id text, edge_change_xid text, schema_hash text, digest text
+                     )
+                 ), updated AS (
+                     UPDATE synchro.sync_scope_digest_cache AS cache
+                     SET schema_hash = decode(input.schema_hash, 'hex'),
+                         digest = decode(input.digest, 'hex')
+                     FROM input
+                     WHERE input.edge_change_xid IS NOT NULL
+                       AND cache.scope_id = input.scope_id
+                       AND cache.edge_change_xid = input.edge_change_xid::xid8
+                     RETURNING cache.scope_id
+                 ), inserted AS (
+                     INSERT INTO synchro.sync_scope_digest_cache (
+                         scope_id, edge_change_xid, schema_hash, digest
+                     )
+                     SELECT input.scope_id, pg_current_xact_id(),
+                            decode(input.schema_hash, 'hex'), decode(input.digest, 'hex')
+                     FROM input
+                     WHERE input.edge_change_xid IS NULL
+                     ON CONFLICT (scope_id) DO NOTHING
+                     RETURNING scope_id
+                 )
+                 SELECT scope_id FROM updated
+                 UNION ALL
+                 SELECT scope_id FROM inserted",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(fills)).into()],
+            )
+            .map_err(|_| "storing scope digest cache failed".to_string())?;
+        let mut installed_scopes = std::collections::HashSet::with_capacity(installed.len());
+        for row in installed {
+            let scope_id = row
+                .get_by_name::<String, &str>("scope_id")
+                .map_err(|_| "stored scope digest cache key is malformed".to_string())?
+                .ok_or_else(|| "stored scope digest cache key is null".to_string())?;
+            installed_scopes.insert(scope_id);
+        }
+        for scope_id in &installed_scopes {
+            let checksum = computed
+                .remove(scope_id)
+                .ok_or_else(|| format!("stored an unknown scope digest {scope_id:?}"))?;
+            checksums.insert(scope_id.clone(), checksum);
+        }
+        pending = misses
+            .into_keys()
+            .filter(|scope_id| !installed_scopes.contains(scope_id))
+            .collect();
+    }
+
+    Ok(checksums)
 }
 
 pub(crate) fn contract_pk_value(
@@ -1391,13 +1614,6 @@ pub(crate) fn contract_pk_value(
     let mut object = serde_json::Map::new();
     object.insert(table.primary_key_field_id.clone(), value);
     serde_json::Value::Object(object)
-}
-
-fn decode_digest(bytes: Vec<u8>, name: &str) -> Result<Sha256Digest, String> {
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| format!("{name} must contain exactly 32 octets"))?;
-    Ok(Sha256Digest::from_bytes(bytes))
 }
 
 /// Double-quote a SQL identifier, escaping internal double quotes.

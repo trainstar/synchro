@@ -1,0 +1,21 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1905,6 +1905,8 @@ fn accepted_evaluation(
+ }
+ 
+ fn replayed_mutation(mutation: &Mutation, stored: &StoredMutation) -> EvaluatedMutation {
++    let mut outcome = stored.outcome.clone();
++    outcome["outcome_schema"] = serde_json::Value::Null;
+     let accepted = stored
+         .outcome
+         .get("status")
+@@ -1912,7 +1914,7 @@ fn replayed_mutation(mutation: &Mutation, stored: &StoredMutation) -> Evaluated
+         == Some("applied");
+     EvaluatedMutation {
+         mutation: mutation.clone(),
+-        outcome: stored.outcome.clone(),
++        outcome,
+         accepted,
+         new_write: false,
+         outcome_schema: stored.outcome_schema.clone(),

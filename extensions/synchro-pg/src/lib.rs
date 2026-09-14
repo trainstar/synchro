@@ -5,6 +5,7 @@ use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
 mod bgworker;
 mod bucketing;
+mod build_fingerprint;
 mod client;
 mod compaction;
 mod cursor_token;
@@ -17,7 +18,9 @@ mod rebuild;
 mod rebuild_token;
 mod registry;
 mod schema;
+mod scope_digest;
 mod seed_token;
+mod spi_helpers;
 mod stream_position;
 mod stream_reset;
 mod wal_decoder;
@@ -40,9 +43,15 @@ CREATE TABLE IF NOT EXISTS sync_runtime_state (
     stream_generation TEXT NOT NULL,
     cursor_secret TEXT NOT NULL,
     active_slot_name NAME,
+    active_publication_name NAME,
+    active_publication_oid OID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_name NAME;
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_oid OID;
 INSERT INTO sync_runtime_state (singleton, stream_generation, cursor_secret)
 VALUES (
     true,
@@ -50,6 +59,12 @@ VALUES (
     replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '')
 )
 ON CONFLICT (singleton) DO NOTHING;
+
+CREATE TABLE sync_extension_build (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    installed_fingerprint TEXT NOT NULL CHECK (installed_fingerprint ~ '^[0-9a-f]{64}$'),
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE sync_token_keys (
     key_id TEXT PRIMARY KEY,
@@ -100,6 +115,62 @@ SELECT stream_generation, 'active', true, now()
 FROM sync_runtime_state
 WHERE singleton = true
   AND NOT EXISTS (SELECT 1 FROM sync_registry_generations);
+
+-- Keep activation requests durable until an initial slot binding can replay them.
+CREATE TABLE IF NOT EXISTS sync_registry_activation_requests (
+    registry_generation BIGINT PRIMARY KEY
+        REFERENCES sync_registry_generations(generation) ON DELETE CASCADE,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    emitted_at TIMESTAMPTZ
+);
+
+CREATE OR REPLACE FUNCTION synchro_replay_registry_activation_requests()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+DECLARE
+    request RECORD;
+BEGIN
+    IF OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL THEN
+        FOR request IN
+            SELECT activation.registry_generation
+            FROM sync_registry_activation_requests activation
+            JOIN sync_registry_generations generation
+              ON generation.generation = activation.registry_generation
+             AND generation.state = 'pending'
+             AND generation.validated
+            ORDER BY activation.registry_generation
+            FOR UPDATE OF activation
+        LOOP
+            PERFORM pg_logical_emit_message(
+                true,
+                'synchro_registry',
+                convert_to(
+                    format(
+                        '{"generation":%s,"action":"activate"}',
+                        request.registry_generation
+                    ),
+                    'UTF8'
+                )
+            );
+            UPDATE sync_registry_activation_requests
+            SET emitted_at = now()
+            WHERE registry_generation = request.registry_generation;
+        END LOOP;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS synchro_replay_registry_activation_requests
+    ON sync_runtime_state;
+CREATE TRIGGER synchro_replay_registry_activation_requests
+AFTER UPDATE OF active_slot_name ON sync_runtime_state
+FOR EACH ROW
+WHEN (OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL)
+EXECUTE FUNCTION synchro_replay_registry_activation_requests();
 
 CREATE TABLE IF NOT EXISTS sync_logical_ids (
     logical_id UUID PRIMARY KEY,
@@ -176,6 +247,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     field_id UUID NOT NULL REFERENCES sync_logical_ids(logical_id),
     physical_column NAME NOT NULL,
     portable_type TEXT NOT NULL,
+    native_json BOOLEAN NOT NULL,
     decimal_precision INTEGER,
     decimal_scale INTEGER,
     nullable BOOLEAN NOT NULL,
@@ -186,6 +258,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     FOREIGN KEY (registry_generation, relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     CHECK (NOT primary_key OR (NOT nullable AND NOT writable)),
+    CHECK (NOT native_json OR portable_type = 'json'),
     CHECK (
         (portable_type = 'decimal' AND decimal_precision > 0 AND decimal_scale >= 0 AND decimal_scale <= decimal_precision)
         OR (portable_type <> 'decimal' AND decimal_precision IS NULL AND decimal_scale IS NULL)
@@ -278,6 +351,7 @@ CREATE TABLE sync_registry_membership_stages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     activated_at TIMESTAMPTZ,
     CHECK (source_registry_generation < registry_generation),
+    CHECK (affected_scopes IS NULL OR cardinality(affected_scopes) > 0),
     CHECK (
         (state = 'pending'
          AND stream_generation IS NULL
@@ -285,7 +359,6 @@ CREATE TABLE sync_registry_membership_stages (
          AND activation_end_lsn IS NULL
          AND staged_record_count IS NULL
          AND staged_edge_count IS NULL
-         AND affected_scopes IS NULL
          AND NOT verified
          AND activated_at IS NULL)
         OR
@@ -582,6 +655,17 @@ CREATE TABLE IF NOT EXISTS sync_shared_scopes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A granted scope belongs to one user and can be revoked from that user. An
+-- identity scope is unconditional and a shared scope belongs to every user, so
+-- neither expresses an assignment that changes.
+CREATE TABLE IF NOT EXISTS sync_user_scopes (
+    user_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    assigned BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, scope_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_scope_state (
     scope_id TEXT PRIMARY KEY,
     stream_generation TEXT NOT NULL,
@@ -611,6 +695,69 @@ CREATE TABLE IF NOT EXISTS sync_bucket_edges (
     PRIMARY KEY (table_name, record_id, bucket_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sync_bucket_edges_bucket ON sync_bucket_edges (bucket_id, table_name, record_id);
+
+CREATE TABLE IF NOT EXISTS sync_scope_digest_cache (
+    scope_id TEXT PRIMARY KEY,
+    edge_change_xid XID8 NOT NULL,
+    schema_hash BYTEA CHECK (schema_hash IS NULL OR octet_length(schema_hash) = 32),
+    digest BYTEA CHECK (digest IS NULL OR octet_length(digest) = 32),
+    CHECK ((schema_hash IS NULL) = (digest IS NULL))
+);
+
+CREATE OR REPLACE FUNCTION sync_lock_scope_digest_boundary()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    LOCK TABLE synchro.sync_wal_progress IN ROW EXCLUSIVE MODE;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sync_invalidate_scope_digest()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        INSERT INTO synchro.sync_scope_digest_cache AS cache (scope_id, edge_change_xid)
+        VALUES (OLD.bucket_id, pg_current_xact_id())
+        ON CONFLICT (scope_id) DO UPDATE
+        SET edge_change_xid = EXCLUDED.edge_change_xid,
+            schema_hash = NULL,
+            digest = NULL
+        WHERE cache.edge_change_xid <> EXCLUDED.edge_change_xid
+           OR cache.digest IS NOT NULL;
+    END IF;
+
+    IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.bucket_id IS DISTINCT FROM OLD.bucket_id) THEN
+        INSERT INTO synchro.sync_scope_digest_cache AS cache (scope_id, edge_change_xid)
+        VALUES (NEW.bucket_id, pg_current_xact_id())
+        ON CONFLICT (scope_id) DO UPDATE
+        SET edge_change_xid = EXCLUDED.edge_change_xid,
+            schema_hash = NULL,
+            digest = NULL
+        WHERE cache.edge_change_xid <> EXCLUDED.edge_change_xid
+           OR cache.digest IS NOT NULL;
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sync_lock_scope_digest_boundary ON sync_bucket_edges;
+CREATE TRIGGER sync_lock_scope_digest_boundary
+BEFORE INSERT OR UPDATE OR DELETE ON sync_bucket_edges
+FOR EACH STATEMENT EXECUTE FUNCTION sync_lock_scope_digest_boundary();
+
+DROP TRIGGER IF EXISTS sync_invalidate_scope_digest ON sync_bucket_edges;
+CREATE TRIGGER sync_invalidate_scope_digest
+AFTER INSERT OR UPDATE OR DELETE ON sync_bucket_edges
+FOR EACH ROW EXECUTE FUNCTION sync_invalidate_scope_digest();
 
 CREATE TABLE IF NOT EXISTS sync_rule_failures (
     id BIGSERIAL PRIMARY KEY,
@@ -1277,6 +1424,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
         'truncate_unsupported',
         'registered_relation_drift'
     )),
+    failure_detail TEXT NOT NULL CHECK (
+        octet_length(failure_detail) BETWEEN 1 AND 512
+    ),
     relation_id UUID,
     lifecycle TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active', 'repaired', 'reset')),
     poisoned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1285,8 +1435,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
     attempt_count BIGINT NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
     CHECK ((lifecycle = 'active') = (resolved_at IS NULL))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_wal_one_active_poison
-    ON sync_wal_poison ((lifecycle)) WHERE lifecycle = 'active';
+DROP INDEX IF EXISTS idx_sync_wal_one_active_poison;
+CREATE UNIQUE INDEX idx_sync_wal_one_active_poison
+    ON sync_wal_poison (stream_generation) WHERE lifecycle = 'active';
 
 CREATE TABLE IF NOT EXISTS sync_wal_worker_state (
     worker_id TEXT PRIMARY KEY,
@@ -1434,7 +1585,13 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
        ) THEN
         RETURN OLD;
     END IF;
@@ -1476,7 +1633,24 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
+       ) THEN
+        RETURN OLD;
+    END IF;
+    IF TG_OP = 'DELETE'
+       AND EXISTS (
+           SELECT 1
+           FROM sync_registry_membership_stages stage
+           WHERE stage.registry_generation::text = NULLIF(
+                     current_setting('synchro.membership_activation_generation', true), ''
+                 )
+             AND stage.state = 'pending'
        ) THEN
         RETURN OLD;
     END IF;
@@ -1781,8 +1955,17 @@ BEGIN
     ALTER ROLE synchro_monitor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+
+    -- Backfill and worker materialization stage edges in transaction-local tables.
+    EXECUTE pg_catalog.format(
+        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner, synchro_worker',
+        pg_catalog.current_database()
+    );
 END
 $roles$;
+
+INSERT INTO synchro.sync_extension_build (singleton, installed_fingerprint)
+VALUES (true, synchro.synchro_build_fingerprint());
 
 CREATE SCHEMA IF NOT EXISTS synchro_projection;
 ALTER SCHEMA synchro_projection OWNER TO synchro_owner;
@@ -1863,20 +2046,32 @@ BEGIN
         grantee := CASE
             WHEN function_record.proname IN (
                 'synchro_contract_info', 'synchro_connect', 'synchro_pull', 'synchro_push',
-                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness'
+                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness',
+                'synchro_build_fingerprint'
             ) THEN 'synchro_adapter'
-            WHEN function_record.proname IN (
-                'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
-            ) THEN 'synchro_seed'
-            WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
-            THEN 'synchro_monitor'
-            WHEN function_record.proname IN (
+             WHEN function_record.proname IN (
+                 'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
+             ) THEN 'synchro_seed'
+             WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
+             THEN 'synchro_monitor'
+             WHEN function_record.proname IN (
+                 'synchro_projection_bootstrap_active_stream',
+                 'synchro_projection_bootstrap_main_boundary',
+                 'synchro_projection_bootstrap_slot_absent',
+                  'synchro_projection_bootstrap_slot_drop_state',
+                 'synchro_projection_bootstrap_next_aborted_slot',
+                 'synchro_projection_bootstrap_is_activated',
+                 'synchro_projection_bootstrap_interrupted'
+             ) THEN 'synchro_worker'
+             WHEN function_record.proname IN (
                 'synchro_register_table', 'synchro_register_capture_dependency',
                 'synchro_prepare_projection_view',
-                'synchro_register_membership_dependency',
-                'synchro_unregister_table', 'synchro_register_shared_scope',
-                'synchro_unregister_shared_scope', 'synchro_backfill_bucket_edges',
-                 'synchro_compact', 'synchro_retry_wal_poison', 'synchro_health_detail',
+                 'synchro_register_membership_dependency',
+                 'synchro_unregister_table', 'synchro_register_shared_scope',
+                 'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
+                 'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
+                  'synchro_compact', 'synchro_inject_client_retention_expiry',
+                 'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
                  'synchro_prepare_stream_reset', 'synchro_lock_stream_reset_sources',
                  'synchro_mark_stream_reset_snapshot',
@@ -1889,7 +2084,7 @@ BEGIN
                  'synchro_activate_projection_bootstrap',
                  'synchro_projection_bootstrap_status',
                  'synchro_abort_projection_bootstrap',
-                 'synchro_complete_projection_bootstrap_cleanup'
+                  'synchro_complete_projection_bootstrap_cleanup'
              ) THEN 'synchro_operator'
             ELSE NULL
         END;
@@ -1913,6 +2108,9 @@ BEGIN
         IF function_record.proname = 'synchro_health_detail' THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
         END IF;
+        IF function_record.proname = 'synchro_projection_bootstrap_slot_drop_state' THEN
+            EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
+        END IF;
     END LOOP;
 END
 $function_grants$;
@@ -1934,7 +2132,7 @@ GRANT SELECT, INSERT, UPDATE ON synchro.sync_captured_projections TO synchro_wor
 GRANT SELECT, INSERT ON synchro.sync_capture_dependency_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_current_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_clients, synchro.sync_client_checkpoints,
-    synchro.sync_shared_scopes TO synchro_worker;
+    synchro.sync_shared_scopes, synchro.sync_user_scopes TO synchro_worker;
 GRANT DELETE ON synchro.sync_client_checkpoints TO synchro_worker;
 GRANT SELECT, INSERT, UPDATE ON synchro.sync_scope_state,
     synchro.sync_schema_manifest TO synchro_worker;
@@ -1949,6 +2147,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON synchro.sync_stream_reset_captured_rows,
 GRANT SELECT, INSERT, DELETE ON synchro.sync_stream_reset_membership_edges,
     synchro.sync_stream_reset_scope_digests TO synchro_worker;
 GRANT SELECT ON synchro.sync_stream_reset_fence_coverage TO synchro_worker;
+-- A membership activation invalidates the rebuild state of every affected
+-- scope. The worker performs that invalidation, so it deletes rebuild pages
+-- and staged rows through their sessions, and then the sessions themselves.
+GRANT SELECT, DELETE ON synchro.sync_rebuild_sessions,
+    synchro.sync_rebuild_pages, synchro.sync_rebuild_staged_rows TO synchro_worker;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA synchro TO synchro_worker;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro REVOKE ALL ON TABLES FROM PUBLIC;
@@ -1964,13 +2167,13 @@ ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro REVOKE USAGE O
 // GUC settings (readable from all modules via crate::*)
 // ---------------------------------------------------------------------------
 
-/// Name of the logical replication slot. Defaults to "synchro_slot" when NULL.
+/// Name of the logical replication slot.
 pub(crate) static REPLICATION_SLOT_GUC: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+    GucSetting::<Option<CString>>::new(Some(c"synchro_slot"));
 
-/// Name of the WAL publication. Defaults to "synchro_pub" when NULL.
+/// Name of the WAL publication.
 pub(crate) static PUBLICATION_NAME_GUC: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+    GucSetting::<Option<CString>>::new(Some(c"synchro_pub"));
 
 /// Database the WAL background worker should connect to.
 pub(crate) static DATABASE_GUC: GucSetting<Option<CString>> =
@@ -1984,13 +2187,17 @@ pub(crate) static WORKER_LOGIN_GUC: GucSetting<Option<CString>> =
 pub(crate) static AUTO_START_GUC: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Maximum accepted age of the WAL worker heartbeat, in seconds.
-pub(crate) static MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC: GucSetting<i32> = GucSetting::<i32>::new(0);
+// Thirty seconds tolerates transient scheduling delays across 30 one-second worker polling cycles.
+pub(crate) static MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC: GucSetting<i32> =
+    GucSetting::<i32>::new(30);
 
 /// Maximum accepted difference between current WAL and acknowledged WAL, in bytes.
-pub(crate) static MAX_WAL_LAG_BYTES_GUC: GucSetting<i32> = GucSetting::<i32>::new(0);
+// Sixty-four MiB absorbs brief write bursts while bounding unacknowledged WAL growth.
+pub(crate) static MAX_WAL_LAG_BYTES_GUC: GucSetting<i32> = GucSetting::<i32>::new(67_108_864);
 
 /// Maximum accepted age of the oldest unmaterialized registered write, in seconds.
-pub(crate) static MAX_WAL_LAG_SECONDS_GUC: GucSetting<i32> = GucSetting::<i32>::new(0);
+// Thirty seconds permits brief materialization bursts while detecting sustained capture delay.
+pub(crate) static MAX_WAL_LAG_SECONDS_GUC: GucSetting<i32> = GucSetting::<i32>::new(30);
 
 pub(crate) fn configured_worker_login() -> Option<String> {
     WORKER_LOGIN_GUC
@@ -2377,6 +2584,8 @@ mod tests {
             )?;
 
             crate::schema::publish_schema_manifest(client)?;
+            crate::materialize::migrate_schema_digests(client, source_generation)
+                .expect("migrate test membership digests");
             Ok::<_, spi::Error>(())
         })
         .unwrap();
@@ -2672,8 +2881,7 @@ mod tests {
     }
 
     fn push_mutation(
-        user_id: &str,
-        client_id: &str,
+        client: (&str, &str),
         mutation_label: &str,
         table_name: &str,
         operation: &str,
@@ -2681,6 +2889,7 @@ mod tests {
         base_version: Option<&str>,
         columns: Option<&[(&str, Value)]>,
     ) -> Value {
+        let (user_id, client_id) = client;
         let mut pk = serde_json::Map::new();
         pk.insert(
             primary_key_field_id(table_name),

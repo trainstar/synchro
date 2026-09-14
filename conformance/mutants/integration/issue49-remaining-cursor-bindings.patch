@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/cursor_token.rs b/extensions/synchro-pg/src/cursor_token.rs
+--- a/extensions/synchro-pg/src/cursor_token.rs
++++ b/extensions/synchro-pg/src/cursor_token.rs
+@@ -146,7 +146,7 @@ pub(crate) fn parse_scope_cursor(
+     let key = load_verification_key(client, &payload.key_id)?;
+     verify(&key.secret, &payload_bytes, &signature)?;
+     if payload.user_binding != context.user_binding
+-        || payload.client_binding != context.client_binding
++        || context.client_binding.is_empty()
+         || payload.client_generation != context.client_generation
+         || payload.scope_id != context.scope_id
+         || payload.schema_hash != context.schema_hash

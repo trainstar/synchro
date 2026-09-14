@@ -12,11 +12,12 @@
     "request": {
       "client_id": "ios-device-unsupported",
       "platform": "ios",
-      "app_version": "0.9.0",
-      "protocol_version": 1,
+      "app_version": "0.3.0",
+      "client_generation": 1,
+      "protocol_version": 3,
       "schema": {
         "version": 4,
-        "hash": "deadbeef"
+        "hash": "deadbeef00000000000000000000000000000000000000000000000000000000"
       },
       "scope_set_version": 2,
       "known_scopes": {}
@@ -25,17 +26,20 @@
   "expected": {
     "response": {
       "server_time": "2026-03-20T18:22:11Z",
-      "protocol_version": 1,
+      "protocol_version": 3,
+      "client_generation": 1,
       "scope_set_version": 2,
       "schema": {
         "version": 9,
-        "hash": "9f4ea2bc",
-        "action": "unsupported"
+        "hash": "9f4ea2bc00000000000000000000000000000000000000000000000000000000",
+        "action": "unsupported",
+        "reason": "unknown_schema_lineage"
       },
       "scopes": {
         "add": [],
         "remove": []
-      }
+      },
+      "scope_cursor_updates": {}
     },
     "assertions": [
       "response.schema.action must equal unsupported",

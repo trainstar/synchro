@@ -25,7 +25,7 @@ const (
 	artifactSchemaURI     = "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json"
 	performanceSchemaURI  = "https://synchro.dev/conformance/schemas/performance-budgets-v2.schema.json"
 
-	lockedPerformanceDigest = "b5ea8bf7d4e12ebc1c11e20d15e2f33d34ec1a23978eceed0b38d7105118b800"
+	lockedPerformanceDigest = "cd29425e0cd55e4e8c27a5c36fb185a253396541f2561a76c52564e158cd6d50"
 )
 
 var lockedSupportCells = map[SupportCellID]supportTuple{
@@ -33,17 +33,22 @@ var lockedSupportCells = map[SupportCellID]supportTuple{
 	"SUP-PG-015":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "15"}, policy: "excluded"},
 	"SUP-PG-016":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "16"}, policy: "excluded"},
 	"SUP-PG-017":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "17"}, policy: "excluded"},
-	"SUP-PG-018":                 {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, policy: "required"},
+	"SUP-PG-LINUX-X64-001":       {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, extensionArchitecture: "linux-x64", policy: "required"},
+	"SUP-PG-MACOS-ARM64-001":     {component: "postgresql-server", platform: "postgresql", platformVersion: versionTuple{kind: "exact", value: "18"}, policy: "excluded"},
 	"SUP-IOS-MIN-001":            {component: "swift-client", platform: "ios", platformVersion: versionTuple{kind: "minimum", value: "16"}, policy: "required"},
 	"SUP-IOS-CURRENT-001":        {component: "swift-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
-	"SUP-MACOS-MIN-001":          {component: "swift-client", platform: "macos", platformVersion: versionTuple{kind: "minimum", value: "13"}, policy: "required"},
-	"SUP-MACOS-CURRENT-001":      {component: "swift-client", platform: "macos", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
+	"SUP-MACOS-CURRENT-001":      {component: "swift-client", platform: "macos", platformVersion: versionTuple{kind: "current-stable"}, policy: "tested"},
 	"SUP-ANDROID-MIN-001":        {component: "kotlin-client", platform: "android", platformVersion: versionTuple{kind: "minimum", value: "24"}, policy: "required"},
 	"SUP-ANDROID-CURRENT-001":    {component: "kotlin-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
-	"SUP-RN-IOS-MIN-001":         {component: "react-native-client", platform: "ios", platformVersion: versionTuple{kind: "minimum", value: "16"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
 	"SUP-RN-IOS-CURRENT-001":     {component: "react-native-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
-	"SUP-RN-ANDROID-MIN-001":     {component: "react-native-client", platform: "android", platformVersion: versionTuple{kind: "minimum", value: "24"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
 	"SUP-RN-ANDROID-CURRENT-001": {component: "react-native-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
+}
+
+var lockedSemanticCorpusCellIDs = []SupportCellID{
+	"SUP-MACOS-CURRENT-001",
+	"SUP-ANDROID-CURRENT-001",
+	"SUP-RN-IOS-CURRENT-001",
+	"SUP-RN-ANDROID-CURRENT-001",
 }
 
 var lockedArtifactRoles = map[ArtifactInventoryID]string{
@@ -52,6 +57,7 @@ var lockedArtifactRoles = map[ArtifactInventoryID]string{
 	"ARTDEF-PG-SQL-001":             "pg-install-sql",
 	"ARTDEF-ADAPTER-001":            "adapter",
 	"ARTDEF-SEED-TOOL-001":          "seed-tool",
+	"ARTDEF-GO-MODULE-001":          "go-module",
 	"ARTDEF-SWIFT-SPM-001":          "swift-spm",
 	"ARTDEF-COCOAPODS-001":          "cocoapods",
 	"ARTDEF-KOTLIN-MAVEN-001":       "kotlin-maven",
@@ -65,16 +71,21 @@ type versionTuple struct {
 }
 
 type supportTuple struct {
-	component       string
-	platform        string
-	platformVersion versionTuple
-	runtimeVersion  versionTuple
-	policy          string
+	component             string
+	platform              string
+	platformVersion       versionTuple
+	runtimeVersion        versionTuple
+	extensionArchitecture string
+	policy                string
 }
 
 var lockedBudgetTriples = map[BudgetID]budgetTriple{
 	"BUD-WARM-CONNECT-001":             {"warm_connect_http_requests", "eq", "1"},
-	"BUD-WARM-CONNECT-NONCONNECT-001":  {"warm_connect_non_connect_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-PULL-001":        {"warm_connect_pull_http_requests", "eq", "1"},
+	"BUD-WARM-CONNECT-PUSH-001":        {"warm_connect_push_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-REBUILD-001":     {"warm_connect_rebuild_page_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-SCHEMA-001":      {"warm_connect_schema_fetch_http_requests", "eq", "0"},
+	"BUD-WARM-CONNECT-OTHER-001":       {"warm_connect_other_http_requests", "eq", "0"},
 	"BUD-STEADY-PULL-001":              {"steady_state_pull_http_requests_per_cycle", "eq", "1"},
 	"BUD-STEADY-PULL-NONPULL-001":      {"steady_state_pull_non_pull_http_requests_per_cycle", "eq", "0"},
 	"BUD-PENDING-PUSH-001":             {"pending_cycle_push_http_requests", "eq", "1"},
@@ -544,15 +555,22 @@ func validateApplicability(requirement Requirement) error {
 
 func validateSupportMatrix(matrix SupportMatrix) []error {
 	var failures []error
-	if matrix.CurrentTrackPolicy != (CurrentTrackPolicy{Selector: "current-stable", ResolveAt: "release-candidate-start", RecordExactVersionsIn: "rc-manifest"}) {
+	if matrix.CurrentTrackPolicy != (CurrentTrackPolicy{Selector: "current-stable", ResolveAt: "release-candidate-start", RecordExactVersionsIn: "release-manifest.json"}) {
 		failures = append(failures, fmt.Errorf("support matrix current-track policy does not match the locked policy"))
+	}
+	if !supportCellIDSlicesEqual(matrix.SemanticCorpusCellIDs, lockedSemanticCorpusCellIDs) {
+		failures = append(failures, fmt.Errorf("support matrix semantic corpus cell IDs do not match the locked v0.3.0 set"))
 	}
 	if len(matrix.Cells) != len(lockedSupportCells) {
 		failures = append(failures, fmt.Errorf("support matrix must contain exactly %d cells, found %d", len(lockedSupportCells), len(matrix.Cells)))
 	}
 	seenIDs := make(map[SupportCellID]struct{}, len(matrix.Cells))
 	seenTuples := make(map[string]SupportCellID, len(matrix.Cells))
+	requiredCount := 0
 	for _, cell := range matrix.Cells {
+		if cell.Policy == "required" {
+			requiredCount++
+		}
 		if _, exists := seenIDs[cell.ID]; exists {
 			failures = append(failures, fmt.Errorf("duplicate support cell ID %s", cell.ID))
 		} else {
@@ -578,16 +596,32 @@ func validateSupportMatrix(matrix SupportMatrix) []error {
 			failures = append(failures, fmt.Errorf("support matrix is missing locked cell %s", id))
 		}
 	}
+	if requiredCount != 7 {
+		failures = append(failures, fmt.Errorf("support matrix must contain exactly 7 required cells, found %d", requiredCount))
+	}
 	return failures
+}
+
+func supportCellIDSlicesEqual(left, right []SupportCellID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func supportTupleFromCell(cell SupportCell) supportTuple {
 	return supportTuple{
-		component:       cell.Component,
-		platform:        cell.Platform,
-		platformVersion: selectorTuple(cell.PlatformVersion),
-		runtimeVersion:  selectorTuple(cell.RuntimeVersion),
-		policy:          cell.Policy,
+		component:             cell.Component,
+		platform:              cell.Platform,
+		platformVersion:       selectorTuple(cell.PlatformVersion),
+		runtimeVersion:        selectorTuple(cell.RuntimeVersion),
+		extensionArchitecture: cell.ExtensionArchitecture,
+		policy:                cell.Policy,
 	}
 }
 
@@ -600,7 +634,7 @@ func selectorTuple(selector *VersionSelector) versionTuple {
 
 func supportCellTuple(cell SupportCell) string {
 	tuple := supportTupleFromCell(cell)
-	return strings.Join([]string{tuple.component, tuple.platform, tuple.platformVersion.kind, tuple.platformVersion.value, tuple.runtimeVersion.kind, tuple.runtimeVersion.value, tuple.policy}, "\x00")
+	return strings.Join([]string{tuple.component, tuple.platform, tuple.platformVersion.kind, tuple.platformVersion.value, tuple.runtimeVersion.kind, tuple.runtimeVersion.value, tuple.extensionArchitecture, tuple.policy}, "\x00")
 }
 
 func validateArtifactInventory(inventory ArtifactInventory) []error {

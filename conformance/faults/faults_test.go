@@ -27,10 +27,16 @@ func TestLoadCatalogAndValidatePlanExactly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load scenario: %v", err)
 	}
-	if len(scenario.FaultPlans) != 1 {
-		t.Fatalf("fault plan count = %d, want 1", len(scenario.FaultPlans))
+	var matchingPlans []scenarios.FaultPlan
+	for _, candidate := range scenario.FaultPlans {
+		if candidate.ID == "FPL-PUSH-RESPONSE-LOSS-001" {
+			matchingPlans = append(matchingPlans, candidate)
+		}
 	}
-	plan := scenario.FaultPlans[0]
+	if len(matchingPlans) != 1 {
+		t.Fatalf("matching fault plan count = %d, want 1", len(matchingPlans))
+	}
+	plan := matchingPlans[0]
 	if err := ValidatePlan(plan, catalog); err != nil {
 		t.Fatalf("validate exact plan: %v", err)
 	}
@@ -137,6 +143,65 @@ func TestResponseLossAndTimeoutFollowUpstreamCompletion(t *testing.T) {
 		<-completed
 		<-body.done
 	})
+}
+
+func TestTemporaryUnavailableWireFaultReturnsCanonicalResponseWithoutUpstreamDispatch(t *testing.T) {
+	calls := 0
+	fault := newWireFault(t, WireOptions{Mode: WireTemporaryUnavailable}, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("temporary unavailable fault reached upstream")
+	}))
+
+	response, err := fault.RoundTrip(testRequest(t, "temporary-unavailable-request"))
+	if err != nil {
+		t.Fatalf("inject temporary unavailable response: %v", err)
+	}
+	defer response.Body.Close()
+	if calls != 0 {
+		t.Fatalf("temporary unavailable upstream calls = %d, want 0", calls)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != TemporaryUnavailableRetryAfter || response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("temporary unavailable response = status %d, retry-after %q, content-type %q", response.StatusCode, response.Header.Get("Retry-After"), response.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read temporary unavailable response: %v", err)
+	}
+	if string(body) != temporaryUnavailableBody {
+		t.Fatalf("temporary unavailable body = %q", body)
+	}
+}
+
+func TestRetryLaterResponseIsCanonical(t *testing.T) {
+	request := testRequest(t, "retry-later-request")
+	response := NewRetryLaterResponse(request)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != RetryLaterRetryAfter || response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("retry later response = status %d, retry-after %q, content-type %q", response.StatusCode, response.Header.Get("Retry-After"), response.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read retry later response: %v", err)
+	}
+	if string(body) != retryLaterBody {
+		t.Fatalf("retry later body = %q", body)
+	}
+}
+
+func TestIdempotencyConflictResponseIsCanonicalAndNonRetryable(t *testing.T) {
+	request := testRequest(t, "idempotency-conflict-request")
+	response := NewIdempotencyConflictResponse(request)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict || response.Header.Get("Retry-After") != "" || response.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("idempotency conflict response = status %d, retry-after %q, content-type %q", response.StatusCode, response.Header.Get("Retry-After"), response.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read idempotency conflict response: %v", err)
+	}
+	if string(body) != idempotencyConflictBody {
+		t.Fatalf("idempotency conflict body = %q", body)
+	}
 }
 
 func TestTruncationAndWireCancellationCleanup(t *testing.T) {

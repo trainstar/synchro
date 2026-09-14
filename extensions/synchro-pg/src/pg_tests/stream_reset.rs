@@ -82,6 +82,96 @@
     }
 
     #[pg_test]
+    fn projection_bootstrap_runtime_reads_return_bounded_state() {
+        setup_test_tables();
+        configure_reset_test_slot("synchro_reset_old");
+
+        let active_stream: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro.synchro_projection_bootstrap_active_stream()",
+        )
+        .expect("read active projection bootstrap stream")
+        .expect("active projection bootstrap stream");
+        let stream_generation = active_stream.0["stream_generation"]
+            .as_str()
+            .expect("active stream generation")
+            .to_string();
+        assert_eq!(active_stream.0["active_slot_name"], "synchro_reset_old");
+
+        let before_boundary: Option<bool> = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_main_boundary($1, '0/1')",
+            &[stream_generation.as_str().into()],
+        )
+        .expect("read unset projection bootstrap boundary");
+        assert_eq!(before_boundary, Some(false));
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET materialized_commit_lsn = '0/1', materialized_end_lsn = '0/1'
+             WHERE singleton",
+        )
+        .expect("set projection bootstrap boundary");
+        let at_boundary: Option<bool> = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_main_boundary($1, '0/1')",
+            &[stream_generation.as_str().into()],
+        )
+        .expect("read reached projection bootstrap boundary");
+        assert_eq!(at_boundary, Some(true));
+
+        let candidate_slot = "synchro_reset_candidate";
+        let absent: Option<bool> = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_slot_absent($1)",
+            &[candidate_slot.into()],
+        )
+        .expect("read absent projection bootstrap slot");
+        assert_eq!(absent, Some(true));
+        let slot_state: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT synchro.synchro_projection_bootstrap_slot_drop_state($1)",
+            &[candidate_slot.into()],
+        )
+        .expect("read absent projection bootstrap slot state")
+        .expect("absent projection bootstrap slot state");
+        assert_eq!(
+            slot_state.0,
+            serde_json::json!({"present": false, "active": false, "valid": true})
+        );
+        let aborted_slot: Option<String> = Spi::get_one(
+            "SELECT synchro.synchro_projection_bootstrap_next_aborted_slot()",
+        )
+        .expect("read next aborted projection bootstrap slot");
+        assert_eq!(aborted_slot, None);
+
+        let interrupted: pgrx::JsonB = Spi::get_one(
+            "SELECT synchro.synchro_projection_bootstrap_interrupted()",
+        )
+        .expect("read interrupted projection bootstrap")
+        .expect("interrupted projection bootstrap state");
+        assert_eq!(interrupted.0["present"], false);
+
+        let invalid_slot_accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>(
+                "SELECT synchro.synchro_projection_bootstrap_slot_absent('INVALID-SLOT')",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        assert!(!invalid_slot_accepted, "invalid slot names must be rejected");
+        let unknown_bootstrap_accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>(
+                "SELECT synchro.synchro_projection_bootstrap_is_activated(
+                     '00000000-0000-4000-8000-000000000001'::uuid
+                 )",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        assert!(
+            !unknown_bootstrap_accepted,
+            "unknown projection bootstraps must be rejected"
+        );
+    }
+
+    #[pg_test]
     fn stream_reset_activation_installs_verified_baseline_atomically() {
         setup_test_tables();
         configure_reset_test_slot("synchro_reset_old");
@@ -684,7 +774,6 @@
             crate::health::ReadinessConfiguration {
                 database: Some(database),
                 publication: Some("synchro_pub".to_string()),
-                replication_slot: Some("synchro_reset_old".to_string()),
                 worker_login: Some("missing_reset_worker".to_string()),
                 max_heartbeat_age_seconds: 30,
                 max_wal_lag_bytes: i32::MAX,
@@ -763,4 +852,125 @@
         assert_eq!(installed.0["row_data"], json!({"id": 1, "target_id": 7}));
         assert_eq!(installed.0["source_reset_id"], json!(id));
         assert_eq!(installed.0["fence_covered"], json!(true));
+    }
+
+    #[pg_test]
+    fn candidate_membership_catchup_reconciles_only_affected_records() {
+        setup_test_tables();
+        configure_reset_test_slot("synchro_reset_old");
+        let affected_id = "26000000-0000-4000-8000-000000000001";
+        let untouched_id = "26000000-0000-4000-8000-000000000002";
+        Spi::run_with_args(
+            "INSERT INTO public.test_orders (id, user_id, title) VALUES
+                 ($1::uuid, 'u1', 'affected'),
+                 ($2::uuid, 'u1', 'untouched')",
+            &[affected_id.into(), untouched_id.into()],
+        )
+        .expect("insert candidate membership source rows");
+
+        let prepared = prepare_reset_for_test("synchro_reset_candidate");
+        let reset_id = reset_id(&prepared);
+        lock_and_stage_reset(&reset_id, "synchro_reset_candidate");
+        let stage: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'registry_generation', captured.registry_generation,
+                 'relation_id', registry.relation_id
+             )
+             FROM synchro.sync_stream_reset_captured_rows captured
+             JOIN synchro.sync_registry registry
+               ON registry.registry_generation = captured.registry_generation
+              AND registry.table_name = 'test_orders'
+             WHERE captured.reset_id = $1::uuid
+             LIMIT 1",
+            &[reset_id.as_str().into()],
+        )
+        .expect("load candidate membership stage")
+        .expect("candidate membership stage");
+        let registry_generation = stage.0["registry_generation"]
+            .as_i64()
+            .expect("candidate registry generation");
+        let relation_id = stage.0["relation_id"]
+            .as_str()
+            .expect("candidate relation identity")
+            .to_string();
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_stream_reset_membership_edges (
+                 reset_id, relation_id, table_name, record_id, scope_id,
+                 checksum, row_version
+             )
+             SELECT captured.reset_id, captured.relation_id, registry.table_name,
+                    captured.record_id, 'candidate-sentinel', captured.checksum,
+                    captured.row_version
+             FROM synchro.sync_stream_reset_captured_rows captured
+             JOIN synchro.sync_registry registry
+               ON registry.registry_generation = $3
+              AND registry.relation_id = captured.relation_id
+             WHERE captured.reset_id = $1::uuid
+               AND captured.relation_id = $2::uuid
+               AND captured.record_id = $4",
+            &[
+                reset_id.as_str().into(),
+                relation_id.as_str().into(),
+                registry_generation.into(),
+                untouched_id.into(),
+            ],
+        )
+        .expect("insert untouched candidate sentinel edge");
+
+        Spi::connect_mut(|client| {
+            client
+                .update(
+                    "SELECT set_config('synchro.stream_reset_staging_id', $1, true)",
+                    None,
+                    &[reset_id.as_str().into()],
+                )
+                .map_err(|error| error.to_string())?;
+            client
+                .update(
+                    "SELECT set_config(
+                         'synchro.stream_reset_staging_registry_generation', $1, true
+                     )",
+                    None,
+                    &[registry_generation.to_string().as_str().into()],
+                )
+                .map_err(|error| error.to_string())?;
+            let registry = crate::registry::load_registry_generation_from_client(
+                client,
+                registry_generation,
+            )
+            .map_err(|error| error.to_string())?;
+            crate::bgworker::reconcile_candidate_membership_records(
+                client,
+                &reset_id,
+                registry_generation,
+                &registry,
+                &[(relation_id.clone(), affected_id.to_string())],
+            )
+        })
+        .expect("reconcile only the affected candidate membership");
+
+        let edges: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_object_agg(record_id, scopes ORDER BY record_id)
+             FROM (
+                 SELECT record_id, jsonb_agg(scope_id ORDER BY scope_id) AS scopes
+                 FROM synchro.sync_stream_reset_membership_edges
+                 WHERE reset_id = $1::uuid
+                   AND relation_id = $2::uuid
+                   AND record_id = ANY($3::text[])
+                 GROUP BY record_id
+             ) scoped",
+            &[
+                reset_id.as_str().into(),
+                relation_id.as_str().into(),
+                vec![affected_id, untouched_id].into(),
+            ],
+        )
+        .expect("load candidate membership edges")
+        .expect("candidate membership edges");
+
+        assert_eq!(edges.0[affected_id], json!(["user:u1"]));
+        assert_eq!(
+            edges.0[untouched_id],
+            json!(["candidate-sentinel", "user:u1"])
+        );
     }

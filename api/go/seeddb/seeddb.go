@@ -31,7 +31,13 @@ var clientCompatibleMigrationIdentifiers = []string{
 	"synchro_v2_buckets",
 	"synchro_v3_scopes",
 	"synchro_v4_scope_integrity",
+	"synchro_v5_rejected_mutations",
+	"synchro_v6_protocol_3",
+	"synchro_v7_pending_local_revision",
+	"synchro_v8_sealed_push_batches",
 }
+
+const sqliteUserVersion = 6
 
 type GenerateOptions struct {
 	OutputPath string
@@ -137,20 +143,28 @@ type indexSchema struct {
 }
 
 type localSchemaTable struct {
-	TableID         string              `json:"-"`
-	TableName       string              `json:"tableName"`
-	UpdatedAtColumn string              `json:"updatedAtColumn"`
-	DeletedAtColumn string              `json:"deletedAtColumn"`
-	Composition     string              `json:"composition,omitempty"`
-	PrimaryKey      []string            `json:"primaryKey"`
-	Columns         []localSchemaColumn `json:"columns"`
+	TableID           string              `json:"tableID"`
+	RelationID        string              `json:"relationID"`
+	TableName         string              `json:"tableName"`
+	PrimaryKeyFieldID string              `json:"primaryKeyFieldID"`
+	CreatedAtFieldID  *string             `json:"createdAtFieldID"`
+	UpdatedAtFieldID  *string             `json:"updatedAtFieldID"`
+	DeletedAtFieldID  *string             `json:"deletedAtFieldID"`
+	UpdatedAtColumn   string              `json:"updatedAtColumn"`
+	DeletedAtColumn   string              `json:"deletedAtColumn"`
+	Composition       string              `json:"composition,omitempty"`
+	PrimaryKey        []string            `json:"primaryKey"`
+	Columns           []localSchemaColumn `json:"columns"`
 }
 
 type localSchemaColumn struct {
-	FieldID          string  `json:"-"`
+	FieldID          string  `json:"fieldID"`
 	Name             string  `json:"name"`
 	LogicalType      string  `json:"logicalType"`
 	Nullable         bool    `json:"nullable"`
+	Writable         bool    `json:"writable"`
+	Precision        *int    `json:"precision"`
+	Scale            *int    `json:"scale"`
 	SQLiteDefaultSQL *string `json:"sqliteDefaultSQL"`
 	IsPrimaryKey     bool    `json:"isPrimaryKey"`
 }
@@ -455,6 +469,9 @@ func (m manifestEnvelope) validate() error {
 	if (m.Manifest.TransitionClass == "initial") != (m.Manifest.ParentSchema == nil) {
 		return errors.New("schema manifest parent_schema does not match its transition_class")
 	}
+	if m.Manifest.TransitionClass == "class_2" && m.Manifest.CompatibilityFloor > m.Manifest.ParentSchema.Version {
+		return errors.New("Class 2 schema manifest has an invalid compatibility_floor")
+	}
 	if len(m.Manifest.Tables) == 0 {
 		return errors.New("schema manifest contains no synced tables")
 	}
@@ -462,8 +479,7 @@ func (m manifestEnvelope) validate() error {
 	tableNames := make(map[string]struct{}, len(m.Manifest.Tables))
 	tableIDs := make(map[string]struct{}, len(m.Manifest.Tables))
 	relationIDs := make(map[string]struct{}, len(m.Manifest.Tables))
-	previousTableID := ""
-	for tableIndex, table := range m.Manifest.Tables {
+	for _, table := range m.Manifest.Tables {
 		if table.Name == "" {
 			return errors.New("schema manifest contains an empty table name")
 		}
@@ -483,12 +499,8 @@ func (m manifestEnvelope) validate() error {
 		if _, exists := tableIDs[table.ID]; exists {
 			return fmt.Errorf("schema manifest contains duplicate table_id %s", table.ID)
 		}
-		if tableIndex > 0 && !strictlyOrderedID(previousTableID, table.ID) {
-			return errors.New("schema manifest tables are not in canonical order")
-		}
 		tableIDs[table.ID] = struct{}{}
 		relationIDs[table.RelationID] = struct{}{}
-		previousTableID = table.ID
 
 		if table.PrimaryKeyFieldID == "" {
 			return fmt.Errorf("table %s has an empty primary_key_field_id", table.Name)
@@ -503,20 +515,15 @@ func (m manifestEnvelope) validate() error {
 		fieldIDs := make(map[string]struct{}, len(table.Fields))
 		fieldsByID := make(map[string]fieldSchema, len(table.Fields))
 		fieldNames := make(map[string]struct{}, len(table.Fields))
-		previousFieldID := ""
-		for fieldIndex, field := range table.Fields {
+		for _, field := range table.Fields {
 			if field.ID == "" {
 				return fmt.Errorf("table %s contains an empty field_id", table.Name)
 			}
 			if _, exists := fieldIDs[field.ID]; exists {
 				return fmt.Errorf("table %s contains duplicate field_id %s", table.Name, field.ID)
 			}
-			if fieldIndex > 0 && !strictlyOrderedID(previousFieldID, field.ID) {
-				return fmt.Errorf("table %s fields are not in canonical order", table.Name)
-			}
 			fieldIDs[field.ID] = struct{}{}
 			fieldsByID[field.ID] = field
-			previousFieldID = field.ID
 			if field.Name == "" {
 				return fmt.Errorf("table %s contains an empty field name", table.Name)
 			}
@@ -570,8 +577,7 @@ func (m manifestEnvelope) validate() error {
 		}
 		indexIDs := make(map[string]struct{}, len(table.Indexes))
 		indexNames := make(map[string]struct{}, len(table.Indexes))
-		previousIndexID := ""
-		for indexPosition, index := range table.Indexes {
+		for _, index := range table.Indexes {
 			if index.ID == "" || index.Name == "" || len(index.FieldIDs) == 0 {
 				return fmt.Errorf("table %s contains an invalid index", table.Name)
 			}
@@ -581,12 +587,8 @@ func (m manifestEnvelope) validate() error {
 			if _, exists := indexNames[index.Name]; exists {
 				return fmt.Errorf("table %s contains duplicate index name %s", table.Name, index.Name)
 			}
-			if indexPosition > 0 && !strictlyOrderedID(previousIndexID, index.ID) {
-				return fmt.Errorf("table %s indexes are not in canonical order", table.Name)
-			}
 			indexIDs[index.ID] = struct{}{}
 			indexNames[index.Name] = struct{}{}
-			previousIndexID = index.ID
 			indexedFields := make(map[string]struct{}, len(index.FieldIDs))
 			for _, fieldID := range index.FieldIDs {
 				if _, exists := fieldIDs[fieldID]; !exists {
@@ -691,18 +693,26 @@ func (m manifestEnvelope) localTables() ([]localSchemaTable, error) {
 				Name:             field.Name,
 				LogicalType:      field.Type,
 				Nullable:         field.Nullable,
+				Writable:         field.Writable,
+				Precision:        field.Precision,
+				Scale:            field.Scale,
 				SQLiteDefaultSQL: nil,
 				IsPrimaryKey:     isPK,
 			})
 		}
 		tables = append(tables, localSchemaTable{
-			TableID:         table.ID,
-			TableName:       table.Name,
-			UpdatedAtColumn: lifecycleFieldName(fieldsByID, table.Lifecycle.UpdatedAtFieldID),
-			DeletedAtColumn: lifecycleFieldName(fieldsByID, table.Lifecycle.DeletedAtFieldID),
-			Composition:     table.Composition,
-			PrimaryKey:      []string{pk},
-			Columns:         localColumns,
+			TableID:           table.ID,
+			RelationID:        table.RelationID,
+			TableName:         table.Name,
+			PrimaryKeyFieldID: table.PrimaryKeyFieldID,
+			CreatedAtFieldID:  table.Lifecycle.CreatedAtFieldID,
+			UpdatedAtFieldID:  table.Lifecycle.UpdatedAtFieldID,
+			DeletedAtFieldID:  table.Lifecycle.DeletedAtFieldID,
+			UpdatedAtColumn:   lifecycleFieldName(fieldsByID, table.Lifecycle.UpdatedAtFieldID),
+			DeletedAtColumn:   lifecycleFieldName(fieldsByID, table.Lifecycle.DeletedAtFieldID),
+			Composition:       table.Composition,
+			PrimaryKey:        []string{pk},
+			Columns:           localColumns,
 		})
 	}
 	return tables, nil
@@ -774,20 +784,6 @@ func checkDestinationFamily(path string, overwrite bool) error {
 		return fmt.Errorf("checking output path: %w", err)
 	}
 	return nil
-}
-
-func publishVerifiedSQLiteOutput(
-	ctx context.Context,
-	temporaryPath, outputPath string,
-	overwrite bool,
-	env manifestEnvelope,
-	tables []localSchemaTable,
-	portable portableSeedManifest,
-) error {
-	if err := verifySQLiteOutput(ctx, temporaryPath, env, tables, portable, seedSnapshotComplete); err != nil {
-		return err
-	}
-	return publishOutput(temporaryPath, outputPath, overwrite)
 }
 
 func verifySQLiteOutput(
@@ -930,9 +926,8 @@ func verifySQLiteIntegrity(ctx context.Context, db *sql.DB) error {
 func verifySQLiteQueues(ctx context.Context, db *sql.DB) error {
 	for _, table := range []string{
 		"_synchro_pending_changes",
+		"_synchro_push_batches",
 		"_synchro_rejected_mutations",
-		"_synchro_bucket_members",
-		"_synchro_bucket_checkpoints",
 	} {
 		var count int64
 		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdentifier(table)).Scan(&count); err != nil {
@@ -1546,6 +1541,7 @@ func createInternalTables(ctx context.Context, tx *sql.Tx) error {
 			operation TEXT NOT NULL,
 			base_updated_at TEXT,
 			client_updated_at TEXT NOT NULL,
+			local_revision INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (table_name, record_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS _synchro_meta (
@@ -1554,17 +1550,6 @@ func createInternalTables(ctx context.Context, tx *sql.Tx) error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS grdb_migrations (
 			identifier TEXT NOT NULL PRIMARY KEY
-		)`,
-		`CREATE TABLE IF NOT EXISTS _synchro_bucket_members (
-			bucket_id TEXT NOT NULL,
-			table_name TEXT NOT NULL,
-			record_id TEXT NOT NULL,
-			checksum INTEGER NOT NULL DEFAULT 0,
-			PRIMARY KEY (bucket_id, table_name, record_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS _synchro_bucket_checkpoints (
-			bucket_id TEXT PRIMARY KEY,
-			checkpoint INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS _synchro_scopes (
 			scope_id TEXT PRIMARY KEY,
@@ -1595,8 +1580,27 @@ func createInternalTables(ctx context.Context, tx *sql.Tx) error {
 			table_name TEXT NOT NULL,
 			record_id TEXT NOT NULL,
 			server_version TEXT NOT NULL,
-			row_checksum TEXT NOT NULL,
+			row_checksum TEXT,
 			PRIMARY KEY (table_name, record_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS _synchro_rebuild_attempts (
+			scope_id TEXT PRIMARY KEY,
+			rebuild_id TEXT NOT NULL,
+			client_generation INTEGER NOT NULL,
+			schema_version INTEGER NOT NULL,
+			schema_hash TEXT NOT NULL,
+			generation INTEGER NOT NULL,
+			cursor TEXT,
+			page_limit INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS _synchro_push_batches (
+			batch_id TEXT PRIMARY KEY,
+			request_json TEXT NOT NULL,
+			pending_json TEXT NOT NULL,
+			schema_json TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			completed_at TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS _synchro_rejected_mutations (
 			mutation_id TEXT PRIMARY KEY,
@@ -1614,6 +1618,7 @@ func createInternalTables(ctx context.Context, tx *sql.Tx) error {
 			ON _synchro_rejected_mutations (table_name, record_id)`,
 		`INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('sync_lock', '0')`,
 		`INSERT OR IGNORE INTO _synchro_meta (key, value) VALUES ('checkpoint', '0')`,
+		fmt.Sprintf("PRAGMA user_version = %d", sqliteUserVersion),
 	}
 
 	for _, stmt := range statements {
@@ -1876,7 +1881,11 @@ func sqliteValue(column localSchemaColumn, raw any) (any, error) {
 
 	switch column.LogicalType {
 	case "string", "decimal", "datetime", "date", "time":
-		return fmt.Sprint(raw), nil
+		value, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("unsupported text value %T", raw)
+		}
+		return value, nil
 	case "json":
 		if value, ok := raw.(string); ok {
 			return value, nil
@@ -1887,75 +1896,38 @@ func sqliteValue(column localSchemaColumn, raw any) (any, error) {
 		}
 		return string(encoded), nil
 	case "boolean":
-		switch value := raw.(type) {
-		case bool:
+		value, ok := raw.(bool)
+		if ok {
 			if value {
 				return int64(1), nil
 			}
 			return int64(0), nil
-		case float64:
-			if value == 0 {
-				return int64(0), nil
-			}
-			if value == 1 {
-				return int64(1), nil
-			}
-		case string:
-			switch strings.ToLower(strings.TrimSpace(value)) {
-			case "true", "1":
-				return int64(1), nil
-			case "false", "0":
-				return int64(0), nil
-			}
 		}
 		return nil, fmt.Errorf("unsupported boolean value %T", raw)
 	case "int", "int64":
-		switch value := raw.(type) {
-		case float64:
-			if math.Trunc(value) != value {
-				return nil, fmt.Errorf("non-integer numeric value %v", value)
-			}
-			return int64(value), nil
-		case int64:
-			return value, nil
-		case int:
-			return int64(value), nil
-		case json.Number:
+		value, ok := raw.(json.Number)
+		if ok {
 			return value.Int64()
-		case string:
-			return strconv.ParseInt(value, 10, 64)
 		}
 		return nil, fmt.Errorf("unsupported integer value %T", raw)
 	case "float":
-		switch value := raw.(type) {
-		case float64:
-			return value, nil
-		case float32:
-			return float64(value), nil
-		case int64:
-			return float64(value), nil
-		case int:
-			return float64(value), nil
-		case json.Number:
+		value, ok := raw.(json.Number)
+		if ok {
 			return value.Float64()
-		case string:
-			return strconv.ParseFloat(value, 64)
 		}
 		return nil, fmt.Errorf("unsupported float value %T", raw)
 	case "bytes":
-		switch value := raw.(type) {
-		case []byte:
-			return value, nil
-		case string:
+		value, ok := raw.(string)
+		if ok {
 			decoded, err := base64.RawURLEncoding.DecodeString(value)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("decoding bytes: %w", err)
 			}
 			return decoded, nil
 		}
 		return nil, fmt.Errorf("unsupported bytes value %T", raw)
 	default:
-		return raw, nil
+		return nil, fmt.Errorf("unsupported logical type %q", column.LogicalType)
 	}
 }
 
@@ -1996,9 +1968,9 @@ func seedMetadata(
 	if err != nil {
 		return nil, fmt.Errorf("encoding local schema: %w", err)
 	}
-	knownBucketsJSON, err := json.Marshal(portableScopeIDs(portable.PortableScopes))
+	schemaManifestJSON, err := json.Marshal(env.Manifest)
 	if err != nil {
-		return nil, fmt.Errorf("encoding portable scope ids: %w", err)
+		return nil, fmt.Errorf("encoding schema manifest: %w", err)
 	}
 	boundaryJSON, err := canonicalJSON(snapshotBoundaryJSONValue(portable.SnapshotBoundary))
 	if err != nil {
@@ -2008,8 +1980,8 @@ func seedMetadata(
 		"schema_version":            fmt.Sprintf("%d", env.SchemaVersion),
 		"schema_hash":               env.SchemaHash,
 		"local_schema":              string(localSchemaJSON),
+		"schema_manifest":           string(schemaManifestJSON),
 		"scope_set_version":         "0",
-		"known_buckets":             string(knownBucketsJSON),
 		"snapshot_complete":         snapshotComplete,
 		"seed_export_id":            portable.ExportID,
 		"seed_export_manifest_hash": portable.ExportManifestHash,
@@ -2017,14 +1989,6 @@ func seedMetadata(
 		"seed_snapshot_boundary":    string(boundaryJSON),
 		"seed_page_limit":           strconv.FormatInt(portable.PageLimit, 10),
 	}, nil
-}
-
-func portableScopeIDs(scopes []portableSeedScope) []string {
-	ids := make([]string, 0, len(scopes))
-	for _, scope := range scopes {
-		ids = append(ids, scope.ID)
-	}
-	return ids
 }
 
 func createTableSQL(table localSchemaTable) string {
@@ -2049,12 +2013,18 @@ func createTableSQL(table localSchemaTable) string {
 	)
 }
 
+// cdcTriggerSQL builds the seed capture triggers.
+//
+// A trigger body is stored in the database schema and is parsed again by every
+// client that opens the seed. SQLite adds UPSERT in 3.24 and Android API 24
+// ships SQLite 3.9, so an "ON CONFLICT ... DO UPDATE" body makes the whole seed
+// schema unreadable on the minimum supported cell. Each body therefore updates
+// the conflicting row first and inserts only when no row exists.
 func cdcTriggerSQL(table localSchemaTable) []string {
 	name := table.TableName
 	pkColumn := table.PrimaryKey[0]
 	lockCheck := "(SELECT value FROM _synchro_meta WHERE key = 'sync_lock') = '0'"
-	nowExpr := "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
-	hasUpdatedAt := strings.TrimSpace(table.UpdatedAtColumn) != ""
+	nowExpr := "substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z'"
 	hasDeletedAt := strings.TrimSpace(table.DeletedAtColumn) != ""
 	escapedName := escapeSQLString(name)
 	insertTrigger := quoteIdentifier("_synchro_cdc_insert_" + name)
@@ -2062,13 +2032,13 @@ func cdcTriggerSQL(table localSchemaTable) []string {
 	deleteTrigger := quoteIdentifier("_synchro_cdc_delete_" + name)
 	quotedTable := quoteIdentifier(name)
 	quotedPK := quoteIdentifier(pkColumn)
-	quotedUpdatedAt := quoteIdentifier(table.UpdatedAtColumn)
 	quotedDeletedAt := quoteIdentifier(table.DeletedAtColumn)
 
-	baseUpdatedAtExpr := "NULL"
-	if hasUpdatedAt {
-		baseUpdatedAtExpr = "OLD." + quotedUpdatedAt
-	}
+	baseUpdatedAtExpr := fmt.Sprintf(
+		"(SELECT server_version FROM _synchro_row_versions WHERE table_name = '%s' AND record_id = OLD.%s)",
+		escapedName,
+		quotedPK,
+	)
 
 	updateOperationExpr := "'update'"
 	if hasDeletedAt {
@@ -2100,13 +2070,22 @@ END`, deleteTrigger, quotedTable, lockCheck, quotedTable, quotedDeletedAt, nowEx
 AFTER DELETE ON %s
 WHEN %s
 BEGIN
-	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
-	VALUES (OLD.%s, '%s', 'delete', %s, %s)
-	ON CONFLICT (table_name, record_id) DO UPDATE SET
+	UPDATE _synchro_pending_changes SET
 		operation = 'delete',
-		base_updated_at = COALESCE(_synchro_pending_changes.base_updated_at, excluded.base_updated_at),
-		client_updated_at = excluded.client_updated_at;
-END`, deleteTrigger, quotedTable, lockCheck, quotedPK, escapedName, baseUpdatedAtExpr, nowExpr)
+		base_updated_at = COALESCE(base_updated_at, %s),
+		local_revision = local_revision + 1,
+		client_updated_at = %s
+	WHERE table_name = '%s' AND record_id = OLD.%s;
+	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
+	SELECT OLD.%s, '%s', 'delete', %s, %s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM _synchro_pending_changes
+		WHERE table_name = '%s' AND record_id = OLD.%s
+	);
+END`, deleteTrigger, quotedTable, lockCheck,
+			baseUpdatedAtExpr, nowExpr, escapedName, quotedPK,
+			quotedPK, escapedName, baseUpdatedAtExpr, nowExpr,
+			escapedName, quotedPK)
 	}
 
 	return []string{
@@ -2117,39 +2096,53 @@ END`, deleteTrigger, quotedTable, lockCheck, quotedPK, escapedName, baseUpdatedA
 AFTER INSERT ON %s
 WHEN %s
 BEGIN
-	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, client_updated_at)
-	VALUES (NEW.%s, '%s', 'create', %s)
-	ON CONFLICT (table_name, record_id) DO UPDATE SET
+	UPDATE _synchro_pending_changes SET
 		operation = CASE
-			WHEN _synchro_pending_changes.operation = 'delete' THEN 'update'
-			ELSE _synchro_pending_changes.operation
+			WHEN operation = 'delete' THEN 'update'
+			ELSE operation
 		END,
-		client_updated_at = excluded.client_updated_at;
-END`, insertTrigger, quotedTable, lockCheck, quotedPK, escapedName, nowExpr),
+		local_revision = local_revision + 1,
+		client_updated_at = %s
+	WHERE table_name = '%s' AND record_id = NEW.%s;
+	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, client_updated_at)
+	SELECT NEW.%s, '%s', 'create', %s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM _synchro_pending_changes
+		WHERE table_name = '%s' AND record_id = NEW.%s
+	);
+END`, insertTrigger, quotedTable, lockCheck,
+			nowExpr, escapedName, quotedPK,
+			quotedPK, escapedName, nowExpr,
+			escapedName, quotedPK),
 		fmt.Sprintf(`CREATE TRIGGER %s
 AFTER UPDATE ON %s
 WHEN %s
 BEGIN
-	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
-	VALUES (
-		NEW.%s, '%s',
-		%s,
-		%s,
-		%s
-	)
-	ON CONFLICT (table_name, record_id) DO UPDATE SET
+	UPDATE _synchro_pending_changes SET
 		operation = CASE
-			WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'update' THEN 'create'
-			WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'delete' THEN 'delete'
-			ELSE excluded.operation
+			WHEN operation = 'create' AND (%s) = 'update' THEN 'create'
+			WHEN operation = 'create' AND (%s) = 'delete' THEN 'delete'
+			ELSE (%s)
 		END,
 		base_updated_at = CASE
-			WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'delete' THEN NULL
-			ELSE COALESCE(_synchro_pending_changes.base_updated_at, excluded.base_updated_at)
+			WHEN operation = 'create' AND (%s) = 'delete' THEN NULL
+			ELSE COALESCE(base_updated_at, %s)
 		END,
-		client_updated_at = excluded.client_updated_at;
+		local_revision = local_revision + 1,
+		client_updated_at = %s
+	WHERE table_name = '%s' AND record_id = NEW.%s;
+	INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
+	SELECT NEW.%s, '%s', %s, %s, %s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM _synchro_pending_changes
+		WHERE table_name = '%s' AND record_id = NEW.%s
+	);
 %s
-END`, updateTrigger, quotedTable, lockCheck, quotedPK, escapedName, updateOperationExpr, baseUpdatedAtExpr, nowExpr, updateCleanupSQL),
+END`, updateTrigger, quotedTable, lockCheck,
+			updateOperationExpr, updateOperationExpr, updateOperationExpr,
+			updateOperationExpr, baseUpdatedAtExpr, nowExpr, escapedName, quotedPK,
+			quotedPK, escapedName, updateOperationExpr, baseUpdatedAtExpr, nowExpr,
+			escapedName, quotedPK, updateCleanupSQL),
 		deleteTriggerSQL,
 	}
 }

@@ -47,6 +47,124 @@
         );
     }
 
+    #[pg_test]
+    fn test_backfill_waits_for_progress_before_checkpoint_lock() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS dblink").expect("install dblink extension");
+        let connection_string: String = Spi::get_one(
+            "SELECT format(
+                        'host=%L port=%s dbname=%I user=%I',
+                        current_setting('unix_socket_directories'),
+                        current_setting('port'),
+                        current_database(),
+                        current_user
+                    )",
+        )
+        .unwrap()
+        .expect("dblink connection string");
+        let pull_name = "synchro_backfill_pull";
+        let backfill_name = "synchro_backfill_contender";
+        Spi::run_with_args(
+            "SELECT public.dblink_connect($1, $2)",
+            &[pull_name.into(), connection_string.as_str().into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT public.dblink_connect($1, $2)",
+            &[backfill_name.into(), connection_string.as_str().into()],
+        )
+        .unwrap();
+
+        dblink_exec(pull_name, "SET lock_timeout = '5s'");
+        dblink_exec(backfill_name, "SET statement_timeout = '5s'");
+        dblink_exec(pull_name, "BEGIN");
+        dblink_exec(
+            pull_name,
+            "LOCK TABLE synchro.sync_wal_progress IN SHARE MODE",
+        );
+        dblink_exec(backfill_name, "BEGIN");
+        let backfill_pid: i32 = dblink_query(backfill_name, "SELECT pg_backend_pid()")
+            .parse()
+            .expect("parse backfill PID");
+        let sent: i32 = Spi::get_one_with_args(
+            "SELECT public.dblink_send_query($1, $2)",
+            &[
+                backfill_name.into(),
+                "SELECT synchro_backfill_bucket_edges(NULL)".into(),
+            ],
+        )
+        .unwrap()
+        .expect("send backfill query");
+
+        let mut waiting_for_progress = false;
+        // A loaded runner can take several seconds to reach the lock wait,
+        // and the loop exits on first observation, so the budget is generous.
+        for _ in 0..3000 {
+            waiting_for_progress = Spi::get_one_with_args(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_locks
+                     WHERE pid = $1
+                       AND relation = 'synchro.sync_wal_progress'::regclass
+                       AND mode = 'ShareRowExclusiveLock'
+                       AND NOT granted
+                 )",
+                &[i64::from(backfill_pid).into()],
+            )
+            .unwrap()
+            .unwrap_or(false);
+            if waiting_for_progress {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let checkpoint_locked = if waiting_for_progress {
+            Spi::get_one_with_args(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_locks
+                     WHERE pid = $1
+                       AND relation = 'synchro.sync_client_checkpoints'::regclass
+                       AND mode = 'ShareRowExclusiveLock'
+                       AND granted
+                 )",
+                &[i64::from(backfill_pid).into()],
+            )
+            .unwrap()
+            .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if waiting_for_progress {
+            dblink_exec(
+                pull_name,
+                "LOCK TABLE synchro.sync_client_checkpoints IN ROW EXCLUSIVE MODE",
+            );
+        }
+        dblink_exec(pull_name, "COMMIT");
+        let result = dblink_get_result(backfill_name);
+        Spi::run_with_args(
+            "SELECT result
+             FROM public.dblink_get_result($1) AS result_row(result text)",
+            &[backfill_name.into()],
+        )
+        .unwrap();
+        dblink_exec(backfill_name, "ROLLBACK");
+        Spi::run_with_args(
+            "SELECT public.dblink_disconnect($1)",
+            &[pull_name.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT public.dblink_disconnect($1)",
+            &[backfill_name.into()],
+        )
+        .unwrap();
+
+        assert_eq!(sent, 1);
+        assert!(waiting_for_progress, "backfill did not wait for progress");
+        assert!(!checkpoint_locked, "backfill locked checkpoints before progress");
+        assert!(!result.starts_with("ERROR"), "backfill failed: {result}");
+    }
+
     fn run_source_gated_registration(
         create_table: &str,
         registration: &str,
@@ -102,7 +220,8 @@
         assert_eq!(sent, 1);
 
         let mut waiting = false;
-        for _ in 0..1000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             let waiting_row: Option<bool> = Spi::get_one_with_args(
                 "SELECT EXISTS (
                      SELECT 1 FROM pg_locks
@@ -115,6 +234,7 @@
                 waiting = true;
                 break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(waiting, "registration did not wait for the source write gate");
         dblink_exec(driver_name, "COMMIT");
@@ -685,6 +805,34 @@
         setup_test_tables();
         register_client("empty-table-user", "empty-table-client");
         Spi::run(
+            "CREATE TABLE test_empty_added_manifest_boundary (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             INSERT INTO test_empty_added_manifest_boundary (id, value)
+             VALUES ('a1000000-0000-4000-8000-000000000101', 'existing')",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_empty_added_manifest_boundary',
+                 $$SELECT ARRAY['global'] FROM test_empty_added_manifest_boundary WHERE id = $1::uuid$$,
+                 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .unwrap();
+        activate_pending_registry_for_test();
+        let boundary_class: String = Spi::get_one(
+            "SELECT transition_class
+             FROM sync_schema_manifest
+             ORDER BY schema_version DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("empty added-table boundary manifest");
+        assert_eq!(boundary_class, "class_3");
+        Spi::run(
             "CREATE TABLE test_empty_added_manifest (
                  id UUID PRIMARY KEY,
                  value TEXT NOT NULL
@@ -739,6 +887,83 @@
             transition.0["compatibility_floor"],
             transition.0["parent_schema_version"]
         );
+    }
+
+    #[pg_test]
+    fn test_added_empty_table_with_stale_stats_is_class_2() {
+        setup_test_tables();
+        register_client("stale-statistics-user", "stale-statistics-client");
+        Spi::run(
+            "CREATE TABLE test_empty_stale_statistics_manifest (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             INSERT INTO test_empty_stale_statistics_manifest (id, value)
+             VALUES ('a1000000-0000-4000-8000-000000000102', 'stale');
+             ANALYZE test_empty_stale_statistics_manifest;
+             DELETE FROM test_empty_stale_statistics_manifest",
+        )
+        .unwrap();
+        let has_stale_estimate: Option<bool> = Spi::get_one(
+            "SELECT reltuples > 0
+             FROM pg_catalog.pg_class
+             WHERE oid = 'test_empty_stale_statistics_manifest'::regclass",
+        )
+        .unwrap();
+        assert_eq!(has_stale_estimate, Some(true));
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_empty_stale_statistics_manifest',
+                 $$SELECT ARRAY['global'] FROM test_empty_stale_statistics_manifest WHERE id = $1::uuid$$,
+                 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .unwrap();
+        let generation: i64 = Spi::get_one(
+            "SELECT generation
+             FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("stale-statistics generation");
+        let requires_bootstrap = Spi::connect(|client| {
+            crate::schema::generation_requires_projection_bootstrap(client, generation)
+        })
+        .unwrap();
+        let pending_body = Spi::connect(|client| {
+            let pending = crate::schema::prepare_pending_manifest(client, generation)
+                .expect("prepare stale-statistics manifest")
+                .expect("stale-statistics pending manifest");
+            Ok::<_, spi::Error>(
+                serde_json::from_str::<Value>(&pending.canonical_body)
+                    .expect("decode stale-statistics pending manifest"),
+            )
+        })
+        .unwrap();
+
+        activate_pending_registry_for_test();
+
+        let transition: pgrx::JsonB = Spi::get_one(
+            "SELECT jsonb_build_object(
+                 'metadata_class', transition_class,
+                 'body_class', canonical_manifest_body::jsonb ->> 'transition_class',
+                 'affected_scopes', affected_scopes
+             )
+             FROM sync_schema_manifest
+             ORDER BY schema_version DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("stale-statistics manifest transition");
+
+        assert!(!requires_bootstrap);
+        assert_eq!(pending_body["transition_class"], "class_2");
+        assert_eq!(transition.0["metadata_class"], "class_2");
+        assert_eq!(transition.0["body_class"], "class_2");
+        assert_eq!(transition.0["affected_scopes"], json!([]));
     }
 
     #[pg_test]
@@ -1094,7 +1319,7 @@
             "stored row digest must use the current production schema binding"
         );
 
-        let terminal = Spi::connect(|client| {
+        let terminal = Spi::connect_mut(|client| {
             Ok::<_, spi::Error>(
                 crate::pull::compute_bucket_checksums(client, &[scope_id.to_string()])
                     .expect("current class 2 terminal scope digest"),
@@ -1130,6 +1355,287 @@
         );
         assert_eq!(rebuild["checksum"]["digest"], scope_digest.to_lower_hex());
         assert!(rebuild["records"][0]["row"][optional_field_id].is_null());
+    }
+
+    #[pg_test]
+    fn test_class_4_field_removal_keeps_rebuild_valid() {
+        setup_test_tables();
+        let user_id = "class-4-digest-user";
+        let client_id = "class-4-digest-client";
+        let scope_id = "user:class-4-digest-user";
+        let record_id = "c4000000-0000-4000-8000-000000000001";
+        register_client(user_id, client_id);
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, $2, 'retired class 4 field')",
+            &[record_id.into(), user_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, scope_id);
+        insert_changelog(scope_id, "test_orders", record_id, 1);
+
+        let retired_field_id: String = Spi::get_one(
+            "SELECT field.field_id::text
+             FROM sync_registry_fields field
+             JOIN sync_registry_generations generation
+               ON generation.generation = field.registry_generation
+             JOIN sync_registry registry
+               ON registry.registry_generation = field.registry_generation
+              AND registry.relation_id = field.relation_id
+             WHERE generation.state = 'active'
+               AND registry.table_name = 'test_orders'
+               AND field.physical_column = 'title'",
+        )
+        .unwrap()
+        .expect("retired class 4 field identity");
+
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 p_table_name := 'test_orders',
+                 p_bucket_sql := $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 p_composition := 'single_scope',
+                 p_pk_column := 'id',
+                 p_updated_at_col := 'updated_at',
+                 p_deleted_at_col := 'deleted_at',
+                 p_push_policy := 'enabled',
+                 p_sync_columns := ARRAY[
+                     'id', 'user_id', 'amount', 'created_at', 'updated_at', 'deleted_at'
+                 ]
+             )",
+        )
+        .unwrap();
+        activate_pending_registry_for_test();
+
+        let (schema_version, schema_hash) = latest_schema_ref();
+        let transition: String = Spi::get_one_with_args(
+            "SELECT transition_class
+             FROM sync_schema_manifest
+             WHERE schema_version = $1 AND schema_hash = $2",
+            &[schema_version.into(), schema_hash.as_str().into()],
+        )
+        .unwrap()
+        .expect("class 4 field removal transition");
+        assert_eq!(transition, "class_4");
+
+        let migrated: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'row_data', captured.row_data,
+                 'row_checksum', encode(captured.checksum, 'hex'),
+                 'edge_checksum', encode(edge.checksum, 'hex'),
+                 'current_generation', generation.generation,
+                 'row_generation', captured.registry_generation
+             )
+             FROM sync_captured_rows captured
+             JOIN sync_bucket_edges edge
+               ON edge.relation_id = captured.relation_id
+              AND edge.record_id = captured.record_id
+             CROSS JOIN LATERAL (
+                 SELECT generation
+                 FROM sync_registry_generations
+                 WHERE state = 'active'
+             ) generation
+             WHERE captured.record_id = $1 AND edge.bucket_id = $2",
+            &[record_id.into(), scope_id.into()],
+        )
+        .unwrap()
+        .expect("migrated class 4 projection");
+        assert!(migrated.0["row_data"].get(&retired_field_id).is_none());
+        assert_eq!(migrated.0["row_checksum"], migrated.0["edge_checksum"]);
+        assert_eq!(migrated.0["row_generation"], migrated.0["current_generation"]);
+
+        let rebuilt = rebuild_client(user_id, client_id, scope_id, None, 100);
+        assert!(rebuilt.get("error").is_none(), "{rebuilt}");
+        assert_eq!(rebuilt["records"].as_array().map(Vec::len), Some(1));
+        assert!(rebuilt["records"][0]["row"]
+            .get(&retired_field_id)
+            .is_none());
+    }
+
+    #[pg_test]
+    fn test_class_4_table_removal_retires_live_projection() {
+        setup_test_tables();
+        let user_id = "class-4-table-user";
+        let client_id = "class-4-table-client";
+        let scope_id = "user:class-4-table-user";
+        let record_id = "c4000000-0000-4000-8000-000000000002";
+        let initial = register_client(user_id, client_id);
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, $2, 'retired class 4 table')",
+            &[record_id.into(), user_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, scope_id);
+        insert_changelog(scope_id, "test_orders", record_id, 1);
+
+        Spi::run("SELECT synchro_unregister_table('test_orders')").unwrap();
+        activate_pending_registry_for_test();
+
+        let live_state: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'rows', (SELECT count(*) FROM sync_captured_rows WHERE record_id = $1),
+                 'edges', (SELECT count(*) FROM sync_bucket_edges WHERE record_id = $1)
+             )",
+            &[record_id.into()],
+        )
+        .unwrap()
+        .expect("retired class 4 live projection state");
+        assert_eq!(live_state.0["rows"], 0);
+        assert_eq!(live_state.0["edges"], 0);
+
+        let reset = connect_client(
+            user_id,
+            json!({
+                "client_id": client_id,
+                "client_generation": 1,
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 3,
+                "schema_reset": true,
+                "schema": {
+                    "version": initial["schema"]["version"],
+                    "hash": initial["schema"]["hash"]
+                },
+                "scope_set_version": 1,
+                "known_scopes": { (scope_id): { "cursor": null } }
+            }),
+        );
+        assert_eq!(reset["schema"]["action"], "rebuild_local");
+        let rebuilt = rebuild_client(user_id, client_id, scope_id, None, 100);
+        assert!(rebuilt.get("error").is_none(), "{rebuilt}");
+        assert!(rebuilt["records"].as_array().is_some_and(Vec::is_empty));
+    }
+
+    #[pg_test]
+    fn test_class_4_live_type_change_requires_bootstrap() {
+        setup_test_tables();
+        let record_id = "c4000000-0000-4000-8000-000000000003";
+        register_client("class-4-type-user", "class-4-type-client");
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'class-4-type-user', '42')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, "user:class-4-type-user");
+        insert_changelog("user:class-4-type-user", "test_orders", record_id, 1);
+        Spi::run(
+            "ALTER TABLE test_orders ALTER COLUMN title DROP DEFAULT;
+             ALTER TABLE test_orders ALTER COLUMN title TYPE bigint USING title::bigint",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_orders',
+                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
+                 ARRAY['internal_notes']
+             )",
+        )
+        .unwrap();
+
+        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
+        assert!(result.is_err(), "live Class 4 type change must require bootstrap");
+    }
+
+    #[pg_test]
+    fn test_class_4_historical_type_change_requires_bootstrap() {
+        setup_test_tables();
+        let record_id = "c4000000-0000-4000-8000-000000000005";
+        register_client("class-4-history-user", "class-4-history-client");
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'class-4-history-user', '42')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, "user:class-4-history-user");
+        insert_changelog("user:class-4-history-user", "test_orders", record_id, 1);
+        Spi::run("SET LOCAL session_replication_role = replica").unwrap();
+        Spi::run_with_args(
+            "DELETE FROM test_orders WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .unwrap();
+        Spi::run("SET LOCAL session_replication_role = origin").unwrap();
+        Spi::run_with_args(
+            "DELETE FROM sync_bucket_edges WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "DELETE FROM sync_captured_rows WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        let historical_count: i64 = Spi::get_one_with_args(
+            "SELECT count(*) FROM sync_captured_projections WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap()
+        .expect("historical Class 4 projection count");
+        assert!(historical_count > 0);
+
+        Spi::run(
+            "ALTER TABLE test_orders ALTER COLUMN title DROP DEFAULT;
+             ALTER TABLE test_orders ALTER COLUMN title TYPE bigint USING title::bigint",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                 'test_orders',
+                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
+                 ARRAY['internal_notes']
+             )",
+        )
+        .unwrap();
+
+        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
+        assert!(
+            result.is_err(),
+            "historical Class 4 type change must require bootstrap"
+        );
+    }
+
+    #[pg_test]
+    fn test_class_4_live_lifecycle_change_is_rejected() {
+        setup_test_tables();
+        let record_id = "c4000000-0000-4000-8000-000000000004";
+        register_client("class-4-lifecycle-user", "class-4-lifecycle-client");
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'class-4-lifecycle-user', 'retained')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge(
+            "test_orders",
+            record_id,
+            "user:class-4-lifecycle-user",
+        );
+        insert_changelog(
+            "user:class-4-lifecycle-user",
+            "test_orders",
+            record_id,
+            1,
+        );
+        Spi::run("ALTER TABLE test_orders DROP COLUMN deleted_at").unwrap();
+        let result = std::panic::catch_unwind(|| {
+            Spi::run(
+                "SELECT tests.register_legacy_test_table(
+                     'test_orders',
+                     $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                     'single_scope', 'id', 'updated_at', '', 'enabled',
+                     ARRAY['internal_notes']
+                 )",
+            )
+            .unwrap();
+        });
+        assert!(
+            result.is_err(),
+            "live Class 4 lifecycle change must be rejected"
+        );
     }
 
     #[pg_test]
@@ -1413,7 +1919,8 @@
              LIMIT 1",
         )
         .unwrap();
-        let tables = manifest.unwrap().0["tables"].as_array().unwrap().clone();
+        let manifest = manifest.unwrap();
+        let tables = manifest.0["tables"].as_array().unwrap();
         assert!(!tables.iter().any(|table| table["name"] == "test_orders"));
         assert!(tables.iter().any(|table| table["name"] == "test_products"));
     }
@@ -1428,13 +1935,12 @@
             server_time,
             parsed.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
         );
-        assert_eq!(
+        assert!(
             resp["schema"]
                 .get("version")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
-                > 0,
-            true
+                > 0
         );
         let added_scopes = resp["scopes"]["add"].as_array().unwrap();
         assert!(added_scopes
@@ -2640,6 +3146,55 @@
     }
 
     #[pg_test]
+    fn test_registry_loads_child_metadata_in_one_scan_per_table() {
+        setup_test_tables();
+        Spi::run("SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off")
+            .expect("force registry metadata sequential scans");
+        let field_scans_before: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_registry_fields'::regclass
+             ), 0)",
+        )
+        .expect("read registry field scan count before load")
+        .expect("registry field scan count before load");
+        let capture_field_scans_before: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_capture_dependency_fields'::regclass
+             ), 0)",
+        )
+        .expect("read capture field scan count before load")
+        .expect("capture field scan count before load");
+
+        let registrations = crate::registry::load_registry().expect("load active registry");
+        let field_scans: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_registry_fields'::regclass
+             ), 0)",
+        )
+        .expect("read registry field scan count")
+        .expect("registry field scan count");
+        let capture_field_scans: i64 = Spi::get_one(
+            "SELECT COALESCE((
+                 SELECT seq_scan
+                 FROM pg_catalog.pg_stat_xact_all_tables
+                 WHERE relid = 'synchro.sync_capture_dependency_fields'::regclass
+             ), 0)",
+        )
+        .expect("read capture field scan count")
+        .expect("capture field scan count");
+
+        assert_eq!(registrations.len(), 3);
+        assert_eq!(field_scans - field_scans_before, 1);
+        assert_eq!(capture_field_scans - capture_field_scans_before, 1);
+    }
+
+    #[pg_test]
     fn test_connect_publishes_initial_empty_manifest() {
         let response = connect_client(
             "empty_user",
@@ -2658,4 +3213,202 @@
         assert_eq!(response["schema_definition"]["tables"], json!([]));
         let count: Option<i64> = Spi::get_one("SELECT count(*) FROM sync_schema_manifest").unwrap();
         assert_eq!(count, Some(1));
+    }
+
+    fn stage_orders_transition(drop_title: bool, add_headline: bool) -> i64 {
+        if drop_title {
+            Spi::run("ALTER TABLE test_orders DROP COLUMN title").unwrap();
+        }
+        if add_headline {
+            Spi::run("ALTER TABLE test_orders ADD COLUMN headline TEXT").unwrap();
+        }
+        Spi::run(
+            "SELECT tests.register_legacy_test_table(
+                'test_orders',
+                $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                'single_scope',
+                'id', 'updated_at', 'deleted_at', 'enabled',
+                ARRAY['internal_notes']
+            )",
+        )
+        .unwrap();
+        let staged: Option<i64> = Spi::get_one(
+            "SELECT max(g.generation)
+             FROM sync_registry_generations g
+             JOIN sync_registry r ON r.registry_generation = g.generation
+             WHERE g.state = 'pending' AND r.table_name = 'test_orders'",
+        )
+        .unwrap();
+        staged.expect("staged transition generation")
+    }
+
+    fn staged_generation_requires_bootstrap(generation: i64) -> bool {
+        Spi::connect(|client| {
+            crate::schema::generation_requires_projection_bootstrap(client, generation)
+        })
+        .expect("classify staged generation")
+    }
+
+    // Issue #43: manifest publication refuses a class 4 reshape over retained
+    // rows, so bootstrap preparation must accept the same generation and
+    // produce the pending class 4 manifest the activation publishes.
+    #[pg_test]
+    fn test_class_4_reshape_over_rows_requires_projection_bootstrap() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let staged = stage_orders_transition(true, true);
+        assert!(staged_generation_requires_bootstrap(staged));
+        let published: Option<i64> =
+            Spi::get_one("SELECT max(schema_version) FROM sync_schema_manifest").unwrap();
+        let pending = Spi::connect(|client| {
+            crate::schema::prepare_pending_manifest(client, staged)
+                .map_err(pgrx::spi::Error::CursorNotFound)
+        })
+        .expect("prepare pending class 4 manifest")
+        .expect("pending class 4 manifest is present");
+        assert_eq!(pending.version, published.expect("published manifest") + 1);
+    }
+
+    #[pg_test]
+    fn test_class_4_field_removal_over_rows_keeps_wal_activation() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let staged = stage_orders_transition(true, false);
+        assert!(!staged_generation_requires_bootstrap(staged));
+    }
+
+    #[pg_test]
+    fn test_class_4_reshape_over_empty_relation_keeps_wal_activation() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        let staged = stage_orders_transition(true, true);
+        assert!(!staged_generation_requires_bootstrap(staged));
+    }
+
+    fn loaded_orders_registration_validates(active_generation: i64) -> Result<(), pgrx::spi::Error> {
+        Spi::connect(|client| {
+            let registration = crate::registry::active_registration_for_logical_name(
+                client,
+                active_generation,
+                "test_orders",
+            )?
+            .expect("active orders registration");
+            crate::registry::validate_loaded_registration(client, &registration)
+        })
+    }
+
+    fn active_orders_generation() -> i64 {
+        let active: Option<i64> = Spi::get_one(
+            "SELECT max(g.generation)
+             FROM sync_registry_generations g
+             JOIN sync_registry r ON r.registry_generation = g.generation
+             WHERE g.state = 'active' AND r.table_name = 'test_orders'",
+        )
+        .unwrap();
+        active.expect("active orders generation")
+    }
+
+    // Issue #43: the staged class 4 window leaves the active registration
+    // behind the live catalog by design, and the loader tolerates exactly
+    // that window while activation waits on the operator bootstrap.
+    #[pg_test]
+    fn test_loaded_registration_tolerates_staged_reshape_window() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let active = active_orders_generation();
+        stage_orders_transition(true, true);
+        loaded_orders_registration_validates(active).expect("staged window validation");
+    }
+
+    #[pg_test(error = "registered synced column metadata has drifted")]
+    fn test_loaded_registration_rejects_unstaged_catalog_drift() {
+        setup_test_tables();
+        let active = active_orders_generation();
+        Spi::run("ALTER TABLE test_orders ADD COLUMN rogue TEXT").unwrap();
+        loaded_orders_registration_validates(active).expect("unstaged drift must abort");
+    }
+
+    // Issue #43: membership activation clears affected rebuild state while
+    // sessions are live, so the child immutability trigger accepts the same
+    // staged-generation authorization as the session trigger.
+    #[pg_test]
+    fn test_membership_activation_clears_live_rebuild_state() {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let staged = stage_orders_transition(true, true);
+        connect_client(
+            "user-a",
+            json!({
+                "client_id": "client-a",
+                "platform": "ios",
+                "app_version": "1.0.0",
+                "protocol_version": 3,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            }),
+        );
+        Spi::run(
+            "INSERT INTO sync_rebuild_sessions (
+                 user_id, client_id, rebuild_id, scope_id, client_generation,
+                 schema_version, schema_hash, stream_generation,
+                 membership_generation, retention_generation,
+                 boundary_position_kind, accepted_write_epoch, page_limit,
+                 snapshot_checksum, staged_row_count
+             ) VALUES (
+                 'user-a', 'client-a', '44444444-4444-4444-4444-444444444444',
+                 'user:user-a', 1, 1, repeat('a', 64), 'sg-1', 1, 1,
+                 'generation_start', 1, 10, decode(repeat('ab', 32), 'hex'), 0
+             )",
+        )
+        .unwrap();
+        Spi::run(
+            "INSERT INTO sync_rebuild_pages (session_id, next_row_ordinal, response)
+             SELECT session_id, 0, '{}'::jsonb
+             FROM sync_rebuild_sessions
+             WHERE rebuild_id = '44444444-4444-4444-4444-444444444444'",
+        )
+        .unwrap();
+        let active = active_orders_generation();
+        Spi::run(&format!(
+            "INSERT INTO sync_stream_resets (
+                 reset_id, operation_kind, source_stream_generation,
+                 target_stream_generation, source_registry_generation,
+                 target_registry_generation, old_slot_name, candidate_slot_name,
+                 database_oid, database_name, plugin, lifecycle,
+                 consistent_point, exported_snapshot_name, activation_barrier,
+                 baseline_staged_at, staged_row_count, staged_version_count,
+                 staged_edge_count, staged_fence_count, staged_scope_count
+             ) VALUES (
+                 '55555555-5555-5555-5555-555555555555', 'projection_bootstrap',
+                 'sg-1', 'sg-1', {active}, {staged}, 'old_slot', 'cand_slot',
+                 1, current_database(), 'pgoutput', 'catching_up',
+                 '0/10', 'snap_test', '0/20', now(), 0, 0, 0, 0, 0
+             )"
+        ))
+        .unwrap();
+        Spi::run(
+            "SELECT set_config(
+                 'synchro.stream_reset_id',
+                 '55555555-5555-5555-5555-555555555555', true
+             )",
+        )
+        .unwrap();
+        Spi::connect_mut(|client| {
+            crate::materialize::invalidate_affected_membership_generation(
+                client,
+                &["user:user-a".to_string()],
+                staged,
+            )
+        })
+        .expect("membership activation clears live rebuild state");
+        let remaining: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM sync_rebuild_sessions").unwrap();
+        assert_eq!(remaining, Some(0));
+        let pages: Option<i64> = Spi::get_one("SELECT count(*) FROM sync_rebuild_pages").unwrap();
+        assert_eq!(pages, Some(0));
     }

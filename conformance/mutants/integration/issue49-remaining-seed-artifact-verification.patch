@@ -1,0 +1,18 @@
+diff --git a/api/go/seeddb/integrity.go b/api/go/seeddb/integrity.go
+--- a/api/go/seeddb/integrity.go
++++ b/api/go/seeddb/integrity.go
+@@ -629,12 +629,9 @@ func verifyPortableSeedRecord(
+ 	writeBlob(hasher, rowBody)
+ 	writeText(hasher, record.ServerVersion)
+-	actual := hasher.Sum(nil)
+-	if hex.EncodeToString(actual) != record.RowChecksum.Digest {
+-		return "", seedDigestRow{}, errors.New("portable seed row digest does not match its row")
+-	}
+ 
+ 	var digest [sha256.Size]byte
+-	copy(digest[:], actual)
++	claimed, _ := hex.DecodeString(record.RowChecksum.Digest)
++	copy(digest[:], claimed)
+ 	recordID, err := sqliteRecordID(primary.LogicalType, pkValue)
+ 	if err != nil {
+ 		return "", seedDigestRow{}, err

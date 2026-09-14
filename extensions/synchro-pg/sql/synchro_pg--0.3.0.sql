@@ -7,7 +7,7 @@ The ordering of items is not stable, it is driven by a dependency graph.
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:36
+-- synchro-pg/src/lib.rs:39
 -- bootstrap
 
 CREATE TABLE IF NOT EXISTS sync_runtime_state (
@@ -15,9 +15,15 @@ CREATE TABLE IF NOT EXISTS sync_runtime_state (
     stream_generation TEXT NOT NULL,
     cursor_secret TEXT NOT NULL,
     active_slot_name NAME,
+    active_publication_name NAME,
+    active_publication_oid OID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_name NAME;
+ALTER TABLE sync_runtime_state
+    ADD COLUMN IF NOT EXISTS active_publication_oid OID;
 INSERT INTO sync_runtime_state (singleton, stream_generation, cursor_secret)
 VALUES (
     true,
@@ -25,6 +31,12 @@ VALUES (
     replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '')
 )
 ON CONFLICT (singleton) DO NOTHING;
+
+CREATE TABLE sync_extension_build (
+    singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    installed_fingerprint TEXT NOT NULL CHECK (installed_fingerprint ~ '^[0-9a-f]{64}$'),
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE sync_token_keys (
     key_id TEXT PRIMARY KEY,
@@ -75,6 +87,62 @@ SELECT stream_generation, 'active', true, now()
 FROM sync_runtime_state
 WHERE singleton = true
   AND NOT EXISTS (SELECT 1 FROM sync_registry_generations);
+
+-- Keep activation requests durable until an initial slot binding can replay them.
+CREATE TABLE IF NOT EXISTS sync_registry_activation_requests (
+    registry_generation BIGINT PRIMARY KEY
+        REFERENCES sync_registry_generations(generation) ON DELETE CASCADE,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    emitted_at TIMESTAMPTZ
+);
+
+CREATE OR REPLACE FUNCTION synchro_replay_registry_activation_requests()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+DECLARE
+    request RECORD;
+BEGIN
+    IF OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL THEN
+        FOR request IN
+            SELECT activation.registry_generation
+            FROM sync_registry_activation_requests activation
+            JOIN sync_registry_generations generation
+              ON generation.generation = activation.registry_generation
+             AND generation.state = 'pending'
+             AND generation.validated
+            ORDER BY activation.registry_generation
+            FOR UPDATE OF activation
+        LOOP
+            PERFORM pg_logical_emit_message(
+                true,
+                'synchro_registry',
+                convert_to(
+                    format(
+                        '{"generation":%s,"action":"activate"}',
+                        request.registry_generation
+                    ),
+                    'UTF8'
+                )
+            );
+            UPDATE sync_registry_activation_requests
+            SET emitted_at = now()
+            WHERE registry_generation = request.registry_generation;
+        END LOOP;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS synchro_replay_registry_activation_requests
+    ON sync_runtime_state;
+CREATE TRIGGER synchro_replay_registry_activation_requests
+AFTER UPDATE OF active_slot_name ON sync_runtime_state
+FOR EACH ROW
+WHEN (OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL)
+EXECUTE FUNCTION synchro_replay_registry_activation_requests();
 
 CREATE TABLE IF NOT EXISTS sync_logical_ids (
     logical_id UUID PRIMARY KEY,
@@ -151,6 +219,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     field_id UUID NOT NULL REFERENCES sync_logical_ids(logical_id),
     physical_column NAME NOT NULL,
     portable_type TEXT NOT NULL,
+    native_json BOOLEAN NOT NULL,
     decimal_precision INTEGER,
     decimal_scale INTEGER,
     nullable BOOLEAN NOT NULL,
@@ -161,6 +230,7 @@ CREATE TABLE IF NOT EXISTS sync_registry_fields (
     FOREIGN KEY (registry_generation, relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     CHECK (NOT primary_key OR (NOT nullable AND NOT writable)),
+    CHECK (NOT native_json OR portable_type = 'json'),
     CHECK (
         (portable_type = 'decimal' AND decimal_precision > 0 AND decimal_scale >= 0 AND decimal_scale <= decimal_precision)
         OR (portable_type <> 'decimal' AND decimal_precision IS NULL AND decimal_scale IS NULL)
@@ -253,6 +323,7 @@ CREATE TABLE sync_registry_membership_stages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     activated_at TIMESTAMPTZ,
     CHECK (source_registry_generation < registry_generation),
+    CHECK (affected_scopes IS NULL OR cardinality(affected_scopes) > 0),
     CHECK (
         (state = 'pending'
          AND stream_generation IS NULL
@@ -260,7 +331,6 @@ CREATE TABLE sync_registry_membership_stages (
          AND activation_end_lsn IS NULL
          AND staged_record_count IS NULL
          AND staged_edge_count IS NULL
-         AND affected_scopes IS NULL
          AND NOT verified
          AND activated_at IS NULL)
         OR
@@ -557,6 +627,17 @@ CREATE TABLE IF NOT EXISTS sync_shared_scopes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A granted scope belongs to one user and can be revoked from that user. An
+-- identity scope is unconditional and a shared scope belongs to every user, so
+-- neither expresses an assignment that changes.
+CREATE TABLE IF NOT EXISTS sync_user_scopes (
+    user_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    assigned BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, scope_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_scope_state (
     scope_id TEXT PRIMARY KEY,
     stream_generation TEXT NOT NULL,
@@ -586,6 +667,69 @@ CREATE TABLE IF NOT EXISTS sync_bucket_edges (
     PRIMARY KEY (table_name, record_id, bucket_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sync_bucket_edges_bucket ON sync_bucket_edges (bucket_id, table_name, record_id);
+
+CREATE TABLE IF NOT EXISTS sync_scope_digest_cache (
+    scope_id TEXT PRIMARY KEY,
+    edge_change_xid XID8 NOT NULL,
+    schema_hash BYTEA CHECK (schema_hash IS NULL OR octet_length(schema_hash) = 32),
+    digest BYTEA CHECK (digest IS NULL OR octet_length(digest) = 32),
+    CHECK ((schema_hash IS NULL) = (digest IS NULL))
+);
+
+CREATE OR REPLACE FUNCTION sync_lock_scope_digest_boundary()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    LOCK TABLE synchro.sync_wal_progress IN ROW EXCLUSIVE MODE;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sync_invalidate_scope_digest()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        INSERT INTO synchro.sync_scope_digest_cache AS cache (scope_id, edge_change_xid)
+        VALUES (OLD.bucket_id, pg_current_xact_id())
+        ON CONFLICT (scope_id) DO UPDATE
+        SET edge_change_xid = EXCLUDED.edge_change_xid,
+            schema_hash = NULL,
+            digest = NULL
+        WHERE cache.edge_change_xid <> EXCLUDED.edge_change_xid
+           OR cache.digest IS NOT NULL;
+    END IF;
+
+    IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.bucket_id IS DISTINCT FROM OLD.bucket_id) THEN
+        INSERT INTO synchro.sync_scope_digest_cache AS cache (scope_id, edge_change_xid)
+        VALUES (NEW.bucket_id, pg_current_xact_id())
+        ON CONFLICT (scope_id) DO UPDATE
+        SET edge_change_xid = EXCLUDED.edge_change_xid,
+            schema_hash = NULL,
+            digest = NULL
+        WHERE cache.edge_change_xid <> EXCLUDED.edge_change_xid
+           OR cache.digest IS NOT NULL;
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sync_lock_scope_digest_boundary ON sync_bucket_edges;
+CREATE TRIGGER sync_lock_scope_digest_boundary
+BEFORE INSERT OR UPDATE OR DELETE ON sync_bucket_edges
+FOR EACH STATEMENT EXECUTE FUNCTION sync_lock_scope_digest_boundary();
+
+DROP TRIGGER IF EXISTS sync_invalidate_scope_digest ON sync_bucket_edges;
+CREATE TRIGGER sync_invalidate_scope_digest
+AFTER INSERT OR UPDATE OR DELETE ON sync_bucket_edges
+FOR EACH ROW EXECUTE FUNCTION sync_invalidate_scope_digest();
 
 CREATE TABLE IF NOT EXISTS sync_rule_failures (
     id BIGSERIAL PRIMARY KEY,
@@ -1252,6 +1396,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
         'truncate_unsupported',
         'registered_relation_drift'
     )),
+    failure_detail TEXT NOT NULL CHECK (
+        octet_length(failure_detail) BETWEEN 1 AND 512
+    ),
     relation_id UUID,
     lifecycle TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active', 'repaired', 'reset')),
     poisoned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1260,8 +1407,9 @@ CREATE TABLE IF NOT EXISTS sync_wal_poison (
     attempt_count BIGINT NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
     CHECK ((lifecycle = 'active') = (resolved_at IS NULL))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_wal_one_active_poison
-    ON sync_wal_poison ((lifecycle)) WHERE lifecycle = 'active';
+DROP INDEX IF EXISTS idx_sync_wal_one_active_poison;
+CREATE UNIQUE INDEX idx_sync_wal_one_active_poison
+    ON sync_wal_poison (stream_generation) WHERE lifecycle = 'active';
 
 CREATE TABLE IF NOT EXISTS sync_wal_worker_state (
     worker_id TEXT PRIMARY KEY,
@@ -1409,7 +1557,13 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
        ) THEN
         RETURN OLD;
     END IF;
@@ -1451,7 +1605,24 @@ BEGIN
            SELECT 1
            FROM sync_stream_resets reset
            WHERE reset.reset_id::text = NULLIF(current_setting('synchro.stream_reset_id', true), '')
-             AND reset.lifecycle = 'baseline_staged'
+             AND (
+                 reset.lifecycle = 'baseline_staged'
+                 OR (
+                     reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                 )
+             )
+       ) THEN
+        RETURN OLD;
+    END IF;
+    IF TG_OP = 'DELETE'
+       AND EXISTS (
+           SELECT 1
+           FROM sync_registry_membership_stages stage
+           WHERE stage.registry_generation::text = NULLIF(
+                     current_setting('synchro.membership_activation_generation', true), ''
+                 )
+             AND stage.state = 'pending'
        ) THEN
         RETURN OLD;
     END IF;
@@ -1725,7 +1896,7 @@ $$;
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:371
+-- synchro-pg/src/stream_reset.rs:597
 -- synchro_pg::stream_reset::synchro_abort_projection_bootstrap
 CREATE  FUNCTION "synchro_abort_projection_bootstrap"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1736,7 +1907,7 @@ AS 'MODULE_PATHNAME', 'synchro_abort_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:230
+-- synchro-pg/src/stream_reset.rs:229
 -- synchro_pg::stream_reset::synchro_abort_stream_reset
 CREATE  FUNCTION "synchro_abort_stream_reset"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1747,7 +1918,7 @@ AS 'MODULE_PATHNAME', 'synchro_abort_stream_reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:329
+-- synchro-pg/src/stream_reset.rs:328
 -- synchro_pg::stream_reset::synchro_activate_projection_bootstrap
 CREATE  FUNCTION "synchro_activate_projection_bootstrap"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1758,7 +1929,7 @@ AS 'MODULE_PATHNAME', 'synchro_activate_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:215
+-- synchro-pg/src/stream_reset.rs:214
 -- synchro_pg::stream_reset::synchro_activate_stream_reset
 CREATE  FUNCTION "synchro_activate_stream_reset"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1772,26 +1943,35 @@ AS 'MODULE_PATHNAME', 'synchro_activate_stream_reset_wrapper';
 -- synchro-pg/src/materialize.rs:47
 -- synchro_pg::materialize::synchro_backfill_bucket_edges
 CREATE  FUNCTION "synchro_backfill_bucket_edges"(
-	"p_table_name" TEXT DEFAULT NULL /* core::option::Option<&str> */
+	"p_table_name" TEXT DEFAULT NULL, /* core::option::Option<&str> */
+	"p_batch_size" bigint DEFAULT 1000 /* i64 */
 ) RETURNS jsonb /* pgrx::datum::json::JsonB */
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_backfill_bucket_edges_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- synchro-pg/src/build_fingerprint.rs:37
+-- synchro_pg::build_fingerprint::synchro_build_fingerprint
+CREATE  FUNCTION "synchro_build_fingerprint"() RETURNS TEXT /* alloc::string::String */
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_build_fingerprint_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- synchro-pg/src/compaction.rs:9
 -- synchro_pg::compaction::synchro_compact
 CREATE  FUNCTION "synchro_compact"(
-	"p_stale_threshold" TEXT DEFAULT '30 days', /* &str */
+	"p_stale_threshold" TEXT DEFAULT '30 days', /* core::option::Option<&str> */
 	"p_batch_size" INT DEFAULT 10000 /* i32 */
 ) RETURNS jsonb /* pgrx::datum::json::JsonB */
-STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_compact_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:380
+-- synchro-pg/src/stream_reset.rs:606
 -- synchro_pg::stream_reset::synchro_complete_projection_bootstrap_cleanup
 CREATE  FUNCTION "synchro_complete_projection_bootstrap_cleanup"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1802,7 +1982,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_projection_bootstrap_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:240
+-- synchro-pg/src/stream_reset.rs:239
 -- synchro_pg::stream_reset::synchro_complete_stream_reset_cleanup
 CREATE  FUNCTION "synchro_complete_stream_reset_cleanup"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1813,7 +1993,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_stream_reset_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:120
+-- synchro-pg/src/client.rs:129
 -- synchro_pg::client::synchro_connect
 CREATE  FUNCTION "synchro_connect"(
 	"p_user_id" TEXT, /* &str */
@@ -1825,7 +2005,7 @@ AS 'MODULE_PATHNAME', 'synchro_connect_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:56
+-- synchro-pg/src/client.rs:59
 -- synchro_pg::client::synchro_contract_info
 CREATE  FUNCTION "synchro_contract_info"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -1846,7 +2026,7 @@ AS 'MODULE_PATHNAME', 'synchro_debug_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:305
+-- synchro-pg/src/stream_reset.rs:304
 -- synchro_pg::stream_reset::synchro_emit_projection_bootstrap_barrier
 CREATE  FUNCTION "synchro_emit_projection_bootstrap_barrier"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1857,7 +2037,19 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1013
+-- synchro-pg/src/portable_seed.rs:212
+-- synchro_pg::portable_seed::synchro_grant_user_scope
+CREATE  FUNCTION "synchro_grant_user_scope"(
+	"p_user_id" TEXT, /* &str */
+	"p_scope_id" TEXT /* &str */
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/health.rs:1065
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -1866,7 +2058,18 @@ AS 'MODULE_PATHNAME', 'synchro_health_detail_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:154
+-- synchro-pg/src/compaction.rs:37
+-- synchro_pg::compaction::synchro_inject_client_retention_expiry
+CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
+	"p_user_id" TEXT, /* core::option::Option<&str> */
+	"p_client_id" TEXT /* core::option::Option<&str> */
+) RETURNS bool /* bool */
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_inject_client_retention_expiry_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:153
 -- synchro_pg::stream_reset::synchro_lock_stream_reset_sources
 CREATE  FUNCTION "synchro_lock_stream_reset_sources"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1877,7 +2080,7 @@ AS 'MODULE_PATHNAME', 'synchro_lock_stream_reset_sources_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:166
+-- synchro-pg/src/stream_reset.rs:165
 -- synchro_pg::stream_reset::synchro_mark_stream_reset_snapshot
 CREATE  FUNCTION "synchro_mark_stream_reset_snapshot"(
 	"reset_id" uuid, /* pgrx::datum::uuid::Uuid */
@@ -1889,7 +2092,7 @@ AS 'MODULE_PATHNAME', 'synchro_mark_stream_reset_snapshot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:245
+-- synchro-pg/src/portable_seed.rs:328
 -- synchro_pg::portable_seed::synchro_portable_seed_manifest
 CREATE  FUNCTION "synchro_portable_seed_manifest"(
 	"p_page_limit" INT DEFAULT 1000 /* i32 */
@@ -1900,7 +2103,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:417
+-- synchro-pg/src/portable_seed.rs:501
 -- synchro_pg::portable_seed::synchro_portable_seed_scope
 CREATE  FUNCTION "synchro_portable_seed_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -1915,7 +2118,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:250
+-- synchro-pg/src/stream_reset.rs:249
 -- synchro_pg::stream_reset::synchro_prepare_projection_bootstrap
 CREATE  FUNCTION "synchro_prepare_projection_bootstrap"(
 	"registry_generation" bigint, /* i64 */
@@ -1927,7 +2130,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:185
+-- synchro-pg/src/registry.rs:182
 -- synchro_pg::registry::synchro_prepare_projection_view
 CREATE  FUNCTION "synchro_prepare_projection_view"(
 	"p_relation_name" TEXT, /* &str */
@@ -1940,7 +2143,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_view_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:145
+-- synchro-pg/src/stream_reset.rs:144
 -- synchro_pg::stream_reset::synchro_prepare_stream_reset
 CREATE  FUNCTION "synchro_prepare_stream_reset"(
 	"candidate_slot_name" TEXT /* &str */
@@ -1951,7 +2154,79 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_stream_reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:343
+-- synchro-pg/src/stream_reset.rs:342
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_active_stream
+CREATE  FUNCTION "synchro_projection_bootstrap_active_stream"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_active_stream_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:514
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_interrupted
+CREATE  FUNCTION "synchro_projection_bootstrap_interrupted"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_interrupted_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:492
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_is_activated
+CREATE  FUNCTION "synchro_projection_bootstrap_is_activated"(
+	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
+) RETURNS bool /* bool */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_is_activated_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:367
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_main_boundary
+CREATE  FUNCTION "synchro_projection_bootstrap_main_boundary"(
+	"stream_generation" TEXT, /* &str */
+	"marker_lsn" TEXT /* &str */
+) RETURNS bool /* bool */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_main_boundary_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:459
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_next_aborted_slot
+CREATE  FUNCTION "synchro_projection_bootstrap_next_aborted_slot"() RETURNS TEXT /* core::option::Option<alloc::string::String> */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_next_aborted_slot_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:394
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_slot_absent
+CREATE  FUNCTION "synchro_projection_bootstrap_slot_absent"(
+	"candidate_slot_name" TEXT /* &str */
+) RETURNS bool /* bool */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_slot_absent_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:419
+-- synchro_pg::stream_reset::synchro_projection_bootstrap_slot_drop_state
+CREATE  FUNCTION "synchro_projection_bootstrap_slot_drop_state"(
+	"candidate_slot_name" TEXT /* &str */
+) RETURNS jsonb /* pgrx::datum::json::JsonB */
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_slot_drop_state_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/stream_reset.rs:569
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_status
 CREATE  FUNCTION "synchro_projection_bootstrap_status"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1962,7 +2237,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_status_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/pull.rs:24
+-- synchro-pg/src/pull.rs:25
 -- synchro_pg::pull::synchro_pull
 CREATE  FUNCTION "synchro_pull"(
 	"p_user_id" TEXT, /* &str */
@@ -1974,7 +2249,7 @@ AS 'MODULE_PATHNAME', 'synchro_pull_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/push.rs:133
+-- synchro-pg/src/push.rs:129
 -- synchro_pg::push::synchro_push
 CREATE  FUNCTION "synchro_push"(
 	"p_user_id" TEXT, /* &str */
@@ -1986,7 +2261,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1006
+-- synchro-pg/src/health.rs:1058
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -1995,7 +2270,7 @@ AS 'MODULE_PATHNAME', 'synchro_readiness_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/rebuild.rs:95
+-- synchro-pg/src/rebuild.rs:96
 -- synchro_pg::rebuild::synchro_rebuild
 CREATE  FUNCTION "synchro_rebuild"(
 	"p_user_id" TEXT, /* &str */
@@ -2007,7 +2282,7 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:622
+-- synchro-pg/src/registry.rs:652
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2020,7 +2295,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:848
+-- synchro-pg/src/registry.rs:928
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2035,7 +2310,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_membership_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:133
+-- synchro-pg/src/portable_seed.rs:137
 -- synchro_pg::portable_seed::synchro_register_shared_scope
 CREATE  FUNCTION "synchro_register_shared_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2047,7 +2322,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:339
+-- synchro-pg/src/registry.rs:336
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2059,7 +2334,8 @@ CREATE  FUNCTION "synchro_register_table"(
 	"p_push_policy" TEXT DEFAULT 'enabled', /* &str */
 	"p_exclude_columns" TEXT[] DEFAULT '{}', /* alloc::vec::Vec<alloc::string::String> */
 	"p_sync_columns" TEXT[] DEFAULT '{}', /* alloc::vec::Vec<alloc::string::String> */
-	"p_max_scope_fanout" INT DEFAULT 8 /* i32 */
+	"p_max_scope_fanout" INT DEFAULT 8, /* i32 */
+	"p_affected_scopes" TEXT[] DEFAULT '{}' /* alloc::vec::Vec<alloc::string::String> */
 ) RETURNS void
 STRICT
 LANGUAGE c /* Rust */
@@ -2067,7 +2343,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:317
+-- synchro-pg/src/stream_reset.rs:316
 -- synchro_pg::stream_reset::synchro_request_projection_bootstrap_barrier
 CREATE  FUNCTION "synchro_request_projection_bootstrap_barrier"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2078,12 +2354,24 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:523
+-- synchro-pg/src/bgworker.rs:700
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_retry_wal_poison_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/portable_seed.rs:244
+-- synchro_pg::portable_seed::synchro_revoke_user_scope
+CREATE  FUNCTION "synchro_revoke_user_scope"(
+	"p_user_id" TEXT, /* &str */
+	"p_scope_id" TEXT /* &str */
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_revoke_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -2096,7 +2384,7 @@ AS 'MODULE_PATHNAME', 'synchro_schema_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:266
+-- synchro-pg/src/stream_reset.rs:265
 -- synchro_pg::stream_reset::synchro_stage_projection_bootstrap
 CREATE  FUNCTION "synchro_stage_projection_bootstrap"(
 	"bootstrap_id" uuid, /* pgrx::datum::uuid::Uuid */
@@ -2114,7 +2402,7 @@ AS 'MODULE_PATHNAME', 'synchro_stage_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:175
+-- synchro-pg/src/stream_reset.rs:174
 -- synchro_pg::stream_reset::synchro_stage_stream_reset
 CREATE  FUNCTION "synchro_stage_stream_reset"(
 	"reset_id" uuid, /* pgrx::datum::uuid::Uuid */
@@ -2141,7 +2429,7 @@ AS 'MODULE_PATHNAME', 'synchro_tables_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:204
+-- synchro-pg/src/portable_seed.rs:287
 -- synchro_pg::portable_seed::synchro_unregister_shared_scope
 CREATE  FUNCTION "synchro_unregister_shared_scope"(
 	"p_scope_id" TEXT /* &str */
@@ -2152,7 +2440,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:805
+-- synchro-pg/src/registry.rs:885
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */
@@ -2163,7 +2451,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1755
+-- synchro-pg/src/lib.rs:1929
 -- finalize
 
 DO $roles$
@@ -2193,8 +2481,17 @@ BEGIN
     ALTER ROLE synchro_monitor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
     ALTER ROLE synchro_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
+
+    -- Backfill and worker materialization stage edges in transaction-local tables.
+    EXECUTE pg_catalog.format(
+        'GRANT TEMPORARY ON DATABASE %I TO synchro_owner, synchro_worker',
+        pg_catalog.current_database()
+    );
 END
 $roles$;
+
+INSERT INTO synchro.sync_extension_build (singleton, installed_fingerprint)
+VALUES (true, synchro.synchro_build_fingerprint());
 
 CREATE SCHEMA IF NOT EXISTS synchro_projection;
 ALTER SCHEMA synchro_projection OWNER TO synchro_owner;
@@ -2275,20 +2572,32 @@ BEGIN
         grantee := CASE
             WHEN function_record.proname IN (
                 'synchro_contract_info', 'synchro_connect', 'synchro_pull', 'synchro_push',
-                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness'
+                'synchro_rebuild', 'synchro_schema_manifest', 'synchro_tables', 'synchro_readiness',
+                'synchro_build_fingerprint'
             ) THEN 'synchro_adapter'
-            WHEN function_record.proname IN (
-                'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
-            ) THEN 'synchro_seed'
-            WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
-            THEN 'synchro_monitor'
-            WHEN function_record.proname IN (
+             WHEN function_record.proname IN (
+                 'synchro_portable_seed_manifest', 'synchro_portable_seed_scope'
+             ) THEN 'synchro_seed'
+             WHEN function_record.proname IN ('synchro_readiness', 'synchro_health_detail')
+             THEN 'synchro_monitor'
+             WHEN function_record.proname IN (
+                 'synchro_projection_bootstrap_active_stream',
+                 'synchro_projection_bootstrap_main_boundary',
+                 'synchro_projection_bootstrap_slot_absent',
+                  'synchro_projection_bootstrap_slot_drop_state',
+                 'synchro_projection_bootstrap_next_aborted_slot',
+                 'synchro_projection_bootstrap_is_activated',
+                 'synchro_projection_bootstrap_interrupted'
+             ) THEN 'synchro_worker'
+             WHEN function_record.proname IN (
                 'synchro_register_table', 'synchro_register_capture_dependency',
                 'synchro_prepare_projection_view',
-                'synchro_register_membership_dependency',
-                'synchro_unregister_table', 'synchro_register_shared_scope',
-                'synchro_unregister_shared_scope', 'synchro_backfill_bucket_edges',
-                 'synchro_compact', 'synchro_retry_wal_poison', 'synchro_health_detail',
+                 'synchro_register_membership_dependency',
+                 'synchro_unregister_table', 'synchro_register_shared_scope',
+                 'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
+                 'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
+                  'synchro_compact', 'synchro_inject_client_retention_expiry',
+                 'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
                  'synchro_prepare_stream_reset', 'synchro_lock_stream_reset_sources',
                  'synchro_mark_stream_reset_snapshot',
@@ -2301,7 +2610,7 @@ BEGIN
                  'synchro_activate_projection_bootstrap',
                  'synchro_projection_bootstrap_status',
                  'synchro_abort_projection_bootstrap',
-                 'synchro_complete_projection_bootstrap_cleanup'
+                  'synchro_complete_projection_bootstrap_cleanup'
              ) THEN 'synchro_operator'
             ELSE NULL
         END;
@@ -2325,6 +2634,9 @@ BEGIN
         IF function_record.proname = 'synchro_health_detail' THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
         END IF;
+        IF function_record.proname = 'synchro_projection_bootstrap_slot_drop_state' THEN
+            EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
+        END IF;
     END LOOP;
 END
 $function_grants$;
@@ -2346,7 +2658,7 @@ GRANT SELECT, INSERT, UPDATE ON synchro.sync_captured_projections TO synchro_wor
 GRANT SELECT, INSERT ON synchro.sync_capture_dependency_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_current_projections TO synchro_worker;
 GRANT SELECT ON synchro.sync_clients, synchro.sync_client_checkpoints,
-    synchro.sync_shared_scopes TO synchro_worker;
+    synchro.sync_shared_scopes, synchro.sync_user_scopes TO synchro_worker;
 GRANT DELETE ON synchro.sync_client_checkpoints TO synchro_worker;
 GRANT SELECT, INSERT, UPDATE ON synchro.sync_scope_state,
     synchro.sync_schema_manifest TO synchro_worker;
@@ -2361,6 +2673,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON synchro.sync_stream_reset_captured_rows,
 GRANT SELECT, INSERT, DELETE ON synchro.sync_stream_reset_membership_edges,
     synchro.sync_stream_reset_scope_digests TO synchro_worker;
 GRANT SELECT ON synchro.sync_stream_reset_fence_coverage TO synchro_worker;
+-- A membership activation invalidates the rebuild state of every affected
+-- scope. The worker performs that invalidation, so it deletes rebuild pages
+-- and staged rows through their sessions, and then the sessions themselves.
+GRANT SELECT, DELETE ON synchro.sync_rebuild_sessions,
+    synchro.sync_rebuild_pages, synchro.sync_rebuild_staged_rows TO synchro_worker;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA synchro TO synchro_worker;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro REVOKE ALL ON TABLES FROM PUBLIC;

@@ -145,10 +145,6 @@ func TestExpandScopeTopologyWorkloadPreservesCumulativeSampleEvidence(t *testing
 			path: "conformance/scenarios/performance/shared-private-scopes-001.json",
 			want: map[string]int{"1/1000": 3, "8/1000": 3},
 		},
-		{
-			path: "conformance/scenarios/performance/multi-scope-provenance-001.json",
-			want: map[string]int{"1/1": 3, "2/2": 3},
-		},
 	}
 	for _, test := range tests {
 		t.Run(filepath.Base(test.path), func(t *testing.T) {

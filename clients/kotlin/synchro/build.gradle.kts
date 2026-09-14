@@ -19,6 +19,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -33,6 +34,7 @@ android {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
@@ -42,12 +44,15 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.11.1")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+    testImplementation("org.jetbrains.kotlin:kotlin-reflect:1.9.22")
     testImplementation("androidx.test:core:1.5.0")
 }
 
 mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
-    val localPublish = gradle.startParameter.taskNames.any { it.contains("MavenLocal") }
+    val localPublish = gradle.startParameter.taskNames.any {
+        it.contains("MavenLocal") || it.contains("ConsumerRepository")
+    }
     if (!localPublish) {
         signAllPublications()
     }
@@ -77,6 +82,39 @@ mavenPublishing {
             developerConnection.set("scm:git:ssh://github.com/trainstar/synchro.git")
         }
     }
+}
+
+providers.environmentVariable("SYNCHRO_CONSUMER_MAVEN_REPOSITORY").orNull?.let { repositoryPath ->
+    publishing {
+        repositories {
+            maven {
+                name = "consumer"
+                url = uri(repositoryPath)
+            }
+        }
+    }
+}
+
+providers.environmentVariable("SYNCHRO_RELEASE_MAVEN_REPOSITORY").orNull?.let { repositoryPath ->
+    publishing {
+        repositories {
+            maven {
+                name = "release"
+                url = uri(repositoryPath)
+            }
+        }
+    }
+}
+
+tasks.register("releaseBundle") {
+    group = "publishing"
+    description = "Write the signed Maven release repository bundle."
+    doFirst {
+        require(!providers.environmentVariable("SYNCHRO_RELEASE_MAVEN_REPOSITORY").orNull.isNullOrBlank()) {
+            "SYNCHRO_RELEASE_MAVEN_REPOSITORY is required"
+        }
+    }
+    dependsOn("publishAllPublicationsToReleaseRepository")
 }
 
 val integrationTestPatterns = listOf(

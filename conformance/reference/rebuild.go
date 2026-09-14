@@ -203,7 +203,6 @@ func rebuildRequestPage(_ context.Context, model *Model, payload json.RawMessage
 	}
 	return result, nil
 }
-
 func decodeRebuildRequest(payload json.RawMessage) (rebuildRequestPayload, error) {
 	var request rebuildRequestPayload
 	if err := decodeStrictPayload(payload, &request); err != nil {

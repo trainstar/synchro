@@ -88,6 +88,119 @@
     }
 
     #[pg_test]
+    fn test_same_schema_bootstrap_uses_manifest_hash() {
+        setup_test_tables();
+        let table = create_capture_dependency_table(true);
+        Spi::run(&format!(
+            "SELECT synchro.synchro_register_capture_dependency(
+                 'public.{table}', ARRAY['id']::text[], ARRAY['target_id']::text[]
+             )"
+        ))
+        .expect("stage same-schema projection bootstrap generation");
+        configure_reset_test_slot("synchro_same_schema_old");
+
+        let target_generation: i64 = Spi::get_one(&format!(
+            "SELECT generation.generation
+             FROM synchro.sync_registry registry
+             JOIN synchro.sync_registry_generations generation
+               ON generation.generation = registry.registry_generation
+             WHERE registry.physical_relation_oid = 'public.{table}'::regclass
+               AND generation.state = 'pending' AND generation.validated"
+        ))
+        .expect("load same-schema projection bootstrap generation")
+        .expect("same-schema projection bootstrap generation");
+        let (_, expected_hash) = latest_schema_ref();
+        let prepared = Spi::connect_mut(|client| {
+            crate::stream_reset::prepare_projection_bootstrap_for_test(
+                client,
+                target_generation,
+                "synchro_same_schema_candidate",
+            )
+        })
+        .expect("prepare same-schema projection bootstrap");
+        assert!(prepared["schema_hash"].is_null());
+
+        let actual_hash = Spi::connect(|client| {
+            crate::pull::schema_hash_for_generation(client, target_generation)
+        })
+        .expect("load inherited schema hash");
+        assert_eq!(actual_hash.to_lower_hex(), expected_hash);
+    }
+
+    #[pg_test]
+    fn test_synced_projection_serializes_json_values_as_canonical_text() {
+        setup_portable_type_contract_table();
+        let record_id = "10101010-1010-4010-8010-101010101010";
+        Spi::run_with_args(
+            "INSERT INTO test_portable_type_contract (
+                 id, user_id, label, col_json, col_text_array, col_int_array
+             ) VALUES (
+                 $1::uuid, 'projection-user', 'portable JSON',
+                 '{\"b\":2,\"a\":1}'::jsonb, ARRAY['alpha', 'beta'], ARRAY[1, 2]
+             )",
+            &[record_id.into()],
+        )
+        .unwrap();
+
+        let row_data = Spi::connect(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            let table = registry
+                .iter()
+                .find(|table| table.table_name == "test_portable_type_contract")
+                .expect("portable type registration");
+            assert!(
+                table
+                    .fields
+                    .iter()
+                    .find(|field| field.physical_column == "col_json")
+                    .expect("native JSON field")
+                    .native_json
+            );
+            assert!(
+                table
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        matches!(
+                            field.physical_column.as_str(),
+                            "col_text_array" | "col_int_array"
+                        )
+                    })
+                    .all(|field| !field.native_json)
+            );
+            let projection = crate::pull::synced_row_projection_sql(table, "source");
+            let query = format!(
+                "SELECT {projection} AS row_data
+                 FROM test_portable_type_contract source
+                 WHERE source.id = $1::uuid"
+            );
+            let mut row_data = client
+                .select(&query, None, &[record_id.into()])?
+                .first()
+                .get_by_name::<pgrx::JsonB, &str>("row_data")?
+                .expect("projected row")
+                .0;
+            crate::pull::canonicalize_synced_row_data(table, &mut row_data)
+                .expect("canonical projected row");
+            Ok::<_, pgrx::spi::Error>(row_data)
+        })
+        .unwrap();
+
+        assert_eq!(
+            row_data[field_id("test_portable_type_contract", "col_json")].as_str(),
+            Some("{\"a\":1,\"b\":2}")
+        );
+        assert_eq!(
+            row_data[field_id("test_portable_type_contract", "col_text_array")].as_str(),
+            Some("[\"alpha\",\"beta\"]")
+        );
+        assert_eq!(
+            row_data[field_id("test_portable_type_contract", "col_int_array")].as_str(),
+            Some("[1,2]")
+        );
+    }
+
+    #[pg_test]
     fn test_pull_reads_immutable_captured_projection() {
         setup_test_tables();
         register_client("u1", "c1");
@@ -131,6 +244,59 @@
             change["server_version"].as_str(),
             captured_version.as_deref()
         );
+    }
+
+    #[pg_test]
+    fn test_pull_matches_projection_record_with_shared_event() {
+        setup_pull_fixtures();
+        let first_id = "a1111111-1111-1111-1111-111111111111";
+        let second_id = "a2222222-2222-2222-2222-222222222222";
+
+        Spi::run_with_args(
+            "UPDATE sync_captured_projections target
+             SET commit_lsn = source.commit_lsn,
+                 event_ordinal = source.event_ordinal
+             FROM sync_captured_projections source
+             WHERE source.record_id = $1
+               AND target.record_id = $2
+               AND source.image_kind = 'after'
+               AND target.image_kind = 'after';
+             UPDATE sync_changelog target
+             SET commit_lsn = source.commit_lsn,
+                 event_ordinal = source.event_ordinal,
+                 effect_ordinal = 1
+             FROM sync_changelog source
+             WHERE source.record_id = $1
+               AND target.record_id = $2;
+             UPDATE sync_wal_transactions transaction
+             SET effect_count = 2
+             FROM sync_changelog source
+             WHERE source.record_id = $1
+               AND transaction.stream_generation = source.stream_generation
+               AND transaction.commit_lsn = source.commit_lsn",
+            &[first_id.into(), second_id.into()],
+        )
+        .unwrap();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
+            100,
+        );
+        assert!(response.get("error").is_none(), "{response}");
+        let changes = response["changes"].as_array().expect("pull changes");
+        assert_eq!(changes.len(), 2);
+        let id_field = field_id("test_orders", "id");
+        let title_field = field_id("test_orders", "title");
+        for (record_id, title) in [(first_id, "Order 1"), (second_id, "Order 2")] {
+            let change = changes
+                .iter()
+                .find(|change| change["row"][&id_field].as_str() == Some(record_id))
+                .expect("pull change for shared-event record");
+            assert_eq!(change["row"][&title_field].as_str(), Some(title));
+        }
     }
 
     #[pg_test]
@@ -196,10 +362,112 @@
         )
         .unwrap();
 
-        let result = Spi::connect(|client| {
+        let result = Spi::connect_mut(|client| {
             crate::pull::compute_bucket_checksums(client, &["user:checksum-user".to_string()])
         });
         assert!(result.is_err(), "checksum calculation must bind table to relation");
+    }
+
+    #[pg_test]
+    fn test_scope_digest_cache_invalidates_edge_changes() {
+        setup_test_tables();
+        let record_id = "16151515-1515-4515-8515-151515151515";
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'cache-user', 'cached row')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, "user:cache-old");
+        let scopes = ["user:cache-old".to_string(), "user:cache-new".to_string()];
+
+        let before =
+            Spi::connect_mut(|client| crate::pull::compute_bucket_checksums(client, &scopes))
+                .expect("compute initial cached scope digests");
+        let valid_cache_rows: i64 = Spi::get_one(
+            "SELECT count(*) FROM sync_scope_digest_cache
+             WHERE scope_id = ANY(ARRAY['user:cache-old', 'user:cache-new'])
+               AND schema_hash IS NOT NULL AND digest IS NOT NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(valid_cache_rows, 2);
+
+        Spi::run_with_args(
+            "UPDATE sync_bucket_edges SET bucket_id = 'user:cache-new'
+             WHERE table_name = 'test_orders' AND record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        let invalid_cache_rows: i64 = Spi::get_one(
+            "SELECT count(*) FROM sync_scope_digest_cache
+             WHERE scope_id = ANY(ARRAY['user:cache-old', 'user:cache-new'])
+               AND schema_hash IS NULL AND digest IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(invalid_cache_rows, 2);
+
+        let moved =
+            Spi::connect_mut(|client| crate::pull::compute_bucket_checksums(client, &scopes))
+                .expect("recompute moved scope digests");
+        assert_ne!(before["user:cache-old"], moved["user:cache-old"]);
+        assert_ne!(before["user:cache-new"], moved["user:cache-new"]);
+
+        Spi::run_with_args(
+            "DELETE FROM sync_bucket_edges
+             WHERE table_name = 'test_orders' AND record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+        let digest_is_null: bool = Spi::get_one(
+            "SELECT digest IS NULL FROM sync_scope_digest_cache
+             WHERE scope_id = 'user:cache-new'",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(digest_is_null);
+    }
+
+    #[pg_test]
+    fn test_scope_digest_cache_recomputes_for_schema_hash_mismatch() {
+        setup_test_tables();
+        let scope_id = "user:cache-schema".to_string();
+        let initial = Spi::connect_mut(|client| {
+            crate::pull::compute_bucket_checksums(client, std::slice::from_ref(&scope_id))
+        })
+        .expect("compute initial scope digest");
+        Spi::run_with_args(
+            "UPDATE sync_scope_digest_cache
+             SET schema_hash = decode(repeat('00', 32), 'hex'),
+                 digest = decode(repeat('00', 32), 'hex')
+             WHERE scope_id = $1",
+            &[scope_id.as_str().into()],
+        )
+        .unwrap();
+
+        let recomputed = Spi::connect_mut(|client| {
+            crate::pull::compute_bucket_checksums(client, std::slice::from_ref(&scope_id))
+        })
+        .expect("recompute scope digest for current schema");
+        assert_eq!(initial, recomputed);
+        let (_, schema_hash) = latest_schema_ref();
+        let cached_schema_hash: String = Spi::get_one_with_args(
+            "SELECT encode(schema_hash, 'hex') FROM sync_scope_digest_cache WHERE scope_id = $1",
+            &[scope_id.as_str().into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cached_schema_hash, schema_hash);
+    }
+
+    #[pg_test]
+    fn test_scope_digest_cache_fill_uses_writable_spi() {
+        let checksums = Spi::connect_mut(|client| {
+            crate::pull::compute_bucket_checksums(client, &["debug:cold".to_string()])
+        })
+        .expect("cold scope digest");
+        assert!(checksums.contains_key("debug:cold"));
     }
 
     #[pg_test]
@@ -325,6 +593,22 @@
         assert_eq!(resp["changes"].as_array().unwrap().len(), 0);
         assert_eq!(resp["rebuild"].as_array().unwrap().len(), 1);
         assert_eq!(resp["rebuild"][0].as_str(), Some("user:user1"));
+    }
+
+    #[pg_test]
+    fn test_pull_redacts_invalid_cursor_parser_details() {
+        setup_pull_fixtures();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "synchro.v1.invalid" } }),
+            100,
+        );
+
+        assert_eq!(response["error"]["code"].as_str(), Some("invalid_request"));
+        assert_eq!(response["error"]["message"].as_str(), Some("invalid scope cursor"));
     }
 
     #[pg_test]
@@ -625,6 +909,32 @@
                 .any(|scope| scope["id"].as_str() == Some("user:u1")),
             "user:u1 should be present in scope updates"
         );
+    }
+
+    #[pg_test]
+    fn test_pull_scope_updates_removed() {
+        setup_test_tables();
+        register_shared_scope("shared:public", false);
+        register_client("u1", "c1");
+
+        let scopes = client_scope_ids("u1", "c1")
+            .into_iter()
+            .map(|scope_id| {
+                let cursor = issued_scope_cursor("u1", "c1", &scope_id, 0);
+                (scope_id, json!({ "cursor": cursor }))
+            })
+            .collect::<serde_json::Map<String, Value>>();
+        Spi::run_with_args(
+            "SELECT synchro_unregister_shared_scope($1)",
+            &["shared:public".into()],
+        )
+        .unwrap();
+
+        let resp = pull_client("u1", "c1", 1, Value::Object(scopes), 100);
+
+        assert_eq!(resp["scope_set_version"].as_i64(), Some(2));
+        assert_eq!(resp["scope_updates"]["add"], json!([]));
+        assert_eq!(resp["scope_updates"]["remove"], json!(["shared:public"]));
     }
 
     #[pg_test]

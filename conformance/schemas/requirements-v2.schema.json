@@ -81,8 +81,7 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/proofType" },
-          "contains": { "const": "negative-control" }
+          "items": { "$ref": "#/$defs/proofType" }
         },
         "applicable_components": {
           "type": "array",

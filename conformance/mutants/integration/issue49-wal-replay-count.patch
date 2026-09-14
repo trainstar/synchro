@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -3454,7 +3454,7 @@ fn verify_replayed_transaction(
+     client
+         .update(
+             "UPDATE synchro.sync_wal_transactions
+-             SET replay_count = replay_count + 1
++             SET replay_count = replay_count
+              WHERE stream_generation = $1 AND commit_lsn = $2::pg_lsn",
+             None,
+             &[

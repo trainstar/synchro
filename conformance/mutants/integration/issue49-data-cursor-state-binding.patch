@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/cursor_token.rs b/extensions/synchro-pg/src/cursor_token.rs
+--- a/extensions/synchro-pg/src/cursor_token.rs
++++ b/extensions/synchro-pg/src/cursor_token.rs
+@@ -120,7 +120,7 @@ pub(crate) fn issue_scope_cursor(
+         scope_id: context.scope_id.clone(),
+         schema_hash: context.schema_hash.clone(),
+         membership_generation: scope.membership_generation,
+-        retention_generation: scope.retention_generation,
++        retention_generation: scope.retention_generation + 1,
+         issued_at: current_utc_timestamp(client, "incremental cursor issue time", "")?,
+     };
+     let payload = canonical_payload(&payload)?;

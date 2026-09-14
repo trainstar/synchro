@@ -44,6 +44,13 @@ var wireCases = map[string]wireCase{
 	"temporary_unavailable":     {status: 503, errorCode: "temporary_unavailable", hasCode: true, retryable: true, operations: []string{"connect", "push", "pull", "rebuild"}},
 }
 
+var connectSchemaActions = stringSet([]string{
+	"none",
+	"replace",
+	"rebuild_local",
+	"unsupported",
+})
+
 var operationTransport = map[string]string{
 	"connect":  "http",
 	"push":     "http",
@@ -59,9 +66,9 @@ var operationTransport = map[string]string{
 var predicateNames = map[string]map[string]struct{}{
 	"state-equality":          {"state-equals-authored-model": {}, "state-unchanged": {}},
 	"wire-outcome":            {"canonical-wire-outcome": {}},
-	"state-transition":        {"legal-state-transition": {}},
+	"state-transition":        {"legal-state-transition": {}, "schema-dispatch-observations-satisfied": {}},
 	"artifact-integrity":      {"artifact-policy-satisfied": {}},
-	"performance-measurement": {"performance-contract-satisfied": {}},
+	"performance-measurement": {"performance-contract-satisfied": {}, "schema-dispatch-measurement-satisfied": {}},
 }
 
 var predicateByOracle = map[string]string{
@@ -77,11 +84,12 @@ var proofTargetPolicy = map[string]map[string]struct{}{
 	"server-black-box": {"test-blackbox": {}},
 	"native-e2e": {
 		"test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
+		"test-rn-warm-connect-ios": {}, "test-rn-warm-connect-android": {},
 	},
 	"fault-injection": {
 		"test-blackbox": {}, "test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
 	},
-	"negative-control": {"test-conformance": {}},
+	"negative-control": {"test-conformance": {}, "test-integration-mutants": {}, "test-rn-warm-connect-control": {}},
 }
 
 type targetRule struct {
@@ -92,29 +100,53 @@ type targetRule struct {
 }
 
 var targetRules = map[string]targetRule{
-	"test-conformance":    {},
-	"test-blackbox":       {component: "postgresql-server", hasComponent: true},
-	"test-swift":          {component: "swift-client", hasComponent: true},
-	"test-kotlin":         {component: "kotlin-client", hasComponent: true},
-	"test-rn-e2e-ios":     {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
-	"test-rn-e2e-android": {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
+	"test-conformance":         {},
+	"test-integration-mutants": {},
+	"test-blackbox":            {component: "postgresql-server", hasComponent: true},
+	"test-swift":               {component: "swift-client", hasComponent: true},
+	"test-kotlin":              {component: "kotlin-client", hasComponent: true},
+	"test-rn-e2e-ios":          {component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true},
+	"test-rn-e2e-android":      {component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true},
+	"test-rn-warm-connect-ios": {
+		component: "react-native-client", platform: "ios", hasComponent: true, hasPlatform: true,
+	},
+	"test-rn-warm-connect-android": {
+		component: "react-native-client", platform: "android", hasComponent: true, hasPlatform: true,
+	},
+	"test-rn-warm-connect-control": {},
 }
 
 var targetRequiredRoles = map[string]map[string]struct{}{
-	"test-conformance":    {"conformance-runner": {}},
-	"test-blackbox":       {"pg-extension": {}, "adapter": {}},
-	"test-swift":          {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
-	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
-	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
-	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
+	"test-conformance":         {"conformance-runner": {}},
+	"test-integration-mutants": {"conformance-runner": {}, "pg-extension": {}},
+	"test-blackbox":            {"pg-extension": {}, "adapter": {}},
+	"test-swift":               {"pg-extension": {}, "adapter": {}, "swift-spm": {}},
+	"test-kotlin":              {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}},
+	"test-rn-e2e-ios":          {"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}},
+	"test-rn-e2e-android":      {"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {}},
+	"test-rn-warm-connect-ios": {
+		"pg-extension": {}, "adapter": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {},
+	},
+	"test-rn-warm-connect-android": {
+		"pg-extension": {}, "adapter": {}, "kotlin-maven": {}, "react-native-npm": {},
+	},
+	"test-rn-warm-connect-control": {"conformance-runner": {}, "pg-extension": {}, "adapter": {}},
 }
 
 var targetAllowedRoles = map[string]map[string]struct{}{
-	"test-blackbox":       {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
-	"test-swift":          {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
-	"test-kotlin":         {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
-	"test-rn-e2e-ios":     {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
-	"test-rn-e2e-android": {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-integration-mutants": {"conformance-runner": {}, "pg-extension": {}},
+	"test-blackbox":            {"pg-extension": {}, "pg-install-sql": {}, "adapter": {}, "seed-tool": {}, "portable-seed": {}},
+	"test-swift":               {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "portable-seed": {}},
+	"test-kotlin":              {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "portable-seed": {}},
+	"test-rn-e2e-ios":          {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-rn-e2e-android":      {"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {}},
+	"test-rn-warm-connect-ios": {
+		"pg-extension": {}, "adapter": {}, "seed-tool": {}, "swift-spm": {}, "cocoapods": {}, "react-native-npm": {}, "portable-seed": {},
+	},
+	"test-rn-warm-connect-android": {
+		"pg-extension": {}, "adapter": {}, "seed-tool": {}, "kotlin-maven": {}, "react-native-npm": {}, "portable-seed": {},
+	},
+	"test-rn-warm-connect-control": {"conformance-runner": {}, "pg-extension": {}, "adapter": {}},
 }
 
 // Validate checks all semantic bindings in one scenario. It does not execute
@@ -215,14 +247,16 @@ func ValidateAllWithVectors(scenarios []Scenario, bundle *contract.Bundle, vecto
 					if !contains(requirement.ApplicableComponents, component) {
 						continue
 					}
-					for _, cell := range requiredSupportCellsFor(bundle, component) {
+					for _, cell := range semanticSupportCellsFor(bundle, component) {
 						expectedKeys[fmt.Sprintf("%s|%s|%s", requirementID, proofType, cell)] = struct{}{}
 					}
 				}
-			case "reference-model", "negative-control":
+			case "reference-model":
 				expectedKeys[fmt.Sprintf("%s|%s|null", requirementID, proofType)] = struct{}{}
+			case "negative-control":
+				// Catalog control ownership is validated independently below.
 			case "fault-injection":
-				// Fault injection is a singleton over the selected requirement.
+				// Fault-injection closure is checked after all authored keys are known.
 			}
 		}
 		for key := range expectedKeys {
@@ -245,13 +279,23 @@ func ValidateAllWithVectors(scenarios []Scenario, bundle *contract.Bundle, vecto
 				}
 				continue
 			}
-			if _, required := requiredProofs[proofType]; !required {
+			if _, required := requiredProofs[proofType]; !required && proofType != "negative-control" {
 				failures = append(failures, fmt.Errorf("selected requirement %s has non-required proof type %s", requirementID, proofType))
 			}
 		}
-		if _, required := requiredProofs["fault-injection"]; required && faultInjectionOwners != 1 {
+		faultRequired := false
+		if _, required := requiredProofs["fault-injection"]; required {
+			faultRequired = true
+		}
+		postgresFaultCells := selectedPostgresFaultCells(selectedProofKeys, requirementID, bundle)
+		if len(postgresFaultCells) > 0 {
+			requiredPostgresCells := requiredSupportCellsFor(bundle, "postgresql-server")
+			if !supportCellSetsEqual(postgresFaultCells, supportCellIDs(requiredPostgresCells)) || faultInjectionOwners != len(requiredPostgresCells) {
+				failures = append(failures, fmt.Errorf("selected requirement %s PostgreSQL fault-injection obligations must exactly cover required extension architecture cells", requirementID))
+			}
+		} else if faultRequired && faultInjectionOwners != 1 {
 			failures = append(failures, fmt.Errorf("selected requirement %s requires exactly one fault-injection obligation, found %d", requirementID, faultInjectionOwners))
-		} else if _, required := requiredProofs["fault-injection"]; !required && faultInjectionOwners > 1 {
+		} else if !faultRequired && faultInjectionOwners > 1 {
 			failures = append(failures, fmt.Errorf("selected requirement %s has multiple optional fault-injection obligations, found %d", requirementID, faultInjectionOwners))
 		}
 		catalogControlIDs := make([]contract.ControlID, 0, 1)
@@ -335,6 +379,7 @@ func (v *scenarioValidator) validate() {
 	v.validateTargetsAndArtifacts()
 	v.validateRequiredProofs()
 	v.validatePerformance()
+	v.validateNativeProof()
 	v.validateOwnership()
 }
 
@@ -482,6 +527,49 @@ func (v *scenarioValidator) validateOperationsAndWire() {
 				v.add("%s wire expectation %s is invalid for contract operation %s", v.scenario.ID, wire.ContractCase, step.Operation.ContractOperation)
 			}
 		}
+		v.validateWireAction(step, stepExists, wire)
+	}
+	v.validateNativeWireFaults()
+}
+
+func (v *scenarioValidator) validateNativeWireFaults() {
+	for _, step := range v.scenario.Steps {
+		_, temporaryUnavailable, err := TemporaryUnavailablePushTarget(step.Operation)
+		if err != nil {
+			v.add("%s step %s has invalid wire fault: %v", v.scenario.ID, step.ID, err)
+			continue
+		}
+		_, sealedRetry, err := SealedRetryPushTarget(step.Operation)
+		if err != nil {
+			v.add("%s step %s has invalid wire fault: %v", v.scenario.ID, step.ID, err)
+			continue
+		}
+		if !temporaryUnavailable && !sealedRetry {
+			continue
+		}
+		if step.NativeBinding == nil || step.NativeBinding.Kind != "public-call" || step.NativeBinding.Stage != "synchronous" {
+			v.add("%s step %s wire fault requires a synchronous public native push step", v.scenario.ID, step.ID)
+		}
+		wire, found := v.wireByStep[step.ID]
+		expectedCase := wireFaultTemporaryUnavailable
+		if sealedRetry {
+			expectedCase = "idempotency_conflict"
+		}
+		if !found || wire.ContractCase != expectedCase {
+			v.add("%s step %s wire fault requires %s wire expectations", v.scenario.ID, step.ID, expectedCase)
+		}
+	}
+}
+
+func (v *scenarioValidator) validateWireAction(step Step, stepExists bool, wire WireExpectation) {
+	if wire.Action == "" {
+		return
+	}
+	if _, known := connectSchemaActions[wire.Action]; !known {
+		v.add("%s wire expectation has unknown connect schema action %q", v.scenario.ID, wire.Action)
+	}
+	if !stepExists || step.Operation.ContractOperation != "connect" || wire.ContractCase != "connect_success" {
+		v.add("%s wire expectation action %q requires a connect_success connect outcome", v.scenario.ID, wire.Action)
 	}
 }
 
@@ -875,8 +963,8 @@ func (v *scenarioValidator) validateTargetsAndArtifacts() {
 		if obligation.SupportCellID != nil {
 			if !hasSupport {
 				v.add("%s obligation %s references unknown support cell %s", v.scenario.ID, obligation.ObligationID, *obligation.SupportCellID)
-			} else if supportCell.Policy != "required" {
-				v.add("%s obligation %s references excluded or non-required support cell %s", v.scenario.ID, obligation.ObligationID, *obligation.SupportCellID)
+			} else if supportCell.Policy != "required" && !isSemanticSupportCell(v.bundle, *obligation.SupportCellID) {
+				v.add("%s obligation %s references excluded or unauthorized support cell %s", v.scenario.ID, obligation.ObligationID, *obligation.SupportCellID)
 			}
 		}
 		for _, requirementID := range obligation.RequirementIDs {
@@ -969,6 +1057,13 @@ func (v *scenarioValidator) validateRequiredProofs() {
 		}
 		requiredSupportCells[cell.Component] = append(requiredSupportCells[cell.Component], cell.ID)
 	}
+	semanticSupportCells := make(map[string][]contract.SupportCellID)
+	for _, cellID := range v.bundle.Support.SemanticCorpusCellIDs {
+		cell, known := supportCellByID(v.bundle, cellID)
+		if known {
+			semanticSupportCells[cell.Component] = append(semanticSupportCells[cell.Component], cell.ID)
+		}
+	}
 	for _, requirementID := range uniqueRequirementIDs(v.scenario.RequirementIDs) {
 		requirement, known := requirementByID(v.bundle, requirementID)
 		if !known {
@@ -980,18 +1075,32 @@ func (v *scenarioValidator) validateRequiredProofs() {
 			if !contains(stringIDs(obligation.RequirementIDs), string(requirementID)) {
 				continue
 			}
-			if _, requiredProof := required[obligation.ProofType]; requiredProof || obligation.ProofType == "fault-injection" {
+			if _, requiredProof := required[obligation.ProofType]; requiredProof ||
+				obligation.ProofType == "fault-injection" || obligation.ProofType == "negative-control" {
 				continue
 			}
 			v.add("%s requirement %s has non-required proof type %s", v.scenario.ID, requirementID, obligation.ProofType)
 		}
 		faultInjectionCount := 0
+		postgresFaultCells := make([]contract.SupportCellID, 0, 2)
 		for _, obligation := range v.scenario.ProofObligations {
 			if obligation.ProofType == "fault-injection" && contains(stringIDs(obligation.RequirementIDs), string(requirementID)) {
 				faultInjectionCount++
+				if obligation.SupportCellID != nil {
+					cell, known := supportCellByID(v.bundle, *obligation.SupportCellID)
+					if known && cell.Component == "postgresql-server" {
+						postgresFaultCells = append(postgresFaultCells, *obligation.SupportCellID)
+					}
+				}
 			}
 		}
-		if faultInjectionCount > 1 {
+		_, faultRequired := required["fault-injection"]
+		if len(postgresFaultCells) > 0 {
+			requiredPostgresCells := requiredSupportCells["postgresql-server"]
+			if !supportCellSetsEqual(postgresFaultCells, requiredPostgresCells) || faultInjectionCount != len(requiredPostgresCells) {
+				v.add("%s requirement %s PostgreSQL fault-injection obligations must exactly cover required extension architecture cells", v.scenario.ID, requirementID)
+			}
+		} else if !faultRequired && faultInjectionCount > 1 {
 			v.add("%s requirement %s has multiple optional fault-injection obligations, found %d", v.scenario.ID, requirementID, faultInjectionCount)
 		}
 		for _, proofType := range sortedStrings(requirement.RequiredProofTypes) {
@@ -1007,19 +1116,75 @@ func (v *scenarioValidator) validateRequiredProofs() {
 					if !contains(requirement.ApplicableComponents, component) {
 						continue
 					}
-					for _, cellID := range requiredSupportCells[component] {
+					for _, cellID := range semanticSupportCells[component] {
 						v.requireProofKey(requirementID, proofType, &cellID, obligationsByKey)
 					}
 				}
-			case "reference-model", "negative-control":
+			case "reference-model":
 				v.requireProofKey(requirementID, proofType, nil, obligationsByKey)
+			case "negative-control":
+				// Catalog control ownership is validated independently.
 			case "fault-injection":
-				v.requireSingletonProof(requirementID, proofType, obligationsByKey)
+				if len(postgresFaultCells) == 0 {
+					v.requireSingletonProof(requirementID, proofType, obligationsByKey)
+				}
 			default:
 				v.add("%s requirement %s has unknown required proof type %s", v.scenario.ID, requirementID, proofType)
 			}
 		}
 	}
+}
+
+func supportCellByID(bundle *contract.Bundle, id contract.SupportCellID) (contract.SupportCell, bool) {
+	for _, cell := range bundle.Support.Cells {
+		if cell.ID == id {
+			return cell, true
+		}
+	}
+	return contract.SupportCell{}, false
+}
+
+func selectedPostgresFaultCells(selectedProofKeys map[string][]string, requirementID contract.RequirementID, bundle *contract.Bundle) []contract.SupportCellID {
+	var result []contract.SupportCellID
+	for key := range selectedProofKeysForRequirement(selectedProofKeys, requirementID) {
+		parts := strings.Split(key, "|")
+		if len(parts) != 3 || parts[1] != "fault-injection" {
+			continue
+		}
+		id := contract.SupportCellID(parts[2])
+		cell, known := supportCellByID(bundle, id)
+		if known && cell.Component == "postgresql-server" {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func supportCellSetsEqual(left, right []contract.SupportCellID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftSet := make(map[contract.SupportCellID]struct{}, len(left))
+	for _, id := range left {
+		leftSet[id] = struct{}{}
+	}
+	if len(leftSet) != len(right) {
+		return false
+	}
+	for _, id := range right {
+		if _, found := leftSet[id]; !found {
+			return false
+		}
+	}
+	return true
+}
+
+func supportCellIDs(values []string) []contract.SupportCellID {
+	result := make([]contract.SupportCellID, len(values))
+	for index, value := range values {
+		result[index] = contract.SupportCellID(value)
+	}
+	return result
 }
 
 func (v *scenarioValidator) requireSingletonProof(requirementID contract.RequirementID, proofType string, counts map[string]int) {
@@ -1071,6 +1236,7 @@ func (v *scenarioValidator) validatePerformance() {
 		}
 		v.validatePerformanceItem(string(item.ID), item.SupportCellIDs, item.ArtifactInventoryIDs, budgets, measurements, supportCells, artifactRoles, false)
 	}
+	v.validateMeasurementBindings(measurements)
 	for _, obligation := range v.scenario.ProofObligations {
 		for _, id := range obligation.PerformanceBudgetIDs {
 			item, exists := budgets[id]
@@ -1218,6 +1384,27 @@ func requiredSupportCellsFor(bundle *contract.Bundle, component string) []string
 	}
 	sort.Strings(result)
 	return result
+}
+
+func semanticSupportCellsFor(bundle *contract.Bundle, component string) []string {
+	result := make([]string, 0)
+	for _, cellID := range bundle.Support.SemanticCorpusCellIDs {
+		cell, known := supportCellByID(bundle, cellID)
+		if known && cell.Component == component {
+			result = append(result, string(cellID))
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func isSemanticSupportCell(bundle *contract.Bundle, id contract.SupportCellID) bool {
+	for _, cellID := range bundle.Support.SemanticCorpusCellIDs {
+		if cellID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func selectedProofKeysForRequirement(keys map[string][]string, requirementID contract.RequirementID) map[string][]string {

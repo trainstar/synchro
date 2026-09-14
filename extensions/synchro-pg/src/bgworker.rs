@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 
@@ -8,10 +8,10 @@ use pgrx::spi::{SpiClient, SpiHeapTupleData, SpiTupleTable};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use synchro_core::change::ChangeOperation;
-use synchro_core::checksum::{row_identity, scope_digest, ScopeDigestEntry, Sha256Digest};
+use synchro_core::checksum::Sha256Digest;
 use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
 
-use crate::bucketing::{resolve_dependency_impacts, resolve_membership};
+use crate::bucketing::resolve_dependency_impacts;
 use crate::pull::synced_row_digest;
 use crate::registry::{
     load_membership_dependencies_from_client, load_registry_generation_for_activation,
@@ -23,15 +23,20 @@ use crate::wal_decoder::{
 };
 
 const BATCH_SIZE: i32 = 500;
+const JSONB_BATCH_SIZE: usize = 500;
 const IDLE_POLL_MS: u64 = 100;
 const WORKER_ID: &str = "synchro_wal_consumer";
 const REGISTRY_PREFIX: &str = "synchro_registry";
 const FENCE_PREFIX: &str = "synchro_fence";
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
+const MAX_POISON_DETAIL_BYTES: usize = 512;
+const STARTUP_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+const STARTUP_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone)]
 struct PoisonFailure {
     class: &'static str,
+    detail: String,
     commit_lsn: u64,
     relation_id: Option<String>,
     commit_timestamp: Option<i64>,
@@ -119,10 +124,50 @@ struct MaterializedTransaction {
     end_lsn: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct WorkerIdentity {
     session_login_oid: i64,
     worker_role_oid: pg_sys::Oid,
+    startup_runtime: WorkerStartupIdentity,
+}
+
+struct WorkerSlotPreparation {
+    session_login_oid: i64,
+    worker_role_oid: pg_sys::Oid,
+    startup: WorkerStartupIdentity,
+    connected_database: String,
+    existing_slot: ExistingWorkerSlot,
+}
+
+struct PublicationIdentity {
+    name: String,
+    oid: i64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WorkerRuntimeIdentity {
+    pub(crate) stream_generation: String,
+    pub(crate) slot_name: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WorkerStartupIdentity {
+    pub(crate) runtime: WorkerRuntimeIdentity,
+    pub(crate) active_slot_is_unbound: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExistingWorkerSlot {
+    Missing,
+    Inactive,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SlotBindingDecision {
+    Reuse,
+    Replace,
+    Fail,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -314,21 +359,99 @@ pub fn register_bgworker() {
         .load();
 }
 
+fn startup_retry_exhausted(started_at: std::time::Instant) -> bool {
+    started_at.elapsed() >= STARTUP_RETRY_BUDGET
+}
+
 #[pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
+    // The pgrx SIGTERM handler only sets a latch flag, so a statement that
+    // runs at fast shutdown outlives the postmaster wait budget. The
+    // standard backend die handler raises FATAL at the next interrupt
+    // check inside the executor and inside lock waits, which bounds the
+    // exit. The postmaster does not restart workers while it shuts down,
+    // and an isolated SIGTERM restarts the worker through the configured
+    // restart time, which is the designed self-heal path.
+    unsafe extern "C-unwind" fn worker_die(signal: core::ffi::c_int) {
+        unsafe { pg_sys::die(signal) };
+    }
+    unsafe {
+        pg_sys::pqsignal_be(pg_sys::SIGTERM as i32, Some(worker_die));
+    }
+    // PostgreSQL restarts this worker only after a nonzero exit status.
+    // Self-heal paths must raise errors. Shutdown returns cleanly.
     let Some(worker_login) = crate::configured_worker_login() else {
-        return;
+        pgrx::error!("synchro WAL worker login is unavailable");
     };
     let database = database_name();
     BackgroundWorker::connect_worker_to_spi(Some(&database), Some(&worker_login));
 
-    let identity = loop {
-        match run_worker_transaction(|| prepare_worker(&database, &worker_login)) {
-            Ok(identity) => break identity,
-            Err(_) => {
-                if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
+    let preparation_started_at = std::time::Instant::now();
+    let identity = 'prepare: loop {
+        let expected_runtime = loop {
+            match run_worker_transaction(|| {
+                capture_worker_preparation_identity(&database, &worker_login)
+            }) {
+                Ok(identity) => break identity,
+                Err(error) => {
+                    if startup_retry_exhausted(preparation_started_at) {
+                        log!(
+                            "synchro WAL worker preparation failed after {} seconds: {error}",
+                            STARTUP_RETRY_BUDGET.as_secs()
+                        );
+                        pgrx::error!(
+                            "synchro WAL worker preparation failed after {} seconds: {error}",
+                            STARTUP_RETRY_BUDGET.as_secs()
+                        );
+                    }
+                    if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
+                        return;
+                    }
+                }
+            }
+        };
+        if let Err(error) = validate_worker_preparation_identity(&worker_login, &expected_runtime) {
+            if error == "worker runtime identity changed" {
+                continue 'prepare;
+            }
+            log!("synchro WAL worker identity changed: {error}");
+            pgrx::error!("synchro WAL worker identity changed: {error}");
+        }
+        match prepare_worker(&database, &worker_login) {
+            Ok(identity) => {
+                if !preparation_runtime_matches(&expected_runtime, &identity.startup_runtime) {
+                    continue 'prepare;
+                }
+                if let Err(error) = validate_worker_startup_authorization(&worker_login, &identity)
+                {
+                    log!("synchro WAL worker identity changed: {error}");
+                    pgrx::error!("synchro WAL worker identity changed: {error}");
+                }
+                break identity;
+            }
+            Err(error) => {
+                if let Err(identity_error) =
+                    validate_worker_preparation_identity(&worker_login, &expected_runtime)
+                {
+                    if identity_error == "worker runtime identity changed" {
+                        continue 'prepare;
+                    }
+                    log!("synchro WAL worker identity changed: {identity_error}");
+                    pgrx::error!("synchro WAL worker identity changed: {identity_error}");
+                }
+                if startup_retry_exhausted(preparation_started_at) {
+                    log!(
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
+                    pgrx::error!(
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
+                }
+                if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
                     return;
                 }
             }
@@ -336,27 +459,58 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     };
     activate_worker_role(identity.worker_role_oid);
 
-    while run_worker_transaction(|| initialize_worker(&database, identity.session_login_oid))
-        .is_err()
-    {
-        if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
+    let initialization_started_at = std::time::Instant::now();
+    loop {
+        if let Err(error) = validate_worker_startup_authorization(&worker_login, &identity) {
+            log!("synchro WAL worker identity changed: {error}");
+            pgrx::error!("synchro WAL worker identity changed: {error}");
+        }
+        match run_worker_transaction(|| {
+            initialize_worker(
+                &database,
+                identity.session_login_oid,
+                identity.worker_role_oid,
+            )
+        }) {
+            Ok(()) => break,
+            Err(error) => {
+                if let Err(identity_error) =
+                    validate_worker_startup_authorization(&worker_login, &identity)
+                {
+                    log!("synchro WAL worker identity changed: {identity_error}");
+                    pgrx::error!("synchro WAL worker identity changed: {identity_error}");
+                }
+                if startup_retry_exhausted(initialization_started_at) {
+                    log!(
+                        "synchro WAL worker initialization failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
+                    pgrx::error!(
+                        "synchro WAL worker initialization failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
+                }
+            }
+        }
+        if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
             return;
         }
     }
 
     let mut decoder_failure_logged = false;
     let mut decoder_state = loop {
-        if validate_worker_authorization(&worker_login, identity.worker_role_oid).is_err() {
-            return;
+        if let Err(error) = validate_worker_authorization(&worker_login, &identity) {
+            log!("synchro WAL worker identity changed: {error}");
+            pgrx::error!("synchro WAL worker identity changed: {error}");
         }
-        match fresh_decoder() {
+        match fresh_decoder(identity.worker_role_oid) {
             Ok(state) => break state,
             Err(error) => {
                 if !decoder_failure_logged {
                     log!("synchro WAL decoder initialization blocked: {error}");
                     decoder_failure_logged = true;
                 }
-                let _ = heartbeat("blocked");
+                let _ = heartbeat("blocked", identity.worker_role_oid);
                 if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(1))) {
                     return;
                 }
@@ -368,16 +522,20 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     let mut transient_failure_logged = false;
     let mut poll_gate_failure_logged = false;
 
-    while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
-        if validate_worker_authorization(&worker_login, identity.worker_role_oid).is_err() {
-            return;
+    loop {
+        if let Err(error) = validate_worker_role_authorization(&worker_login, &identity) {
+            log!("synchro WAL worker identity changed: {error}");
+            pgrx::error!("synchro WAL worker identity changed: {error}");
+        }
+        if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
+            break;
         }
         if let Err(error) = acquire_worker_poll_gate() {
             if !poll_gate_failure_logged {
                 log!("synchro WAL poll gate blocked: {error}");
                 poll_gate_failure_logged = true;
             }
-            let _ = heartbeat("blocked");
+            let _ = heartbeat("blocked", identity.worker_role_oid);
             continue;
         }
         poll_gate_failure_logged = false;
@@ -390,11 +548,11 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         );
         if let Err(error) = release_worker_poll_gate() {
             log!("synchro WAL poll gate release failed: {error}");
-            return;
+            pgrx::error!("synchro WAL poll gate release failed: {error}");
         }
     }
 
-    let _ = heartbeat("stopped");
+    let _ = heartbeat("stopped", identity.worker_role_oid);
 }
 
 fn poll_worker_once(
@@ -405,19 +563,31 @@ fn poll_worker_once(
     worker_role_oid: pg_sys::Oid,
 ) {
     let mut blocked = false;
-    match validated_runtime_capture_identity() {
-        Ok(identity) if identity != decoder_state.identity => match fresh_decoder_for(identity) {
-            Ok(fresh) => *decoder_state = fresh,
-            Err(error) => {
-                if !*transient_failure_logged {
-                    log!("synchro WAL runtime decoder refresh blocked: {error}");
-                    *transient_failure_logged = true;
+    match validated_runtime_capture_identity(worker_role_oid) {
+        Ok(identity) if identity != decoder_state.identity => {
+            let refreshed = retire_prior_generation_poison_for_worker(
+                &identity.stream_generation,
+                worker_role_oid,
+            )
+            .and_then(|_| fresh_decoder_for(identity, worker_role_oid));
+            match refreshed {
+                Ok(fresh) => *decoder_state = fresh,
+                Err(error) => {
+                    if !*transient_failure_logged {
+                        log!("synchro WAL runtime decoder refresh blocked: {error}");
+                        *transient_failure_logged = true;
+                    }
+                    blocked = true;
                 }
-                blocked = true;
             }
-        },
+        }
         Ok(_) => {}
         Err(error) => {
+            if error == "loading active capture identity failed"
+                || error == "active replication slot is unavailable"
+            {
+                pgrx::error!("synchro WAL runtime identity changed: {error}");
+            }
             if !*transient_failure_logged {
                 log!("synchro WAL runtime identity blocked: {error}");
                 *transient_failure_logged = true;
@@ -425,12 +595,19 @@ fn poll_worker_once(
             blocked = true;
         }
     }
-    if !blocked && active_poison_state().unwrap_or((true, false)).0 {
-        blocked = true;
-        if retry_requested().unwrap_or(false) {
-            if let Ok(fresh) = fresh_decoder() {
-                *decoder_state = fresh;
-                blocked = false;
+    if !blocked {
+        let poison_state = active_poison_state_for_worker(
+            &decoder_state.identity.stream_generation,
+            worker_role_oid,
+        )
+        .unwrap_or((true, false));
+        if poison_state.0 {
+            blocked = true;
+            if poison_state.1 {
+                if let Ok(fresh) = fresh_decoder(worker_role_oid) {
+                    *decoder_state = fresh;
+                    blocked = false;
+                }
             }
         }
     }
@@ -462,7 +639,7 @@ fn poll_worker_once(
                     *transient_failure_logged = true;
                 }
                 blocked = true;
-                if let Ok(fresh) = fresh_decoder() {
+                if let Ok(fresh) = fresh_decoder(worker_role_oid) {
                     *decoder_state = fresh;
                 }
             }
@@ -480,7 +657,7 @@ fn poll_worker_once(
             blocked = true;
         }
     }
-    let _ = heartbeat(if blocked { "blocked" } else { "running" });
+    let _ = heartbeat(if blocked { "blocked" } else { "running" }, worker_role_oid);
 }
 
 fn acquire_worker_poll_gate() -> Result<(), String> {
@@ -528,6 +705,11 @@ fn synchro_retry_wal_poison() -> bool {
                 "UPDATE synchro.sync_wal_poison
                  SET retry_requested_at = now()
                  WHERE lifecycle = 'active'
+                   AND stream_generation = (
+                       SELECT stream_generation
+                       FROM synchro.sync_runtime_state
+                       WHERE singleton
+                   )
                    AND failure_class <> 'truncate_unsupported'",
                 None,
                 &[],
@@ -539,12 +721,41 @@ fn synchro_retry_wal_poison() -> bool {
 
 fn validate_worker_authorization(
     worker_login: &str,
-    expected_worker_role_oid: pg_sys::Oid,
+    expected_identity: &WorkerIdentity,
 ) -> Result<(), String> {
     run_worker_transaction(|| {
-        Spi::connect(|client| {
-            let identity = validated_worker_identity(client, worker_login)?;
-            if identity.worker_role_oid != expected_worker_role_oid {
+        Spi::connect_mut(|client| {
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            (|| {
+                validate_worker_runtime_identity(
+                    client,
+                    &expected_identity.startup_runtime.runtime,
+                )?;
+                if session_login_oid != expected_identity.session_login_oid
+                    || worker_role_oid != expected_identity.worker_role_oid
+                {
+                    return Err("worker group role identity changed".to_string());
+                }
+                Ok(())
+            })()
+        })
+    })
+}
+
+fn validate_worker_role_authorization(
+    worker_login: &str,
+    expected_identity: &WorkerIdentity,
+) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            if session_login_oid != expected_identity.session_login_oid
+                || worker_role_oid != expected_identity.worker_role_oid
+            {
                 return Err("worker group role identity changed".to_string());
             }
             Ok(())
@@ -552,10 +763,45 @@ fn validate_worker_authorization(
     })
 }
 
+fn validate_worker_startup_authorization(
+    worker_login: &str,
+    expected_identity: &WorkerIdentity,
+) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            (|| {
+                validate_worker_startup_identity(client, &expected_identity.startup_runtime)?;
+                if session_login_oid != expected_identity.session_login_oid
+                    || worker_role_oid != expected_identity.worker_role_oid
+                {
+                    return Err("worker group role identity changed".to_string());
+                }
+                Ok(())
+            })()
+        })
+    })
+}
+
+fn validate_worker_preparation_identity(
+    worker_login: &str,
+    expected_identity: &WorkerStartupIdentity,
+) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            let (_, worker_role_oid) = validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            validate_worker_startup_identity(client, expected_identity)
+        })
+    })
+}
+
 fn validated_worker_identity(
     client: &SpiClient<'_>,
     worker_login: &str,
-) -> Result<WorkerIdentity, String> {
+) -> Result<(i64, pg_sys::Oid), String> {
     let validation = crate::health::validate_worker_login(client, worker_login)?;
     if !validation.is_valid() {
         return Err("worker login authorization is invalid".to_string());
@@ -587,15 +833,24 @@ fn validated_worker_identity(
         .map(pg_sys::Oid::from)
         .filter(|oid| *oid != pg_sys::InvalidOid)
         .ok_or_else(|| "worker group role is invalid".to_string())?;
-    Ok(WorkerIdentity {
-        session_login_oid: session_user_oid,
-        worker_role_oid,
-    })
+    Ok((session_user_oid, worker_role_oid))
 }
 
 fn activate_worker_role(worker_role_oid: pg_sys::Oid) {
     // SAFETY: Catalog validation proved membership and all negative role attributes.
     unsafe { pg_sys::SetCurrentRoleId(worker_role_oid, false) };
+}
+
+fn activate_worker_role_in_transaction(
+    _client: &mut SpiClient<'_>,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(), String> {
+    activate_worker_role(worker_role_oid);
+    // SAFETY: The direct role switch must select the validated worker group role.
+    if unsafe { pg_sys::GetCurrentRoleId() } != worker_role_oid {
+        return Err("worker group role identity changed".to_string());
+    }
+    Ok(())
 }
 
 fn activate_session_login() {
@@ -605,51 +860,99 @@ fn activate_session_login() {
 
 fn prepare_worker(database: &str, worker_login: &str) -> Result<WorkerIdentity, String> {
     let configured_slot = configured_replication_slot();
-    Spi::connect_mut(|client| {
-        let identity = validated_worker_identity(client, worker_login)?;
-        let (_, connected_database) = connected_database(client, database)?;
-        activate_worker_role(identity.worker_role_oid);
-        let resolved = resolved_slot_name(client, &configured_slot);
-        activate_session_login();
-        let (slot, bootstrap) = resolved?;
-        ensure_slot(client, &slot, &connected_database, bootstrap)?;
-        Ok(identity)
+    let preparation = run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            let (session_login_oid, worker_role_oid) =
+                validated_worker_identity(client, worker_login)?;
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            let (_, connected_database) = connected_database(client, database)?;
+            let startup = capture_worker_startup_identity(client, &configured_slot)?;
+            let existing_slot = existing_worker_slot(client, &startup.runtime.slot_name)?;
+            if slot_binding_decision(&startup, existing_slot) == SlotBindingDecision::Fail {
+                return Err("configured replication slot is owned by another backend".to_string());
+            }
+            Ok(WorkerSlotPreparation {
+                session_login_oid,
+                worker_role_oid,
+                startup,
+                connected_database,
+                existing_slot,
+            })
+        })
+    })?;
+    let startup_runtime =
+        match slot_binding_decision(&preparation.startup, preparation.existing_slot) {
+            SlotBindingDecision::Fail => {
+                return Err("configured replication slot is owned by another backend".to_string());
+            }
+            SlotBindingDecision::Reuse => {
+                prepare_bound_worker_slot(&preparation, &configured_slot)?
+            }
+            SlotBindingDecision::Replace => {
+                let boundary = run_replication_transaction(preparation.worker_role_oid, || {
+                    Spi::connect_mut(|client| {
+                        replace_unbound_slot(
+                            client,
+                            &preparation.startup.runtime.slot_name,
+                            preparation.existing_slot,
+                            &preparation.connected_database,
+                        )
+                    })
+                })?;
+                bind_unbound_worker_slot(&preparation, &configured_slot, &boundary)?
+            }
+        };
+    Ok(WorkerIdentity {
+        session_login_oid: preparation.session_login_oid,
+        worker_role_oid: preparation.worker_role_oid,
+        startup_runtime,
     })
 }
 
-fn initialize_worker(database: &str, worker_login_oid: i64) -> Result<(), String> {
+fn preparation_runtime_matches(
+    expected: &WorkerStartupIdentity,
+    prepared: &WorkerStartupIdentity,
+) -> bool {
+    if !expected.active_slot_is_unbound {
+        return expected == prepared;
+    }
+    !prepared.active_slot_is_unbound
+        && prepared.runtime.stream_generation == expected.runtime.stream_generation
+        && prepared.runtime.slot_name == expected.runtime.slot_name
+}
+
+fn capture_worker_preparation_identity(
+    database: &str,
+    worker_login: &str,
+) -> Result<WorkerStartupIdentity, String> {
+    let configured_slot = configured_replication_slot();
+    Spi::connect_mut(|client| {
+        let (_, worker_role_oid) = validated_worker_identity(client, worker_login)?;
+        let _ = connected_database(client, database)?;
+        activate_worker_role_in_transaction(client, worker_role_oid)?;
+        capture_worker_startup_identity(client, &configured_slot)
+    })
+}
+
+fn initialize_worker(
+    database: &str,
+    worker_login_oid: i64,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(), String> {
     let configured_slot = configured_replication_slot();
     let publication = publication_name();
     Spi::connect_mut(|client| {
+        activate_worker_role_in_transaction(client, worker_role_oid)?;
         let (database_oid, connected_database) = connected_database(client, database)?;
-        ensure_publication(client, &publication)?;
-        let slot = effective_slot_name(client, &configured_slot)?;
-        client
-            .update(
-                "UPDATE synchro.sync_runtime_state
-                  SET active_slot_name = $1, updated_at = now()
-                  WHERE singleton = true AND active_slot_name IS NULL",
-                None,
-                &[slot.as_str().into()],
-            )
-            .map_err(|_| "storing active slot failed".to_string())?;
-        client
-            .update(
-                "UPDATE synchro.sync_wal_progress progress
-                 SET generation_start_lsn = slot.confirmed_flush_lsn, updated_at = now()
-                 FROM synchro.sync_runtime_state runtime
-                 JOIN pg_catalog.pg_replication_slots slot
-                   ON slot.slot_name = runtime.active_slot_name
-                 WHERE progress.singleton AND runtime.singleton
-                   AND progress.generation_start_lsn IS NULL
-                   AND progress.materialized_end_lsn IS NULL
-                   AND progress.acknowledged_end_lsn IS NULL
-                   AND slot.slot_type = 'logical'
-                   AND slot.confirmed_flush_lsn IS NOT NULL",
-                None,
-                &[],
-            )
-            .map_err(|_| "storing stream generation boundary failed".to_string())?;
+        let publication = ensure_publication(client, &publication)?;
+        let (runtime, active_slot_is_unbound) =
+            capture_worker_runtime_identity(client, &configured_slot)?;
+        if active_slot_is_unbound {
+            return Err("active replication slot is unavailable".to_string());
+        }
+        validate_bound_slot(client, &runtime, &connected_database, &publication)?;
+        let stream_generation = active_stream_generation(client)?;
+        retire_prior_generation_poison(client, &stream_generation)?;
         client
             .update(
                 "INSERT INTO synchro.sync_wal_worker_state (
@@ -714,39 +1017,138 @@ fn connected_database(
     Ok((database_oid, connected_database))
 }
 
+#[cfg(feature = "pg_test")]
 pub(crate) fn effective_slot_name(
     client: &SpiClient<'_>,
     configured_slot: &str,
 ) -> Result<String, String> {
-    resolved_slot_name(client, configured_slot).map(|resolved| resolved.0)
+    capture_worker_runtime_identity(client, configured_slot).map(|(identity, _)| identity.slot_name)
 }
 
-fn resolved_slot_name(
+pub(crate) fn capture_worker_startup_identity(
     client: &SpiClient<'_>,
     configured_slot: &str,
-) -> Result<(String, bool), String> {
-    let durable = client
+) -> Result<WorkerStartupIdentity, String> {
+    capture_worker_runtime_identity(client, configured_slot).map(
+        |(runtime, active_slot_is_unbound)| WorkerStartupIdentity {
+            runtime,
+            active_slot_is_unbound,
+        },
+    )
+}
+
+pub(crate) fn capture_worker_runtime_identity(
+    client: &SpiClient<'_>,
+    configured_slot: &str,
+) -> Result<(WorkerRuntimeIdentity, bool), String> {
+    let row = client
         .select(
-            "SELECT active_slot_name::text AS active_slot_name
+            "SELECT stream_generation,
+                    active_slot_name::text AS active_slot_name
              FROM synchro.sync_runtime_state WHERE singleton = true",
             None,
             &[],
         )
         .map_err(|_| "loading active replication slot failed".to_string())?
-        .first()
+        .first();
+    let stream_generation = row
+        .get_by_name::<String, &str>("stream_generation")
+        .map_err(|_| "loading active replication slot failed".to_string())?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "active stream generation is unavailable".to_string())?;
+    let active_slot_name = row
         .get_by_name::<String, &str>("active_slot_name")
         .map_err(|_| "loading active replication slot failed".to_string())?;
-    match durable {
-        Some(slot) if !slot.is_empty() => Ok((slot, false)),
-        Some(_) => Err("active replication slot is invalid".to_string()),
-        None if !configured_slot.is_empty() => Ok((configured_slot.to_string(), true)),
-        None => Err("configured replication slot is invalid".to_string()),
-    }
+    let (slot_name, bootstrap) = match active_slot_name {
+        Some(slot) if !slot.is_empty() => (slot, false),
+        Some(_) => return Err("active replication slot is invalid".to_string()),
+        None if !configured_slot.is_empty() => (configured_slot.to_string(), true),
+        None => return Err("configured replication slot is invalid".to_string()),
+    };
+    Ok((
+        WorkerRuntimeIdentity {
+            stream_generation,
+            slot_name,
+        },
+        bootstrap,
+    ))
 }
 
-fn validated_runtime_capture_identity() -> Result<RuntimeCaptureIdentity, String> {
+pub(crate) fn validate_worker_runtime_identity(
+    client: &SpiClient<'_>,
+    identity: &WorkerRuntimeIdentity,
+) -> Result<(), String> {
+    validate_worker_identity(client, identity, false)
+}
+
+pub(crate) fn validate_worker_startup_identity(
+    client: &SpiClient<'_>,
+    identity: &WorkerStartupIdentity,
+) -> Result<(), String> {
+    validate_worker_identity(client, &identity.runtime, identity.active_slot_is_unbound)
+}
+
+fn validate_worker_identity(
+    client: &SpiClient<'_>,
+    identity: &WorkerRuntimeIdentity,
+    active_slot_is_unbound: bool,
+) -> Result<(), String> {
+    let valid = client
+        .select(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_catalog.pg_namespace namespace
+                 WHERE namespace.nspname = 'synchro'
+                   AND (
+                       SELECT count(*)
+                       FROM pg_catalog.pg_class class
+                       WHERE class.relnamespace = namespace.oid
+                         AND class.relkind IN ('r', 'p')
+                         AND class.relname IN (
+                             'sync_registry',
+                             'sync_registry_generations',
+                             'sync_runtime_state',
+                             'sync_stream_resets',
+                             'sync_wal_poison',
+                             'sync_wal_progress',
+                             'sync_wal_worker_state'
+                         )
+                   ) = 7
+                   AND EXISTS (
+                       SELECT 1
+                        FROM synchro.sync_runtime_state runtime
+                        WHERE runtime.singleton
+                          AND runtime.stream_generation = $1
+                          AND (
+                              ($3 AND runtime.active_slot_name IS NULL)
+                              OR (NOT $3 AND runtime.active_slot_name::text = $2)
+                          )
+                    )
+              ) AS valid",
+            None,
+            &[
+                identity.stream_generation.as_str().into(),
+                identity.slot_name.as_str().into(),
+                active_slot_is_unbound.into(),
+            ],
+        )
+        .map_err(|_| "validating worker runtime identity failed".to_string())?
+        .first()
+        .get_by_name::<bool, &str>("valid")
+        .map_err(|_| "validating worker runtime identity failed".to_string())?
+        .unwrap_or(false);
+    if !valid {
+        return Err("worker runtime identity changed".to_string());
+    }
+    Ok(())
+}
+
+fn validated_runtime_capture_identity(
+    worker_role_oid: pg_sys::Oid,
+) -> Result<RuntimeCaptureIdentity, String> {
     run_worker_transaction(|| {
-        Spi::connect(|client| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             let row = client
                 .select(
                     "SELECT runtime.stream_generation,
@@ -787,29 +1189,41 @@ fn validate_runtime_capture_identity(
     client: &SpiClient<'_>,
     identity: &RuntimeCaptureIdentity,
 ) -> Result<(), String> {
+    let publication = publication_name();
     let valid = client
         .select(
             "SELECT EXISTS (
-                 SELECT 1
-                  FROM synchro.sync_runtime_state runtime
-                   JOIN synchro.sync_wal_progress progress ON progress.singleton
-                   JOIN synchro.sync_registry_generations registry
-                     ON registry.generation = progress.registry_generation
-                    AND registry.state = 'active'
-                    AND registry.validated
-                    AND registry.stream_generation = runtime.stream_generation
-                   JOIN pg_catalog.pg_replication_slots slot
-                     ON slot.slot_name = runtime.active_slot_name
-                  JOIN pg_catalog.pg_database database
-                    ON database.oid = slot.datoid
-                  AND database.datname = pg_catalog.current_database()
-                 WHERE runtime.singleton
-                   AND runtime.stream_generation = $1
-                   AND runtime.active_slot_name::text = $2
-                   AND progress.stream_generation = $1
-                   AND progress.registry_generation = $3
-                   AND slot.slot_type = 'logical'
-                   AND slot.plugin = 'pgoutput'
+                  SELECT 1
+                   FROM synchro.sync_runtime_state runtime
+                    JOIN synchro.sync_wal_progress progress ON progress.singleton
+                    JOIN synchro.sync_registry_generations registry
+                      ON registry.generation = progress.registry_generation
+                     AND registry.state = 'active'
+                     AND registry.validated
+                     AND registry.stream_generation = runtime.stream_generation
+                    JOIN pg_catalog.pg_replication_slots slot
+                      ON slot.slot_name = runtime.active_slot_name
+                    JOIN pg_catalog.pg_publication publication
+                      ON publication.oid = runtime.active_publication_oid
+                     AND publication.pubname = runtime.active_publication_name
+                     AND publication.pubname::text = $4
+                     AND NOT publication.puballtables
+                    JOIN pg_catalog.pg_database database
+                      ON database.oid = slot.datoid
+                     AND database.datname = pg_catalog.current_database()
+                  WHERE runtime.singleton
+                    AND runtime.stream_generation = $1
+                    AND runtime.active_slot_name::text = $2
+                    AND progress.stream_generation = $1
+                    AND progress.registry_generation = $3
+                    AND runtime.active_publication_name::text = $4
+                    AND progress.generation_start_lsn IS NOT NULL
+                    AND COALESCE(
+                        progress.acknowledged_end_lsn,
+                        progress.generation_start_lsn
+                    ) = slot.confirmed_flush_lsn
+                    AND slot.slot_type = 'logical'
+                    AND slot.plugin = 'pgoutput'
                    AND NOT slot.temporary
                    AND slot.invalidation_reason IS NULL
                    AND slot.wal_status IS DISTINCT FROM 'lost'
@@ -821,6 +1235,7 @@ fn validate_runtime_capture_identity(
                 identity.stream_generation.as_str().into(),
                 identity.slot_name.as_str().into(),
                 identity.registry_generation.into(),
+                publication.as_str().into(),
             ],
         )
         .map_err(|_| "validating active replication slot failed".to_string())?
@@ -834,74 +1249,69 @@ fn validate_runtime_capture_identity(
     Ok(())
 }
 
-fn ensure_slot(
+fn prepare_bound_worker_slot(
+    preparation: &WorkerSlotPreparation,
+    configured_slot: &str,
+) -> Result<WorkerStartupIdentity, String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, preparation.worker_role_oid)?;
+            let publication = ensure_publication(client, &publication_name())?;
+            validate_bound_slot(
+                client,
+                &preparation.startup.runtime,
+                &preparation.connected_database,
+                &publication,
+            )?;
+            let prepared = capture_worker_startup_identity(client, configured_slot)?;
+            if prepared.active_slot_is_unbound {
+                return Err("active replication slot is unavailable".to_string());
+            }
+            Ok(prepared)
+        })
+    })
+}
+
+fn existing_worker_slot(
     client: &mut SpiClient<'_>,
     slot: &str,
-    connected_database: &str,
-    allow_create: bool,
-) -> Result<(), String> {
+) -> Result<ExistingWorkerSlot, String> {
     let rows = client
         .select(
-            "SELECT plugin::text AS plugin, database::text AS database_name,
-                    slot_type::text AS slot_type, temporary,
-                    invalidation_reason, wal_status::text AS wal_status,
-                    restart_lsn IS NOT NULL AS has_restart_lsn,
-                    confirmed_flush_lsn IS NOT NULL AS has_confirmed_flush_lsn
-             FROM pg_catalog.pg_replication_slots
-             WHERE slot_name = $1",
+            "SELECT active
+              FROM pg_catalog.pg_replication_slots
+              WHERE slot_name = $1",
             None,
             &[slot.into()],
         )
         .map_err(|_| "checking replication slot failed".to_string())?;
-    if let Some(row) = rows.into_iter().next() {
-        let plugin = row
-            .get_by_name::<String, &str>("plugin")
+    match rows.into_iter().next() {
+        Some(row) => match row
+            .get_by_name::<bool, &str>("active")
             .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or_default();
-        let database = row
-            .get_by_name::<String, &str>("database_name")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or_default();
-        let slot_type = row
-            .get_by_name::<String, &str>("slot_type")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or_default();
-        let temporary = row
-            .get_by_name::<bool, &str>("temporary")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or(true);
-        let invalidation_reason = row
-            .get_by_name::<String, &str>("invalidation_reason")
-            .map_err(|_| "checking replication slot failed".to_string())?;
-        let wal_status = row
-            .get_by_name::<String, &str>("wal_status")
-            .map_err(|_| "checking replication slot failed".to_string())?;
-        let has_restart_lsn = row
-            .get_by_name::<bool, &str>("has_restart_lsn")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or(false);
-        let has_confirmed_flush_lsn = row
-            .get_by_name::<bool, &str>("has_confirmed_flush_lsn")
-            .map_err(|_| "checking replication slot failed".to_string())?
-            .unwrap_or(false);
-        if plugin != "pgoutput"
-            || database != connected_database
-            || slot_type != "logical"
-            || temporary
-            || invalidation_reason.is_some()
-            || wal_status.as_deref() == Some("lost")
-            || !has_restart_lsn
-            || !has_confirmed_flush_lsn
         {
-            return Err("configured replication slot is incompatible".to_string());
-        }
-        return Ok(());
+            Some(true) | None => Ok(ExistingWorkerSlot::Active),
+            Some(false) => Ok(ExistingWorkerSlot::Inactive),
+        },
+        None => Ok(ExistingWorkerSlot::Missing),
     }
+}
 
-    if !allow_create {
-        return Err("active replication slot is unavailable".to_string());
+fn replace_unbound_slot(
+    client: &mut SpiClient<'_>,
+    slot: &str,
+    existing_slot: ExistingWorkerSlot,
+    connected_database: &str,
+) -> Result<String, String> {
+    if existing_slot == ExistingWorkerSlot::Inactive {
+        client
+            .select(
+                "SELECT pg_catalog.pg_drop_replication_slot($1)",
+                None,
+                &[slot.into()],
+            )
+            .map_err(|_| "dropping configured replication slot failed".to_string())?;
     }
-
     client
         .select(
             "SELECT pg_catalog.pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -909,13 +1319,258 @@ fn ensure_slot(
             &[slot.into()],
         )
         .map_err(|_| "creating replication slot failed".to_string())?;
+    client
+        .select(
+            "SELECT confirmed_flush_lsn::text AS confirmed_flush_lsn
+             FROM pg_catalog.pg_replication_slots
+             WHERE slot_name = $1
+               AND slot_type = 'logical'
+               AND plugin = 'pgoutput'
+               AND database = $2
+               AND NOT temporary
+               AND confirmed_flush_lsn IS NOT NULL",
+            None,
+            &[slot.into(), connected_database.into()],
+        )
+        .map_err(|_| "confirming replication slot failed".to_string())?
+        .first()
+        .get_by_name::<String, &str>("confirmed_flush_lsn")
+        .map_err(|_| "confirming replication slot failed".to_string())?
+        .ok_or_else(|| "new replication slot is invalid".to_string())
+}
+
+fn bind_unbound_worker_slot(
+    preparation: &WorkerSlotPreparation,
+    configured_slot: &str,
+    boundary: &str,
+) -> Result<WorkerStartupIdentity, String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, preparation.worker_role_oid)?;
+            let publication = ensure_publication(client, &publication_name())?;
+            bind_replacement_slot(client, &preparation.startup, &publication, boundary)?;
+            let prepared = capture_worker_startup_identity(client, configured_slot)?;
+            if prepared.active_slot_is_unbound {
+                return Err("active replication slot is unavailable".to_string());
+            }
+            Ok(prepared)
+        })
+    })
+}
+
+fn bind_replacement_slot(
+    client: &mut SpiClient<'_>,
+    startup: &WorkerStartupIdentity,
+    publication: &PublicationIdentity,
+    boundary: &str,
+) -> Result<(), String> {
+    let slot = startup.runtime.slot_name.as_str();
+    let bound = client
+        .update(
+            "WITH progress AS (
+                 SELECT stream_generation
+                 FROM synchro.sync_wal_progress
+                 WHERE singleton
+                   AND stream_generation = $1
+                   AND generation_start_lsn IS NULL
+                   AND materialized_commit_lsn IS NULL
+                   AND materialized_end_lsn IS NULL
+                   AND acknowledged_end_lsn IS NULL
+                 FOR UPDATE
+             ), runtime AS (
+                 UPDATE synchro.sync_runtime_state
+                 SET active_slot_name = $2,
+                     active_publication_name = $3::name,
+                     active_publication_oid = $4::oid,
+                     updated_at = now()
+                 FROM progress
+                 WHERE synchro.sync_runtime_state.singleton
+                   AND synchro.sync_runtime_state.stream_generation = $1
+                   AND synchro.sync_runtime_state.active_slot_name IS NULL
+                 RETURNING synchro.sync_runtime_state.stream_generation
+             )
+             UPDATE synchro.sync_wal_progress progress
+             SET generation_start_lsn = $5::pg_lsn,
+                 updated_at = now()
+             FROM runtime
+             WHERE progress.singleton
+               AND progress.stream_generation = runtime.stream_generation",
+            None,
+            &[
+                startup.runtime.stream_generation.as_str().into(),
+                slot.into(),
+                publication.name.as_str().into(),
+                publication.oid.into(),
+                boundary.into(),
+            ],
+        )
+        .map_err(|_| "binding fresh replication slot failed".to_string())?
+        .len();
+    if bound != 1 {
+        return Err("unbound stream progress is invalid".to_string());
+    }
     Ok(())
 }
 
-fn ensure_publication(client: &mut SpiClient<'_>, publication: &str) -> Result<(), String> {
+pub(crate) fn slot_binding_decision(
+    runtime_state: &WorkerStartupIdentity,
+    existing_slot: ExistingWorkerSlot,
+) -> SlotBindingDecision {
+    if !runtime_state.active_slot_is_unbound {
+        return SlotBindingDecision::Reuse;
+    }
+    match existing_slot {
+        ExistingWorkerSlot::Active => SlotBindingDecision::Fail,
+        ExistingWorkerSlot::Missing | ExistingWorkerSlot::Inactive => SlotBindingDecision::Replace,
+    }
+}
+
+fn validate_bound_slot(
+    client: &mut SpiClient<'_>,
+    runtime: &WorkerRuntimeIdentity,
+    connected_database: &str,
+    publication: &PublicationIdentity,
+) -> Result<(), String> {
+    let valid = client
+        .select(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM synchro.sync_runtime_state runtime
+                 JOIN synchro.sync_wal_progress progress ON progress.singleton
+                 JOIN synchro.sync_registry_generations registry
+                   ON registry.generation = progress.registry_generation
+                  AND registry.state = 'active'
+                  AND registry.validated
+                  AND registry.stream_generation = runtime.stream_generation
+                 JOIN pg_catalog.pg_replication_slots slot
+                   ON slot.slot_name = runtime.active_slot_name
+                 JOIN pg_catalog.pg_database database
+                   ON database.oid = slot.datoid
+                  AND database.datname::text = $3
+                 JOIN pg_catalog.pg_publication publication
+                   ON publication.oid = runtime.active_publication_oid
+                  AND publication.pubname = runtime.active_publication_name
+                  AND publication.pubname::text = $4
+                  AND NOT publication.puballtables
+                 WHERE runtime.singleton
+                   AND runtime.stream_generation = $1
+                   AND runtime.active_slot_name::text = $2
+                   AND runtime.active_publication_name::text = $4
+                   AND progress.stream_generation = runtime.stream_generation
+                   AND progress.generation_start_lsn IS NOT NULL
+                   AND slot.slot_type = 'logical'
+                   AND slot.plugin = 'pgoutput'
+                   AND NOT slot.temporary
+                   AND slot.invalidation_reason IS NULL
+                   AND slot.wal_status IS DISTINCT FROM 'lost'
+                   AND slot.restart_lsn IS NOT NULL
+                   AND slot.confirmed_flush_lsn IS NOT NULL
+             ) AS valid",
+            None,
+            &[
+                runtime.stream_generation.as_str().into(),
+                runtime.slot_name.as_str().into(),
+                connected_database.into(),
+                publication.name.as_str().into(),
+            ],
+        )
+        .map_err(|_| "validating active replication slot failed".to_string())?
+        .first()
+        .get_by_name::<bool, &str>("valid")
+        .map_err(|_| "validating active replication slot failed".to_string())?
+        .unwrap_or(false);
+    if !valid {
+        return Err("active replication slot is invalid".to_string());
+    }
+    let row = client
+        .update(
+            "SELECT slot.confirmed_flush_lsn::text AS actual_lsn,
+                    COALESCE(
+                        progress.acknowledged_end_lsn,
+                        progress.generation_start_lsn
+                    )::text AS expected_lsn,
+                    progress.materialized_end_lsn::text AS materialized_end_lsn
+             FROM synchro.sync_runtime_state runtime
+             JOIN synchro.sync_wal_progress progress
+               ON progress.singleton
+              AND progress.stream_generation = runtime.stream_generation
+             JOIN pg_catalog.pg_replication_slots slot
+               ON slot.slot_name = runtime.active_slot_name
+             WHERE runtime.singleton
+               AND runtime.stream_generation = $1
+               AND runtime.active_slot_name::text = $2
+             FOR UPDATE OF progress",
+            None,
+            &[
+                runtime.stream_generation.as_str().into(),
+                runtime.slot_name.as_str().into(),
+            ],
+        )
+        .map_err(|_| "reading active replication slot boundary failed".to_string())?
+        .first();
+    let actual = row
+        .get_by_name::<String, &str>("actual_lsn")
+        .map_err(|_| "reading active replication slot boundary failed".to_string())?
+        .and_then(|value| parse_lsn(&value))
+        .ok_or_else(|| "active replication slot boundary is invalid".to_string())?;
+    let expected = row
+        .get_by_name::<String, &str>("expected_lsn")
+        .map_err(|_| "reading active replication slot boundary failed".to_string())?
+        .and_then(|value| parse_lsn(&value))
+        .ok_or_else(|| "active replication acknowledgement is invalid".to_string())?;
+    let materialized_end = row
+        .get_by_name::<String, &str>("materialized_end_lsn")
+        .map_err(|_| "reading active materialized boundary failed".to_string())?
+        .and_then(|value| parse_lsn(&value));
+    if let Some(reconciled) = startup_slot_reconciliation(actual, expected, materialized_end)? {
+        let requested = format_lsn(reconciled);
+        let expected = format_lsn(expected);
+        let updated = client
+            .update(
+                "UPDATE synchro.sync_wal_progress
+                 SET acknowledged_end_lsn = $1::pg_lsn, updated_at = now()
+                 WHERE singleton
+                   AND stream_generation = $2
+                   AND COALESCE(acknowledged_end_lsn, generation_start_lsn) = $3::pg_lsn
+                   AND materialized_end_lsn >= $1::pg_lsn",
+                None,
+                &[
+                    requested.as_str().into(),
+                    runtime.stream_generation.as_str().into(),
+                    expected.as_str().into(),
+                ],
+            )
+            .map_err(|_| "reconciling active replication slot failed".to_string())?
+            .len();
+        if updated != 1 {
+            return Err("active replication slot boundary changed".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn startup_slot_reconciliation(
+    actual: u64,
+    expected: u64,
+    materialized_end: Option<u64>,
+) -> Result<Option<u64>, String> {
+    if actual == expected {
+        return Ok(None);
+    }
+    if actual > expected && materialized_end.is_some_and(|materialized| actual <= materialized) {
+        return Ok(Some(actual));
+    }
+    Err("active replication slot is invalid".to_string())
+}
+
+fn ensure_publication(
+    client: &mut SpiClient<'_>,
+    publication: &str,
+) -> Result<PublicationIdentity, String> {
     let rows = client
         .select(
-            "SELECT puballtables FROM pg_catalog.pg_publication WHERE pubname = $1",
+            "SELECT oid::bigint AS publication_oid, puballtables
+             FROM pg_catalog.pg_publication WHERE pubname = $1",
             None,
             &[publication.into()],
         )
@@ -928,20 +1583,32 @@ fn ensure_publication(client: &mut SpiClient<'_>, publication: &str) -> Result<(
         {
             return Err("configured publication must be explicit".to_string());
         }
-        return Ok(());
+        let oid = row
+            .get_by_name::<i64, &str>("publication_oid")
+            .map_err(|_| "checking publication failed".to_string())?
+            .filter(|oid| *oid > 0)
+            .ok_or_else(|| "configured publication is unavailable".to_string())?;
+        return Ok(PublicationIdentity {
+            name: publication.to_string(),
+            oid,
+        });
     }
 
     Err("configured publication is unavailable".to_string())
 }
 
-fn fresh_decoder() -> Result<DecoderState, String> {
-    let identity = validated_runtime_capture_identity()?;
-    fresh_decoder_for(identity)
+fn fresh_decoder(worker_role_oid: pg_sys::Oid) -> Result<DecoderState, String> {
+    let identity = validated_runtime_capture_identity(worker_role_oid)?;
+    fresh_decoder_for(identity, worker_role_oid)
 }
 
-fn fresh_decoder_for(identity: RuntimeCaptureIdentity) -> Result<DecoderState, String> {
+fn fresh_decoder_for(
+    identity: RuntimeCaptureIdentity,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<DecoderState, String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             validate_runtime_capture_identity(client, &identity)?;
             let registry =
                 load_registry_generation_for_worker(client, identity.registry_generation)
@@ -1137,7 +1804,7 @@ fn validate_candidate_slot_boundary(
             if !valid {
                 return Err("candidate slot boundary is invalid".to_string());
             }
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             validate_candidate_binding(client, bootstrap, false)
         })
     })
@@ -1628,7 +2295,7 @@ fn advance_candidate_slot(
             if actual != transaction.end_lsn {
                 return Err("candidate slot advanced to an unexpected boundary".to_string());
             }
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             let updated = client
                 .update(
                     "UPDATE synchro.sync_stream_resets
@@ -1693,6 +2360,12 @@ fn select_candidate_projection(
     Ok(())
 }
 
+struct CandidateMembershipRecord {
+    record_id: String,
+    checksum: Vec<u8>,
+    row_version: String,
+}
+
 fn recompute_candidate_membership(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
@@ -1719,62 +2392,275 @@ fn recompute_candidate_membership(
         if registration.registry_generation != registry_generation {
             return Err("candidate registry generation changed".to_string());
         }
-        let rows = client
-            .select(
-                "SELECT record_id, checksum, row_version::text AS row_version
-                 FROM synchro.sync_stream_reset_captured_rows
-                 WHERE reset_id = $1::uuid
-                   AND relation_id = $2::uuid
-                   AND registry_generation = $3
-                   AND NOT deleted
-                 ORDER BY record_id",
-                None,
-                &[
-                    bootstrap_id.into(),
-                    registration.relation_id.as_str().into(),
-                    registry_generation.into(),
-                ],
-            )
-            .map_err(|_| "loading candidate membership rows failed".to_string())?;
-        for row in rows {
-            let record_id = optional_text(&row, "record_id")?
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "candidate membership row identity is missing".to_string())?;
-            let row_version = optional_text(&row, "row_version")?
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "candidate membership row version is missing".to_string())?;
-            let checksum = row
-                .get_by_name::<Vec<u8>, &str>("checksum")
-                .map_err(|_| "reading candidate membership row failed".to_string())?
-                .and_then(|value| <[u8; 32]>::try_from(value).ok())
-                .ok_or_else(|| "candidate membership row digest is invalid".to_string())?;
-            let scopes = resolve_membership(client, registration, &record_id)
-                .map_err(|_| "resolving candidate membership failed".to_string())?;
-            for scope_id in scopes {
-                client
-                    .update(
-                        "INSERT INTO synchro.sync_stream_reset_membership_edges (
-                             reset_id, relation_id, table_name, record_id, scope_id,
-                             checksum, row_version, staged_at
-                         ) VALUES (
-                             $1::uuid, $2::uuid, $3, $4, $5, $6, $7::uuid, now()
-                         )",
-                        None,
-                        &[
-                            bootstrap_id.into(),
-                            registration.relation_id.as_str().into(),
-                            registration.table_name.as_str().into(),
-                            record_id.as_str().into(),
-                            scope_id.as_str().into(),
-                            checksum.to_vec().into(),
-                            row_version.as_str().into(),
-                        ],
-                    )
-                    .map_err(|_| "recording candidate membership failed".to_string())?;
+        let mut after = None;
+        loop {
+            let records = load_candidate_membership_batch(
+                client,
+                bootstrap_id,
+                registry_generation,
+                registration,
+                after.as_deref(),
+            )?;
+            if records.is_empty() {
+                break;
             }
+            after = records.last().map(|record| record.record_id.clone());
+            write_candidate_membership_records(client, bootstrap_id, registration, &records)?;
         }
     }
     Ok(())
+}
+
+/// Reconcile only the candidate rows that one transaction changed.
+pub(crate) fn reconcile_candidate_membership_records(
+    client: &mut SpiClient<'_>,
+    bootstrap_id: &str,
+    registry_generation: i64,
+    registry: &[TableRegistration],
+    records: &[(String, String)],
+) -> Result<(), String> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let mut registrations = HashMap::new();
+    for registration in registry
+        .iter()
+        .filter(|registration| registration.is_synced())
+    {
+        if registration.registry_generation != registry_generation {
+            return Err("candidate registry generation changed".to_string());
+        }
+        registrations.insert(registration.relation_id.as_str(), registration);
+    }
+    let mut seen = HashSet::with_capacity(records.len());
+    let mut records_by_relation = HashMap::<&str, Vec<String>>::new();
+    let mut edge_input = Vec::with_capacity(records.len());
+    for (relation_id, record_id) in records {
+        let registration = registrations
+            .get(relation_id.as_str())
+            .ok_or_else(|| "candidate impact relation is unavailable".to_string())?;
+        if !seen.insert((relation_id.as_str(), record_id.as_str())) {
+            continue;
+        }
+        records_by_relation
+            .entry(registration.relation_id.as_str())
+            .or_default()
+            .push(record_id.clone());
+        edge_input.push(serde_json::json!({
+            "relation_id": relation_id,
+            "record_id": record_id,
+        }));
+    }
+    client
+        .update(
+            "WITH impact AS (
+                 SELECT relation_id, record_id
+                 FROM jsonb_to_recordset($2::jsonb) AS input(
+                     relation_id text, record_id text
+                 )
+             )
+             DELETE FROM synchro.sync_stream_reset_membership_edges edge
+             USING impact
+             WHERE edge.reset_id = $1::uuid
+               AND edge.relation_id = impact.relation_id::uuid
+               AND edge.record_id = impact.record_id",
+            None,
+            &[
+                bootstrap_id.into(),
+                pgrx::JsonB(serde_json::Value::Array(edge_input)).into(),
+            ],
+        )
+        .map_err(|_| "clearing affected candidate membership failed".to_string())?;
+    for (relation_id, record_ids) in records_by_relation {
+        let registration = registrations
+            .get(relation_id)
+            .ok_or_else(|| "candidate impact registration is unavailable".to_string())?;
+        let records = load_candidate_membership_records(
+            client,
+            bootstrap_id,
+            registry_generation,
+            registration,
+            &record_ids,
+        )?;
+        write_candidate_membership_records(client, bootstrap_id, registration, &records)?;
+    }
+    Ok(())
+}
+
+fn load_candidate_membership_batch(
+    client: &SpiClient<'_>,
+    bootstrap_id: &str,
+    registry_generation: i64,
+    registration: &TableRegistration,
+    after: Option<&str>,
+) -> Result<Vec<CandidateMembershipRecord>, String> {
+    let (query, values) = match after {
+        Some(after) => (
+            "SELECT record_id, checksum, row_version::text AS row_version
+             FROM synchro.sync_stream_reset_captured_rows
+             WHERE reset_id = $1::uuid
+               AND relation_id = $2::uuid
+               AND registry_generation = $3
+               AND NOT deleted
+               AND record_id > $4
+             ORDER BY record_id
+             LIMIT $5",
+            vec![
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registry_generation.into(),
+                after.into(),
+                i64::try_from(JSONB_BATCH_SIZE)
+                    .map_err(|_| "candidate membership batch size is invalid".to_string())?
+                    .into(),
+            ],
+        ),
+        None => (
+            "SELECT record_id, checksum, row_version::text AS row_version
+             FROM synchro.sync_stream_reset_captured_rows
+             WHERE reset_id = $1::uuid
+               AND relation_id = $2::uuid
+               AND registry_generation = $3
+               AND NOT deleted
+             ORDER BY record_id
+             LIMIT $4",
+            vec![
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registry_generation.into(),
+                i64::try_from(JSONB_BATCH_SIZE)
+                    .map_err(|_| "candidate membership batch size is invalid".to_string())?
+                    .into(),
+            ],
+        ),
+    };
+    let rows = client
+        .select(query, None, &values)
+        .map_err(|_| "loading candidate membership rows failed".to_string())?;
+    candidate_membership_records(rows)
+}
+
+fn load_candidate_membership_records(
+    client: &SpiClient<'_>,
+    bootstrap_id: &str,
+    registry_generation: i64,
+    registration: &TableRegistration,
+    record_ids: &[String],
+) -> Result<Vec<CandidateMembershipRecord>, String> {
+    if record_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = client
+        .select(
+            "SELECT record_id, checksum, row_version::text AS row_version
+             FROM synchro.sync_stream_reset_captured_rows
+             WHERE reset_id = $1::uuid
+               AND relation_id = $2::uuid
+               AND registry_generation = $3
+               AND NOT deleted
+               AND record_id = ANY($4)
+             ORDER BY record_id",
+            None,
+            &[
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registry_generation.into(),
+                record_ids.to_vec().into(),
+            ],
+        )
+        .map_err(|_| "loading affected candidate membership rows failed".to_string())?;
+    candidate_membership_records(rows)
+}
+
+fn candidate_membership_records(
+    rows: SpiTupleTable<'_>,
+) -> Result<Vec<CandidateMembershipRecord>, String> {
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        let record_id = optional_text(&row, "record_id")?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "candidate membership row identity is missing".to_string())?;
+        let row_version = optional_text(&row, "row_version")?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "candidate membership row version is missing".to_string())?;
+        let checksum = row
+            .get_by_name::<Vec<u8>, &str>("checksum")
+            .map_err(|_| "reading candidate membership row failed".to_string())?
+            .and_then(|value| <[u8; 32]>::try_from(value.clone()).ok().map(|_| value))
+            .ok_or_else(|| "candidate membership row digest is invalid".to_string())?;
+        records.push(CandidateMembershipRecord {
+            record_id,
+            checksum,
+            row_version,
+        });
+    }
+    Ok(records)
+}
+
+fn write_candidate_membership_records(
+    client: &mut SpiClient<'_>,
+    bootstrap_id: &str,
+    registration: &TableRegistration,
+    records: &[CandidateMembershipRecord],
+) -> Result<(), String> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let record_ids = records
+        .iter()
+        .map(|record| record.record_id.clone())
+        .collect::<Vec<_>>();
+    let memberships =
+        crate::materialize::resolve_membership_batch(client, registration, &record_ids)
+            .map_err(|_| "resolving candidate membership failed".to_string())?;
+    let mut edges = Vec::new();
+    for record in records {
+        let scopes = memberships
+            .get(&record.record_id)
+            .ok_or_else(|| "candidate membership result is missing a record".to_string())?;
+        for scope_id in scopes {
+            edges.push(serde_json::json!({
+                "record_id": record.record_id,
+                "scope_id": scope_id,
+                "checksum_hex": lower_hex(&record.checksum),
+                "row_version": record.row_version,
+            }));
+        }
+    }
+    if edges.is_empty() {
+        return Ok(());
+    }
+    let expected = edges.len();
+    let inserted = client
+        .update(
+            "INSERT INTO synchro.sync_stream_reset_membership_edges (
+                 reset_id, relation_id, table_name, record_id, scope_id,
+                 checksum, row_version, staged_at
+             )
+             SELECT $2::uuid, $3::uuid, $4, input.record_id, input.scope_id,
+                    decode(input.checksum_hex, 'hex'), input.row_version::uuid, now()
+             FROM jsonb_to_recordset($1::jsonb) AS input(
+                 record_id text, scope_id text, checksum_hex text, row_version text
+             )
+             RETURNING record_id",
+            None,
+            &[
+                pgrx::JsonB(serde_json::Value::Array(edges)).into(),
+                bootstrap_id.into(),
+                registration.relation_id.as_str().into(),
+                registration.table_name.as_str().into(),
+            ],
+        )
+        .map_err(|_| "recording candidate membership failed".to_string())?
+        .len();
+    if inserted != expected {
+        return Err("candidate membership insert count differs".to_string());
+    }
+    Ok(())
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn finalize_candidate(bootstrap: &CandidateBootstrap) -> Result<(), String> {
@@ -1993,76 +2879,12 @@ fn compute_candidate_scope_digests(
     bootstrap: &CandidateBootstrap,
     registry: &[TableRegistration],
 ) -> Result<Vec<(String, Sha256Digest, i64, String)>, String> {
-    let schema_hash =
-        crate::pull::schema_hash_for_generation(client, bootstrap.identity.registry_generation)?;
-    let schema_hash_text = schema_hash.to_lower_hex();
-    let scope_rows = client
-        .select(
-            "SELECT scope_id FROM synchro.sync_scope_state
-             UNION
-             SELECT scope_id FROM synchro.sync_stream_reset_membership_edges
-             WHERE reset_id = $1::uuid
-             ORDER BY scope_id",
-            None,
-            &[bootstrap.identity.bootstrap_id.as_str().into()],
-        )
-        .map_err(|_| "loading candidate scope identities failed".to_string())?;
-    let mut entries = BTreeMap::<String, Vec<ScopeDigestEntry>>::new();
-    for row in scope_rows {
-        let scope_id = optional_text(&row, "scope_id")?
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "candidate scope identity is invalid".to_string())?;
-        entries.insert(scope_id, Vec::new());
-    }
-    let edge_rows = client
-        .select(
-            "SELECT relation_id::text AS relation_id, record_id, scope_id, checksum
-             FROM synchro.sync_stream_reset_membership_edges
-             WHERE reset_id = $1::uuid
-             ORDER BY scope_id, relation_id, record_id",
-            None,
-            &[bootstrap.identity.bootstrap_id.as_str().into()],
-        )
-        .map_err(|_| "loading candidate digest edges failed".to_string())?;
-    for row in edge_rows {
-        let relation_id = optional_text(&row, "relation_id")?
-            .ok_or_else(|| "candidate edge relation is missing".to_string())?;
-        let record_id = optional_text(&row, "record_id")?
-            .ok_or_else(|| "candidate edge row identity is missing".to_string())?;
-        let scope_id = optional_text(&row, "scope_id")?
-            .ok_or_else(|| "candidate edge scope is missing".to_string())?;
-        let registration = registry
-            .iter()
-            .find(|candidate| candidate.relation_id == relation_id)
-            .ok_or_else(|| "candidate edge relation is not registered".to_string())?;
-        let primary_key = crate::pull::row_primary_key_json(registration, &record_id)?;
-        let identity = row_identity(
-            &crate::pull::canonical_table(registration)?,
-            &serde_json::to_string(&primary_key)
-                .map_err(|_| "encoding candidate row identity failed".to_string())?,
-        )
-        .map_err(|_| "candidate row identity is invalid".to_string())?;
-        let checksum = row
-            .get_by_name::<Vec<u8>, &str>("checksum")
-            .map_err(|_| "reading candidate edge digest failed".to_string())?
-            .and_then(|value| <[u8; 32]>::try_from(value).ok())
-            .map(Sha256Digest::from_bytes)
-            .ok_or_else(|| "candidate edge digest is invalid".to_string())?;
-        entries
-            .get_mut(&scope_id)
-            .ok_or_else(|| "candidate edge scope is unavailable".to_string())?
-            .push(ScopeDigestEntry::new(identity, checksum));
-    }
-    entries
-        .into_iter()
-        .map(|(scope_id, scope_entries)| {
-            let row_count = i64::try_from(scope_entries.len())
-                .map_err(|_| "candidate scope row count overflowed".to_string())?;
-            let digest = scope_digest(schema_hash, &scope_id, &scope_entries)
-                .map_err(|_| "computing candidate scope digest failed".to_string())?;
-            Ok((scope_id, digest, row_count, schema_hash_text.clone()))
-        })
-        .collect()
+    crate::scope_digest::compute_reset_scope_digests(
+        client,
+        &bootstrap.identity.bootstrap_id,
+        bootstrap.identity.registry_generation,
+        registry,
+    )
 }
 
 fn update_candidate_staged_counts(
@@ -2186,7 +3008,7 @@ fn poll_and_process(
         run_replication_transaction(worker_role_oid, || peek_messages(slot, &publication))
             .map_err(|_| PollFailure::Transient("peek"))?;
     if messages.is_empty() {
-        record_oldest_unmaterialized_commit(decoder.pending_commit_timestamp())
+        record_oldest_unmaterialized_commit(decoder.pending_commit_timestamp(), worker_role_oid)
             .map_err(|_| PollFailure::Transient("lag_record"))?;
         return Ok(0);
     }
@@ -2212,6 +3034,8 @@ fn poll_and_process(
                         if sql_xid != transaction.xid {
                             return Err(PollFailure::Poison(PoisonFailure {
                                 class: "validation_failed",
+                                detail: "WAL transaction identifier did not match the decoded transaction"
+                                    .to_string(),
                                 commit_lsn: transaction.commit_lsn,
                                 relation_id: infer_transaction_relation_id(transaction),
                                 commit_timestamp: Some(transaction.commit_timestamp),
@@ -2228,6 +3052,7 @@ fn poll_and_process(
             Err(_) => {
                 return Err(PollFailure::Poison(PoisonFailure {
                     class: "decode_failed",
+                    detail: "WAL decoder rejected a replication message".to_string(),
                     commit_lsn: pending_final_lsn.unwrap_or(message.lsn),
                     relation_id: None,
                     commit_timestamp: pending_commit_timestamp,
@@ -2241,14 +3066,17 @@ fn poll_and_process(
             .first()
             .map(|transaction| transaction.commit_timestamp)
             .or_else(|| decoder.pending_commit_timestamp()),
+        worker_role_oid,
     )
     .map_err(|_| PollFailure::Transient("lag_record"))?;
 
     let mut previous = None;
+    let mut acknowledged_boundary = None;
     for (index, transaction) in transactions.iter().enumerate() {
         if previous.is_some_and(|commit_lsn| commit_lsn >= transaction.commit_lsn) {
             return Err(PollFailure::Poison(PoisonFailure {
                 class: "validation_failed",
+                detail: "decoded transactions were not in commit order".to_string(),
                 commit_lsn: transaction.commit_lsn,
                 relation_id: infer_transaction_relation_id(transaction),
                 commit_timestamp: Some(transaction.commit_timestamp),
@@ -2262,20 +3090,19 @@ fn poll_and_process(
                 PollFailure::Poison(failure)
             }
         })?;
-        advance_slot(
-            slot,
-            transaction.commit_lsn,
-            materialized.end_lsn,
-            worker_role_oid,
-        )
-        .map_err(|_| PollFailure::Transient("slot_advance"))?;
+        acknowledged_boundary = Some((transaction.commit_lsn, materialized.end_lsn));
         record_oldest_unmaterialized_commit(
             transactions
                 .get(index + 1)
                 .map(|next| next.commit_timestamp)
                 .or_else(|| decoder.pending_commit_timestamp()),
+            worker_role_oid,
         )
         .map_err(|_| PollFailure::Transient("lag_record"))?;
+    }
+    if let Some((commit_lsn, end_lsn)) = acknowledged_boundary {
+        advance_slot(slot, commit_lsn, end_lsn, worker_role_oid)
+            .map_err(|_| PollFailure::Transient("slot_advance"))?;
     }
 
     Ok(message_count)
@@ -2283,7 +3110,7 @@ fn poll_and_process(
 
 fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<(), PollFailure> {
     run_replication_transaction(worker_role_oid, || {
-        Spi::connect(|client| {
+        Spi::connect_mut(|client| {
             let actual = client
                 .select(
                     "SELECT confirmed_flush_lsn::text AS actual_lsn
@@ -2297,7 +3124,8 @@ fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<()
                 .map_err(|_| PollFailure::Transient("slot_boundary"))?
                 .and_then(|value| parse_lsn(&value))
                 .ok_or(PollFailure::Transient("slot_boundary"))?;
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)
+                .map_err(|_| PollFailure::Transient("slot_boundary"))?;
             let expected = client
                 .select(
                     "SELECT COALESCE(acknowledged_end_lsn, generation_start_lsn)::text
@@ -2315,6 +3143,8 @@ fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<()
             if actual != expected {
                 return Err(PollFailure::Poison(PoisonFailure {
                     class: "transaction_commit_failed",
+                    detail: "logical slot acknowledgement did not match durable progress"
+                        .to_string(),
                     commit_lsn: actual,
                     relation_id: None,
                     commit_timestamp: None,
@@ -2729,7 +3559,11 @@ fn validate_activation_chain(
     let mut seen = HashSet::new();
     for generation in activations {
         if !seen.insert(*generation) {
-            return Err(failure("validation_failed", transaction.commit_lsn));
+            return Err(failure_with_detail(
+                "validation_failed",
+                transaction.commit_lsn,
+                "registry activation contained a duplicate generation",
+            ));
         }
         let rows = client
             .select(
@@ -2740,31 +3574,69 @@ fn validate_activation_chain(
                 None,
                 &[(*generation).into()],
             )
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "loading registry activation state failed",
+                )
+            })?;
         let Some(row) = rows.into_iter().next() else {
-            return Err(failure("validation_failed", transaction.commit_lsn));
+            return Err(failure_with_detail(
+                "validation_failed",
+                transaction.commit_lsn,
+                "registry activation generation is missing",
+            ));
         };
         let actual_parent = row
             .get_by_name::<i64, &str>("parent_generation")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation parent failed",
+                )
+            })?;
         let validated = row
             .get_by_name::<bool, &str>("validated")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation validation state failed",
+                )
+            })?
             .unwrap_or(false);
         let state = row
             .get_by_name::<String, &str>("state")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation lifecycle state failed",
+                )
+            })?
             .unwrap_or_default();
         let stream = row
             .get_by_name::<String, &str>("stream_generation")
-            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+            .map_err(|_| {
+                failure_with_detail(
+                    "validation_failed",
+                    transaction.commit_lsn,
+                    "reading registry activation stream generation failed",
+                )
+            })?
             .unwrap_or_default();
         if actual_parent != Some(parent)
             || !validated
             || state != "pending"
             || stream != stream_generation
         {
-            return Err(failure("validation_failed", transaction.commit_lsn));
+            return Err(failure_with_detail(
+                "validation_failed",
+                transaction.commit_lsn,
+                "registry activation is not a validated pending generation",
+            ));
         }
         parent = *generation;
     }
@@ -3093,90 +3965,144 @@ fn persist_events_and_projections(
 ) -> Result<PersistedEvents, PoisonFailure> {
     let mut impacts = Vec::with_capacity(events.len());
     let mut dependency_events = Vec::with_capacity(events.len());
-    for event in events {
+    for event_chunk_input in events.chunks(JSONB_BATCH_SIZE) {
+        let mut event_rows = Vec::with_capacity(event_chunk_input.len());
+        let mut fence_rows = Vec::with_capacity(event_chunk_input.len());
+        for event in event_chunk_input {
+            let event_ordinal = i64::try_from(event.event.event_ordinal)
+                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+            event_rows.push(serde_json::json!({
+                "write_ordinal": event_ordinal,
+                "event_ordinal": event_ordinal,
+                "bootstrap_id": target.bootstrap_id(),
+                "relation_id": event.registration.relation_id,
+                "registration_kind": event.registration.registration_kind.as_str(),
+                "physical_schema": event.event.relation.namespace,
+                "physical_relation": event.event.relation.name,
+                "physical_relation_oid": i64::from(event.event.relation.oid),
+                "operation": event.operation_name,
+                "fence_id": event.fence_id,
+            }));
+            fence_rows.push(serde_json::json!({
+                "fence_id": event.fence_id,
+                "event_ordinal": event_ordinal,
+            }));
+        }
+
         match target {
             ProjectionTarget::Active { stream_generation } => {
-                client
+                let event_count = event_rows.len();
+                let inserted = client
                     .update(
                         "INSERT INTO synchro.sync_wal_events (
-                     stream_generation, commit_lsn, event_ordinal, relation_id,
-                     registration_kind, physical_schema, physical_relation,
-                     physical_relation_oid, operation, fence_id
-                 ) VALUES (
-                     $1, $2::pg_lsn, $3, $4::uuid, $5, $6, $7, $8::oid, $9, $10::uuid
-                 )",
+                             stream_generation, commit_lsn, event_ordinal, relation_id,
+                             registration_kind, physical_schema, physical_relation,
+                             physical_relation_oid, operation, fence_id
+                         )
+                         SELECT $3, $2::pg_lsn, input.event_ordinal,
+                                input.relation_id::uuid, input.registration_kind,
+                                input.physical_schema, input.physical_relation,
+                                input.physical_relation_oid::oid, input.operation,
+                                input.fence_id::uuid
+                         FROM jsonb_to_recordset($1::jsonb) AS input(
+                             write_ordinal bigint,
+                             event_ordinal bigint,
+                             bootstrap_id text,
+                             relation_id text,
+                             registration_kind text,
+                             physical_schema text,
+                             physical_relation text,
+                             physical_relation_oid bigint,
+                             operation text,
+                             fence_id text
+                         )
+                         ORDER BY input.write_ordinal
+                         RETURNING event_ordinal",
                         None,
                         &[
-                            stream_generation.into(),
+                            pgrx::JsonB(serde_json::Value::Array(event_rows)).into(),
                             format_lsn(transaction.commit_lsn).as_str().into(),
-                            i64::try_from(event.event.event_ordinal)
-                                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                                .into(),
-                            event.registration.relation_id.as_str().into(),
-                            event.registration.registration_kind.as_str().into(),
-                            event.event.relation.namespace.as_str().into(),
-                            event.event.relation.name.as_str().into(),
-                            i64::from(event.event.relation.oid).into(),
-                            event.operation_name.into(),
-                            event.fence_id.as_str().into(),
+                            stream_generation.into(),
                         ],
                     )
                     .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+                if inserted.len() != event_count {
+                    return Err(failure("materialization_failed", transaction.commit_lsn));
+                }
+                let fence_count = fence_rows.len();
                 let covered = client
                     .update(
-                        "UPDATE synchro.sync_write_fences
-                 SET coverage = 'materialized', stream_generation = $1,
-                     commit_lsn = $2::pg_lsn, event_ordinal = $3,
-                     materialized_at = now()
-                 WHERE fence_id = $4::uuid AND coverage = 'pending'",
+                        "UPDATE synchro.sync_write_fences fence
+                         SET coverage = 'materialized', stream_generation = $2,
+                             commit_lsn = $3::pg_lsn, event_ordinal = input.event_ordinal,
+                             materialized_at = now()
+                         FROM jsonb_to_recordset($1::jsonb) AS input(
+                             fence_id text, event_ordinal bigint
+                         )
+                         WHERE fence.fence_id = input.fence_id::uuid
+                           AND fence.coverage = 'pending'
+                         RETURNING fence.fence_id",
                         None,
                         &[
+                            pgrx::JsonB(serde_json::Value::Array(fence_rows)).into(),
                             stream_generation.into(),
                             format_lsn(transaction.commit_lsn).as_str().into(),
-                            i64::try_from(event.event.event_ordinal)
-                                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                                .into(),
-                            event.fence_id.as_str().into(),
                         ],
                     )
                     .map_err(|_| failure("fence_correlation_failed", transaction.commit_lsn))?
                     .len();
-                if covered != 1 {
+                if covered != fence_count {
                     return Err(failure("fence_correlation_failed", transaction.commit_lsn));
                 }
             }
-            ProjectionTarget::Candidate { bootstrap_id, .. } => {
-                client
+            ProjectionTarget::Candidate { .. } => {
+                let event_count = event_rows.len();
+                let inserted = client
                     .update(
                         "INSERT INTO synchro.sync_projection_bootstrap_events (
                              bootstrap_id, commit_lsn, event_ordinal, relation_id,
                              registration_kind, physical_schema, physical_relation,
                              physical_relation_oid, operation, fence_id
-                         ) VALUES (
-                             $1::uuid, $2::pg_lsn, $3, $4::uuid, $5, $6, $7,
-                             $8::oid, $9, $10::uuid
-                         )",
+                         )
+                         SELECT input.bootstrap_id::uuid, $2::pg_lsn, input.event_ordinal,
+                                input.relation_id::uuid, input.registration_kind,
+                                input.physical_schema, input.physical_relation,
+                                input.physical_relation_oid::oid, input.operation,
+                                input.fence_id::uuid
+                         FROM jsonb_to_recordset($1::jsonb) AS input(
+                             write_ordinal bigint,
+                             event_ordinal bigint,
+                             bootstrap_id text,
+                             relation_id text,
+                             registration_kind text,
+                             physical_schema text,
+                             physical_relation text,
+                             physical_relation_oid bigint,
+                             operation text,
+                             fence_id text
+                         )
+                         ORDER BY input.write_ordinal
+                         RETURNING event_ordinal",
                         None,
                         &[
-                            bootstrap_id.into(),
+                            pgrx::JsonB(serde_json::Value::Array(event_rows)).into(),
                             format_lsn(transaction.commit_lsn).as_str().into(),
-                            i64::try_from(event.event.event_ordinal)
-                                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                                .into(),
-                            event.registration.relation_id.as_str().into(),
-                            event.registration.registration_kind.as_str().into(),
-                            event.event.relation.namespace.as_str().into(),
-                            event.event.relation.name.as_str().into(),
-                            i64::from(event.event.relation.oid).into(),
-                            event.operation_name.into(),
-                            event.fence_id.as_str().into(),
                         ],
                     )
                     .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+                if inserted.len() != event_count {
+                    return Err(failure("materialization_failed", transaction.commit_lsn));
+                }
+            }
+        }
+    }
+
+    for event in events {
+        if let ProjectionTarget::Candidate { .. } = target {
+            if event.registration.is_synced() {
                 persist_candidate_row_version(client, target, event, transaction.commit_lsn)?;
             }
         }
-
         if event.registration.is_capture_dependency() {
             let dependency_event =
                 persist_capture_dependency_event(client, target, transaction, event)?;
@@ -3770,26 +4696,48 @@ fn capture_after_projection(
         .ok_or_else(|| "source event has no after image".to_string())?;
     let prior_data = prior.and_then(|row| row.row_data.as_object());
     let mut raw = serde_json::Map::new();
-    for column in &event.registration.sync_columns {
+    let mut native_json_values = serde_json::Map::new();
+    for field in &event.registration.fields {
+        let column = &field.physical_column;
         let value = image
             .get(column)
             .ok_or_else(|| format!("source after image omits synced column {column}"))?;
         let value = match value {
-            TupleValue::Null => serde_json::Value::Null,
-            TupleValue::Text(bytes) => serde_json::Value::String(
-                std::str::from_utf8(bytes)
+            TupleValue::Null => {
+                if field.native_json {
+                    native_json_values.insert(field.field_id.clone(), serde_json::Value::Null);
+                }
+                serde_json::Value::Null
+            }
+            TupleValue::Text(bytes) => {
+                let text = std::str::from_utf8(bytes)
                     .map_err(|_| format!("synced column {column} has invalid text"))?
-                    .to_string(),
-            ),
+                    .to_string();
+                if field.native_json {
+                    native_json_values.insert(
+                        field.field_id.clone(),
+                        serde_json::Value::String(text.clone()),
+                    );
+                }
+                serde_json::Value::String(text)
+            }
             TupleValue::Binary(_) => {
                 return Err(format!(
                     "synced column {column} uses unsupported binary output"
                 ))
             }
-            TupleValue::Unchanged => prior_data
-                .and_then(|data| data.get(column))
-                .cloned()
-                .ok_or_else(|| format!("unchanged synced column {column} has no prior value"))?,
+            TupleValue::Unchanged => {
+                let prior_value = prior_data
+                    .and_then(|data| data.get(&field.field_id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("unchanged synced column {column} has no prior value")
+                    })?;
+                if field.native_json {
+                    native_json_values.insert(field.field_id.clone(), prior_value.clone());
+                }
+                prior_value
+            }
         };
         raw.insert(column.clone(), value);
     }
@@ -3811,11 +4759,20 @@ fn capture_after_projection(
         .map_err(|_| "reading canonical captured row failed".to_string())?
         .ok_or_else(|| "canonical captured row is missing".to_string())?
         .0;
+    let row_object = row_data
+        .as_object_mut()
+        .ok_or_else(|| "canonical captured row is not an object".to_string())?;
+    row_object.extend(native_json_values);
     crate::pull::canonicalize_synced_row_data(event.registration, &mut row_data)?;
-    let deleted = event.registration.has_deleted_at
-        && row_data
-            .get(&event.registration.deleted_at_col)
-            .is_some_and(|value| !value.is_null());
+    let deleted = if event.registration.has_deleted_at {
+        captured_row_deleted(
+            &event.registration.fields,
+            &event.registration.deleted_at_col,
+            &row_data,
+        )?
+    } else {
+        false
+    };
     let digest = synced_row_digest(
         client,
         event.registration,
@@ -3830,6 +4787,21 @@ fn capture_after_projection(
         deleted,
         registry_generation: event.registration.registry_generation,
     })
+}
+
+fn captured_row_deleted(
+    fields: &[crate::registry::FieldRegistration],
+    deleted_at_col: &str,
+    row_data: &serde_json::Value,
+) -> Result<bool, String> {
+    let field = fields
+        .iter()
+        .find(|field| field.physical_column == deleted_at_col)
+        .ok_or_else(|| "registered deletion field is missing".to_string())?;
+    let value = row_data
+        .get(&field.field_id)
+        .ok_or_else(|| "captured deletion field is missing".to_string())?;
+    Ok(!value.is_null())
 }
 
 fn persist_projection(
@@ -4012,6 +4984,7 @@ fn collect_membership_impacts(
             )
         })
         .collect();
+    let mut reevaluation_projections = Vec::new();
 
     for event in persisted.dependency_events {
         for dependency in dependencies
@@ -4045,19 +5018,39 @@ fn collect_membership_impacts(
                 else {
                     continue;
                 };
-                if let Some(impact) = impacts.get_mut(&key) {
-                    if event.event_ordinal <= impact.event_ordinal {
-                        continue;
+                if impacts
+                    .get(&key)
+                    .is_some_and(|impact| event.event_ordinal <= impact.event_ordinal)
+                {
+                    continue;
+                }
+                if let ProjectionTarget::Active { stream_generation } = target {
+                    let event_ordinal = i64::try_from(event.event_ordinal)
+                        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+                    reevaluation_projections.push(serde_json::json!({
+                        "event_ordinal": event_ordinal,
+                        "relation_id": target_registration.relation_id,
+                        "registry_generation": captured.registry_generation,
+                        "record_id": record_id,
+                        "row_version": captured.row_version,
+                        "checksum_hex": captured.digest.to_lower_hex(),
+                        "deleted": captured.deleted,
+                    }));
+                    if reevaluation_projections.len() == JSONB_BATCH_SIZE {
+                        let projections = std::mem::replace(
+                            &mut reevaluation_projections,
+                            Vec::with_capacity(JSONB_BATCH_SIZE),
+                        );
+                        persist_reevaluation_projection_batch(
+                            client,
+                            stream_generation,
+                            transaction.commit_lsn,
+                            projections,
+                        )
+                        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
                     }
-                    persist_reevaluation_projection(
-                        client,
-                        target,
-                        transaction,
-                        target_registration,
-                        event.event_ordinal,
-                        &record_id,
-                        &captured,
-                    )?;
+                }
+                if let Some(impact) = impacts.get_mut(&key) {
                     impact.event_ordinal = event.event_ordinal;
                     if !impact.direct_change {
                         impact.operation = if captured.deleted {
@@ -4071,15 +5064,6 @@ fn collect_membership_impacts(
                     }
                     continue;
                 }
-                persist_reevaluation_projection(
-                    client,
-                    target,
-                    transaction,
-                    target_registration,
-                    event.event_ordinal,
-                    &record_id,
-                    &captured,
-                )?;
                 impacts.insert(
                     key,
                     ImpactedRow {
@@ -4099,6 +5083,15 @@ fn collect_membership_impacts(
                 );
             }
         }
+    }
+    if let ProjectionTarget::Active { stream_generation } = target {
+        persist_reevaluation_projection_batch(
+            client,
+            stream_generation,
+            transaction.commit_lsn,
+            reevaluation_projections,
+        )
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
     }
 
     let mut keyed_impacts = impacts
@@ -4128,45 +5121,235 @@ fn collect_membership_impacts(
         .collect())
 }
 
-fn persist_reevaluation_projection(
+pub(super) fn persist_reevaluation_projection_batch(
     client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    transaction: &WalTransaction,
-    registration: &TableRegistration,
-    event_ordinal: u64,
-    record_id: &str,
-    captured: &CapturedRow,
-) -> Result<(), PoisonFailure> {
-    let ProjectionTarget::Active { stream_generation } = target else {
+    stream_generation: &str,
+    commit_lsn: u64,
+    projections: Vec<serde_json::Value>,
+) -> Result<(), ()> {
+    if projections.is_empty() {
         return Ok(());
-    };
-    client
+    }
+    if projections.len() > JSONB_BATCH_SIZE {
+        return Err(());
+    }
+    let expected = i64::try_from(projections.len()).map_err(|_| ())?;
+    let counts = client
         .update(
-            "INSERT INTO synchro.sync_captured_projections (
-                 stream_generation, commit_lsn, event_ordinal, relation_id,
-                 image_kind, registry_generation, record_id, row_data,
-                 row_version, checksum, deleted
-             ) VALUES (
-                 $1, $2::pg_lsn, $3, $4::uuid, 'after', $5, $6, $7,
-                 $8::uuid, $9, $10
-             )",
+            "WITH projection_input AS (
+                 SELECT event_ordinal, relation_id, registry_generation,
+                        record_id, row_version, checksum_hex, deleted
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     event_ordinal bigint,
+                     relation_id text,
+                     registry_generation bigint,
+                     record_id text,
+                     row_version text,
+                     checksum_hex text,
+                     deleted boolean
+                 )
+             ), matched AS (
+                 SELECT input.event_ordinal, input.relation_id, input.record_id,
+                        captured.registry_generation, captured.row_data,
+                        captured.row_version, captured.checksum, captured.deleted
+                 FROM projection_input input
+                 JOIN synchro.sync_captured_rows captured
+                   ON captured.relation_id = input.relation_id::uuid
+                  AND captured.record_id = input.record_id
+                  AND captured.registry_generation = input.registry_generation
+                  AND captured.row_version = input.row_version::uuid
+                  AND captured.checksum = decode(input.checksum_hex, 'hex')
+                  AND captured.deleted = input.deleted
+             ), inserted AS (
+                 INSERT INTO synchro.sync_captured_projections (
+                     stream_generation, commit_lsn, event_ordinal, relation_id,
+                     image_kind, registry_generation, record_id, row_data,
+                     row_version, checksum, deleted
+                 )
+                 SELECT $2, $3::pg_lsn, matched.event_ordinal,
+                        matched.relation_id::uuid, 'after',
+                        matched.registry_generation, matched.record_id,
+                        matched.row_data, matched.row_version, matched.checksum,
+                        matched.deleted
+                 FROM matched
+                 WHERE (SELECT count(*) FROM matched) = $4
+                 RETURNING record_id
+             )
+             SELECT (SELECT count(*) FROM matched) = $4
+                    AND (SELECT count(*) FROM inserted) = $4 AS complete",
             None,
             &[
+                pgrx::JsonB(serde_json::Value::Array(projections)).into(),
                 stream_generation.into(),
-                format_lsn(transaction.commit_lsn).as_str().into(),
-                i64::try_from(event_ordinal)
-                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                    .into(),
-                registration.relation_id.as_str().into(),
-                captured.registry_generation.into(),
-                record_id.into(),
-                pgrx::JsonB(captured.row_data.clone()).into(),
-                captured.row_version.as_str().into(),
-                captured.digest.as_bytes().to_vec().into(),
-                captured.deleted.into(),
+                format_lsn(commit_lsn).as_str().into(),
+                expected.into(),
             ],
         )
-        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        .map_err(|_| ())?;
+    if counts.len() != 1
+        || counts
+            .first()
+            .get_by_name::<bool, &str>("complete")
+            .map_err(|_| ())?
+            != Some(true)
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn persist_impact_batch(
+    client: &mut SpiClient<'_>,
+    stream_generation: &str,
+    commit_lsn: u64,
+    changelog_effects: &[serde_json::Value],
+    edge_deletes: &[serde_json::Value],
+    edge_upserts: &[serde_json::Value],
+) -> Result<(), PoisonFailure> {
+    if changelog_effects.len() > JSONB_BATCH_SIZE
+        || edge_deletes.len() > JSONB_BATCH_SIZE
+        || edge_upserts.len() > JSONB_BATCH_SIZE
+    {
+        return Err(failure("validation_failed", commit_lsn));
+    }
+    let expected_effect_count = i64::try_from(changelog_effects.len())
+        .map_err(|_| failure("validation_failed", commit_lsn))?;
+    let expected_edge_delete_count =
+        i64::try_from(edge_deletes.len()).map_err(|_| failure("validation_failed", commit_lsn))?;
+    let expected_edge_upsert_count =
+        i64::try_from(edge_upserts.len()).map_err(|_| failure("validation_failed", commit_lsn))?;
+    let counts = client
+        .update(
+            "WITH effect_input AS (
+                 SELECT write_ordinal, bucket_id, table_name, record_id, operation,
+                        event_ordinal, effect_ordinal, relation_id, row_version,
+                        projection_image
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     write_ordinal bigint,
+                     bucket_id text,
+                     table_name text,
+                     record_id text,
+                     operation smallint,
+                     event_ordinal bigint,
+                     effect_ordinal integer,
+                     relation_id text,
+                     row_version text,
+                     projection_image text
+                 )
+             ), scope_input AS (
+                 SELECT DISTINCT effect.bucket_id AS scope_id
+                 FROM effect_input effect
+             ), scope_inserted AS (
+                 INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
+                 SELECT scope_id, $4
+                 FROM scope_input
+                 ON CONFLICT (scope_id) DO NOTHING
+                 RETURNING scope_id
+             ), effect_inserted AS (
+                 INSERT INTO synchro.sync_changelog (
+                     bucket_id, table_name, record_id, operation,
+                     stream_generation, commit_lsn, event_ordinal,
+                     effect_ordinal, relation_id, row_version, projection_image
+                 )
+                 SELECT effect.bucket_id, effect.table_name, effect.record_id,
+                        effect.operation, $4, $5::pg_lsn, effect.event_ordinal,
+                        effect.effect_ordinal, effect.relation_id::uuid,
+                        effect.row_version::uuid, effect.projection_image
+                 FROM effect_input effect
+                 ORDER BY effect.write_ordinal
+                 RETURNING seq
+             ), edge_delete_input AS (
+                 SELECT table_name, record_id, bucket_id
+                 FROM jsonb_to_recordset($2::jsonb) AS input(
+                     table_name text, record_id text, bucket_id text
+                 )
+             ), edge_deleted AS (
+                 DELETE FROM synchro.sync_bucket_edges edge
+                 USING edge_delete_input input
+                 WHERE edge.table_name = input.table_name
+                   AND edge.record_id = input.record_id
+                   AND edge.bucket_id = input.bucket_id
+                 RETURNING edge.table_name, edge.record_id, edge.bucket_id
+             ), edge_upsert_input AS (
+                 SELECT relation_id, table_name, record_id, bucket_id,
+                        checksum_hex, row_version
+                 FROM jsonb_to_recordset($3::jsonb) AS input(
+                     relation_id text,
+                     table_name text,
+                     record_id text,
+                     bucket_id text,
+                     checksum_hex text,
+                     row_version text
+                 )
+             ), edge_upserted AS (
+                 INSERT INTO synchro.sync_bucket_edges (
+                     relation_id, table_name, record_id, bucket_id,
+                     checksum, row_version, updated_at
+                 )
+                 SELECT input.relation_id::uuid, input.table_name, input.record_id,
+                        input.bucket_id, decode(input.checksum_hex, 'hex'),
+                        input.row_version::uuid, now()
+                 FROM edge_upsert_input input
+                 ON CONFLICT (table_name, record_id, bucket_id) DO UPDATE SET
+                     relation_id = EXCLUDED.relation_id,
+                     checksum = EXCLUDED.checksum,
+                     row_version = EXCLUDED.row_version,
+                     updated_at = now()
+                 RETURNING table_name, record_id, bucket_id
+             )
+             SELECT (SELECT count(*) FROM effect_input)::bigint AS effect_expected,
+                    (SELECT count(*) FROM effect_inserted)::bigint AS effect_inserted,
+                    (SELECT count(*) FROM edge_delete_input)::bigint AS edge_delete_expected,
+                    (SELECT count(*) FROM edge_deleted)::bigint AS edge_deleted,
+                    (SELECT count(*) FROM edge_upsert_input)::bigint AS edge_upsert_expected,
+                    (SELECT count(*) FROM edge_upserted)::bigint AS edge_upserted",
+            None,
+            &[
+                pgrx::JsonB(serde_json::Value::Array(changelog_effects.to_vec())).into(),
+                pgrx::JsonB(serde_json::Value::Array(edge_deletes.to_vec())).into(),
+                pgrx::JsonB(serde_json::Value::Array(edge_upserts.to_vec())).into(),
+                stream_generation.into(),
+                format_lsn(commit_lsn).as_str().into(),
+            ],
+        )
+        .map_err(|_| failure("materialization_failed", commit_lsn))?;
+    if counts.len() != 1 {
+        return Err(failure("materialization_failed", commit_lsn));
+    }
+    let counts = counts.first();
+    let effect_expected = counts
+        .get_by_name::<i64, &str>("effect_expected")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let effect_inserted = counts
+        .get_by_name::<i64, &str>("effect_inserted")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_delete_expected = counts
+        .get_by_name::<i64, &str>("edge_delete_expected")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_deleted = counts
+        .get_by_name::<i64, &str>("edge_deleted")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_upsert_expected = counts
+        .get_by_name::<i64, &str>("edge_upsert_expected")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    let edge_upserted = counts
+        .get_by_name::<i64, &str>("edge_upserted")
+        .map_err(|_| failure("materialization_failed", commit_lsn))?
+        .ok_or_else(|| failure("materialization_failed", commit_lsn))?;
+    if effect_inserted != effect_expected
+        || edge_deleted != edge_delete_expected
+        || edge_upserted != edge_upsert_expected
+        || effect_inserted != expected_effect_count
+        || edge_deleted != expected_edge_delete_count
+        || edge_upserted != expected_edge_upsert_count
+    {
+        return Err(failure("materialization_failed", commit_lsn));
+    }
     Ok(())
 }
 
@@ -4177,103 +5360,239 @@ fn materialize_impacts(
     registry: &[TableRegistration],
     impacts: Vec<ImpactedRow>,
 ) -> Result<i64, PoisonFailure> {
-    if matches!(target, ProjectionTarget::Candidate { .. }) {
-        recompute_candidate_membership(client, target, registry)
-            .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+    if let ProjectionTarget::Candidate {
+        bootstrap_id,
+        registry_generation,
+    } = target
+    {
+        let records = impacts
+            .iter()
+            .map(|impact| {
+                let registration = registry
+                    .get(impact.registration_index)
+                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+                Ok((registration.relation_id.clone(), impact.record_id.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        reconcile_candidate_membership_records(
+            client,
+            bootstrap_id,
+            registry_generation,
+            registry,
+            &records,
+        )
+        .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
         return Ok(0);
     }
     let ProjectionTarget::Active { stream_generation } = target else {
         unreachable!();
     };
+
     let mut effect_count = 0i64;
     let mut next_effect_ordinals: HashMap<(u64, String), i32> = HashMap::new();
-    for impact in impacts {
-        let registration = &registry[impact.registration_index];
-        let existing = load_existing_buckets(client, &registration.table_name, &impact.record_id)
+    for impact_chunk in impacts.chunks(JSONB_BATCH_SIZE) {
+        let impact_keys = impact_chunk
+            .iter()
+            .map(|impact| {
+                serde_json::json!({
+                    "table_name": registry[impact.registration_index].table_name,
+                    "record_id": impact.record_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut existing_buckets = HashMap::<(String, String), Vec<String>>::new();
+        let existing_rows = client
+            .select(
+                "SELECT edge.table_name, edge.record_id, edge.bucket_id
+                     FROM synchro.sync_bucket_edges edge
+                     JOIN jsonb_to_recordset($1::jsonb) AS impact(table_name text, record_id text)
+                       ON impact.table_name = edge.table_name
+                      AND impact.record_id = edge.record_id
+                     ORDER BY edge.table_name, edge.record_id, edge.bucket_id",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(impact_keys)).into()],
+            )
             .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
-        let mut desired = if impact.operation == ChangeOperation::Delete {
-            Vec::new()
-        } else {
-            resolve_membership(client, registration, &impact.record_id)
+        for row in existing_rows {
+            let table_name = row
+                .get_by_name::<String, &str>("table_name")
                 .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
-        };
-        desired.sort();
-        desired.dedup();
-        let mut existing = existing;
-        existing.sort();
-        existing.dedup();
+                .ok_or_else(|| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+            let record_id = row
+                .get_by_name::<String, &str>("record_id")
+                .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+            if let Some(bucket_id) = row
+                .get_by_name::<String, &str>("bucket_id")
+                .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
+            {
+                existing_buckets
+                    .entry((table_name, record_id))
+                    .or_default()
+                    .push(bucket_id);
+            }
+        }
 
-        let mut entries = build_edge_diff_entries(
-            &registration.table_name,
-            &impact.record_id,
-            impact.operation,
-            &existing,
-            &desired,
-        );
-        if !impact.direct_change {
-            entries.retain(|entry| entry.operation != ChangeOperation::Update);
+        let mut record_ids_by_registration = HashMap::<usize, Vec<String>>::new();
+        for impact in impact_chunk
+            .iter()
+            .filter(|impact| impact.operation != ChangeOperation::Delete)
+        {
+            record_ids_by_registration
+                .entry(impact.registration_index)
+                .or_default()
+                .push(impact.record_id.clone());
         }
-        entries.sort_by(|left, right| {
-            left.bucket_id
-                .cmp(&right.bucket_id)
-                .then_with(|| left.operation.to_i16().cmp(&right.operation.to_i16()))
-        });
-        for entry in &entries {
-            client
-                .update(
-                    "INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
-                     VALUES ($1, $2)
-                     ON CONFLICT (scope_id) DO NOTHING",
-                    None,
-                    &[entry.bucket_id.as_str().into(), stream_generation.into()],
-                )
-                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
-            let next_effect_ordinal = next_effect_ordinals
-                .entry((impact.event_ordinal, entry.bucket_id.clone()))
-                .or_insert(0);
-            let effect_ordinal = *next_effect_ordinal;
-            *next_effect_ordinal = next_effect_ordinal
-                .checked_add(1)
+        let mut desired_memberships = HashMap::<(usize, String), Vec<String>>::new();
+        for (registration_index, record_ids) in record_ids_by_registration {
+            let registration = registry
+                .get(registration_index)
                 .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
-            let projection_image = if entry.operation == ChangeOperation::Delete {
-                impact.delete_projection_image
+            let memberships =
+                crate::materialize::resolve_membership_batch(client, registration, &record_ids)
+                    .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+            for (record_id, scopes) in memberships {
+                desired_memberships.insert((registration_index, record_id), scopes);
+            }
+        }
+
+        let mut changelog_effects = Vec::new();
+        let mut edge_deletes = Vec::new();
+        let mut edge_upserts = Vec::new();
+        for impact in impact_chunk {
+            let registration = &registry[impact.registration_index];
+            let mut existing = existing_buckets
+                .remove(&(registration.table_name.clone(), impact.record_id.clone()))
+                .unwrap_or_default();
+            let mut desired = if impact.operation == ChangeOperation::Delete {
+                Vec::new()
             } else {
-                Some("after")
+                desired_memberships
+                    .remove(&(impact.registration_index, impact.record_id.clone()))
+                    .ok_or_else(|| failure("scope_evaluation_failed", transaction.commit_lsn))?
             };
-            client
-                .update(
-                    "INSERT INTO synchro.sync_changelog (
-                         bucket_id, table_name, record_id, operation,
-                         stream_generation, commit_lsn, event_ordinal,
-                         effect_ordinal, relation_id, row_version, projection_image
-                     ) VALUES (
-                         $1, $2, $3, $4, $5, $6::pg_lsn, $7, $8,
-                         $9::uuid, $10::uuid, $11
-                     )",
-                    None,
-                    &[
-                        entry.bucket_id.as_str().into(),
-                        entry.table_name.as_str().into(),
-                        entry.record_id.as_str().into(),
-                        entry.operation.to_i16().into(),
-                        stream_generation.into(),
-                        format_lsn(transaction.commit_lsn).as_str().into(),
-                        i64::try_from(impact.event_ordinal)
-                            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                            .into(),
-                        effect_ordinal.into(),
-                        registration.relation_id.as_str().into(),
-                        impact.row_version.as_str().into(),
-                        projection_image.into(),
-                    ],
-                )
-                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
-            effect_count = effect_count
-                .checked_add(1)
-                .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+            desired.sort();
+            desired.dedup();
+            existing.sort();
+            existing.dedup();
+
+            let mut entries = build_edge_diff_entries(
+                &registration.table_name,
+                &impact.record_id,
+                impact.operation,
+                &existing,
+                &desired,
+            );
+            if !impact.direct_change {
+                entries.retain(|entry| entry.operation != ChangeOperation::Update);
+            }
+            entries.sort_by(|left, right| {
+                left.bucket_id
+                    .cmp(&right.bucket_id)
+                    .then_with(|| left.operation.to_i16().cmp(&right.operation.to_i16()))
+            });
+            let mut local_effects = Vec::new();
+            let mut local_edge_deletes = Vec::new();
+            let mut local_edge_upserts = Vec::new();
+            for entry in &entries {
+                let next_effect_ordinal = next_effect_ordinals
+                    .entry((impact.event_ordinal, entry.bucket_id.clone()))
+                    .or_insert(0);
+                let effect_ordinal = *next_effect_ordinal;
+                *next_effect_ordinal = next_effect_ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+                let projection_image = if entry.operation == ChangeOperation::Delete {
+                    impact.delete_projection_image
+                } else {
+                    Some("after")
+                };
+                let write_ordinal = effect_count;
+                let event_ordinal = i64::try_from(impact.event_ordinal)
+                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+                local_effects.push(serde_json::json!({
+                    "write_ordinal": write_ordinal,
+                    "bucket_id": entry.bucket_id,
+                    "table_name": entry.table_name,
+                    "record_id": entry.record_id,
+                    "operation": entry.operation.to_i16(),
+                    "event_ordinal": event_ordinal,
+                    "effect_ordinal": effect_ordinal,
+                    "relation_id": registration.relation_id,
+                    "row_version": impact.row_version,
+                    "projection_image": projection_image,
+                }));
+                effect_count = effect_count
+                    .checked_add(1)
+                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+            }
+            let diff = diff_bucket_sets(&existing, &desired);
+            if impact.operation == ChangeOperation::Delete {
+                for bucket_id in diff.removed {
+                    local_edge_deletes.push(serde_json::json!({
+                        "table_name": registration.table_name,
+                        "record_id": impact.record_id,
+                        "bucket_id": bucket_id,
+                    }));
+                }
+            } else {
+                let digest = impact
+                    .digest
+                    .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+                let checksum_hex = digest.to_lower_hex();
+                for bucket_id in diff.added.iter().chain(diff.kept.iter()) {
+                    local_edge_upserts.push(serde_json::json!({
+                        "relation_id": registration.relation_id,
+                        "table_name": registration.table_name,
+                        "record_id": impact.record_id,
+                        "bucket_id": bucket_id,
+                        "checksum_hex": checksum_hex,
+                        "row_version": impact.row_version,
+                    }));
+                }
+                for bucket_id in diff.removed {
+                    local_edge_deletes.push(serde_json::json!({
+                        "table_name": registration.table_name,
+                        "record_id": impact.record_id,
+                        "bucket_id": bucket_id,
+                    }));
+                }
+            }
+            if local_effects.len() > JSONB_BATCH_SIZE
+                || local_edge_deletes.len() > JSONB_BATCH_SIZE
+                || local_edge_upserts.len() > JSONB_BATCH_SIZE
+            {
+                return Err(failure("scope_evaluation_failed", transaction.commit_lsn));
+            }
+            if local_effects.len() > JSONB_BATCH_SIZE - changelog_effects.len()
+                || local_edge_deletes.len() > JSONB_BATCH_SIZE - edge_deletes.len()
+                || local_edge_upserts.len() > JSONB_BATCH_SIZE - edge_upserts.len()
+            {
+                persist_impact_batch(
+                    client,
+                    stream_generation,
+                    transaction.commit_lsn,
+                    &changelog_effects,
+                    &edge_deletes,
+                    &edge_upserts,
+                )?;
+                changelog_effects.clear();
+                edge_deletes.clear();
+                edge_upserts.clear();
+            }
+            changelog_effects.extend(local_effects);
+            edge_deletes.extend(local_edge_deletes);
+            edge_upserts.extend(local_edge_upserts);
         }
-        apply_edge_diff(client, registration, &impact, &existing, &desired)
-            .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+
+        persist_impact_batch(
+            client,
+            stream_generation,
+            transaction.commit_lsn,
+            &changelog_effects,
+            &edge_deletes,
+            &edge_upserts,
+        )?;
     }
     Ok(effect_count)
 }
@@ -4351,6 +5670,12 @@ fn activate_generations(
     }
     crate::schema::publish_schema_manifest(client)
         .map_err(|_| failure("materialization_failed", commit_lsn))?;
+    // The digest migration must follow publication. schema_hash_for_generation
+    // resolves the newest manifest at or below a generation, so migrating before
+    // publication computes every digest against the outgoing manifest and leaves
+    // it stale. Schema publication migrates after it records its manifest.
+    crate::materialize::migrate_schema_digests(client, final_generation)
+        .map_err(|_| failure("materialization_failed", commit_lsn))?;
     Ok(final_generation)
 }
 
@@ -4379,7 +5704,8 @@ fn advance_slot(
             if actual != end_lsn {
                 return Err(failure("transaction_commit_failed", commit_lsn));
             }
-            activate_worker_role(worker_role_oid);
+            activate_worker_role_in_transaction(client, worker_role_oid)
+                .map_err(|_| failure("transaction_commit_failed", commit_lsn))?;
             let updated = client
                 .update(
                     "UPDATE synchro.sync_wal_progress
@@ -4403,21 +5729,25 @@ fn persist_poison(failure: PoisonFailure) -> Result<(), String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
             let stream = active_stream_generation(client)?;
+            retire_prior_generation_poison(client, &stream)?;
             client
                 .update(
                     "INSERT INTO synchro.sync_wal_poison (
-                         stream_generation, commit_lsn, failure_class,
-                         relation_id, lifecycle, poisoned_at, attempt_count
-                     )
-                     SELECT $1, $2::pg_lsn, $3, $4::uuid, 'active', now(), 1
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
-                     )",
+                          stream_generation, commit_lsn, failure_class,
+                          failure_detail, relation_id, lifecycle, poisoned_at, attempt_count
+                      )
+                       SELECT $1, $2::pg_lsn, $3, $4, $5::uuid, 'active', now(), 1
+                      WHERE NOT EXISTS (
+                          SELECT 1
+                          FROM synchro.sync_wal_poison
+                          WHERE lifecycle = 'active' AND stream_generation = $1
+                      )",
                     None,
                     &[
                         stream.as_str().into(),
                         format_lsn(failure.commit_lsn).as_str().into(),
                         failure.class.into(),
+                        failure.detail.as_str().into(),
                         failure.relation_id.as_deref().into(),
                     ],
                 )
@@ -4442,9 +5772,13 @@ fn persist_poison(failure: PoisonFailure) -> Result<(), String> {
     })
 }
 
-fn record_oldest_unmaterialized_commit(commit_timestamp: Option<i64>) -> Result<(), String> {
+fn record_oldest_unmaterialized_commit(
+    commit_timestamp: Option<i64>,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(), String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             client
                 .update(
                     "UPDATE synchro.sync_wal_worker_state
@@ -4524,45 +5858,91 @@ fn repair_same_position_poison(
     Ok(())
 }
 
-fn active_poison_state() -> Result<(bool, bool), String> {
+pub(crate) fn retire_prior_generation_poison(
+    client: &mut SpiClient<'_>,
+    stream_generation: &str,
+) -> Result<usize, String> {
+    client
+        .update(
+            "UPDATE synchro.sync_wal_poison
+             SET lifecycle = 'reset', resolved_at = now()
+             WHERE lifecycle = 'active' AND stream_generation <> $1",
+            None,
+            &[stream_generation.into()],
+        )
+        .map(|updated| updated.len())
+        .map_err(|_| "retiring prior stream WAL poison failed".to_string())
+}
+
+fn retire_prior_generation_poison_for_worker(
+    stream_generation: &str,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<usize, String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
-            let row = client
-                .select(
-                    "SELECT EXISTS (
-                         SELECT 1 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
-                     ) AS active,
-                     EXISTS (
-                         SELECT 1 FROM synchro.sync_wal_poison
-                         WHERE lifecycle = 'active'
-                           AND retry_requested_at IS NOT NULL
-                           AND failure_class <> 'truncate_unsupported'
-                     ) AS repairable",
-                    None,
-                    &[],
-                )
-                .map_err(|_| "loading WAL poison failed".to_string())?
-                .first();
-            let active = row
-                .get_by_name::<bool, &str>("active")
-                .map_err(|_| "loading WAL poison failed".to_string())?
-                .unwrap_or(true);
-            let repairable = row
-                .get_by_name::<bool, &str>("repairable")
-                .map_err(|_| "loading WAL poison failed".to_string())?
-                .unwrap_or(false);
-            Ok((active, repairable))
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            retire_prior_generation_poison(client, stream_generation)
         })
     })
 }
 
-fn retry_requested() -> Result<bool, String> {
-    active_poison_state().map(|state| state.1)
+#[cfg(feature = "pg_test")]
+pub(crate) fn active_poison_state(stream_generation: &str) -> Result<(bool, bool), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| load_active_poison_state(client, stream_generation))
+    })
 }
 
-fn heartbeat(state: &str) -> Result<(), String> {
+fn active_poison_state_for_worker(
+    stream_generation: &str,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(bool, bool), String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            load_active_poison_state(client, stream_generation)
+        })
+    })
+}
+
+fn load_active_poison_state(
+    client: &mut SpiClient<'_>,
+    stream_generation: &str,
+) -> Result<(bool, bool), String> {
+    let row = client
+        .select(
+            "SELECT EXISTS (
+                  SELECT 1
+                  FROM synchro.sync_wal_poison
+                  WHERE lifecycle = 'active' AND stream_generation = $1
+              ) AS active,
+              EXISTS (
+                  SELECT 1 FROM synchro.sync_wal_poison
+                  WHERE lifecycle = 'active'
+                    AND stream_generation = $1
+                    AND retry_requested_at IS NOT NULL
+                    AND failure_class <> 'truncate_unsupported'
+              ) AS repairable",
+            None,
+            &[stream_generation.into()],
+        )
+        .map_err(|_| "loading WAL poison failed".to_string())?
+        .first();
+    let active = row
+        .get_by_name::<bool, &str>("active")
+        .map_err(|_| "loading WAL poison failed".to_string())?
+        .unwrap_or(true);
+    let repairable = row
+        .get_by_name::<bool, &str>("repairable")
+        .map_err(|_| "loading WAL poison failed".to_string())?
+        .unwrap_or(false);
+    Ok((active, repairable))
+}
+
+fn heartbeat(state: &str, worker_role_oid: pg_sys::Oid) -> Result<(), String> {
+    run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
             client
                 .update(
                     "UPDATE synchro.sync_wal_worker_state w
@@ -4652,99 +6032,6 @@ const fn operation_rank(operation: ChangeOperation) -> u8 {
     }
 }
 
-fn load_existing_buckets(
-    client: &SpiClient<'_>,
-    table_name: &str,
-    record_id: &str,
-) -> Result<Vec<String>, String> {
-    let rows = client
-        .select(
-            "SELECT bucket_id
-             FROM synchro.sync_bucket_edges
-             WHERE table_name = $1 AND record_id = $2
-             ORDER BY bucket_id",
-            None,
-            &[table_name.into(), record_id.into()],
-        )
-        .map_err(|_| "loading scope edges failed".to_string())?;
-    let mut buckets = Vec::new();
-    for row in rows {
-        if let Some(bucket) = row
-            .get_by_name::<String, &str>("bucket_id")
-            .map_err(|_| "loading scope edges failed".to_string())?
-        {
-            buckets.push(bucket);
-        }
-    }
-    Ok(buckets)
-}
-
-fn apply_edge_diff(
-    client: &mut SpiClient<'_>,
-    registration: &TableRegistration,
-    impact: &ImpactedRow,
-    existing: &[String],
-    desired: &[String],
-) -> Result<(), String> {
-    if impact.operation == ChangeOperation::Delete {
-        client
-            .update(
-                "DELETE FROM synchro.sync_bucket_edges WHERE table_name = $1 AND record_id = $2",
-                None,
-                &[
-                    registration.table_name.as_str().into(),
-                    impact.record_id.as_str().into(),
-                ],
-            )
-            .map_err(|_| "deleting scope edges failed".to_string())?;
-        return Ok(());
-    }
-
-    let digest = impact
-        .digest
-        .ok_or_else(|| "current projected row has no row digest".to_string())?;
-    let diff = diff_bucket_sets(existing, desired);
-    for bucket in diff.added.iter().chain(diff.kept.iter()) {
-        client
-            .update(
-                "INSERT INTO synchro.sync_bucket_edges (
-                     relation_id, table_name, record_id, bucket_id,
-                     checksum, row_version, updated_at
-                 ) VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid, now())
-                 ON CONFLICT (table_name, record_id, bucket_id) DO UPDATE SET
-                     relation_id = EXCLUDED.relation_id,
-                      checksum = EXCLUDED.checksum,
-                     row_version = EXCLUDED.row_version,
-                     updated_at = now()",
-                None,
-                &[
-                    registration.relation_id.as_str().into(),
-                    registration.table_name.as_str().into(),
-                    impact.record_id.as_str().into(),
-                    bucket.as_str().into(),
-                    digest.as_bytes().to_vec().into(),
-                    impact.row_version.as_str().into(),
-                ],
-            )
-            .map_err(|_| "upserting scope edge failed".to_string())?;
-    }
-    for bucket in &diff.removed {
-        client
-            .update(
-                "DELETE FROM synchro.sync_bucket_edges
-                 WHERE table_name = $1 AND record_id = $2 AND bucket_id = $3",
-                None,
-                &[
-                    registration.table_name.as_str().into(),
-                    impact.record_id.as_str().into(),
-                    bucket.as_str().into(),
-                ],
-            )
-            .map_err(|_| "deleting scope edge failed".to_string())?;
-    }
-    Ok(())
-}
-
 fn parse_lsn(value: &str) -> Option<u64> {
     let (high, low) = value.split_once('/')?;
     let high = u64::from_str_radix(high, 16).ok()?;
@@ -4757,12 +6044,38 @@ fn format_lsn(value: u64) -> String {
 }
 
 fn failure(class: &'static str, commit_lsn: u64) -> PoisonFailure {
+    let detail = match class {
+        "decode_failed" => "WAL decoding failed",
+        "validation_failed" => "WAL validation failed",
+        "fence_correlation_failed" => "WAL fence correlation failed",
+        "materialization_failed" => "WAL materialization failed",
+        "projection_write_failed" => "WAL projection write failed",
+        "scope_evaluation_failed" => "WAL scope evaluation failed",
+        "transaction_commit_failed" => "WAL transaction commit failed",
+        "truncate_unsupported" => "WAL transaction truncated a registered relation",
+        "registered_relation_drift" => "registered relation metadata drifted",
+        "activation_barrier" => "WAL processing reached an activation barrier",
+        _ => "WAL processing failed",
+    };
+    failure_with_detail(class, commit_lsn, detail)
+}
+
+fn failure_with_detail(class: &'static str, commit_lsn: u64, detail: &str) -> PoisonFailure {
     PoisonFailure {
         class,
+        detail: bounded_poison_detail(detail),
         commit_lsn,
         relation_id: None,
         commit_timestamp: None,
     }
+}
+
+fn bounded_poison_detail(detail: &str) -> String {
+    let mut end = detail.len().min(MAX_POISON_DETAIL_BYTES);
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail[..end].to_string()
 }
 
 fn run_worker_transaction<R, E, F: FnOnce() -> Result<R, E> + UnwindSafe + RefUnwindSafe>(
@@ -4793,4 +6106,48 @@ fn run_replication_transaction<R, E, F: FnOnce() -> Result<R, E> + UnwindSafe + 
     let result = run_worker_transaction(body);
     activate_worker_role(worker_role_oid);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_slot_reconciliation_stays_within_materialized_state() {
+        assert_eq!(startup_slot_reconciliation(20, 10, Some(30)), Ok(Some(20)));
+        assert!(startup_slot_reconciliation(40, 10, Some(30)).is_err());
+    }
+
+    #[test]
+    fn captured_row_deletion_uses_logical_field_identity() {
+        let field = crate::registry::FieldRegistration {
+            field_id: "field-deleted-at".to_string(),
+            physical_column: "deleted_at".to_string(),
+            portable_type: "datetime".to_string(),
+            native_json: false,
+            decimal_precision: None,
+            decimal_scale: None,
+            nullable: true,
+            writable: false,
+            primary_key: false,
+        };
+
+        assert_eq!(
+            captured_row_deleted(
+                &[field],
+                "deleted_at",
+                &serde_json::json!({ "field-deleted-at": "2026-08-17T02:31:43.476060Z" }),
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn poison_detail_stays_within_the_storage_bound() {
+        let detail = format!("{}x", "a".repeat(MAX_POISON_DETAIL_BYTES));
+        assert_eq!(
+            bounded_poison_detail(&detail).len(),
+            MAX_POISON_DETAIL_BYTES
+        );
+    }
 }

@@ -1,0 +1,161 @@
+package integration
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/trainstar/synchro/conformance/blackbox"
+)
+
+func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	harness, token := provisionRealProofHarness(t, ctx)
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+	if err != nil {
+		t.Fatalf("create native controller: %v", err)
+	}
+
+	resumeWAL, err := controller.PauseWALMaterialization(ctx)
+	if err != nil {
+		t.Fatalf("pause WAL materialization: %v", err)
+	}
+	walPaused := true
+	defer func() {
+		if walPaused {
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+			if err := resumeWAL(cleanupContext); err != nil {
+				t.Errorf("resume WAL materialization: %v", err)
+			}
+		}
+	}()
+	pausedID := "00000000-0000-4000-8c03-000000000000"
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		pausedID,
+		"diagnostic-user",
+		"paused-WAL-materialization",
+	); err != nil {
+		t.Fatalf("insert source row while WAL materialization is paused: %v", err)
+	}
+	paused, err := harness.Operator().ObserveWALRecordsForTable(ctx, "cf_items", []string{pausedID})
+	if err != nil {
+		t.Fatalf("observe paused WAL materialization: %v", err)
+	}
+	if len(paused.Records) != 0 {
+		t.Fatalf("WAL worker materialized a source row while paused: %#v", paused)
+	}
+	if err := resumeWAL(ctx); err != nil {
+		t.Fatalf("resume WAL materialization: %v", err)
+	}
+	walPaused = false
+	waitForRealWALRecords(t, ctx, harness, "cf_items", pausedID)
+	if err := harness.Source().ExecContext(ctx, "DELETE FROM cf_items WHERE id = $1", pausedID); err != nil {
+		t.Fatalf("delete WAL materialization gate row: %v", err)
+	}
+	waitForRealWALEffects(t, ctx, harness, "cf_items", 2, pausedID)
+
+	before := connectRealProtocolClient(t, ctx, harness, token, "extension-reinstall-before")
+	rebuildRealScope(t, ctx, harness, token, before, "user:diagnostic-user", "00000000-0000-4000-8c03-000000000011")
+	rebuildRealScope(t, ctx, harness, token, before, "cf:global", "00000000-0000-4000-8c03-000000000012")
+	beforeTable := requireRealTable(t, before, "cf_items")
+	beforeID := "00000000-0000-4000-8c03-000000000001"
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		beforeID,
+		"diagnostic-user",
+		"before-extension-reinstall",
+	); err != nil {
+		t.Fatalf("insert pre-reinstall source row: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", beforeID)
+	pullUntilRealRecords(t, ctx, harness, token, before, []realRecordExpectation{{
+		scopeID:  "user:diagnostic-user",
+		table:    beforeTable,
+		recordID: beforeID,
+		value:    "before-extension-reinstall",
+	}})
+	acknowledgeRealClientCursors(t, ctx, harness, token, before)
+	if err := harness.Source().ExecContext(ctx, "DELETE FROM cf_items WHERE id = $1", beforeID); err != nil {
+		t.Fatalf("delete pre-reinstall source row: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", beforeID)
+
+	reinstall, err := harness.ReinstallExtension(ctx)
+	if err != nil {
+		t.Fatalf("reinstall extension: %v", err)
+	}
+	rebound := waitForReinstalledWorker(t, ctx, harness, reinstall, 0)
+	if rebound.ActiveRegistryGeneration <= 0 {
+		t.Fatalf("reinstalled worker has no active registry generation: %#v", rebound)
+	}
+	if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
+		t.Fatalf("restore diagnostic registrations: %v", err)
+	}
+	activated := waitForReinstalledWorker(t, ctx, harness, reinstall, rebound.ActiveRegistryGeneration)
+	if activated.WorkerRegistryGeneration != activated.ActiveRegistryGeneration ||
+		activated.PendingRegistryGenerationCount != 0 {
+		t.Fatalf("reinstalled registry generations did not activate: %#v", activated)
+	}
+
+	after := connectRealProtocolClient(t, ctx, harness, token, "extension-reinstall-after")
+	rebuildRealScope(t, ctx, harness, token, after, "user:diagnostic-user", "00000000-0000-4000-8c03-000000000021")
+	rebuildRealScope(t, ctx, harness, token, after, "cf:global", "00000000-0000-4000-8c03-000000000022")
+	afterTable := requireRealTable(t, after, "cf_items")
+	afterID := "00000000-0000-4000-8c03-000000000002"
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+		afterID,
+		"diagnostic-user",
+		"after-extension-reinstall",
+	); err != nil {
+		t.Fatalf("insert post-reinstall source row: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", afterID)
+	pullUntilRealRecords(t, ctx, harness, token, after, []realRecordExpectation{{
+		scopeID:  "user:diagnostic-user",
+		table:    afterTable,
+		recordID: afterID,
+		value:    "after-extension-reinstall",
+	}})
+	acknowledgeRealClientCursors(t, ctx, harness, token, after)
+	final := waitForReinstalledWorker(t, ctx, harness, reinstall, rebound.ActiveRegistryGeneration)
+	if !final.NoValidationFailurePoison {
+		t.Fatalf("reinstalled worker has validation_failed poison: %#v", final)
+	}
+}
+
+func waitForReinstalledWorker(
+	t *testing.T,
+	ctx context.Context,
+	harness *blackbox.Harness,
+	reinstall blackbox.ExtensionReinstallResult,
+	minimumGeneration int64,
+) blackbox.ExtensionReinstallObservation {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	var observation blackbox.ExtensionReinstallObservation
+	var err error
+	for time.Now().Before(deadline) {
+		observation, err = harness.Operator().ObserveExtensionReinstall(ctx, reinstall.ReinstallLSN)
+		if err == nil && observation.WorkerPID > 0 && observation.WorkerPID != reinstall.PriorWorkerPID &&
+			observation.ActiveSlotName == harness.Names().ReplicationSlot && observation.RestartLSN != "" &&
+			observation.SlotActive && observation.RestartLSNAtOrAfterReinstall &&
+			observation.ActiveRegistryGeneration > minimumGeneration &&
+			// The worker reports its own generation after activation, so a
+			// sample can land between the two. Wait for the settled state
+			// the caller asserts.
+			observation.WorkerRegistryGeneration == observation.ActiveRegistryGeneration &&
+			observation.PendingRegistryGenerationCount == 0 && observation.NoValidationFailurePoison {
+			return observation
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("reinstalled worker did not bind a fresh active slot: %#v, %v; %s", observation, err, harness.FailureDiagnostics())
+	return blackbox.ExtensionReinstallObservation{}
+}

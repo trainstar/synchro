@@ -23,6 +23,7 @@ var (
 	kotlinCoordinatesRE             = regexp.MustCompile(`(?m)^    coordinates\("fit\.trainstar", "synchro", .*\)$`)
 	cargoWorkspaceVersionRE         = regexp.MustCompile(`(?ms)(\[workspace\.package\]\s+version = ")([^"]+)(")`)
 	controlVersionRE                = regexp.MustCompile(`(?m)^default_version = '.*'$`)
+	artifactInventoryReleaseRE      = regexp.MustCompile(`(?m)^  "release": ".*",$`)
 	baseSQLFileRE                   = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+)\.sql$`)
 )
 
@@ -144,6 +145,11 @@ func Sync(root string) error {
 			pattern:  controlVersionRE,
 			expected: fmt.Sprintf(`default_version = '%s'`, version),
 		},
+		{
+			path:     filepath.Join(root, "conformance/artifacts/inventory.json"),
+			pattern:  artifactInventoryReleaseRE,
+			expected: fmt.Sprintf(`  "release": "%s",`, version),
+		},
 	}
 
 	for _, replacement := range replacements {
@@ -222,6 +228,11 @@ func Check(root string, expectedTag string) error {
 			path:     filepath.Join(root, "extensions/synchro-pg/synchro_pg.control"),
 			pattern:  controlVersionRE,
 			expected: fmt.Sprintf(`default_version = '%s'`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/artifacts/inventory.json"),
+			pattern:  artifactInventoryReleaseRE,
+			expected: fmt.Sprintf(`  "release": "%s",`, version),
 		},
 	}
 

@@ -234,6 +234,9 @@ func checkpointFactsFailure(want []scenarios.CheckpointFact, got []reference.Loc
 		if string(checkpoint.Scope) != fact.ScopeID || checkpoint.HasCursor != fact.HasCursor || checkpoint.HasChecksum != fact.HasChecksum || checkpoint.Verified != fact.Verified {
 			return fmt.Sprintf("checkpoint %d does not match the authored facts", index)
 		}
+		if fact.Checksum != nil && (!checkpoint.HasChecksum || hex.EncodeToString(checkpoint.Checksum[:]) != *fact.Checksum) {
+			return fmt.Sprintf("checkpoint %d checksum does not match the authored facts", index)
+		}
 	}
 	return ""
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestInstallExtensionRejectsBundleIdentityChangeAfterLoad(t *testing.T) {
@@ -46,6 +49,7 @@ func TestInstallExtensionRejectsBundleIdentityChangeAfterLoad(t *testing.T) {
 			test.replace(t, loaded)
 			harness := &Harness{env: EnvironmentConfig{
 				ExtensionArtifact: root,
+				postgresVersion:   postgresqlRuntimeVersion,
 				extension:         loaded,
 			}}
 			if err := harness.installExtension(context.Background()); err == nil {
@@ -171,6 +175,266 @@ func TestCleanupAcceptsUnchangedCandidateArtifacts(t *testing.T) {
 	}
 }
 
+func TestInstallationLockSerializesOneSharedPath(t *testing.T) {
+	path, err := VerifyInstallationLockPath(filepath.Join(t.TempDir(), "installation.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireInstallationLock(context.Background(), path)
+	if err != nil {
+		t.Fatalf("acquire first installation lock: %v", err)
+	}
+	if lock.path != path {
+		t.Fatalf("acquired installation lock path = %q, want %q", lock.path, path)
+	}
+	contender, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer contender.Close()
+	err = syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		t.Fatalf("shared installation lock did not exclude a contender: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release first installation lock: %v", err)
+	}
+	if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("released installation lock still excluded a contender: %v", err)
+	}
+	if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("release contender lock: %v", err)
+	}
+}
+
+func TestNormalizeHarnessConfigRejectsChangedInstallationLock(t *testing.T) {
+	installationLock, err := VerifyInstallationLockPath(filepath.Join(t.TempDir(), "installation.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := EnvironmentConfig{
+		PG18BinDir:       "/verified/postgresql/bin",
+		InstallationLock: installationLock,
+		installationLock: installationLock,
+		extension:        extensionBundle{root: "/verified/extension"},
+		verified:         true,
+	}
+	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: environment}); err != nil {
+		t.Fatalf("verified installation lock binding was rejected: %v", err)
+	}
+	environment.InstallationLock = filepath.Join(t.TempDir(), "changed.lock")
+	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: environment}); err == nil {
+		t.Fatal("changed public installation lock was accepted")
+	}
+}
+
+func TestCreateRunDirectoriesUsesShortExternalSocketAndCleansExactly(t *testing.T) {
+	longParent := filepath.Join(t.TempDir(), strings.Repeat("long-root-", 12))
+	if err := os.Mkdir(longParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{config: HarnessConfig{TempParent: longParent}}
+	if err := harness.createRunDirectories(); err != nil {
+		t.Fatalf("create run directories: %v", err)
+	}
+	runRoot := harness.runRoot
+	socketDir := harness.socketDir
+	t.Cleanup(func() {
+		_ = os.RemoveAll(socketDir)
+		_ = os.RemoveAll(runRoot)
+	})
+	if withinPath(socketDir, runRoot) {
+		t.Fatalf("PostgreSQL socket directory %q is inside long run root %q", socketDir, runRoot)
+	}
+	if path := filepath.Join(socketDir, ".s.PGSQL.65535"); len(path) > maximumPostgreSQLSocketPathBytes {
+		t.Fatalf("PostgreSQL socket path has %d bytes: %q", len(path), path)
+	}
+	info, err := os.Lstat(socketDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("PostgreSQL socket directory mode = %v", info.Mode())
+	}
+	unownedSibling := socketDir + "-unowned"
+	if err := os.Mkdir(unownedSibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(unownedSibling)
+	})
+	if err := harness.removeCluster(); err != nil {
+		t.Fatalf("remove cluster directories: %v", err)
+	}
+	if err := harness.removeRunRoot(); err != nil {
+		t.Fatalf("remove run root: %v", err)
+	}
+	if _, err := os.Stat(socketDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket directory remains after cleanup: %v", err)
+	}
+	if _, err := os.Stat(runRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("run root remains after cleanup: %v", err)
+	}
+	if _, err := os.Stat(unownedSibling); err != nil {
+		t.Fatalf("cleanup removed an unowned socket sibling: %v", err)
+	}
+}
+
+func TestAttachedLifecycleCommandUsesExactArgvAndOwnedIdentity(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	runID := strings.Repeat("b", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$ARGUMENTS_PATH\"\nprintf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"postgres://admin@127.0.0.1:55433/synchro_conformance_owned\",\"destroyed\":false}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	harness := attachedLifecycleHarnessFixture(script, runID)
+	response, err := harness.runAttachLifecycleCommand(context.Background(), "restart")
+	if err != nil {
+		t.Fatalf("valid attached lifecycle command failed: %v", err)
+	}
+	if response.RunID != runID || response.Destroyed == nil || *response.Destroyed || response.AttachDatabaseURL == "" {
+		t.Fatalf("attached lifecycle response = %#v", response)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arguments) != "fixed restart "+runID+"\n" {
+		t.Fatalf("lifecycle argv = %q", arguments)
+	}
+
+	harness.env.AttachRunID = strings.Repeat("c", 32)
+	if _, err := harness.runAttachLifecycleCommand(context.Background(), "restart"); err == nil {
+		t.Fatal("changed lifecycle identity was accepted")
+	}
+}
+
+func TestAttachedLifecycleCommandRejectsMismatchedResponseAndRedactsFailure(t *testing.T) {
+	root := t.TempDir()
+	runID := strings.Repeat("e", 32)
+	mismatched := filepath.Join(root, "mismatched")
+	if err := os.WriteFile(mismatched, []byte("#!/bin/sh\nprintf '%s\\n' '{\"run_id\":\""+strings.Repeat("f", 32)+"\",\"attach_database_url\":\"postgres://127.0.0.1/owned\",\"destroyed\":false}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attachedLifecycleHarnessFixture(mismatched, runID).runAttachLifecycleCommand(context.Background(), "restart"); err == nil {
+		t.Fatal("mismatched lifecycle response identity was accepted")
+	}
+
+	secret := "lifecycle-secret-value"
+	failing := filepath.Join(root, "failing")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\nprintf '%s\\n' '"+secret+"' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := attachedLifecycleHarnessFixture(failing, runID)
+	harness.env.Admin.password = []byte(secret)
+	_, err := harness.runAttachLifecycleCommand(context.Background(), "restart")
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("lifecycle failure was not safely surfaced: %v", err)
+	}
+}
+
+func TestAttachedDefaultClosePreservesRepeatedHarnessReuse(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	destroyedPath := filepath.Join(root, "destroyed")
+	runID := strings.Repeat("c", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nif [ -e \"$DESTROYED_PATH\" ]; then exit 1; fi\nprintf '%s\\n' \"$*\" >> \"$ARGUMENTS_PATH\"\nif [ \"$2\" = destroy ]; then touch \"$DESTROYED_PATH\"; printf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"\",\"destroyed\":true}'; else printf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"postgres://admin@127.0.0.1:55433/synchro_conformance_owned\",\"destroyed\":false}'; fi\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	t.Setenv("DESTROYED_PATH", destroyedPath)
+	for scenario := 0; scenario < 2; scenario++ {
+		harness := attachedLifecycleHarnessFixture(script, runID)
+		harness.attached = true
+		harness.runRoot = filepath.Join(root, fmt.Sprintf("run-root-%d", scenario))
+		if err := os.Mkdir(harness.runRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := harness.runAttachLifecycleCommand(context.Background(), "restart"); err != nil {
+			t.Fatalf("scenario %d could not reuse attached lifecycle: %v", scenario, err)
+		}
+		if err := harness.Close(context.Background()); err != nil {
+			t.Fatalf("scenario %d close failed: %v", scenario, err)
+		}
+	}
+	if _, err := os.Stat(destroyedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("default attached close destroyed the outer lifecycle: %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "fixed restart " + runID + "\nfixed restart " + runID + "\n"
+	if string(arguments) != want {
+		t.Fatalf("reused lifecycle argv = %q", arguments)
+	}
+}
+
+func TestAttachedOwnedCloseRunsDestroyExactlyOnce(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	runID := strings.Repeat("d", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$ARGUMENTS_PATH\"\nprintf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"\",\"destroyed\":true}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	harness := attachedLifecycleHarnessFixture(script, runID)
+	harness.env.AttachDestroyOnClose = true
+	harness.env.attachLifecycle.destroyOnClose = true
+	harness.attached = true
+	harness.runRoot = filepath.Join(root, "run-root")
+	if err := os.Mkdir(harness.runRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.Close(context.Background()); err != nil {
+		t.Fatalf("attached cleanup failed: %v", err)
+	}
+	if err := harness.Close(context.Background()); err != nil {
+		t.Fatalf("repeated attached cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(harness.runRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attached cleanup retained local run root: %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arguments) != "fixed destroy "+runID+"\n" {
+		t.Fatalf("destroy argv = %q", arguments)
+	}
+}
+
+func attachedLifecycleHarnessFixture(executable, runID string) *Harness {
+	command := []string{executable, "fixed"}
+	return &Harness{
+		config: HarnessConfig{ProcessLogBytes: 1024, ShutdownTimeout: time.Second},
+		env: EnvironmentConfig{
+			AttachRunID:            runID,
+			AttachLifecycleCommand: append([]string(nil), command...),
+			attachLifecycle:        attachLifecycleConfig{runID: runID, argv: append([]string(nil), command...)},
+		},
+	}
+}
+
+func TestDatabaseDropErrorPreservesPostgreSQLStateAndMessage(t *testing.T) {
+	cause := &pgconn.PgError{Code: "55006", Message: "database is being accessed by other users"}
+	err := databaseDropError(cause)
+	if !strings.Contains(err.Error(), "SQLSTATE 55006") || !strings.Contains(err.Error(), cause.Message) {
+		t.Fatalf("database drop error = %v", err)
+	}
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError != cause {
+		t.Fatal("database drop error did not preserve PostgreSQL cause")
+	}
+}
+
 func appendArtifactWhitespace(t *testing.T, path string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -210,6 +474,7 @@ func candidateArtifactEnvironmentFixture(t *testing.T) EnvironmentConfig {
 		AdapterArtifact:   adapterPath,
 		adapterSHA256:     adapter.sha256,
 		adapterIdentity:   adapter,
+		postgresVersion:   postgresqlRuntimeVersion,
 		extension:         extension,
 		verified:          true,
 	}
@@ -259,6 +524,47 @@ func TestValidateSourceDMLUsesClosedTableSet(t *testing.T) {
 	}
 	if err := validateSourceDML("UPDATE cf_items SET value = $1 WHERE id = $2"); err != nil {
 		t.Fatalf("rejected source DML: %v", err)
+	}
+	if err := validateSourceDML("INSERT INTO cf_item_impacts (id, scope_key) VALUES ($1, $2)"); err != nil {
+		t.Fatalf("rejected capture dependency source DML: %v", err)
+	}
+}
+
+func TestDiagnosticSourceTableShapeRestoreScriptUsesAuthoredSourceContract(t *testing.T) {
+	restore := diagnosticSourceTableShapeRestoreSQL()
+	if !strings.Contains(restore, "SET LOCAL search_path TO "+diagnosticSourceRestoreSchemaName+";") {
+		t.Fatal("source shape restore does not create an isolated authored reference schema")
+	}
+	if !strings.Contains(restore, diagnosticSchemaSQL) {
+		t.Fatal("source shape restore does not use the authored diagnostic source contract")
+	}
+	for _, table := range diagnosticSourceTables {
+		if !strings.Contains(restore, quotePostgresLiteral(table)) {
+			t.Fatalf("source shape restore omits diagnostic source table %q", table)
+		}
+	}
+	for _, statement := range []string{
+		"ALTER TABLE public.%I ADD COLUMN %I %s",
+		"ALTER TABLE public.%I ALTER COLUMN %I TYPE %s USING %I::%s",
+		"ALTER TABLE public.%I ALTER COLUMN %I SET DEFAULT %s",
+		"ALTER TABLE public.%I DROP COLUMN %I",
+	} {
+		if !strings.Contains(restore, statement) {
+			t.Fatalf("source shape restore does not restore authored columns with %q", statement)
+		}
+	}
+}
+
+func TestSourceMutationErrorPreservesOnlySQLState(t *testing.T) {
+	errorWithState := sourceMutationError("source mutation failed", &pgconn.PgError{
+		Code:    "42725",
+		Message: "private database detail",
+	})
+	if errorWithState.Error() != "source mutation failed (SQLSTATE 42725)" || strings.Contains(errorWithState.Error(), "private") {
+		t.Fatal("source mutation error did not preserve only SQLSTATE")
+	}
+	if sourceMutationError("source mutation failed", errors.New("private database detail")).Error() != "source mutation failed" {
+		t.Fatal("non-PostgreSQL source mutation error was not redacted")
 	}
 }
 
@@ -356,7 +662,7 @@ func TestProjectionBootstrapResultJSONTagsRemainExact(t *testing.T) {
 	}
 }
 
-func TestPostmasterConfigurationSetsFiniteHealthLimits(t *testing.T) {
+func TestPostmasterConfigurationStagesWorkerAutoStartAfterBootstrap(t *testing.T) {
 	dataDir := t.TempDir()
 	configurationPath := filepath.Join(dataDir, "postgresql.conf")
 	if err := os.WriteFile(configurationPath, nil, 0o600); err != nil {
@@ -382,6 +688,8 @@ func TestPostmasterConfigurationSetsFiniteHealthLimits(t *testing.T) {
 	}
 	for _, setting := range []string{
 		"max_replication_slots = 2",
+		"shared_preload_libraries = 'synchro_pg'",
+		"synchro.auto_start = off",
 		"synchro.max_worker_heartbeat_age_seconds = 30",
 		"synchro.max_wal_lag_bytes = 67108864",
 		"synchro.max_wal_lag_seconds = 30",
@@ -389,6 +697,112 @@ func TestPostmasterConfigurationSetsFiniteHealthLimits(t *testing.T) {
 		if !strings.Contains(string(configuration), setting+"\n") {
 			t.Fatalf("PostgreSQL configuration does not contain %q", setting)
 		}
+	}
+	if strings.Contains(string(configuration), "synchro.auto_start = on") {
+		t.Fatal("bootstrap PostgreSQL configuration enables the WAL worker")
+	}
+	if err := harness.enableWorkerAutoStart(); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err = os.ReadFile(configurationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(configuration), "synchro.auto_start = on\n") != 1 {
+		t.Fatal("PostgreSQL configuration does not enable the WAL worker once after bootstrap")
+	}
+}
+
+func TestCaptureReadinessFailureIncludesLastObservedStateAndQueryError(t *testing.T) {
+	queryErr := context.DeadlineExceeded
+	err := captureReadinessFailure(
+		"heartbeat,worker",
+		`{"ready":false,"checks":{"worker":{"state":"failed"}}}`,
+		queryErr,
+	)
+	for _, wanted := range []string{
+		"checks=heartbeat,worker",
+		`last_state={"ready":false,"checks":{"worker":{"state":"failed"}}}`,
+		"query_error=context deadline exceeded",
+	} {
+		if !strings.Contains(err.Error(), wanted) {
+			t.Fatalf("capture readiness failure does not contain %q: %v", wanted, err)
+		}
+	}
+	if !errors.Is(err, queryErr) {
+		t.Fatalf("capture readiness failure does not wrap the query error: %v", err)
+	}
+}
+
+func TestOperationalLogDisclosureUsesCompleteUnsanitizedLogs(t *testing.T) {
+	const canary = "protected-log-canary"
+	for _, test := range []struct {
+		name      string
+		adapter   string
+		postgres  string
+		collector string
+		wantLeak  bool
+		wantError bool
+	}{
+		{name: "clean", adapter: "adapter started", collector: "database ready"},
+		{name: "redacted credential", adapter: canary, wantLeak: true},
+		{name: "outside diagnostic suffix", adapter: canary + strings.Repeat("x", 600), wantLeak: true},
+		{name: "postgres process", postgres: canary, wantLeak: true},
+		{name: "unfiltered collector", collector: "LOG: " + canary, wantLeak: true},
+		{name: "truncated process", adapter: strings.Repeat("x", 2049), wantError: true},
+		{name: "truncated collector", collector: strings.Repeat("x", 2049), wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			if err := os.Mkdir(filepath.Join(directory, "log"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "log", "postgresql.log"), []byte(test.collector), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			adapter := newBoundedLog(2048, [][]byte{[]byte(canary)})
+			postgres := newBoundedLog(2048, [][]byte{[]byte(canary)})
+			_, _ = adapter.Write([]byte(test.adapter))
+			_, _ = postgres.Write([]byte(test.postgres))
+			harness := &Harness{
+				config:   HarnessConfig{ProcessLogBytes: 2048, ShutdownTimeout: time.Second},
+				dataDir:  directory,
+				adapter:  &ownedProcess{log: adapter},
+				postgres: &ownedProcess{log: postgres},
+			}
+			leaked, err := harness.StopAdapterAndObserveLogDisclosure(context.Background(), []string{canary})
+			if (err != nil) != test.wantError || leaked != test.wantLeak {
+				t.Fatalf("log observation: disclosure=%t error=%v", leaked, err)
+			}
+		})
+	}
+}
+
+func TestFailureDiagnosticsIncludesRedactedPostgresFileLog(t *testing.T) {
+	dataDir := t.TempDir()
+	logDir := filepath.Join(dataDir, "log")
+	if err := os.Mkdir(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("worker-password")
+	if err := os.WriteFile(
+		filepath.Join(logDir, "postgresql.log"),
+		[]byte("synchro WAL worker preparation failed: "+string(secret)),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{
+		config:   HarnessConfig{ProcessLogBytes: 1024},
+		dataDir:  dataDir,
+		postgres: &ownedProcess{log: newBoundedLog(1024, [][]byte{secret})},
+	}
+	diagnostics := harness.FailureDiagnostics()
+	if !strings.Contains(diagnostics, "synchro WAL worker preparation failed") {
+		t.Fatalf("PostgreSQL collector log is absent: %s", diagnostics)
+	}
+	if strings.Contains(diagnostics, string(secret)) || !strings.Contains(diagnostics, "[REDACTED]") {
+		t.Fatalf("PostgreSQL collector log was not redacted: %s", diagnostics)
 	}
 }
 

@@ -2,7 +2,8 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "@trainstar/synchro-react-native": ["./src/index"]
+      "@trainstar/synchro-react-native": ["./src/index"],
+      "@trainstar/synchro-react-native/inspection": ["./src/inspection"]
     },
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,

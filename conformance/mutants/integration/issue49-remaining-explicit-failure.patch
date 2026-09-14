@@ -1,0 +1,18 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -434,13 +434,7 @@ fn load_pull_positions(
+             }
+             Ok(ParsedScopeCursor::Current(_)) => stale_scopes.push(scope_id.clone()),
+             Ok(ParsedScopeCursor::Stale) => stale_scopes.push(scope_id.clone()),
+-            Err(_) => {
+-                return Err(protocol_error_response(
+-                    ProtocolErrorCode::InvalidRequest,
+-                    "invalid scope cursor",
+-                    false,
+-                ));
+-            }
++            Err(_) => stale_scopes.push(scope_id.clone()),
+         }
+     }
+ 

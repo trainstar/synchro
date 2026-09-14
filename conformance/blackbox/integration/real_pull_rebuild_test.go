@@ -13,6 +13,9 @@ func TestRealS02DivergentPullPaginationIsStarvationFree(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	harness, token := provisionRealProofHarness(t, ctx)
+	if err := harness.Operator().ConfigureTypedKeyCollisionTables(ctx); err != nil {
+		t.Fatalf("configure S-02 typed key collision tables: %v", err)
+	}
 	anchorID := "00000000-0000-4000-8000-00000000b010"
 	if err := harness.Source().ExecContext(
 		ctx,
@@ -31,6 +34,8 @@ func TestRealS02DivergentPullPaginationIsStarvationFree(t *testing.T) {
 
 	globalTable := requireRealTable(t, client, "cf_global_items")
 	userTable := requireRealTable(t, client, "cf_items")
+	stringKeyTable := requireRealTable(t, client, "cf_string_keys")
+	intKeyTable := requireRealTable(t, client, "cf_int_keys")
 	globalFirstID := "00000000-0000-4000-8000-00000000b011"
 	globalSecondID := "00000000-0000-4000-8000-00000000b012"
 	userID := "00000000-0000-4000-8000-00000000b013"
@@ -155,9 +160,102 @@ func TestRealS02DivergentPullPaginationIsStarvationFree(t *testing.T) {
 	requireRealPullChange(t, collisionChanges, "user:diagnostic-user", userTable, collisionID, "s02-user-collision")
 	requireRealPullChange(t, collisionChanges, "cf:global", globalTable, collisionID, "s02-global-collision")
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
+	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_string_keys (id, owner_id, value) VALUES ($1, $2, $3)", "1", "diagnostic-user", "s02-string-key"); err != nil {
+		t.Fatalf("insert S-02 string key row: %v", err)
+	}
+	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_int_keys (id, owner_id, value) VALUES ($1, $2, $3)", 1, "diagnostic-user", "s02-int-key"); err != nil {
+		t.Fatalf("insert S-02 integer key row: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_string_keys", "1")
+	waitForRealWALRecords(t, ctx, harness, "cf_int_keys", "1")
+	tableCollisionPage := pullRealClientWithLimit(t, ctx, harness, token, client, client.Scopes, 2)
+	tableCollisionChanges := requireRealChanges(t, tableCollisionPage)
+	t.Run("assertion", func(t *testing.T) {
+		if len(tableCollisionChanges) != 2 || tableCollisionPage["has_more"] != false {
+			t.Fatalf("S-02 typed key collision page = %#v", tableCollisionPage)
+		}
+		requireRealPullChange(t, tableCollisionChanges, "user:diagnostic-user", stringKeyTable, "1", "s02-string-key")
+		requireRealPullChange(t, tableCollisionChanges, "user:diagnostic-user", intKeyTable, float64(1), "s02-int-key")
+	})
+	acknowledgeRealClientCursors(t, ctx, harness, token, client)
+	assertDiagnosticCheckpointScopes(t, observeCheckpointMap(t, ctx, harness, client.ID))
 
-	checkpoints := observeCheckpointMap(t, ctx, harness, client.ID)
-	assertDiagnosticCheckpointScopes(t, checkpoints)
+	priorCrossScopeSchema := loadRealSchemaTableReference(t, ctx, harness, "cf_items")
+	if err := harness.Operator().ConfigureCrossScopeTable(ctx); err != nil {
+		t.Fatalf("configure S-02 cross-scope table: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		if err := harness.Operator().RestoreCrossScopeTable(cleanupContext); err != nil {
+			t.Errorf("restore S-02 cross-scope table: %v", err)
+		}
+	})
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), "cf_items")
+		if err == nil && !sameRealSchemaReference(current.Schema, priorCrossScopeSchema.Schema) {
+			break
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			t.Fatalf("wait for S-02 cross-scope schema: %v", ctx.Err())
+		case <-timer.C:
+		}
+	}
+	currentCrossScopeSchema, err := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), "cf_items")
+	if err != nil || sameRealSchemaReference(currentCrossScopeSchema.Schema, priorCrossScopeSchema.Schema) {
+		t.Fatalf("S-02 cross-scope schema did not activate: %v; %s", err, harness.FailureDiagnostics())
+	}
+	crossScopeClient := connectRealProtocolClient(t, ctx, harness, token, "s02-cross-scope-client", "cf:dedup", "cf:global", "user:diagnostic-user")
+	rebuildRealScope(t, ctx, harness, token, crossScopeClient, "user:diagnostic-user", "00000000-0000-4000-8000-00000000b003")
+	rebuildRealScope(t, ctx, harness, token, crossScopeClient, "cf:global", "00000000-0000-4000-8000-00000000b004")
+	rebuildRealScope(t, ctx, harness, token, crossScopeClient, "cf:dedup", "00000000-0000-4000-8000-00000000b005")
+	dedupID := "00000000-0000-4000-8000-00000000b016"
+	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)", dedupID, "diagnostic-user", "s02-cross-scope-created"); err != nil {
+		t.Fatalf("insert S-02 cross-scope row: %v", err)
+	}
+	if err := harness.Source().ExecContext(ctx, "UPDATE cf_items SET value = $2 WHERE id = $1", dedupID, "s02-cross-scope-latest"); err != nil {
+		t.Fatalf("update S-02 cross-scope row: %v", err)
+	}
+	waitForRealWALEffects(t, ctx, harness, "cf_items", 4, dedupID)
+	crossScopePage := pullRealClientWithLimit(t, ctx, harness, token, crossScopeClient, crossScopeClient.Scopes, 10)
+	crossScopeChanges := requireRealChanges(t, crossScopePage)
+	if len(crossScopeChanges) != 2 || crossScopePage["has_more"] != false {
+		t.Fatalf("S-02 cross-scope page = %#v", crossScopePage)
+	}
+	for _, scopeID := range []string{"user:diagnostic-user", "cf:dedup"} {
+		requireRealPullChange(t, crossScopeChanges, scopeID, userTable, dedupID, "s02-cross-scope-latest")
+		count := 0
+		for _, change := range crossScopeChanges {
+			if change["scope"] == scopeID && change["table"] == userTable.ID {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("S-02 cross-scope change count for %s = %d", scopeID, count)
+		}
+	}
+	crossChecksums, ok := crossScopePage["checksums"].(map[string]any)
+	if !ok || len(crossChecksums) != 3 {
+		t.Fatalf("S-02 cross-scope terminal checksums = %#v", crossScopePage["checksums"])
+	}
+	acknowledgeRealClientCursors(t, ctx, harness, token, crossScopeClient)
+
+	checkpoints := observeCheckpointMap(t, ctx, harness, crossScopeClient.ID)
+	if len(checkpoints) != 3 {
+		t.Fatalf("S-02 checkpoint scope count = %d", len(checkpoints))
+	}
+	for _, scopeID := range []string{"cf:global", "cf:dedup", "user:diagnostic-user"} {
+		checkpoint, ok := checkpoints[scopeID]
+		if !ok || checkpoint.ScopeID != scopeID || checkpoint.StreamGeneration == "" || checkpoint.PositionKind == "" {
+			t.Fatalf("S-02 checkpoint for %s is invalid: %#v", scopeID, checkpoint)
+		}
+	}
 }
 
 func TestRealS03PullHydrationFailurePreservesCursors(t *testing.T) {
@@ -165,6 +263,7 @@ func TestRealS03PullHydrationFailurePreservesCursors(t *testing.T) {
 	defer cancel()
 	harness, token := provisionRealProofHarness(t, ctx)
 	client := connectRealProtocolClient(t, ctx, harness, token, "s03-hydration-client")
+	schemaQueueTable := requireRealTable(t, client, "cf_schema_queue")
 	rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8000-00000000b101")
 	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8000-00000000b102")
 
@@ -184,7 +283,7 @@ func TestRealS03PullHydrationFailurePreservesCursors(t *testing.T) {
 	witness := cloneRealProtocolClient(client)
 	witnessResponse := pullRealClient(t, ctx, harness, token, witness)
 	witnessChanges := requireRealChanges(t, witnessResponse)
-	change := requireSchemaQueuePullChange(t, witnessChanges, "user:diagnostic-user", recordID, "s03-captured-value")
+	change := requireSchemaQueuePullChange(t, witnessChanges, "user:diagnostic-user", schemaQueueTable, recordID, "s03-captured-value")
 	if change["table"] == "" {
 		t.Fatal("S-03 witness change has no logical table identity")
 	}
@@ -216,7 +315,7 @@ func TestRealS03PullHydrationFailurePreservesCursors(t *testing.T) {
 
 	restored := pullRealClient(t, ctx, harness, token, client)
 	restoredChanges := requireRealChanges(t, restored)
-	restoredChange := requireSchemaQueuePullChange(t, restoredChanges, "user:diagnostic-user", recordID, "s03-captured-value")
+	restoredChange := requireSchemaQueuePullChange(t, restoredChanges, "user:diagnostic-user", schemaQueueTable, recordID, "s03-captured-value")
 	if restoredChange["table"] != change["table"] {
 		t.Fatalf("S-03 source table identity changed: first=%v restored=%v", change["table"], restoredChange["table"])
 	}
@@ -445,7 +544,7 @@ func requireRealChanges(t *testing.T, response map[string]any) []map[string]any 
 	return changes
 }
 
-func requireRealPullChange(t *testing.T, changes []map[string]any, scopeID string, table realProtocolTable, recordID, value string) map[string]any {
+func requireRealPullChange(t *testing.T, changes []map[string]any, scopeID string, table realProtocolTable, recordID any, value string) map[string]any {
 	t.Helper()
 	for _, change := range changes {
 		if change["scope"] != scopeID || change["table"] != table.ID {
@@ -461,18 +560,18 @@ func requireRealPullChange(t *testing.T, changes []map[string]any, scopeID strin
 		}
 		return change
 	}
-	t.Fatalf("real pull did not return %s in scope %s: %#v", recordID, scopeID, changes)
+	t.Fatalf("real pull did not return %v in scope %s: %#v", recordID, scopeID, changes)
 	return nil
 }
 
-func requireSchemaQueuePullChange(t *testing.T, changes []map[string]any, scopeID, recordID, value string) map[string]any {
+func requireSchemaQueuePullChange(t *testing.T, changes []map[string]any, scopeID string, table realProtocolTable, recordID, value string) map[string]any {
 	t.Helper()
 	for _, change := range changes {
-		if change["scope"] != scopeID || change["table"] == "" {
+		if change["scope"] != scopeID || change["table"] != table.ID {
 			continue
 		}
 		pk, ok := change["pk"].(map[string]any)
-		if !ok || !mapContainsValue(pk, recordID) {
+		if !ok || pk[table.PrimaryKeyField] != recordID {
 			continue
 		}
 		row, ok := change["row"].(map[string]any)
@@ -556,6 +655,10 @@ func requireRealProtocolError(t *testing.T, status int, response map[string]any,
 }
 
 func waitForRealWALRecords(t *testing.T, ctx context.Context, harness *blackbox.Harness, tableName string, recordIDs ...string) {
+	waitForRealWALEffects(t, ctx, harness, tableName, len(recordIDs), recordIDs...)
+}
+
+func waitForRealWALEffects(t *testing.T, ctx context.Context, harness *blackbox.Harness, tableName string, expectedEffects int, recordIDs ...string) {
 	t.Helper()
 	var lastObservation blackbox.WALPipelineObservation
 	var lastErr error
@@ -564,7 +667,7 @@ func waitForRealWALRecords(t *testing.T, ctx context.Context, harness *blackbox.
 		observation, err := harness.Operator().ObserveWALRecordsForTable(ctx, tableName, recordIDs)
 		lastObservation = observation
 		lastErr = err
-		if err == nil && len(observation.Records) == len(recordIDs) && observation.WorkerRunning && !observation.BlockingPoison && observation.ContiguousAcknowledged {
+		if err == nil && len(observation.Records) == expectedEffects && observation.WorkerRunning && !observation.BlockingPoison && observation.ContiguousAcknowledged {
 			return
 		}
 		timer := time.NewTimer(50 * time.Millisecond)

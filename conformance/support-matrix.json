@@ -5,14 +5,23 @@
   "current_track_policy": {
     "selector": "current-stable",
     "resolve_at": "release-candidate-start",
-    "record_exact_versions_in": "rc-manifest"
+    "record_exact_versions_in": "release-manifest.json"
   },
+  "semantic_corpus_cell_ids": [
+    "SUP-MACOS-CURRENT-001",
+    "SUP-ANDROID-CURRENT-001",
+    "SUP-RN-IOS-CURRENT-001",
+    "SUP-RN-ANDROID-CURRENT-001"
+  ],
   "cells": [
     {
       "id": "SUP-PG-014",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "14" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "14"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 14 is outside v0.3.0 certification."
     },
@@ -20,7 +29,10 @@
       "id": "SUP-PG-015",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "15" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "15"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 15 is outside v0.3.0 certification."
     },
@@ -28,7 +40,10 @@
       "id": "SUP-PG-016",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "16" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "16"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 16 is outside v0.3.0 certification."
     },
@@ -36,50 +51,72 @@
       "id": "SUP-PG-017",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "17" },
+      "platform_version": {
+        "kind": "exact",
+        "value": "17"
+      },
       "policy": "excluded",
       "note": "PostgreSQL 17 is outside v0.3.0 certification."
     },
     {
-      "id": "SUP-PG-018",
+      "id": "SUP-PG-LINUX-X64-001",
       "component": "postgresql-server",
       "platform": "postgresql",
-      "platform_version": { "kind": "exact", "value": "18" },
-      "policy": "required"
+      "platform_version": {
+        "kind": "exact",
+        "value": "18"
+      },
+      "extension_architecture": "linux-x64",
+      "policy": "required",
+      "note": "PG18 Ubuntu 24.04 Linux x64 is the only supported server binary cell."
+    },
+    {
+      "id": "SUP-PG-MACOS-ARM64-001",
+      "component": "postgresql-server",
+      "platform": "postgresql",
+      "platform_version": {
+        "kind": "exact",
+        "value": "18"
+      },
+      "policy": "excluded",
+      "note": "PostgreSQL servers deploy on Linux. The macos-arm64 extension build is a development convenience and is outside v0.3.0 certification."
     },
     {
       "id": "SUP-IOS-MIN-001",
       "component": "swift-client",
       "platform": "ios",
-      "platform_version": { "kind": "minimum", "value": "16" },
+      "platform_version": {
+        "kind": "minimum",
+        "value": "16"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-IOS-CURRENT-001",
       "component": "swift-client",
       "platform": "ios",
-      "platform_version": { "kind": "current-stable" },
-      "policy": "required"
-    },
-    {
-      "id": "SUP-MACOS-MIN-001",
-      "component": "swift-client",
-      "platform": "macos",
-      "platform_version": { "kind": "minimum", "value": "13" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-MACOS-CURRENT-001",
       "component": "swift-client",
       "platform": "macos",
-      "platform_version": { "kind": "current-stable" },
-      "policy": "required"
+      "platform_version": {
+        "kind": "current-stable"
+      },
+      "policy": "tested"
     },
     {
       "id": "SUP-ANDROID-MIN-001",
       "component": "kotlin-client",
       "platform": "android",
-      "platform_version": { "kind": "minimum", "value": "24" },
+      "platform_version": {
+        "kind": "minimum",
+        "value": "24"
+      },
       "policy": "required",
       "note": "The minimum selector is an Android API level."
     },
@@ -87,39 +124,35 @@
       "id": "SUP-ANDROID-CURRENT-001",
       "component": "kotlin-client",
       "platform": "android",
-      "platform_version": { "kind": "current-stable" },
-      "policy": "required"
-    },
-    {
-      "id": "SUP-RN-IOS-MIN-001",
-      "component": "react-native-client",
-      "platform": "ios",
-      "platform_version": { "kind": "minimum", "value": "16" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-RN-IOS-CURRENT-001",
       "component": "react-native-client",
       "platform": "ios",
-      "platform_version": { "kind": "current-stable" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
-      "policy": "required"
-    },
-    {
-      "id": "SUP-RN-ANDROID-MIN-001",
-      "component": "react-native-client",
-      "platform": "android",
-      "platform_version": { "kind": "minimum", "value": "24" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
+      "runtime_version": {
+        "kind": "series",
+        "value": "0.83.x"
+      },
       "policy": "required"
     },
     {
       "id": "SUP-RN-ANDROID-CURRENT-001",
       "component": "react-native-client",
       "platform": "android",
-      "platform_version": { "kind": "current-stable" },
-      "runtime_version": { "kind": "series", "value": "0.83.x" },
+      "platform_version": {
+        "kind": "current-stable"
+      },
+      "runtime_version": {
+        "kind": "series",
+        "value": "0.83.x"
+      },
       "policy": "required"
     }
   ]

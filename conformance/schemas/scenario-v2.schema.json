@@ -75,6 +75,11 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/step" }
     },
+    "measurement_bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/measurementBinding" }
+    },
     "wire_expectations": {
       "type": "array",
       "uniqueItems": true,
@@ -85,9 +90,301 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/assertion" }
+    },
+    "native_identity_aliases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nativeIdentityAlias" }
+    },
+    "native_lifecycle_boundaries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nativeLifecycleBoundary" }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "proof_obligations": {
+            "contains": {
+              "type": "object",
+              "properties": { "proof_type": { "const": "native-e2e" } },
+              "required": ["proof_type"]
+            }
+          }
+        },
+        "required": ["proof_obligations"]
+      },
+      "then": {
+        "required": ["native_identity_aliases"],
+        "properties": {
+          "steps": {
+            "items": { "required": ["native_binding"] }
+          }
+        }
+      },
+      "else": {
+        "allOf": [
+          {
+            "not": {
+              "anyOf": [
+                { "required": ["native_identity_aliases"] },
+                { "required": ["native_lifecycle_boundaries"] }
+              ]
+            }
+          },
+          {
+            "properties": {
+              "steps": {
+                "items": { "not": { "required": ["native_binding"] } }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
   "$defs": {
+    "nativeClientKey": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "nativeCallId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "nativeStepBinding": {
+      "description": "A real native proof boundary. Equal call IDs bind one public call.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["controller", "artifact", "local-write", "public-call", "process", "workload"] },
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "call_id": { "$ref": "#/$defs/nativeCallId" },
+        "stage": { "type": "string", "enum": ["synchronous", "begin", "observe", "await-step", "await-call"] },
+        "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
+        "completion": { "type": "string", "enum": ["idle", "blocked", "error"] },
+        "workload": { "$ref": "#/$defs/nativeWorkloadParameters" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "controller" } }, "required": ["kind"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["user_id"] },
+                { "required": ["client_id"] },
+                { "required": ["call_id"] },
+                { "required": ["stage"] },
+                { "required": ["method"] },
+                { "required": ["completion"] }
+              ]
+            }
+          },
+          "else": { "required": ["user_id", "client_id"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "public-call" } }, "required": ["kind"] },
+          "then": {
+            "required": ["call_id", "stage"],
+            "allOf": [
+              {
+                "if": { "properties": { "stage": { "const": "synchronous" } }, "required": ["stage"] },
+                "then": { "required": ["method", "completion"] }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "begin" } }, "required": ["stage"] },
+                "then": {
+                  "required": ["method"],
+                  "not": { "required": ["completion"] }
+                }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "await-step" } }, "required": ["stage"] },
+                "then": {
+                  "not": {
+                    "anyOf": [
+                      { "required": ["method"] },
+                      { "required": ["completion"] }
+                    ]
+                  }
+                }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "await-call" } }, "required": ["stage"] },
+                "then": {
+                  "required": ["completion"],
+                  "not": { "required": ["method"] }
+                }
+              }
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["call_id"] },
+                { "required": ["stage"] },
+                { "required": ["method"] },
+                { "required": ["completion"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "workload" } }, "required": ["kind"] },
+          "then": { "required": ["workload"] },
+          "else": { "not": { "required": ["workload"] } }
+        }
+      ]
+    },
+    "nativeWorkloadParameters": {
+      "description": "One bounded deterministic local-write generator. Native manifest derivation consumes this object.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_count", "batch_size", "seed", "authored_schema", "client_version", "targets", "mutation_kinds", "expectation"],
+      "properties": {
+        "record_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "batch_size": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "seed": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "authored_schema": { "$ref": "#/$defs/schemaFact" },
+        "client_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeWorkloadTarget" }
+        },
+        "mutation_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/nativeWorkloadMutationKind" }
+        },
+        "expectation": { "$ref": "#/$defs/nativeWorkloadExpectation" }
+      }
+    },
+    "nativeWorkloadTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "table_id", "primary_key_field_id"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/nativeClientKey" },
+        "table_id": { "$ref": "#/$defs/nativeClientKey" },
+        "primary_key_field_id": { "$ref": "#/$defs/nativeClientKey" }
+      }
+    },
+    "nativeWorkloadMutationKind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "count", "field_ids"],
+      "properties": {
+        "operation": { "const": "insert" },
+        "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "field_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeClientKey" }
+        }
+      }
+    },
+    "nativeWorkloadExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_count", "batch_count", "operation_digest", "per_scope_cardinalities"],
+      "properties": {
+        "operation_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "batch_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "operation_digest": { "$ref": "#/$defs/sha256" },
+        "per_scope_cardinalities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeWorkloadScopeCardinality" }
+        }
+      }
+    },
+    "nativeWorkloadScopeCardinality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "cardinality"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/nativeClientKey" },
+        "cardinality": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "nativeIdentityAlias": {
+      "description": "One typed authored identity value that a native proof resolves to one runtime value.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "alias", "value", "step_ids", "expectation_ids"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "batch-id",
+            "checksum",
+            "client-generation",
+            "cursor",
+            "mutation-id",
+            "primary-key",
+            "rebuild-id",
+            "row-version",
+            "schema",
+            "scope",
+            "scope-set-version",
+            "server-version",
+            "table"
+          ]
+        },
+        "alias": { "$ref": "#/$defs/nativeClientKey" },
+        "value": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["version", "hash"],
+              "properties": {
+                "version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                "hash": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          ]
+        },
+        "step_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stepId" }
+        },
+        "expectation_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/expectationId" }
+        }
+      }
+    },
+    "nativeLifecycleBoundary": {
+      "description": "One public lifecycle call placed after a terminal authored step.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "phase", "after_step_id", "user_id", "client_id", "method"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nativeClientKey" },
+        "phase": { "type": "string", "enum": ["setup", "exercise", "cleanup"] },
+        "after_step_id": { "$ref": "#/$defs/stepId" },
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "method": { "const": "stop" }
+      }
+    },
     "scenarioId": {
       "type": "string",
       "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
@@ -140,6 +437,10 @@
       "type": "string",
       "pattern": "^MEAS-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
     },
+    "stratumId": {
+      "type": "string",
+      "pattern": "^STR-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
     "vectorSetId": {
       "type": "string",
       "pattern": "^VSET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
@@ -177,33 +478,43 @@
           "enum": ["connect", "push", "pull", "rebuild", "local", "artifact", "process", "model", "workload"]
         },
         "name": { "type": "string", "minLength": 1 },
-        "payload": { "type": "object" }
+        "payload": { "type": "object" },
+        "wire_fault": { "$ref": "#/$defs/wireFaultControl" }
       }
     },
-	"expectedOutcome": {
-	  "oneOf": [
-	    {
-	      "type": "object",
-	      "additionalProperties": false,
-	      "required": ["disposition"],
-	      "properties": {
-	        "disposition": { "const": "success" }
-	      }
-	    },
-	    {
-	      "type": "object",
-	      "additionalProperties": false,
-	      "required": ["disposition", "error_code"],
-	      "properties": {
-	        "disposition": { "const": "error" },
-	        "error_code": {
-	          "type": "string",
-	          "enum": ["source_transaction_predecessor_pending", "source_transaction_poison_blocked"]
-	        }
-	      }
-	    }
-	  ]
-	},
+    "wireFaultControl": {
+      "description": "One bounded native-only push response fault.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["temporary_unavailable", "sealed_retry"] }
+      }
+    },
+    "expectedOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition"],
+          "properties": {
+            "disposition": { "const": "success" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "error_code"],
+          "properties": {
+            "disposition": { "const": "error" },
+            "error_code": {
+              "type": "string",
+              "enum": ["source_transaction_predecessor_pending", "source_transaction_poison_blocked"]
+            }
+          }
+        }
+      ]
+    },
     "proofObligation": {
       "type": "object",
       "additionalProperties": false,
@@ -443,7 +754,7 @@
         "scope_id": { "type": "string", "minLength": 1 },
         "membership_generation": { "type": "integer", "minimum": 1 },
         "cardinality": { "$ref": "#/$defs/count" },
-        "effect_versions": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        "effect_versions": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
       }
     },
     "poisonFact": {
@@ -523,6 +834,7 @@
         "scope_id": { "type": "string", "minLength": 1 },
         "has_cursor": { "type": "boolean" },
         "has_checksum": { "type": "boolean" },
+        "checksum": { "$ref": "#/$defs/sha256" },
         "verified": { "type": "boolean" }
       }
     },
@@ -670,11 +982,18 @@
             "state-unchanged",
             "canonical-wire-outcome",
             "legal-state-transition",
+            "schema-dispatch-observations-satisfied",
             "artifact-policy-satisfied",
-            "performance-contract-satisfied"
+            "performance-contract-satisfied",
+            "schema-dispatch-measurement-satisfied"
           ]
         },
-        "payload": { "type": "object", "maxProperties": 0 }
+        "payload": {
+          "oneOf": [
+            { "type": "object", "maxProperties": 0 },
+            { "$ref": "#/$defs/schemaDispatchPredicatePayload" }
+          ]
+        }
       },
       "oneOf": [
         {
@@ -692,7 +1011,7 @@
         {
           "properties": {
             "contract_predicate": { "const": "state-transition" },
-            "name": { "const": "legal-state-transition" }
+            "name": { "enum": ["legal-state-transition", "schema-dispatch-observations-satisfied"] }
           }
         },
         {
@@ -704,10 +1023,75 @@
         {
           "properties": {
             "contract_predicate": { "const": "performance-measurement" },
-            "name": { "const": "performance-contract-satisfied" }
+            "name": { "enum": ["performance-contract-satisfied", "schema-dispatch-measurement-satisfied"] }
           }
         }
       ]
+    },
+    "schemaDispatchPredicatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurement_id", "minimum_sample_count_per_stratum", "strata"],
+      "properties": {
+        "measurement_id": { "$ref": "#/$defs/measurementId" },
+        "minimum_sample_count_per_stratum": { "type": "integer", "minimum": 1 },
+        "strata": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["stratum_id", "schema_case"],
+            "properties": {
+              "stratum_id": { "$ref": "#/$defs/stratumId" },
+              "schema_case": {
+                "type": "string",
+                "enum": ["current", "class_1", "class_2", "class_3_affected", "class_3_unaffected", "class_4"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "measurementSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurement_id", "stratum_id", "sample_id", "parameters", "operation"],
+      "properties": {
+        "measurement_id": { "$ref": "#/$defs/measurementId" },
+        "stratum_id": { "$ref": "#/$defs/stratumId" },
+        "sample_id": {
+          "type": "string",
+          "pattern": "^SAMPLE-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+        },
+        "parameters": { "type": "object" },
+        "operation": { "$ref": "#/$defs/measurementOperationTarget" }
+      }
+    },
+    "measurementOperationId": {
+      "type": "string",
+      "pattern": "^MOP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "measurementOperationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "family", "boundary", "value"],
+      "properties": {
+        "id": { "$ref": "#/$defs/measurementOperationId" },
+        "family": { "type": "string", "pattern": "^[a-z]+(?:[-_][a-z0-9]+)*$" },
+        "boundary": { "type": "string", "pattern": "^[a-z]+(?:-[a-z0-9]+)*$" },
+        "value": { "not": { "type": "null" } }
+      }
+    },
+    "measurementBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "measurement_sample"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/stepId" },
+        "measurement_sample": { "$ref": "#/$defs/measurementSample" }
+      }
     },
     "step": {
       "type": "object",
@@ -716,8 +1100,10 @@
       "properties": {
         "id": { "$ref": "#/$defs/stepId" },
         "phase": { "type": "string", "enum": ["setup", "exercise", "cleanup"] },
-        "transport": { "type": "string", "enum": ["http", "local", "artifact", "process", "model"] },
-        "description": { "type": "string", "minLength": 1 },
+		"transport": { "type": "string", "enum": ["http", "local", "artifact", "process", "model"] },
+		"description": { "type": "string", "minLength": 1 },
+		"native_binding": { "$ref": "#/$defs/nativeStepBinding" },
+		"measurement_sample": { "$ref": "#/$defs/measurementSample" },
 		"operation": { "$ref": "#/$defs/operation" },
 		"expected_outcome": { "$ref": "#/$defs/expectedOutcome" }
       }
@@ -751,6 +1137,10 @@
             "capture_pending",
             "temporary_unavailable"
           ]
+        },
+        "action": {
+          "type": "string",
+          "enum": ["none", "replace", "rebuild_local", "unsupported"]
         },
         "http_status": {
           "oneOf": [

@@ -35,6 +35,10 @@ type workloadSampleExpectation struct {
 // expandWorkload turns the only model-runner macro into a typed execution
 // plan. The reference model remains the sole owner of state changes.
 func expandWorkload(snapshot reference.StateSnapshot, operation scenarios.Operation) (workloadExpansionPlan, error) {
+	return expandWorkloadForBinding(snapshot, operation, nil)
+}
+
+func expandWorkloadForBinding(snapshot reference.StateSnapshot, operation scenarios.Operation, binding *scenarios.NativeStepBinding) (workloadExpansionPlan, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(operation.Payload, &payload); err != nil {
 		return workloadExpansionPlan{}, fmt.Errorf("decode workload/prepare payload: %w", err)
@@ -52,7 +56,11 @@ func expandWorkload(snapshot reference.StateSnapshot, operation scenarios.Operat
 		}
 		return workloadExpansionPlan{Operations: operations}, err
 	case "scope_cardinality":
-		operations, err := expandScopeCardinalityWorkload(snapshot, payload)
+		var client *reference.ClientKey
+		if binding != nil && binding.Kind == "workload" {
+			client = &reference.ClientKey{UserID: reference.UserID(binding.UserID), ClientID: reference.ClientID(binding.ClientID)}
+		}
+		operations, err := expandScopeCardinalityWorkloadForClient(snapshot, payload, client)
 		return workloadExpansionPlan{Operations: operations}, err
 	case "pending_mutations":
 		operations, err := expandPendingMutationsWorkload(snapshot, payload)

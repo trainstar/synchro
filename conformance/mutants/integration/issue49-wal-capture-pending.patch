@@ -1,0 +1,48 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -96,13 +96,6 @@ fn synchro_pull(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+         if let Err(error) = validate_schema_ref(client, &request.schema) {
+             return error;
+         }
+-        if client_has_pending_fence(client, p_user_id, &request.client_id) {
+-            return protocol_error_response(
+-                ProtocolErrorCode::CapturePending,
+-                "accepted writes are pending capture",
+-                true,
+-            );
+-        }
+ 
+         let server_scopes = client_state.bucket_subs;
+         let scope_set_version = client_state.scope_set_version;
+diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/rebuild.rs
+--- a/extensions/synchro-pg/src/rebuild.rs
++++ b/extensions/synchro-pg/src/rebuild.rs
+@@ -203,13 +203,6 @@ fn synchro_rebuild(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+             if !session_is_current(&session, &request, &client_state, &scope_binding, &boundary) {
+                 return rebuild_restart_response(&request.scope);
+             }
+-            if crate::pull::client_has_pending_fence(client, p_user_id, &request.client_id) {
+-                return protocol_error_response(
+-                    ProtocolErrorCode::CapturePending,
+-                    "accepted writes are pending capture",
+-                    true,
+-                );
+-            }
+             let row_ordinal = continuation
+                 .as_ref()
+                 .map(|continuation| continuation.next_row_ordinal)
+@@ -230,13 +223,6 @@ fn synchro_rebuild(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+         if continuation.is_some() || !client_state.bucket_subs.contains(&request.scope) {
+             return invalid_request_response();
+         }
+-        if crate::pull::client_has_pending_fence(client, p_user_id, &request.client_id) {
+-            return protocol_error_response(
+-                ProtocolErrorCode::CapturePending,
+-                "accepted writes are pending capture",
+-                true,
+-            );
+-        }
+         let boundary = match load_materialized_boundary(client) {
+             Ok(boundary) => boundary,
+             Err(error) => return integrity_failure_with_log("loading boundary", &error),

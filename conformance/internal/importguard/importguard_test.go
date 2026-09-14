@@ -73,11 +73,11 @@ func TestModulePolicyRejectsDependencyDrift(t *testing.T) {
 		},
 		{
 			name: "missing indirect dependency",
-			mod:  strings.Replace(testModuleFile, "\tgolang.org/x/text v0.29.0 // indirect\n", "", 1),
+			mod:  strings.Replace(testModuleFile, "\tgolang.org/x/text v0.39.0 // indirect\n", "", 1),
 		},
 		{
 			name: "changed indirect version",
-			mod:  strings.Replace(testModuleFile, "golang.org/x/text v0.29.0", "golang.org/x/text v0.28.0", 1),
+			mod:  strings.Replace(testModuleFile, "golang.org/x/text v0.39.0", "golang.org/x/text v0.38.0", 1),
 		},
 		{
 			name: "unexpected indirect dependency",
@@ -249,24 +249,24 @@ func TestCheckRejectsProtectedDirectAndTransitiveEdges(t *testing.T) {
 			"protected/direct.go":  "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox\"\n",
 		}, root: modulePath + "/protected"},
 		{name: "transitive", files: map[string]string{
-			"blackbox/baseline/base.go": "package baseline\n",
-			"shared/shared.go":          "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-			"protected/transitive.go":   "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
+			"blackbox/transport/base.go": "package transport\n",
+			"shared/shared.go":           "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/transport\"\n",
+			"protected/transitive.go":    "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
 		}, root: modulePath + "/protected"},
 		{name: "inactive-build-tag", files: map[string]string{
-			"blackbox/baseline/base.go": "package baseline\n",
-			"shared/shared.go":          "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-			"protected/hidden.go":       "//go:build synchro_never\n\npackage protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
+			"blackbox/transport/base.go": "package transport\n",
+			"shared/shared.go":           "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/transport\"\n",
+			"protected/hidden.go":        "//go:build synchro_never\n\npackage protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
 		}, root: modulePath + "/protected"},
 		{name: "inactive-platform", files: map[string]string{
-			"blackbox/baseline/base.go": "package baseline\n",
-			"protected/hidden_plan9.go": "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
+			"blackbox/transport/base.go": "package transport\n",
+			"protected/hidden_plan9.go":  "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/transport\"\n",
 		}, root: modulePath + "/protected"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.files["go.mod"] = testModuleFile
 			root := tempModule(t, test.files)
-			policy := Policy{ModuleRoot: root, Protected: []string{test.root}, ForbiddenEdges: []string{modulePath + "/blackbox", modulePath + "/blackbox/baseline"}}
+			policy := Policy{ModuleRoot: root, Protected: []string{test.root}, ForbiddenEdges: []string{modulePath + "/blackbox"}}
 			if err := Check(context.Background(), policy); err == nil {
 				t.Fatal("protected forbidden edge was accepted")
 			}
@@ -278,9 +278,6 @@ func TestDefaultPolicyProtectsModelRunnerAndStrictReleasePackages(t *testing.T) 
 	for _, packagePath := range []string{
 		modulePath + "/modelrunner",
 		modulePath + "/execution",
-		modulePath + "/evidence",
-		modulePath + "/inventory",
-		modulePath + "/cmd/synchro-evidence",
 	} {
 		if !containsExact(defaultProtected, packagePath) {
 			t.Fatalf("strict release package %q is not protected", packagePath)
@@ -301,26 +298,11 @@ func TestDefaultPolicyRejectsProtectedBlackboxEdges(t *testing.T) {
 			},
 		},
 		{
-			name: "direct baseline",
-			files: map[string]string{
-				"blackbox/baseline/base.go": "package baseline\n",
-				"protected/direct.go":       "package protected\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-			},
-		},
-		{
 			name: "transitive blackbox",
 			files: map[string]string{
 				"blackbox/blackbox.go":    "package blackbox\n",
 				"shared/shared.go":        "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox\"\n",
 				"protected/transitive.go": "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
-			},
-		},
-		{
-			name: "transitive baseline",
-			files: map[string]string{
-				"blackbox/baseline/base.go": "package baseline\n",
-				"shared/shared.go":          "package shared\nimport _ \"github.com/trainstar/synchro/conformance/blackbox/baseline\"\n",
-				"protected/transitive.go":   "package protected\nimport _ \"github.com/trainstar/synchro/conformance/shared\"\n",
 			},
 		},
 	} {
@@ -334,31 +316,34 @@ func TestDefaultPolicyRejectsProtectedBlackboxEdges(t *testing.T) {
 	}
 }
 
-func TestBaselineImportsAreLimitedToDiagnosticIntegration(t *testing.T) {
-	baseline := modulePath + "/blackbox/baseline"
-	for allowed := range diagnosticBaselineImporters {
-		if err := checkBaselineImporters(map[string][]string{
-			allowed:  {baseline},
-			baseline: nil,
-		}); err != nil {
-			t.Fatalf("diagnostic integration %q was rejected: %v", allowed, err)
+func TestDiagnosticBlackboxImporterClassificationIsExact(t *testing.T) {
+	blackbox := modulePath + "/blackbox"
+	approved := []string{
+		modulePath + "/blackbox/integration",
+		modulePath + "/blackbox/syntheticproof",
+		modulePath + "/cmd/synchro-local-postgres",
+		modulePath + "/cmd/synchro-conformance",
+		modulePath + "/kotlin",
+		modulePath + "/reactnative",
+		modulePath + "/swift",
+	}
+	if len(diagnosticBlackboxImporters) != len(approved) {
+		t.Fatalf("diagnostic black-box importer count = %d, want %d", len(diagnosticBlackboxImporters), len(approved))
+	}
+	for _, source := range approved {
+		if _, found := diagnosticBlackboxImporters[source]; !found {
+			t.Fatalf("approved diagnostic black-box importer %q is absent", source)
 		}
+		t.Run(strings.TrimPrefix(source, modulePath+"/"), func(t *testing.T) {
+			if err := checkBlackboxImporters(map[string][]string{source: {blackbox}}); err != nil {
+				t.Fatalf("diagnostic black-box importer rejected: %v", err)
+			}
+		})
 	}
 
-	for _, graph := range []map[string][]string{
-		{
-			modulePath + "/modelrunner": {baseline},
-			baseline:                    nil,
-		},
-		{
-			modulePath + "/evidence": {modulePath + "/shared"},
-			modulePath + "/shared":   {baseline},
-			baseline:                 nil,
-		},
-	} {
-		if err := checkBaselineImporters(graph); err == nil {
-			t.Fatal("non-diagnostic baseline dependency was accepted")
-		}
+	unclassified := modulePath + "/blackbox/syntheticproof/unclassified"
+	if err := checkBlackboxImporters(map[string][]string{unclassified: {blackbox}}); err == nil {
+		t.Fatal("unclassified package below a diagnostic package was accepted")
 	}
 }
 
@@ -500,7 +485,7 @@ go 1.25.0
 require (
 	github.com/dlclark/regexp2/v2 v2.6.0
 	github.com/gowebpki/jcs v1.0.1
-	github.com/jackc/pgx/v5 v5.8.0
+	github.com/jackc/pgx/v5 v5.9.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
 
@@ -508,7 +493,7 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 )
 `

@@ -103,10 +103,19 @@ worker AS (
     FROM synchro.sync_wal_worker_state state
     WHERE state.worker_id = 'synchro_wal_consumer'
 ),
-configured_slot AS (
+active_poison AS (
+    SELECT poison.failure_class,
+           poison.failure_detail,
+           poison.commit_lsn::text AS commit_lsn,
+           poison.relation_id::text AS relation_id
+    FROM synchro.sync_wal_poison poison
+    JOIN runtime ON poison.stream_generation = runtime.stream_generation
+    WHERE poison.lifecycle = 'active'
+),
+runtime_slot AS (
     SELECT slot.*
     FROM pg_catalog.pg_replication_slots slot
-    JOIN runtime ON runtime.active_slot_name = slot.slot_name
+    JOIN runtime ON runtime.active_slot_name::text = slot.slot_name::text
 ),
 configured_publication AS (
     SELECT publication.*
@@ -130,7 +139,7 @@ SELECT
         FROM pg_catalog.pg_extension extension
         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = extension.extnamespace
         WHERE extension.extname = 'synchro_pg'
-          AND extension.extversion = $5::text
+          AND extension.extversion = $4::text
           AND namespace.nspname = 'synchro'
     ) AS extension_matches,
     (
@@ -325,7 +334,7 @@ SELECT
     ) AS capture_triggers_valid,
     EXISTS (
         SELECT 1
-        FROM configured_slot slot
+        FROM runtime_slot slot
         JOIN current_database_state database ON database.database_name = slot.database::text
         JOIN runtime ON runtime.active_slot_name::text = slot.slot_name::text
         LEFT JOIN worker ON true
@@ -353,16 +362,17 @@ SELECT
         JOIN pg_catalog.pg_stat_activity activity
           ON activity.pid = worker.backend_pid
          AND activity.datid = database.database_oid
-        WHERE worker.worker_login_oid = $4::oid
+         WHERE worker.worker_login_oid = $3::oid
           AND worker.state = 'running'
     ) AS worker_state_valid,
     (
-        NOT EXISTS (
-            SELECT 1
-            FROM synchro.sync_wal_poison poison
-            WHERE poison.lifecycle = 'active'
-        )
+        NOT EXISTS (SELECT 1 FROM active_poison)
     ) AS poison_clear,
+    (SELECT failure_class FROM active_poison) AS poison_failure_class,
+    (SELECT failure_detail FROM active_poison) AS poison_failure_detail,
+    (SELECT commit_lsn FROM active_poison) AS poison_commit_lsn,
+    (SELECT relation_id FROM active_poison) AS poison_relation_id,
+    (SELECT active_slot_name::text FROM runtime) AS active_slot_name,
     NOT EXISTS (
         SELECT 1
         FROM synchro.sync_stream_resets reset
@@ -412,14 +422,14 @@ SELECT
     ) AS progress_valid,
     CASE
         WHEN NOT EXISTS (SELECT 1 FROM progress) THEN NULL
-        WHEN NOT EXISTS (SELECT 1 FROM configured_slot) THEN NULL
+        WHEN NOT EXISTS (SELECT 1 FROM runtime_slot) THEN NULL
         ELSE (
             SELECT slot.confirmed_flush_lsn = COALESCE(
                        progress.acknowledged_end_lsn,
                        progress.generation_start_lsn
                    )
                    AND slot.confirmed_flush_lsn <= pg_catalog.pg_current_wal_lsn()
-            FROM configured_slot slot
+            FROM runtime_slot slot
             CROSS JOIN progress
         )
     END AS slot_acknowledgement_valid,
@@ -431,7 +441,7 @@ SELECT
         JOIN current_database_state database
           ON database.database_oid = worker.database_oid
          AND database.database_name = worker.database_name::text
-        WHERE worker.worker_login_oid = $4::oid
+         WHERE worker.worker_login_oid = $3::oid
     ) AS heartbeat_age_seconds,
     (
             SELECT least(
@@ -444,7 +454,7 @@ SELECT
                     ),
                     9223372036854775807::numeric
                 )::bigint
-        FROM configured_slot slot
+        FROM runtime_slot slot
         WHERE slot.confirmed_flush_lsn IS NOT NULL
           AND slot.confirmed_flush_lsn <= pg_catalog.pg_current_wal_lsn()
     ) AS wal_lag_bytes,
@@ -455,12 +465,8 @@ SELECT
                     epoch FROM pg_catalog.clock_timestamp()
                                - worker.oldest_unmaterialized_commit_timestamp
                 )::double precision
-            WHEN worker.wal_observed_at IS NOT NULL
-                 AND NOT EXISTS (
-                     SELECT 1
-                     FROM synchro.sync_wal_poison poison
-                     WHERE poison.lifecycle = 'active'
-                 ) THEN 0::double precision
+             WHEN worker.wal_observed_at IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM active_poison) THEN 0::double precision
             ELSE NULL
         END
         FROM worker
@@ -516,7 +522,6 @@ pub(crate) fn validate_worker_login(
 pub(crate) struct ReadinessConfiguration {
     pub(crate) database: Option<String>,
     pub(crate) publication: Option<String>,
-    pub(crate) replication_slot: Option<String>,
     pub(crate) worker_login: Option<String>,
     pub(crate) max_heartbeat_age_seconds: i32,
     pub(crate) max_wal_lag_bytes: i32,
@@ -524,11 +529,10 @@ pub(crate) struct ReadinessConfiguration {
 }
 
 impl ReadinessConfiguration {
-    fn configured() -> Self {
+    pub(crate) fn configured() -> Self {
         Self {
             database: configured_string(&crate::DATABASE_GUC),
             publication: configured_string(&crate::PUBLICATION_NAME_GUC),
-            replication_slot: configured_string(&crate::REPLICATION_SLOT_GUC),
             worker_login: crate::configured_worker_login(),
             max_heartbeat_age_seconds: crate::MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC.get(),
             max_wal_lag_bytes: crate::MAX_WAL_LAG_BYTES_GUC.get(),
@@ -583,9 +587,26 @@ impl HealthCheck {
 
 #[derive(Default, Serialize)]
 struct HealthObservations {
+    active_slot_name: Option<String>,
+    extension_objects: Option<ExtensionObjectsObservation>,
     heartbeat_age_seconds: Option<f64>,
     wal_lag_bytes: Option<i64>,
     wal_lag_seconds: Option<f64>,
+    poison: Option<PoisonObservation>,
+}
+
+#[derive(Serialize)]
+struct ExtensionObjectsObservation {
+    library_fingerprint: String,
+    installed_fingerprint: String,
+}
+
+#[derive(Serialize)]
+struct PoisonObservation {
+    failure_class: String,
+    failure_detail: String,
+    commit_lsn: String,
+    relation_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -599,6 +620,7 @@ impl Default for ReadinessStatus {
         let mut checks = BTreeMap::new();
         for name in [
             "database_contract",
+            "extension_objects_stale",
             "registry_generation",
             "schema_generation",
             "relation_identity",
@@ -663,6 +685,8 @@ struct RawReadiness {
     replication_slot_valid: bool,
     worker_state_valid: bool,
     poison_clear: bool,
+    poison: Option<PoisonObservation>,
+    active_slot_name: Option<String>,
     stream_reset_clear: bool,
     progress_valid: bool,
     slot_acknowledgement_valid: Option<bool>,
@@ -679,7 +703,6 @@ fn load_raw_readiness(
 ) -> Result<RawReadiness, String> {
     let database = configuration.database.as_deref().unwrap_or("");
     let publication = configuration.publication.as_deref().unwrap_or("");
-    let slot = configuration.replication_slot.as_deref().unwrap_or("");
     let row = client
         .select(
             READINESS_SQL,
@@ -687,7 +710,6 @@ fn load_raw_readiness(
             &[
                 database.into(),
                 publication.into(),
-                slot.into(),
                 worker_login_oid.into(),
                 env!("CARGO_PKG_VERSION").into(),
             ],
@@ -726,6 +748,24 @@ fn load_raw_readiness(
         _ => return Err("schema readiness state is incomplete".to_string()),
     };
 
+    let poison_failure_class = optional_value::<String>(&row, "poison_failure_class")?;
+    let poison_failure_detail = optional_value::<String>(&row, "poison_failure_detail")?;
+    let poison_commit_lsn = optional_value::<String>(&row, "poison_commit_lsn")?;
+    let poison = match (
+        poison_failure_class,
+        poison_failure_detail,
+        poison_commit_lsn,
+    ) {
+        (Some(failure_class), Some(failure_detail), Some(commit_lsn)) => Some(PoisonObservation {
+            failure_class,
+            failure_detail,
+            commit_lsn,
+            relation_id: optional_value(&row, "poison_relation_id")?,
+        }),
+        (None, None, None) => None,
+        _ => return Err("poison readiness state is incomplete".to_string()),
+    };
+
     Ok(RawReadiness {
         database_matches: required_bool(&row, "database_matches")?,
         extension_matches: required_bool(&row, "extension_matches")?,
@@ -737,6 +777,8 @@ fn load_raw_readiness(
         replication_slot_valid: required_bool(&row, "replication_slot_valid")?,
         worker_state_valid: required_bool(&row, "worker_state_valid")?,
         poison_clear: required_bool(&row, "poison_clear")?,
+        poison,
+        active_slot_name: optional_value(&row, "active_slot_name")?,
         stream_reset_clear: required_bool(&row, "stream_reset_clear")?,
         progress_valid: required_bool(&row, "progress_valid")?,
         slot_acknowledgement_valid: optional_value(&row, "slot_acknowledgement_valid")?,
@@ -813,6 +855,21 @@ pub(crate) fn load_readiness_status_with_configuration(
     configuration: ReadinessConfiguration,
 ) -> ReadinessStatus {
     let mut status = ReadinessStatus::default();
+    let library_fingerprint = crate::build_fingerprint::library_fingerprint();
+    let installed_fingerprint = crate::build_fingerprint::installed_fingerprint();
+    status.observations.extension_objects = Some(ExtensionObjectsObservation {
+        library_fingerprint: library_fingerprint.to_string(),
+        installed_fingerprint: installed_fingerprint
+            .clone()
+            .unwrap_or_else(|| "missing".to_string()),
+    });
+    status.set(
+        "extension_objects_stale",
+        known_check(
+            installed_fingerprint.as_deref() == Some(library_fingerprint),
+            "extension_objects_stale",
+        ),
+    );
 
     if configuration.database.is_none() {
         status.set(
@@ -824,12 +881,6 @@ pub(crate) fn load_readiness_status_with_configuration(
         status.set(
             "publication",
             HealthCheck::failed("publication_not_configured"),
-        );
-    }
-    if configuration.replication_slot.is_none() {
-        status.set(
-            "replication_slot",
-            HealthCheck::failed("replication_slot_not_configured"),
         );
     }
     if configuration.worker_login.is_none() {
@@ -860,6 +911,9 @@ pub(crate) fn load_readiness_status_with_configuration(
     let Ok((login, raw)) = loaded else {
         return status;
     };
+
+    status.observations.poison = raw.poison;
+    status.observations.active_slot_name = raw.active_slot_name;
 
     if configuration.database.is_some() {
         status.set(
@@ -901,12 +955,10 @@ pub(crate) fn load_readiness_status_with_configuration(
         "capture_triggers",
         known_check(raw.capture_triggers_valid, "capture_triggers_invalid"),
     );
-    if configuration.replication_slot.is_some() {
-        status.set(
-            "replication_slot",
-            known_check(raw.replication_slot_valid, "replication_slot_invalid"),
-        );
-    }
+    status.set(
+        "replication_slot",
+        known_check(raw.replication_slot_valid, "replication_slot_invalid"),
+    );
     status.set("poison", known_check(raw.poison_clear, "blocking_poison"));
     status.set(
         "stream_reset",

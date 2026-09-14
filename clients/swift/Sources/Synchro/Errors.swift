@@ -9,8 +9,12 @@ public enum SynchroError: Error, Sendable {
     case pushRejected(results: [RejectedMutation])
     case networkError(underlying: Error)
     case serverError(status: Int, message: String)
+    case protocolError(status: Int, code: ProtocolErrorCode, message: String)
     case databaseError(underlying: Error)
     case invalidResponse(message: String)
+    case blocked(SyncFailure)
+    case unsupportedSchema(reason: SchemaUnsupportedReason)
+    case invalidStateTransition(from: SyncStatus, to: SyncStatus)
     case alreadyStarted
     case notStarted
 }
@@ -34,10 +38,18 @@ extension SynchroError: LocalizedError {
             return "Network error: \(err.localizedDescription)"
         case .serverError(let status, let message):
             return "Server error \(status): \(message)"
+        case .protocolError(let status, let code, let message):
+            return "Protocol error \(status) \(code.rawValue): \(message)"
         case .databaseError(let err):
             return "Database error: \(err.localizedDescription)"
         case .invalidResponse(let message):
             return "Invalid response: \(message)"
+        case .blocked(let failure):
+            return failure.message
+        case .unsupportedSchema(let reason):
+            return "Schema recovery is required: \(reason.rawValue)"
+        case .invalidStateTransition(let from, let to):
+            return "Invalid sync state transition from \(from.rawValue) to \(to.rawValue)"
         case .alreadyStarted:
             return "Sync has already been started"
         case .notStarted:

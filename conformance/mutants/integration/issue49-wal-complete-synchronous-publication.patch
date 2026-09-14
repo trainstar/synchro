@@ -1,0 +1,36 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -2354,7 +2354,31 @@ fn push_insert(
+         table = qualified_relation_name(&table_reg.physical_schema, &table_reg.physical_relation),
+         pk = pg_quote_ident(&table_reg.pk_column),
+     );
+-    execute_push_dml(client, mutation_id, &sql, data, record_id)
++    let outcome = execute_push_dml(client, mutation_id, &sql, data, record_id);
++    if matches!(outcome, DmlOutcome::Applied) {
++        client
++            .update(
++                "INSERT INTO synchro.sync_bucket_edges (
++                     relation_id, table_name, record_id, bucket_id, checksum, row_version
++                 )
++                 SELECT registry.relation_id, registry.table_name, $1,
++                        'user:diagnostic-user', decode(repeat('00', 32), 'hex'),
++                        version.row_version
++                 FROM synchro.sync_registry registry
++                 JOIN synchro.sync_registry_generations generation
++                   ON generation.generation = registry.registry_generation
++                  AND generation.state = 'active'
++                 JOIN synchro.sync_row_versions version
++                   ON version.relation_id = registry.relation_id
++                  AND version.record_id = $1
++                 WHERE registry.table_name = 'cf_items'
++                 ON CONFLICT (table_name, record_id, bucket_id) DO NOTHING",
++                None,
++                &[record_id.into()],
++            )
++            .unwrap_or_else(|_| pgrx::error!("publishing synchronous push edge failed"));
++    }
++    outcome
+ }
+ 
+ fn push_update(

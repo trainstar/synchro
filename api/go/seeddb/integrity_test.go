@@ -65,9 +65,9 @@ func TestVerifyPortableSeedRecordUsesProtocolThreeDigest(t *testing.T) {
 	}
 }
 
-func TestChecksumObjectRejectsProtocolTwoNumericShape(t *testing.T) {
+func TestChecksumObjectRejectsMissingStructuredChecksum(t *testing.T) {
 	if err := (checksumObject{}).validate(); err == nil {
-		t.Fatal("empty protocol 2 checksum shape was accepted")
+		t.Fatal("empty structured checksum was accepted")
 	}
 }
 
@@ -284,6 +284,16 @@ func TestSchemaManifestRejectsRehashedSemanticMutants(t *testing.T) {
 			},
 		},
 		{
+			name: "class-2 compatibility floor does not extend parent lineage",
+			mutate: func(env *manifestEnvelope) {
+				env.SchemaVersion = 2
+				env.Manifest.SchemaVersion = 2
+				env.Manifest.TransitionClass = "class_2"
+				env.Manifest.CompatibilityFloor = 2
+				env.Manifest.ParentSchema = &schemaRef{Version: 1, Hash: strings.Repeat("1", 64)}
+			},
+		},
+		{
 			name: "index name is duplicated",
 			mutate: func(env *manifestEnvelope) {
 				env.Manifest.Tables[0].Indexes[1].Name = env.Manifest.Tables[0].Indexes[0].Name
@@ -318,8 +328,8 @@ func TestExportManifestRejectsChangedBodyWithStaleHash(t *testing.T) {
 	}
 }
 
-func TestManifestArraysRequireCanonicalOrderAndAffectHashes(t *testing.T) {
-	t.Run("schema hash uses received field order", func(t *testing.T) {
+func TestManifestHashCanonicalizesSemanticallyUnorderedCollections(t *testing.T) {
+	t.Run("fields", func(t *testing.T) {
 		env := validManifestEnvelope(t)
 		originalHash := env.SchemaHash
 		env.Manifest.Tables[0].Fields[0], env.Manifest.Tables[0].Fields[1] =
@@ -328,11 +338,11 @@ func TestManifestArraysRequireCanonicalOrderAndAffectHashes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hash reordered schema manifest: %v", err)
 		}
-		if changedHash == originalHash {
-			t.Fatal("schema manifest hash ignored received field order")
+		if changedHash != originalHash {
+			t.Fatal("schema manifest hash changed with field order")
 		}
-		if err := env.validate(); err == nil {
-			t.Fatal("schema manifest accepted noncanonical field order")
+		if err := env.validate(); err != nil {
+			t.Fatalf("schema manifest rejected equivalent field order: %v", err)
 		}
 	})
 
@@ -344,12 +354,11 @@ func TestManifestArraysRequireCanonicalOrderAndAffectHashes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hash reordered schema manifest: %v", err)
 		}
-		if changedHash == originalHash {
-			t.Fatal("schema manifest hash ignored received table order")
+		if changedHash != originalHash {
+			t.Fatal("schema manifest hash changed with table order")
 		}
-		rehashSchemaManifest(t, &env)
-		if err := env.validate(); err == nil {
-			t.Fatal("schema manifest accepted noncanonical table order")
+		if err := env.validate(); err != nil {
+			t.Fatalf("schema manifest rejected equivalent table order: %v", err)
 		}
 	})
 
@@ -362,12 +371,11 @@ func TestManifestArraysRequireCanonicalOrderAndAffectHashes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("hash reordered schema manifest: %v", err)
 		}
-		if changedHash == originalHash {
-			t.Fatal("schema manifest hash ignored received index order")
+		if changedHash != originalHash {
+			t.Fatal("schema manifest hash changed with index order")
 		}
-		rehashSchemaManifest(t, &env)
-		if err := env.validate(); err == nil {
-			t.Fatal("schema manifest accepted noncanonical index order")
+		if err := env.validate(); err != nil {
+			t.Fatalf("schema manifest rejected equivalent index order: %v", err)
 		}
 	})
 

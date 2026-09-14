@@ -71,42 +71,145 @@
     }
 
     #[pg_test]
+    fn test_compact_deactivates_marked_retention_client() {
+        setup_test_tables();
+        register_client("u1", "expired-by-injected-clock");
+        register_client("u1", "active-at-injected-clock");
+        let marked: bool = Spi::get_one(
+            "SELECT synchro_inject_client_retention_expiry('u1', 'expired-by-injected-clock')",
+        )
+        .expect("mark retention client")
+        .expect("retention client mark result");
+
+        let response: pgrx::JsonB = Spi::get_one("SELECT synchro_compact('30 days', 10000)")
+            .unwrap()
+            .expect("compaction response with marked retention client");
+        let active_clients: Vec<String> = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT client_id
+                     FROM sync_clients
+                     WHERE user_id = 'u1' AND is_active
+                     ORDER BY client_id",
+                    None,
+                    &[],
+                )
+                .expect("read marked retention client state")
+                .map(|row| {
+                    row.get_by_name::<String, &str>("client_id")
+                        .expect("read marked retention client ID")
+                        .expect("marked retention client ID")
+                })
+                .collect()
+        });
+
+        assert!(marked);
+        assert_eq!(response.0["deactivated_clients"], 1);
+        assert_eq!(active_clients, vec!["active-at-injected-clock"]);
+    }
+
+    #[pg_test]
+    fn test_compact_keeps_future_expiry_client_active() {
+        setup_test_tables();
+        register_client("u1", "future-expiry");
+        Spi::run(
+            "UPDATE sync_clients
+             SET generation_expires_at = pg_catalog.statement_timestamp() + interval '1 hour'
+             WHERE user_id = 'u1' AND client_id = 'future-expiry'",
+        )
+        .expect("set future client expiry");
+
+        let response: pgrx::JsonB = Spi::get_one("SELECT synchro_compact('30 days', 10000)")
+            .unwrap()
+            .expect("compaction response with future expiry client");
+        let active: Option<bool> = Spi::get_one(
+            "SELECT is_active
+             FROM sync_clients
+             WHERE user_id = 'u1' AND client_id = 'future-expiry'",
+        )
+        .unwrap();
+
+        assert_eq!(response.0["deactivated_clients"].as_i64(), Some(0));
+        assert_eq!(active, Some(true));
+    }
+
+    #[pg_test]
+    fn test_expire_retention_rejects_empty_identity() {
+        setup_test_tables();
+        register_client("u1", "c1");
+
+        let accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>(
+                "SELECT synchro_inject_client_retention_expiry('', 'c1')",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        let null_accepted = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            Spi::get_one::<bool>(
+                "SELECT synchro_inject_client_retention_expiry(NULL, 'c1')",
+            )
+            .is_ok()
+        }))
+        .catch_others(|_| false)
+        .execute();
+        let active: bool = Spi::get_one(
+            "SELECT is_active FROM sync_clients WHERE user_id = 'u1' AND client_id = 'c1'",
+        )
+        .expect("read retention client after rejected expiry")
+        .expect("retention client after rejected expiry");
+
+        assert!(!accepted, "empty retention identity must be rejected");
+        assert!(!null_accepted, "null retention identity must be rejected");
+        assert!(active);
+    }
+
+    #[pg_test]
     fn test_compact_rejects_zero_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
-            "0 seconds",
+        assert_rejected_compaction_preserves_state(
+            Some("0 seconds"),
             "b1000000-0000-4000-8000-000000000001",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_negative_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
-            "-1 second",
+        assert_rejected_compaction_preserves_state(
+            Some("-1 second"),
             "b1000000-0000-4000-8000-000000000002",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_infinite_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
-            "infinity",
+        assert_rejected_compaction_preserves_state(
+            Some("infinity"),
             "b1000000-0000-4000-8000-000000000003",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_malformed_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
-            "not an interval",
+        assert_rejected_compaction_preserves_state(
+            Some("not an interval"),
             "b1000000-0000-4000-8000-000000000004",
         );
     }
 
     #[pg_test]
     fn test_compact_rejects_unsafe_stale_threshold_without_mutation() {
-        assert_rejected_stale_threshold_preserves_state(
-            "1000000 years",
+        assert_rejected_compaction_preserves_state(
+            Some("1000000 years"),
             "b1000000-0000-4000-8000-000000000005",
+        );
+    }
+
+    #[pg_test]
+    fn test_compact_rejects_null_stale_threshold_without_mutation() {
+        assert_rejected_compaction_preserves_state(
+            None,
+            "b1000000-0000-4000-8000-000000000007",
         );
     }
 
@@ -175,6 +278,41 @@
         let deleted = resp["deleted_entries"].as_i64().unwrap_or(0);
         // With no active clients, all entries should be deleted.
         assert!(deleted >= before.unwrap_or(0));
+    }
+
+    #[pg_test]
+    fn test_compact_deletes_at_most_requested_batch_size() {
+        setup_test_tables();
+        let first = "e1100000-0000-0000-0000-000000000001";
+        let second = "e1100000-0000-0000-0000-000000000002";
+        let third = "e1100000-0000-0000-0000-000000000003";
+        Spi::run_with_args(
+            "INSERT INTO test_products (id, name) VALUES
+             ($1::uuid, 'first'), ($2::uuid, 'second'), ($3::uuid, 'third')",
+            &[first.into(), second.into(), third.into()],
+        )
+        .unwrap();
+        for record_id in [first, second, third] {
+            insert_changelog("global", "test_products", record_id, 1);
+        }
+
+        let response: pgrx::JsonB = Spi::get_one("SELECT synchro_compact('7 days', 2)")
+            .unwrap()
+            .expect("bounded compaction response");
+        let remaining: i64 = Spi::get_one(
+            "SELECT count(*)
+             FROM sync_changelog
+             WHERE record_id IN (
+                 'e1100000-0000-0000-0000-000000000001',
+                 'e1100000-0000-0000-0000-000000000002',
+                 'e1100000-0000-0000-0000-000000000003'
+             )",
+        )
+        .unwrap()
+        .expect("remaining bounded compaction effects");
+
+        assert_eq!(response.0["deleted_entries"].as_i64(), Some(2));
+        assert_eq!(remaining, 1);
     }
 
     #[pg_test]
@@ -380,7 +518,10 @@
         ));
     }
 
-    fn assert_rejected_stale_threshold_preserves_state(threshold: &str, record_id: &str) {
+    fn assert_rejected_compaction_preserves_state(
+        threshold: Option<&str>,
+        record_id: &str,
+    ) {
         setup_test_tables();
         register_client("u1", "c1");
         Spi::run_with_args(
@@ -427,7 +568,7 @@
         .unwrap()
         .expect("state after rejected compaction");
 
-        assert!(!accepted, "invalid stale threshold must be rejected");
+        assert!(!accepted, "invalid stale compaction input must be rejected");
         assert_eq!(retained.0["active"], true);
         assert_eq!(retained.0["effect_count"], before);
     }

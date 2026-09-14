@@ -32,8 +32,7 @@
             "cas-matrix",
             vec![
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-absent-insert",
                     "test_orders",
                     "insert",
@@ -42,8 +41,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("created"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-absent-update",
                     "test_orders",
                     "update",
@@ -52,8 +50,7 @@
                     Some(&[("title", json!("missing"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-absent-delete",
                     "test_orders",
                     "delete",
@@ -62,8 +59,7 @@
                     None,
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-live-insert",
                     "test_orders",
                     "insert",
@@ -72,8 +68,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("duplicate"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-live-update",
                     "test_orders",
                     "update",
@@ -82,8 +77,7 @@
                     Some(&[("title", json!("updated"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-live-delete",
                     "test_orders",
                     "delete",
@@ -92,8 +86,7 @@
                     None,
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-stale-update",
                     "test_orders",
                     "update",
@@ -102,8 +95,7 @@
                     Some(&[("title", json!("stale"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-stale-delete",
                     "test_orders",
                     "delete",
@@ -112,8 +104,7 @@
                     None,
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-deleted-insert",
                     "test_orders",
                     "insert",
@@ -122,8 +113,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("revive"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-deleted-update",
                     "test_orders",
                     "update",
@@ -132,8 +122,7 @@
                     Some(&[("title", json!("revive"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "cas-deleted-delete",
                     "test_orders",
                     "delete",
@@ -215,8 +204,7 @@
             client_id,
             "accepted-insert",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-insert",
                 "test_orders",
                 "insert",
@@ -246,8 +234,7 @@
             client_id,
             "accepted-update",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-update",
                 "test_orders",
                 "update",
@@ -278,8 +265,7 @@
             client_id,
             "accepted-soft-delete",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-soft-delete",
                 "test_orders",
                 "delete",
@@ -322,8 +308,7 @@
             client_id,
             "accepted-hard-delete",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "accepted-hard-delete",
                 "test_bare_items",
                 "delete",
@@ -380,8 +365,7 @@
         let equal_version = current_row_version("test_orders", equal_time);
 
         let mut past_update = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-past-update",
             "test_orders",
             "update",
@@ -391,8 +375,7 @@
         );
         past_update["client_version"] = json!("2000-01-01T00:00:00.000000Z");
         let mut future_delete_loses = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-future-delete-loses",
             "test_orders",
             "delete",
@@ -402,8 +385,7 @@
         );
         future_delete_loses["client_version"] = json!("2099-01-01T00:00:00.000000Z");
         let mut future_delete = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-future-delete",
             "test_orders",
             "delete",
@@ -413,8 +395,7 @@
         );
         future_delete["client_version"] = json!("2099-01-01T00:00:00.000000Z");
         let mut equal_update_loses = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-equal-update-loses",
             "test_orders",
             "update",
@@ -424,8 +405,7 @@
         );
         equal_update_loses["client_version"] = json!(TEST_CLIENT_VERSION);
         let equal_update = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "time-equal-update",
             "test_orders",
             "update",
@@ -537,8 +517,7 @@
             "columns": never_synced_columns,
         });
         let mut incompatible = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "mixed-schema-incompatible",
             "test_orders",
             "insert",
@@ -550,6 +529,12 @@
         let mut incompatible_columns = serde_json::Map::new();
         incompatible_columns.insert(legacy_field_id, json!("preserved authored value"));
         incompatible["columns"] = Value::Object(incompatible_columns);
+        let incompatible_intent = incompatible.clone();
+        let incompatible_mutation_id = incompatible["mutation_id"]
+            .as_str()
+            .expect("schema-incompatible mutation ID")
+            .to_string();
+        let submitted_schema = schema_ref_value();
 
         let epoch_before = accepted_write_epoch(user_id, client_id);
         let response = push_client(
@@ -558,8 +543,7 @@
             "mixed-outcomes",
             vec![
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-applied-first",
                     "test_orders",
                     "insert",
@@ -568,8 +552,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("first"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-conflict",
                     "test_orders",
                     "insert",
@@ -578,8 +561,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("conflict"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-policy",
                     "test_products",
                     "insert",
@@ -588,8 +570,7 @@
                     Some(&[("name", json!("read only"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-applied-second",
                     "test_orders",
                     "insert",
@@ -598,8 +579,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("second"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "mixed-validation",
                     "test_orders",
                     "insert",
@@ -661,6 +641,51 @@
             ]
         );
         assert_eq!(accepted_write_epoch(user_id, client_id), epoch_before + 1);
+
+        let ledger: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'request_ordinal', request_ordinal,
+                 'authored_schema', jsonb_build_object(
+                     'version', authored_schema_version,
+                     'hash', authored_schema_hash
+                 ),
+                 'submitted_schema', jsonb_build_object(
+                     'version', submitted_schema_version,
+                     'hash', submitted_schema_hash
+                 ),
+                 'outcome_schema', jsonb_build_object(
+                     'version', outcome_schema_version,
+                     'hash', outcome_schema_hash
+                 ),
+                 'outcome_status', outcome_status,
+                 'rejection_code', rejection_code,
+                 'sealed_request', convert_from(sealed_canonical_request, 'UTF8')::jsonb,
+                 'sealed_response', convert_from(sealed_canonical_response, 'UTF8')::jsonb
+             )
+             FROM sync_push_mutations
+             WHERE user_id = $1 AND client_id = $2 AND mutation_id = $3::uuid",
+            &[
+                user_id.into(),
+                client_id.into(),
+                incompatible_mutation_id.clone().into(),
+            ],
+        )
+        .unwrap();
+        let ledger = ledger.expect("schema-incompatible mutation ledger").0;
+        let incompatible_outcome = rejected
+            .iter()
+            .find(|outcome| {
+                outcome["mutation_id"].as_str() == Some(incompatible_mutation_id.as_str())
+            })
+            .expect("schema-incompatible outcome");
+        assert_eq!(ledger["request_ordinal"], json!(7));
+        assert_eq!(ledger["authored_schema"], incompatible_intent["authored_schema"]);
+        assert_eq!(ledger["submitted_schema"], submitted_schema);
+        assert_eq!(ledger["outcome_schema"], submitted_schema);
+        assert_eq!(ledger["outcome_status"], json!("rejected_terminal"));
+        assert_eq!(ledger["rejection_code"], json!("schema_incompatible"));
+        assert_eq!(ledger["sealed_request"], incompatible_intent);
+        assert_eq!(ledger["sealed_response"], *incompatible_outcome);
     }
 
     #[pg_test]
@@ -678,8 +703,7 @@
             client_id,
             "ledger-conflict",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 mutation_label,
                 "test_orders",
                 "insert",
@@ -754,8 +778,7 @@
             "domain-failure",
             vec![
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "domain-valid",
                     "test_orders",
                     "insert",
@@ -764,8 +787,7 @@
                     Some(&[("user_id", json!(user_id)), ("title", json!("valid"))]),
                 ),
                 push_mutation(
-                    user_id,
-                    client_id,
+                    (user_id, client_id),
                     "domain-invalid",
                     "test_checked_orders",
                     "insert",
@@ -805,6 +827,7 @@
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 user_id TEXT NOT NULL,
                 document JSONB NOT NULL,
+                optional_document JSONB,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 deleted_at TIMESTAMPTZ
             )",
@@ -831,14 +854,17 @@
             client_id,
             "json-checksum",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "json-checksum",
                 "test_json_orders",
                 "insert",
                 record_id,
                 None,
-                Some(&[("user_id", json!(user_id)), ("document", json!(document))]),
+                Some(&[
+                    ("user_id", json!(user_id)),
+                    ("document", json!(document)),
+                    ("optional_document", serde_json::Value::Null),
+                ]),
             )],
         );
         let outcome = &response.json["accepted"][0];
@@ -847,6 +873,7 @@
             outcome["server_row"][field_id("test_json_orders", "document")].as_str(),
             Some(document)
         );
+        assert!(outcome["server_row"][field_id("test_json_orders", "optional_document")].is_null());
         assert_checksum_object(outcome);
         assert_row_outcome_matches_source(outcome, "test_json_orders", record_id);
     }
@@ -858,8 +885,7 @@
         let client_id = "c1";
         register_client(user_id, client_id);
         let valid = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "invalid-shape",
             "test_orders",
             "insert",
@@ -938,8 +964,7 @@
 
         let oversized_title = "x".repeat(66_000);
         let oversized = push_mutation(
-            user_id,
-            client_id,
+            (user_id, client_id),
             "invalid-normalized-size",
             "test_orders",
             "insert",
@@ -996,8 +1021,7 @@
             client_id,
             "rls-allowed",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "rls-allowed",
                 "test_orders",
                 "insert",
@@ -1013,8 +1037,7 @@
             client_id,
             "rls-rejected",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "rls-rejected",
                 "test_orders",
                 "insert",
@@ -1073,8 +1096,7 @@
             client_id,
             "policy-invalid-authored",
             vec![push_mutation(
-                user_id,
-                client_id,
+                (user_id, client_id),
                 "policy-invalid-authored",
                 "test_orders",
                 "insert",
@@ -1103,8 +1125,7 @@
             "c1",
             "schema-mismatch",
             vec![push_mutation(
-                "u1",
-                "c1",
+                ("u1", "c1"),
                 "schema-mismatch",
                 "test_orders",
                 "insert",
