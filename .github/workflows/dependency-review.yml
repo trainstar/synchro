@@ -30,6 +30,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           format: sarif
+          limit-severities-for-sarif: true
           output: trivy-dependencies.sarif
           exit-code: 1
 
