@@ -251,8 +251,10 @@ func ValidateAllWithVectors(scenarios []Scenario, bundle *contract.Bundle, vecto
 						expectedKeys[fmt.Sprintf("%s|%s|%s", requirementID, proofType, cell)] = struct{}{}
 					}
 				}
-			case "reference-model", "negative-control":
+			case "reference-model":
 				expectedKeys[fmt.Sprintf("%s|%s|null", requirementID, proofType)] = struct{}{}
+			case "negative-control":
+				// Catalog control ownership is validated independently below.
 			case "fault-injection":
 				// Fault-injection closure is checked after all authored keys are known.
 			}
@@ -277,7 +279,7 @@ func ValidateAllWithVectors(scenarios []Scenario, bundle *contract.Bundle, vecto
 				}
 				continue
 			}
-			if _, required := requiredProofs[proofType]; !required {
+			if _, required := requiredProofs[proofType]; !required && proofType != "negative-control" {
 				failures = append(failures, fmt.Errorf("selected requirement %s has non-required proof type %s", requirementID, proofType))
 			}
 		}
@@ -1073,7 +1075,8 @@ func (v *scenarioValidator) validateRequiredProofs() {
 			if !contains(stringIDs(obligation.RequirementIDs), string(requirementID)) {
 				continue
 			}
-			if _, requiredProof := required[obligation.ProofType]; requiredProof || obligation.ProofType == "fault-injection" {
+			if _, requiredProof := required[obligation.ProofType]; requiredProof ||
+				obligation.ProofType == "fault-injection" || obligation.ProofType == "negative-control" {
 				continue
 			}
 			v.add("%s requirement %s has non-required proof type %s", v.scenario.ID, requirementID, obligation.ProofType)
@@ -1117,8 +1120,10 @@ func (v *scenarioValidator) validateRequiredProofs() {
 						v.requireProofKey(requirementID, proofType, &cellID, obligationsByKey)
 					}
 				}
-			case "reference-model", "negative-control":
+			case "reference-model":
 				v.requireProofKey(requirementID, proofType, nil, obligationsByKey)
+			case "negative-control":
+				// Catalog control ownership is validated independently.
 			case "fault-injection":
 				if len(postgresFaultCells) == 0 {
 					v.requireSingletonProof(requirementID, proofType, obligationsByKey)

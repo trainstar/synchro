@@ -375,6 +375,78 @@ func TestValidateUsesTargetsCapturedFromMakefile(t *testing.T) {
 	}
 }
 
+func TestValidateNegativeControlsAreIndependentOfRequiredProofTypes(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatalf("load authored contract: %v", err)
+	}
+	for _, requirement := range bundle.Requirements.Requirements {
+		if contains(requirement.RequiredProofTypes, "negative-control") {
+			t.Fatalf("requirement %s retains negative-control metadata", requirement.ID)
+		}
+	}
+	validationBundle := cloneBundle(bundle)
+	validationBundle.Performance.Budgets = nil
+	validationBundle.Performance.RequiredMeasurements = nil
+
+	base := authoredTimeScenario()
+	if err := Validate(base, validationBundle); err != nil {
+		t.Fatalf("validate independently authored negative control: %v", err)
+	}
+	if err := ValidateAll([]Scenario{base}, validationBundle); err != nil {
+		t.Fatalf("validate global negative-control ownership: %v", err)
+	}
+
+	legacyBundle := cloneBundle(validationBundle)
+	for index := range legacyBundle.Requirements.Requirements {
+		if legacyBundle.Requirements.Requirements[index].ID == "SYNC-TIME-001" {
+			proofTypes := append([]string(nil), legacyBundle.Requirements.Requirements[index].RequiredProofTypes...)
+			legacyBundle.Requirements.Requirements[index].RequiredProofTypes = append(
+				proofTypes,
+				"negative-control",
+			)
+		}
+	}
+	if err := ValidateAll([]Scenario{base}, legacyBundle); err != nil {
+		t.Fatalf("negative-control validation depends on requirement proof metadata: %v", err)
+	}
+
+	missing := cloneScenario(base)
+	var obligations []ProofObligation
+	for _, obligation := range missing.ProofObligations {
+		if obligation.ProofType != "negative-control" {
+			obligations = append(obligations, obligation)
+		}
+	}
+	missing.ProofObligations = obligations
+	var ownership []Ownership
+	for _, owner := range missing.Ownership {
+		if owner.ProofType != "negative-control" {
+			ownership = append(ownership, owner)
+		}
+	}
+	missing.Ownership = ownership
+	var proofTypes []string
+	for _, proofType := range missing.ProofTypes {
+		if proofType != "negative-control" {
+			proofTypes = append(proofTypes, proofType)
+		}
+	}
+	missing.ProofTypes = proofTypes
+	if err := requireErrorCategory(ValidateAll([]Scenario{missing}, validationBundle), "selected requirement SYNC-TIME-001 does not have exactly one negative-control obligation"); err != nil {
+		t.Fatal(err)
+	}
+
+	duplicate := cloneScenario(base)
+	duplicate.ID = "SCN-TIME-002"
+	for index := range duplicate.Ownership {
+		duplicate.Ownership[index].ScenarioID = duplicate.ID
+	}
+	if err := requireErrorCategory(ValidateAll([]Scenario{base, duplicate}, validationBundle), "negative control CTRL-TIMESTAMP-001 is reused by 2 obligations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRejectsSemanticMutants(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {
