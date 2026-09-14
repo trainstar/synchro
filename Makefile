@@ -63,6 +63,7 @@
 	test \
 	test-rust-core \
 	test-rust-mutants \
+	test-rust-mutants-broad \
 	test-integration-mutants \
 	test-integration-mutant \
 	test-rust-pg \
@@ -76,16 +77,17 @@
 	ext-test \
 	ext-seed \
 	build-swift-native-runner \
+	build-kotlin-library \
 	build-kotlin-conformance-app \
 	test-swift-unit \
 	test-client-schema-identity \
 	_test-client-schema-identity \
 	test-swift-warm-connect \
-	test-swift-performance \
+	test-swift-scenarios \
 	test-swift \
 	test-kotlin-unit \
 	test-kotlin-warm-connect \
-	test-kotlin-performance \
+	test-kotlin-scenarios \
 	test-kotlin-instrumentation \
 	test-kotlin \
 	test-kotlin-integration \
@@ -197,6 +199,7 @@ CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 ADAPTER_TEST_URL ?=
 REPLICATION_URL = $(ADAPTER_TEST_URL)
 override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
+R1_BENCHMARK_EXTENSION_TARGET ?= conformance-pg18-extension-artifact
 
 SYNCHROD_PG_PORT ?= 8091
 SYNCHRO_TEST_HOST ?= localhost
@@ -306,6 +309,7 @@ help:
 	@echo "  test                  - Run the default local validation set"
 	@echo "  test-rust-core        - Run synchro-core unit tests"
 	@echo "  test-rust-mutants     - Run targeted synchro-core mutation tests"
+	@echo "  test-rust-mutants-broad - Run broad synchro-core mutation search"
 	@echo "  test-integration-mutants - Run curated production integration mutants"
 	@echo "  test-integration-mutant - Run one manifest mutant with INTEGRATION_MUTANT_ID"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
@@ -315,12 +319,14 @@ help:
 	@echo "  local-postgres-start  - Start an isolated PostgreSQL 18 through the Go provisioner"
 	@echo "  local-postgres-stop   - Stop the isolated PostgreSQL 18 provisioner"
 	@echo "  build-swift-native-runner - Build the macOS native conformance process"
+	@echo "  build-kotlin-library  - Build the Kotlin client library"
 	@echo "  build-kotlin-conformance-app - Build the Android native conformance test APK"
 	@echo "  test-swift-unit       - Run Swift unit tests"
 	@echo "  test-swift-warm-connect - Run the direct Swift warm-connect scenario"
-	@echo "  test-swift-performance - Run the direct Swift performance scenarios"
+	@echo "  test-swift-scenarios  - Run the direct Swift correctness scenarios"
 	@echo "  test-swift            - Run Swift integration tests against the local adapter"
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
+	@echo "  test-kotlin-scenarios - Run the direct Kotlin correctness scenarios"
 	@echo "  test-kotlin-instrumentation - Run Android instrumentation on the selected device"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
@@ -551,7 +557,7 @@ _run-r1-benchmark:
 		test -x "$$pg_config" || { echo "pgrx PostgreSQL 18 configuration is unavailable" >&2; exit 1; }; \
 		pg_bindir="$$(dirname "$$pg_config")"; \
 		$(MAKE) --no-print-directory conformance-adapter-artifact CONFORMANCE_ADAPTER_ARTIFACT_DIR="$$adapter_bundle"; \
-		$(MAKE) --no-print-directory conformance-pg18-extension-artifact CONFORMANCE_EXTENSION_ARTIFACT="$$extension_bundle" PGRX_TARGET_DIR="$$artifact_root/cargo-target"; \
+		$(MAKE) --no-print-directory $(R1_BENCHMARK_EXTENSION_TARGET) CONFORMANCE_EXTENSION_ARTIFACT="$$extension_bundle" PGRX_TARGET_DIR="$$artifact_root/cargo-target"; \
 		test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "R1 artifact packaging changed the worktree" >&2; exit 1; }; \
 		test "$$(git rev-parse --verify HEAD)" = "$$revision" || { echo "R1 benchmark revision changed during packaging" >&2; exit 1; }; \
 		cd conformance; \
@@ -809,6 +815,11 @@ test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit 
 build-swift-native-runner:
 	cd clients/swift && swift build --product synchro-native-runner
 
+build-kotlin-library:
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :synchro:compileDebugKotlin
+
 build-kotlin-conformance-app:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
@@ -860,7 +871,7 @@ test-swift-warm-connect: conformance-mod-download build-swift-native-runner
 			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=10m \
 			-run '^TestRealSwiftWarmConnect$$' -args --provision --install
 
-test-swift-performance: conformance-mod-download build-swift-native-runner build-seed
+test-swift-scenarios: conformance-mod-download build-swift-native-runner build-seed
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		runner_dir="$$(cd clients/swift && swift build --show-bin-path)"; \
@@ -871,9 +882,9 @@ test-swift-performance: conformance-mod-download build-swift-native-runner build
 		SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
 			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
 			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=30m \
-			-run '^TestRealSwiftPerformance$$' $(GO_TEST_ARGS) -args --provision --install
+			-run '^TestRealSwiftScenarios$$' $(GO_TEST_ARGS) -args --provision --install
 
-test-swift: test-swift-warm-connect test-swift-performance
+test-swift: test-swift-warm-connect test-swift-scenarios
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
@@ -923,7 +934,7 @@ test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=12m \
 			-run '^TestRealKotlinWarmConnect$$' -args --provision --install
 
-test-kotlin-performance: conformance-mod-download build-kotlin-conformance-app build-seed
+test-kotlin-scenarios: conformance-mod-download build-kotlin-conformance-app build-seed
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
 	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
 	@set -eu; \
@@ -941,7 +952,7 @@ test-kotlin-performance: conformance-mod-download build-kotlin-conformance-app b
 			SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
 			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
 			-- go test -tags kotlinintegration -json ./kotlin -count=1 -timeout=75m \
-			-run '^TestRealKotlinPerformance$$' $(GO_TEST_ARGS) -args --provision --install
+			-run '^TestRealKotlinScenarios$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-kotlin-instrumentation: build-kotlin-conformance-app
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
@@ -950,7 +961,7 @@ test-kotlin-instrumentation: build-kotlin-conformance-app
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.injected.device.serial="$(KOTLIN_ANDROID_SERIAL)" -Pandroid.testInstrumentationRunnerArguments.notClass=com.trainstar.synchro.conformance.NativeSessionInstrumentationTest :conformance-app:connectedDebugAndroidTest
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
 
-test-kotlin: test-kotlin-warm-connect test-kotlin-performance
+test-kotlin: test-kotlin-warm-connect test-kotlin-scenarios
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	# Repeat preparation to prove that the integration fixture is idempotent.
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
@@ -1421,12 +1432,8 @@ release-check: override GO_TEST_ARGS := -v -count=1 -p 1
 release-check: override GO_TEST_PKGS := ./...
 release-check: override GRADLE_TEST_ARGS := --rerun-tasks
 release-check: override DETOX_ARGS :=
-# test-r1-benchmark is a separate required release gate. Its baseline is
-# fingerprint-bound to the pinned benchmark host, so it runs there, not
-# inside release-check. Release evidence requires both results.
 release-check: validation-check evidence rc-check-pg18
 	@echo "Release validation passed."
-	@echo "Reminder: run make test-r1-benchmark on the pinned benchmark host. It is a separate required release gate."
 
 release-kotlin-local: version-check
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
@@ -1713,6 +1720,17 @@ test-rust-mutants:
 	cd extensions && SYNCHRO_REPO_ROOT="$(CURDIR)" cargo mutants \
 		-p synchro-core \
 		--config .cargo/mutants.toml \
+		--baseline run \
+		--jobs 4 \
+		--timeout 120 \
+		--no-shuffle
+
+test-rust-mutants-broad:
+	@command -v cargo-mutants >/dev/null || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
+	@test "$$(cargo mutants --version)" = "cargo-mutants 27.1.0" || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
+	cd extensions && SYNCHRO_REPO_ROOT="$(CURDIR)" cargo mutants \
+		-p synchro-core \
+		--no-config \
 		--baseline run \
 		--jobs 4 \
 		--timeout 120 \

@@ -14,7 +14,7 @@ import (
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
-func TestRealKotlinPerformance(t *testing.T) {
+func TestRealKotlinScenarios(t *testing.T) {
 	// Each scenario runs in its own subtest, so its fixture cleanup closes
 	// the harness and releases the shared installation lock before the next
 	// scenario provisions. One shared subtest deadlocks on that lock.
@@ -389,7 +389,7 @@ var kotlinPerformanceSuiteReset sync.Once
 func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
-		t.Fatal("TestRealKotlinPerformance requires --provision --install")
+		t.Fatal("TestRealKotlinScenarios requires --provision --install")
 	}
 	adbPath := os.Getenv("SYNCHRO_KOTLIN_ADB")
 	deviceSerial := os.Getenv("SYNCHRO_KOTLIN_DEVICE_SERIAL")

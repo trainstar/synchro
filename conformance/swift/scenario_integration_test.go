@@ -14,7 +14,7 @@ import (
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
-func TestRealSwiftPerformance(t *testing.T) {
+func TestRealSwiftScenarios(t *testing.T) {
 	// Each scenario runs as its own subtest. A shared subtest stops at the first
 	// failure, which hides every scenario after it and makes the run order a
 	// hidden dependency. A scenario that fails before its reset leaves server
@@ -312,7 +312,7 @@ var swiftPerformanceSuiteReset sync.Once
 func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
-		t.Fatal("TestRealSwiftPerformance requires --provision --install")
+		t.Fatal("TestRealSwiftScenarios requires --provision --install")
 	}
 	runnerPath := os.Getenv("SYNCHRO_SWIFT_NATIVE_RUNNER")
 	if runnerPath == "" {
