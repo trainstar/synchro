@@ -8,13 +8,13 @@ Synchro supports two consumption modes:
 - local, for pre-release integration in another repo
 - published, for tagged or registry-backed releases
 
-Consumers should switch dependency source only. Package identity and runtime behavior should stay the same.
+Consumers should switch dependency source only. Package identity and runtime behavior stay the same.
 
 ## Local and published matrix
 
 | Surface | Local development | Published release |
 | --- | --- | --- |
-| Native Apple SDK | local SPM path to `dist/local-consumer/apple/Synchro` | tagged SPM release from the repo root |
+| Native Apple SDK | local SPM path to `dist/local-consumer/apple/Synchro` | tagged SPM release from the repository root |
 | Apple pod surface | `pod 'Synchro', :path => '/absolute/path/to/dist/local-consumer/apple/Synchro'` | `pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'` |
 | Kotlin SDK | Maven repository at `dist/local-consumer/maven` | Maven Central |
 | React Native package | local packed `.tgz` from `make local-consumer-artifacts` | npm |
@@ -45,6 +45,8 @@ Run `make test-packaged-consumers` to build isolated applications from these sta
 
 The repo uses one canonical release version from the root `VERSION` file.
 
+The public Go module uses `api/go/v<version>` at the same commit as `v<version>`.
+
 Use:
 
 - `make version-check` to verify metadata alignment
@@ -60,7 +62,7 @@ pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<ve
 pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 ```
 
-That requirement applies in both local and published consumption modes until the bridge dependency story is simplified further.
+That requirement applies in local and published consumption modes.
 
 ## Read next
 

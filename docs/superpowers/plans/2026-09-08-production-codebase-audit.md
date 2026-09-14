@@ -1,5 +1,7 @@
 # Synchro Production Codebase Audit
 
+> Historical record. `RELEASE.md` and the 2026-09-14 release-process plan supersede this plan for release operation.
+
 Audit snapshot: `da07df14b19736e3e5a4a7d53244df2fc0082524`.
 
 This is a static, read-only audit. The standard is a textbook, dead-simple, production-grade offline-first sync library.

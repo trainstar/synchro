@@ -1,21 +1,21 @@
 ---
-title: Verification Overview
-description: How Synchro separates release requirements from generated candidate evidence.
+title: Testing Evidence Overview
+description: How Synchro records testing evidence.
 ---
 
-# Verification Overview
+# Testing Evidence Overview
 
-Synchro's verification model separates the contract from proof of a particular release candidate.
+Synchro separates the contract from testing evidence.
 
 ## What Is Authored
 
 The specification, requirements catalog, support matrix, and scenarios are reviewed source material. They define behavior, proof obligations, required environments, and expected outcomes. They do not contain hand-maintained coverage or release-readiness results.
 
-The Tier 1 matrix requires PostgreSQL 18 on `linux-x64` and `macos-arm64` extension architectures. It also requires Swift on iOS 16 and current iOS. Kotlin requires Android API 24 and current Android. React Native 0.83.x requires current iOS and current Android. PostgreSQL 14 through 17 are excluded. Swift on macOS is Tier 2 and has no certification claim.
+The support matrix defines PostgreSQL 18 on Ubuntu 24.04 Linux x64. It defines Swift on iOS 16 and current iOS. It defines Kotlin on Android API 24 and current Android. It defines React Native 0.83.x on current iOS and Android. PostgreSQL 14 through 17 are excluded. macOS hosts Swift validation and is not a PostgreSQL support cell.
 
 ## What Is Generated
 
-The release workflow will generate immutable evidence for an identified candidate. Evidence records exact environments, requirement and scenario IDs, results, logs, replay information, and artifact hashes. The RC manifest resolves moving current-stable selectors to exact versions.
+Release records the exact environment, commands, results, replay information, and artifact hashes. `release-manifest.json` records resolved current versions.
 
 Tooling computes release eligibility from that evidence. Documentation, fixture presence, and the current handwritten test inventory do not certify a release.
 
@@ -33,8 +33,8 @@ The Makefile reads the generated packaged summary from `dist/verification/packag
 
 Security evidence may be access-controlled while a finding is unresolved. Public reports describe scope and disposition without publishing exploit instructions.
 
-## Candidate Promotion
+## Release Procedure
 
-Final-version artifacts are built once, hashed, and tested in clean environments. Approval promotes the exact tested bytes from the unchanged candidate commit. Any source, package metadata, build input, or artifact change creates a new candidate and invalidates earlier evidence.
+Release builds final distributions once. Package checks and publication use the same sealed bytes.
 
-Read the [Support Policy](/synchro/reference/support-policy/) for required environments and [Release Verification](/synchro/spec/07-release-verification/) for the normative evidence rules.
+Read the [Support Policy](/synchro/reference/support-policy/) for required environments. Read [Testing Evidence](/synchro/spec/07-release-verification/) for evidence rules. Use [RELEASE.md](https://github.com/trainstar/synchro/blob/dev/RELEASE.md) for release procedure.

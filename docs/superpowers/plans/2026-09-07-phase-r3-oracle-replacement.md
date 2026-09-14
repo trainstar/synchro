@@ -1,5 +1,7 @@
 # Phase R3 Child Plan: Oracle Replacement
 
+> Historical record. `RELEASE.md` and the 2026-09-14 release-process plan supersede this plan for release operation.
+
 This is the approved execution plan for Phase R3.
 The parent definition is `docs/superpowers/plans/2026-08-21-v0.3.0-remediation-and-debloat.md`, section `# Phase R3: Oracle Replacement (post-0.3.0)` at line 162.
 The user locked this phase breakdown on 2026-09-07.

@@ -5,7 +5,7 @@
   "current_track_policy": {
     "selector": "current-stable",
     "resolve_at": "release-candidate-start",
-    "record_exact_versions_in": "rc-manifest"
+    "record_exact_versions_in": "release-manifest.json"
   },
   "semantic_corpus_cell_ids": [
     "SUP-MACOS-CURRENT-001",
@@ -68,7 +68,7 @@
       },
       "extension_architecture": "linux-x64",
       "policy": "required",
-      "note": "Published by the release package-extension matrix. The derived PostgreSQL server-cell count is 2."
+      "note": "PG18 Ubuntu 24.04 Linux x64 is the only supported server binary cell."
     },
     {
       "id": "SUP-PG-MACOS-ARM64-001",

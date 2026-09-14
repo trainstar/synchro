@@ -15,11 +15,6 @@ import {
   performanceCatalogSemanticErrors,
   vectorCatalogSemanticErrors,
 } from "./validators/catalogs.mjs";
-import {
-  ciSummarySemanticErrors,
-  requiredGateVariableNames,
-  validCISummaryFixture,
-} from "./validators/ci-summary.mjs";
 import { parseMakeTargets } from "./validators/make-targets.mjs";
 import { markdownAnchors } from "./validators/markdown.mjs";
 import { parseJsonStrict } from "./validators/strict-json.mjs";
@@ -34,9 +29,6 @@ const schemaFiles = {
   requirements: "requirements-v2.schema.json",
   supportMatrix: "support-matrix.schema.json",
   scenario: "scenario-v2.schema.json",
-  ciSummary: "ci-summary-v1.schema.json",
-  rcCandidateLock: "rc-candidate-lock-v1.schema.json",
-  rcManifest: "rc-manifest-v2.schema.json",
   faultCatalog: "fault-catalog-v1.schema.json",
   artifactInventory: "artifact-inventory-v1.schema.json",
   performanceBudgets: "performance-budgets-v2.schema.json",
@@ -73,19 +65,6 @@ function validateInstance(validator, value, label) {
   if (validator(value)) return true;
   fail(`${label} is invalid:\n    ${formatAjvErrors(validator.errors)}`);
   return false;
-}
-
-function expectInvalid(validator, value, label, matches) {
-  if (!validator) {
-    fail(`${label} could not run because its schema did not compile`);
-    return;
-  }
-  if (!validator(value)) {
-    if (!matches || matches(validator.errors ?? [])) return;
-    fail(`${label} failed for the wrong reason:\n    ${formatAjvErrors(validator.errors)}`);
-    return;
-  }
-  fail(`${label} unexpectedly passed`);
 }
 
 function recordErrors(errors, label) {
@@ -340,46 +319,13 @@ async function loadScenarios(catalog, validator) {
   return scenarios;
 }
 
-function runCISummaryControls(validator) {
-  const valid = validCISummaryFixture();
-  if (validateInstance(validator, valid, "Valid generated CI summary self-test")) {
-    recordErrors(ciSummarySemanticErrors(valid), "Valid generated CI summary self-test");
-  }
-  const missingVariable = structuredClone(valid);
-  missingVariable.gate_variables.pop();
-  expectInvalid(
-    validator,
-    missingVariable,
-    "CI summary missing gate variable control",
-    (errors) => errors.some((error) => error.instancePath === "/gate_variables"),
-  );
-  const wrongHome = structuredClone(valid);
-  wrongHome.coverage[0].proof_home = "real-integration";
-  expectInvalid(
-    validator,
-    wrongHome,
-    "CI summary wrong proof home control",
-    (errors) => errors.some((error) => error.instancePath.endsWith("/proof_home")),
-  );
-  const duplicateHome = structuredClone(valid);
-  duplicateHome.coverage.push({
-    ...duplicateHome.coverage[0],
-    coverage_id: "COV-FEDCBA9876543210",
-  });
-  if (validator(duplicateHome)) {
-    const errors = ciSummarySemanticErrors(duplicateHome);
-    if (!errors.some((error) => error.includes("repeats ownership tuple"))) {
-      fail("CI summary duplicate proof-home control unexpectedly passed");
-    }
-  }
-}
-
 async function main() {
   runValidatorSelfTests();
   const ajv = new Ajv2020({ allErrors: true, strict: false, validateSchema: true });
   addFormats(ajv, { formats: ["date-time", "uri"], mode: "full" });
   const { schemas, validators } = await loadSchemas(ajv);
   const values = await loadAuthoredInputs(validators);
+  const releaseVersion = (await readFile(resolve(repoRoot, "VERSION"), "utf8")).trim();
 
   if (values.requirements && values.supportMatrix) {
     recordErrors(
@@ -387,7 +333,7 @@ async function main() {
       "Authored IDs",
     );
     recordErrors(
-      supportPolicyErrors(values.requirements, values.supportMatrix),
+      supportPolicyErrors(values.requirements, values.supportMatrix, releaseVersion),
       "Support policy",
     );
     for (const requirement of values.requirements.requirements) {
@@ -446,21 +392,6 @@ async function main() {
     );
   }
 
-  runCISummaryControls(validators.ciSummary);
-  const schemaGateVariables =
-    schemas.ciSummary?.$defs?.gateVariable?.properties?.name?.enum ?? [];
-  if (
-    JSON.stringify(schemaGateVariables) !==
-    JSON.stringify(requiredGateVariableNames)
-  ) {
-    fail("CI summary schema gate-variable allowlist differs from semantic validation");
-  }
-  if (schemas.rcManifest?.properties?.evidence !== undefined) {
-    fail("RC manifest retains the legacy evidence property");
-  }
-  if (schemas.rcManifest?.properties?.ci_summary === undefined) {
-    fail("RC manifest does not bind one CI summary");
-  }
   if (failures.length > 0) {
     console.error(`Contract verification failed with ${failures.length} error(s):`);
     failures.forEach((message) => console.error(`  - ${message}`));
@@ -468,7 +399,7 @@ async function main() {
     return;
   }
   console.log(
-    "Contract verification passed: schemas, authored inputs, references, support policy, scenarios, CI summary, and proof homes.",
+    "Contract verification passed: schemas, authored inputs, references, support policy, scenarios, catalogs, vectors, and artifacts.",
   );
 }
 

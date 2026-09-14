@@ -18,7 +18,7 @@ function supportPolicyKey(cell) {
   return `${supportDimensionKey(cell)}|${cell.policy}`;
 }
 
-export function supportPolicyErrors(requirements, supportMatrix) {
+export function supportPolicyErrors(requirements, supportMatrix, releaseVersion) {
   const errors = [
     ...duplicateLogicalIdErrors(
       supportMatrix.cells,
@@ -26,11 +26,11 @@ export function supportPolicyErrors(requirements, supportMatrix) {
       "Support matrix cells",
     ),
   ];
-  if (requirements.release !== "0.3.0") {
-    errors.push(`Requirements release must be 0.3.0, found ${requirements.release}`);
+  if (requirements.release !== releaseVersion) {
+    errors.push(`Requirements release must be ${releaseVersion}, found ${requirements.release}`);
   }
-  if (supportMatrix.release !== "0.3.0") {
-    errors.push(`Support matrix release must be 0.3.0, found ${supportMatrix.release}`);
+  if (supportMatrix.release !== releaseVersion) {
+    errors.push(`Support matrix release must be ${releaseVersion}, found ${supportMatrix.release}`);
   }
 
   const dimensions = new Map();
@@ -109,12 +109,12 @@ export function supportPolicyErrors(requirements, supportMatrix) {
     if (!actualCell) {
       errors.push(`Missing required support policy cell ${id}`);
     } else if (supportPolicyKey(actualCell) !== supportPolicyKey(expectedCell)) {
-      errors.push(`${id} does not match its locked v0.3.0 support policy tuple`);
+      errors.push(`${id} does not match its supported policy tuple`);
     }
   }
   for (const id of actualById.keys()) {
     if (!expectedById.has(id)) {
-      errors.push(`${id} is outside the locked v0.3.0 support policy`);
+      errors.push(`${id} is outside the supported policy`);
     }
   }
   const semanticCorpusCellIds = [
@@ -128,7 +128,7 @@ export function supportPolicyErrors(requirements, supportMatrix) {
     JSON.stringify(semanticCorpusCellIds)
   ) {
     errors.push(
-      "Support matrix semantic corpus cell IDs do not match the locked v0.3.0 set",
+      "Support matrix semantic corpus cell IDs do not match the supported set",
     );
   }
   for (const requirement of requirements.requirements) {

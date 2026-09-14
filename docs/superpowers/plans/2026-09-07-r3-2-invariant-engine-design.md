@@ -1,5 +1,7 @@
 # R3.2 Invariant-Engine Design
 
+> Historical record. `RELEASE.md` and the 2026-09-14 release-process plan supersede this plan for release operation.
+
 This is the binding design contract for R3.2 and R3.3.
 The primary authored it from `.ignore/r3/tmp/r3-2-design-inputs.md`, which cites repository evidence for every input.
 Parallel implementation streams follow this contract with disjoint file ownership.

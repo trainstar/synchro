@@ -1,5 +1,7 @@
 # R3.1 final reference deletion-contract table
 
+> Historical record. `RELEASE.md` and the 2026-09-14 release-process plan supersede this plan for release operation.
+
 Count: **603 total rows**. Targets: `mutation-conservation` 72, `cursor-monotonicity` 89, `checksum-convergence` 31, `scope-isolation` 83, `no-state-forks` 50, `oracle-internal` 161, `ENGINE-GAP` 114, `WITHDRAWN` 3
 
 The review target counts total 603. This table has three `WITHDRAWN` rows because the current source lacks the checks described by REF-556 through REF-558. Therefore, the review categories reconcile to 600 active target rows, plus 3 withdrawn rows.

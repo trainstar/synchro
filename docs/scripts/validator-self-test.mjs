@@ -13,10 +13,6 @@ import {
 } from "./validators/markdown.mjs";
 import { parseJsonStrict } from "./validators/strict-json.mjs";
 import { supportPolicyErrors } from "./validators/support-policy.mjs";
-import {
-  ciSummarySemanticErrors,
-  validCISummaryFixture,
-} from "./validators/ci-summary.mjs";
 
 function requireSelfTest(condition, message) {
   if (!condition) throw new Error(`validator self-test failed: ${message}`);
@@ -117,9 +113,9 @@ export function runValidatorSelfTests() {
   );
   requireSelfTest(
     supportPolicyErrors(
-      { release: "0.3.0", requirements: [] },
+      { release: "test-release", requirements: [] },
       {
-        release: "0.3.0",
+        release: "test-release",
         semantic_corpus_cell_ids: [],
         cells: [
           {
@@ -138,32 +134,16 @@ export function runValidatorSelfTests() {
           },
         ],
       },
+      "test-release",
     ).some((error) => error.includes("duplicate logical ID")),
     "support policy validation accepted a duplicate cell",
   );
-
-  const summary = validCISummaryFixture();
   requireSelfTest(
-    ciSummarySemanticErrors(summary).length === 0,
-    "CI summary semantic validation rejected the valid fixture",
-  );
-  const duplicateHome = structuredClone(summary);
-  duplicateHome.coverage.push({
-    ...duplicateHome.coverage[0],
-    coverage_id: "COV-FEDCBA9876543210",
-  });
-  requireSelfTest(
-    ciSummarySemanticErrors(duplicateHome).some((error) =>
-      error.includes("repeats ownership tuple"),
-    ),
-    "CI summary semantic validation accepted a duplicate proof home",
-  );
-  const unboundHash = structuredClone(summary);
-  unboundHash.obligations[0].artifact_hashes[0] = "c".repeat(64);
-  requireSelfTest(
-    ciSummarySemanticErrors(unboundHash).some((error) =>
-      error.includes("outside the summary"),
-    ),
-    "CI summary semantic validation accepted an unbound artifact hash",
+    supportPolicyErrors(
+      { release: "test-release", requirements: [] },
+      { release: "other-release", semantic_corpus_cell_ids: [], cells: [] },
+      "test-release",
+    ).some((error) => error.includes("Support matrix release must be test-release")),
+    "support policy validation accepted a mismatched release version",
   );
 }

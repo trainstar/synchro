@@ -1,3 +1,5 @@
+> Historical record. `RELEASE.md` and the 2026-09-14 release-process plan supersede this plan for release operation.
+
 | check-id | resolution | classification |
 |---|---|---|
 | MOD-032 | true-gap | uncovered-semantics: result-kind typing |

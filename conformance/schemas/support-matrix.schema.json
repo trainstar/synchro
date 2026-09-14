@@ -29,7 +29,7 @@
       "properties": {
         "selector": { "const": "current-stable" },
         "resolve_at": { "const": "release-candidate-start" },
-        "record_exact_versions_in": { "const": "rc-manifest" }
+        "record_exact_versions_in": { "const": "release-manifest.json" }
       }
     },
     "semanticCorpusCellIDs": {

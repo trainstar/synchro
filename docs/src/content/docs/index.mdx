@@ -17,16 +17,16 @@ Swift and Kotlin are first-class client engines. React Native is a bridge over t
 - Deterministic selective sync. Server-defined scopes, materialized membership, and explicit rebuilds make behavior predictable.
 - Portable seeds. Generate client-compatible SQLite seeds from PostgreSQL for faster first start and bundled shared data.
 
-## Tier 1 certification scope
+## Supported release scope
 
-- PostgreSQL 18 on the published `linux-x64` and `macos-arm64` extension architectures
+- PostgreSQL 18 on Ubuntu 24.04 Linux x64
 - Swift on iOS 16 and current stable iOS
 - Kotlin on Android API 24 and current stable Android API
 - React Native 0.83.x on current stable iOS and current stable Android
 
-Swift on macOS is Tier 2. It is built and tested in CI without certification.
+macOS hosts Apple toolchain and Swift validation. It is not a PostgreSQL support cell.
 
-This matrix states required policy. Candidate results come from generated evidence tied to exact artifacts. A new certified cell requires named production demand that justifies its recurring evidence cost. The current test inventory is not release certification. See the [Verification overview](/synchro/verification/overview/) and [Support policy](/synchro/reference/support-policy/).
+The support matrix states required policy. Testing evidence records executed checks. See [Testing Evidence Overview](/synchro/verification/overview/) and [Support policy](/synchro/reference/support-policy/).
 
 ## Start here by goal
 
@@ -49,7 +49,7 @@ The published spec is the release contract for the current implementation:
 - [Invariants](/synchro/spec/04-invariants/)
 - [Schema Evolution](/synchro/spec/05-schema-evolution/)
 - [Conformance Plan](/synchro/spec/06-conformance-plan/)
-- [Release Verification](/synchro/spec/07-release-verification/)
+- [Testing Evidence](/synchro/spec/07-release-verification/)
 
 ## Public release surfaces
 

@@ -1,5 +1,7 @@
 # R3.1 ENGINE-GAP proof-home resolution
 
+> Historical record. `RELEASE.md` and the 2026-09-14 release-process plan supersede this plan for release operation.
+
 | check-id | resolution | classification or proof |
 |---|---|---|
 | REF-001 | true-gap | uncovered-semantics: lifecycle recovery validation |

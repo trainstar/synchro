@@ -1,5 +1,7 @@
 # R3.1 modelrunner final deletion-contract table
 
+> Historical record. `RELEASE.md` and the 2026-09-14 release-process plan supersede this plan for release operation.
+
 **Count: 312 total rows.** `mutation-conservation`: 25 `cursor-monotonicity`: 32 `checksum-convergence`: 33 `scope-isolation`: 22 `no-state-forks`: 15 `proven-elsewhere`: 10 `oracle-internal`: 162 `ENGINE-GAP`: 13.
 
 The supplied review lists **312 total rows**, not 603. The merged table therefore contains 312 rows and reconciles to the supplied category counts, while 603 cannot be reconciled from these two inputs.
