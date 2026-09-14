@@ -559,24 +559,25 @@ jobs:
           test -f "$work/attach.env"
           SYNCHRO_ATTACH_DIR="$work/state"; export SYNCHRO_ATTACH_DIR
           set -a; . "$work/attach.env"; set +a
-          admin_password="$(cat "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")"
-          adapter_password="$(cat "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE")"
-          admin_url="$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$admin_password" <<'PY'
+          admin_url="$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE" <<'PY'
           import sys, urllib.parse
+          with open(sys.argv[3], encoding="utf-8") as stream:
+              password = stream.read().rstrip("\n")
           value = urllib.parse.urlsplit(sys.argv[1])
-          auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(sys.argv[3], safe="")
+          auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(password, safe="")
           print(urllib.parse.urlunsplit((value.scheme, auth + "@" + value.netloc, value.path, value.query, "")))
           PY
           )"
-          adapter_url="$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$adapter_password" <<'PY'
+          adapter_url="$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE" <<'PY'
           import sys, urllib.parse
+          with open(sys.argv[3], encoding="utf-8") as stream:
+              password = stream.read().rstrip("\n")
           value = urllib.parse.urlsplit(sys.argv[1])
-          auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(sys.argv[3], safe="")
+          auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(password, safe="")
           print(urllib.parse.urlunsplit((value.scheme, auth + "@" + value.netloc, value.path, value.query, "")))
           PY
           )"
-          unset admin_password adapter_password
-          DATABASE_URL="$admin_url" dist/release-provisioner/synchro-local-postgres prepare --repo-root "$GITHUB_WORKSPACE" --database-url "$admin_url"
+          DATABASE_URL="$admin_url" dist/release-provisioner/synchro-local-postgres prepare --repo-root "$GITHUB_WORKSPACE"
           DATABASE_URL="$adapter_url" JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")" LISTEN_ADDR=127.0.0.1:8091 \
             nohup "$work/adapter/synchrod-pg" > "$work/adapter.log" 2>&1 &
           echo "$!" > "$work/adapter.pid"
@@ -628,13 +629,11 @@ jobs:
     needs: [candidate, seal]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
-    environment: release-fixtures
     permissions:
       actions: read
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - cell: SUP-IOS-MIN-001
@@ -667,6 +666,14 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: brew
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
       - name: Download sealed release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -674,20 +681,6 @@ jobs:
           run-id: ${{ needs.seal.outputs.artifact_run_id }}
           github-token: ${{ github.token }}
           path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
-
-      - name: Download provisioner
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-provisioner
-          run-id: ${{ needs.seal.outputs.artifact_run_id }}
-          github-token: ${{ github.token }}
-          path: dist/release-provisioner
-
-      - name: Configure fixture SSH identity
-        env:
-          RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
-          RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
-        run: scripts/ci/release-linux-fixture.sh setup-ssh "$RUNNER_TEMP/release-fixture-ssh"
 
       - name: Select required Xcode and simulator
         env:
@@ -709,32 +702,47 @@ jobs:
           xcrun simctl bootstatus "$udid" -b
           echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
 
-      - name: Run Apple package cell through Linux fixture
-        env:
-          RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
-          RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
-          RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
-          RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
+      - name: Start local Apple fixture
         run: |
           set -euo pipefail
-          scripts/ci/release-linux-fixture.sh \
-            --known-hosts "$RUNNER_TEMP/release-fixture-ssh/known-hosts" \
-            --key "$RUNNER_TEMP/release-fixture-ssh/private-key" \
-            --user "$RELEASE_FIXTURE_SSH_USER" \
-            --host "$RELEASE_FIXTURE_SSH_HOST" \
-            --remote-root "$RELEASE_FIXTURE_REMOTE_ROOT" \
-            --pg18-bin-dir "$RELEASE_FIXTURE_PG18_BIN_DIR" \
-            --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
-            --version "${{ needs.candidate.outputs.version }}" \
-            --provisioner "dist/release-provisioner/synchro-local-postgres" \
-            --cell "${{ matrix.cell }}" -- \
-            make release-run-support-cell \
-              VERSION="${{ needs.candidate.outputs.version }}" \
-              RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
-              RELEASE_EVIDENCE_DIR="dist/package-evidence" \
-              RELEASE_CONSUMER_DIR="dist/release-consumer" \
-              SUPPORT_CELL_ID="${{ matrix.cell }}" \
-              SUPPORT_PLATFORM_VERSION="${{ matrix.support }}"
+          make local-postgres-start
+          attach="$GITHUB_WORKSPACE/.ignore/r2/tmp/local-postgres/attach.env"
+          SYNCHRO_ATTACH_DIR="$(dirname "$attach")"
+          export SYNCHRO_ATTACH_DIR
+          set -a
+          # shellcheck disable=SC1090
+          . "$attach"
+          set +a
+          ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          SYNCHRO_TEST_JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
+          SYNCHRO_TEST_URL=http://127.0.0.1:8091
+          WARM_CONNECT_ENV_FILE="$attach"
+          export ADAPTER_TEST_URL SYNCHRO_TEST_JWT_SECRET SYNCHRO_TEST_URL WARM_CONNECT_ENV_FILE
+          echo "::add-mask::$ADAPTER_TEST_URL"
+          echo "::add-mask::$SYNCHRO_TEST_JWT_SECRET"
+          {
+            echo "ADAPTER_TEST_URL=$ADAPTER_TEST_URL"
+            echo "SYNCHRO_TEST_JWT_SECRET=$SYNCHRO_TEST_JWT_SECRET"
+            echo "SYNCHRO_TEST_URL=$SYNCHRO_TEST_URL"
+            echo "WARM_CONNECT_ENV_FILE=$WARM_CONNECT_ENV_FILE"
+          } >> "$GITHUB_ENV"
+          make synchrod-pg-test-start
+
+      - name: Run Apple package lifecycle
+        run: |
+          make release-run-support-cell \
+            VERSION="${{ needs.candidate.outputs.version }}" \
+            RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
+            RELEASE_EVIDENCE_DIR=dist/package-evidence \
+            RELEASE_CONSUMER_DIR=dist/release-consumer \
+            SUPPORT_CELL_ID="${{ matrix.cell }}" \
+            SUPPORT_PLATFORM_VERSION="${{ matrix.support }}"
+
+      - name: Stop local Apple fixture
+        if: always()
+        run: |
+          make synchrod-pg-test-stop
+          make local-postgres-stop
 
       - name: Delete simulator
         if: always() && env.IOS_SIMULATOR_UDID != ''

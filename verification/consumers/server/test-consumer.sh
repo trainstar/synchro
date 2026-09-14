@@ -65,16 +65,16 @@ for _ in $(seq 1 90); do test -f "$work_dir/attach.env" && break; sleep 1; done
 test -f "$work_dir/attach.env"
 SYNCHRO_ATTACH_DIR=$work_dir/state
 export SYNCHRO_ATTACH_DIR
+# shellcheck disable=SC1091
 . "$work_dir/attach.env"
 attach_run_id=$SYNCHRO_CONFORMANCE_ATTACH_RUN_ID
 
-admin_password=$(cat "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")
-adapter_password=$(cat "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE")
-make_url() { python3 -c 'import sys, urllib.parse; base, user, credential = sys.argv[1:]; value=urllib.parse.urlsplit(base); print(urllib.parse.urlunsplit((value.scheme, urllib.parse.quote(user,safe="")+":"+urllib.parse.quote(credential,safe="")+"@"+value.netloc, value.path, value.query, "")))' "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$1" "$2"; }
-admin_url=$(make_url "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$admin_password")
-adapter_url=$(make_url "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$adapter_password")
-unset admin_password adapter_password
-DATABASE_URL="$admin_url" "$provisioner" prepare --repo-root "$repo_root" --database-url "$admin_url"
+make_url() {
+  python3 -c 'import pathlib, sys, urllib.parse; base, user, path = sys.argv[1:]; credential = pathlib.Path(path).read_text().rstrip("\n"); value=urllib.parse.urlsplit(base); print(urllib.parse.urlunsplit((value.scheme, urllib.parse.quote(user,safe="")+":"+urllib.parse.quote(credential,safe="")+"@"+value.netloc, value.path, value.query, "")))' "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$1" "$2"
+}
+admin_url=$(make_url "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")
+adapter_url=$(make_url "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE")
+DATABASE_URL="$admin_url" "$provisioner" prepare --repo-root "$repo_root"
 
 start_adapter() {
   DATABASE_URL="$adapter_url" JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")" LISTEN_ADDR="${listen_url#http://}" "$adapter" >"$work_dir/adapter.log" 2>&1 &

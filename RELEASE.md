@@ -14,9 +14,6 @@ The `publish` job performs every tag and public operation after approval.
 
 Configure protected `dev` and release tags.
 
-Configure `release-fixtures` without required reviewers.
-Store only the Linux fixture SSH secrets in that environment.
-
 Configure `release-signing` without required reviewers.
 Store only `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` in that environment.
 
@@ -27,9 +24,10 @@ Configure npm trusted publishing for `.github/workflows/release.yml` and the `re
 Do not configure an npm publication token.
 
 The `publish` job is the only job that uses the protected `release` environment.
-Do not configure approval rules on `release-signing` or `release-fixtures`.
+Do not configure approval rules on `release-signing`.
 
-Configure the required Linux fixture host and mobile runtimes.
+Use the required GitHub-hosted macOS and Ubuntu runners.
+Install the required mobile runtimes through the workflow.
 
 Do not continue when a required control, credential, or runtime is unavailable.
 
@@ -60,6 +58,17 @@ React Native 0.83.x supports current iOS and Android.
 
 macOS hosts Apple and Swift validation. It is not a PostgreSQL support cell.
 
+Candidate Apple tests use PostgreSQL 18 on their GitHub-hosted macOS runners.
+
+Release Apple package cells use the same internal macOS PostgreSQL fixture.
+They test exact sealed client artifacts through the source adapter.
+The macOS PostgreSQL fixture is not a supported server output.
+
+The Ubuntu server package cell verifies the exact sealed Linux server artifacts.
+
+Android and React Native Android run against Linux PostgreSQL on Ubuntu.
+They provide representative client-to-Linux end-to-end proof.
+
 The Go module tag is `api/go/v<version>` at the same commit as `v<version>`.
 
 Swift uses the root Git package. CocoaPods trunk publication does not occur.
@@ -86,6 +95,8 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 Candidate CI owns source correctness. Release does not run completed source suites again.
 
 Release builds distributions once. Package checks and publication use the identical sealed payloads.
+
+Candidate Swift and React Native iOS jobs use independent host-local PostgreSQL instances.
 
 The `publish` job waits for `package-gate` and the protected `release` approval.
 No attestation, tag, release, or registry write occurs before that job starts.
