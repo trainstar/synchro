@@ -172,6 +172,83 @@ stop_process() {
   printf '%s\n' "$label process $pid did not stop" >&2
   return 1
 }
+confirm_process_shutdown() {
+  label=$1
+  file=$2
+  expected=$3
+  [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' "$label pid file is missing or unsafe" >&2; return 1; }
+  pid=$(cat "$file")
+  case "$pid" in *[!0-9]*|'') printf '%s\n' "$label pid is invalid" >&2; return 1 ;; esac
+  for unused in $(seq 1 30); do
+    kill -0 "$pid" >/dev/null 2>&1 || return 0
+    [ -r "/proc/$pid/cmdline" ] || { printf '%s\n' "cannot verify $label process $pid" >&2; return 1; }
+    process_command=$(tr '\000' '\n' < "/proc/$pid/cmdline")
+    case "$process_command" in
+      *"$expected"*) ;;
+      *) printf '%s\n' "$label pid $pid does not belong to this fixture" >&2; return 1 ;;
+    esac
+    sleep 1
+  done
+  printf '%s\n' "$label process $pid did not stop" >&2
+  return 1
+}
+read_lifecycle_state() {
+  python3 - "$run/state/lifecycle-state.json" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+directory = os.path.dirname(path)
+try:
+    directory_info = os.lstat(directory)
+except FileNotFoundError:
+    raise SystemExit(2)
+if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode) or stat.S_IMODE(directory_info.st_mode) & 0o077:
+    raise SystemExit("lifecycle state directory is unsafe")
+try:
+    info = os.lstat(path)
+except FileNotFoundError:
+    raise SystemExit(2)
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+    raise SystemExit("lifecycle state file is unsafe")
+if info.st_size > 65536:
+    raise SystemExit("lifecycle state file is too large")
+
+def object_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate lifecycle state member")
+        result[key] = value
+    return result
+
+try:
+    with open(path, "r", encoding="utf-8") as stream:
+        value = json.load(stream, object_pairs_hook=object_pairs)
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+    raise SystemExit(f"lifecycle state is invalid: {error}")
+if not isinstance(value, dict) or set(value) != {"run_id", "control_address", "destroyed"}:
+    raise SystemExit("lifecycle state members are invalid")
+run_id = value["run_id"]
+control_address = value["control_address"]
+destroyed = value["destroyed"]
+if not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+    raise SystemExit("lifecycle state run ID is invalid")
+if type(destroyed) is not bool or not isinstance(control_address, str):
+    raise SystemExit("lifecycle state values are invalid")
+if destroyed:
+    if control_address:
+        raise SystemExit("destroyed lifecycle state has a control address")
+else:
+    match = re.fullmatch(r"127[.]0[.]0[.]1:([1-9][0-9]{0,4})", control_address)
+    if match is None or int(match.group(1)) > 65535:
+        raise SystemExit("lifecycle state control address is invalid")
+print(run_id, "true" if destroyed else "false")
+PY
+}
 case "$mode" in
   pre-attach)
     [ "$run_id" = - ] || exit 1
@@ -185,12 +262,78 @@ case "$mode" in
     ;;
   *) exit 1 ;;
 esac
-if [ "$mode" = attached ]; then
-  "$run/provisioner" lifecycle --state-dir "$run/state" destroy "$run_id"
+
+if lifecycle_value=$(read_lifecycle_state); then
+  lifecycle_status=valid
+  lifecycle_run_id=${lifecycle_value%% *}
+  lifecycle_destroyed=${lifecycle_value#* }
+else
+  lifecycle_result=$?
+  case "$lifecycle_result" in
+    2) lifecycle_status=absent ;;
+    *) lifecycle_status=invalid ;;
+  esac
 fi
-stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
-stop_process provisioner "$run/provisioner.pid" "$run/provisioner"
-rm -rf -- "$run"
+provisioner_started=0
+provisioner_marker_invalid=0
+if [ -e "$run/provisioner.started" ] || [ -L "$run/provisioner.started" ]; then
+  provisioner_started=1
+  if [ ! -f "$run/provisioner.started" ] || [ -L "$run/provisioner.started" ]; then
+    provisioner_marker_invalid=1
+  fi
+fi
+if [ -e "$run/provisioner.pid" ] || [ -L "$run/provisioner.pid" ]; then
+  provisioner_started=1
+fi
+
+case "$lifecycle_status" in
+  valid)
+    if [ "$mode" = attached ] && [ "$lifecycle_run_id" != "$run_id" ]; then
+      printf '%s\n' "remote cleanup run identity does not match lifecycle state" >&2
+      exit 1
+    fi
+    stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
+    if [ "$lifecycle_destroyed" = false ]; then
+      "$run/provisioner" lifecycle --state-dir "$run/state" destroy "$lifecycle_run_id"
+      lifecycle_value=$(read_lifecycle_state)
+      [ "${lifecycle_value%% *}" = "$lifecycle_run_id" ] && [ "${lifecycle_value#* }" = true ] || {
+        printf '%s\n' "lifecycle destroy did not persist destroyed state" >&2
+        exit 1
+      }
+    fi
+    confirm_process_shutdown provisioner "$run/provisioner.pid" "$run/provisioner"
+    rm -rf -- "$run"
+    ;;
+  absent)
+    [ "$mode" = pre-attach ] || { printf '%s\n' "attached cleanup lacks lifecycle state" >&2; exit 1; }
+    if [ "$provisioner_started" -ne 0 ]; then
+      stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
+      if [ -e "$run/provisioner.pid" ] || [ -L "$run/provisioner.pid" ]; then
+        stop_process provisioner "$run/provisioner.pid" "$run/provisioner"
+      fi
+      if [ "$provisioner_marker_invalid" -ne 0 ]; then
+        printf '%s\n' "provisioner start marker is unsafe" >&2
+      else
+        printf '%s\n' "provisioner started without lifecycle state" >&2
+      fi
+      exit 1
+    fi
+    [ ! -e "$run/adapter.pid" ] && [ ! -L "$run/adapter.pid" ] || {
+      stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
+      printf '%s\n' "adapter state exists before provisioner lifecycle state" >&2
+      exit 1
+    }
+    rm -rf -- "$run"
+    ;;
+  invalid)
+    stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
+    if [ -e "$run/provisioner.pid" ] || [ -L "$run/provisioner.pid" ]; then
+      stop_process provisioner "$run/provisioner.pid" "$run/provisioner"
+    fi
+    printf '%s\n' "remote lifecycle state is invalid; retained fixture for operator recovery" >&2
+    exit 1
+    ;;
+esac
 REMOTE
 }
 
@@ -310,6 +453,8 @@ s.close()
 PY
 )
 printf '%s\n' "$http_port" > "$run/http.port"
+: > "$run/provisioner.started"
+chmod 600 "$run/provisioner.started"
 nohup "$run/provisioner" start \
   --pg18-bin-dir "$pgbin" \
   --extension-artifact "$run/extension-bundle" \
@@ -320,9 +465,56 @@ nohup "$run/provisioner" start \
   --attach-environment-file "$run/attach.env" \
   --lifecycle-command-json "$lifecycle_json" \
   >"$run/provisioner.log" 2>&1 &
-printf '%s\n' "$!" > "$run/provisioner.pid"
-for unused in $(seq 1 120); do [ -f "$run/attach.env" ] && break; sleep 1; done
-[ -f "$run/attach.env" ]
+provisioner_pid=$!
+printf '%s\n' "$provisioner_pid" > "$run/provisioner.pid"
+REMOTE
+
+ssh_command "$ssh_target" sh -s -- "$remote_run" <<'REMOTE'
+set -eu
+run=$1
+[ ! -L "$run" ] && [ "$(cd "$run" && pwd -P)" = "$run" ] || exit 1
+[ -f "$run/provisioner.pid" ] && [ ! -L "$run/provisioner.pid" ] || { printf '%s\n' "provisioner pid file is missing or unsafe" >&2; exit 1; }
+provisioner_pid=$(cat "$run/provisioner.pid")
+case "$provisioner_pid" in *[!0-9]*|'') printf '%s\n' "provisioner pid is invalid" >&2; exit 1 ;; esac
+provisioner_diagnostics() {
+  if [ -f "$run/provisioner.log" ] && [ ! -L "$run/provisioner.log" ]; then
+    tail -c 16384 -- "$run/provisioner.log" >&2
+  else
+    printf '%s\n' "provisioner log is missing or unsafe" >&2
+  fi
+}
+for unused in $(seq 1 3600); do
+  if ! kill -0 "$provisioner_pid" >/dev/null 2>&1; then
+    printf '%s\n' "provisioner exited before attach environment became available" >&2
+    provisioner_diagnostics
+    exit 1
+  fi
+  if [ ! -r "/proc/$provisioner_pid/cmdline" ]; then
+    printf '%s\n' "provisioner process identity is unreadable" >&2
+    provisioner_diagnostics
+    exit 1
+  fi
+  if ! tr '\000' '\n' < "/proc/$provisioner_pid/cmdline" | grep -Fqx -- "$run/provisioner"; then
+    printf '%s\n' "provisioner process identity does not match the owned executable" >&2
+    provisioner_diagnostics
+    exit 1
+  fi
+  [ -f "$run/attach.env" ] && exit 0
+  sleep 1
+done
+printf '%s\n' "provisioner attach environment was unavailable after 3600 seconds" >&2
+provisioner_diagnostics
+exit 1
+REMOTE
+
+ssh_command "$ssh_target" sh -s -- "$remote_run" <<'REMOTE'
+set -eu
+run=$1
+[ ! -L "$run" ] && [ "$(cd "$run" && pwd -P)" = "$run" ] || exit 1
+[ -f "$run/attach.env" ] && [ ! -L "$run/attach.env" ] || exit 1
+http_port=$(cat "$run/http.port")
+case "$http_port" in *[!0-9]*|'') printf '%s\n' "remote HTTP port is invalid" >&2; exit 1 ;; esac
+[ "$http_port" -ge 1 ] && [ "$http_port" -le 65535 ] || { printf '%s\n' "remote HTTP port is invalid" >&2; exit 1; }
 SYNCHRO_ATTACH_DIR="$run/state"
 export SYNCHRO_ATTACH_DIR
 . "$run/attach.env"

@@ -230,6 +230,7 @@ jobs:
     if: github.event_name == 'push'
     needs: candidate-server
     runs-on: macos-15
+    timeout-minutes: 240
     environment: release-fixtures
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -359,8 +360,9 @@ jobs:
   candidate-rn-ios:
     name: candidate React Native iOS
     if: github.event_name == 'push'
-    needs: candidate-server
+    needs: [candidate-server, candidate-swift]
     runs-on: macos-15
+    timeout-minutes: 240
     environment: release-fixtures
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

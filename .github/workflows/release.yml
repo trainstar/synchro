@@ -627,12 +627,14 @@ jobs:
     name: package ${{ matrix.cell }}
     needs: [candidate, seal]
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
     environment: release-fixtures
     permissions:
       actions: read
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - cell: SUP-IOS-MIN-001

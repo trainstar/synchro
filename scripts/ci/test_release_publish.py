@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -420,6 +421,268 @@ esac
             self.assertIn("retained /srv/synchro/run-123-1-candidate-swift-CI-SWIFT", result.stderr)
             self.assertIn("pre-attach", ssh_log.read_text(encoding="utf-8").splitlines()[2])
             self.assertTrue(os.access(provisioner, os.X_OK))
+
+    def run_pre_attach_cleanup_scenario(
+        self,
+        root: Path,
+        scenario: str,
+    ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        ssh_count = root / "ssh-count"
+        lifecycle_log = root / "lifecycle-log"
+        fake_ssh = fake_bin / "ssh"
+        fake_ssh.write_text(
+            """#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -i|-o) shift 2 ;;
+    *) break ;;
+  esac
+done
+[ "$#" -gt 0 ]
+shift
+count=0
+[ ! -f "$FAKE_SSH_COUNT" ] || count=$(cat "$FAKE_SSH_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FAKE_SSH_COUNT"
+case "$count" in
+  1)
+    "$@"
+    ;;
+  2)
+    case "$FAKE_CLEANUP_SCENARIO" in
+      safe-pre-start)
+        cat >/dev/null
+        ;;
+      provisioner-early-exit|provisioner-pid-reuse)
+        "$@"
+        ;;
+      lifecycle-state|unconfirmed-start)
+        run=
+        for argument in "$@"; do run=$argument; done
+        "$@"
+        cat > "$run/provisioner" <<'PROVISIONER'
+#!/bin/sh
+set -eu
+[ "$1" = lifecycle ] && [ "$2" = --state-dir ] && [ "$4" = destroy ]
+printf '%s\n' "$*" >> "$FAKE_LIFECYCLE_LOG"
+printf '{"run_id":"%s","control_address":"","destroyed":true}\n' "$5" > "$3/lifecycle-state.json"
+chmod 600 "$3/lifecycle-state.json"
+PROVISIONER
+        chmod 700 "$run/provisioner"
+        : > "$run/provisioner.started"
+        chmod 600 "$run/provisioner.started"
+        printf '%s\n' 99999999 > "$run/provisioner.pid"
+        if [ "$FAKE_CLEANUP_SCENARIO" = lifecycle-state ]; then
+          mkdir -m 700 "$run/state"
+          printf '%s\n' '{"run_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","control_address":"127.0.0.1:54321","destroyed":false}' > "$run/state/lifecycle-state.json"
+          chmod 600 "$run/state/lifecycle-state.json"
+        fi
+        ;;
+      *) exit 98 ;;
+    esac
+    case "$FAKE_CLEANUP_SCENARIO" in
+      provisioner-early-exit|provisioner-pid-reuse) ;;
+      *) exit 41 ;;
+    esac
+    ;;
+  3)
+    case "$FAKE_CLEANUP_SCENARIO" in
+      provisioner-early-exit|provisioner-pid-reuse)
+      cat >/dev/null
+      after_separator=0
+      run=
+      for argument in "$@"; do
+        if [ "$after_separator" -eq 1 ]; then
+          run=$argument
+          break
+        fi
+        [ "$argument" = -- ] && after_separator=1
+      done
+      [ -n "$run" ]
+      : > "$run/provisioner.started"
+      chmod 600 "$run/provisioner.started"
+      if [ "$FAKE_CLEANUP_SCENARIO" = provisioner-early-exit ]; then
+        printf '%s\n' 99999999 > "$run/provisioner.pid"
+      else
+        printf '%s\n' "$PPID" > "$run/provisioner.pid"
+      fi
+      {
+        printf '%16384s' '' | tr ' ' x
+        printf '%s\n' "fixture provisioner failed before attach"
+      } > "$run/provisioner.log"
+      ;;
+    *)
+      "$@"
+      ;;
+    esac
+    ;;
+  4|5)
+    case "$FAKE_CLEANUP_SCENARIO" in
+      provisioner-early-exit|provisioner-pid-reuse) ;;
+      *) exit 99 ;;
+    esac
+    "$@"
+    ;;
+  *) exit 99 ;;
+esac
+""",
+            encoding="utf-8",
+        )
+        fake_ssh.chmod(0o700)
+
+        release = root / "release/artifacts"
+        release.mkdir(parents=True)
+        for name in (
+            "synchro-pg-pg18-ubuntu24.04-linux-x64-1.2.3.tar.gz",
+            "synchrod-pg-linux-x64-1.2.3",
+            "synchro-seed-linux-x64-1.2.3",
+        ):
+            (release / name).write_bytes(name.encode("ascii"))
+        provisioner = root / "synchro-local-postgres"
+        provisioner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        ssh_directory = root / "ssh"
+        remote_root = (root / "remote").resolve()
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{fake_bin}:{environment['PATH']}",
+                "FAKE_SSH_COUNT": str(ssh_count),
+                "FAKE_CLEANUP_SCENARIO": scenario,
+                "FAKE_LIFECYCLE_LOG": str(lifecycle_log),
+                "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_JOB": "candidate-swift",
+                "GITHUB_WORKSPACE": str(ROOT),
+                "RUNNER_TEMP": str(root),
+                "RELEASE_FIXTURE_SSH_PRIVATE_KEY": "fixture-private-key",
+                "RELEASE_FIXTURE_SSH_KNOWN_HOSTS": "fixture.example ssh-ed25519 AAAAfixture",
+            }
+        )
+        setup = subprocess.run(
+            [
+                "sh",
+                str(ROOT / "scripts/ci/release-linux-fixture.sh"),
+                "setup-ssh",
+                str(ssh_directory),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        result = subprocess.run(
+            [
+                "sh",
+                str(ROOT / "scripts/ci/release-linux-fixture.sh"),
+                "--known-hosts",
+                str(ssh_directory / "known-hosts"),
+                "--key",
+                str(ssh_directory / "private-key"),
+                "--user",
+                "fixture",
+                "--host",
+                "fixture.example",
+                "--remote-root",
+                str(remote_root),
+                "--pg18-bin-dir",
+                "/usr/lib/postgresql/18/bin",
+                "--release-dir",
+                str(release.parent),
+                "--version",
+                "1.2.3",
+                "--provisioner",
+                str(provisioner),
+                "--cell",
+                "CI-SWIFT",
+                "--",
+                "true",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        remote_run = remote_root / "run-123-1-candidate-swift-CI-SWIFT"
+        return result, remote_run, lifecycle_log
+
+    def test_pre_attach_cleanup_removes_run_before_provisioner_start(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, remote_run, _ = self.run_pre_attach_cleanup_scenario(
+                Path(directory),
+                "safe-pre-start",
+            )
+            self.assertEqual(result.returncode, 41)
+            self.assertFalse(remote_run.exists())
+            self.assertNotIn("remote fixture cleanup failed", result.stderr)
+
+    def test_pre_attach_cleanup_destroys_valid_lifecycle_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, remote_run, lifecycle_log = self.run_pre_attach_cleanup_scenario(
+                Path(directory),
+                "lifecycle-state",
+            )
+            self.assertEqual(result.returncode, 41)
+            self.assertFalse(remote_run.exists())
+            self.assertIn(
+                "lifecycle --state-dir "
+                + str(remote_run / "state")
+                + " destroy bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                lifecycle_log.read_text(encoding="utf-8"),
+            )
+
+    def test_pre_attach_cleanup_retains_unconfirmed_started_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, remote_run, _ = self.run_pre_attach_cleanup_scenario(
+                Path(directory),
+                "unconfirmed-start",
+            )
+            self.assertEqual(result.returncode, 41)
+            self.assertTrue(remote_run.is_dir())
+            self.assertIn("provisioner started without lifecycle state", result.stderr)
+            self.assertIn("retained " + str(remote_run), result.stderr)
+
+    def test_attach_wait_fails_immediately_when_provisioner_exits(self) -> None:
+        cases = (
+            (
+                "provisioner-early-exit",
+                "provisioner exited before attach environment became available",
+            ),
+            (
+                "provisioner-pid-reuse",
+                "provisioner process identity",
+            ),
+        )
+        for scenario, expected_error in cases:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                started = time.monotonic()
+                result, remote_run, _ = self.run_pre_attach_cleanup_scenario(
+                    Path(directory),
+                    scenario,
+                )
+                duration = time.monotonic() - started
+                self.assertEqual(result.returncode, 1)
+                self.assertLess(duration, 10)
+                self.assertIn(expected_error, result.stderr)
+                self.assertIn("fixture provisioner failed before attach", result.stderr)
+                self.assertLess(len(result.stderr.encode("utf-8")), 18000)
+                self.assertTrue(remote_run.is_dir())
+                self.assertIn("retained " + str(remote_run), result.stderr)
+
+    def test_fixture_jobs_allow_serialized_installation_lock_wait(self) -> None:
+        fixture = (ROOT / "scripts/ci/release-linux-fixture.sh").read_text(encoding="utf-8")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("for unused in $(seq 1 3600)", fixture)
+        self.assertNotIn("for unused in $(seq 1 120); do [ -f \"$run/attach.env\" ]", fixture)
+        self.assertIn("needs: [candidate-server, candidate-swift]", ci)
+        self.assertGreaterEqual(ci.count("timeout-minutes: 240"), 2)
+        package_apple = release[release.index("\n  package-apple:"):release.index("\n  package-gate:")]
+        self.assertIn("timeout-minutes: 240", package_apple)
+        self.assertIn("max-parallel: 1", package_apple)
 
     def test_release_has_one_post_package_approval_before_public_side_effects(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
