@@ -118,6 +118,7 @@ remote_run="$remote_root/$run_name"
 work_dir=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/synchro-linux-fixture.XXXXXX")
 forward_pid=
 remote_created=0
+launch_dispatched=0
 run_id=
 
 ssh_target="$ssh_user@$ssh_host"
@@ -128,71 +129,264 @@ scp_command() {
   scp -i "$key_file" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts" "$@"
 }
 
+pidfd_helper_base64=$(base64 <<'PY' | tr -d '\n'
+import os
+import re
+import select
+import signal
+import stat
+import sys
+import time
+
+RECORD = re.compile(rb"([1-9][0-9]*) ([1-9][0-9]*)\n?")
+DIAGNOSTIC_LIMIT = 16384
+
+
+class IdentityError(Exception):
+    pass
+
+
+def safe_regular(path: str, maximum: int) -> os.stat_result:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as error:
+        raise error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+        raise IdentityError(f"unsafe file: {path}")
+    if info.st_size > maximum:
+        raise IdentityError(f"oversized file: {path}")
+    return info
+
+
+def read_start_time(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as stream:
+            data = stream.read(4097)
+    except FileNotFoundError as error:
+        raise ProcessLookupError(pid) from error
+    except OSError as error:
+        raise IdentityError(f"process stat is unreadable: {error}") from error
+    if len(data) > 4096:
+        raise IdentityError("process stat is oversized")
+    end = data.rfind(b")")
+    fields = data[end + 2 :].split() if end >= 0 else []
+    if len(fields) <= 19 or not fields[19].isdigit():
+        raise IdentityError("process start time is invalid")
+    return int(fields[19])
+
+
+def read_executable(pid: int) -> str:
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except FileNotFoundError as error:
+        raise ProcessLookupError(pid) from error
+    except OSError as error:
+        raise IdentityError(f"process executable is unreadable: {error}") from error
+
+
+def open_pidfd(pid: int) -> int:
+    try:
+        return os.pidfd_open(pid, 0)
+    except ProcessLookupError:
+        raise
+    except (AttributeError, OSError) as error:
+        raise IdentityError(f"pidfd is unavailable: {error}") from error
+
+
+def validate_owned_process(pid: int, start_time: int, expected: str) -> int | None:
+    try:
+        descriptor = open_pidfd(pid)
+    except ProcessLookupError:
+        return None
+    try:
+        try:
+            actual_start = read_start_time(pid)
+            actual_executable = read_executable(pid)
+        except ProcessLookupError:
+            os.close(descriptor)
+            return None
+        if actual_start != start_time:
+            raise IdentityError("process start time does not match the owned process")
+        if actual_executable != expected:
+            raise IdentityError("process executable does not match the owned process")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_record(path: str, required: bool) -> tuple[int, int] | None:
+    try:
+        safe_regular(path, 128)
+    except FileNotFoundError:
+        if required:
+            raise IdentityError(f"process identity is missing: {path}")
+        return None
+    try:
+        with open(path, "rb") as stream:
+            data = stream.read(129)
+    except OSError as error:
+        raise IdentityError(f"process identity is unreadable: {error}") from error
+    match = RECORD.fullmatch(data)
+    if match is None:
+        raise IdentityError("process identity record is invalid")
+    return int(match.group(1)), int(match.group(2))
+
+
+def write_record(pid: int, path: str, expected: str) -> None:
+    try:
+        descriptor = open_pidfd(pid)
+    except ProcessLookupError as error:
+        raise IdentityError("process exited before its identity was recorded") from error
+    try:
+        start_time = read_start_time(pid)
+        poller = select.poll()
+        poller.register(descriptor, select.POLLIN)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                actual_executable = read_executable(pid)
+            except ProcessLookupError as error:
+                raise IdentityError("process exited before its identity was recorded") from error
+            if read_start_time(pid) != start_time:
+                raise IdentityError("process identity changed before it was recorded")
+            if actual_executable == expected:
+                break
+            if time.monotonic() >= deadline or poller.poll(10):
+                raise IdentityError("process executable did not become the owned executable")
+            time.sleep(0.01)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        output = os.open(path, flags, 0o600)
+        try:
+            os.write(output, f"{pid} {start_time}\n".encode("ascii"))
+            os.fsync(output)
+        finally:
+            os.close(output)
+    finally:
+        os.close(descriptor)
+
+
+def diagnostics(path: str) -> None:
+    try:
+        info = safe_regular(path, 64 << 20)
+        with open(path, "rb") as stream:
+            stream.seek(max(0, info.st_size - DIAGNOSTIC_LIMIT))
+            data = stream.read(DIAGNOSTIC_LIMIT)
+    except (FileNotFoundError, IdentityError, OSError):
+        print("provisioner log is missing or unsafe", file=sys.stderr)
+        return
+    sys.stderr.buffer.write(data)
+    if data and not data.endswith(b"\n"):
+        sys.stderr.buffer.write(b"\n")
+
+
+def wait_for_attach(record: str, expected: str, attach: str, log: str, timeout: int) -> None:
+    identity = read_record(record, True)
+    assert identity is not None
+    descriptor = validate_owned_process(identity[0], identity[1], expected)
+    if descriptor is None:
+        print("provisioner exited before attach environment became available", file=sys.stderr)
+        diagnostics(log)
+        raise SystemExit(1)
+    poller = select.poll()
+    poller.register(descriptor, select.POLLIN)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                info = os.lstat(attach)
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                    raise IdentityError("attach environment is unsafe")
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print(f"provisioner attach environment was unavailable after {timeout} seconds", file=sys.stderr)
+                diagnostics(log)
+                raise SystemExit(1)
+            if poller.poll(min(1000, max(1, int(remaining * 1000)))):
+                print("provisioner exited before attach environment became available", file=sys.stderr)
+                diagnostics(log)
+                raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+
+
+def stop_owned(record: str, expected: str, timeout: int, required: bool) -> None:
+    identity = read_record(record, required)
+    if identity is None:
+        return
+    descriptor = validate_owned_process(identity[0], identity[1], expected)
+    if descriptor is None:
+        return
+    try:
+        try:
+            signal.pidfd_send_signal(descriptor, signal.SIGTERM, None, 0)
+        except ProcessLookupError:
+            return
+        except (AttributeError, OSError) as error:
+            raise IdentityError(f"pidfd signal failed: {error}") from error
+        poller = select.poll()
+        poller.register(descriptor, select.POLLIN)
+        if not poller.poll(timeout * 1000):
+            raise IdentityError("owned process did not stop")
+    finally:
+        os.close(descriptor)
+
+
+def main() -> None:
+    operation = sys.argv[1]
+    if operation == "record" and len(sys.argv) == 5:
+        write_record(int(sys.argv[2]), sys.argv[3], sys.argv[4])
+    elif operation == "wait" and len(sys.argv) == 7:
+        wait_for_attach(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6]))
+    elif operation == "stop" and len(sys.argv) == 6:
+        stop_owned(sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5] == "required")
+    else:
+        raise IdentityError("pidfd helper arguments are invalid")
+
+
+try:
+    main()
+except (IdentityError, ProcessLookupError, ValueError) as error:
+    print(f"pidfd helper: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+)
+
 remote_cleanup() {
   if [ -n "$run_id" ]; then
     cleanup_mode=attached
     cleanup_run_id=$run_id
-  else
+  elif [ "$launch_dispatched" -ne 0 ]; then
     cleanup_mode=pre-attach
     cleanup_run_id=-
+  else
+    cleanup_mode=pre-launch
+    cleanup_run_id=-
   fi
-  ssh_command "$ssh_target" sh -s -- "$remote_root" "$remote_run" "$run_name" "$cleanup_mode" "$cleanup_run_id" <<'REMOTE'
+  ssh_command "$ssh_target" sh -s -- "$remote_root" "$remote_run" "$run_name" "$cleanup_mode" "$cleanup_run_id" "$pidfd_helper_base64" <<'REMOTE'
 set -eu
 root=$1
 run=$2
 name=$3
 mode=$4
 run_id=$5
+pidfd_helper=$6
 [ "$run" = "$root/$name" ] || exit 1
 [ "$(dirname "$run")" = "$root" ] || exit 1
 [ "$(basename "$run")" = "$name" ] || exit 1
 [ -d "$root" ] && [ ! -L "$root" ] && [ "$(cd "$root" && pwd -P)" = "$root" ] || exit 1
 [ ! -e "$run" ] && exit 0
 [ -d "$run" ] && [ ! -L "$run" ] && [ "$(cd "$run" && pwd -P)" = "$run" ] || exit 1
-stop_process() {
-  label=$1
-  file=$2
-  expected=$3
-  [ -e "$file" ] || return 0
-  [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' "$label pid file is unsafe" >&2; return 1; }
-  pid=$(cat "$file")
-  case "$pid" in *[!0-9]*|'') printf '%s\n' "$label pid is invalid" >&2; return 1 ;; esac
-  kill -0 "$pid" >/dev/null 2>&1 || return 0
-  [ -r "/proc/$pid/cmdline" ] || { printf '%s\n' "cannot verify $label process $pid" >&2; return 1; }
-  process_command=$(tr '\000' '\n' < "/proc/$pid/cmdline")
-  case "$process_command" in
-    *"$expected"*) ;;
-    *) printf '%s\n' "$label pid $pid does not belong to this fixture" >&2; return 1 ;;
-  esac
-  kill "$pid" || { printf '%s\n' "could not stop $label process $pid" >&2; return 1; }
-  for unused in $(seq 1 30); do
-    kill -0 "$pid" >/dev/null 2>&1 || return 0
-    sleep 1
-  done
-  printf '%s\n' "$label process $pid did not stop" >&2
-  return 1
+pidfd() {
+  printf '%s' "$pidfd_helper" | base64 -d | python3 - "$@"
 }
-confirm_process_shutdown() {
-  label=$1
-  file=$2
-  expected=$3
-  [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' "$label pid file is missing or unsafe" >&2; return 1; }
-  pid=$(cat "$file")
-  case "$pid" in *[!0-9]*|'') printf '%s\n' "$label pid is invalid" >&2; return 1 ;; esac
-  for unused in $(seq 1 30); do
-    kill -0 "$pid" >/dev/null 2>&1 || return 0
-    [ -r "/proc/$pid/cmdline" ] || { printf '%s\n' "cannot verify $label process $pid" >&2; return 1; }
-    process_command=$(tr '\000' '\n' < "/proc/$pid/cmdline")
-    case "$process_command" in
-      *"$expected"*) ;;
-      *) printf '%s\n' "$label pid $pid does not belong to this fixture" >&2; return 1 ;;
-    esac
-    sleep 1
-  done
-  printf '%s\n' "$label process $pid did not stop" >&2
-  return 1
-}
-read_lifecycle_state() {
+read_lifecycle_run_id() {
   python3 - "$run/state/lifecycle-state.json" <<'PY'
 import json
 import os
@@ -217,39 +411,31 @@ if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(
 if info.st_size > 65536:
     raise SystemExit("lifecycle state file is too large")
 
-def object_pairs(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate lifecycle state member")
-        result[key] = value
-    return result
+class ObjectPairs(list):
+    pass
 
 try:
     with open(path, "r", encoding="utf-8") as stream:
-        value = json.load(stream, object_pairs_hook=object_pairs)
+        value = json.load(stream, object_pairs_hook=ObjectPairs)
 except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
     raise SystemExit(f"lifecycle state is invalid: {error}")
-if not isinstance(value, dict) or set(value) != {"run_id", "control_address", "destroyed"}:
-    raise SystemExit("lifecycle state members are invalid")
-run_id = value["run_id"]
-control_address = value["control_address"]
-destroyed = value["destroyed"]
+if not isinstance(value, ObjectPairs):
+    raise SystemExit("lifecycle state is not an object")
+run_ids = [item for key, item in value if key == "run_id"]
+if len(run_ids) != 1:
+    raise SystemExit("lifecycle state must contain one run ID")
+run_id = run_ids[0]
 if not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
     raise SystemExit("lifecycle state run ID is invalid")
-if type(destroyed) is not bool or not isinstance(control_address, str):
-    raise SystemExit("lifecycle state values are invalid")
-if destroyed:
-    if control_address:
-        raise SystemExit("destroyed lifecycle state has a control address")
-else:
-    match = re.fullmatch(r"127[.]0[.]0[.]1:([1-9][0-9]{0,4})", control_address)
-    if match is None or int(match.group(1)) > 65535:
-        raise SystemExit("lifecycle state control address is invalid")
-print(run_id, "true" if destroyed else "false")
+print(run_id)
 PY
 }
 case "$mode" in
+  pre-launch)
+    [ "$run_id" = - ] || exit 1
+    rm -rf -- "$run"
+    exit 0
+    ;;
   pre-attach)
     [ "$run_id" = - ] || exit 1
     ;;
@@ -263,74 +449,31 @@ case "$mode" in
   *) exit 1 ;;
 esac
 
-if lifecycle_value=$(read_lifecycle_state); then
-  lifecycle_status=valid
-  lifecycle_run_id=${lifecycle_value%% *}
-  lifecycle_destroyed=${lifecycle_value#* }
+if lifecycle_run_id=$(read_lifecycle_run_id); then
+  lifecycle_status=usable
 else
   lifecycle_result=$?
   case "$lifecycle_result" in
     2) lifecycle_status=absent ;;
-    *) lifecycle_status=invalid ;;
+    *) lifecycle_status=unusable ;;
   esac
-fi
-provisioner_started=0
-provisioner_marker_invalid=0
-if [ -e "$run/provisioner.started" ] || [ -L "$run/provisioner.started" ]; then
-  provisioner_started=1
-  if [ ! -f "$run/provisioner.started" ] || [ -L "$run/provisioner.started" ]; then
-    provisioner_marker_invalid=1
-  fi
-fi
-if [ -e "$run/provisioner.pid" ] || [ -L "$run/provisioner.pid" ]; then
-  provisioner_started=1
 fi
 
 case "$lifecycle_status" in
-  valid)
+  usable)
     if [ "$mode" = attached ] && [ "$lifecycle_run_id" != "$run_id" ]; then
       printf '%s\n' "remote cleanup run identity does not match lifecycle state" >&2
       exit 1
     fi
-    stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
-    if [ "$lifecycle_destroyed" = false ]; then
-      "$run/provisioner" lifecycle --state-dir "$run/state" destroy "$lifecycle_run_id"
-      lifecycle_value=$(read_lifecycle_state)
-      [ "${lifecycle_value%% *}" = "$lifecycle_run_id" ] && [ "${lifecycle_value#* }" = true ] || {
-        printf '%s\n' "lifecycle destroy did not persist destroyed state" >&2
-        exit 1
-      }
-    fi
-    confirm_process_shutdown provisioner "$run/provisioner.pid" "$run/provisioner"
+    [ -x "$run/provisioner" ] && [ ! -L "$run/provisioner" ] || exit 1
+    "$run/provisioner" lifecycle --state-dir "$run/state" destroy "$lifecycle_run_id"
+    pidfd stop "$run/adapter.pid" "$run/synchrod-pg" 30 optional
     rm -rf -- "$run"
     ;;
-  absent)
-    [ "$mode" = pre-attach ] || { printf '%s\n' "attached cleanup lacks lifecycle state" >&2; exit 1; }
-    if [ "$provisioner_started" -ne 0 ]; then
-      stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
-      if [ -e "$run/provisioner.pid" ] || [ -L "$run/provisioner.pid" ]; then
-        stop_process provisioner "$run/provisioner.pid" "$run/provisioner"
-      fi
-      if [ "$provisioner_marker_invalid" -ne 0 ]; then
-        printf '%s\n' "provisioner start marker is unsafe" >&2
-      else
-        printf '%s\n' "provisioner started without lifecycle state" >&2
-      fi
-      exit 1
-    fi
-    [ ! -e "$run/adapter.pid" ] && [ ! -L "$run/adapter.pid" ] || {
-      stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
-      printf '%s\n' "adapter state exists before provisioner lifecycle state" >&2
-      exit 1
-    }
-    rm -rf -- "$run"
-    ;;
-  invalid)
-    stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
-    if [ -e "$run/provisioner.pid" ] || [ -L "$run/provisioner.pid" ]; then
-      stop_process provisioner "$run/provisioner.pid" "$run/provisioner"
-    fi
-    printf '%s\n' "remote lifecycle state is invalid; retained fixture for operator recovery" >&2
+  absent|unusable)
+    [ "$mode" = pre-attach ] || { printf '%s\n' "attached cleanup lacks usable lifecycle state" >&2; exit 1; }
+    pidfd stop "$run/provisioner.pid" "$run/provisioner" 30 required
+    printf '%s\n' "pre-attach cleanup lacks usable lifecycle state" >&2
     exit 1
     ;;
 esac
@@ -415,7 +558,8 @@ PY
 )
 lifecycle_base64=$(printf '%s' "$lifecycle_json" | base64 | tr -d '\n')
 
-ssh_command "$ssh_target" sh -s -- "$remote_run" "$pg18_bin_dir" "$extension_hash" "$adapter_hash" "$seed_hash" "$provisioner_hash" "$lifecycle_base64" <<'REMOTE'
+launch_dispatched=1
+ssh_command "$ssh_target" sh -s -- "$remote_run" "$pg18_bin_dir" "$extension_hash" "$adapter_hash" "$seed_hash" "$provisioner_hash" "$lifecycle_base64" "$pidfd_helper_base64" <<'REMOTE'
 set -eu
 run=$1
 pgbin=$2
@@ -424,6 +568,10 @@ adapter_hash=$4
 seed_hash=$5
 provisioner_hash=$6
 lifecycle_json=$(printf '%s' "$7" | base64 -d)
+pidfd_helper=$8
+pidfd() {
+  printf '%s' "$pidfd_helper" | base64 -d | python3 - "$@"
+}
 [ ! -L "$run" ] && [ "$(cd "$run" && pwd -P)" = "$run" ] || exit 1
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || exit 1
 . /etc/os-release
@@ -453,8 +601,6 @@ s.close()
 PY
 )
 printf '%s\n' "$http_port" > "$run/http.port"
-: > "$run/provisioner.started"
-chmod 600 "$run/provisioner.started"
 nohup "$run/provisioner" start \
   --pg18-bin-dir "$pgbin" \
   --extension-artifact "$run/extension-bundle" \
@@ -466,50 +612,27 @@ nohup "$run/provisioner" start \
   --lifecycle-command-json "$lifecycle_json" \
   >"$run/provisioner.log" 2>&1 &
 provisioner_pid=$!
-printf '%s\n' "$provisioner_pid" > "$run/provisioner.pid"
+pidfd record "$provisioner_pid" "$run/provisioner.pid" "$run/provisioner"
 REMOTE
 
-ssh_command "$ssh_target" sh -s -- "$remote_run" <<'REMOTE'
+ssh_command "$ssh_target" sh -s -- "$remote_run" "$pidfd_helper_base64" <<'REMOTE'
 set -eu
 run=$1
+pidfd_helper=$2
 [ ! -L "$run" ] && [ "$(cd "$run" && pwd -P)" = "$run" ] || exit 1
-[ -f "$run/provisioner.pid" ] && [ ! -L "$run/provisioner.pid" ] || { printf '%s\n' "provisioner pid file is missing or unsafe" >&2; exit 1; }
-provisioner_pid=$(cat "$run/provisioner.pid")
-case "$provisioner_pid" in *[!0-9]*|'') printf '%s\n' "provisioner pid is invalid" >&2; exit 1 ;; esac
-provisioner_diagnostics() {
-  if [ -f "$run/provisioner.log" ] && [ ! -L "$run/provisioner.log" ]; then
-    tail -c 16384 -- "$run/provisioner.log" >&2
-  else
-    printf '%s\n' "provisioner log is missing or unsafe" >&2
-  fi
+pidfd() {
+  printf '%s' "$pidfd_helper" | base64 -d | python3 - "$@"
 }
-for unused in $(seq 1 3600); do
-  if ! kill -0 "$provisioner_pid" >/dev/null 2>&1; then
-    printf '%s\n' "provisioner exited before attach environment became available" >&2
-    provisioner_diagnostics
-    exit 1
-  fi
-  if [ ! -r "/proc/$provisioner_pid/cmdline" ]; then
-    printf '%s\n' "provisioner process identity is unreadable" >&2
-    provisioner_diagnostics
-    exit 1
-  fi
-  if ! tr '\000' '\n' < "/proc/$provisioner_pid/cmdline" | grep -Fqx -- "$run/provisioner"; then
-    printf '%s\n' "provisioner process identity does not match the owned executable" >&2
-    provisioner_diagnostics
-    exit 1
-  fi
-  [ -f "$run/attach.env" ] && exit 0
-  sleep 1
-done
-printf '%s\n' "provisioner attach environment was unavailable after 3600 seconds" >&2
-provisioner_diagnostics
-exit 1
+pidfd wait "$run/provisioner.pid" "$run/provisioner" "$run/attach.env" "$run/provisioner.log" 3600
 REMOTE
 
-ssh_command "$ssh_target" sh -s -- "$remote_run" <<'REMOTE'
+ssh_command "$ssh_target" sh -s -- "$remote_run" "$pidfd_helper_base64" <<'REMOTE'
 set -eu
 run=$1
+pidfd_helper=$2
+pidfd() {
+  printf '%s' "$pidfd_helper" | base64 -d | python3 - "$@"
+}
 [ ! -L "$run" ] && [ "$(cd "$run" && pwd -P)" = "$run" ] || exit 1
 [ -f "$run/attach.env" ] && [ ! -L "$run/attach.env" ] || exit 1
 http_port=$(cat "$run/http.port")
@@ -518,29 +641,31 @@ case "$http_port" in *[!0-9]*|'') printf '%s\n' "remote HTTP port is invalid" >&
 SYNCHRO_ATTACH_DIR="$run/state"
 export SYNCHRO_ATTACH_DIR
 . "$run/attach.env"
-admin_password=$(cat "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")
-adapter_password=$(cat "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE")
-admin_url=$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$admin_password" <<'PY'
+admin_url=$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE" <<'PY'
 import sys, urllib.parse
-base, user, password = sys.argv[1:]
+base, user, password_file = sys.argv[1:]
+with open(password_file, encoding="utf-8") as stream:
+    password = stream.read().rstrip("\n")
 value = urllib.parse.urlsplit(base)
 netloc = urllib.parse.quote(user, safe="") + ":" + urllib.parse.quote(password, safe="") + "@" + value.netloc
 print(urllib.parse.urlunsplit((value.scheme, netloc, value.path, value.query, "")))
 PY
 )
-adapter_url=$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$adapter_password" <<'PY'
+adapter_url=$(python3 - "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE" <<'PY'
 import sys, urllib.parse
-base, user, password = sys.argv[1:]
+base, user, password_file = sys.argv[1:]
+with open(password_file, encoding="utf-8") as stream:
+    password = stream.read().rstrip("\n")
 value = urllib.parse.urlsplit(base)
 netloc = urllib.parse.quote(user, safe="") + ":" + urllib.parse.quote(password, safe="") + "@" + value.netloc
 print(urllib.parse.urlunsplit((value.scheme, netloc, value.path, value.query, "")))
 PY
 )
-unset admin_password adapter_password
-DATABASE_URL="$admin_url" "$run/provisioner" prepare --repo-root "$run/repo" --database-url "$admin_url"
+DATABASE_URL="$admin_url" "$run/provisioner" prepare --repo-root "$run/repo"
 DATABASE_URL="$adapter_url" JWT_SECRET=$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE") LISTEN_ADDR="127.0.0.1:$http_port" \
   nohup "$run/synchrod-pg" >"$run/adapter.log" 2>&1 &
-printf '%s\n' "$!" > "$run/adapter.pid"
+adapter_pid=$!
+pidfd record "$adapter_pid" "$run/adapter.pid" "$run/synchrod-pg"
 for unused in $(seq 1 60); do curl --fail --silent "http://127.0.0.1:$http_port/ready" >/dev/null && exit 0; sleep 1; done
 cat "$run/adapter.log" >&2
 exit 1
@@ -600,15 +725,15 @@ export SYNCHRO_TEST_URL="http://127.0.0.1:$local_http_port"
 export SYNCHRO_CONFORMANCE_JWT_SECRET_FILE="$work_dir/attach/jwt-secret"
 SYNCHRO_TEST_JWT_SECRET=$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")
 export SYNCHRO_TEST_JWT_SECRET
-admin_password=$(cat "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")
-ADAPTER_TEST_URL=$(python3 - "$local_database_url" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$admin_password" <<'PY'
+ADAPTER_TEST_URL=$(python3 - "$local_database_url" "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE" <<'PY'
 import sys, urllib.parse
+with open(sys.argv[3], encoding="utf-8") as stream:
+    password = stream.read().rstrip("\n")
 value = urllib.parse.urlsplit(sys.argv[1])
-auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(sys.argv[3], safe="")
+auth = urllib.parse.quote(sys.argv[2], safe="") + ":" + urllib.parse.quote(password, safe="")
 print(urllib.parse.urlunsplit((value.scheme, auth + "@" + value.netloc, value.path, value.query, "")))
 PY
 )
-unset admin_password
 REPLICATION_URL=$ADAPTER_TEST_URL
 WARM_CONNECT_ENV_FILE="$work_dir/attach/attach.env"
 export ADAPTER_TEST_URL REPLICATION_URL WARM_CONNECT_ENV_FILE

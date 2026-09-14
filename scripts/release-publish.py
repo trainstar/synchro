@@ -355,7 +355,7 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
     else:
         npm_status = "published-latest"
 
-    complete = github_status == "public-latest" and maven_status == "published" and npm_status == "published-latest"
+    complete = tag_status == "complete" and github_status == "public-latest" and maven_status == "published" and npm_status == "published-latest"
     if complete:
         next_operation = "complete"
     elif tag_status != "complete":
