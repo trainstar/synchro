@@ -952,6 +952,8 @@ test-kotlin-instrumentation: build-kotlin-conformance-app
 
 test-kotlin: test-kotlin-warm-connect test-kotlin-performance
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
+	# Repeat preparation to prove that the integration fixture is idempotent.
+	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results

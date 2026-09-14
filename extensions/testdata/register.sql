@@ -416,13 +416,27 @@ BEGIN
             1000
         );
 
-        PERFORM synchro.synchro_register_table(
-            'public.' || dependency.target_relation,
-            'public.' || dependency.final_membership_function,
-            dependency.composition,
-            'id', 'updated_at', 'deleted_at', 'enabled',
-            p_affected_scopes => ARRAY['bootstrap']::text[]
-        );
+        IF NOT EXISTS (
+            SELECT 1
+            FROM synchro.sync_registry registry
+            WHERE registry.registry_generation = (
+                      SELECT max(generation.generation)
+                      FROM synchro.sync_registry_generations generation
+                      WHERE generation.state IN ('active', 'pending')
+                        AND generation.validated
+                  )
+              AND registry.physical_schema = 'public'
+              AND registry.physical_relation = dependency.target_relation
+              AND registry.membership_function_name = dependency.final_membership_function
+        ) THEN
+            PERFORM synchro.synchro_register_table(
+                'public.' || dependency.target_relation,
+                'public.' || dependency.final_membership_function,
+                dependency.composition,
+                'id', 'updated_at', 'deleted_at', 'enabled',
+                p_affected_scopes => ARRAY['bootstrap']::text[]
+            );
+        END IF;
     END LOOP;
 END
 $dependencies$;
