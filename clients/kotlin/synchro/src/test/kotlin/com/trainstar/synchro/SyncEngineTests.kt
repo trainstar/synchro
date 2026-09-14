@@ -36,6 +36,7 @@ import org.robolectric.annotation.Config
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.coroutines.CoroutineContext
@@ -1746,7 +1747,7 @@ class SyncEngineTests {
     @Test
     fun testRebuildBackoffStoresExactRequestAndRetainsAttempt() = runTest {
         val timing = BlockingRetryTiming(5_000L)
-        var failRebuild = false
+        val failRebuild = AtomicBoolean(false)
         val failedRequestJSON = mutableListOf<String>()
         val (engine, db) = makeIntegrationEnv(
             maxRetryAttempts = 1,
@@ -1756,7 +1757,7 @@ class SyncEngineTests {
                 request.path!!.endsWith("/sync/connect") -> mockResponse(connectJSON)
                 request.path!!.endsWith("/sync/rebuild") -> {
                     val body = request.body.readUtf8()
-                    if (failRebuild) {
+                    if (failRebuild.get()) {
                         failedRequestJSON += body
                         MockResponse().setResponseCode(503).setHeader("Retry-After", "30")
                             .setBody(RETRYABLE_503_ERROR_JSON)
@@ -1773,7 +1774,7 @@ class SyncEngineTests {
             engine.start()
             val receiptCountBeforeFailure = db.query("SELECT * FROM _synchro_rebuild_page_receipts").size
             db.execute("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL WHERE scope_id = ?", arrayOf(scopeID))
-            failRebuild = true
+            failRebuild.set(true)
 
             val syncJob = CoroutineScope(Dispatchers.Default).launch {
                 runCatching { engine.syncNow() }
