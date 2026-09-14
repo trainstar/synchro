@@ -873,7 +873,7 @@ func PostgreSQLInstallationLockPath(ctx context.Context, pg18BinDir string) (str
 	if err != nil {
 		return "", err
 	}
-	lockParent, err := canonicalDirectory(os.TempDir())
+	lockParent, err := canonicalDirectory("/tmp")
 	if err != nil {
 		return "", errors.New("PostgreSQL installation lock parent is invalid")
 	}

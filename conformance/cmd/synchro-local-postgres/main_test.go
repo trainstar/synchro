@@ -150,10 +150,19 @@ func TestPostgreSQLInstallationLockPathUsesCanonicalDestinationPair(t *testing.T
 	writePGConfig(wrapperBinDir, pkglibdir, sharedir)
 	writePGConfig(distinctBinDir, otherPKGLibDir, otherShareDir)
 
+	tempA := filepath.Join(root, "caller-temp-a")
+	tempB := filepath.Join(root, "caller-temp-b")
+	for _, path := range []string{tempA, tempB} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", tempA)
 	first, err := blackbox.PostgreSQLInstallationLockPath(context.Background(), binDir)
 	if err != nil {
 		t.Fatalf("resolve installation lock: %v", err)
 	}
+	t.Setenv("TMPDIR", tempB)
 	second, err := blackbox.PostgreSQLInstallationLockPath(context.Background(), wrapperBinDir)
 	if err != nil {
 		t.Fatalf("resolve shared destination lock: %v", err)
@@ -164,6 +173,13 @@ func TestPostgreSQLInstallationLockPathUsesCanonicalDestinationPair(t *testing.T
 	}
 	if first != second {
 		t.Fatalf("identical destination pairs resolved different locks: %q and %q", first, second)
+	}
+	canonicalTmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(first) != canonicalTmp {
+		t.Fatalf("installation lock parent = %q, want %q", filepath.Dir(first), canonicalTmp)
 	}
 	if first == distinct {
 		t.Fatalf("distinct destination pairs resolved one lock: %q", first)
