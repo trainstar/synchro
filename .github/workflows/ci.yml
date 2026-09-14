@@ -231,13 +231,6 @@ jobs:
     needs: candidate-server
     runs-on: macos-15
     environment: release-fixtures
-    env:
-      RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
-      RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
-      RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
-      RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
-      RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
-      RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -251,13 +244,31 @@ jobs:
           name: candidate-linux-fixture
           path: dist/candidate-fixture
 
+      - name: Configure fixture SSH identity
+        env:
+          RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
+          RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
+        run: scripts/ci/release-linux-fixture.sh setup-ssh "$RUNNER_TEMP/release-fixture-ssh"
+
       - name: Ensure CocoaPods is available
         run: command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
 
       - name: Run Swift checks against Linux PostgreSQL
+        env:
+          RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
+          RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
+          RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
+          RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
         run: |
+          set -euo pipefail
           VERSION=$(python3 -c 'import json; print(json.load(open("conformance/support-matrix.json"))["release"])')
           scripts/ci/release-linux-fixture.sh \
+            --known-hosts "$RUNNER_TEMP/release-fixture-ssh/known-hosts" \
+            --key "$RUNNER_TEMP/release-fixture-ssh/private-key" \
+            --user "$RELEASE_FIXTURE_SSH_USER" \
+            --host "$RELEASE_FIXTURE_SSH_HOST" \
+            --remote-root "$RELEASE_FIXTURE_REMOTE_ROOT" \
+            --pg18-bin-dir "$RELEASE_FIXTURE_PG18_BIN_DIR" \
             --release-dir dist/candidate-fixture \
             --version "$VERSION" \
             --provisioner dist/candidate-fixture/synchro-local-postgres \
@@ -351,13 +362,6 @@ jobs:
     needs: candidate-server
     runs-on: macos-15
     environment: release-fixtures
-    env:
-      RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
-      RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
-      RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
-      RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
-      RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
-      RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -383,6 +387,12 @@ jobs:
           name: candidate-linux-fixture
           path: dist/candidate-fixture
 
+      - name: Configure fixture SSH identity
+        env:
+          RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
+          RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
+        run: scripts/ci/release-linux-fixture.sh setup-ssh "$RUNNER_TEMP/release-fixture-ssh"
+
       - name: Install React Native dependencies
         working-directory: clients/react-native
         run: |
@@ -398,9 +408,21 @@ jobs:
           fi
 
       - name: Run React Native iOS checks against Linux PostgreSQL
+        env:
+          RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
+          RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
+          RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
+          RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
         run: |
+          set -euo pipefail
           VERSION=$(python3 -c 'import json; print(json.load(open("conformance/support-matrix.json"))["release"])')
           scripts/ci/release-linux-fixture.sh \
+            --known-hosts "$RUNNER_TEMP/release-fixture-ssh/known-hosts" \
+            --key "$RUNNER_TEMP/release-fixture-ssh/private-key" \
+            --user "$RELEASE_FIXTURE_SSH_USER" \
+            --host "$RELEASE_FIXTURE_SSH_HOST" \
+            --remote-root "$RELEASE_FIXTURE_REMOTE_ROOT" \
+            --pg18-bin-dir "$RELEASE_FIXTURE_PG18_BIN_DIR" \
             --release-dir dist/candidate-fixture \
             --version "$VERSION" \
             --provisioner dist/candidate-fixture/synchro-local-postgres \

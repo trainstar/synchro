@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from typing import Any
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+SLSA_PROVENANCE = re.compile(r"^https://slsa[.]dev/provenance/v[0-9]+(?:[.][0-9]+)?$")
 MAVEN_STATES = {"PENDING", "VALIDATING", "VALIDATED", "PUBLISHING", "PUBLISHED", "FAILED"}
 NPM_PACKAGE = "@trainstar/synchro-react-native"
 MAVEN_BASE = "https://repo1.maven.org/maven2"
@@ -68,6 +70,87 @@ def sha256_file(path: Path) -> str:
     except OSError as error:
         raise PublicationError(f"cannot hash {path}: {error}") from error
     return digest.hexdigest()
+
+
+def normalize_sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise PublicationError(f"{label} is invalid")
+    digest = value.removeprefix("sha256:")
+    if not SHA256.fullmatch(digest):
+        raise PublicationError(f"{label} is invalid")
+    return digest
+
+
+def positive_identifier(value: Any, label: str) -> str:
+    if isinstance(value, bool):
+        raise PublicationError(f"{label} is invalid")
+    text = str(value)
+    if not re.fullmatch(r"[1-9][0-9]*", text):
+        raise PublicationError(f"{label} is invalid")
+    return text
+
+
+def verify_sealed_receipt(
+    receipt: Any,
+    artifact: Any,
+    manifest: Any,
+    expected_run_id: str,
+    *,
+    now: datetime.datetime | None = None,
+) -> dict[str, str]:
+    expected_receipt = {"artifact_id", "artifact_digest", "run_id", "run_attempt", "expires_at"}
+    if not isinstance(receipt, dict) or set(receipt) != expected_receipt:
+        raise PublicationError("sealed artifact receipt has invalid members")
+    run_id = positive_identifier(receipt["run_id"], "sealed artifact receipt run ID")
+    if run_id != positive_identifier(expected_run_id, "expected recovery run ID"):
+        raise PublicationError("sealed artifact receipt belongs to another workflow run")
+    run_attempt = positive_identifier(receipt["run_attempt"], "sealed artifact receipt run attempt")
+    artifact_id = positive_identifier(receipt["artifact_id"], "sealed artifact receipt artifact ID")
+    receipt_digest = normalize_sha256(receipt["artifact_digest"], "sealed artifact receipt digest")
+    expires_at = receipt["expires_at"]
+    if not isinstance(expires_at, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", expires_at):
+        raise PublicationError("sealed artifact receipt expiration is invalid")
+    try:
+        expiration = datetime.datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    except ValueError as error:
+        raise PublicationError("sealed artifact receipt expiration is invalid") from error
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    if current.tzinfo is None:
+        raise PublicationError("receipt verification time must include a time zone")
+    if expiration <= current:
+        raise PublicationError("sealed artifact receipt has expired")
+
+    if not isinstance(artifact, dict):
+        raise PublicationError("sealed artifact API response is invalid")
+    if positive_identifier(artifact.get("id"), "sealed artifact API ID") != artifact_id:
+        raise PublicationError("sealed artifact API identity differs from the receipt")
+    if artifact.get("name") != "sealed-release" or artifact.get("expired") is not False:
+        raise PublicationError("sealed artifact is missing or expired")
+    workflow_run = artifact.get("workflow_run")
+    if not isinstance(workflow_run, dict) or positive_identifier(workflow_run.get("id"), "sealed artifact workflow run ID") != run_id:
+        raise PublicationError("sealed artifact belongs to another workflow run")
+    api_digest = normalize_sha256(artifact.get("digest"), "sealed artifact API digest")
+    if api_digest != receipt_digest:
+        raise PublicationError("sealed artifact digest differs from the receipt")
+
+    if not isinstance(manifest, dict):
+        raise PublicationError("sealed release manifest is invalid")
+    build = manifest.get("build")
+    if not isinstance(build, dict):
+        raise PublicationError("sealed release manifest build identity is invalid")
+    if positive_identifier(build.get("run_id"), "sealed release build run ID") != run_id:
+        raise PublicationError("sealed release was produced by another workflow run")
+    if positive_identifier(build.get("run_attempt"), "sealed release build run attempt") != run_attempt:
+        raise PublicationError("sealed release was produced by another workflow attempt")
+    if build.get("workflow_path") != ".github/workflows/release.yml":
+        raise PublicationError("sealed release was produced by another workflow")
+    return {
+        "artifact_id": artifact_id,
+        "artifact_digest": receipt_digest,
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "expires_at": expires_at,
+    }
 
 
 def release_identity(release_dir: Path) -> dict[str, Any]:
@@ -167,6 +250,26 @@ def require_hash_map(actual: Any, expected: dict[str, str], label: str, *, parti
     return set(actual) == set(expected)
 
 
+def has_npm_provenance(distribution: Any) -> bool:
+    if not isinstance(distribution, dict):
+        return False
+    attestations = distribution.get("attestations")
+    provenance = attestations.get("provenance") if isinstance(attestations, dict) else None
+    attestation_url = attestations.get("url") if isinstance(attestations, dict) else None
+    parsed_url = urllib.parse.urlsplit(attestation_url) if isinstance(attestation_url, str) else None
+    return (
+        isinstance(provenance, dict)
+        and isinstance(provenance.get("predicateType"), str)
+        and SLSA_PROVENANCE.fullmatch(provenance["predicateType"]) is not None
+        and parsed_url is not None
+        and parsed_url.scheme == "https"
+        and parsed_url.netloc == "registry.npmjs.org"
+        and parsed_url.path.startswith("/-/npm/v1/attestations/")
+        and not parsed_url.query
+        and not parsed_url.fragment
+    )
+
+
 def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]:
     if not isinstance(state, dict) or set(state) != {"tags", "github", "maven", "npm"}:
         raise PublicationError("publication state has invalid members")
@@ -227,17 +330,30 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
         maven_status = str(deployment_state).lower()
 
     npm = state["npm"]
-    if not isinstance(npm, dict) or set(npm) != {"sha256", "dist_tags"} or not isinstance(npm["dist_tags"], dict):
+    if not isinstance(npm, dict) or set(npm) != {"sha256", "dist_tags", "provenance"} or not isinstance(npm["dist_tags"], dict):
         raise PublicationError("npm state is invalid")
     npm_hash = npm["sha256"]
     if npm_hash is not None and npm_hash != identity["npm"]["sha256"]:
         raise PublicationError("npm package bytes differ")
+    if not isinstance(npm["provenance"], bool):
+        raise PublicationError("npm provenance state is invalid")
     for name, version in npm["dist_tags"].items():
         if not isinstance(name, str) or not isinstance(version, str):
             raise PublicationError("npm dist-tag state is invalid")
         if name in {"candidate", "latest"} and version == identity["version"] and npm_hash is None:
             raise PublicationError("npm dist-tag points to a missing package")
-    npm_status = "absent" if npm_hash is None else "published-latest" if npm["dist_tags"].get("latest") == identity["version"] else "published-candidate"
+    if npm["dist_tags"].get("candidate") == identity["version"]:
+        raise PublicationError("npm candidate dist-tag is obsolete")
+    if npm_hash is None:
+        if npm["provenance"]:
+            raise PublicationError("npm provenance points to a missing package")
+        npm_status = "absent"
+    elif not npm["provenance"]:
+        raise PublicationError("npm package provenance is missing")
+    elif npm["dist_tags"].get("latest") != identity["version"]:
+        raise PublicationError("npm package exists but is not published under latest")
+    else:
+        npm_status = "published-latest"
 
     complete = github_status == "public-latest" and maven_status == "published" and npm_status == "published-latest"
     if complete:
@@ -249,9 +365,9 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
     elif maven_status != "published":
         next_operation = "publish-maven"
     elif npm_status == "absent":
-        next_operation = "publish-npm-candidate"
+        next_operation = "publish-npm"
     else:
-        next_operation = "verify-and-promote"
+        next_operation = "promote-github"
     return {
         "source_tags": tag_status,
         "github": github_status,
@@ -357,8 +473,8 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
             if not isinstance(asset, dict) or not isinstance(asset.get("name"), str) or not isinstance(asset.get("browser_download_url"), str):
                 raise PublicationError("GitHub release asset response is invalid")
             digest_value = asset.get("digest")
-            if release_value.get("draft") and isinstance(digest_value, str) and digest_value.startswith("sha256:"):
-                digest = digest_value.removeprefix("sha256:")
+            if release_value.get("draft") and digest_value is not None:
+                digest = normalize_sha256(digest_value, "GitHub release asset digest")
             else:
                 data = request_bytes(asset["browser_download_url"])
                 if data is None:
@@ -373,6 +489,7 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
     version = identity["version"]
     npm_root = request_json(f"https://registry.npmjs.org/{urllib.parse.quote(NPM_PACKAGE, safe='@')}")
     npm_hash = None
+    npm_provenance = False
     dist_tags: dict[str, str] = {}
     if npm_root is not None:
         if not isinstance(npm_root, dict):
@@ -386,13 +503,15 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
             raise PublicationError("npm registry versions are invalid")
         package = versions.get(version)
         if package is not None:
-            tarball_url = package.get("dist", {}).get("tarball") if isinstance(package, dict) else None
+            distribution = package.get("dist") if isinstance(package, dict) else None
+            tarball_url = distribution.get("tarball") if isinstance(distribution, dict) else None
             if not isinstance(tarball_url, str):
                 raise PublicationError("npm package tarball URL is missing")
             data = request_bytes(tarball_url)
             if data is None:
                 raise PublicationError("npm package tarball is unavailable")
             npm_hash = sha256_bytes(data)
+            npm_provenance = has_npm_provenance(distribution)
 
     public_maven: dict[str, str] = {}
     for relative in identity["maven_entries"]:
@@ -403,7 +522,7 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
         "tags": tags,
         "github": github,
         "maven": {"deployment_id": None, "deployment_name": None, "deployment_state": None, "bundle_sha256": None, "public_files": public_maven},
-        "npm": {"sha256": npm_hash, "dist_tags": dist_tags},
+        "npm": {"sha256": npm_hash, "dist_tags": dist_tags, "provenance": npm_provenance},
     }
 
 
@@ -471,6 +590,12 @@ def main() -> int:
     central_publish_parser.add_argument("--deployment-id", required=True)
     central_drop_parser = subparsers.add_parser("central-drop")
     central_drop_parser.add_argument("--deployment-id", required=True)
+    receipt_parser = subparsers.add_parser("verify-receipt")
+    receipt_parser.add_argument("--receipt", type=Path, required=True)
+    receipt_parser.add_argument("--artifact", type=Path, required=True)
+    receipt_parser.add_argument("--release-manifest", type=Path, required=True)
+    receipt_parser.add_argument("--expected-run-id", required=True)
+    receipt_parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "identity":
@@ -501,6 +626,16 @@ def main() -> int:
             central_request(
                 f"/deployment/{urllib.parse.quote(args.deployment_id, safe='')}",
                 method="DELETE",
+            )
+        elif args.command == "verify-receipt":
+            write_json(
+                args.output,
+                verify_sealed_receipt(
+                    load_json(args.receipt, "sealed artifact receipt"),
+                    load_json(args.artifact, "sealed artifact API response"),
+                    load_json(args.release_manifest, "sealed release manifest"),
+                    args.expected_run_id,
+                ),
             )
         else:
             raise PublicationError(f"unsupported command {args.command}")

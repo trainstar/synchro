@@ -20,8 +20,8 @@ env:
   GOWORK: 'off'
   POSTGRESQL_VERSION: '18.3'
   PGRX_VERSION: '0.17.0'
+  RELEASE_ATTESTATION_PREDICATE_TYPE: https://trainstar.fit/synchro/attestations/release/v1
   RUST_TOOLCHAIN: '1.92.0'
-  SEALED_ARTIFACT_NAME: sealed-release
 
 jobs:
   candidate:
@@ -61,23 +61,27 @@ jobs:
           jq -e --arg repository "$GITHUB_REPOSITORY" \
             '.path == ".github/workflows/release.yml" and .event == "workflow_dispatch" and .status == "completed" and .head_repository.full_name == $repository' \
             <<<"$run_json" >/dev/null || { echo "recovery requires a completed Release workflow run" >&2; exit 1; }
-          resume_run_attempt="$(jq -r '.run_attempt' <<<"$run_json")"
           artifacts="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN_ID/artifacts?per_page=100")"
-          count="$(jq --arg name "$SEALED_ARTIFACT_NAME" '[.artifacts[] | select(.name == $name and .expired == false)] | length' <<<"$artifacts")"
-          test "$count" = 1 || { echo "recovery requires one unexpired sealed-release artifact" >&2; exit 1; }
           receipt_count="$(jq '[.artifacts[] | select(.name == "publication-sealed-candidate" and .expired == false)] | length' <<<"$artifacts")"
           test "$receipt_count" = 1 || { echo "recovery requires the sealed candidate receipt" >&2; exit 1; }
-          mkdir -p "$RUNNER_TEMP/recovery"
-          gh run download "$RESUME_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$SEALED_ARTIFACT_NAME" --dir "$RUNNER_TEMP/recovery"
+          receipt_id="$(jq -r '.artifacts[] | select(.name == "publication-sealed-candidate" and .expired == false) | .id' <<<"$artifacts")"
           mkdir -p "$RUNNER_TEMP/recovery-receipt"
-          gh run download "$RESUME_RUN_ID" --repo "$GITHUB_REPOSITORY" --name publication-sealed-candidate --dir "$RUNNER_TEMP/recovery-receipt"
-          test -f "$RUNNER_TEMP/recovery/release-manifest.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$receipt_id/zip" > "$RUNNER_TEMP/recovery-receipt.zip"
+          unzip -q "$RUNNER_TEMP/recovery-receipt.zip" -d "$RUNNER_TEMP/recovery-receipt"
           test -f "$RUNNER_TEMP/recovery-receipt/sealed-release-receipt.json"
-          sealed_id="$(jq -r --arg name "$SEALED_ARTIFACT_NAME" '.artifacts[] | select(.name == $name and .expired == false) | .id' <<<"$artifacts")"
-          sealed_digest="$(jq -r --arg name "$SEALED_ARTIFACT_NAME" '.artifacts[] | select(.name == $name and .expired == false) | .digest' <<<"$artifacts")"
-          jq -e --arg id "$sealed_id" --arg digest "$sealed_digest" --arg run "$RESUME_RUN_ID" --arg attempt "$resume_run_attempt" \
-            '.artifact_id == $id and .artifact_digest == $digest and .run_id == $run and .run_attempt == $attempt and (.expires_at | fromdateiso8601) > now' \
-            "$RUNNER_TEMP/recovery-receipt/sealed-release-receipt.json" >/dev/null
+          sealed_id="$(jq -r '.artifact_id' "$RUNNER_TEMP/recovery-receipt/sealed-release-receipt.json")"
+          case "$sealed_id" in ''|*[!0-9]*|0) echo "sealed artifact receipt has an invalid artifact ID" >&2; exit 1 ;; esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$sealed_id" > "$RUNNER_TEMP/recovery-artifact.json"
+          mkdir -p "$RUNNER_TEMP/recovery"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$sealed_id/zip" > "$RUNNER_TEMP/recovery.zip"
+          unzip -q "$RUNNER_TEMP/recovery.zip" -d "$RUNNER_TEMP/recovery"
+          test -f "$RUNNER_TEMP/recovery/release-manifest.json"
+          python3 scripts/release-publish.py verify-receipt \
+            --receipt "$RUNNER_TEMP/recovery-receipt/sealed-release-receipt.json" \
+            --artifact "$RUNNER_TEMP/recovery-artifact.json" \
+            --release-manifest "$RUNNER_TEMP/recovery/release-manifest.json" \
+            --expected-run-id "$RESUME_RUN_ID" \
+            --output "$RUNNER_TEMP/verified-sealed-receipt.json"
 
       - name: Resolve and verify candidate identity
         id: resolve
@@ -219,7 +223,6 @@ jobs:
     permissions:
       contents: read
     env:
-      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
@@ -255,28 +258,18 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: dopplerhq/cli-action@4819d808ab99e5cde19a0637a16536a4038fad73 # v4.0.1
-
       - name: Build exact signed Maven bundle and npm tarball
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          RELEASE_VERSION: ${{ needs.candidate.outputs.version }}
         run: |
           set -euo pipefail
-          test -n "$DOPPLER_TOKEN" || { echo "DOPPLER_TOKEN is required" >&2; exit 1; }
-          cat > "$RUNNER_TEMP/build-packages.sh" <<'SCRIPT'
-          #!/bin/sh
-          set -eu
-          : "${MAVEN_CENTRAL_USERNAME:?MAVEN_CENTRAL_USERNAME is required}"
-          : "${MAVEN_CENTRAL_PASSWORD:?MAVEN_CENTRAL_PASSWORD is required}"
           : "${GPG_PRIVATE_KEY:?GPG_PRIVATE_KEY is required}"
           : "${GPG_PASSPHRASE:?GPG_PASSPHRASE is required}"
-          export ORG_GRADLE_PROJECT_mavenCentralUsername="$MAVEN_CENTRAL_USERNAME"
-          export ORG_GRADLE_PROJECT_mavenCentralPassword="$MAVEN_CENTRAL_PASSWORD"
           export ORG_GRADLE_PROJECT_signingInMemoryKey="$GPG_PRIVATE_KEY"
           export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword="$GPG_PASSPHRASE"
           make release-stage-packages VERSION="$RELEASE_VERSION"
-          SCRIPT
-          chmod 700 "$RUNNER_TEMP/build-packages.sh"
-          RELEASE_VERSION="${{ needs.candidate.outputs.version }}" \
-            doppler run --project synchro --config ci --command "$RUNNER_TEMP/build-packages.sh"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -291,10 +284,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       actions: read
-      artifact-metadata: write
-      attestations: write
       contents: read
-      id-token: write
     outputs:
       artifact_run_id: ${{ needs.candidate.outputs.artifact_run_id }}
     steps:
@@ -371,12 +361,6 @@ jobs:
 
       - name: Verify sealed release
         run: make release-verify VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
-
-      - name: Attest sealed file subjects
-        if: needs.candidate.outputs.mode == 'normal'
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-checksums: dist/releases/${{ needs.candidate.outputs.release_dir_name }}/SHA256SUMS
 
       - name: Upload sealed release
         if: needs.candidate.outputs.mode == 'normal'
@@ -697,6 +681,12 @@ jobs:
           github-token: ${{ github.token }}
           path: dist/release-provisioner
 
+      - name: Configure fixture SSH identity
+        env:
+          RELEASE_FIXTURE_SSH_PRIVATE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
+          RELEASE_FIXTURE_SSH_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
+        run: scripts/ci/release-linux-fixture.sh setup-ssh "$RUNNER_TEMP/release-fixture-ssh"
+
       - name: Select required Xcode and simulator
         env:
           IOS_VERSION: ${{ matrix.ios }}
@@ -717,38 +707,21 @@ jobs:
           xcrun simctl bootstatus "$udid" -b
           echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
 
-      - name: Configure fixture SSH identity
-        env:
-          FIXTURE_KEY: ${{ secrets.RELEASE_FIXTURE_SSH_PRIVATE_KEY }}
-          FIXTURE_KNOWN_HOSTS: ${{ secrets.RELEASE_FIXTURE_SSH_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          test -n "$FIXTURE_KEY" || { echo "RELEASE_FIXTURE_SSH_PRIVATE_KEY is required" >&2; exit 1; }
-          test -n "$FIXTURE_KNOWN_HOSTS" || { echo "RELEASE_FIXTURE_SSH_KNOWN_HOSTS is required" >&2; exit 1; }
-          install -m 600 /dev/null "$RUNNER_TEMP/release-fixture-key"
-          install -m 600 /dev/null "$RUNNER_TEMP/release-fixture-known-hosts"
-          printf '%s\n' "$FIXTURE_KEY" > "$RUNNER_TEMP/release-fixture-key"
-          printf '%s\n' "$FIXTURE_KNOWN_HOSTS" > "$RUNNER_TEMP/release-fixture-known-hosts"
-          chmod 700 dist/release-provisioner/synchro-local-postgres scripts/ci/release-linux-fixture.sh
-
       - name: Run Apple package cell through Linux fixture
         env:
-          FIXTURE_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
-          FIXTURE_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
-          FIXTURE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
-          FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
-          RELEASE_FIXTURE_CELL_ID: ${{ matrix.cell }}
+          RELEASE_FIXTURE_SSH_HOST: ${{ secrets.RELEASE_FIXTURE_SSH_HOST }}
+          RELEASE_FIXTURE_SSH_USER: ${{ secrets.RELEASE_FIXTURE_SSH_USER }}
+          RELEASE_FIXTURE_REMOTE_ROOT: ${{ secrets.RELEASE_FIXTURE_REMOTE_ROOT }}
+          RELEASE_FIXTURE_PG18_BIN_DIR: ${{ secrets.RELEASE_FIXTURE_PG18_BIN_DIR }}
         run: |
           set -euo pipefail
-          : "${FIXTURE_HOST:?RELEASE_FIXTURE_SSH_HOST is required}"
-          : "${FIXTURE_USER:?RELEASE_FIXTURE_SSH_USER is required}"
-          : "${FIXTURE_ROOT:?RELEASE_FIXTURE_REMOTE_ROOT is required}"
-          : "${FIXTURE_PG18_BIN_DIR:?RELEASE_FIXTURE_PG18_BIN_DIR is required}"
           scripts/ci/release-linux-fixture.sh \
-            --known-hosts "$RUNNER_TEMP/release-fixture-known-hosts" \
-            --key "$RUNNER_TEMP/release-fixture-key" \
-            --user "$FIXTURE_USER" --host "$FIXTURE_HOST" \
-            --remote-root "$FIXTURE_ROOT" --pg18-bin-dir "$FIXTURE_PG18_BIN_DIR" \
+            --known-hosts "$RUNNER_TEMP/release-fixture-ssh/known-hosts" \
+            --key "$RUNNER_TEMP/release-fixture-ssh/private-key" \
+            --user "$RELEASE_FIXTURE_SSH_USER" \
+            --host "$RELEASE_FIXTURE_SSH_HOST" \
+            --remote-root "$RELEASE_FIXTURE_REMOTE_ROOT" \
+            --pg18-bin-dir "$RELEASE_FIXTURE_PG18_BIN_DIR" \
             --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
             --version "${{ needs.candidate.outputs.version }}" \
             --provisioner "dist/release-provisioner/synchro-local-postgres" \
@@ -836,12 +809,12 @@ jobs:
     environment: release
     permissions:
       actions: read
-      attestations: read
+      artifact-metadata: write
+      attestations: write
       contents: write
       id-token: write
       issues: read
     env:
-      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
       ANDROID_HOME: /Users/runner/Library/Android/sdk
       ANDROID_SDK_ROOT: /Users/runner/Library/Android/sdk
     steps:
@@ -871,8 +844,6 @@ jobs:
           node-version: '22'
           registry-url: https://registry.npmjs.org
 
-      - uses: dopplerhq/cli-action@4819d808ab99e5cde19a0637a16536a4038fad73 # v4.0.1
-
       - name: Download exact sealed release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -881,7 +852,7 @@ jobs:
           github-token: ${{ github.token }}
           path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
 
-      - name: Recheck approved candidate and credentials
+      - name: Recheck approved candidate and sealed identity
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -899,22 +870,57 @@ jobs:
           milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"
           jq -e --arg title "v$version" '([.[] | select(.title == $title)] | length) == 1 and ([.[] | select(.title == $title)][0].open_issues == 0)' <<<"$milestones" >/dev/null
           GITHUB_TOKEN="$GH_TOKEN" python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-before.json"
-          test -n "$DOPPLER_TOKEN" || { echo "DOPPLER_TOKEN is required" >&2; exit 1; }
-          cat > "$RUNNER_TEMP/check-release-secrets.sh" <<'SCRIPT'
-          #!/bin/sh
-          set -eu
-          test -n "$MAVEN_CENTRAL_USERNAME"
-          test -n "$MAVEN_CENTRAL_PASSWORD"
-          test -n "$GPG_PRIVATE_KEY"
-          test -n "$GPG_PASSPHRASE"
-          SCRIPT
-          chmod 700 "$RUNNER_TEMP/check-release-secrets.sh"
-          doppler run --project synchro --config ci --command "$RUNNER_TEMP/check-release-secrets.sh"
+
+      - name: Check sealed file attestations
+        id: sealed_attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          required=false
+          while read -r digest relative; do
+            if ! gh attestation verify "$release/$relative" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --predicate-type "$RELEASE_ATTESTATION_PREDICATE_TYPE" \
+              --format json > "$RUNNER_TEMP/release-attestation.json" 2>/dev/null; then
+              required=true
+              break
+            fi
+            if ! jq -e --slurpfile manifest "$release/release-manifest.json" \
+              'any(.[]; .verificationResult.statement.predicate == $manifest[0])' \
+              "$RUNNER_TEMP/release-attestation.json" >/dev/null; then
+              required=true
+              break
+            fi
+            test "$(shasum -a 256 "$release/$relative" | cut -d ' ' -f 1)" = "$digest"
+          done < "$release/SHA256SUMS"
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+
+      - name: Attest sealed file subjects
+        if: steps.sealed_attestations.outputs.required == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-checksums: dist/releases/${{ needs.candidate.outputs.release_dir_name }}/SHA256SUMS
+          predicate-type: ${{ env.RELEASE_ATTESTATION_PREDICATE_TYPE }}
+          predicate-path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}/release-manifest.json
+
+      - name: Verify sealed file attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           while read -r digest relative; do
             gh attestation verify "$release/$relative" \
               --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-              --source-digest "$commit" >/dev/null
+              --predicate-type "$RELEASE_ATTESTATION_PREDICATE_TYPE" \
+              --format json > "$RUNNER_TEMP/release-attestation.json"
+            jq -e --slurpfile manifest "$release/release-manifest.json" \
+              'any(.[]; .verificationResult.statement.predicate == $manifest[0])' \
+              "$RUNNER_TEMP/release-attestation.json" >/dev/null
             test "$(shasum -a 256 "$release/$relative" | cut -d ' ' -f 1)" = "$digest"
           done < "$release/SHA256SUMS"
 
@@ -984,6 +990,7 @@ jobs:
           version="${{ needs.candidate.outputs.version }}"
           expected_commit="${{ needs.candidate.outputs.source_commit }}"
           python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-github.json"
+          jq -e '.source_tags == "complete" and .github == "public"' "$RUNNER_TEMP/public-github-classification.json" >/dev/null
           SYNCHRO_GO_CONSUMER_MODE=public make test-consumer-go
           git clone --quiet --depth 1 --branch "v$version" https://github.com/trainstar/synchro.git "$RUNNER_TEMP/public-swift"
           test "$(git -C "$RUNNER_TEMP/public-swift" rev-parse HEAD)" = "$expected_commit"
@@ -997,21 +1004,26 @@ jobs:
 
       - name: Resolve or upload and validate Maven deployment
         id: maven
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
         run: |
           set -euo pipefail
+          : "${MAVEN_CENTRAL_USERNAME:?MAVEN_CENTRAL_USERNAME is required}"
+          : "${MAVEN_CENTRAL_PASSWORD:?MAVEN_CENTRAL_PASSWORD is required}"
           release="$GITHUB_WORKSPACE/dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           identity="$RUNNER_TEMP/release-identity.json"
           python3 scripts/release-publish.py identity --release-dir "$release" --output "$identity"
           bundle="$release/$(jq -r '.maven_bundle.path' "$identity")"
           name="$(jq -r '.maven_bundle.deployment_name' "$identity")"
-          doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-list --name $name --output $RUNNER_TEMP/central-list.json"
+          python3 scripts/release-publish.py central-list --name "$name" --output "$RUNNER_TEMP/central-list.json"
           python3 scripts/release-publish.py central-select --input "$RUNNER_TEMP/central-list.json" --name "$name" --output "$RUNNER_TEMP/central-selected.json"
           deployment_id="$(jq -r '.deployment_id // empty' "$RUNNER_TEMP/central-selected.json")"
           deployment_state="$(jq -r '.deployment_state // empty' "$RUNNER_TEMP/central-selected.json")"
           public_maven="$(jq -r '.maven' "$RUNNER_TEMP/public-github-classification.json")"
           if [ -n "$deployment_id" ] && { [ "$deployment_state" = PENDING ] || [ "$deployment_state" = VALIDATING ]; }; then
             for _ in $(seq 1 120); do
-              doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-status --deployment-id $deployment_id --output $RUNNER_TEMP/central-status.json"
+              python3 scripts/release-publish.py central-status --deployment-id "$deployment_id" --output "$RUNNER_TEMP/central-status.json"
               deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
               case "$deployment_state" in
                 VALIDATED|FAILED|PUBLISHING|PUBLISHED) break ;;
@@ -1021,7 +1033,7 @@ jobs:
             done
           fi
           if [ -n "$deployment_id" ] && { [ "$deployment_state" = VALIDATED ] || [ "$deployment_state" = FAILED ]; }; then
-            doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-drop --deployment-id $deployment_id"
+            python3 scripts/release-publish.py central-drop --deployment-id "$deployment_id"
             deployment_id=
             deployment_state=
           fi
@@ -1029,7 +1041,7 @@ jobs:
             if [ "$public_maven" = published ]; then
               deployment_state=PUBLIC
             else
-              doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-upload --bundle $bundle --name $name --output $RUNNER_TEMP/central-upload.json"
+              python3 scripts/release-publish.py central-upload --bundle "$bundle" --name "$name" --output "$RUNNER_TEMP/central-upload.json"
               deployment_id="$(jq -r '.deployment_id' "$RUNNER_TEMP/central-upload.json")"
               test -n "$deployment_id"
               deployment_state=PENDING
@@ -1038,7 +1050,7 @@ jobs:
           jq -n --arg deployment_id "$deployment_id" --arg deployment_name "$name" --arg bundle_sha256 "$(shasum -a 256 "$bundle" | cut -d ' ' -f 1)" '{deployment_id:$deployment_id,deployment_name:$deployment_name,bundle_sha256:$bundle_sha256}' > "$RUNNER_TEMP/maven-operation.json"
           if [ "$deployment_state" = PENDING ] || [ "$deployment_state" = VALIDATING ]; then
             for _ in $(seq 1 120); do
-              doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-status --deployment-id $deployment_id --output $RUNNER_TEMP/central-status.json"
+              python3 scripts/release-publish.py central-status --deployment-id "$deployment_id" --output "$RUNNER_TEMP/central-status.json"
               deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
               case "$deployment_state" in
                 VALIDATED|PUBLISHING|PUBLISHED) break ;;
@@ -1066,19 +1078,23 @@ jobs:
         env:
           DEPLOYMENT_ID: ${{ steps.maven.outputs.deployment_id }}
           DEPLOYMENT_STATE: ${{ steps.maven.outputs.deployment_state }}
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
         run: |
           set -euo pipefail
+          : "${MAVEN_CENTRAL_USERNAME:?MAVEN_CENTRAL_USERNAME is required}"
+          : "${MAVEN_CENTRAL_PASSWORD:?MAVEN_CENTRAL_PASSWORD is required}"
           release="$GITHUB_WORKSPACE/dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           deployment_state="$DEPLOYMENT_STATE"
           if [ "$deployment_state" = PUBLIC ]; then
             deployment_state=PUBLISHED
           fi
           if [ "$deployment_state" = VALIDATED ]; then
-            doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-publish --deployment-id $DEPLOYMENT_ID"
+            python3 scripts/release-publish.py central-publish --deployment-id "$DEPLOYMENT_ID"
           fi
           if [ "$deployment_state" != PUBLISHED ]; then
             for _ in $(seq 1 120); do
-              doppler run --project synchro --config ci --command "python3 scripts/release-publish.py central-status --deployment-id $DEPLOYMENT_ID --output $RUNNER_TEMP/central-status.json"
+              python3 scripts/release-publish.py central-status --deployment-id "$DEPLOYMENT_ID" --output "$RUNNER_TEMP/central-status.json"
               deployment_state="$(jq -r '.deploymentState // .deployment_state // .state // empty' "$RUNNER_TEMP/central-status.json")"
               case "$deployment_state" in
                 PUBLISHED) break ;;
@@ -1110,7 +1126,7 @@ jobs:
           clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
             -PsynchroVersion="${{ needs.candidate.outputs.version }}" :app:assembleRelease
 
-      - name: Publish or verify exact npm candidate
+      - name: Publish or verify exact npm release through trusted OIDC
         env:
           GITHUB_TOKEN: ''
         run: |
@@ -1118,23 +1134,38 @@ jobs:
           release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           version="${{ needs.candidate.outputs.version }}"
           tarball="$release/artifacts/trainstar-synchro-react-native-$version.tgz"
+          package='@trainstar/synchro-react-native'
           npm install --global npm@11.6.2
           python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-before-npm.json"
           npm_state="$(jq -r '.npm' "$RUNNER_TEMP/public-before-npm-classification.json")"
           if [ "$npm_state" = absent ]; then
-            npm publish "$tarball" --access public --provenance --tag candidate
+            test "$(jq -r '.github' "$RUNNER_TEMP/public-before-npm-classification.json")" = public
+            test "$(jq -r '.maven' "$RUNNER_TEMP/public-before-npm-classification.json")" = published
+            test -z "${NODE_AUTH_TOKEN:-}"
+            test -z "${NPM_TOKEN:-}"
+            env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$tarball" --access public --provenance --tag latest
           else
-            test "$npm_state" = published-candidate || test "$npm_state" = published-latest
+            test "$npm_state" = published-latest
           fi
           for _ in $(seq 1 40); do
             if python3 scripts/release-publish.py observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-npm.json"; then
               npm_state="$(jq -r '.npm' "$RUNNER_TEMP/public-npm-classification.json")"
-              [ "$npm_state" != absent ] && break
+              [ "$npm_state" = published-latest ] && break
             fi
             sleep 15
           done
-          test "$npm_state" = published-candidate || test "$npm_state" = published-latest
-          jq -n --arg package '@trainstar/synchro-react-native' --arg version "$version" --arg sha256 "$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)" '{package:$package,version:$version,sha256:$sha256}' > "$RUNNER_TEMP/npm-operation.json"
+          test "$npm_state" = published-latest
+          test "$(npm view "$package@$version" version)" = "$version"
+          mkdir -p "$RUNNER_TEMP/npm-provenance"
+          (
+            cd "$RUNNER_TEMP/npm-provenance"
+            npm init --yes >/dev/null
+            npm install --ignore-scripts --save-exact "$package@$version"
+            npm audit signatures --json > "$RUNNER_TEMP/npm-provenance.json"
+          )
+          jq -e '(.invalid // []) == [] and (.missing // []) == []' "$RUNNER_TEMP/npm-provenance.json" >/dev/null
+          jq -n --arg package "$package" --arg version "$version" --arg sha256 "$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)" \
+            '{package:$package,version:$version,sha256:$sha256,dist_tag:"latest",provenance:"verified"}' > "$RUNNER_TEMP/npm-operation.json"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -1160,17 +1191,11 @@ jobs:
           sh verification/consumers/react-native/test-consumer.sh ios "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
           sh verification/consumers/react-native/test-consumer.sh android "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
 
-      - name: Promote npm and GitHub latest only after public checks
+      - name: Mark GitHub latest only after public checks
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="${{ needs.candidate.outputs.version }}"
-          npm install --global npm@11.6.2
-          npm dist-tag add "@trainstar/synchro-react-native@$version" latest
-          if [ "$(npm view "@trainstar/synchro-react-native" dist-tags.candidate 2>/dev/null || true)" = "$version" ]; then
-            npm dist-tag rm "@trainstar/synchro-react-native" candidate
-          fi
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/${{ steps.github_release.outputs.release_id }}" -f make_latest=true >/dev/null
           env -u GITHUB_TOKEN python3 scripts/release-publish.py observe-public \
             --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \

@@ -2,6 +2,64 @@
 # Run one Apple package cell against an isolated Linux release fixture.
 set -eu
 
+setup_usage() {
+  printf '%s\n' "usage: $0 setup-ssh OUTPUT-DIRECTORY" >&2
+  exit 2
+}
+
+setup_ssh() {
+  [ "$#" -eq 1 ] || setup_usage
+  output_dir=$1
+  case "$output_dir" in /*) ;; *) printf '%s\n' "SSH output directory must be absolute" >&2; exit 1 ;; esac
+  case "$output_dir" in *[!A-Za-z0-9_./-]*|*/../*|*/..|*//*|/) printf '%s\n' "SSH output directory is unsafe" >&2; exit 1 ;; esac
+  : "${RELEASE_FIXTURE_SSH_PRIVATE_KEY:?RELEASE_FIXTURE_SSH_PRIVATE_KEY is required}"
+  : "${RELEASE_FIXTURE_SSH_KNOWN_HOSTS:?RELEASE_FIXTURE_SSH_KNOWN_HOSTS is required}"
+  [ ! -e "$output_dir" ] || { printf '%s\n' "SSH output directory already exists" >&2; exit 1; }
+  umask 077
+  mkdir -m 700 "$output_dir"
+  printf '%s\n' "$RELEASE_FIXTURE_SSH_PRIVATE_KEY" > "$output_dir/private-key"
+  printf '%s\n' "$RELEASE_FIXTURE_SSH_KNOWN_HOSTS" > "$output_dir/known-hosts"
+  chmod 600 "$output_dir/private-key" "$output_dir/known-hosts"
+}
+
+select_free_port() {
+  python3 - "$@" <<'PY'
+import socket
+import sys
+
+excluded = set()
+for raw in sys.argv[1:]:
+    try:
+        port = int(raw)
+    except ValueError as error:
+        raise SystemExit(f"excluded port is invalid: {raw}") from error
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"excluded port is invalid: {raw}")
+    excluded.add(port)
+
+while True:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    if port not in excluded:
+        print(port)
+        break
+PY
+}
+
+case "${1:-}" in
+  setup-ssh)
+    shift
+    setup_ssh "$@"
+    exit 0
+    ;;
+  select-free-port)
+    shift
+    select_free_port "$@"
+    exit 0
+    ;;
+esac
+
 usage() {
   printf '%s\n' "usage: $0 --known-hosts FILE --key FILE --user USER --host HOST --remote-root DIR --pg18-bin-dir DIR --release-dir DIR --version X.Y.Z --provisioner FILE --cell ID -- COMMAND..." >&2
   exit 2
@@ -43,7 +101,9 @@ done
 [ -f "$known_hosts" ] && [ ! -L "$known_hosts" ] || { printf '%s\n' "known-hosts file is missing or unsafe" >&2; exit 1; }
 [ -f "$key_file" ] && [ ! -L "$key_file" ] || { printf '%s\n' "SSH key file is missing or unsafe" >&2; exit 1; }
 [ -d "$release_dir" ] && [ ! -L "$release_dir" ] || { printf '%s\n' "sealed release directory is missing or unsafe" >&2; exit 1; }
-[ -x "$provisioner" ] && [ ! -L "$provisioner" ] || { printf '%s\n' "provisioner is missing or unsafe" >&2; exit 1; }
+[ -f "$provisioner" ] && [ ! -L "$provisioner" ] || { printf '%s\n' "provisioner is missing or unsafe" >&2; exit 1; }
+chmod 700 "$provisioner"
+[ -x "$provisioner" ] || { printf '%s\n' "provisioner is not executable" >&2; exit 1; }
 case "$version" in [0-9]*.[0-9]*.[0-9]*) ;; *) printf '%s\n' "release version is invalid" >&2; exit 1 ;; esac
 case "$ssh_user" in ''|*[!A-Za-z0-9_.-]*) printf '%s\n' "SSH user is invalid" >&2; exit 1 ;; esac
 case "$ssh_host" in ''|*[!A-Za-z0-9:._-]*) printf '%s\n' "SSH host is invalid" >&2; exit 1 ;; esac
@@ -60,6 +120,11 @@ case "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$GITHUB_JOB" in *[!A-Za-z0-9_.:-]*) pri
 run_name="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-${cell}"
 remote_run="$remote_root/$run_name"
 
+work_dir=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/synchro-linux-fixture.XXXXXX")
+forward_pid=
+remote_created=0
+run_id=
+
 ssh_target="$ssh_user@$ssh_host"
 ssh_command() {
   ssh -i "$key_file" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts" "$@"
@@ -67,42 +132,107 @@ ssh_command() {
 scp_command() {
   scp -i "$key_file" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts" "$@"
 }
-work_dir=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/synchro-linux-fixture.XXXXXX")
-forward_pid=
-remote_created=0
-run_id=
 
 remote_cleanup() {
-  ssh_command "$ssh_target" sh -s -- "$remote_root" "$remote_run" "$run_name" "$run_id" <<'REMOTE' >/dev/null 2>&1 || true
+  if [ -n "$run_id" ]; then
+    cleanup_mode=attached
+    cleanup_run_id=$run_id
+  else
+    cleanup_mode=pre-attach
+    cleanup_run_id=-
+  fi
+  ssh_command "$ssh_target" sh -s -- "$remote_root" "$remote_run" "$run_name" "$cleanup_mode" "$cleanup_run_id" <<'REMOTE'
 set -eu
 root=$1
 run=$2
 name=$3
-run_id=$4
+mode=$4
+run_id=$5
 [ "$run" = "$root/$name" ] || exit 1
 [ "$(dirname "$run")" = "$root" ] || exit 1
 [ "$(basename "$run")" = "$name" ] || exit 1
-[ ! -L "$root" ] && [ ! -L "$run" ] || exit 1
-if [ -n "$run_id" ] && [ -x "$run/provisioner" ]; then
-  "$run/provisioner" lifecycle --state-dir "$run/state" destroy "$run_id" >/dev/null 2>&1 || true
-elif [ -f "$run/provisioner.pid" ]; then
-  pid=$(cat "$run/provisioner.pid")
-  case "$pid" in *[!0-9]*|'') ;; *) kill "$pid" >/dev/null 2>&1 || true ;; esac
+[ -d "$root" ] && [ ! -L "$root" ] && [ "$(cd "$root" && pwd -P)" = "$root" ] || exit 1
+[ ! -e "$run" ] && exit 0
+[ -d "$run" ] && [ ! -L "$run" ] && [ "$(cd "$run" && pwd -P)" = "$run" ] || exit 1
+stop_process() {
+  label=$1
+  file=$2
+  expected=$3
+  [ -e "$file" ] || return 0
+  [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' "$label pid file is unsafe" >&2; return 1; }
+  pid=$(cat "$file")
+  case "$pid" in *[!0-9]*|'') printf '%s\n' "$label pid is invalid" >&2; return 1 ;; esac
+  kill -0 "$pid" >/dev/null 2>&1 || return 0
+  [ -r "/proc/$pid/cmdline" ] || { printf '%s\n' "cannot verify $label process $pid" >&2; return 1; }
+  process_command=$(tr '\000' '\n' < "/proc/$pid/cmdline")
+  case "$process_command" in
+    *"$expected"*) ;;
+    *) printf '%s\n' "$label pid $pid does not belong to this fixture" >&2; return 1 ;;
+  esac
+  kill "$pid" || { printf '%s\n' "could not stop $label process $pid" >&2; return 1; }
+  for unused in $(seq 1 30); do
+    kill -0 "$pid" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  printf '%s\n' "$label process $pid did not stop" >&2
+  return 1
+}
+case "$mode" in
+  pre-attach)
+    [ "$run_id" = - ] || exit 1
+    ;;
+  attached)
+    case "$run_id" in
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) printf '%s\n' "remote cleanup run identity is invalid" >&2; exit 1 ;;
+    esac
+    [ -x "$run/provisioner" ] && [ ! -L "$run/provisioner" ] || exit 1
+    ;;
+  *) exit 1 ;;
+esac
+if [ "$mode" = attached ]; then
+  "$run/provisioner" lifecycle --state-dir "$run/state" destroy "$run_id"
 fi
-if [ -f "$run/adapter.pid" ]; then
-  pid=$(cat "$run/adapter.pid")
-  case "$pid" in *[!0-9]*|'') ;; *) kill "$pid" >/dev/null 2>&1 || true ;; esac
-fi
+stop_process adapter "$run/adapter.pid" "$run/synchrod-pg"
+stop_process provisioner "$run/provisioner.pid" "$run/provisioner"
 rm -rf -- "$run"
 REMOTE
 }
 
 cleanup() {
-  [ -z "$forward_pid" ] || kill "$forward_pid" >/dev/null 2>&1 || true
-  [ "$remote_created" -eq 0 ] || remote_cleanup
-  rm -rf "$work_dir"
+  command_status=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  cleanup_status=0
+  if [ -n "$forward_pid" ] && kill -0 "$forward_pid" >/dev/null 2>&1; then
+    if ! kill "$forward_pid"; then
+      printf '%s\n' "could not stop SSH tunnel process $forward_pid" >&2
+      cleanup_status=1
+    else
+      wait "$forward_pid" >/dev/null 2>&1
+    fi
+  fi
+  if [ "$remote_created" -ne 0 ]; then
+    remote_cleanup
+    cleanup_error=$?
+    if [ "$cleanup_error" -ne 0 ]; then
+      printf '%s\n' "remote fixture cleanup failed with status $cleanup_error; retained $remote_run for operator recovery" >&2
+      cleanup_status=$cleanup_error
+    fi
+  fi
+  if ! rm -rf -- "$work_dir"; then
+    printf '%s\n' "local fixture cleanup failed: $work_dir" >&2
+    [ "$cleanup_status" -ne 0 ] || cleanup_status=1
+  fi
+  if [ "$command_status" -ne 0 ]; then
+    exit "$command_status"
+  fi
+  exit "$cleanup_status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 extension="$release_dir/artifacts/synchro-pg-pg18-ubuntu24.04-linux-x64-$version.tar.gz"
 adapter="$release_dir/artifacts/synchrod-pg-linux-x64-$version"
@@ -250,9 +380,11 @@ PY
 )
 remote_http_port=$(ssh_command "$ssh_target" cat "$remote_run/http.port")
 # Lifecycle restart responses keep the remote loopback port.
-# Matching local ports keep those responses valid through the SSH tunnel.
+# Only PostgreSQL must preserve that port through the SSH tunnel.
 local_pg_port=$remote_pg_port
-local_http_port=$remote_http_port
+local_http_port=$(select_free_port "$local_pg_port")
+SYNCHROD_PG_PORT=$(select_free_port "$local_pg_port" "$local_http_port")
+export SYNCHROD_PG_PORT
 ssh_command -N \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=15 \
