@@ -1,468 +1,493 @@
 # Synchro Release Process Implementation Plan
 
 **Date:** 2026-09-14
-**Status:** Ready, except for approved performance limits
 **Target:** `v0.3.0` and later releases
+**Status:** Implementation plan, not release certification
+**Reviewed source:** `fcb931a804376c82bb98e4f90f3b76946dba4864`
 
-## Required Outcome
+## Outcome And Boundaries
 
-Release day has three maintainer actions:
+The routine release has three maintainer actions:
 
 1. Merge the release pull request.
-2. Run the Release workflow on `dev`.
-3. Approve the protected `release` environment.
+2. Dispatch Release on `dev`.
+3. Approve publication in the protected `release` environment.
 
-Automation performs every build, test, publication, and public verification step.
+Automation checks the exact commit, builds each distribution payload once, tests installation, publishes dependencies first, and verifies public consumption.
 
-`RELEASE.md` becomes the only human release procedure.
+`RELEASE.md` becomes the only active release procedure.
 
-For this plan, "works" has a strict meaning:
+This change removes duplicate execution and the documented 72-hour release requirement.
+It does not require a new test framework, a complete test rewrite, or closure of unrelated repository cleanup.
 
-- The supported contract passes on the exact published source and payloads.
-- Supported platform boundaries pass packaged lifecycle tests.
-- Approved user performance limits pass on controlled reference cells.
-- Every public destination passes a clean install check.
-
-No finite process can prove that unknown defects do not exist.
-
-This process gives objective evidence for declared behavior. It does not claim an impossible absolute guarantee.
+No finite review or test suite proves the absence of unknown defects.
+The process must produce evidence for declared behavior, not a statement of perfection.
+Record execution time and maintainer actions before and after implementation.
+Do not promise a measured speed improvement before that comparison exists.
 
 ## Design Authority
 
-Use these inputs in this order:
+Use product requirements and failure risks to select proof.
+Use official platform and registry rules to select publication controls.
+Use repository code to identify existing implementation, missing connections, and safe deletions.
 
-1. The supported public contract defines required behavior.
-2. Data-loss, compatibility, security, performance, and distribution risks define proof.
-3. Official platform and registry rules define publication controls.
-4. Current code identifies migration work and deletion candidates.
+Current implementation output is not a correctness oracle.
+Current specifications can contain contradictions.
+Resolve a contradiction explicitly before changing its behavior or expected result.
+Record product decisions in the applicable issue.
 
-Current tests, targets, schemas, plans, and workflows have no presumed design value.
+Preserve a test because its assertions protect required behavior, not because its name or count looks useful.
+Each behavior has one authoritative proof home for each independent implementation.
+Shared scenarios across independent engines are not duplicate proof.
+Package smoke verifies installation, not the complete semantic corpus again.
+Do not require every proof type or a mutant for every requirement.
+Choose proof depth from the risk of an undetected failure.
 
-Keep a current mechanism only when it is the smallest proof for one required risk.
+## Support And Distribution
 
-Do not preserve a test because it is unique. Preserve it only when its required behavior is unique.
+The existing support matrix remains the single machine-readable support declaration.
 
-## Fixed Product Contract
-
-| Topic | Decision |
-|---|---|
-| First supported release | `v0.3.0` |
-| Supported wire protocol | Protocol 3 only |
-| Other protocol values | One generic unsupported-version rejection |
-| PostgreSQL | PostgreSQL 18 on Linux x64 |
-| Direct binaries | Linux x64 |
-| Public clients | Swift, Kotlin, and React Native |
-| Swift distribution | Exact repository tag through Swift Package Manager |
-| React Native iOS dependency | Tag-backed root `Synchro.podspec` |
-| CocoaPods trunk | No standalone publication |
-| Kotlin distribution | `fit.trainstar:synchro` through Maven Central |
-| React Native distribution | `@trainstar/synchro-react-native` through npm |
-| Historical versions | Keep all tags, assets, and package versions immutable |
-| Fixed 72-hour soak | Delete it |
-| Release timer | None |
-| Build policy | Build each publishable payload once |
-| Recovery | Resume identical payloads or issue a patch release |
-
-## Four Release Gates
-
-| Gate | Required evidence |
-|---|---|
-| 1. Candidate | Exact `dev` commit passes deterministic correctness and security CI |
-| 2. Package | Sealed payloads pass lifecycle, boundary, and performance checks |
-| 3. Publish | One approval permits immutable tag and registry publication |
-| 4. Public | Clean consumers install, verify identity, and run minimal live smoke |
-
-The release workflow does not repeat source tests from Gate 1.
-
-The release workflow never skips a failed or missing publication destination.
-
-## Testing Model
-
-| Proof | Purpose | Cadence |
+| Surface | Supported release boundary | Distribution |
 |---|---|---|
-| Unit tests | Local deterministic rules and boundaries | Pull request and candidate CI |
-| Contract vectors | Exact wire behavior | Pull request and candidate CI |
-| Real integration | PostgreSQL, adapter, and native engine behavior | Candidate CI |
-| Invariants | Safety across large state spaces | Candidate CI |
-| Seeded random tests | Operation, conflict, retry, and restart order | Scheduled |
-| Fault tests | Network, process, storage, and dependency failures | Scheduled |
-| Mutation controls | Prove that critical assertions detect defects | Scheduled |
-| Endurance | Leaks, races, backlog growth, and resource drift | Scheduled |
-| Packaged lifecycle | Install, connect, push, pull, kill, and resume | Release |
-| Performance | User workloads and resource limits | Release and scheduled |
-| Public smoke | Registry and package consumption | After publication |
+| Server | PostgreSQL 18, Linux x64 | Extension archive with control file and generated SQL |
+| Direct tools | Linux x64 | `synchrod-pg` and `synchro-seed` binaries |
+| Go host library | Go 1.25 minimum, Linux x64 host | `github.com/trainstar/synchro/api/go` at `api/go/v<version>` |
+| Swift | iOS 16 and current stable iOS | Root Swift package at `v<version>` |
+| Kotlin | Android API 24 and current stable Android | `fit.trainstar:synchro` on Maven Central |
+| React Native | React Native 0.83.x, current stable iOS and Android | `@trainstar/synchro-react-native` on npm |
+| Apple pod dependency | Exact release version | Root Git-backed `Synchro.podspec` |
 
-### Scheduled Does Not Mean a 72-Hour Soak
+Use Ubuntu 24.04 LTS x64 with official PGDG PostgreSQL 18 packages as the initial prebuilt-server environment.
+PGDG supports this combination.
+This is a narrow binary-support decision, not a claim about every Linux distribution.
+Record actual shared-library dependencies from the artifact.
+Do not invent a libc minimum.
 
-Scheduled validation is an automatic nightly or weekly workflow.
+Resolve current stable versions from vendor releases before candidate creation.
+Freeze exact OS, runtime, architecture, toolchain, and dependency versions for that candidate.
+A preinstalled runner image does not establish the current stable runtime.
+Missing required runtimes block the affected gate.
 
-Random tests record their seeds. Endurance tests use a bounded workload and time limit.
+Keep macOS as an Apple toolchain and Swift semantic-test host.
+Do not certify or publish a macOS PostgreSQL extension.
+Android host selection does not add support cells.
+Run semantics on representative hosts and package boundaries on the declared minimum/current cells.
+Do not create an OS, architecture, database, and dependency cross-product.
 
-No release waits for a fresh scheduled run or for elapsed soak time.
+Test declared dependency floors and current versions inside supported ranges through clean consumers.
+Keep iOS 16, Android API 24, and GRDB 7.x as the native package floors.
+Require the Swift 6 toolchain because GRDB 7.0.0 requires it.
+The current Swift 5.9 manifest declaration does not establish dependency compatibility.
+Do not change Swift language mode as part of release-process cleanup.
+Align the unbounded root GRDB pod dependency with the Swift package's supported major version.
+React Native 0.83.0 requires Node 20.19.4 or later and iOS 15.1 or later.
+Synchro's iOS 16 minimum therefore controls its bridge deployment floor.
+Declare the Node floor in npm metadata instead of promising unspecified Node 20 compatibility.
+Keep one supported React Native architecture, the existing TurboModule path.
 
-A confirmed failure becomes a minimized deterministic regression. That regression blocks release until its fix passes.
+There is no CocoaPods trunk publication.
+The RN iOS installation instructions must include the Git-backed Synchro and GRDB dependencies.
+The RN Android package must resolve the matching Maven release without workspace substitution.
+Publish both `v<version>` and `api/go/v<version>` at the same source commit.
+The root tag alone does not version the Go subdirectory module.
+Verify Go module resolution and host startup from a clean consumer without `replace` or workspace overrides.
 
-An unexplained failure cannot be dismissed as flaky. It needs a reproduced cause or an infrastructure fix.
+Do not publish conformance runners, generated test seeds, internal receipts, or unsupported server binaries.
+Generate portable test seeds from the isolated server instance that consumes them.
 
-### Edge Cases
+## Four Gates
 
-Experts do not enumerate every possible sync sequence.
+| Gate | Required outcome |
+|---|---|
+| Candidate | Required source CI passes for the exact release commit |
+| Package | Sealed distributions pass clean installation and lifecycle checks |
+| Publish | One approval authorizes dependency-ordered publication |
+| Public | Anonymous consumers resolve the intended versions and pass live smoke |
 
-They combine authored examples, state invariants, generated sequences, fault injection, and production defect regressions.
+Release consumes the successful candidate CI result.
+It does not repeat that commit's completed source suites.
+A different merge commit requires its own result.
 
-Run full semantics once for each independent engine:
+Bind results to repository, source SHA, workflow identity, run ID, attempt, commands, and resolved environment.
+Reject stale results, missing jobs, failed jobs, skipped required work, and incomplete result files.
+Derive exact required artifact, cell, operation, and destination sets from the canonical declarations.
+The final verifier rejects missing or extra records independently of earlier workflow sequencing.
+Keep original failures and their diagnoses.
+An unexplained retry-only pass is not release evidence.
 
-- PostgreSQL and `synchro-core`
-- Swift
-- Kotlin
+## Testing Without Duplicate Systems
 
-React Native is a bridge. Test bridge parity and lifecycle behavior on iOS and Android.
-
-Run package compatibility on the minimum and current supported client versions.
-
-Do not run a platform cross-product. Do not certify PostgreSQL on macOS.
-
-Client tests can use a separate Linux server through one adapter URL.
-
-### Performance
-
-Performance is a product contract. It is not an ad hoc release-day opinion.
-
-Define five user workloads:
-
-1. Initial synchronization
-2. Incremental pull
-3. Offline backlog push
-4. Rebuild
-5. Process termination and resume
-
-Define the supported data size and concurrency for each workload.
-
-Define only user-relevant limits:
-
-- Completion latency
-- Peak resident memory
-- Local database growth
-- Sustained sync throughput
-- Server database round trips
-
-Use one controlled reference cell for the server, Swift, and Kotlin.
-
-Use real mobile devices for user-visible timing. Use deterministic counters for query and storage limits.
-
-React Native uses native-engine results plus one bridge-overhead check per mobile platform.
-
-The first supported release must pass approved absolute limits.
-
-Later releases must also compare with the last supported release on the same reference cell.
-
-Current measurements can inform diagnosis. They cannot define acceptable performance.
-
-A limit failure blocks approval. A rerun can diagnose noise but cannot erase an unexplained failure.
-
-**Open product input:** Numeric performance limits are not approved.
-
-The implementation must measure representative workloads and obtain approval for each limit.
-
-Do not invent limits from the current implementation or an arbitrary percentage.
-
-## Public Distribution
-
-| Surface | Published form | Public check |
+| Proof | Required CI | Scheduled extension |
 |---|---|---|
-| PostgreSQL extension | PG18 Linux x64 archive | Clean PG18 install |
-| `synchrod-pg` | Linux x64 binary | Attestation, startup, and live smoke |
-| `synchro-seed` | Linux x64 binary | Attestation and command smoke |
-| Swift | Exact Git tag | Clean Swift Package Manager resolution |
-| Apple pod metadata | Root tag-backed podspec | Clean Git-backed pod resolution |
-| Kotlin | Signed Maven Central bundle | Clean Android dependency and build |
-| React Native | Exact npm tarball | Clean npm install and native builds |
+| Deterministic rules and shared vectors | Unit and contract tests | None |
+| Real server and native behavior | Existing integration and authored scenarios | Additional environments only after support approval |
+| Critical faults and durability | Deterministic failures at relevant transaction boundaries | Wider fault combinations |
+| Stateful sequences | Bounded seeded execution against real implementation and independent invariants | More seeds and longer workloads |
+| Negative controls | Critical assertion controls and gate-integrity controls | Broad mutation search |
+| Endurance and capacity | Existing deterministic safety bounds | Bounded endurance and capacity exploration |
 
-Do not publish conformance runners, portable seed data, verification receipts, or unsupported server binaries.
+Pull requests run fast source checks.
+Every push to `dev` runs the complete candidate set, including real native and both bridge paths.
+Required correctness does not depend on the scheduled workflow running first.
 
-## Verified Transition Blockers
+Retain the existing shared scenarios and test drivers.
+Trace each required assertion to its executable consumer before deleting or moving a test.
+Do not create a second scenario catalog, coverage database, reference engine, or receipt framework.
 
-These facts were verified on 2026-09-14. They do not define the target design.
+The risk map must cover these connected behaviors:
 
-- `.github/workflows/release.yml` blocks `v0.3.*`.
-- Missing registry credentials currently skip publication.
-- npm and Maven publication currently rebuild payloads.
-- `dev` has no ruleset or protected release environment.
-- Secret scanning and push protection are disabled.
-- npm already contains immutable `0.1.x` versions.
-- Maven Central has no public `fit.trainstar:synchro` artifact.
-- Maven account and namespace state require authenticated confirmation.
-- Current performance budgets mostly count requests.
-- The current benchmark accepts one implementation snapshot as its baseline.
+- Offline SQL edits, capture suppression, same-row dependency normalization, and durable intent.
+- Push conflicts, exact replay, response loss, later local edits, and canonical reconciliation.
+- Atomic pull apply, cursor commits, terminal checksums, and overlapping-scope provenance.
+- Rebuild interruption, snapshot boundaries, concurrent writes, pruning, and finality.
+- Schema changes, interrupted migration, queued intent, scope changes, and retention expiry.
+- WAL ordering, acknowledgment, replay, poison, reset, and worker recovery.
+- Authentication, role boundaries, strict wire decoding, readiness, limits, and redaction.
+- Empty startup, portable seeds, authenticated continuation, cancellation, stop, background, and restart.
 
-## Implementation Work
+Use authored expected values and independent invariants.
+Compare observable rows, outcomes, queues, cursors, and durable state.
+Test presence, a model-only run, and implementation-generated expectations do not prove production behavior.
+Minimize every discovered production defect into permanent regression coverage.
 
-### 1. Define the Supported Contract
+Retain structured result parsers and their negative controls.
+Required gates reject zero matches, filtered execution, missing results, skips, and substituted runtimes.
+Do not replace these checks with shell exit status or a handwritten coverage claim.
 
-**Files**
+### Performance And Endurance
 
-- Add `RELEASE.md`.
-- Delete `RELEASING.md`.
-- Update `README.md`, `AGENTS.md`, and `conformance/support-matrix.json`.
-- Update support, consumption, conformance, and verification documentation.
-- Replace `docs/src/content/docs/spec/07-release-verification.mdx`.
-- Add `docs/src/content/docs/spec/08-performance.mdx`.
-- Replace `conformance/performance/budgets.json`.
+New performance budgets and benchmark design are a separate work item.
+They do not block this release-process implementation.
+`RELEASE.md` must distinguish enforced checks from deferred performance work.
 
-**Work**
+Retain correctness and request-bound assertions inside performance-named targets.
+Separate these assertions from timing characterization before changing their cadence.
+Do not delete the existing R1 benchmark merely because it compares measured baselines.
+Remove its separate release-blocking status.
+Keep timing comparison available as scheduled or manual performance evidence.
+Retain its required correctness assertions through their semantic proof homes.
 
-1. Make `RELEASE.md` the only release procedure.
-2. Put the three maintainer actions first.
-3. Record every fixed product decision from this plan.
-4. Define one support matrix with Linux x64 server support.
-5. Define minimum and current client boundaries.
-6. Define the five performance workloads and supported sizes.
-7. Approve absolute performance limits from user needs.
-8. Store those limits in one small machine-readable contract.
-9. Keep protocol behavior in protocol specifications.
-10. Keep release operation only in `RELEASE.md`.
+The later performance policy covers initial sync, incremental pull, backlog push, rebuild, and restart.
+It must state workload sizes, environment, sampling, noise handling, and user-relevant latency, memory, storage, and throughput limits.
+Measured release baselines support regression detection.
+User requirements establish acceptable absolute limits.
+Neither kind of limit is a correctness oracle.
 
-**Done when**
+Schedule wider seeded and endurance runs without a release timer.
+Record the seed and operation schedule before execution.
+A known supported-contract failure blocks release through its issue and deterministic regression.
+No release waits 72 hours.
 
-- Support documents agree with the support matrix.
-- Each performance limit has a user-facing reason.
-- `make verify-contract` and `make docs-build` pass.
+## Supported Upgrades And Recovery
 
-### 2. Establish the Protocol 3 Baseline
+`v0.3.0` is the first supported Protocol 3 baseline.
+Do not promise migration from `0.1.x` or experimental server databases.
+Reject unsupported state explicitly without deleting local writes.
+Keep all historical tags, assets, and package versions unchanged.
 
-**Files**
+For supported releases, preserve durable application data and queued intent across SDK upgrades.
+Test the previous supported package and each distinct supported stored-data format.
+Use the old package to create the database before opening it with the candidate.
+Include pending writes, rejections, partial rebuilds, and interrupted schema migration.
 
-- Swift database, change tracker, pull processor, and related tests
-- Kotlin database, change tracker, push, pull, SQLite schema, and related tests
-- `extensions/synchro-core/src/fingerprint.rs`
-- Protocol documentation and vectors
+Test server-first rolling upgrades with the previous supported clients.
+Test new clients against the preceding supported server within the declared compatibility window.
+During `0.x`, patch releases preserve the minor line's public API and storage compatibility.
+A breaking minor release requires an explicit compatibility window and data-preserving migration procedure before its candidate starts.
+Do not infer this project's support promise from SemVer's permissive `0.x` rule.
 
-**Work**
+`v0.3.0` requires fresh extension installation, not an update from an unsupported preview.
+The next supported server release requires versioned update SQL and `ALTER EXTENSION UPDATE`.
+Keep fresh-install SQL generation separate from update scripts.
+Prove preservation of authoritative rows, registrations, ledgers, checkpoints, and worker recovery.
+Document required PostgreSQL restarts, configuration, roles, backup, and restore steps.
+Do not require Android to verify a server installation.
 
-1. Replace preview local migrations with one current database baseline.
-2. Reject a preview database explicitly.
-3. Do not convert or discard preview pending writes.
-4. Remove `legacy_blocked`, `legacy_import`, and `legacy_unsealed`.
-5. Keep `blocked_by_predecessor`.
-6. Remove Protocol 2 conversion behavior and documentation.
-7. Rename current-vector helpers that use `legacy`.
-8. Test new, current, and rejected preview databases.
-9. Test generic rejection for every wire version other than 3.
+Do not promise an untested binary downgrade after a storage migration.
+Recovery uses a verified backup before new writes, or a forward repair that preserves subsequent writes.
+Never drop synchronization state merely to make an upgrade pass.
+Preview-code removal and broad migration cleanup are not prerequisites for this workflow change.
 
-**Done when**
+## Implementation Sequence
 
-- Swift and Kotlin tests pass.
-- Production code contains no preview lifecycle state.
-- Current Protocol 3 behavior still passes.
+Complete each prerequisite before its dependent step.
+Parallelize independent host jobs, not changes to a shared unverified contract.
 
-### 3. Rebuild Validation From Required Risks
+### 1. Establish One Procedure
 
-**Files**
+**Files:** `RELEASE.md`, `RELEASING.md`, `README.md`, `AGENTS.md`, support matrix, documentation, and documentation validators.
 
-- Rewrite `.github/workflows/ci.yml`.
-- Add `.github/workflows/scheduled-validation.yml`.
-- Delete `.github/workflows/rn-ios-validation.yml`.
-- Merge and delete separate CodeQL and dependency workflows.
-- Update `Makefile`.
-- Add one small static contract-to-proof map.
+1. Write the complete `RELEASE.md` procedure.
+2. Put the three routine maintainer actions first.
+3. Specify one-time setup, version preparation, support, gates, approval, publication, public checks, and recovery.
+4. Include the upgrade and deferred-performance policies above.
+5. Replace `RELEASING.md` with a link to `RELEASE.md`.
+6. Remove competing release procedures from specifications 06 and 07 and verification documentation.
+7. Preserve protocol semantics and shared scenario definitions outside the release procedure.
+8. Replace duplicated support claims with references to the support matrix.
+9. Update validators and self-tests that currently require old release schemas or hard-coded version values.
+10. Mark historical release plans and trackers as superseded procedure.
+11. Preserve unresolved findings in the existing issue ledger.
+12. Keep `VERSION` authoritative across package metadata, SQL filenames, and release checks.
+13. Remove hard-coded release versions and obsolete client installation requirements.
 
-**Work**
+**Acceptance:** `make docs-build` passes, including contract verification.
+Active release instructions and links resolve to one procedure.
+Deleting every historical report is not an acceptance criterion.
 
-1. Evaluate every current test against the supported contract.
-2. Delete tests for unsupported or duplicate behavior.
-3. Map each normative requirement to one proof target and cadence.
-4. Add stable `CI / pull-request` and `CI / candidate` aggregate jobs.
-5. Run candidate CI on every push to `dev`.
-6. Include deterministic correctness, security, and structural performance guards.
-7. Reject failed, skipped, filtered, and zero-test required gates.
-8. Put seeded random, fault, mutation, capacity, and endurance tests in scheduled validation.
-9. Record random seeds before execution.
-10. Add small Make targets for Linux, Apple, Android, and React Native hosts.
-11. Remove `validation-check`, `phase-5-check`, and the current `release-check`.
+### 2. Configure External Controls
 
-**Done when**
+**Depends on:** Step 1.
 
-- Every supported behavior has one proof home.
-- No test remains because of current-state precedent.
-- Release does not rerun source semantic suites.
+1. Protect `dev` with pull requests, resolved conversations, and the required pull-request aggregate.
+2. Protect release tags against unauthorized creation, movement, and deletion.
+3. Enable GitHub immutable releases.
+4. Create the protected `release` environment with one publication approval.
+5. Restrict signing material to trusted `dev` staging jobs in a separate signing environment.
+6. Restrict publication credentials to publication jobs.
+7. Default workflow permissions to read-only.
+8. Pin action commits, tool versions, and supported build environments.
+9. Enable required workflows, secret scanning, push protection, and dependency security updates.
+10. Cover actual Go, Cargo, Swift, Gradle, npm, and Actions dependency locations.
+11. Block unresolved applicable Critical and High security findings.
+12. Configure npm trusted publishing for this workflow and environment.
+13. Require npm two-factor authentication and disable token publication.
+14. Verify the Maven account, namespace, Portal token, signing key, and public-key distribution.
+15. Verify the Linux fixture host, isolated networking, credentials, and minimum/current mobile runtimes.
 
-### 4. Build and Test Exact Payloads
+Missing credentials or external approval block the affected step explicitly.
+They never produce a skipped success.
+The normal publication approval does not authorize a bypass of failed tests.
+CI rewiring can proceed while external setup runs.
+Its integrated gate requires the corresponding host and repository controls.
 
-**Files**
+### 3. Connect Existing Tests To Required CI
 
-- Replace `scripts/rc-artifacts.py` with `scripts/release-artifacts.py`.
-- Replace its tests.
-- Update release Make targets.
-- Replace `conformance/artifacts/inventory.json`.
-- Simplify or replace `verification/packaged_smoke.py`.
-- Update packaged consumer fixtures.
+**Depends on:** Step 1 for implementation and Step 2 for integrated execution.
+**Files:** `Makefile`, CI/security workflows, scenario ownership, test-result parsers, and existing host drivers.
 
-**Work**
+1. Reuse existing requirement IDs, proof mappings, vectors, scenario runners, and meaningful negative controls.
+2. Repair demonstrated coverage gaps without duplicating existing native journeys.
+3. Add stable `CI / pull-request` and `CI / candidate` aggregate jobs.
+4. Keep security workflows as reusable CI jobs with scheduled rescans.
+5. Remove duplicate push and pull-request triggers from those reusable workflows.
+6. Include iOS bridge correctness in candidate CI instead of scheduled-only validation.
+7. Keep critical deterministic faults and bounded real stateful execution in candidate CI.
+8. Move only wider exploration, broad mutation search, timing characterization, and endurance to scheduled validation.
+9. Keep focused Make targets without adding redundant host wrappers.
+10. Connect Apple and Android clients to isolated Linux server fixtures.
+11. Preserve fixture control, reset, and fault operations across the host boundary.
+12. Verify server artifact identity, endpoint reachability, per-run isolation, and cleanup before accepting remote evidence.
+13. Reject preview databases without converting or deleting pending writes.
+14. Preserve current Protocol 3 schema journals and storage transitions.
+15. Remove stale mutation selectors without removing required assertion controls.
 
-1. Add `make release-stage VERSION=x.y.z`.
-2. Add `make release-verify RELEASE_DIR=...`.
-3. Stage the extension, adapter, seed tool, npm tarball, and Maven bundle.
-4. Sign the Maven payloads during staging.
-5. Create required Maven checksums and detached signatures.
-6. Create one `release-manifest.json`.
-7. Record source commit, CI run, destination, path, size, and SHA-256.
-8. Create `SHA256SUMS` and one SPDX JSON SBOM.
-9. Seal the candidate before package tests.
-10. Reject missing, extra, renamed, or modified files.
-11. Run lifecycle checks from sealed paths.
-12. Run performance checks on the sealed payloads.
+The adapter data URL alone is not a complete fixture-control interface.
+Reuse `SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL` and the existing transferable attach bundle.
+Attach already provides remote SQL setup, observation, and WAL pause control.
+It does not own remote PostgreSQL restart or cleanup.
 
-**Done when**
+Use SSH forwarding for database and adapter connections to the isolated Linux test host.
+Verify the host key and bind forwarded ports to loopback.
+Add restart and destroy operations to the existing provisioner control path.
+Each operation must accept only its owned run identity and return the corresponding attach configuration.
+Clean remote databases, slots, roles, processes, and temporary files through that owner.
+Do not add a second fixture service or share mutable fixtures between CI runs.
 
-- A one-byte mutation fails verification.
-- An unexpected file fails verification.
-- Verification never rebuilds a payload.
+Native semantic CI can use the existing host-local development adapter against attached Linux PostgreSQL.
+That internal test build is not a published macOS server binary.
+Packaged and public consumer checks must use the sealed Linux adapter on the Linux fixture host.
+Forward its HTTP endpoint to the Apple or Android consumer.
+Do not substitute a host-local development adapter in package evidence.
 
-### 5. Replace the Release Workflow
+**Acceptance:** Each required engine and bridge runs against real dependencies.
+Negative controls reject missing tests, failed children, wrong environments, and incomplete results.
+Candidate CI passes on a clean commit.
 
-**File**
+### 4. Stage And Verify Exact Distributions
 
-- Rewrite `.github/workflows/release.yml`.
+**Depends on:** Steps 2 and 3.
+**Files:** Artifact staging script, artifact inventory, Make targets, `verification/`, package metadata, and consumer fixtures.
 
-**New release**
+1. Evolve the existing artifact staging and verification implementation.
+2. Add `make release-stage VERSION=x.y.z`.
+3. Add `make release-verify RELEASE_DIR=...`.
+4. Stage final-version extension, tools, Go and Apple source inputs, npm tarball, and Maven bundle.
+5. Include required package metadata, licenses, Maven signatures, and checksums before sealing.
+6. Generate an SPDX JSON SBOM covering shipped components.
+7. Generate provenance with supported GitHub and registry tooling.
+8. Generate `release-manifest.json` and `SHA256SUMS` from the completed distribution inputs.
+9. Persist the sealed candidate as an immutable Actions artifact before any publication operation.
+10. Record its artifact ID, digest, originating run, and expiration.
+11. Install only from sealed paths in clean consumer environments.
+12. Recheck payload identity after testing and before publication.
+13. Verify provenance signer, repository, workflow, source SHA, and subject hashes with official tools.
+14. Validate the signed Maven bundle privately and remove that unpublished test deployment.
 
-1. Use `workflow_dispatch` without release-mode or skip inputs.
-2. Require the selected ref to be `dev` and the candidate to equal its current head.
-3. Read and validate the version from the candidate.
-4. Require zero open issues in the matching release milestone.
-5. Require successful `CI / candidate` for the exact commit.
-6. Fail on an existing public version.
-7. Build, seal, and test payloads once.
-8. Wait for the protected `release` environment.
-9. Create the immutable tag and a draft GitHub release.
-10. Publish the same payloads to GitHub, npm, and Maven Central.
-11. Verify every public destination.
-12. Finalize the GitHub release.
+The manifest binds source, CI result, build inputs, dependencies, provenance, destinations, paths, sizes, and payload SHA-256 values.
+It does not contain its own content hash.
+Swift and pod distributions bind the exact source tree and package metadata.
+The Go module binds its subdirectory source and required metadata to the same commit.
+Consumer compilation is necessary and does not violate the build-once distribution rule.
+Do not require GitHub-generated archive compression bytes to equal a local archive.
+
+Use clean caches and dependency resolution for public checks.
+Reject workspace links, `mavenLocal()`, local overrides, stale installed packages, and unexpected files.
+Reuse existing consumers for install, connect, SQL write, push, pull, process kill, and resume.
+Public consumer entry points must not import inspection SPI, proof annotations, or internal inspection modules.
+Keep those inspection tools in semantic tests, not public installation proof.
+Compare downloaded binaries, npm tarballs, and Maven payload files with the sealed manifest hashes.
+Verify real data and durable outcomes, not only command success.
+Include an unsigned iOS device build and an Android release build.
+Simulator and debug builds do not establish release-configuration compatibility.
+Exercise the packaged seed tool through seed generation and normal authenticated continuation.
+
+Server installation must configure `shared_preload_libraries`, database identity, worker login, replication access, and runtime roles.
+Restart PostgreSQL before checking worker readiness and committed-WAL delivery.
+Exercise the packaged `synchrod-pg projection-bootstrap` command with distinct operator and worker credentials.
+Retain generated-SQL drift checks and distinguish role-preserving reinstall from a version upgrade.
+
+**Acceptance:** Changed bytes, extra files, wrong dependencies, and source substitution fail.
+Verification and publication cannot rebuild a distribution.
+Linux server smoke does not require a mobile emulator.
+
+### 5. Publish And Resume Without Rebuilding
+
+**Depends on:** Step 4.
+**File:** `.github/workflows/release.yml` and focused publication helpers.
+
+Use `workflow_dispatch`.
+The normal dispatch has no skip controls.
+An optional original run ID selects recovery instead of creating a new candidate.
+Serialize publication with one repository-wide concurrency group.
+
+**New candidate**
+
+1. Freeze the selected `dev` head and validate its canonical `VERSION`.
+2. Require the exact commit's successful candidate CI.
+3. Require closure of applicable release blockers, not every open repository issue.
+4. Reject an existing version that does not belong to this candidate.
+5. Build, seal, persist, and verify distributions.
+6. Wait for the single publication approval.
+7. Recheck candidate identity, required results, credentials, and release blockers.
+8. Create both immutable source tags at the candidate commit.
+9. Create a draft GitHub release and attach every intended GitHub asset.
+10. Publish the GitHub release with `make_latest: false`.
+11. Verify anonymous GitHub downloads, Go module consumption, and tag-backed Apple dependencies.
+12. Upload the signed Maven bundle with `USER_MANAGED`.
+13. Record its deployment ID before requesting publication.
+14. Require `VALIDATED`, publish that deployment, and verify public Maven files and consumption.
+15. Publish the sealed npm tarball after native dependency checks pass.
+16. Verify public npm identity and clean iOS/Android consumer behavior.
+17. Mark GitHub and npm latest only after every required public check passes.
+
+Use a non-default npm dist-tag until final public verification succeeds.
+GitHub drafts cannot prove anonymous download access.
+Public verification requires publication, so cross-registry publication is not an atomic transaction.
+Do not describe partial publication as a completed release.
 
 **Recovery**
 
-1. Prefer rerunning failed jobs in the original run.
-2. Permit a new dispatch only from the immutable release tag.
-3. Require the tag, draft manifest, and source commit to agree.
-4. Download and verify the original sealed payloads.
-5. Skip only a destination that contains identical bytes.
-6. Resume missing publication and verification.
-7. Fail on any identity mismatch.
+| Observed state | Required action |
+|---|---|
+| No sealed candidate | Start a new candidate without claiming prior package verification |
+| Sealed candidate, no tag | Restore original bytes and resume approved publication |
+| Only one required source tag | Verify its commit and create the missing tag at that same commit |
+| Tag only or partial draft assets | Verify tag identity and finish missing draft assets |
+| GitHub public, registry missing | Keep non-latest status and publish remaining original payloads |
+| Registry operation interrupted | Query its recorded operation and published content before retry |
+| Maven upload outcome unknown | Recover or remove the unpublished Portal deployment before another upload |
+| Published bytes match | Skip upload and repeat only incomplete public checks |
+| Bytes, tag, source, or version differ | Stop and record the conflict |
+| Original artifacts expired or disappeared | Stop recovery, never rebuild under an already published version |
+| Published product defect | Warn users, retain immutable versions, and release a corrected patch |
 
-**Security**
+Retain candidate artifacts for the configured 90-day Actions recovery window.
+Persist operation identifiers separately from the sealed manifest.
+Never edit that manifest to record progress.
+Resume must work from the original run ID before a tag exists.
+Reject missing evidence rather than manufacture replacement receipts.
 
-- Default workflow permissions to `contents: read`.
-- Scope write, OIDC, attestation, and issue permissions to required jobs.
-- Make missing credentials fail.
-- Keep the GitHub release draft until all public checks pass.
+**Acceptance:** Inject interruption at every publication boundary.
+Resume tag-only, partial-upload, partial-registry, and public-check failures with identical payloads.
+Wrong-source and wrong-byte attempts fail.
+Do not test failure recovery by publishing disposable production versions.
 
-**Done when**
+### 6. Remove Replaced Machinery And Prove The Procedure
 
-- Negative controls reject wrong commits, open milestones, changed payloads, tag conflicts, and missing credentials.
-- A failed destination resumes without rebuilding.
+**Depends on:** Steps 1 through 5.
 
-### 6. Configure External Controls
+1. Remove repeated source suites from Release.
+2. Remove obsolete `validation-check`, `phase-5-check`, and release receipt wrappers after replacement gates pass.
+3. Keep focused Make targets and structured test-result parsing.
+4. Remove old candidate/evidence schemas only after all live consumers migrate.
+5. Update documentation validators, package consumers, inventories, and tests in the same migration.
+6. Remove scheduled-only iOS workflow machinery after candidate CI owns its required behavior.
+7. Retain useful benchmark code and unresolved defect evidence.
+8. Remove plan-specific release instructions from active documentation and `AGENTS.md`.
+9. Run an independent deletion and simplification review.
+10. Run focused validation and the complete candidate gate on clean commits.
+11. Run package verification and publication failure controls.
+12. Reach the approval gate and cancel without changing tags, releases, or public registries.
+13. Record elapsed time, duplicate executions, and required maintainer actions.
 
-**GitHub**
+**Acceptance:** One procedure and one implementation of each check remain.
+Required correctness still executes.
+No dependent gate accepts missing work.
+The first real release supplies public-install evidence through the normal procedure.
+Publication failure controls supply interruption and recovery evidence.
+Implementation completion and a successful public release are separate recorded outcomes.
 
-1. Protect `dev` with a ruleset.
-2. Require a pull request, resolved conversations, and `CI / pull-request`.
-3. Block force pushes and deletion.
-4. Keep one audited administrator recovery path.
-5. Require one review when two eligible maintainers exist.
-6. Create a `release-signing` environment for Maven signing material.
-7. Create a protected `release` environment for publication.
-8. Enable secret scanning, push protection, and Dependabot security updates.
-9. Pin actions, toolchains, runner families, and build containers.
+Do not close product issues merely because a tracker or report was removed.
+Do not require every R2/R3 cleanup item before replacing duplicate release orchestration.
+Keep only demonstrated release blockers on the release path.
 
-**npm**
+## Review Evidence
 
-1. Configure trusted publishing for `.github/workflows/release.yml`.
-2. Bind it to the `release` environment.
-3. Use a GitHub-hosted runner and a supported pinned npm CLI.
-4. Require two-factor authentication and disallow publication tokens.
-5. Keep automatic provenance enabled.
+This review examined product, test, packaging, automation, and documentation areas.
+Source inspection establishes implementation and wiring, not a fresh passing runtime result.
+This was not a complete line-by-line defect audit.
+Access to `clients/react-native/example/ios/.xcode.env` was denied.
+That file was not inspected or accessed through another route.
 
-**Maven Central**
+| Finding | Evidence at the reviewed commit | Plan consequence |
+|---|---|---|
+| Source suites run twice | `.github/workflows/ci.yml:217-246`, `.github/workflows/release.yml:197-254` | Reuse exact-commit CI |
+| Native response-loss proof already exists | `conformance/swift/push_response_loss.go:40-197`, `conformance/kotlin/push_response_loss.go:39-199` | Reuse, do not replace wholesale |
+| Correctness uses performance-named targets | `Makefile:863-876`, `Makefile:926-953` | Split cadence by assertion purpose |
+| Server smoke depends on Android | `Makefile:1627-1631` | Give server installation its own driver |
+| Release publication ignores native dependency order | `.github/workflows/release.yml:1012-1073` | Publish native dependencies before npm |
+| Old release schemas have live validators | `docs/scripts/verify-contract.mjs:32-43`, `docs/scripts/validators/ci-summary.mjs:1-16` | Migrate consumers before deletion |
+| Support prose conflicts with Linux-only packaging | `README.md:45-62`, `docs/src/content/docs/reference/support-policy.mdx:19-29`, `.github/workflows/release.yml:954-965` | One support declaration |
+| Current Android is hard-coded | `.github/workflows/release.yml:650`, `.github/workflows/release.yml:843` | Resolve vendor versions per candidate |
+| Apple dependency ranges differ | `Package.swift:15`, `Synchro.podspec:14` | Align GRDB support and test consumer resolution |
+| Manifest generation accepts incomplete smoke | `scripts/rc-artifacts.py:277-300`, `scripts/ci/test_rc_artifacts.py:50-66` | Verify exact required sets |
+| Consumers use inspection APIs | `verification/consumers/swift/Sources/SynchroConsumer/main.swift:1-2`, `verification/consumers/react-native/App.tsx:3-5` | Add public-API-only entry points |
+| Real bounded stateful proof exists | `conformance/blackbox/integration/soak_test.go:39-103`, `conformance/soak/runner.go:88-167` | Reuse in candidate CI |
+| Existing server staging omits the seed tool | `Makefile:608-627`, `Makefile:698-735` | Stage and exercise the existing seed artifact |
+| Server has an operator command | `api/go/cmd/synchrod-pg/main.go:179-230` | Include projection-bootstrap package smoke |
+| Go is a subdirectory module | `api/go/go.mod:1-4` | Publish `api/go/v<version>` and verify Go consumers |
+| Remote SQL attach exists, but lifecycle remains local | `conformance/blackbox/environment.go:150-158`, `conformance/blackbox/process.go:1468-1485`, `conformance/blackbox/process.go:1905-1930` | Reuse SQL attach and add owned remote lifecycle control |
 
-1. Confirm the account and verify the `fit.trainstar` namespace.
-2. Create a Portal user token and artifact-signing key.
-3. Publish the signing public key.
-4. Store credentials only in scoped environments.
-5. Upload one sealed test bundle as `USER_MANAGED`.
-6. Require Central to report `VALIDATED`.
-7. Drop the test deployment without publication.
-8. Use `AUTOMATIC` only after the GitHub approval gate.
+GitHub API inspection on 2026-09-14 UTC found unprotected `dev`, no rulesets, and no release environment.
+It also found disabled secret scanning, push protection, and dependency security updates.
+CodeQL and React Native iOS Validation reported `disabled_inactivity`.
+Verify actual control activation during implementation, not only checked-in configuration.
 
-Missing Maven setup blocks publication. It never produces a skipped success.
+## Engineering Basis
 
-### 7. Delete Duplicate Machinery
-
-Run a reference search before each deletion.
-
-Delete these items after their replacements pass:
-
-- `conformance/schemas/rc-candidate-lock-v1.schema.json`
-- `conformance/schemas/rc-manifest-v2.schema.json`
-- `conformance/schemas/ci-summary-v1.schema.json`
-- `conformance/schemas/performance-budgets-v2.schema.json`
-- `conformance/cmd/synchro-evidence/`
-- `conformance/evidence/`
-- Release-only receipt types in `conformance/execution/`
-- `scripts/ci/build-phase-5-input.py`
-- `scripts/ci/test_evidence_variables.py`
-- `scripts/release-support-check.py`
-- `scripts/rc-artifacts.py`
-- `conformance/blackbox/integration/real_r1_benchmark_test.go`
-- `conformance/blackbox/integration/testdata/r1-benchmark-baseline.json`
-- Obsolete release tests and Make targets
-
-Inline a shared helper when only one concrete consumer remains.
-
-Keep or replace proof behavior only when the risk model requires it.
-
-### 8. Migrate Work and Prove the Process
-
-1. Map every incomplete R2 and R3 item to a GitHub issue.
-2. Keep oracle-retirement data only when an open issue needs it.
-3. Move required row data out of the plans directory.
-4. Delete R2 and R3 trackers.
-5. Delete superseded plans and agent reports.
-6. Remove plan-specific instructions from `AGENTS.md`.
-7. Run all focused Make targets on clean commits.
-8. Run contract, documentation, workflow, and artifact negative checks.
-9. Run complete candidate CI with zero failures and zero required skips.
-10. Run the Release workflow to the approval gate.
-11. Cancel and prove that no public state changed.
-12. Complete the real `v0.3.0` release after product gates pass.
-13. Verify GitHub, npm, Maven, Swift, and pod consumption.
-14. Deprecate npm `0.1.x` as unsupported previews.
-15. Mark old GitHub releases as unsupported previews.
-16. Delete this plan after every completion condition passes.
-
-Do not close a product issue because its old plan or report is removed.
-
-## Completion Conditions
-
-- One short `RELEASE.md` contains the complete maintainer procedure.
-- One support matrix defines every supported boundary.
-- Protocol 3 is the only supported protocol path.
-- Exact payloads pass correctness, lifecycle, and approved performance limits.
-- Repository and registry controls are active.
-- Partial publication resumes with identical bytes.
-- Public consumers install and run from every destination.
-- No duplicate release evidence system, tracker, or release plan remains.
-
-## Standards Basis
-
-- [Google SRE: Release Engineering](https://sre.google/sre-book/release-engineering/)
-- [Google SRE: Testing for Reliability](https://sre.google/sre-book/testing-reliability/)
-- [Google SRE: Implementing SLOs](https://sre.google/workbook/implementing-slos/)
-- [Semantic Versioning 2.0.0](https://semver.org/)
-- [SLSA Build Track](https://slsa.dev/spec/v1.2/build-track-basics)
-- [GitHub deployment environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
-- [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
-- [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
-- [Maven Central deployment bundles](https://central.sonatype.org/publish/publish-portal-upload/)
-- [Maven Central Publisher API](https://central.sonatype.org/publish/publish-portal-api/)
-- [Android benchmarks in CI](https://developer.android.com/topic/performance/benchmarking/benchmarking-in-ci)
+- [Google SRE release engineering](https://sre.google/sre-book/release-engineering/): shared test targets, exact revisions, automation, and packaged-system verification.
+- [Google SRE testing for reliability](https://sre.google/sre-book/testing-reliability/): risk-based layered tests, failure coverage, and testing cost.
+- [Semantic Versioning](https://semver.org/): explicit public API and immutable published versions.
+- [PostgreSQL extension packaging](https://www.postgresql.org/docs/18/extend-extensions.html): installation, control files, update scripts, and durable database changes.
+- [PostgreSQL Ubuntu support](https://www.postgresql.org/download/linux/ubuntu/): supported initial Linux binary environment.
+- [Go module repository conventions](https://go.dev/doc/modules/managing-source): subdirectory version tags and clean source consumption.
+- [GitHub immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases): attach assets before publication and preserve bytes.
+- [GitHub release API](https://docs.github.com/en/rest/releases/releases): draft visibility and latest-release controls.
+- [GitHub artifact retention](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts): bounded recovery storage.
+- [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations): standard provenance generation and verification.
+- [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/): scoped OIDC publication and provenance.
+- [React Native 0.83 package requirements](https://github.com/facebook/react-native/blob/v0.83.0/packages/react-native/package.json) and [Apple deployment requirements](https://github.com/facebook/react-native/blob/v0.83.0/packages/react-native/scripts/cocoapods/helpers.rb): dependency and platform floors.
+- [GRDB 7.0.0 manifest](https://github.com/groue/GRDB.swift/blob/v7.0.0/Package.swift): required Swift 6 toolchain.
+- [Maven deployment bundles](https://central.sonatype.org/publish/publish-portal-upload/) and [Publisher API](https://central.sonatype.org/publish/publish-portal-api/): signed payloads and explicit publication state.
+- [Android benchmarks in CI](https://developer.android.com/topic/performance/benchmarking/benchmarking-in-ci): measured regression baselines and noise control.
