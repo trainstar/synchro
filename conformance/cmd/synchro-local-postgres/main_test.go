@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 )
@@ -253,6 +255,71 @@ func TestRunLifecycleUsesOwnedControlProtocolAndSameRunDestroyIsIdempotent(t *te
 	}
 	if err := runLifecycle(context.Background(), []string{"--state-dir", stateDir, "restart", runID}); err == nil {
 		t.Fatal("restart accepted a destroyed run")
+	}
+}
+
+func TestRunLifecycleCancellationUnblocksStalledPeer(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDirectory(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	runID := strings.Repeat("d", 32)
+	listener, err := openLifecycleListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLifecycleState(stateDir, lifecycleState{
+		RunID:          runID,
+		ControlAddress: listener.Addr().String(),
+	}); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+
+	requestRead := make(chan struct{})
+	releasePeer := make(chan struct{})
+	peerDone := make(chan struct{})
+	go func() {
+		defer close(peerDone)
+		connection, acceptErr := listener.AcceptTCP()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = io.ReadAll(connection)
+		close(requestRead)
+		<-releasePeer
+	}()
+	t.Cleanup(func() {
+		close(releasePeer)
+		_ = listener.Close()
+		<-peerDone
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- runLifecycle(ctx, []string{"--state-dir", stateDir, "restart", runID})
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled peer did not receive the lifecycle request")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled lifecycle command error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled lifecycle command waited for peer close")
+	}
+	select {
+	case <-peerDone:
+		t.Fatal("stalled peer closed before the lifecycle command returned")
+	default:
 	}
 }
 

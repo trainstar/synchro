@@ -523,18 +523,38 @@ func runLifecycle(ctx context.Context, args []string) error {
 		return errors.New("connect to owned lifecycle run failed")
 	}
 	defer connection.Close()
+	operationDeadline := time.Now().Add(localStartupTimeout + localShutdownTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(operationDeadline) {
+		operationDeadline = contextDeadline
+	}
+	if err := connection.SetDeadline(operationDeadline); err != nil {
+		return errors.New("bound lifecycle command failed")
+	}
+	stopCancellation := context.AfterFunc(ctx, func() {
+		_ = connection.Close()
+	})
+	defer stopCancellation()
 	request, err := json.Marshal(lifecycleRequest{Operation: operation, RunID: runID})
 	if err != nil {
 		return errors.New("encode lifecycle command failed")
 	}
 	if _, err := connection.Write(append(request, '\n')); err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return fmt.Errorf("send lifecycle command: %w", contextErr)
+		}
 		return errors.New("send lifecycle command failed")
 	}
 	if tcpConnection, ok := connection.(*net.TCPConn); ok {
 		_ = tcpConnection.CloseWrite()
 	}
 	data, err := io.ReadAll(io.LimitReader(connection, lifecycleMessageBytes+1))
-	if err != nil || len(data) > lifecycleMessageBytes {
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return fmt.Errorf("read lifecycle response: %w", contextErr)
+		}
+		return errors.New("read lifecycle response failed")
+	}
+	if len(data) > lifecycleMessageBytes {
 		return errors.New("read lifecycle response failed")
 	}
 	var response lifecycleResponse
