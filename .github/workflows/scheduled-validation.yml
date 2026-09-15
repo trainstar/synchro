@@ -63,6 +63,27 @@ jobs:
       - name: Run broad core mutation search
         run: make test-rust-mutants-broad
 
+  broad-integration-mutation:
+    name: broad integration mutation search
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Run every integration mutant
+        run: make test-integration-mutants-broad
+
   benchmark-characterization:
     name: benchmark characterization
     runs-on: ubuntu-24.04
