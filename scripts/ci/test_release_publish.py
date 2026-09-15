@@ -45,6 +45,26 @@ class PublicationStateTests(unittest.TestCase):
             "npm": {"sha256": None, "dist_tags": {}, "provenance": False},
         }
 
+    def test_candidate_identity_accepts_exact_commit_and_version(self) -> None:
+        release_publish.validate_candidate_identity(self.commit, self.version)
+
+    def test_candidate_identity_rejects_invalid_commit_lengths(self) -> None:
+        for commit in ("a" * 39, "a" * 41):
+            with self.subTest(length=len(commit)):
+                with self.assertRaisesRegex(release_publish.PublicationError, "source commit"):
+                    release_publish.validate_candidate_identity(commit, self.version)
+
+    def test_candidate_identity_rejects_noncanonical_values(self) -> None:
+        invalid = (
+            ("A" * 40, self.version),
+            (self.commit, "v1.2.3"),
+            (self.commit, "1.2"),
+        )
+        for commit, version in invalid:
+            with self.subTest(commit=commit, version=version):
+                with self.assertRaises(release_publish.PublicationError):
+                    release_publish.validate_candidate_identity(commit, version)
+
     def test_new_candidate_starts_with_tags(self) -> None:
         result = release_publish.classify_publication(self.identity, self.state())
         self.assertEqual(result["next_operation"], "create-tags")

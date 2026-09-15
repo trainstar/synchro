@@ -105,8 +105,9 @@ jobs:
             version="$(tr -d '\n' < VERSION)"
             artifact_run_id="$GITHUB_RUN_ID"
           fi
-          case "$source_commit" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo "candidate source commit is invalid" >&2; exit 1 ;; esac
-          case "$version" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "VERSION must match X.Y.Z" >&2; exit 1 ;; esac
+          python3 scripts/release-publish.py validate-candidate \
+            --source-commit "$source_commit" \
+            --version "$version"
           git checkout --detach "$source_commit"
           test "$(tr -d '\n' < VERSION)" = "$version"
           make version-check
