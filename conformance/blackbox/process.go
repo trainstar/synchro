@@ -61,6 +61,7 @@ var diagnosticSchemaSQL string
 var diagnosticRegistrationSQL string
 
 var diagnosticUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var adapterStartupMutex sync.Mutex
 
 var diagnosticSourceTables = []string{
 	"cf_global_items",
@@ -691,12 +692,6 @@ func (h *Harness) createRunDirectories() error {
 	}
 	h.runRoot = root
 	if h.attached {
-		adapterPort, err := allocateLoopbackPort()
-		if err != nil {
-			return errors.New("allocate adapter loopback port failed")
-		}
-		h.adapterPort = adapterPort
-		h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
 		return nil
 	}
 	h.dataDir = filepath.Join(root, "postgres")
@@ -709,13 +704,7 @@ func (h *Harness) createRunDirectories() error {
 	if err != nil {
 		return errors.New("allocate PostgreSQL loopback port failed")
 	}
-	adapterPort, err := allocateLoopbackPort()
-	if err != nil {
-		return errors.New("allocate adapter loopback port failed")
-	}
 	h.port = port
-	h.adapterPort = adapterPort
-	h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
 	return nil
 }
 
@@ -2051,6 +2040,14 @@ func (h *Harness) verifyRunRoleSeparation(ctx context.Context, database *sql.DB)
 }
 
 func (h *Harness) startAdapter(ctx context.Context) error {
+	adapterStartupMutex.Lock()
+	defer adapterStartupMutex.Unlock()
+	adapterPort, err := allocateLoopbackPort()
+	if err != nil {
+		return errors.New("allocate adapter loopback port failed")
+	}
+	h.adapterPort = adapterPort
+	h.adapterURL = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(adapterPort))
 	if err := verifyExecutable(h.env.AdapterArtifact); err != nil {
 		return errors.New("adapter artifact changed before execution")
 	}

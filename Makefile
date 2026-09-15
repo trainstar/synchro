@@ -1472,20 +1472,43 @@ android-emulator-prepare:
 		"$$@" wait-for-device; \
 		"$$@" shell svc power stayon true; \
 		"$$@" shell settings put system screen_off_timeout 2147483647; \
+		"$$@" shell locksettings set-disabled true >/dev/null; \
 		"$$@" shell input keyevent 224; \
 		"$$@" shell wm dismiss-keyguard; \
 		"$$@" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null; \
-		"$$@" shell input keyevent 3
+		"$$@" shell input keyevent 3; \
+		home_component="$$("$$@" shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tr -d '\r' | tail -n 1)"; \
+		home_package="$${home_component%%/*}"; \
+		test -n "$$home_package"; \
+		for _ in $$(seq 1 30); do \
+			if "$$@" shell dumpsys window | grep -F 'mCurrentFocus=' | grep -F "$$home_package" >/dev/null; then exit 0; fi; \
+			sleep 1; \
+		done; \
+		echo "Android Home did not receive window focus" >&2; \
+		"$$@" shell dumpsys power | grep -E 'mWakefulness=|mStayOn=' >&2 || true; \
+		"$$@" shell dumpsys window | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; \
+		exit 1
 
 test-rn-e2e-android-run: android-emulator-prepare
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -f clients/react-native/example/artifacts/android-test-results.json
 	mkdir -p clients/react-native/example/artifacts
-	cd clients/react-native/example && \
-		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
-		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
-		$(TEST_ENV) npx detox test --configuration $(RN_ANDROID_DETOX_CONFIG) $(DETOX_ARGS) --json --outputFile artifacts/android-test-results.json
+	@set +e; \
+		cd clients/react-native/example && \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+			JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+			$(TEST_ENV) npx detox test --configuration $(RN_ANDROID_DETOX_CONFIG) $(DETOX_ARGS) --json --outputFile artifacts/android-test-results.json; \
+		status=$$?; \
+		if [ "$$status" -ne 0 ]; then \
+			adb="$(ANDROID_HOME)/platform-tools/adb"; \
+			serial="$${ANDROID_SERIAL:-$(KOTLIN_ANDROID_SERIAL)}"; \
+			set -- "$$adb"; \
+			if [ -n "$$serial" ]; then set -- "$$@" -s "$$serial"; fi; \
+			"$$@" shell dumpsys power | grep -E 'mWakefulness=|mStayOn=' >&2 || true; \
+			"$$@" shell dumpsys window | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; \
+		fi; \
+		exit "$$status"
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/android-test-results.json
 
 test-rn-e2e-android:
