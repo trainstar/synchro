@@ -9,6 +9,10 @@ if [ -z "$repo_root" ] || [ ! -f "$repo_root/Makefile" ]; then
 fi
 
 scratch_parent=${SYNCHRO_MUTANT_TMPDIR:-${TMPDIR:-/tmp}}
+case "${INTEGRATION_MUTANTS_BROAD:-0}" in
+	0|1) ;;
+	*) printf '%s\n' 'INTEGRATION_MUTANTS_BROAD must be 0 or 1' >&2; exit 1 ;;
+esac
 run_root=$(mktemp -d "$scratch_parent/synchro-integration-mutants.XXXXXX")
 # Failure logs stay inside the repository so an agent or operator can read them.
 # A system temp directory is outside the sandbox and cannot be inspected after a
@@ -86,7 +90,7 @@ package_artifacts() {
 	workspace=$1
 	label=$2
 	artifact_root="$run_root/artifacts/$label"
-	target_root="$run_root/targets/$label"
+	target_root="$run_root/target-cache"
 	adapter_artifact="$artifact_root/adapter"
 	extension_artifact="$artifact_root/extension"
 	seed_artifact="$artifact_root/synchro-seed"
@@ -194,12 +198,10 @@ cleanup_category() {
 	category=$1
 	workspace_path="$run_root/workspaces/$category"
 	artifact_path="$run_root/artifacts/$category"
-	target_path="$run_root/targets/$category"
 	rm -rf \
 		"$workspace_path" \
-		"$artifact_path" \
-		"$target_path"
-	for path in "$workspace_path" "$artifact_path" "$target_path"; do
+		"$artifact_path"
+	for path in "$workspace_path" "$artifact_path"; do
 		if [ -e "$path" ]; then
 			fail "integration mutant cleanup failed: $category"
 		fi
@@ -312,9 +314,11 @@ run_category \
 	conformance/mutants/integration/pull-deduplication.patch \
 	TestRealS02DivergentPullPaginationIsStarvationFree
 
-while IFS="$tab" read -r category patch test_path; do
-	run_category "$category" "$patch" "$test_path"
-done <"$run_root/manifest.tsv"
+if [ "${INTEGRATION_MUTANTS_BROAD:-0}" -eq 1 ]; then
+	while IFS="$tab" read -r category patch test_path; do
+		run_category "$category" "$patch" "$test_path"
+	done <"$run_root/manifest.tsv"
+fi
 
 gate_passed=1
 printf 'Integration mutation gate passed: %s killed, 0 survived\n' "$mutant_count"

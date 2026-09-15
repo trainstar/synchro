@@ -65,6 +65,7 @@
 	test-rust-mutants \
 	test-rust-mutants-broad \
 	test-integration-mutants \
+	test-integration-mutants-broad \
 	test-integration-mutant \
 	test-rust-pg \
 	test-rust-pg-all \
@@ -324,6 +325,7 @@ help:
 	@echo "  test-rust-mutants     - Run targeted synchro-core mutation tests"
 	@echo "  test-rust-mutants-broad - Run broad synchro-core mutation search"
 	@echo "  test-integration-mutants - Run curated production integration mutants"
+	@echo "  test-integration-mutants-broad - Run every production integration mutant"
 	@echo "  test-integration-mutant - Run one manifest mutant with INTEGRATION_MUTANT_ID"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
@@ -1801,6 +1803,9 @@ test-rust-mutants-broad:
 
 test-integration-mutants: test-conformance-testresult
 	sh conformance/mutants/integration_gate.sh "$(CURDIR)"
+
+test-integration-mutants-broad: test-conformance-testresult
+	INTEGRATION_MUTANTS_BROAD=1 sh conformance/mutants/integration_gate.sh "$(CURDIR)"
 
 test-integration-mutant: test-conformance-testresult
 	@test -n "$(INTEGRATION_MUTANT_ID)" || { echo "INTEGRATION_MUTANT_ID is required" >&2; exit 1; }
