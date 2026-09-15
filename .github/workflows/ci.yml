@@ -360,14 +360,6 @@ jobs:
 
       - uses: ./.github/actions/setup-conformance-pg18
 
-      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            clients/react-native/node_modules
-            clients/react-native/example/node_modules
-            clients/react-native/.yarn/install-state.gz
-          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
-
       - name: Install React Native dependencies
         working-directory: clients/react-native
         run: |
