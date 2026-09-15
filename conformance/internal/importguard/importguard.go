@@ -25,7 +25,7 @@ const goVersion = "1.25.0"
 var requiredDirectModules = map[string]string{
 	"github.com/dlclark/regexp2/v2":            "v2.6.0",
 	"github.com/gowebpki/jcs":                  "v1.0.1",
-	"github.com/jackc/pgx/v5":                  "v5.9.0",
+	"github.com/jackc/pgx/v5":                  "v5.9.2",
 	"github.com/santhosh-tekuri/jsonschema/v6": "v6.0.2",
 }
 
@@ -363,7 +363,10 @@ func CheckModulePolicy(ctx context.Context, moduleRoot string) error {
 		if location == "" && mod.GoMod != "" {
 			location = filepath.Dir(mod.GoMod)
 		}
-		if location == "" || !withinResolved(location, modCache) {
+		if location == "" {
+			continue
+		}
+		if !withinResolved(location, modCache) {
 			return fmt.Errorf("module %q resolves outside module cache: %q", mod.Path, location)
 		}
 	}

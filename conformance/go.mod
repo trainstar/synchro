@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/dlclark/regexp2/v2 v2.6.0
 	github.com/gowebpki/jcs v1.0.1
-	github.com/jackc/pgx/v5 v5.9.0
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
 
