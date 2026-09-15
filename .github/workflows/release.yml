@@ -604,12 +604,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            adb shell input keyevent 224
-            adb shell wm dismiss-keyguard
-            adb shell input keyevent 82
-            adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS
-            make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.api }}"
+          script: make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.api }}"
 
       - name: Stop local fixture
         if: always()
