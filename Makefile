@@ -1472,6 +1472,7 @@ android-emulator-prepare:
 		"$$@" wait-for-device; \
 		"$$@" shell svc power stayon true; \
 		"$$@" shell settings put system screen_off_timeout 2147483647; \
+		"$$@" shell settings put global hide_error_dialogs 1; \
 		"$$@" shell locksettings set-disabled true >/dev/null; \
 		"$$@" shell input keyevent 224; \
 		"$$@" shell wm dismiss-keyguard; \
