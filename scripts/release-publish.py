@@ -90,6 +90,13 @@ def positive_identifier(value: Any, label: str) -> str:
     return text
 
 
+def validate_candidate_identity(source_commit: str, version: str) -> None:
+    if not COMMIT.fullmatch(source_commit):
+        raise PublicationError("candidate source commit is invalid")
+    if not VERSION.fullmatch(version):
+        raise PublicationError("candidate version is invalid")
+
+
 def verify_sealed_receipt(
     receipt: Any,
     artifact: Any,
@@ -160,10 +167,11 @@ def release_identity(release_dir: Path) -> dict[str, Any]:
     version = manifest.get("release_version")
     source = manifest.get("source")
     distributions = manifest.get("distributions")
-    if not isinstance(version, str) or not VERSION.fullmatch(version):
+    if not isinstance(version, str):
         raise PublicationError("release manifest version is invalid")
-    if not isinstance(source, dict) or not COMMIT.fullmatch(str(source.get("commit", ""))):
+    if not isinstance(source, dict):
         raise PublicationError("release manifest source commit is invalid")
+    validate_candidate_identity(str(source.get("commit", "")), version)
     if source.get("source_tags") != [f"api/go/v{version}", f"v{version}"]:
         raise PublicationError("release manifest source tags are invalid")
     if not isinstance(distributions, list):
@@ -596,6 +604,9 @@ def main() -> int:
     receipt_parser.add_argument("--release-manifest", type=Path, required=True)
     receipt_parser.add_argument("--expected-run-id", required=True)
     receipt_parser.add_argument("--output", type=Path, required=True)
+    candidate_parser = subparsers.add_parser("validate-candidate")
+    candidate_parser.add_argument("--source-commit", required=True)
+    candidate_parser.add_argument("--version", required=True)
     args = parser.parse_args()
     try:
         if args.command == "identity":
@@ -637,6 +648,8 @@ def main() -> int:
                     args.expected_run_id,
                 ),
             )
+        elif args.command == "validate-candidate":
+            validate_candidate_identity(args.source_commit, args.version)
         else:
             raise PublicationError(f"unsupported command {args.command}")
     except PublicationError as error:
