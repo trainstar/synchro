@@ -3285,19 +3285,23 @@ func (executor *OperatorExecutor) InjectRegisteredTruncate(ctx context.Context) 
 	return executor.exec(ctx, "TRUNCATE TABLE public.cf_items")
 }
 
-// InjectDecoderMetadataChange commits one valid source transaction whose
-// relation metadata differs from the running decoder cache.
-func (executor *OperatorExecutor) InjectDecoderMetadataChange(ctx context.Context, recordID string) error {
+// InjectDecoderMetadataChange commits one source transaction while the
+// initialized decoder is blocked from refreshing its relation metadata.
+func (executor *OperatorExecutor) InjectDecoderMetadataChange(ctx context.Context, recordID string) (returnedErr error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady ||
 		ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
 		return errors.New("decoder metadata control is invalid")
 	}
-	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
+	gate, err := executor.harness.acquireWALWorkerGate(ctx)
 	if err != nil {
-		return errors.New("open decoder metadata control connection failed")
+		return errors.New("fence WAL worker for decoder metadata control failed")
 	}
-	defer database.Close()
-	transaction, err := database.BeginTx(ctx, nil)
+	defer func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		returnedErr = errors.Join(returnedErr, gate.release(cleanupContext))
+	}()
+	transaction, err := gate.connection.BeginTx(ctx, nil)
 	if err != nil {
 		return errors.New("begin decoder metadata control failed")
 	}
