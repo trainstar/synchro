@@ -6,12 +6,14 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).parents[1] / "release-artifacts.py"
 SPEC = importlib.util.spec_from_file_location("release_artifacts", SCRIPT)
 assert SPEC and SPEC.loader
@@ -33,6 +35,24 @@ def elf_x64() -> bytes:
 
 
 class ReleaseArtifactsTests(unittest.TestCase):
+    def test_make_build_targets_preserve_absolute_output_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for target, variable, output_name in (
+                ("build", "BINARY", "synchrod-pg"),
+                ("build-seed", "SEED_BINARY", "synchro-seed"),
+            ):
+                output = root / output_name
+                result = subprocess.run(
+                    ["make", "--dry-run", target, f"{variable}={output}"],
+                    cwd=REPO_ROOT,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertIn(f'-o "{output}"', result.stdout)
+                self.assertNotIn(f"../../{output}", result.stdout)
+
     def write_inventory(self, root: Path) -> Path:
         artifacts = [
             self.file_artifact("PG", "pg-extension", "server", "extension/extension-{version}.tar.gz", "artifacts/extension-{version}.tar.gz"),
