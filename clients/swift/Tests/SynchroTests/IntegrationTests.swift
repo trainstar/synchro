@@ -206,7 +206,7 @@ final class IntegrationTests: XCTestCase {
 
         try await clientB.start()
         try await waitForCondition {
-            try await clientB.syncNow()
+            try await self.syncAndWaitForScheduledRetry(clientB)
             let row = try clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
             return (row?["ship_address"] as? String) == #"{"street":"123 Main St"}"#
         }
