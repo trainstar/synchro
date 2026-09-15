@@ -240,13 +240,10 @@ jobs:
           . "$attach"
           set +a
           adapter_test_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
-          jwt_secret="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
           echo "::add-mask::$adapter_test_url"
-          echo "::add-mask::$jwt_secret"
           {
             echo "ADAPTER_TEST_URL=$adapter_test_url"
             echo "WARM_CONNECT_ENV_FILE=$attach"
-            echo "SYNCHRO_TEST_JWT_SECRET=$jwt_secret"
           } >> "$GITHUB_ENV"
 
       - name: Run Swift checks against local PostgreSQL
@@ -396,13 +393,10 @@ jobs:
           . "$attach"
           set +a
           adapter_test_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
-          jwt_secret="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
           echo "::add-mask::$adapter_test_url"
-          echo "::add-mask::$jwt_secret"
           {
             echo "ADAPTER_TEST_URL=$adapter_test_url"
             echo "WARM_CONNECT_ENV_FILE=$attach"
-            echo "SYNCHRO_TEST_JWT_SECRET=$jwt_secret"
           } >> "$GITHUB_ENV"
 
       - name: Run React Native iOS checks against local PostgreSQL
@@ -508,10 +502,6 @@ jobs:
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            adb shell input keyevent 224
-            adb shell wm dismiss-keyguard
-            adb shell input keyevent 82
-            adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS
             make test-rn-e2e-android-run
             make test-consumer-rn-android
 
