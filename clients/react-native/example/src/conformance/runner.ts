@@ -245,7 +245,7 @@ export class PublicConformanceRunner {
     const parameters = command.action.action.parameters;
     const mode = requiredString(parameters.database_mode);
     if ((mode !== 'create' && mode !== 'reuse') || this.sessions.has(clientKey)) {
-      throw new ConformanceCommandError('invalid_command');
+      throw new ConformanceCommandError('invalid_command', new Error('open mode is invalid or the client session already exists'));
     }
     const databasePath = appPrivateDatabasePath(command.runtime.database_path);
     if (mode === 'create' && command.runtime.seed_database_path !== undefined) {
@@ -600,7 +600,7 @@ export class PublicConformanceRunner {
   private requireSession(clientKey: string): ClientSession {
     const session = this.sessions.get(clientKey);
     if (session === undefined) {
-      throw new ConformanceCommandError('invalid_command');
+      throw new ConformanceCommandError('invalid_command', new Error('client session is unavailable'));
     }
     return session;
   }
@@ -702,7 +702,7 @@ function requirePairedRuntimeConnection(runtime: ConformanceCommand['runtime']):
 function requireClientKey(command: ConformanceCommand): string {
   const clientKey = requiredString(command.action.action.parameters.client_key);
   if (clientKey !== command.runtime.client_key) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command and runtime client identities differ'));
   }
   return clientKey;
 }
@@ -712,7 +712,7 @@ const MAXIMUM_LOCAL_OPERATION_BATCH = 64;
 function requireLocalOperationBatch(command: ConformanceCommand): ScenarioOperation[] {
   const steps = command.action.steps;
   if (steps.length < 1 || steps.length > MAXIMUM_LOCAL_OPERATION_BATCH) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error(`local operation batch count ${steps.length} is outside its bound`));
   }
   return steps.map((step) => {
     const operation = step.operation;
@@ -751,7 +751,7 @@ function decodeLocalAction(operation: ScenarioOperation): {
   // relation carries exactly one primary key column.
   const primaryKeyColumns = decodeColumns(decodeColumnValues(payload.pk));
   if (primaryKeyColumns.length !== 1) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('local primary key does not name exactly one column'));
   }
   const primaryKeyField = primaryKeyColumns[0].name;
   const primaryKeyValue = primaryKeyColumns[0].value;
@@ -775,7 +775,7 @@ function decodeLocalAction(operation: ScenarioOperation): {
     case 'update': {
       const fields = decodeColumns(columns);
       if (fields.length === 0) {
-        throw new ConformanceCommandError('invalid_command');
+        throw new ConformanceCommandError('invalid_command', new Error('local update has no columns'));
       }
       values.push(...fields.map((field) => field.value), primaryKeyValue);
       return {
@@ -788,7 +788,7 @@ function decodeLocalAction(operation: ScenarioOperation): {
     }
     case 'delete':
       if (columns.length !== 0) {
-        throw new ConformanceCommandError('invalid_command');
+        throw new ConformanceCommandError('invalid_command', new Error('local delete unexpectedly supplies columns'));
       }
       return {
         tableName,
@@ -813,7 +813,7 @@ function decodeAuthoredColumnNames(columns: unknown[]): string[] {
       return requiredIdentifier(column.field_id);
     });
   if (new Set(columnNames).size !== columnNames.length) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('local write repeats an authored column'));
   }
   return columnNames;
 }
@@ -835,7 +835,7 @@ function decodeColumns(values: unknown[]): Array<{ name: string; value: SQLiteBi
     return { name: requiredIdentifier(column.field_id), value: sqliteBindValue(column.value) };
   });
   if (new Set(fields.map((field) => field.name)).size !== fields.length) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('local write repeats a physical column'));
   }
   return fields.sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -965,7 +965,7 @@ function bounded<T>(values: T[], source: string): T[] {
 
 function requiredRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command member must be an object'));
   }
   return value as Record<string, unknown>;
 }
@@ -987,7 +987,7 @@ function requiredStringArray(value: unknown): string[] {
 
 function requiredString(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 4096) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command string is missing or exceeds its bound'));
   }
   return value;
 }
@@ -1009,7 +1009,7 @@ function requireCallID(value: unknown): string {
 function requiredIdentifier(value: unknown): string {
   const identifier = requiredString(value);
   if (!IDENTIFIER_PATTERN.test(identifier) || identifier.startsWith('_synchro_')) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command SQL identifier is invalid or reserved'));
   }
   return identifier;
 }

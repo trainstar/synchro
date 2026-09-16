@@ -1,6 +1,6 @@
 import { by, element } from 'detox';
 
-import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
+import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
 
 jest.setTimeout(30 * 60 * 1000);
 
@@ -128,13 +128,7 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
     await launchCorpusApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
   }
   const serialized = JSON.stringify(command);
-  await element(by.id('conformance-command-input')).replaceText(serialized);
-  const input = await element(by.id('conformance-command-input')).getAttributes();
-  if (input.text !== serialized) {
-    throw new Error('React Native conformance command input changed');
-  }
-  await element(by.id('conformance-command-input')).tapReturnKey();
-  await element(by.id('btn-conformance-execute')).tap();
+  await submitCorpusCommand(serialized);
   // The response-loss await retries through in-call backoff on the device,
   // so the command poll matches the runner completion wait.
   const deadline = Date.now() + 570000;

@@ -1,6 +1,6 @@
 import { by, device, element } from 'detox';
 
-import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
+import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
 
 type ExchangeResponse = {
   schema_version: number;
@@ -154,13 +154,7 @@ async function exchange(
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);
-  await element(by.id('conformance-command-input')).replaceText(serialized);
-  const input = await element(by.id('conformance-command-input')).getAttributes();
-  if (input.text !== serialized) {
-    throw new Error('React Native conformance command input changed');
-  }
-  await element(by.id('conformance-command-input')).tapReturnKey();
-  await element(by.id('btn-conformance-execute')).tap();
+  await submitCorpusCommand(serialized);
 
   const deadline = Date.now() + 45000;
   while (Date.now() < deadline) {
