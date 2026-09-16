@@ -284,7 +284,7 @@ func TestPendingCycleCleanupDistinguishesObservedBackoffFromAnActiveRetry(t *tes
 			t.Fatal("invalid cleanup state was accepted")
 		}
 	}
-	coordinator.faultPushes = 0
+	coordinator.faultPushBody = nil
 	if err := coordinator.validateCleanupStatus(backoff, true); err == nil {
 		t.Fatal("cleanup without a fault response was accepted")
 	}

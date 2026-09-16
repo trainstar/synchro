@@ -308,7 +308,6 @@ type PendingCycleCoordinator struct {
 
 	proxyMu                 sync.Mutex
 	faultArmed              bool
-	faultPushes             int
 	faultPushBody           []byte
 	proxyFailureCause       error
 	initialPushDone         chan struct{}
@@ -1394,7 +1393,6 @@ func (c *PendingCycleCoordinator) applyCleanupAssignment(ctx context.Context) er
 	}
 	c.proxyMu.Lock()
 	c.faultArmed = true
-	c.faultPushes = 0
 	c.faultPushBody = nil
 	c.proxyFailureCause = nil
 	c.proxyMu.Unlock()
@@ -1427,7 +1425,7 @@ func (c *PendingCycleCoordinator) validateCleanupFault() error {
 	if c.proxyFailureCause != nil {
 		return fmt.Errorf("React Native pending-cycle cleanup proxy failed: %w", c.proxyFailureCause)
 	}
-	if c.faultPushes == 0 {
+	if c.faultPushBody == nil {
 		return errors.New("React Native pending-cycle cleanup temporary-unavailable push is absent")
 	}
 	return nil
@@ -1894,12 +1892,11 @@ func (c *PendingCycleCoordinator) recordTemporaryUnavailablePush(raw []byte) err
 	if !c.faultArmed {
 		return errors.New("React Native pending-cycle temporary-unavailable push arrived after release")
 	}
-	if c.faultPushes == 0 {
+	if c.faultPushBody == nil {
 		c.faultPushBody = append([]byte(nil), raw...)
 	} else if !bytes.Equal(c.faultPushBody, raw) {
 		return errors.New("React Native pending-cycle retry changed the sealed push request")
 	}
-	c.faultPushes++
 	return nil
 }
 
