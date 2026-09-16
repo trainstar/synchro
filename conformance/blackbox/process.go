@@ -3301,6 +3301,27 @@ func (executor *OperatorExecutor) InjectDecoderMetadataChange(ctx context.Contex
 		defer cancel()
 		returnedErr = errors.Join(returnedErr, gate.release(cleanupContext))
 	}()
+	// Let the queued worker refresh registry metadata before the fault changes it.
+	for {
+		var before, after int64
+		const activeGeneration = "SELECT generation FROM synchro.sync_registry_generations WHERE state = 'active'"
+		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&before); err != nil {
+			return errors.New("read decoder registry generation before worker poll failed")
+		}
+		if err := gate.release(ctx); err != nil {
+			return errors.New("release decoder initialization gate failed")
+		}
+		gate, err = executor.harness.acquireWALWorkerGate(ctx)
+		if err != nil {
+			return errors.New("reacquire decoder initialization gate failed")
+		}
+		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&after); err != nil {
+			return errors.New("read decoder registry generation after worker poll failed")
+		}
+		if before == after {
+			break
+		}
+	}
 	transaction, err := gate.connection.BeginTx(ctx, nil)
 	if err != nil {
 		return errors.New("begin decoder metadata control failed")
