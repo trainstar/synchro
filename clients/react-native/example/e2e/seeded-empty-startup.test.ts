@@ -235,4 +235,4 @@ it('executes the seeded-empty-startup coordinator sequence', () => runCorpusComm
     }
   }
   throw new Error('React Native seeded-empty-startup coordinator did not complete');
-}), 600000);
+}));

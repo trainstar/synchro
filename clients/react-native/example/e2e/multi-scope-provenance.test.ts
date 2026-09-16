@@ -79,4 +79,4 @@ it('executes the multi-scope-provenance coordinator sequence', () => runCorpusCo
     result = await execute(next.command);
   }
   throw new Error('React Native multi-scope provenance coordinator did not complete');
-}), 600000);
+}));

@@ -74,4 +74,4 @@ it('executes the rebuild-cardinality coordinator sequence', () => runCorpusComma
     result = await execute(next.command);
   }
   throw new Error('React Native rebuild-cardinality coordinator did not complete');
-}), 600000);
+}));

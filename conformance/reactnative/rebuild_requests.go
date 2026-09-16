@@ -841,7 +841,7 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 		c.stage = rebuildRequestsStageAwaitCall
 	case rebuildRequestsStageAwaitCall:
 		response.Command = c.command("client", "await-call", map[string]any{
-			"client_key": clientKey, "call_id": c.callID,
+			"client_key": clientKey, "call_id": c.callID, "completion": "idle",
 		}, nil)
 		c.stage = rebuildRequestsStageFinalCapture
 	case rebuildRequestsStageFinalCapture:

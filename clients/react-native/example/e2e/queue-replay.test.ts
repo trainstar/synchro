@@ -2,8 +2,6 @@ import { by, element } from 'detox';
 
 import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
 
-jest.setTimeout(30 * 60 * 1000);
-
 type ExchangeResponse = {
   schema_version: number;
   sequence: number;
@@ -173,6 +171,4 @@ it('executes the queue-replay coordinator sequence', () => runCorpusCommandLoop(
     }
   }
   throw new Error('React Native queue-replay coordinator did not complete');
-  // The batched flow drives 133 exchanges and the response-loss await can
-  // hold one command through in-call backoff, past the 120 second default.
-}), 1800000);
+}));

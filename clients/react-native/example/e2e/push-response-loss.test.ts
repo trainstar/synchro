@@ -196,4 +196,4 @@ it('executes the push-response-loss coordinator sequence', () => runCorpusComman
     }
   }
   throw new Error('React Native push-response-loss coordinator did not complete');
-}), 600000);
+}));

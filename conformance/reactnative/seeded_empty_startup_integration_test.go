@@ -113,7 +113,10 @@ func runRealReactNativeSeededEmptyStartup(t *testing.T, platform string) {
 
 	t.Run("assertion", func(t *testing.T) {
 		resultPath := filepath.Join(t.TempDir(), fmt.Sprintf("react-native-%s-seeded-empty-startup.json", platform))
-		command := exec.CommandContext(runContext, "npx", "detox", "test", "e2e/seeded-empty-startup.test.ts", "--config-path", "./.detoxrc.steady-pull.js", "--configuration", detoxConfiguration, "--json", "--outputFile", resultPath)
+		command, err := newCorpusDetoxCommand(runContext, "test", "e2e/seeded-empty-startup.test.ts", "--config-path", "./.detoxrc.steady-pull.js", "--configuration", detoxConfiguration, "--json", "--outputFile", resultPath)
+		if err != nil {
+			t.Fatalf("create React Native %s seeded-empty-startup Detox command: %v", platform, err)
+		}
 		command.Dir = filepath.Join(repositoryRoot, "clients", "react-native", "example")
 		for _, assignment := range os.Environ() {
 			if strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_URL=") || strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_TOKEN=") || strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_STAGE_COUNT=") {

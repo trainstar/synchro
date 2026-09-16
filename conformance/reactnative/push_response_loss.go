@@ -486,7 +486,7 @@ const (
 	pushResponseLossStageLocalWrite
 	pushResponseLossStageBeginCall
 	pushResponseLossStageAwaitStep
-	pushResponseLossStageAwaitCall
+	pushResponseLossStageAwaitBackoff
 	pushResponseLossStagePreRestartCapture
 	pushResponseLossStageRestart
 	pushResponseLossStageRetry
@@ -833,10 +833,10 @@ func (c *PushResponseLossCoordinator) acceptResultLocked(raw json.RawMessage) er
 		return validatePushResponseLossLocal(envelope.Result, c.process)
 	case pushResponseLossStageAwaitStep:
 		return c.validateCallBegun(envelope.Result)
-	case pushResponseLossStageAwaitCall:
-		return c.validateAwaited(envelope.Result)
+	case pushResponseLossStageAwaitBackoff:
+		return c.validateAwaited(envelope.Result, false)
 	case pushResponseLossStagePreRestartCapture:
-		return c.validateCallCompleted(envelope.Result)
+		return c.validateAwaited(envelope.Result, true)
 	case pushResponseLossStageRestart:
 		capture, err := decodeCapture(envelope.Result, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "provenance", "request_trace", "durable_proof", "application_rows"})
 		if err != nil {
@@ -889,8 +889,8 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		c.stage = pushResponseLossStageAwaitStep
 	case pushResponseLossStageAwaitStep:
 		response.Command = c.command("observer", "await-step", map[string]any{"client_key": c.clientKey, "call_id": c.initialCallID()}, nil)
-		c.stage = pushResponseLossStageAwaitCall
-	case pushResponseLossStageAwaitCall:
+		c.stage = pushResponseLossStageAwaitBackoff
+	case pushResponseLossStageAwaitBackoff:
 		if err := c.waitForPushCommit(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -898,7 +898,7 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 			return exchangeResponse{}, err
 		}
 		c.releaseInitialResponse()
-		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.initialCallID()}, nil)
+		response.Command = c.command("observer", "await-step", map[string]any{"client_key": c.clientKey, "call_id": c.initialCallID(), "wait_for_completion": true}, nil)
 		c.stage = pushResponseLossStagePreRestartCapture
 	case pushResponseLossStagePreRestartCapture:
 		parameters, err := c.pushResponseLossCaptureParameters()
@@ -1040,7 +1040,7 @@ func (c *PushResponseLossCoordinator) validateCallBegun(raw json.RawMessage) err
 	}
 	return validatePushResponseLossProcess(members["process"], c.process)
 }
-func (c *PushResponseLossCoordinator) validateAwaited(raw json.RawMessage) error {
+func (c *PushResponseLossCoordinator) validateAwaited(raw json.RawMessage, requireBackoff bool) error {
 	if err := validateActionResult(raw, "awaited"); err != nil {
 		return err
 	}
@@ -1051,22 +1051,10 @@ func (c *PushResponseLossCoordinator) validateAwaited(raw json.RawMessage) error
 	if err := validateSyncStatusShape(members["status"]); err != nil {
 		return err
 	}
-	return validatePushResponseLossProcess(members["process"], c.process)
-}
-func (c *PushResponseLossCoordinator) validateCallCompleted(raw json.RawMessage) error {
-	if err := validateActionResult(raw, "call-completed"); err != nil {
-		return err
-	}
-	var members map[string]json.RawMessage
-	if err := decodeStrictMembers(raw, &members, 6, "React Native push-response-loss call-completed result"); err != nil {
-		return err
-	}
-	var id, state, completion string
-	if json.Unmarshal(members["call_id"], &id) != nil || id != c.initialCallID() || json.Unmarshal(members["state"], &state) != nil || state != "completed" || json.Unmarshal(members["completion"], &completion) != nil || completion != "blocked" {
-		return errors.New("React Native push-response-loss call completion is invalid")
-	}
-	if err := validatePushResponseLossBackoffStatus(members["status"]); err != nil {
-		return err
+	if requireBackoff {
+		if err := validatePushResponseLossBackoffStatus(members["status"]); err != nil {
+			return err
+		}
 	}
 	return validatePushResponseLossProcess(members["process"], c.process)
 }

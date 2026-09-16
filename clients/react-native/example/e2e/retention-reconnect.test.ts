@@ -197,4 +197,4 @@ it('executes the retention-reconnect coordinator sequence', () => runCorpusComma
     }
   }
   throw new Error('React Native retention-reconnect coordinator did not complete');
-}), 600000);
+}));

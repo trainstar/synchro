@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -82,7 +81,10 @@ func runRealReactNativeMultiScopeProvenance(t *testing.T, platform string) {
 	// React Native integration test provides.
 	t.Run("assertion", func(t *testing.T) {
 		resultPath := filepath.Join(t.TempDir(), fmt.Sprintf("react-native-%s-multi-scope-provenance.json", platform))
-		command := exec.CommandContext(ctx, "npx", "detox", "test", "e2e/multi-scope-provenance.test.ts", "--config-path", "./.detoxrc.steady-pull.js", "--configuration", configuration, "--json", "--outputFile", resultPath)
+		command, err := newCorpusDetoxCommand(ctx, "test", "e2e/multi-scope-provenance.test.ts", "--config-path", "./.detoxrc.steady-pull.js", "--configuration", configuration, "--json", "--outputFile", resultPath)
+		if err != nil {
+			t.Fatalf("create React Native %s multi-scope provenance Detox command: %v", platform, err)
+		}
 		command.Dir = filepath.Join(root, "clients", "react-native", "example")
 		for _, assignment := range os.Environ() {
 			if !strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_URL=") && !strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_TOKEN=") && !strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_STAGE_COUNT=") {
