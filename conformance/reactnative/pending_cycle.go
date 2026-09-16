@@ -309,6 +309,7 @@ type PendingCycleCoordinator struct {
 	proxyMu                 sync.Mutex
 	faultArmed              bool
 	faultPushes             int
+	faultPushBody           []byte
 	proxyFailureCause       error
 	initialPushDone         chan struct{}
 	capturePendingDone      chan struct{}
@@ -1108,10 +1109,33 @@ func (c *PendingCycleCoordinator) validateCleanupCall(raw json.RawMessage) error
 		return err
 	}
 	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 4, "pending-cycle cleanup result"); err != nil {
+		return err
+	}
+	return c.validateCleanupStatus(members["status"], false)
+}
+
+func (c *PendingCycleCoordinator) validateCleanupStatus(raw json.RawMessage, allowActiveRetry bool) error {
 	var status syncStatus
-	if err := decodeStrictMembers(raw, &members, 4, "pending-cycle cleanup result"); err != nil ||
-		json.Unmarshal(members["status"], &status) != nil || status.State != "backoff" || isJSONNull(status.RetryAt) {
-		return errors.New("React Native pending-cycle cleanup did not retain retryable push backoff")
+	if err := validateSyncStatusShape(raw); err != nil || json.Unmarshal(raw, &status) != nil {
+		return errors.New("React Native pending-cycle cleanup status is invalid")
+	}
+	switch {
+	case status.State == "backoff":
+		var operation, retryAt string
+		if json.Unmarshal(status.Operation, &operation) != nil || operation != "pushing" ||
+			json.Unmarshal(status.RetryAt, &retryAt) != nil || !isJSONNull(status.Failure) {
+			return errors.New("React Native pending-cycle cleanup backoff is not a retryable push")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, retryAt); err != nil {
+			return errors.New("React Native pending-cycle cleanup retry deadline is invalid")
+		}
+	case status.State == "pushing" && allowActiveRetry:
+		if !isJSONNull(status.Operation) || !isJSONNull(status.RetryAt) || !isJSONNull(status.Failure) {
+			return errors.New("React Native pending-cycle active retry status is invalid")
+		}
+	default:
+		return fmt.Errorf("React Native pending-cycle cleanup status = %q, want retryable push", status.State)
 	}
 	return c.validateCleanupFault()
 }
@@ -1241,11 +1265,7 @@ func (c *PendingCycleCoordinator) captureState(raw json.RawMessage, stage pendin
 		return err
 	}
 	if stage == pendingCycleStageAfterCleanup {
-		var status syncStatus
-		if json.Unmarshal(capture.Status, &status) != nil || status.State != "backoff" || isJSONNull(status.RetryAt) {
-			return errors.New("React Native pending-cycle cleanup capture is not in retryable backoff")
-		}
-		if err := c.validateCleanupFault(); err != nil {
+		if err := c.validateCleanupStatus(capture.Status, true); err != nil {
 			return err
 		}
 	}
@@ -1375,6 +1395,7 @@ func (c *PendingCycleCoordinator) applyCleanupAssignment(ctx context.Context) er
 	c.proxyMu.Lock()
 	c.faultArmed = true
 	c.faultPushes = 0
+	c.faultPushBody = nil
 	c.proxyFailureCause = nil
 	c.proxyMu.Unlock()
 	return nil
@@ -1406,8 +1427,8 @@ func (c *PendingCycleCoordinator) validateCleanupFault() error {
 	if c.proxyFailureCause != nil {
 		return fmt.Errorf("React Native pending-cycle cleanup proxy failed: %w", c.proxyFailureCause)
 	}
-	if c.faultPushes != 1 {
-		return fmt.Errorf("React Native pending-cycle cleanup temporary-unavailable pushes = %d, want 1", c.faultPushes)
+	if c.faultPushes == 0 {
+		return errors.New("React Native pending-cycle cleanup temporary-unavailable push is absent")
 	}
 	return nil
 }
@@ -1872,6 +1893,11 @@ func (c *PendingCycleCoordinator) recordTemporaryUnavailablePush(raw []byte) err
 	defer c.proxyMu.Unlock()
 	if !c.faultArmed {
 		return errors.New("React Native pending-cycle temporary-unavailable push arrived after release")
+	}
+	if c.faultPushes == 0 {
+		c.faultPushBody = append([]byte(nil), raw...)
+	} else if !bytes.Equal(c.faultPushBody, raw) {
+		return errors.New("React Native pending-cycle retry changed the sealed push request")
 	}
 	c.faultPushes++
 	return nil

@@ -242,11 +242,51 @@ func TestPendingCycleRuntimeTargetRejectsAmbiguousValueField(t *testing.T) {
 
 func TestPendingCycleTemporaryUnavailableFaultAcceptsOnlyGeneratedUpdate(t *testing.T) {
 	coordinator := &PendingCycleCoordinator{faultArmed: true}
-	if err := coordinator.recordTemporaryUnavailablePush(json.RawMessage(`{"mutations":[{"op":"update"}]}`)); err != nil {
-		t.Fatalf("generated update fault was rejected: %v", err)
+	for range 2 {
+		if err := coordinator.recordTemporaryUnavailablePush(json.RawMessage(`{"batch_id":"sealed-batch","mutations":[{"op":"update"}]}`)); err != nil {
+			t.Fatalf("generated update retry was rejected: %v", err)
+		}
+	}
+	if err := coordinator.validateCleanupFault(); err != nil {
+		t.Fatalf("repeated temporary-unavailable response was rejected: %v", err)
 	}
 	if err := coordinator.recordTemporaryUnavailablePush(json.RawMessage(`{"mutations":[{"op":"delete"}]}`)); err == nil {
 		t.Fatal("generated delete fault was accepted")
+	}
+	if err := coordinator.recordTemporaryUnavailablePush(json.RawMessage(`{"batch_id":"changed-batch","mutations":[{"op":"update"}]}`)); err == nil {
+		t.Fatal("changed sealed retry request was accepted")
+	}
+}
+
+func TestPendingCycleCleanupDistinguishesObservedBackoffFromAnActiveRetry(t *testing.T) {
+	coordinator := &PendingCycleCoordinator{faultArmed: true}
+	if err := coordinator.recordTemporaryUnavailablePush([]byte(`{"mutations":[{"op":"update"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	backoff := json.RawMessage(`{"state":"backoff","retry_at":"2026-09-16T00:00:00Z","operation":"pushing","failure":null}`)
+	pushing := json.RawMessage(`{"state":"pushing","retry_at":null,"operation":null,"failure":null}`)
+	if err := coordinator.validateCleanupStatus(backoff, false); err != nil {
+		t.Fatalf("observed push backoff was rejected: %v", err)
+	}
+	if err := coordinator.validateCleanupStatus(pushing, true); err != nil {
+		t.Fatalf("retry after observed backoff was rejected: %v", err)
+	}
+	if err := coordinator.validateCleanupStatus(pushing, false); err == nil {
+		t.Fatal("active push substituted for the required backoff observation")
+	}
+	for _, raw := range []json.RawMessage{
+		[]byte(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`),
+		[]byte(`{"state":"error","retry_at":null,"operation":null,"failure":null}`),
+		[]byte(`{"state":"backoff","retry_at":"2026-09-16T00:00:00Z","operation":"pulling","failure":null}`),
+		[]byte(`{"state":"backoff","retry_at":"invalid","operation":"pushing","failure":null}`),
+	} {
+		if err := coordinator.validateCleanupStatus(raw, true); err == nil {
+			t.Fatal("invalid cleanup state was accepted")
+		}
+	}
+	coordinator.faultPushes = 0
+	if err := coordinator.validateCleanupStatus(backoff, true); err == nil {
+		t.Fatal("cleanup without a fault response was accepted")
 	}
 }
 
