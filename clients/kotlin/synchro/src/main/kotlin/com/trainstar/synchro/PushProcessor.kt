@@ -766,14 +766,17 @@ internal class PushProcessor(
         if (mutations.isEmpty() || mutations.map { it.mutationID }.toSet().size != mutations.size) {
             throw SynchroError.InvalidResponse("cannot seal an empty or duplicate mutation batch")
         }
+        val tablesByAuthoredSchema = mutableMapOf<SchemaRef, List<LocalSchemaTable>>()
         mutations.forEach { mutation ->
             mutation.authoredSchema.validate()
             Integrity.validateCanonicalClientVersion(mutation.clientVersion)
-            val authoredTables = schemaTablesForReference(
-                db,
-                mutation.authoredSchema,
-                if (mutation.authoredSchema == requestSchema) currentTables else null,
-            ) ?: throw SynchroError.InvalidResponse("stored mutation has no retained authored schema")
+            val authoredTables = tablesByAuthoredSchema.getOrPut(mutation.authoredSchema) {
+                schemaTablesForReference(
+                    db,
+                    mutation.authoredSchema,
+                    if (mutation.authoredSchema == requestSchema) currentTables else null,
+                ) ?: throw SynchroError.InvalidResponse("stored mutation has no retained authored schema")
+            }
             val table = authoredTables.singleOrNull { it.tableID == mutation.table }
                 ?: throw SynchroError.InvalidResponse("stored mutation has no authored logical table")
             val primaryKey = table.columns.singleOrNull { it.fieldID == table.primaryKeyFieldID }

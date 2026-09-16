@@ -14,6 +14,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -303,6 +304,69 @@ class PushProcessorTests {
             )
             assertEquals(listOf("sealed", "captured"), ledger.map { it.getValue("lifecycle_state") })
             assertEquals(listOf("capture", "capture"), ledger.map { it.getValue("source_kind") })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun historicalSchemaValidationCacheDoesNotSurviveFailedTransport() = runTest {
+        val (database, _, processor) = environment()
+        database.execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            arrayOf("o1", "first", "2026-01-01T00:00:00.000000Z"),
+        )
+        database.execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            arrayOf("o2", "second", "2026-01-01T00:00:00.000000Z"),
+        )
+        val currentHash = "1".repeat(64)
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(409).setBody(
+                """
+                {"error":{"code":"client_generation_expired","message":"generation expired","retryable":false,"current_client_generation":2}}
+                """.trimIndent(),
+            ),
+        )
+        server.start()
+        try {
+            assertTrue(
+                runCatching {
+                    processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable))
+                }.exceptionOrNull() is PushRenewalRequiredException,
+            )
+            val original = wireJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+            assertEquals(2, original.mutations.size)
+
+            installTestSchema(database, 2, currentHash, listOf(localTable))
+            assertTrue(processor.renewRequiredBatches("device-1", 2, 2, currentHash, listOf(localTable)))
+            server.enqueue(
+                MockResponse()
+                    .setBody("partial response")
+                    .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY),
+            )
+
+            val transportFailure = runCatching {
+                processor.processPush(http(server), "device-1", 2, 2, currentHash, listOf(localTable))
+            }.exceptionOrNull()
+            assertTrue(transportFailure is RetryableError)
+            val renewed = wireJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+            assertEquals(SchemaRef(2, currentHash), renewed.schema)
+            assertEquals(2, renewed.mutations.size)
+            assertTrue(renewed.mutations.all { it.authoredSchema == SchemaRef(1, PROTOCOL_TEST_SCHEMA_HASH) })
+
+            database.execute("UPDATE _synchro_push_batches SET schema_json = '[]' WHERE state = 'superseded'")
+            database.execute(
+                "DELETE FROM _synchro_schema_archives WHERE schema_version = ? AND schema_hash = ?",
+                arrayOf(1L, PROTOCOL_TEST_SCHEMA_HASH),
+            )
+
+            val missingHistory = runCatching {
+                processor.processPush(http(server), "device-1", 2, 2, currentHash, listOf(localTable))
+            }.exceptionOrNull()
+            assertTrue(missingHistory is SynchroError.InvalidResponse)
+            assertEquals(2, server.requestCount)
         } finally {
             server.shutdown()
         }

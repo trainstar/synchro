@@ -17,13 +17,31 @@
             "CREATE TABLE test_registration_gate (
                  id UUID PRIMARY KEY,
                  value TEXT NOT NULL
-             )",
-            "SELECT tests.register_legacy_test_table(
-                 'test_registration_gate',
-                 $$SELECT ARRAY['global'] FROM test_registration_gate WHERE id = $1::uuid$$,
+             );
+             CREATE FUNCTION public.test_registration_gate_membership(p_id UUID)
+             RETURNS SETOF TEXT
+             LANGUAGE SQL STABLE SECURITY INVOKER
+             SET search_path = pg_catalog, synchro
+             BEGIN ATOMIC
+                 SELECT 'global'::text;
+             END;
+             REVOKE EXECUTE ON FUNCTION public.test_registration_gate_membership(UUID) FROM PUBLIC;
+             GRANT EXECUTE ON FUNCTION public.test_registration_gate_membership(UUID)
+                 TO synchro_owner, synchro_worker;
+             GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
+             GRANT SELECT ON TABLE test_registration_gate TO synchro_owner;
+             ALTER TABLE test_registration_gate ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY test_registration_gate_policy
+                 ON test_registration_gate
+                 AS PERMISSIVE FOR ALL TO synchro_owner
+                 USING (true) WITH CHECK (true)",
+            "SELECT synchro.synchro_register_table(
+                 'public.test_registration_gate',
+                 'public.test_registration_gate_membership',
                  'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only'
              )",
-            "DROP TABLE test_registration_gate CASCADE",
+            "DROP TABLE test_registration_gate CASCADE;
+             DROP FUNCTION public.test_registration_gate_membership(UUID)",
         );
     }
 
@@ -199,7 +217,22 @@
             driver_name,
             create_table,
         );
+        dblink_exec(contender_name, "BEGIN");
+        let contender_pid: i32 = dblink_query(contender_name, "SELECT pg_backend_pid()")
+            .parse()
+            .expect("parse registration contender PID");
+        // Reserve registry serialization before blocking source writes so another registration cannot intercept the intended wait.
+        dblink_query(
+            contender_name,
+            &format!(
+                "SELECT pg_catalog.pg_advisory_xact_lock({})",
+                crate::registry::REGISTRY_WRITE_LOCK_KEY
+            ),
+        );
         dblink_exec(driver_name, "BEGIN");
+        let driver_pid: i32 = dblink_query(driver_name, "SELECT pg_backend_pid()")
+            .parse()
+            .expect("parse registration driver PID");
         dblink_query(
             driver_name,
             &format!(
@@ -207,42 +240,94 @@
                 crate::SOURCE_WRITE_GATE_LOCK_KEY
             ),
         );
-        dblink_exec(contender_name, "BEGIN");
-        let contender_pid: i32 = dblink_query(contender_name, "SELECT pg_backend_pid()")
-            .parse()
-            .expect("parse registration contender PID");
         let sent: i32 = Spi::get_one_with_args(
             "SELECT public.dblink_send_query($1, $2)",
             &[contender_name.into(), registration.into()],
         )
         .unwrap()
         .expect("send source-gated registration");
-        assert_eq!(sent, 1);
 
         let mut waiting = false;
+        let mut completed_early = false;
+        let mut wait_diagnostic = "unobserved".to_string();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             let waiting_row: Option<bool> = Spi::get_one_with_args(
                 "SELECT EXISTS (
-                     SELECT 1 FROM pg_locks
-                     WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                     SELECT 1
+                     FROM pg_locks waiter
+                     JOIN pg_locks holder
+                       ON holder.locktype = waiter.locktype
+                      AND holder.database IS NOT DISTINCT FROM waiter.database
+                      AND holder.classid IS NOT DISTINCT FROM waiter.classid
+                      AND holder.objid IS NOT DISTINCT FROM waiter.objid
+                      AND holder.objsubid IS NOT DISTINCT FROM waiter.objsubid
+                     WHERE waiter.pid = $1
+                       AND holder.pid = $2
+                       AND waiter.locktype = 'advisory'
+                       AND waiter.database = (
+                           SELECT oid FROM pg_database WHERE datname = current_database()
+                       )
+                       AND waiter.mode = 'ExclusiveLock'
+                       AND holder.mode = 'ExclusiveLock'
+                       AND NOT waiter.granted
+                       AND holder.granted
                  )",
-                &[i64::from(contender_pid).into()],
+                &[i64::from(contender_pid).into(), i64::from(driver_pid).into()],
             )
             .unwrap();
             if waiting_row == Some(true) {
                 waiting = true;
                 break;
             }
+            wait_diagnostic = Spi::get_one_with_args(
+                "SELECT COALESCE(
+                     (
+                         SELECT state || '/' || COALESCE(wait_event_type, '') || '/' ||
+                                COALESCE(wait_event, '')
+                         FROM pg_stat_activity
+                         WHERE pid = $1
+                     ),
+                     'backend-missing'
+                 )",
+                &[i64::from(contender_pid).into()],
+            )
+            .unwrap()
+            .unwrap_or_else(|| "diagnostic-missing".to_string());
+            let busy: Option<i32> = Spi::get_one_with_args(
+                "SELECT public.dblink_is_busy($1)",
+                &[contender_name.into()],
+            )
+            .unwrap();
+            if busy == Some(0) {
+                completed_early = true;
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(waiting, "registration did not wait for the source write gate");
         dblink_exec(driver_name, "COMMIT");
-        let result = dblink_get_result(contender_name);
-        assert!(!result.starts_with("ERROR"), "source-gated registration failed: {result}");
+        if !waiting && !completed_early {
+            Spi::get_one_with_args::<bool>(
+                "SELECT pg_catalog.pg_cancel_backend($1::integer)",
+                &[i64::from(contender_pid).into()],
+            )
+            .expect("cancel registration after its observation deadline");
+        }
+        let result: Option<String> = Spi::get_one_with_args(
+            "SELECT result
+             FROM public.dblink_get_result($1, false) AS result_row(result text)",
+            &[contender_name.into()],
+        )
+        .unwrap();
+        let remote_error: String = Spi::get_one_with_args(
+            "SELECT public.dblink_error_message($1)",
+            &[contender_name.into()],
+        )
+        .unwrap()
+        .unwrap_or_else(|| "error-status-missing".to_string());
         Spi::run_with_args(
             "SELECT result
-             FROM public.dblink_get_result($1) AS result_row(result text)",
+             FROM public.dblink_get_result($1, false) AS result_row(result text)",
             &[contender_name.into()],
         )
         .unwrap();
@@ -259,6 +344,20 @@
             &[contender_name.into()],
         )
         .unwrap();
+
+        assert_eq!(sent, 1);
+        assert!(
+            !completed_early,
+            "registration completed before the source write gate: result={result:?} remote_error={remote_error} wait={wait_diagnostic}"
+        );
+        assert!(
+            waiting,
+            "registration did not wait for the exact source write gate: result={result:?} remote_error={remote_error} wait={wait_diagnostic}"
+        );
+        assert_eq!(
+            remote_error, "OK",
+            "source-gated registration failed: result={result:?}"
+        );
     }
 
     #[pg_test]

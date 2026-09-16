@@ -8,6 +8,7 @@ const DEFAULT_PUBLICATION_NAME: &str = "synchro_pub";
 const PRIMARY_KEY_GUARD_TRIGGER: &str = "synchro_primary_key_guard";
 const CAPTURE_FENCE_TRIGGER: &str = "synchro_capture_fence";
 const CAPTURE_TRUNCATE_TRIGGER: &str = "synchro_capture_truncate_guard";
+pub(crate) const REGISTRY_WRITE_LOCK_KEY: i64 = 0x7379_6e63;
 
 /// Capture role for one registered physical relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2356,7 +2357,7 @@ pub(crate) fn acquire_registry_write_lock(client: &SpiClient<'_>) -> Result<(), 
     client.select(
         "SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)",
         None,
-        &[0x7379_6e63i64.into()],
+        &[REGISTRY_WRITE_LOCK_KEY.into()],
     )?;
     Ok(())
 }
