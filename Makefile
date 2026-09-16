@@ -1879,7 +1879,7 @@ lint-rust: lint-rust-core lint-rust-pg
 
 build-local-postgres:
 	@mkdir -p "$(dir $(LOCAL_POSTGRES_BINARY))"
-	cd conformance && GOFLAGS= GOWORK=off go build -o "$(LOCAL_POSTGRES_BINARY)" ./cmd/synchro-local-postgres
+	cd conformance && GOFLAGS= GOWORK=off go build -o "$(abspath $(LOCAL_POSTGRES_BINARY))" ./cmd/synchro-local-postgres
 
 local-postgres-start: build-local-postgres
 	@test -x "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" || $(MAKE) conformance-adapter-artifact
