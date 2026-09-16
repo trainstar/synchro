@@ -121,7 +121,7 @@ final class PushProcessor: @unchecked Sendable {
         // Resolving a historical table decodes every sealed batch, and one
         // seal resolves the same few (table, schema) pairs for every pending
         // mutation, so the resolution is cached for the batch.
-        var tableCache: [String: LocalSchemaTable] = [:]
+        var historicalTables: [HistoricalTableKey: LocalSchemaTable] = [:]
         return try pending.map { change in
             guard let tableID = change.tableID,
                   let pkFieldID = change.pkFieldID,
@@ -134,20 +134,14 @@ final class PushProcessor: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "mutation ledger lacks authored schema identity")
             }
             let authoredSchema = SchemaRef(version: authoredVersion, hash: authoredHash)
-            let cacheKey = "\(tableID)|\(authoredVersion)|\(authoredHash)"
-            let schema: LocalSchemaTable
-            if let cached = tableCache[cacheKey] {
-                schema = cached
-            } else {
-                schema = try historicalTable(
-                    db,
-                    tableID: tableID,
-                    schema: authoredSchema,
-                    sealedSchema: authoredSchema == requestSchema ? requestSchema : nil,
-                    sealedTables: authoredSchema == requestSchema ? syncedTables : nil
-                )
-                tableCache[cacheKey] = schema
-            }
+            let schema = try historicalTable(
+                db,
+                tableID: tableID,
+                schema: authoredSchema,
+                sealedSchema: authoredSchema == requestSchema ? requestSchema : nil,
+                sealedTables: authoredSchema == requestSchema ? syncedTables : nil,
+                cache: &historicalTables
+            )
             let columns: [String: AnyCodable]? = change.operation == "delete"
                 ? nil
                 : Dictionary(uniqueKeysWithValues: change.fieldValuesByID.values.map { ($0.fieldID, $0.wireValue) })
@@ -388,6 +382,7 @@ final class PushProcessor: @unchecked Sendable {
             throw SynchroError.invalidResponse(message: "stored sealed push batch identity is invalid")
         }
         try batch.request.validate(syncedTables: batch.syncedTables)
+        var historicalTables: [HistoricalTableKey: LocalSchemaTable] = [:]
         for (mutation, pending) in zip(batch.request.mutations, batch.pending) {
             guard mutation.mutationID == pending.mutationID else {
                 throw SynchroError.invalidResponse(message: "stored push mutation identity is invalid")
@@ -397,7 +392,8 @@ final class PushProcessor: @unchecked Sendable {
                 tableID: mutation.table,
                 schema: mutation.authoredSchema,
                 sealedSchema: batch.request.schema,
-                sealedTables: batch.syncedTables
+                sealedTables: batch.syncedTables,
+                cache: &historicalTables
             )
             try validateCapturedMutation(pending, schema: authoredTable)
             guard try self.mutation(from: pending, schema: authoredTable) == mutation else {
@@ -412,6 +408,7 @@ final class PushProcessor: @unchecked Sendable {
         syncedTables: [LocalSchemaTable]
     ) throws {
         try request.validate(syncedTables: syncedTables)
+        var historicalTables: [HistoricalTableKey: LocalSchemaTable] = [:]
         for mutation in request.mutations {
             guard let source = try ledgerEntry(db, mutationID: mutation.mutationID),
                   source.tableID == mutation.table,
@@ -424,7 +421,8 @@ final class PushProcessor: @unchecked Sendable {
                 tableID: mutation.table,
                 schema: mutation.authoredSchema,
                 sealedSchema: request.schema == mutation.authoredSchema ? request.schema : nil,
-                sealedTables: request.schema == mutation.authoredSchema ? syncedTables : nil
+                sealedTables: request.schema == mutation.authoredSchema ? syncedTables : nil,
+                cache: &historicalTables
             )
             try validateCapturedMutation(source, schema: authoredTable)
             let expected = try self.mutation(from: source, schema: authoredTable)
@@ -666,6 +664,7 @@ final class PushProcessor: @unchecked Sendable {
     ) throws -> [ConflictEvent] {
         let outcomeTableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
         let currentTableMap = Dictionary(uniqueKeysWithValues: currentTables.map { ($0.tableID, $0) })
+        var historicalTablesByKey: [HistoricalTableKey: LocalSchemaTable] = [:]
         for outcome in accepted {
             let source = try exactLedgerSource(
                 db,
@@ -696,7 +695,8 @@ final class PushProcessor: @unchecked Sendable {
                     tableID: outcome.table,
                     schema: outcome.outcomeSchema,
                     sealedSchema: historicalSchema,
-                    sealedTables: historicalTables
+                    sealedTables: historicalTables,
+                    cache: &historicalTablesByKey
                 )
                 try verifyAuthoritativeRow(
                     row,
@@ -834,6 +834,7 @@ final class PushProcessor: @unchecked Sendable {
         let outcomeTableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
         let currentTableMap = Dictionary(uniqueKeysWithValues: currentTables.map { ($0.tableID, $0) })
         var conflicts: [ConflictEvent] = []
+        var historicalTablesByKey: [HistoricalTableKey: LocalSchemaTable] = [:]
         for outcome in rejected {
             let source = try exactLedgerSource(
                 db,
@@ -871,7 +872,8 @@ final class PushProcessor: @unchecked Sendable {
                         hash: source.authoredSchemaHash ?? outcome.outcomeSchema.hash
                     ),
                     sealedSchema: historicalSchema,
-                    sealedTables: historicalTables
+                    sealedTables: historicalTables,
+                    cache: &historicalTablesByKey
                 )
                 originalJSON = try encodeOriginalMutation(source, schema: authoredTable)
             } else {
@@ -888,7 +890,8 @@ final class PushProcessor: @unchecked Sendable {
                     tableID: outcome.table,
                     schema: outcome.outcomeSchema,
                     sealedSchema: historicalSchema,
-                    sealedTables: historicalTables
+                    sealedTables: historicalTables,
+                    cache: &historicalTablesByKey
                 )
                 try verifyAuthoritativeRow(
                     row,
@@ -1012,13 +1015,29 @@ final class PushProcessor: @unchecked Sendable {
         let deletedAtValue: DatabaseValue?
     }
 
+    // Retained schema sources can change between transactions, so each operation owns its cache.
+    private struct HistoricalTableKey: Hashable {
+        let tableID: String
+        let schemaVersion: Int64
+        let schemaHash: String
+    }
+
     private func historicalTable(
         _ db: GRDB.Database,
         tableID: String,
         schema: SchemaRef,
         sealedSchema: SchemaRef? = nil,
-        sealedTables: [LocalSchemaTable]? = nil
+        sealedTables: [LocalSchemaTable]? = nil,
+        cache: inout [HistoricalTableKey: LocalSchemaTable]
     ) throws -> LocalSchemaTable {
+        let key = HistoricalTableKey(
+            tableID: tableID,
+            schemaVersion: schema.version,
+            schemaHash: schema.hash
+        )
+        if let cached = cache[key] {
+            return cached
+        }
         var candidates: [[LocalSchemaTable]] = []
         if sealedSchema == schema, let sealedTables {
             candidates.append(sealedTables)
@@ -1067,6 +1086,7 @@ final class PushProcessor: @unchecked Sendable {
         guard let table = tables.first(where: { $0.tableID == tableID }) else {
             throw SynchroError.invalidResponse(message: "outcome schema lacks its logical table")
         }
+        cache[key] = table
         return table
     }
 
