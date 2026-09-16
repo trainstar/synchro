@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 type ExchangeResponse = {
   schema_version: number;
@@ -174,14 +176,13 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   throw new Error('React Native conformance command did not finish');
 }
 
-it('executes the warm-connect coordinator sequence', async () => {
+it('executes the warm-connect coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token } = coordinatorConfiguration();
-  await device.launchApp({
+  await launchCorpusApp({
     newInstance: true,
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
 
   let rawResult = 'null';
   let commandCount = 0;
@@ -205,4 +206,4 @@ it('executes the warm-connect coordinator sequence', async () => {
     }
   }
   throw new Error('React Native coordinator did not complete');
-});
+}));

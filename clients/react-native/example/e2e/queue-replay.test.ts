@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 jest.setTimeout(30 * 60 * 1000);
 
@@ -123,12 +125,7 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   if (requiresProcessRelaunch(command)) {
     // A reuse open is the coordinator's process-restart boundary. Keep the
     // database while replacing the application process before opening it.
-    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
-    // The coordinator holds sync responses on purpose, and Detox on iOS
-    // waits for network idle before each UI action. The held request must
-    // not count toward idleness or every UI step stalls behind it.
-    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-    await expect(element(by.id('conformance-harness'))).toBeVisible();
+    await launchCorpusApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
   }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
@@ -157,14 +154,9 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   throw new Error('React Native conformance command did not finish');
 }
 
-it('executes the queue-replay coordinator sequence', async () => {
+it('executes the queue-replay coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = coordinatorConfiguration();
-  await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
-  // The coordinator holds sync responses on purpose, and Detox on iOS
-  // waits for network idle before each UI action. The held request must
-  // not count toward idleness or every UI step stalls behind it.
-  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
+  await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   let rawResult = 'null';
   let commandCount = 0;
   for (let sequence = 1; sequence <= stageCount; sequence += 1) {
@@ -189,4 +181,4 @@ it('executes the queue-replay coordinator sequence', async () => {
   throw new Error('React Native queue-replay coordinator did not complete');
   // The batched flow drives 133 exchanges and the response-loss await can
   // hold one command through in-call backoff, past the 120 second default.
-}, 1800000);
+}), 1800000);

@@ -42,7 +42,7 @@
     "pack:dry-run": "npm pack --dry-run",
     "test:unit": "jest --runInBand --watchman=false",
     "typecheck": "tsc",
-    "lint": "eslint src/ __tests__/",
+    "lint": "eslint src/ __tests__/ example/e2e/",
     "test": "jest"
   },
   "keywords": [

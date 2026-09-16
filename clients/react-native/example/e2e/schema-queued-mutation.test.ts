@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, device, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 type ExchangeResponse = { schema_version: number; sequence: number } & (
   | { state: 'command'; command: Record<string, unknown> }
@@ -54,8 +56,7 @@ async function exchange(endpoint: string, token: string, sequence: number, resul
 async function execute(command: Record<string, unknown>): Promise<string> {
   if (requiresProcessRelaunch(command)) {
     await device.terminateApp();
-    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
-    await expect(element(by.id('conformance-harness'))).toBeVisible();
+    await launchCorpusApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
   }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
@@ -77,10 +78,9 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   throw new Error('React Native schema-queued-mutation command did not finish');
 }
 
-it('executes the schema-queued-mutation coordinator sequence', async () => {
+it('executes the schema-queued-mutation coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = configuration();
-  await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
+  await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   let result = 'null';
   let commands = 0;
   for (let sequence = 1; sequence <= stageCount; sequence += 1) {
@@ -93,4 +93,4 @@ it('executes the schema-queued-mutation coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error(`React Native schema-queued-mutation coordinator did not complete after ${stageCount} exchanges`);
-}, 600000);
+}), 600000);

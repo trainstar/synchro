@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, device, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 type ExchangeResponse = {
   schema_version: number;
@@ -134,9 +136,7 @@ async function exchange(endpoint: string, token: string, sequence: number, rawRe
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
   if (requiresProcessRelaunch(command)) {
     await device.terminateApp();
-    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
-    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-    await expect(element(by.id('conformance-harness'))).toBeVisible();
+    await launchCorpusApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
   }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
@@ -173,15 +173,13 @@ function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
   return isJSONObject(parameters) && parameters.database_mode === 'reuse';
 }
 
-it('executes the retention-reconnect coordinator sequence', async () => {
+it('executes the retention-reconnect coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = coordinatorConfiguration();
-  await device.launchApp({
+  await launchCorpusApp({
     newInstance: true,
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
-  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
 
   let rawResult = 'null';
   let commandCount = 0;
@@ -205,4 +203,4 @@ it('executes the retention-reconnect coordinator sequence', async () => {
     }
   }
   throw new Error('React Native retention-reconnect coordinator did not complete');
-}, 600000);
+}), 600000);

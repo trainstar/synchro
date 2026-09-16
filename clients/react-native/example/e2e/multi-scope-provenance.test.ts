@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 type Response = { schema_version: number; sequence: number } & (
   | { state: 'command'; command: Record<string, unknown> }
@@ -47,8 +49,7 @@ function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
 
 async function execute(command: Record<string, unknown>): Promise<string> {
   if (requiresProcessRelaunch(command)) {
-    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
-    await expect(element(by.id('conformance-harness'))).toBeVisible();
+    await launchCorpusApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
   }
   const serialized = JSON.stringify(command);
   await element(by.id('conformance-command-input')).replaceText(serialized);
@@ -71,10 +72,9 @@ async function execute(command: Record<string, unknown>): Promise<string> {
 
 // This scenario drives six clients through the coordinator, so it needs more
 // than the shared 120 second budget that the slower simulator cannot meet.
-it('executes the multi-scope-provenance coordinator sequence', async () => {
+it('executes the multi-scope-provenance coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = configuration();
-  await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
+  await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   let result = 'null';
   for (let sequence = 1; sequence <= stageCount; sequence += 1) {
     const next = await exchange(endpoint, token, sequence, result);
@@ -82,4 +82,4 @@ it('executes the multi-scope-provenance coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error('React Native multi-scope provenance coordinator did not complete');
-}, 600000);
+}), 600000);

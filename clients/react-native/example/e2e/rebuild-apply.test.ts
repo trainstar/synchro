@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 type ExchangeResponse = { schema_version: number; sequence: number } & (
   | { state: 'command'; command: Record<string, unknown> }
@@ -64,10 +66,9 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-it('executes the rebuild-apply coordinator sequence', async () => {
+it('executes the rebuild-apply coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = configuration();
-  await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
+  await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   let result = 'null';
   let commands = 0;
   let stoppedAt = 0;
@@ -86,4 +87,4 @@ it('executes the rebuild-apply coordinator sequence', async () => {
     }
   }
   throw new Error(`React Native rebuild-apply coordinator stopped at sequence=${stoppedAt} versus stage_count=${stageCount}: no complete response`);
-}, REBUILD_APPLY_COMMAND_TIMEOUT_MS);
+}), REBUILD_APPLY_COMMAND_TIMEOUT_MS);

@@ -350,6 +350,7 @@ help:
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
 	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
 	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
+	@echo "  rn-ios-build          - Build the iOS conformance app without starting a server"
 	@echo "  test-rn-warm-connect-ios - Run direct React Native warm-connect through the iOS bridge"
 	@echo "  test-rn-performance-android - Run direct React Native steady-pull through the Android bridge"
 	@echo "  test-rn-pending-cycle-ios - Run direct React Native pending-cycle through the iOS bridge"
@@ -1066,8 +1067,8 @@ test-rn-warm-connect-control: conformance-mod-download
 		-- go test -json ./reactnative -count=1 \
 		-run '^TestWarmConnectScopeAuthorityNegativeControl$$'
 
-test-rn-warm-connect-ios: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control rn-seed-asset rn-watchman-reset rn-ios-pods
-	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+test-rn-warm-connect-ios: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control rn-seed-asset
+	@$(MAKE) --no-print-directory rn-ios-build
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
@@ -1427,9 +1428,13 @@ rn-android-emulator-reset:
 		sleep 5; \
 	fi
 
-test-rn-e2e-ios-build: rn-watchman-reset rn-ios-pods
-	@$(MAKE) rn-e2e-server-seed
+.PHONY: rn-ios-build
+rn-ios-build: rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+
+test-rn-e2e-ios-build:
+	@$(MAKE) rn-e2e-server-seed
+	@$(MAKE) --no-print-directory rn-ios-build
 
 test-rn-e2e-ios-run:
 	rm -f clients/react-native/example/artifacts/ios-test-results.json

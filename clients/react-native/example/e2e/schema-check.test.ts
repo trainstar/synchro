@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 type ExchangeResponse = { schema_version: number; sequence: number } & (
   | { state: 'command'; command: Record<string, unknown> }
@@ -180,14 +182,13 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   throw new Error('React Native schema-check command did not finish');
 }
 
-it('executes the schema-check coordinator sequence', async () => {
+it('executes the schema-check coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = configuration();
-  await device.launchApp({
+  await launchCorpusApp({
     newInstance: true,
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
   let result = 'null';
   let commands = 0;
   for (let sequence = 1; sequence <= stageCount; sequence += 1) {
@@ -204,4 +205,4 @@ it('executes the schema-check coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error(`React Native schema-check coordinator did not complete after ${stageCount} exchanges`);
-}, 600000);
+}), 600000);

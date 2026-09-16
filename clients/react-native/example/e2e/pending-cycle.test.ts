@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop } from './corpus-harness';
 
 type ExchangeResponse = {
   schema_version: number;
@@ -148,13 +150,11 @@ function isDeviceRestart(command: Record<string, unknown>): boolean {
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
   if (isDeviceRestart(command)) {
-    await device.launchApp({
+    await launchCorpusApp({
       newInstance: true,
       delete: false,
       launchArgs: { synchroConformance: '1' },
     });
-    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-    await expect(element(by.id('conformance-harness'))).toBeVisible();
     return 'null';
   }
   const serialized = JSON.stringify(command);
@@ -183,15 +183,13 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   throw new Error('React Native conformance command did not finish');
 }
 
-it('executes the pending-cycle coordinator sequence', async () => {
+it('executes the pending-cycle coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, exchanges } = coordinatorConfiguration();
-  await device.launchApp({
+  await launchCorpusApp({
     newInstance: true,
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
-  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
 
   let rawResult = 'null';
   let commandCount = 0;
@@ -215,4 +213,4 @@ it('executes the pending-cycle coordinator sequence', async () => {
     }
   }
   throw new Error('React Native pending-cycle coordinator did not complete');
-});
+}));

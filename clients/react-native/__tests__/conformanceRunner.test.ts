@@ -293,6 +293,80 @@ describe('PublicConformanceRunner call lifecycle', () => {
     }
   });
 
+  it('observes blocked synchronization before its managed invocation finishes', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',
+    });
+    let finishInvocation: () => void = () => {};
+    let invocationFinished = false;
+    mockNativeModule.start.mockImplementation(() => new Promise<void>((resolve) => {
+      finishInvocation = () => {
+        invocationFinished = true;
+        resolve();
+      };
+    }));
+    mockNativeModule.stop.mockImplementation(async () => { finishInvocation(); });
+    mockNativeModule.close.mockImplementation(async () => { finishInvocation(); });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.getSyncStatus
+        .mockResolvedValueOnce(PULLING_STATUS)
+        .mockResolvedValueOnce(BACKOFF_STATUS);
+      await expect(runner.execute(command('client', 'synchronize-step', 'client-a', {
+        method: 'start', completion: 'blocked',
+      }))).resolves.toMatchObject({ kind: 'synchronized', completion: 'blocked' });
+      expect(invocationFinished).toBe(false);
+      await runner.execute(command('client', 'lifecycle', 'client-a', { operation: 'stop' }));
+      expect(invocationFinished).toBe(true);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('closes the native client before draining a blocked invocation', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',
+    });
+    let finishInvocation: () => void = () => {};
+    mockNativeModule.start.mockImplementation(() => new Promise<void>((resolve) => {
+      finishInvocation = resolve;
+    }));
+    mockNativeModule.close.mockImplementation(async () => { finishInvocation(); });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.getSyncStatus.mockResolvedValueOnce(BACKOFF_STATUS);
+      await runner.execute(command('client', 'synchronize-step', 'client-a', {
+        method: 'start', completion: 'blocked',
+      }));
+    } finally {
+      await runner.close();
+    }
+    expect(mockNativeModule.close).toHaveBeenCalled();
+  });
+
+  it('waits for a native status barrier without extending a host exchange', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',
+    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      await runner.execute(command('client', 'begin-call', 'client-a', {
+        call_id: 'queue-call', method: 'reset-schema-and-start',
+      }));
+      mockNativeModule.getSyncStatus
+        .mockResolvedValueOnce(JSON.stringify({ status: 'schema_applying', retryAt: null, operation: null, failure: null }))
+        .mockResolvedValueOnce(JSON.stringify({ status: 'pushing', retryAt: null, operation: null, failure: null }));
+      await expect(runner.execute(command('observer', 'await-step', 'client-a', {
+        call_id: 'queue-call', wait_for_status: 'pushing',
+      }))).resolves.toMatchObject({ kind: 'awaited', status: { state: 'pushing' } });
+      await expect(runner.execute(command('observer', 'await-step', 'client-a', {
+        call_id: 'queue-call', wait_for_status: 'unknown',
+      }))).rejects.toMatchObject({ code: 'invalid_command' });
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('rejects duplicate and mismatched calls', async () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091',
