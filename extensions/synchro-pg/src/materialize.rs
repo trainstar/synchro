@@ -167,58 +167,60 @@ pub(crate) fn resolve_membership_batch(
     client: &SpiClient<'_>,
     registration: &TableRegistration,
     record_ids: &[String],
-) -> Result<std::collections::HashMap<String, Vec<String>>, pgrx::spi::Error> {
-    let maximum = usize::try_from(registration.max_scope_fanout)
-        .unwrap_or_else(|_| pgrx::error!("registered scope fanout limit is invalid"));
-    let query =
-        membership_batch_query(registration).unwrap_or_else(|error| pgrx::error!("{error}"));
-    let mut memberships = std::collections::HashMap::with_capacity(record_ids.len());
-    let mut seen_records = std::collections::HashSet::with_capacity(record_ids.len());
-    for record_id in record_ids {
-        if !seen_records.insert(record_id) {
-            pgrx::error!("membership batch contains a duplicate record identity");
+) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    crate::bucketing::evaluate_scope(|| {
+        let maximum = usize::try_from(registration.max_scope_fanout)
+            .unwrap_or_else(|_| pgrx::error!("registered scope fanout limit is invalid"));
+        let query =
+            membership_batch_query(registration).unwrap_or_else(|error| pgrx::error!("{error}"));
+        let mut memberships = std::collections::HashMap::with_capacity(record_ids.len());
+        let mut seen_records = std::collections::HashSet::with_capacity(record_ids.len());
+        for record_id in record_ids {
+            if !seen_records.insert(record_id) {
+                pgrx::error!("membership batch contains a duplicate record identity");
+            }
+            memberships.insert(record_id.clone(), Vec::new());
         }
-        memberships.insert(record_id.clone(), Vec::new());
-    }
-    if memberships.is_empty() {
-        return Ok(memberships);
-    }
+        if memberships.is_empty() {
+            return Ok(memberships);
+        }
 
-    let input = record_ids
-        .iter()
-        .map(|record_id| serde_json::json!({ "record_id": record_id }))
-        .collect::<Vec<_>>();
-    let rows = client.select(
-        &query,
-        None,
-        &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
-    )?;
-    for row in rows {
-        let record_id = row
-            .get_by_name::<String, &str>("record_id")?
-            .unwrap_or_else(|| pgrx::error!("membership batch record identity is missing"));
-        let scopes = memberships.get_mut(&record_id).unwrap_or_else(|| {
-            pgrx::error!("membership batch returned an unknown record identity")
-        });
-        if scopes.len() >= maximum {
-            pgrx::error!("membership function exceeded its registered scope fanout bound");
+        let input = record_ids
+            .iter()
+            .map(|record_id| serde_json::json!({ "record_id": record_id }))
+            .collect::<Vec<_>>();
+        let rows = client.select(
+            &query,
+            None,
+            &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+        )?;
+        for row in rows {
+            let record_id = row
+                .get_by_name::<String, &str>("record_id")?
+                .unwrap_or_else(|| pgrx::error!("membership batch record identity is missing"));
+            let scopes = memberships.get_mut(&record_id).unwrap_or_else(|| {
+                pgrx::error!("membership batch returned an unknown record identity")
+            });
+            if scopes.len() >= maximum {
+                pgrx::error!("membership function exceeded its registered scope fanout bound");
+            }
+            let scope_id = row
+                .get_by_name::<String, &str>("scope_id")?
+                .unwrap_or_else(|| pgrx::error!("membership function returned a null scope ID"));
+            if scope_id.is_empty()
+                || scope_id.as_bytes().contains(&0)
+                || scope_id.chars().any(char::is_control)
+            {
+                pgrx::error!("membership function returned an invalid scope ID");
+            }
+            scopes.push(scope_id);
         }
-        let scope_id = row
-            .get_by_name::<String, &str>("scope_id")?
-            .unwrap_or_else(|| pgrx::error!("membership function returned a null scope ID"));
-        if scope_id.is_empty()
-            || scope_id.as_bytes().contains(&0)
-            || scope_id.chars().any(char::is_control)
-        {
-            pgrx::error!("membership function returned an invalid scope ID");
+        for scopes in memberships.values_mut() {
+            scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            scopes.dedup();
         }
-        scopes.push(scope_id);
-    }
-    for scopes in memberships.values_mut() {
-        scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        scopes.dedup();
-    }
-    Ok(memberships)
+        Ok(memberships)
+    })
 }
 
 pub(crate) fn activate_staged_membership_generation(

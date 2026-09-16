@@ -3311,8 +3311,8 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	// Record bindings are registered when a source transaction materializes. A
 	// scenario that accepts a push without materializing still needs them, or a
 	// primary-key alias for the pushed row has no runtime binding.
-	for _, event := range transaction.Events {
-		if event.Dependency != nil || event.After == nil {
+	for index, event := range transaction.Events {
+		if index >= len(acceptedEvents) || !acceptedEvents[index] || event.Dependency != nil || event.After == nil {
 			continue
 		}
 		recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)

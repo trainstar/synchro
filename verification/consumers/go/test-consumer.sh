@@ -34,6 +34,13 @@ esac
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/synchro-go-consumer.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+GOMODCACHE="$work_dir/modules"
+GOCACHE="$work_dir/build-cache"
+GOENV=off
+GOFLAGS=-modcacherw
+GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_NOSYSTEM=1
+export GOMODCACHE GOCACHE GOENV GOFLAGS GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
 cp "$consumer_root/go.mod" "$consumer_root/main.go" "$work_dir/"
 (cd "$work_dir" && GOWORK=off go mod edit -require="github.com/trainstar/synchro/api/go@v$version")
 (cd "$work_dir" && GOWORK=off go mod tidy)

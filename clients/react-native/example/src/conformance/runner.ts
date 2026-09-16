@@ -416,14 +416,23 @@ export class PublicConformanceRunner {
 
   private async awaitStep(command: ConformanceCommand): Promise<ConformanceActionResult> {
     const clientKey = requireClientKey(command);
-    const callID = command.action.action.parameters.call_id;
-    if (callID !== undefined && (!isCallID(callID) || this.calls.get(callID)?.clientKey !== clientKey)) {
+    const parameters = command.action.action.parameters;
+    const callID = parameters.call_id;
+    const waitForCompletion = parameters.wait_for_completion;
+    if (
+      (waitForCompletion !== undefined && typeof waitForCompletion !== 'boolean') ||
+      (callID !== undefined && (!isCallID(callID) || this.calls.get(callID)?.clientKey !== clientKey)) ||
+      (waitForCompletion === true && callID === undefined)
+    ) {
       throw new ConformanceCommandError('invalid_command');
     }
     const client = await this.activate(clientKey);
+    const status = waitForCompletion === true
+      ? (await this.waitForCompletion(client)).status
+      : await client.getSyncStatus();
     return {
       kind: 'awaited',
-      status: rawStatus(await client.getSyncStatus()),
+      status: rawStatus(status),
       process: await this.processIdentity(clientKey, client),
     };
   }

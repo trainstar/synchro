@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -472,8 +473,16 @@ func (c *MultiScopeProvenanceCoordinator) advanceLocked(ctx context.Context, seq
 		return response, nil
 	}
 	if c.waiting == "sync" {
+		selectors, err := c.applicationSelectors()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
 		c.waiting = "capture"
-		response.Command = c.command(call, "observer", "capture", map[string]any{"client_keys": []string{call.key}, "sources": []string{"application-rows", "scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace"}})
+		response.Command = c.command(call, "observer", "capture", map[string]any{
+			"client_keys":   []string{call.key},
+			"sources":       []string{"application-rows", "scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace"},
+			"row_selectors": selectors,
+		})
 		return response, nil
 	}
 	return exchangeResponse{}, errInvalidExchange
@@ -490,6 +499,68 @@ func (c *MultiScopeProvenanceCoordinator) command(call multiScopeProvenanceCall,
 		}
 	}
 	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: call.key, Database: "rn-multi-scope-provenance-" + call.step.NativeBinding.ClientID + ".db", ClientID: call.step.NativeBinding.ClientID, ServerURL: c.adapter, AuthToken: c.authTokens[call.key]}}
+}
+
+func (c *MultiScopeProvenanceCoordinator) applicationSelectors() ([]map[string]any, error) {
+	availableSteps := make(map[scenarios.StepID]struct{})
+	for index := 0; index <= c.current && index < len(c.calls); index++ {
+		for _, step := range c.calls[index].operations {
+			availableSteps[step.ID] = struct{}{}
+		}
+	}
+	aliases := make([]scenarios.NativeIdentityAlias, 0)
+	for _, alias := range c.config.Scenario.NativeIdentityAliases {
+		if alias.Kind == "table" {
+			aliases = append(aliases, alias)
+			continue
+		}
+		if alias.Kind != "primary-key" || len(alias.StepIDs) != 1 {
+			continue
+		}
+		if _, found := availableSteps[alias.StepIDs[0]]; found {
+			aliases = append(aliases, alias)
+		}
+	}
+	values, err := c.config.Controller.IdentityValues(aliases)
+	if err != nil {
+		return nil, fmt.Errorf("resolve React Native multi-scope provenance application identities: %w", err)
+	}
+	return multiScopeProvenanceApplicationSelectors(values)
+}
+
+func multiScopeProvenanceApplicationSelectors(values []blackbox.NativeIdentityValue) ([]map[string]any, error) {
+	tableName := ""
+	primaryField := ""
+	primaryValues := make([]any, 0)
+	for _, value := range values {
+		switch value.Kind {
+		case "table":
+			if tableName != "" || value.ApplicationIdentifier == "" {
+				return nil, errors.New("React Native multi-scope provenance application table identity is invalid")
+			}
+			tableName = value.ApplicationIdentifier
+		case "primary-key":
+			var primaryValue any
+			if value.ApplicationIdentifier == "" || json.Unmarshal(value.RuntimeValue, &primaryValue) != nil {
+				return nil, errors.New("React Native multi-scope provenance application primary-key identity is invalid")
+			}
+			if primaryField != "" && primaryField != value.ApplicationIdentifier {
+				return nil, errors.New("React Native multi-scope provenance application primary-key fields differ")
+			}
+			primaryField = value.ApplicationIdentifier
+			primaryValues = append(primaryValues, primaryValue)
+		}
+	}
+	if tableName == "" || primaryField == "" || len(primaryValues) == 0 || len(primaryValues) > 256 {
+		return nil, errors.New("React Native multi-scope provenance application identities are incomplete")
+	}
+	selectors := make([]map[string]any, 0, len(primaryValues))
+	for _, primaryValue := range primaryValues {
+		selectors = append(selectors, map[string]any{
+			"table_name": tableName, "primary_key_field": primaryField, "primary_key": primaryValue,
+		})
+	}
+	return selectors, nil
 }
 
 func (c *MultiScopeProvenanceCoordinator) executeOperations(ctx context.Context, steps []scenarios.Step) error {
@@ -811,12 +882,24 @@ func validateMultiScopeProvenanceRestart(prior actionProcessIdentity, raw json.R
 }
 
 func validateMultiScopeProvenanceNoProgress(before, after finalCapture) error {
+	beforeState, err := decodeClientState(before.ClientState)
+	if err != nil {
+		return err
+	}
+	afterState, err := decodeClientState(after.ClientState)
+	if err != nil {
+		return err
+	}
+	beforeState.ProvenanceMaintenanceWorkCursor = ""
+	afterState.ProvenanceMaintenanceWorkCursor = ""
+	if !reflect.DeepEqual(beforeState, afterState) {
+		return errors.New("React Native multi-scope provenance post-restart synchronization changed client state")
+	}
 	for _, value := range []struct {
 		name        string
 		beforeValue json.RawMessage
 		afterValue  json.RawMessage
 	}{
-		{"client state", before.ClientState, after.ClientState},
 		{"application rows", before.Rows, after.Rows},
 		{"pending mutations", before.Pending, after.Pending},
 		{"rejected mutations", before.Rejected, after.Rejected},

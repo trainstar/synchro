@@ -22,6 +22,20 @@ const READY_STATUS = JSON.stringify({
   failure: null,
 });
 
+const PULLING_STATUS = JSON.stringify({
+  status: 'pulling',
+  retryAt: null,
+  operation: null,
+  failure: null,
+});
+
+const BACKOFF_STATUS = JSON.stringify({
+  status: 'backoff',
+  retryAt: '2026-09-16T00:00:00.000Z',
+  operation: 'pulling',
+  failure: null,
+});
+
 const CLIENT_STATE_COUNTS = {
   application_row_count: 0,
   mutation_ledger_count: 0,
@@ -242,6 +256,41 @@ describe('PublicConformanceRunner call lifecycle', () => {
 
     expect(mockNativeModule.retryAfterError).toHaveBeenCalledTimes(1);
     await runner.close();
+  });
+
+  it('optionally waits for await-step completion and validates the control type', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091',
+      authToken: 'test-token',
+      appVersion: '1.0.0',
+    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      await runner.execute(command('client', 'begin-call', 'client-a', { call_id: 'pending-call', method: 'retry-after-error' }));
+
+      mockNativeModule.getSyncStatus
+        .mockResolvedValueOnce(PULLING_STATUS)
+        .mockResolvedValueOnce(BACKOFF_STATUS);
+      await expect(
+        runner.execute(
+          command('observer', 'await-step', 'client-a', {
+            call_id: 'pending-call',
+            wait_for_completion: true,
+          }, [protocolStep()])
+        )
+      ).resolves.toMatchObject({ kind: 'awaited', status: { state: 'backoff', operation: 'pulling' } });
+
+      await expect(
+        runner.execute(
+          command('observer', 'await-step', 'client-a', {
+            call_id: 'pending-call',
+            wait_for_completion: 'true',
+          }, [protocolStep()])
+        )
+      ).rejects.toMatchObject({ code: 'invalid_command' });
+    } finally {
+      await runner.close();
+    }
   });
 
   it('rejects duplicate and mismatched calls', async () => {

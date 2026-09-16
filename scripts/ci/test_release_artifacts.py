@@ -38,13 +38,18 @@ class ReleaseArtifactsTests(unittest.TestCase):
     def test_make_build_targets_preserve_absolute_output_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for target, variable, output_name in (
-                ("build", "BINARY", "synchrod-pg"),
-                ("build-seed", "SEED_BINARY", "synchro-seed"),
+            for target, variable, value, output in (
+                ("build", "BINARY", str(root / "synchrod-pg"), root / "synchrod-pg"),
+                ("build-seed", "SEED_BINARY", str(root / "synchro-seed"), root / "synchro-seed"),
+                (
+                    "build-local-postgres",
+                    "LOCAL_POSTGRES_BINARY",
+                    "dist/release-provisioner/synchro-local-postgres",
+                    REPO_ROOT / "dist/release-provisioner/synchro-local-postgres",
+                ),
             ):
-                output = root / output_name
                 result = subprocess.run(
-                    ["make", "--dry-run", target, f"{variable}={output}"],
+                    ["make", "--dry-run", target, f"{variable}={value}"],
                     cwd=REPO_ROOT,
                     check=True,
                     capture_output=True,

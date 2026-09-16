@@ -9,7 +9,7 @@ function configuration(): { endpoint: string; token: string; stageCount: number 
   const url = process.env.SYNCHRO_RN_COORDINATOR_URL;
   const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
   const stageCount = Number(process.env.SYNCHRO_RN_COORDINATOR_STAGE_COUNT);
-  if (!url || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !Number.isSafeInteger(stageCount) || stageCount !== 12) {
+  if (!url || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !Number.isSafeInteger(stageCount) || stageCount < 2) {
     throw new Error('React Native rebuild-requests coordinator configuration is invalid');
   }
   const parsed = new URL(url);
@@ -55,6 +55,7 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   if (requiresProcessRelaunch(command)) {
     await device.terminateApp();
     await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
     await expect(element(by.id('conformance-harness'))).toBeVisible();
   }
   const serialized = JSON.stringify(command);
@@ -79,6 +80,7 @@ async function execute(command: Record<string, unknown>): Promise<string> {
 it('executes the rebuild-requests coordinator sequence', async () => {
   const { endpoint, token, stageCount } = configuration();
   await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
+  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
   await expect(element(by.id('conformance-harness'))).toBeVisible();
   let result = 'null';
   let commands = 0;

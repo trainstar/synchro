@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -71,7 +73,7 @@ func TestValidateMultiScopeProvenanceRestartRequiresNewProcessAndSameDatabase(t 
 func TestValidateMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testing.T) {
 	before := finalCapture{
 		Rows:        json.RawMessage(`[{"id":"row-a","value":"before"}]`),
-		ClientState: json.RawMessage(`{"scope_states":[]}`),
+		ClientState: multiScopeProvenanceClientState(t, "1", 1),
 		Pending:     json.RawMessage(`[]`),
 		Rejected:    json.RawMessage(`[]`),
 		Provenance:  json.RawMessage(`[]`),
@@ -81,6 +83,60 @@ func TestValidateMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testin
 	if err := validateMultiScopeProvenanceNoProgress(before, after); err == nil {
 		t.Fatal("post-restart application row change was accepted")
 	}
+}
+
+func TestValidateMultiScopeProvenanceNoProgressIgnoresOnlyMaintenanceCursor(t *testing.T) {
+	before := finalCapture{
+		Rows:        json.RawMessage(`[]`),
+		ClientState: multiScopeProvenanceClientState(t, "1", 0),
+		Pending:     json.RawMessage(`[]`),
+		Rejected:    json.RawMessage(`[]`),
+		Provenance:  json.RawMessage(`[]`),
+	}
+	after := before
+	after.ClientState = multiScopeProvenanceClientState(t, "2", 0)
+	if err := validateMultiScopeProvenanceNoProgress(before, after); err != nil {
+		t.Fatalf("maintenance-only progress was rejected: %v", err)
+	}
+	after.ClientState = multiScopeProvenanceClientState(t, "2", 1)
+	if err := validateMultiScopeProvenanceNoProgress(before, after); err == nil {
+		t.Fatal("application row count change was accepted")
+	}
+}
+
+func TestMultiScopeProvenanceCaptureUsesBoundedRuntimeRowSelectors(t *testing.T) {
+	values := []blackbox.NativeIdentityValue{
+		{Kind: "table", Alias: "items-table", RuntimeValue: json.RawMessage(`"runtime-items-table"`), ApplicationIdentifier: "cf_items"},
+		{Kind: "primary-key", Alias: "row-one-primary-key", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000001"`), ApplicationIdentifier: "id"},
+		{Kind: "primary-key", Alias: "row-two-primary-key", RuntimeValue: json.RawMessage(`"00000000-0000-4000-8000-000000000002"`), ApplicationIdentifier: "id"},
+	}
+	selectors, err := multiScopeProvenanceApplicationSelectors(values)
+	if err != nil {
+		t.Fatalf("derive multi-scope row selectors: %v", err)
+	}
+	want := []map[string]any{
+		{"table_name": "cf_items", "primary_key_field": "id", "primary_key": "00000000-0000-4000-8000-000000000001"},
+		{"table_name": "cf_items", "primary_key_field": "id", "primary_key": "00000000-0000-4000-8000-000000000002"},
+	}
+	if !reflect.DeepEqual(selectors, want) {
+		t.Fatalf("multi-scope row selectors = %#v, want %#v", selectors, want)
+	}
+}
+
+func multiScopeProvenanceClientState(t *testing.T, maintenanceCursor string, applicationRows uint64) json.RawMessage {
+	t.Helper()
+	encoded, err := json.Marshal(inspectedClientState{
+		Schema:                          &clientSchema{Version: 1, Hash: strings.Repeat("a", 64)},
+		ScopeStates:                     []clientScopeState{},
+		ScopeRows:                       []clientScopeRow{},
+		RebuildAttempts:                 []rebuildAttempt{},
+		ApplicationRowCount:             applicationRows,
+		ProvenanceMaintenanceWorkCursor: maintenanceCursor,
+	})
+	if err != nil {
+		t.Fatalf("encode multi-scope client state: %v", err)
+	}
+	return encoded
 }
 
 func TestNewMultiScopeProvenanceCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
@@ -109,6 +165,7 @@ func loadMultiScopeProvenanceScenario(t *testing.T) scenarios.Scenario {
 	}
 	return scenario
 }
+
 func cloneMultiScopeProvenanceScenario(scenario scenarios.Scenario) scenarios.Scenario {
 	raw, err := json.Marshal(scenario)
 	if err != nil {

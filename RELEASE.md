@@ -65,6 +65,7 @@ They test exact sealed client artifacts through the source adapter.
 The macOS PostgreSQL fixture is not a supported server output.
 
 The Ubuntu server package cell verifies the exact sealed Linux server artifacts.
+It also runs packaged projection bootstrap with separate operator and worker credentials.
 
 Android and React Native Android run against Linux PostgreSQL on Ubuntu.
 They provide representative client-to-Linux end-to-end proof.
@@ -94,12 +95,18 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 
 Candidate CI owns source correctness. Release does not run completed source suites again.
 
+Each React Native Candidate job runs its smoke suite and all 14 authored journeys.
+Each journey uses a fresh local PostgreSQL instance.
+The corpus rejects missing scenario runners before execution.
+
 Release builds distributions once. Package checks and publication use the identical sealed payloads.
 
 Candidate Swift and React Native iOS jobs use independent host-local PostgreSQL instances.
 
 The `publish` job waits for `package-gate` and the protected `release` approval.
 No attestation, tag, release, or registry write occurs before that job starts.
+Package validation can run while its acceptance issues remain open.
+Publication requires zero open issues in the release milestone.
 
 The `release-signing` job creates detached signatures only.
 It has no publication credentials and performs no public operation.

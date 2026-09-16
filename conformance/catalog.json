@@ -39,7 +39,7 @@
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "path": "conformance/scenarios/performance/rebuild-apply-001.json",
-      "sha256": "8ecbcec3fe64fffd86375df21479e1de6e765cfc8d59c0e3f1b7f5e7e8572a47"
+      "sha256": "028d72070cda99928c9ec9b63b2b60956f1cb311da9711292e5e41d390a98722"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-CARDINALITY-001",

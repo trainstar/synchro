@@ -926,7 +926,7 @@ func (c *RetentionReconnectCoordinator) advanceLocked(ctx context.Context, seque
 			return exchangeResponse{}, err
 		}
 		response.Command = c.command("observer", "await-step", map[string]any{
-			"client_key": c.main.clientID, "call_id": c.initialCallID,
+			"client_key": c.main.clientID, "call_id": c.initialCallID, "wait_for_completion": true,
 		}, []scenarios.StepID{retentionReconnectStepOrder[1]})
 		c.stage = retentionReconnectStageInitialBackoff
 	case retentionReconnectStageInitialBackoff:

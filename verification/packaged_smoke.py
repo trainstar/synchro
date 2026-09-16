@@ -463,7 +463,7 @@ def collect_summary(repo_root: Path, cells_dir: Path, output: Path) -> None:
     )
 
 
-def verify_summary(repo_root: Path, summary_path: Path) -> None:
+def verify_summary(repo_root: Path, summary_path: Path, release_manifest: Path | None = None) -> None:
     value = load_json(summary_path, "packaged smoke summary")
     required_keys = {
         "schema_version",
@@ -515,6 +515,48 @@ def verify_summary(repo_root: Path, summary_path: Path) -> None:
             raise EvidenceError(f"packaged smoke obligation did not pass: {obligation_id}")
     if seen != expected_ids:
         raise EvidenceError("packaged smoke summary has missing obligations")
+    if release_manifest is not None:
+        manifest = load_json(release_manifest, "sealed release manifest")
+        source = manifest.get("source") if isinstance(manifest, dict) else None
+        if not isinstance(source, dict) or source.get("commit") != value["source_commit"]:
+            raise EvidenceError("packaged smoke and sealed source commits differ")
+        distributions = manifest.get("distributions")
+        if not isinstance(distributions, list):
+            raise EvidenceError("sealed release distributions are missing")
+        role_hashes = {}
+        for record in distributions:
+            if not isinstance(record, dict) or record.get("kind") != "file":
+                continue
+            role, digest = record.get("role"), record.get("sha256")
+            if not isinstance(role, str) or role in role_hashes or not isinstance(digest, str) or not SHA256.fullmatch(digest):
+                raise EvidenceError("sealed release contains invalid file identities")
+            role_hashes[role] = digest
+        manifest_hash = hash_files([release_manifest])[0]
+        required_roles = {
+            ("postgresql-server", "postgresql"): ("pg-extension", "adapter", "seed-tool"),
+            ("swift-client", "ios"): (),
+            ("kotlin-client", "android"): ("kotlin-maven",),
+            ("react-native-client", "ios"): ("react-native-npm",),
+            ("react-native-client", "android"): ("react-native-npm", "kotlin-maven"),
+        }
+        matrix = load_json(repo_root / "conformance/support-matrix.json", "support matrix")
+        expected_hashes = {}
+        for cell in matrix["cells"]:
+            if cell["policy"] != "required":
+                continue
+            key = (cell["component"], cell["platform"])
+            if key not in required_roles or any(role not in role_hashes for role in required_roles[key]):
+                raise EvidenceError(f"sealed release does not cover cell {cell['id']}")
+            hashes = {role_hashes[role] for role in required_roles[key]}
+            if cell["platform"] == "ios":
+                hashes.add(manifest_hash)
+            expected_hashes[cell["id"]] = hashes
+        for obligation in obligations:
+            cell_id = obligation["id"].split("/")[1]
+            if set(obligation["artifact_hashes"]) != expected_hashes[cell_id]:
+                raise EvidenceError(f"packaged smoke cell {cell_id} does not match sealed payloads")
+        if summary_hashes != set().union(*expected_hashes.values()):
+            raise EvidenceError("packaged smoke summary hashes do not match sealed payloads")
 
 
 def dry_summary(repo_root: Path, output: Path) -> None:
@@ -698,6 +740,7 @@ def parse_args() -> argparse.Namespace:
     verify = subparsers.add_parser("verify-summary")
     verify.add_argument("--repo-root", type=Path, required=True)
     verify.add_argument("--summary", type=Path, required=True)
+    verify.add_argument("--release-manifest", type=Path)
 
     dry = subparsers.add_parser("dry-run")
     dry.add_argument("--repo-root", type=Path, required=True)
@@ -754,7 +797,7 @@ def main() -> int:
         elif args.command == "collect":
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
         elif args.command == "verify-summary":
-            verify_summary(args.repo_root.resolve(), args.summary.resolve())
+            verify_summary(args.repo_root.resolve(), args.summary.resolve(), args.release_manifest)
         elif args.command == "dry-run":
             dry_summary(args.repo_root.resolve(), args.output.resolve())
         elif args.command == "config":

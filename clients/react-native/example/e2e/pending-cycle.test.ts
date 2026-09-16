@@ -153,6 +153,7 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
       delete: false,
       launchArgs: { synchroConformance: '1' },
     });
+    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
     await expect(element(by.id('conformance-harness'))).toBeVisible();
     return 'null';
   }
@@ -189,6 +190,7 @@ it('executes the pending-cycle coordinator sequence', async () => {
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
+  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
   await expect(element(by.id('conformance-harness'))).toBeVisible();
 
   let rawResult = 'null';
