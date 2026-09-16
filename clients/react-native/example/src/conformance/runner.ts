@@ -661,13 +661,13 @@ export class PublicConformanceRunner {
       if (invocationError !== undefined || status.status === 'error') {
         return { completion: 'error', status };
       }
+      if (status.status === 'ready' && settled) {
+        return { completion: 'idle', status };
+      }
       if (stopAtBackoff && call?.backoff.status) {
         const observed = call.backoff.status;
         call.backoff.status = null;
         return { completion: 'blocked', status: observed };
-      }
-      if (status.status === 'ready' && settled) {
-        return { completion: 'idle', status };
       }
       if (status.status === 'backoff' && stopAtBackoff) {
         if (call !== undefined) call.backoff.status = null;

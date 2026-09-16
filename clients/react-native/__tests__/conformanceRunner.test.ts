@@ -301,13 +301,17 @@ describe('PublicConformanceRunner call lifecycle', () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',
     });
+    let finishInvocation: () => void = () => {};
+    mockNativeModule.close.mockImplementation(async () => { finishInvocation(); });
     try {
       await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
-      mockNativeModule.start.mockImplementation(async () => {
+      mockNativeModule.start.mockImplementation(() => new Promise<void>((resolve) => {
+        finishInvocation = resolve;
         emitNativeEvent('onStatusChange', JSON.parse(BACKOFF_STATUS));
         mockNativeModule.getSyncStatus.mockResolvedValue(PULLING_STATUS);
         emitNativeEvent('onStatusChange', JSON.parse(PULLING_STATUS));
-      });
+        if (action === 'await-call') resolve();
+      }));
       await runner.execute(command('client', 'begin-call', 'client-a', { call_id: 'delayed-call', method: 'start' }));
       const result = runner.execute(command(
         action === 'await-step' ? 'observer' : 'client', action, 'client-a',
@@ -319,6 +323,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
       await Promise.all([jest.advanceTimersByTimeAsync(540000), assertion]);
 
       if (action === 'await-step') {
+        finishInvocation();
         mockNativeModule.getSyncStatus.mockResolvedValue(READY_STATUS);
         await expect(runner.execute(command('client', 'await-call', 'client-a', { call_id: 'delayed-call' })))
           .resolves.toMatchObject({ completion: 'idle', status: { state: 'ready' } });
@@ -354,6 +359,24 @@ describe('PublicConformanceRunner call lifecycle', () => {
       expect(invocationFinished).toBe(false);
       await runner.execute(command('client', 'lifecycle', 'client-a', { operation: 'stop' }));
       expect(invocationFinished).toBe(true);
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('reports completed recovery instead of an earlier backoff', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',
+    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.start.mockImplementation(async () => {
+        emitNativeEvent('onStatusChange', JSON.parse(BACKOFF_STATUS));
+        emitNativeEvent('onStatusChange', JSON.parse(READY_STATUS));
+      });
+      await runner.execute(command('client', 'begin-call', 'client-a', { call_id: 'recovered-call', method: 'start' }));
+      await expect(runner.execute(command('client', 'await-call', 'client-a', { call_id: 'recovered-call' })))
+        .resolves.toMatchObject({ completion: 'idle', status: { state: 'ready' } });
     } finally {
       await runner.close();
     }
