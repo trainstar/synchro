@@ -6,7 +6,8 @@ export async function runCorpusCommandLoop(execute: () => Promise<void>): Promis
   try {
     return await execute();
   } finally {
-    await device.enableSynchronization();
+    // Fault scenarios can leave requests held until the host closes.
+    await device.terminateApp();
   }
 }
 
@@ -24,7 +25,7 @@ export async function submitCorpusCommand(serialized: string): Promise<void> {
   await input.replaceText(serialized);
   await waitFor(state).toHaveText('ready').withTimeout(30000);
   const attributes = await input.getAttributes();
-  if (attributes.text !== serialized) {
+  if (!('text' in attributes) || attributes.text !== serialized) {
     throw new Error('React Native conformance command input changed');
   }
   await input.tapReturnKey();
