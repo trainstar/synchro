@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
 
 type ExchangeResponse = { schema_version: number; sequence: number } & (
   | { state: 'command'; command: Record<string, unknown> }
@@ -40,10 +42,7 @@ async function exchange(endpoint: string, token: string, sequence: number, resul
 
 async function execute(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);
-  await element(by.id('conformance-command-input')).replaceText(serialized);
-  if ((await element(by.id('conformance-command-input')).getAttributes()).text !== serialized) throw new Error('React Native forged-cursor command input changed');
-  await element(by.id('conformance-command-input')).tapReturnKey();
-  await element(by.id('btn-conformance-execute')).tap();
+  await submitCorpusCommand(serialized);
   const deadline = Date.now() + 120000;
   while (Date.now() < deadline) {
     const state = await element(by.id('conformance-command-state')).getAttributes();
@@ -58,14 +57,9 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   throw new Error('React Native forged-cursor command did not finish');
 }
 
-it('executes the forged-cursor coordinator sequence', async () => {
+it('executes the forged-cursor coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = configuration();
-  await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
-  // The coordinator holds sync responses on purpose, and Detox on iOS
-  // waits for network idle before each UI action. The held request must
-  // not count toward idleness or every UI step stalls behind it.
-  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
+  await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   let result = 'null';
   let commands = 0;
   for (let sequence = 1; sequence <= stageCount; sequence += 1) {
@@ -78,4 +72,4 @@ it('executes the forged-cursor coordinator sequence', async () => {
     result = await execute(next.command);
   }
   throw new Error('React Native forged-cursor coordinator did not complete');
-}, 120_000);
+}), 120_000);

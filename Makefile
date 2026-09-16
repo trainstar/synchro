@@ -350,6 +350,8 @@ help:
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
 	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
 	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
+	@echo "  rn-ios-build          - Build the iOS conformance app without starting a server"
+	@echo "  rn-ios-bundle         - Rebundle JavaScript-only changes in an existing iOS test app"
 	@echo "  test-rn-warm-connect-ios - Run direct React Native warm-connect through the iOS bridge"
 	@echo "  test-rn-performance-android - Run direct React Native steady-pull through the Android bridge"
 	@echo "  test-rn-pending-cycle-ios - Run direct React Native pending-cycle through the iOS bridge"
@@ -1066,8 +1068,8 @@ test-rn-warm-connect-control: conformance-mod-download
 		-- go test -json ./reactnative -count=1 \
 		-run '^TestWarmConnectScopeAuthorityNegativeControl$$'
 
-test-rn-warm-connect-ios: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control rn-seed-asset rn-watchman-reset rn-ios-pods
-	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+test-rn-warm-connect-ios: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control rn-seed-asset
+	@$(MAKE) --no-print-directory rn-ios-build
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
@@ -1427,9 +1429,26 @@ rn-android-emulator-reset:
 		sleep 5; \
 	fi
 
-test-rn-e2e-ios-build: rn-watchman-reset rn-ios-pods
-	@$(MAKE) rn-e2e-server-seed
+.PHONY: rn-ios-build rn-ios-bundle
+rn-ios-build: rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+
+rn-ios-bundle:
+	@set -eu; \
+		project="$(CURDIR)/clients/react-native/example"; \
+		products="$$project/ios/build/Build/Products/Debug-iphonesimulator"; \
+		app="$$products/SynchroReactNativeExample.app"; \
+		test -d "$$app" || { echo "Run rn-ios-build before bundling JavaScript-only changes" >&2; exit 1; }; \
+		cd "$$project"; \
+		CONFIGURATION=Debug PLATFORM_NAME=iphonesimulator FORCE_BUNDLING=1 SKIP_BUNDLING= \
+			CONFIGURATION_BUILD_DIR="$$products" UNLOCALIZED_RESOURCES_FOLDER_PATH=SynchroReactNativeExample.app \
+			PROJECT_ROOT="$$project" PODS_ROOT="$$project/ios/Pods" NODE_BINARY="$$(command -v node)" \
+			./node_modules/react-native/scripts/react-native-xcode.sh; \
+		codesign --force --sign - "$$app"
+
+test-rn-e2e-ios-build:
+	@$(MAKE) rn-e2e-server-seed
+	@$(MAKE) --no-print-directory rn-ios-build
 
 test-rn-e2e-ios-run:
 	rm -f clients/react-native/example/artifacts/ios-test-results.json
@@ -1515,7 +1534,7 @@ test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
 		cd conformance; \
 		SYNCHRO_RN_DETOX_CONFIGURATION="$$configuration" GOFLAGS= GOWORK=off \
 			go run ./cmd/testresult suite -- go test -tags reactnativeintegration -json ./reactnative \
-			-count=1 -timeout=120m -run "^TestRealReactNativeCorpus$$platform$$" -args --provision --install
+			-count=1 -timeout=120m -run "^TestRealReactNativeCorpus$$platform$$" $(GO_TEST_ARGS) -args --provision --install
 
 test-rn-e2e-android:
 	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-android-build

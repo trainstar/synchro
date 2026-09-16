@@ -285,6 +285,7 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 			exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
 			exchange{actor: "client", command: "synchronize-step", state: "command"},
 			exchange{actor: "client", command: "begin-call", state: "command"},
+			exchange{actor: "observer", command: "await-step", state: "command"},
 			exchange{actor: "client", command: "await-call", state: "command"},
 			exchange{actor: "observer", command: "capture", state: "command"},
 			exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
@@ -777,6 +778,24 @@ func TestQueueReplayResponseLossUsesAnAsynchronousBlockedCall(t *testing.T) {
 	process := `{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`
 	if err := coordinator.validateResponseLossCallBegun(json.RawMessage(`{"kind":"call-begun","call_id":"` + coordinator.responseLossCallID() + `","state":"in_flight","process":` + process + `}`)); err != nil {
 		t.Fatalf("validate queue-replay response-loss call begin: %v", err)
+	}
+	barrierContext, cancelBarrier := context.WithTimeout(context.Background(), time.Second)
+	defer cancelBarrier()
+	response, err = coordinator.advanceLocked(barrierContext, 8)
+	if err != nil || coordinator.stage != queueReplayStageResponseLossPushReady || response.Command == nil {
+		t.Fatalf("queue-replay push preparation barrier: response=%#v error=%v", response, err)
+	}
+	action = response.Command.Action.Action
+	if action.Actor != "observer" || action.Command != "await-step" || action.Parameters["wait_for_status"] != "pushing" {
+		t.Fatalf("queue-replay push preparation command = %#v", action)
+	}
+	observed := resultEnvelopeForTest(map[string]any{
+		"kind":    "awaited",
+		"status":  map[string]any{"state": "pushing", "retry_at": nil, "operation": nil, "failure": nil},
+		"process": json.RawMessage(process),
+	})
+	if err := coordinator.acceptResultLocked(observed); err != nil {
+		t.Fatalf("accept queue-replay push preparation: %v", err)
 	}
 	blocked := json.RawMessage(`{"kind":"call-completed","call_id":"` + coordinator.responseLossCallID() + `","state":"completed","completion":"blocked","status":{"state":"backoff","retry_at":"2026-09-02T00:00:01Z","operation":"push","failure":null},"process":` + process + `}`)
 	if err := coordinator.validateResponseLossCallCompleted(blocked); err != nil {

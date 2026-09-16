@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
 
 type ExchangeResponse = { schema_version: number; sequence: number } & (
   | { state: 'command'; command: Record<string, unknown> }
@@ -42,10 +44,7 @@ async function exchange(endpoint: string, token: string, sequence: number, resul
 
 async function execute(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);
-  await element(by.id('conformance-command-input')).replaceText(serialized);
-  if ((await element(by.id('conformance-command-input')).getAttributes()).text !== serialized) throw new Error('React Native conformance command input changed');
-  await element(by.id('conformance-command-input')).tapReturnKey();
-  await element(by.id('btn-conformance-execute')).tap();
+  await submitCorpusCommand(serialized);
   const deadline = Date.now() + REBUILD_APPLY_COMMAND_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const state = await element(by.id('conformance-command-state')).getAttributes();
@@ -64,10 +63,9 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-it('executes the rebuild-apply coordinator sequence', async () => {
+it('executes the rebuild-apply coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = configuration();
-  await device.launchApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
+  await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   let result = 'null';
   let commands = 0;
   let stoppedAt = 0;
@@ -86,4 +84,4 @@ it('executes the rebuild-apply coordinator sequence', async () => {
     }
   }
   throw new Error(`React Native rebuild-apply coordinator stopped at sequence=${stoppedAt} versus stage_count=${stageCount}: no complete response`);
-}, REBUILD_APPLY_COMMAND_TIMEOUT_MS);
+}), REBUILD_APPLY_COMMAND_TIMEOUT_MS);

@@ -890,6 +890,23 @@ func validateMultiScopeProvenanceNoProgress(before, after finalCapture) error {
 	if err != nil {
 		return err
 	}
+	if len(beforeState.ScopeStates) != len(afterState.ScopeStates) {
+		return errors.New("React Native multi-scope provenance post-restart scope set changed")
+	}
+	cursorFingerprints := make([]string, 0, len(afterState.ScopeStates))
+	for index := range beforeState.ScopeStates {
+		prior, current := &beforeState.ScopeStates[index], &afterState.ScopeStates[index]
+		if (prior.Cursor == nil) != (current.Cursor == nil) ||
+			(prior.Cursor != nil && (*prior.Cursor == "" || *current.Cursor == "")) {
+			return errors.New("React Native multi-scope provenance post-restart cursor presence changed")
+		}
+		if current.Cursor != nil {
+			cursorFingerprints = append(cursorFingerprints, hashFingerprint(*current.Cursor))
+		}
+		// The server stamps a new issue time when it renews an opaque cursor.
+		prior.Cursor, current.Cursor = nil, nil
+	}
+	sort.Strings(cursorFingerprints)
 	beforeState.ProvenanceMaintenanceWorkCursor = ""
 	afterState.ProvenanceMaintenanceWorkCursor = ""
 	if !reflect.DeepEqual(beforeState, afterState) {
@@ -908,6 +925,33 @@ func validateMultiScopeProvenanceNoProgress(before, after finalCapture) error {
 		if !semanticRawJSONEqual(value.beforeValue, value.afterValue) {
 			return fmt.Errorf("React Native multi-scope provenance post-restart synchronization changed %s", value.name)
 		}
+	}
+	trace, err := captureTraceFromRaw(after.Trace)
+	if err != nil || trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) ||
+		validateTraceSequence(trace.Observations) != nil {
+		return errors.New("React Native multi-scope provenance post-restart trace is invalid")
+	}
+	var terminal *pullResponseFacts
+	for _, observed := range trace.Observations {
+		if observed.OperationClass == "rebuild" {
+			return errors.New("React Native multi-scope provenance post-restart synchronization rebuilt data")
+		}
+		if observed.OperationClass != "pull" {
+			continue
+		}
+		if err := validateTraceOperation(observed, "pull"); err != nil {
+			return err
+		}
+		response, err := decodePullResponseFacts(observed.PullResponseFacts)
+		if err != nil || *response.ChangeCount != 0 || *response.RebuildScopeCount != 0 {
+			return errors.New("React Native multi-scope provenance post-restart pull changed data")
+		}
+		terminal = &response
+	}
+	if terminal == nil || *terminal.HasMore || !*terminal.ScopeCursorFingerprintsComplete ||
+		*terminal.ChecksumCount != uint64(len(afterState.ScopeStates)) ||
+		!reflect.DeepEqual(terminal.ScopeCursorFingerprints, cursorFingerprints) {
+		return errors.New("React Native multi-scope provenance renewed cursors do not match the terminal pull")
 	}
 	return nil
 }

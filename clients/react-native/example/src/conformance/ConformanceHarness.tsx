@@ -25,7 +25,7 @@ interface ConformanceHarnessProps {
   appVersion: string;
 }
 
-type CommandState = 'ready' | 'running' | 'ok' | 'error';
+type CommandState = 'idle' | 'ready' | 'running' | 'ok' | 'error';
 
 const MAXIMUM_ERROR_DETAIL_CHARACTERS = 512;
 
@@ -48,7 +48,7 @@ export function ConformanceHarness({
   }
 
   const [commandText, setCommandText] = useState('');
-  const [state, setState] = useState<CommandState>('ready');
+  const [state, setState] = useState<CommandState>('idle');
   const [resultText, setResultText] = useState(EMPTY_RESPONSE);
 
   useEffect(() => {
@@ -59,6 +59,12 @@ export function ConformanceHarness({
       });
     };
   }, []);
+
+  const acknowledgeCommandText = (text: string) => {
+    setCommandText(text);
+    setResultText(EMPTY_RESPONSE);
+    setState(text === '' ? 'idle' : 'ready');
+  };
 
   const execute = async () => {
     setState('running');
@@ -120,10 +126,11 @@ export function ConformanceHarness({
         accessibilityHint="Enter one bounded native conformance command in JSON."
         autoCapitalize="none"
         autoCorrect={false}
+        editable={state !== 'running'}
         keyboardType="ascii-capable"
         multiline
         maxLength={MAXIMUM_COMMAND_BYTES}
-        onChangeText={setCommandText}
+        onChangeText={acknowledgeCommandText}
         placeholder="Paste one conformance command"
         returnKeyType="done"
         spellCheck={false}

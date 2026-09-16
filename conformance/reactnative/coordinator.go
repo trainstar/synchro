@@ -121,6 +121,15 @@ type conformanceManifest struct {
 	Steps  []conformanceStep `json:"steps"`
 }
 
+func (manifest conformanceManifest) MarshalJSON() ([]byte, error) {
+	type wireManifest conformanceManifest
+	// The device requires an array even when the action has no steps.
+	if manifest.Steps == nil {
+		manifest.Steps = []conformanceStep{}
+	}
+	return json.Marshal(wireManifest(manifest))
+}
+
 type conformanceAction struct {
 	Actor      string         `json:"actor"`
 	Command    string         `json:"command"`

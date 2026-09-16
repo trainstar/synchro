@@ -1,4 +1,4 @@
-import { SynchroClient, SynchroError } from '@trainstar/synchro-react-native';
+import { SYNC_STATUS_TYPES, SynchroClient, SynchroError } from '@trainstar/synchro-react-native';
 import {
   isCanonicalBase64Url,
   isCanonicalInt64,
@@ -163,6 +163,7 @@ interface ClientSession {
   inspection: SynchroInspection | null;
   events: SyncEvent[];
   unsubscribeEvents: (() => void) | null;
+  pendingSynchronization: Promise<Error | undefined> | null;
 }
 
 interface ClientCall {
@@ -226,18 +227,17 @@ export class PublicConformanceRunner {
   async close(): Promise<void> {
     const sessions = [...this.sessions.values()];
     const calls = [...this.calls.values()];
-    await Promise.all(calls.map(async ({ task }) => {
-      await task;
-    }));
-    this.sessions.clear();
-    this.calls.clear();
-    this.activeClientKey = null;
     for (const session of sessions) {
       session.unsubscribeEvents?.();
       if (session.client !== null) {
         await session.client.close();
       }
+      await session.pendingSynchronization;
     }
+    await Promise.all(calls.map(({ task }) => task));
+    this.sessions.clear();
+    this.calls.clear();
+    this.activeClientKey = null;
   }
 
   private async open(command: ConformanceCommand): Promise<ConformanceActionResult> {
@@ -245,7 +245,7 @@ export class PublicConformanceRunner {
     const parameters = command.action.action.parameters;
     const mode = requiredString(parameters.database_mode);
     if ((mode !== 'create' && mode !== 'reuse') || this.sessions.has(clientKey)) {
-      throw new ConformanceCommandError('invalid_command');
+      throw new ConformanceCommandError('invalid_command', new Error('open mode is invalid or the client session already exists'));
     }
     const databasePath = appPrivateDatabasePath(command.runtime.database_path);
     if (mode === 'create' && command.runtime.seed_database_path !== undefined) {
@@ -264,6 +264,7 @@ export class PublicConformanceRunner {
       inspection: null,
       events: [],
       unsubscribeEvents: null,
+      pendingSynchronization: null,
     });
     let client: SynchroClient;
     try {
@@ -330,13 +331,27 @@ export class PublicConformanceRunner {
 
   private async synchronize(command: ConformanceCommand): Promise<ConformanceActionResult> {
     const clientKey = requireClientKey(command);
-    const method = requireSynchronizeMethod(command.action.action.parameters.method);
+    const parameters = command.action.action.parameters;
+    const method = requireSynchronizeMethod(parameters.method);
+    const completion = parameters.completion;
+    if (completion !== undefined && completion !== 'idle' && completion !== 'blocked' && completion !== 'error') {
+      throw new ConformanceCommandError('invalid_command');
+    }
+    const session = this.requireSession(clientKey);
+    if (session.pendingSynchronization !== null) {
+      throw new ConformanceCommandError('invalid_command');
+    }
     const client = await this.activate(clientKey);
-    const invocationError = await this.invokeSynchronizeMethod(client, method).then(
+    const task = this.invokeSynchronizeMethod(client, method).then(
       () => undefined,
       (error: unknown) => toError(error)
     );
-    const observation = await this.waitForCompletion(client, invocationError);
+    if (completion === 'blocked') {
+      session.pendingSynchronization = task;
+    } else {
+      await task;
+    }
+    const observation = await this.waitForCompletion(client, task, completion === undefined || completion === 'blocked');
     return {
       kind: 'synchronized',
       completion: observation.completion,
@@ -349,7 +364,8 @@ export class PublicConformanceRunner {
     const clientKey = requireClientKey(command);
     const parameters = command.action.action.parameters;
     const callID = requireCallID(parameters.call_id);
-    if (this.calls.has(callID) || [...this.calls.values()].some((call) => call.clientKey === clientKey)) {
+    if (this.calls.has(callID) || this.requireSession(clientKey).pendingSynchronization !== null ||
+      [...this.calls.values()].some((call) => call.clientKey === clientKey)) {
       throw new ConformanceCommandError('invalid_command');
     }
     const client = await this.activate(clientKey);
@@ -375,8 +391,8 @@ export class PublicConformanceRunner {
       throw new ConformanceCommandError('invalid_command');
     }
     const client = await this.activate(clientKey);
-    const invocationError = await call.task;
-    const observation = await this.waitForCompletion(client, invocationError);
+    await call.task;
+    const observation = await this.waitForCompletion(client, call.task);
     this.calls.delete(callID);
     return {
       kind: 'call-completed',
@@ -394,10 +410,16 @@ export class PublicConformanceRunner {
     if (!isLifecycleOperation(operation) || [...this.calls.values()].some((call) => call.clientKey === clientKey)) {
       throw new ConformanceCommandError('invalid_command');
     }
+    const session = this.requireSession(clientKey);
+    if (session.pendingSynchronization !== null && operation !== 'stop') {
+      throw new ConformanceCommandError('invalid_command');
+    }
     const client = await this.activate(clientKey);
     switch (operation) {
       case 'stop':
         await client.stop();
+        await session.pendingSynchronization;
+        session.pendingSynchronization = null;
         break;
       case 'enter-background':
         await client.enterBackground();
@@ -419,17 +441,40 @@ export class PublicConformanceRunner {
     const parameters = command.action.action.parameters;
     const callID = parameters.call_id;
     const waitForCompletion = parameters.wait_for_completion;
+    const waitForStatus = parameters.wait_for_status;
     if (
       (waitForCompletion !== undefined && typeof waitForCompletion !== 'boolean') ||
+      (waitForStatus !== undefined && !SYNC_STATUS_TYPES.some((value) => value === waitForStatus)) ||
       (callID !== undefined && (!isCallID(callID) || this.calls.get(callID)?.clientKey !== clientKey)) ||
-      (waitForCompletion === true && callID === undefined)
+      ((waitForCompletion === true || waitForStatus !== undefined) && callID === undefined) ||
+      (waitForCompletion === true && waitForStatus !== undefined)
     ) {
       throw new ConformanceCommandError('invalid_command');
     }
     const client = await this.activate(clientKey);
-    const status = waitForCompletion === true
-      ? (await this.waitForCompletion(client)).status
-      : await client.getSyncStatus();
+    let status: SyncStatus;
+    if (waitForStatus !== undefined) {
+      let invocationError: Error | undefined;
+      this.calls.get(requireCallID(callID))?.task.then((error) => { invocationError = error; });
+      const deadline = Date.now() + COMPLETION_TIMEOUT_MS;
+      do {
+        status = await client.getSyncStatus();
+        if (invocationError !== undefined) {
+          throw new ConformanceCommandError('execution_failed', invocationError);
+        }
+        if (status.status === waitForStatus || status.status === 'error') {
+          break;
+        }
+        if (Date.now() >= deadline) {
+          throw new ConformanceCommandError('execution_failed', new Error('native call did not reach its status barrier'));
+        }
+        await sleep(POLL_INTERVAL_MS);
+      } while (true);
+    } else {
+      status = waitForCompletion === true
+        ? (await this.waitForCompletion(client, this.calls.get(requireCallID(callID))?.task)).status
+        : await client.getSyncStatus();
+    }
     return {
       kind: 'awaited',
       status: rawStatus(status),
@@ -512,6 +557,8 @@ export class PublicConformanceRunner {
       active.unsubscribeEvents?.();
       active.unsubscribeEvents = null;
       await active.client?.close();
+      await active.pendingSynchronization;
+      active.pendingSynchronization = null;
       active.client = null;
       active.inspection = null;
     }
@@ -553,7 +600,7 @@ export class PublicConformanceRunner {
   private requireSession(clientKey: string): ClientSession {
     const session = this.sessions.get(clientKey);
     if (session === undefined) {
-      throw new ConformanceCommandError('invalid_command');
+      throw new ConformanceCommandError('invalid_command', new Error('client session is unavailable'));
     }
     return session;
   }
@@ -584,23 +631,27 @@ export class PublicConformanceRunner {
 
   private async waitForCompletion(
     client: SynchroClient,
-    invocationError?: Error
+    task?: Promise<Error | undefined>,
+    stopAtBackoff = true
   ): Promise<CompletionObservation> {
-    if (invocationError !== undefined) {
-      // A call that throws completes in error, as the native runners record it.
-      // The contract reaches an explicit schema reset from the error state, so a
-      // thrown unsupported schema is an error completion, not a rejected command.
-      return { completion: 'error', status: await client.getSyncStatus() };
-    }
+    let settled = task === undefined;
+    let invocationError: Error | undefined;
+    task?.then((error) => {
+      invocationError = error;
+      settled = true;
+    });
     const deadline = Date.now() + COMPLETION_TIMEOUT_MS;
     let lastStatus = 'none';
     while (Date.now() < deadline) {
       const status = await client.getSyncStatus();
       lastStatus = status.status;
-      if (status.status === 'ready') {
+      if (invocationError !== undefined) {
+        return { completion: 'error', status };
+      }
+      if (status.status === 'ready' && settled) {
         return { completion: 'idle', status };
       }
-      if (status.status === 'backoff') {
+      if (status.status === 'backoff' && stopAtBackoff) {
         return { completion: 'blocked', status };
       }
       if (status.status === 'error') {
@@ -651,7 +702,7 @@ function requirePairedRuntimeConnection(runtime: ConformanceCommand['runtime']):
 function requireClientKey(command: ConformanceCommand): string {
   const clientKey = requiredString(command.action.action.parameters.client_key);
   if (clientKey !== command.runtime.client_key) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command and runtime client identities differ'));
   }
   return clientKey;
 }
@@ -661,7 +712,7 @@ const MAXIMUM_LOCAL_OPERATION_BATCH = 64;
 function requireLocalOperationBatch(command: ConformanceCommand): ScenarioOperation[] {
   const steps = command.action.steps;
   if (steps.length < 1 || steps.length > MAXIMUM_LOCAL_OPERATION_BATCH) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error(`local operation batch count ${steps.length} is outside its bound`));
   }
   return steps.map((step) => {
     const operation = step.operation;
@@ -700,7 +751,7 @@ function decodeLocalAction(operation: ScenarioOperation): {
   // relation carries exactly one primary key column.
   const primaryKeyColumns = decodeColumns(decodeColumnValues(payload.pk));
   if (primaryKeyColumns.length !== 1) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('local primary key does not name exactly one column'));
   }
   const primaryKeyField = primaryKeyColumns[0].name;
   const primaryKeyValue = primaryKeyColumns[0].value;
@@ -724,7 +775,7 @@ function decodeLocalAction(operation: ScenarioOperation): {
     case 'update': {
       const fields = decodeColumns(columns);
       if (fields.length === 0) {
-        throw new ConformanceCommandError('invalid_command');
+        throw new ConformanceCommandError('invalid_command', new Error('local update has no columns'));
       }
       values.push(...fields.map((field) => field.value), primaryKeyValue);
       return {
@@ -737,7 +788,7 @@ function decodeLocalAction(operation: ScenarioOperation): {
     }
     case 'delete':
       if (columns.length !== 0) {
-        throw new ConformanceCommandError('invalid_command');
+        throw new ConformanceCommandError('invalid_command', new Error('local delete unexpectedly supplies columns'));
       }
       return {
         tableName,
@@ -762,7 +813,7 @@ function decodeAuthoredColumnNames(columns: unknown[]): string[] {
       return requiredIdentifier(column.field_id);
     });
   if (new Set(columnNames).size !== columnNames.length) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('local write repeats an authored column'));
   }
   return columnNames;
 }
@@ -784,7 +835,7 @@ function decodeColumns(values: unknown[]): Array<{ name: string; value: SQLiteBi
     return { name: requiredIdentifier(column.field_id), value: sqliteBindValue(column.value) };
   });
   if (new Set(fields.map((field) => field.name)).size !== fields.length) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('local write repeats a physical column'));
   }
   return fields.sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -914,7 +965,7 @@ function bounded<T>(values: T[], source: string): T[] {
 
 function requiredRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command member must be an object'));
   }
   return value as Record<string, unknown>;
 }
@@ -936,7 +987,7 @@ function requiredStringArray(value: unknown): string[] {
 
 function requiredString(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 4096) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command string is missing or exceeds its bound'));
   }
   return value;
 }
@@ -958,7 +1009,7 @@ function requireCallID(value: unknown): string {
 function requiredIdentifier(value: unknown): string {
   const identifier = requiredString(value);
   if (!IDENTIFIER_PATTERN.test(identifier) || identifier.startsWith('_synchro_')) {
-    throw new ConformanceCommandError('invalid_command');
+    throw new ConformanceCommandError('invalid_command', new Error('command SQL identifier is invalid or reserved'));
   }
   return identifier;
 }

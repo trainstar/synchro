@@ -17,6 +17,7 @@ import (
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/faults"
+	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -436,16 +437,17 @@ type PushResponseLossCoordinatorConfig struct {
 
 // PushResponseLossCoordinator is the command sidecar for one RN response-loss run.
 type PushResponseLossCoordinator struct {
-	config                                             PushResponseLossCoordinatorConfig
-	listener                                           net.Listener
-	server                                             *http.Server
-	transport                                          *http.Client
-	token, adapter, upstream, database                 string
-	steps                                              map[scenarios.StepID]scenarios.Step
-	identities                                         []scenarios.NativeIdentityAlias
-	runtimeIDs                                         map[string]json.RawMessage
-	authTokens                                         map[string]string
-	userID, clientID, clientKey, tableName, primaryKey string
+	config                                                  PushResponseLossCoordinatorConfig
+	listener                                                net.Listener
+	server                                                  *http.Server
+	transport                                               *http.Client
+	token, adapter, upstream, database                      string
+	steps                                                   map[scenarios.StepID]scenarios.Step
+	identities                                              []scenarios.NativeIdentityAlias
+	runtimeIDs                                              map[string]json.RawMessage
+	authTokens                                              map[string]string
+	userID, clientID, clientKey, tableName, primaryKey      string
+	capturePrimaryKey, capturePrimaryKeyID, captureRecordID string
 
 	proxyMu                  sync.Mutex
 	pushRequests             uint64
@@ -564,6 +566,13 @@ func NewPushResponseLossCoordinator(config PushResponseLossCoordinatorConfig) (*
 
 type pushResponseLossIdentity struct{ userID, clientID string }
 
+type pushResponseLossIdentityPhase uint8
+
+const (
+	pushResponseLossIdentityPrepare pushResponseLossIdentityPhase = iota
+	pushResponseLossIdentityReplay
+)
+
 func pushResponseLossClientIdentity(scenario scenarios.Scenario) (pushResponseLossIdentity, error) {
 	var payload struct {
 		AuthenticatedUserID string `json:"authenticated_user_id"`
@@ -609,16 +618,37 @@ func (c *PushResponseLossCoordinator) Prepare(ctx context.Context) error {
 	if err := c.config.Controller.Install(ctx, c.config.Scenario.Model.Setup[0]); err != nil {
 		return fmt.Errorf("install React Native push-response-loss contract: %w", err)
 	}
-	local, err := c.config.Controller.ApplicationWrite(c.steps[pushResponseLossStepOrder[0]].Operation)
+	authoredLocal := c.steps[pushResponseLossStepOrder[0]].Operation
+	var identity struct {
+		TableID string `json:"table_id"`
+		PK      struct {
+			FieldID string `json:"field_id"`
+		} `json:"pk"`
+	}
+	if json.Unmarshal(authoredLocal.Payload, &identity) != nil || identity.TableID == "" || identity.PK.FieldID == "" {
+		return errors.New("React Native push-response-loss authored primary identity is invalid")
+	}
+	runtimeField, err := c.config.Controller.RuntimeFieldID(identity.TableID, identity.PK.FieldID)
+	if err != nil {
+		return fmt.Errorf("resolve React Native push-response-loss primary field identity: %w", err)
+	}
+	c.capturePrimaryKeyID = runtimeField
+	local, err := c.config.Controller.ApplicationWrite(authoredLocal)
 	if err != nil {
 		return err
 	}
 	step := c.steps[pushResponseLossStepOrder[0]]
 	step.Operation = local
 	c.steps[pushResponseLossStepOrder[0]] = step
-	if err := c.bindServerIdentities(false); err != nil {
+	if err := c.bindServerIdentities(pushResponseLossIdentityPrepare); err != nil {
 		return err
 	}
+	capturePrimaryKey, captureRecordID, err := pushResponseLossCaptureSelection(local, c.tableName)
+	if err != nil {
+		return err
+	}
+	c.capturePrimaryKey = capturePrimaryKey
+	c.captureRecordID = captureRecordID
 	c.mu.Lock()
 	c.prepared = true
 	c.mu.Unlock()
@@ -867,9 +897,6 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		if err := c.bindCommittedPush(); err != nil {
 			return exchangeResponse{}, err
 		}
-		if err := c.bindServerIdentities(true); err != nil {
-			return exchangeResponse{}, err
-		}
 		c.releaseInitialResponse()
 		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.initialCallID()}, nil)
 		c.stage = pushResponseLossStagePreRestartCapture
@@ -892,6 +919,9 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 			return exchangeResponse{}, err
 		}
 		if err := c.runControllerReplays(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		if err := c.bindServerIdentities(pushResponseLossIdentityReplay); err != nil {
 			return exchangeResponse{}, err
 		}
 		parameters, err := c.pushResponseLossCaptureParameters()
@@ -945,15 +975,17 @@ func (c *PushResponseLossCoordinator) initialCallID() string {
 }
 
 func (c *PushResponseLossCoordinator) pushResponseLossCaptureParameters() (map[string]any, error) {
-	recordID, err := c.runtimeRecordID()
-	if err != nil {
-		return nil, err
+	if c.tableName == "" || c.capturePrimaryKey == "" || c.captureRecordID == "" {
+		return nil, errors.New("React Native push-response-loss capture selection is unavailable")
 	}
 	return map[string]any{
 		"client_keys": []string{c.clientKey},
 		"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "provenance", "request-trace", "durable-proof", "application-rows"},
+		"durable_proof_identity": map[string]any{
+			"table_name": c.tableName, "record_id": c.captureRecordID,
+		},
 		"row_selectors": []map[string]any{{
-			"table_name": c.tableName, "primary_key_field": c.primaryKey, "primary_key": recordID,
+			"table_name": c.tableName, "primary_key_field": c.capturePrimaryKey, "primary_key": c.captureRecordID,
 		}},
 	}, nil
 }
@@ -1106,11 +1138,16 @@ func (c *PushResponseLossCoordinator) validateTerminalSynchronized(raw json.RawM
 	return validatePushResponseLossProcess(members["process"], c.process)
 }
 
-func (c *PushResponseLossCoordinator) bindServerIdentities(primary bool) error {
-	aliases := make([]scenarios.NativeIdentityAlias, 0, len(c.identities))
-	for _, alias := range c.identities {
-		if alias.Kind == "schema" || alias.Kind == "scope" || alias.Kind == "table" || primary && (alias.Kind == "primary-key" || alias.Kind == "batch-id" || alias.Kind == "mutation-id") {
-			aliases = append(aliases, alias)
+func (c *PushResponseLossCoordinator) bindServerIdentities(phase pushResponseLossIdentityPhase) error {
+	aliases, err := pushResponseLossAliasesForPhase(c.identities, phase)
+	if err != nil {
+		return err
+	}
+	var sealedBatchID, sealedMutationID string
+	if phase == pushResponseLossIdentityReplay {
+		sealedBatchID, sealedMutationID, err = c.sealedRuntimeIdentity()
+		if err != nil {
+			return err
 		}
 	}
 	values, err := c.config.Controller.IdentityValues(aliases)
@@ -1118,6 +1155,17 @@ func (c *PushResponseLossCoordinator) bindServerIdentities(primary bool) error {
 		return fmt.Errorf("resolve React Native push-response-loss identities: %w", err)
 	}
 	for _, value := range values {
+		if phase == pushResponseLossIdentityReplay {
+			if err := validatePushResponseLossFormalIdentity(
+				value,
+				c.capturePrimaryKey,
+				c.captureRecordID,
+				sealedBatchID,
+				sealedMutationID,
+			); err != nil {
+				return err
+			}
+		}
 		c.runtimeIDs[value.Alias] = copyRaw(value.RuntimeValue)
 		if value.Alias == "items-table" {
 			c.tableName = value.ApplicationIdentifier
@@ -1126,11 +1174,100 @@ func (c *PushResponseLossCoordinator) bindServerIdentities(primary bool) error {
 			c.primaryKey = value.ApplicationIdentifier
 		}
 	}
-	if c.tableName == "" || primary && c.primaryKey == "" {
+	switch phase {
+	case pushResponseLossIdentityPrepare:
+		if c.tableName == "" {
+			return errors.New("React Native push-response-loss runtime table identity is unavailable")
+		}
+	case pushResponseLossIdentityReplay:
+		if c.primaryKey == "" || len(c.runtimeIDs["response-loss-primary-key"]) == 0 ||
+			len(c.runtimeIDs["response-loss-batch"]) == 0 || len(c.runtimeIDs["response-loss-mutation"]) == 0 {
+			return errors.New("React Native push-response-loss runtime replay identities are unavailable")
+		}
+	default:
+		return errors.New("React Native push-response-loss identity phase is invalid")
+	}
+	if c.tableName == "" {
 		return errors.New("React Native push-response-loss runtime application identities are unavailable")
 	}
 	return nil
 }
+
+func pushResponseLossAliasesForPhase(
+	identities []scenarios.NativeIdentityAlias,
+	phase pushResponseLossIdentityPhase,
+) ([]scenarios.NativeIdentityAlias, error) {
+	aliases := make([]scenarios.NativeIdentityAlias, 0, len(identities))
+	for _, alias := range identities {
+		include := false
+		switch phase {
+		case pushResponseLossIdentityPrepare:
+			include = alias.Kind == "schema" || alias.Kind == "scope" || alias.Kind == "table"
+		case pushResponseLossIdentityReplay:
+			include = alias.Kind == "primary-key" || alias.Kind == "batch-id" || alias.Kind == "mutation-id"
+		default:
+			return nil, errors.New("React Native push-response-loss identity phase is invalid")
+		}
+		if include {
+			aliases = append(aliases, alias)
+		}
+	}
+	if len(aliases) == 0 {
+		return nil, errors.New("React Native push-response-loss identity phase has no aliases")
+	}
+	return aliases, nil
+}
+
+func validatePushResponseLossFormalIdentity(
+	value blackbox.NativeIdentityValue,
+	capturePrimaryKey string,
+	captureRecordID string,
+	sealedBatchID string,
+	sealedMutationID string,
+) error {
+	var runtime string
+	if json.Unmarshal(value.RuntimeValue, &runtime) != nil || runtime == "" {
+		return fmt.Errorf("React Native push-response-loss formal identity %q is invalid", value.Alias)
+	}
+	switch value.Alias {
+	case "response-loss-primary-key":
+		if runtime != captureRecordID || value.ApplicationIdentifier != capturePrimaryKey {
+			return errors.New("React Native push-response-loss formal primary-key evidence differs from capture selection")
+		}
+	case "response-loss-batch":
+		if runtime != sealedBatchID {
+			return errors.New("React Native push-response-loss formal batch evidence differs from sealed input")
+		}
+	case "response-loss-mutation":
+		if runtime != sealedMutationID {
+			return errors.New("React Native push-response-loss formal mutation evidence differs from sealed input")
+		}
+	default:
+		return fmt.Errorf("React Native push-response-loss formal identity alias %q is unexpected", value.Alias)
+	}
+	return nil
+}
+
+func pushResponseLossCaptureSelection(operation scenarios.Operation, expectedTable string) (string, string, error) {
+	var payload struct {
+		TableID string                     `json:"table_id"`
+		PK      map[string]json.RawMessage `json:"pk"`
+	}
+	if scenarios.OperationKey(operation) != "local/write" ||
+		jsonstrict.Decode(operation.Payload, &payload) != nil ||
+		payload.TableID == "" || payload.TableID != expectedTable || len(payload.PK) != 1 {
+		return "", "", errors.New("React Native push-response-loss capture input identity is invalid")
+	}
+	for field, raw := range payload.PK {
+		var recordID string
+		if field == "" || json.Unmarshal(raw, &recordID) != nil || recordID == "" {
+			return "", "", errors.New("React Native push-response-loss capture primary key is invalid")
+		}
+		return field, recordID, nil
+	}
+	return "", "", errors.New("React Native push-response-loss capture primary key is absent")
+}
+
 func (c *PushResponseLossCoordinator) bindCommittedPush() error {
 	operation, err := pushResponseLossAppliedOperation(c.steps[pushResponseLossStepOrder[1]].Operation)
 	if err != nil {
@@ -1180,28 +1317,103 @@ func (c *PushResponseLossCoordinator) validateDurableCapture(capture finalCaptur
 	if err != nil {
 		return inspectedClientState{}, err
 	}
-	if state.Schema == nil || len(state.ScopeStates) != 1 || len(state.ScopeRows) != 1 || state.ApplicationRowCount != 1 || state.MutationLedgerCount != 1 || state.SealedBatchCount != 1 || state.RejectedMutationCount != 0 {
-		return inspectedClientState{}, errors.New("React Native push-response-loss durable client state is invalid")
+	if state.Schema == nil ||
+		len(state.ScopeStates) != 1 || len(state.ScopeRows) != 0 || len(state.RebuildAttempts) != 0 ||
+		state.ApplicationRowCount != 1 || state.MutationLedgerCount != 1 ||
+		state.MutationOutcomeCount != 0 || state.SealedBatchCount != 1 ||
+		state.RejectedMutationCount != 0 || state.ScopeStateCount != 1 ||
+		state.ScopeRowCount != 0 || state.ProvenanceCount != 0 ||
+		state.RowMetadataCount != 0 || state.RebuildAttemptCount != 0 ||
+		state.RebuildReceiptCount != 1 {
+		return inspectedClientState{}, fmt.Errorf(
+			"React Native push-response-loss durable client state is invalid: application_rows=%d mutation_ledger=%d mutation_outcomes=%d sealed_batches=%d rejected=%d scope_states=%d/%d scope_rows=%d/%d provenance=%d row_metadata=%d rebuild_attempts=%d/%d rebuild_receipts=%d",
+			state.ApplicationRowCount,
+			state.MutationLedgerCount,
+			state.MutationOutcomeCount,
+			state.SealedBatchCount,
+			state.RejectedMutationCount,
+			state.ScopeStateCount,
+			len(state.ScopeStates),
+			state.ScopeRowCount,
+			len(state.ScopeRows),
+			state.ProvenanceCount,
+			state.RowMetadataCount,
+			state.RebuildAttemptCount,
+			len(state.RebuildAttempts),
+			state.RebuildReceiptCount,
+		)
 	}
-	if validateEmptyArray(capture.Pending) != nil || validateEmptyArray(capture.Rejected) != nil {
-		return inspectedClientState{}, errors.New("React Native push-response-loss mutation queues are not empty")
+	scope := state.ScopeStates[0]
+	if scope.ScopeID == "" || scope.Cursor == nil || *scope.Cursor == "" ||
+		scope.Checksum == nil || *scope.Checksum == "" ||
+		scope.LocalChecksum == "" || scope.Generation == 0 {
+		return inspectedClientState{}, errors.New("React Native push-response-loss empty assigned scope state is invalid")
 	}
-	if _, err := decodeDurableProof(capture.DurableProof); err != nil {
+	batchID, mutationID, err := c.sealedRuntimeIdentity()
+	if err != nil {
 		return inspectedClientState{}, err
+	}
+	var pending []struct {
+		MutationID        string  `json:"mutationID"`
+		TableName         string  `json:"tableName"`
+		RecordID          string  `json:"recordID"`
+		PrimaryKeyFieldID string  `json:"primaryKeyFieldID"`
+		Operation         string  `json:"operation"`
+		Status            string  `json:"status"`
+		SealedBatchID     *string `json:"sealedBatchID"`
+		SealedOrdinal     *uint64 `json:"sealedOrdinal"`
+	}
+	if err := decodeStrictValue(capture.Pending, &pending); err != nil || len(pending) != 1 {
+		return inspectedClientState{}, errors.New("React Native push-response-loss preserved pending mutation is invalid")
+	}
+	intent := pending[0]
+	if intent.MutationID != mutationID || intent.TableName != c.tableName ||
+		intent.RecordID != c.captureRecordID || c.capturePrimaryKeyID == "" || intent.PrimaryKeyFieldID != c.capturePrimaryKeyID ||
+		intent.Operation != "insert" || intent.Status != "sealed" ||
+		intent.SealedBatchID == nil || *intent.SealedBatchID != batchID ||
+		intent.SealedOrdinal == nil || *intent.SealedOrdinal != 0 {
+		return inspectedClientState{}, fmt.Errorf(
+			"React Native push-response-loss preserved intent is invalid: mutation_match=%t table_match=%t record_match=%t primary_match=%t operation=%q status=%q batch_match=%t ordinal_zero=%t",
+			intent.MutationID == mutationID,
+			intent.TableName == c.tableName,
+			intent.RecordID == c.captureRecordID,
+			intent.PrimaryKeyFieldID == c.capturePrimaryKeyID,
+			intent.Operation,
+			intent.Status,
+			intent.SealedBatchID != nil && *intent.SealedBatchID == batchID,
+			intent.SealedOrdinal != nil && *intent.SealedOrdinal == 0,
+		)
+	}
+	if validateEmptyArray(capture.Rejected) != nil {
+		return inspectedClientState{}, errors.New("React Native push-response-loss rejected queue is not empty")
+	}
+	if validateEmptyArray(capture.Provenance) != nil {
+		return inspectedClientState{}, errors.New("React Native push-response-loss false authoritative provenance is present")
+	}
+	proof, err := decodeDurableProof(capture.DurableProof)
+	if err != nil {
+		return inspectedClientState{}, err
+	}
+	if proof.RowMetadata != nil {
+		return inspectedClientState{}, errors.New("React Native push-response-loss false authoritative base installation is present")
+	}
+	if len(proof.RebuildReceiptProofs) != 1 {
+		return inspectedClientState{}, errors.New("React Native push-response-loss empty-scope rebuild receipt is unavailable")
+	}
+	receipt := proof.RebuildReceiptProofs[0]
+	if receipt.RebuildIDFingerprint == "" || receipt.PageCount == 0 ||
+		receipt.ReturnedRecordCount != 0 || !receipt.RequestChainValid ||
+		!receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid ||
+		!receipt.ScopeChecksumValid || !receipt.FinalChecksumMatches {
+		return inspectedClientState{}, errors.New("React Native push-response-loss empty-scope rebuild receipt is invalid")
 	}
 	rows, err := decodeRows(capture.Rows)
 	if err != nil {
 		return inspectedClientState{}, err
 	}
-	recordID, err := c.runtimeRecordID()
-	if err != nil {
-		return inspectedClientState{}, err
-	}
-	if len(rows) != 1 || !rowUsesRuntimePrimary(rows[0], c.primaryKey, recordID) {
+	if c.capturePrimaryKey == "" || c.captureRecordID == "" ||
+		len(rows) != 1 || !rowUsesRuntimePrimary(rows[0], c.capturePrimaryKey, c.captureRecordID) {
 		return inspectedClientState{}, errors.New("React Native push-response-loss application row identity is invalid")
-	}
-	if err := validateProvenance(capture.Provenance, state.ScopeStates[0], state.ScopeRows[0]); err != nil {
-		return inspectedClientState{}, err
 	}
 	return state, nil
 }
@@ -1210,7 +1422,21 @@ func (c *PushResponseLossCoordinator) validatePreRestartCapture(capture finalCap
 	if _, err := c.validateDurableCapture(capture); err != nil {
 		return err
 	}
-	return validatePushResponseLossBackoffStatus(capture.Status)
+	if err := validateSyncStatusShape(capture.Status); err != nil {
+		return err
+	}
+	var status syncStatus
+	if err := json.Unmarshal(capture.Status, &status); err != nil {
+		return err
+	}
+	if status.State == "backoff" {
+		return validatePushResponseLossBackoffStatus(capture.Status)
+	}
+	// The managed retry can enter pushing while its response remains held.
+	if status.State != "pushing" {
+		return fmt.Errorf("React Native push-response-loss pre-restart state=%s, want backoff or pushing", status.State)
+	}
+	return nil
 }
 
 func (c *PushResponseLossCoordinator) validateFinalCapture(capture finalCapture) error {
@@ -1630,6 +1856,16 @@ func (c *PushResponseLossCoordinator) validateSealedRetryEvidence() error {
 	}
 	return nil
 }
+
+func (c *PushResponseLossCoordinator) sealedRuntimeIdentity() (string, string, error) {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	if c.sealedBatchID == "" || len(c.sealedMutationIDs) != 1 || c.sealedMutationIDs[0] == "" {
+		return "", "", errors.New("React Native push-response-loss sealed runtime identity is unavailable")
+	}
+	return c.sealedBatchID, c.sealedMutationIDs[0], nil
+}
+
 func (c *PushResponseLossCoordinator) loseInitialResponse(writer http.ResponseWriter) {
 	hijacker, ok := writer.(http.Hijacker)
 	if !ok {

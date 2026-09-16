@@ -118,19 +118,33 @@ type RebuildRequestsCoordinator struct {
 	callID     string
 	pageLimit  uint64
 
-	mu            sync.Mutex
-	prepared      bool
-	closed        bool
-	completed     bool
-	failed        error
-	stage         rebuildRequestsStage
-	nextSeq       uint64
-	process       *actionProcessIdentity
-	sourceApplied bool
-	finalResult   *finalCapture
-	firstReplays  []rebuildPageReplay
-	finalReplays  []rebuildPageReplay
-	result        RebuildRequestsCoordinatorResult
+	mu                 sync.Mutex
+	prepared           bool
+	closed             bool
+	completed          bool
+	failed             error
+	stage              rebuildRequestsStage
+	nextSeq            uint64
+	process            *actionProcessIdentity
+	sourceApplied      bool
+	finalResult        *finalCapture
+	firstRecoveryTrace *traceSnapshot
+	result             RebuildRequestsCoordinatorResult
+
+	proxyMu               sync.Mutex
+	proxyErr              error
+	proxyFailed           chan struct{}
+	proxyFailedOnce       sync.Once
+	firstReplays          []rebuildPageReplay
+	finalReplays          []rebuildPageReplay
+	firstPageObserved     chan struct{}
+	firstPageObservedOnce sync.Once
+	allowFirstPage        chan struct{}
+	allowFirstPageOnce    sync.Once
+	finalPageObserved     chan struct{}
+	finalPageObservedOnce sync.Once
+	allowFinalPage        chan struct{}
+	allowFinalPageOnce    sync.Once
 }
 
 type rebuildPageReplay struct {
@@ -389,6 +403,9 @@ func NewRebuildRequestsCoordinator(config RebuildRequestsCoordinatorConfig) (*Re
 		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), nextSeq: 1,
 		callID: string(*scenarioCallID(config.Scenario)), pageLimit: pageLimit,
+		proxyFailed:       make(chan struct{}),
+		firstPageObserved: make(chan struct{}), allowFirstPage: make(chan struct{}),
+		finalPageObserved: make(chan struct{}), allowFinalPage: make(chan struct{}),
 	}
 	coordinator.server = &http.Server{
 		Handler: coordinator, MaxHeaderBytes: 16 * 1024, ReadHeaderTimeout: 5 * time.Second,
@@ -603,6 +620,9 @@ func (c *RebuildRequestsCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	c.recordRebuildProxyFailure(errCoordinatorUnavailable)
+	c.releaseFirstPage()
+	c.releaseFinalPage()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -702,8 +722,18 @@ func (c *RebuildRequestsCoordinator) acceptResultLocked(raw json.RawMessage) err
 		c.process = &process
 	case rebuildRequestsStageFirstPage:
 		return c.validateCallBegun(envelope.Result)
-	case rebuildRequestsStageFirstRestart, rebuildRequestsStageFinalPage, rebuildRequestsStageFinalRestart, rebuildRequestsStagePull, rebuildRequestsStageAwaitCall:
+	case rebuildRequestsStageFirstRestart, rebuildRequestsStageFinalPage, rebuildRequestsStagePull, rebuildRequestsStageAwaitCall:
 		return c.validateAwaited(envelope.Result)
+	case rebuildRequestsStageFinalRestart:
+		capture, err := c.decodeCaptureResult(envelope.Result, []string{"request_trace"})
+		if err != nil {
+			return err
+		}
+		trace, err := captureTraceFromRaw(capture.Trace)
+		if err != nil {
+			return err
+		}
+		c.firstRecoveryTrace = &trace
 	case rebuildRequestsStageFirstRecoveryBegin, rebuildRequestsStageFinalRecoveryBegin:
 		process, err := c.validateRestarted(envelope.Result)
 		if err != nil {
@@ -751,6 +781,12 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 		}, []scenarios.StepID{rebuildRequestsStepOrder[3]})
 		c.stage = rebuildRequestsStageFirstPage
 	case rebuildRequestsStageFirstPage:
+		if err := c.waitForFirstPage(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		if err := c.applyConcurrentSource(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
 		response.Command = c.command("observer", "await-step", map[string]any{
 			"client_key": clientKey, "call_id": c.callID,
 		}, []scenarios.StepID{rebuildRequestsStepOrder[5]})
@@ -762,6 +798,7 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 		c.callID = "rebuild_first_recovery"
 		c.stage = rebuildRequestsStageFirstRecoveryBegin
 	case rebuildRequestsStageFirstRecoveryBegin:
+		c.releaseFirstPage()
 		response.Command = c.command("client", "begin-call", map[string]any{
 			"client_key": clientKey, "call_id": c.callID, "method": "start",
 		}, nil)
@@ -772,9 +809,13 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 		}, []scenarios.StepID{rebuildRequestsStepOrder[5]})
 		c.stage = rebuildRequestsStageFinalPage
 	case rebuildRequestsStageFinalPage:
-		response.Command = c.command("observer", "await-step", map[string]any{
-			"client_key": clientKey, "call_id": c.callID,
-		}, []scenarios.StepID{rebuildRequestsStepOrder[9]})
+		if err := c.waitForFinalPage(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("observer", "capture", map[string]any{
+			"client_keys": []string{clientKey},
+			"sources":     []string{"request-trace"},
+		}, nil)
 		c.stage = rebuildRequestsStageFinalRestart
 	case rebuildRequestsStageFinalRestart:
 		response.Command = c.command("client", "open", map[string]any{
@@ -783,6 +824,7 @@ func (c *RebuildRequestsCoordinator) advanceLocked(ctx context.Context, sequence
 		c.callID = "rebuild_final_recovery"
 		c.stage = rebuildRequestsStageFinalRecoveryBegin
 	case rebuildRequestsStageFinalRecoveryBegin:
+		c.releaseFinalPage()
 		response.Command = c.command("client", "begin-call", map[string]any{
 			"client_key": clientKey, "call_id": c.callID, "method": "start",
 		}, nil)
@@ -1014,6 +1056,9 @@ func (c *RebuildRequestsCoordinator) applicationSelectors() ([]map[string]any, e
 
 func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, request *http.Request) {
 	if c == nil || c.transport == nil || c.upstream == "" {
+		if c != nil {
+			c.recordRebuildProxyFailure(errors.New("React Native rebuild-requests proxy is unavailable"))
+		}
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
@@ -1023,6 +1068,7 @@ func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, re
 		var err error
 		rebuildRequestBody, err = io.ReadAll(io.LimitReader(request.Body, maximumExchangeBytes+1))
 		if err != nil || len(rebuildRequestBody) > maximumExchangeBytes {
+			c.recordRebuildProxyFailure(errors.New("React Native rebuild-requests request body is invalid"))
 			writeExchangeError(writer, http.StatusBadGateway)
 			return
 		}
@@ -1030,6 +1076,7 @@ func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, re
 	}
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, request.Body)
 	if err != nil {
+		c.recordRebuildProxyFailure(errors.New("React Native rebuild-requests upstream request is invalid"))
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
@@ -1043,24 +1090,26 @@ func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, re
 	}
 	response, err := c.transport.Do(upstreamRequest)
 	if err != nil {
+		c.recordRebuildProxyFailure(errors.New("React Native rebuild-requests upstream request failed"))
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumExchangeBytes+1))
 	if err != nil || len(body) > maximumExchangeBytes {
+		c.recordRebuildProxyFailure(errors.New("React Native rebuild-requests upstream response is invalid"))
 		writeExchangeError(writer, http.StatusBadGateway)
 		return
 	}
 	if request.Method == http.MethodPost && request.URL.Path == "/sync/rebuild" && response.StatusCode == http.StatusOK {
-		if err := c.observeRebuildResponse(request.Context(), rebuildRequestBody, body); err != nil {
-			c.mu.Lock()
-			if c.failed == nil {
-				c.failed = err
-			}
-			c.mu.Unlock()
+		hold, err := c.observeRebuildResponse(rebuildRequestBody, body)
+		if err != nil {
+			c.recordRebuildProxyFailure(err)
 			writeExchangeError(writer, http.StatusBadGateway)
 			return
+		}
+		if hold != nil {
+			<-hold
 		}
 	}
 	for name, values := range response.Header {
@@ -1072,38 +1121,49 @@ func (c *RebuildRequestsCoordinator) proxyAdapter(writer http.ResponseWriter, re
 	_, _ = writer.Write(body)
 }
 
-func (c *RebuildRequestsCoordinator) observeRebuildResponse(ctx context.Context, requestBody, responseBody []byte) error {
+func (c *RebuildRequestsCoordinator) observeRebuildResponse(requestBody, responseBody []byte) (<-chan struct{}, error) {
 	facts, err := firstRebuildResponseFacts(responseBody)
 	if err != nil {
-		return errors.New("React Native rebuild-requests response is invalid")
+		return nil, errors.New("React Native rebuild-requests response is invalid")
 	}
 	replay := rebuildPageReplay{
 		requestDigest:  sha256.Sum256(requestBody),
 		responseDigest: sha256.Sum256(responseBody),
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
 	switch facts.hasMore {
 	case "true":
 		if err := validateFirstRebuildResponse(responseBody); err != nil {
-			return err
+			return nil, err
 		}
 		c.firstReplays = append(c.firstReplays, replay)
 		if len(c.firstReplays) > 2 || len(c.firstReplays) == 2 && c.firstReplays[0] != c.firstReplays[1] {
-			return errors.New("React Native rebuild-requests first page was not replayed exactly")
+			return nil, errors.New("React Native rebuild-requests first page was not replayed exactly")
+		}
+		if len(c.firstReplays) == 1 {
+			c.firstPageObservedOnce.Do(func() { close(c.firstPageObserved) })
+			return c.allowFirstPage, nil
 		}
 	case "false":
 		if facts.records != "1" || facts.cursor != "absent" && facts.cursor != "null" || facts.finalScopeCursor != "nonempty" || facts.checksum != "present" {
-			return fmt.Errorf("React Native rebuild-requests final rebuild response is invalid: %s", facts)
+			return nil, fmt.Errorf("React Native rebuild-requests final rebuild response is invalid: %s", facts)
 		}
 		c.finalReplays = append(c.finalReplays, replay)
 		if len(c.finalReplays) > 2 || len(c.finalReplays) == 2 && c.finalReplays[0] != c.finalReplays[1] {
-			return errors.New("React Native rebuild-requests final page was not replayed exactly")
+			return nil, errors.New("React Native rebuild-requests final page was not replayed exactly")
 		}
-		return nil
+		if len(c.finalReplays) == 1 {
+			c.finalPageObservedOnce.Do(func() { close(c.finalPageObserved) })
+			return c.allowFinalPage, nil
+		}
 	default:
-		return fmt.Errorf("React Native rebuild-requests response finality is invalid: %s", facts)
+		return nil, fmt.Errorf("React Native rebuild-requests response finality is invalid: %s", facts)
 	}
+	return nil, nil
+}
+
+func (c *RebuildRequestsCoordinator) applyConcurrentSource(ctx context.Context) error {
 	if c.sourceApplied {
 		return nil
 	}
@@ -1131,6 +1191,57 @@ func (c *RebuildRequestsCoordinator) observeRebuildResponse(ctx context.Context,
 	}
 	c.sourceApplied = true
 	return nil
+}
+
+func (c *RebuildRequestsCoordinator) waitForFirstPage(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for React Native rebuild-requests first page: %w", ctx.Err())
+	case <-c.proxyFailed:
+		return c.rebuildProxyFailure("first page")
+	case <-c.firstPageObserved:
+		return nil
+	}
+}
+
+func (c *RebuildRequestsCoordinator) waitForFinalPage(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for React Native rebuild-requests final page: %w", ctx.Err())
+	case <-c.proxyFailed:
+		return c.rebuildProxyFailure("final page")
+	case <-c.finalPageObserved:
+		return nil
+	}
+}
+
+func (c *RebuildRequestsCoordinator) releaseFirstPage() {
+	c.allowFirstPageOnce.Do(func() { close(c.allowFirstPage) })
+}
+
+func (c *RebuildRequestsCoordinator) releaseFinalPage() {
+	c.allowFinalPageOnce.Do(func() { close(c.allowFinalPage) })
+}
+
+func (c *RebuildRequestsCoordinator) recordRebuildProxyFailure(err error) {
+	if err == nil {
+		return
+	}
+	c.proxyMu.Lock()
+	if c.proxyErr == nil {
+		c.proxyErr = err
+	}
+	c.proxyMu.Unlock()
+	c.proxyFailedOnce.Do(func() { close(c.proxyFailed) })
+}
+
+func (c *RebuildRequestsCoordinator) rebuildProxyFailure(stage string) error {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	if c.proxyErr == nil {
+		return fmt.Errorf("React Native rebuild-requests %s proxy failed", stage)
+	}
+	return fmt.Errorf("React Native rebuild-requests %s proxy failed: %w", stage, c.proxyErr)
 }
 
 func validateFirstRebuildResponse(raw []byte) error {
@@ -1231,23 +1342,40 @@ func rebuildJSONMemberShape(members map[string]json.RawMessage, name string) str
 }
 
 func (c *RebuildRequestsCoordinator) validateCompletionLocked(ctx context.Context) error {
-	if c.config.Controller == nil || c.finalResult == nil || !c.sourceApplied || len(c.firstReplays) != 2 || len(c.finalReplays) != 2 || c.firstReplays[0] != c.firstReplays[1] || c.finalReplays[0] != c.finalReplays[1] {
-		return errors.New("React Native rebuild-requests final evidence is unavailable")
+	c.proxyMu.Lock()
+	firstReplays := append([]rebuildPageReplay(nil), c.firstReplays...)
+	finalReplays := append([]rebuildPageReplay(nil), c.finalReplays...)
+	proxyErr := c.proxyErr
+	c.proxyMu.Unlock()
+	if c.config.Controller == nil || c.finalResult == nil || c.firstRecoveryTrace == nil || !c.sourceApplied ||
+		len(firstReplays) != 2 || len(finalReplays) != 2 ||
+		firstReplays[0] != firstReplays[1] || finalReplays[0] != finalReplays[1] ||
+		proxyErr != nil {
+		return fmt.Errorf(
+			"React Native rebuild-requests final evidence is unavailable: source_applied=%t first_recovery_trace=%t final_capture=%t first_replays=%d final_replays=%d proxy_error=%t",
+			c.sourceApplied,
+			c.firstRecoveryTrace != nil,
+			c.finalResult != nil,
+			len(firstReplays),
+			len(finalReplays),
+			proxyErr != nil,
+		)
 	}
 	serverCaptures, err := c.config.Controller.Capture(ctx, []string{clientKey}, []string{"server-state"})
 	if err != nil || len(serverCaptures) != 1 {
 		return fmt.Errorf("capture React Native rebuild-requests server state: %w", nativeResultError(err, ""))
 	}
 	server := serverCaptures[0].StateFacts
-	trace, err := captureTraceFromRaw(c.finalResult.Trace)
+	finalTrace, err := captureTraceFromRaw(c.finalResult.Trace)
+	if err != nil {
+		return err
+	}
+	trace, err := combineRebuildRequestsTraces(*c.firstRecoveryTrace, finalTrace)
 	if err != nil {
 		return err
 	}
 	if err := validateRebuildRequestsTransport(c.config.Scenario, trace); err != nil {
 		return err
-	}
-	if len(trace.Observations) != 4 {
-		return errors.New("React Native rebuild-requests transport evidence is incomplete")
 	}
 	if err := c.bindServerIdentities(true); err != nil {
 		return err
@@ -1264,7 +1392,7 @@ func (c *RebuildRequestsCoordinator) validateCompletionLocked(ctx context.Contex
 }
 
 func (c *RebuildRequestsCoordinator) resolveIdentities(server scenarios.StateFacts, trace traceSnapshot) (rebuildRequestsIdentityEvidence, error) {
-	if len(c.identities) != len(rebuildRequestsAliasNames) || len(server.Rebuilds) != 1 || len(trace.Observations) != 4 {
+	if len(c.identities) != len(rebuildRequestsAliasNames) || len(server.Rebuilds) != 1 || len(trace.Observations) != 5 {
 		return rebuildRequestsIdentityEvidence{}, errors.New("React Native rebuild-requests identity evidence is incomplete")
 	}
 	wanted := make(map[string]struct{}, len(rebuildRequestsAliasNames))
@@ -1285,7 +1413,7 @@ func (c *RebuildRequestsCoordinator) resolveIdentities(server scenarios.StateFac
 		runtime[alias] = copyRaw(value)
 	}
 	firstRequest := trace.Observations[1]
-	pullRequest := trace.Observations[3]
+	pullRequest := trace.Observations[4]
 	generation, err := requestInteger(firstRequest, "client_generation")
 	if err != nil || generation == 0 {
 		return rebuildRequestsIdentityEvidence{}, errors.New("React Native rebuild-requests client generation evidence is invalid")
@@ -1339,17 +1467,41 @@ func (c *RebuildRequestsCoordinator) resolveIdentities(server scenarios.StateFac
 	return rebuildRequestsIdentityEvidence{runtime: runtime, resolutions: resolutions, tableName: c.tableName, primaryField: c.primaryKey}, nil
 }
 
+func combineRebuildRequestsTraces(firstRecovery, finalRecovery traceSnapshot) (traceSnapshot, error) {
+	if firstRecovery.Overflowed || finalRecovery.Overflowed ||
+		len(firstRecovery.Observations) != 2 || firstRecovery.SequenceCheckpoint != 2 ||
+		len(finalRecovery.Observations) != 3 || finalRecovery.SequenceCheckpoint != 3 {
+		return traceSnapshot{}, errors.New("React Native rebuild-requests segmented transport trace is incomplete")
+	}
+	if err := validateTraceSequence(firstRecovery.Observations); err != nil {
+		return traceSnapshot{}, fmt.Errorf("React Native rebuild-requests first recovery trace is invalid: %w", err)
+	}
+	if err := validateTraceSequence(finalRecovery.Observations); err != nil {
+		return traceSnapshot{}, fmt.Errorf("React Native rebuild-requests final recovery trace is invalid: %w", err)
+	}
+	combined := traceSnapshot{
+		Observations: append([]transportObservation(nil), firstRecovery.Observations...),
+	}
+	for _, observation := range finalRecovery.Observations {
+		observation.Sequence += uint64(len(firstRecovery.Observations))
+		combined.Observations = append(combined.Observations, observation)
+	}
+	combined.SequenceCheckpoint = uint64(len(combined.Observations))
+	return combined, nil
+}
+
 func validateRebuildRequestsTransport(scenario scenarios.Scenario, trace traceSnapshot) error {
 	ids := []string{
 		"STEP-PERF-REBUILD-REQUESTS-001",
 		"STEP-PERF-REBUILD-REQUESTS-003",
+		"STEP-PERF-REBUILD-REQUESTS-001",
 		"STEP-PERF-REBUILD-REQUESTS-004",
 		"STEP-PERF-REBUILD-REQUESTS-002",
 	}
 	if trace.Overflowed || len(trace.Observations) != len(ids) || trace.SequenceCheckpoint != uint64(len(ids)) || validateTraceSequence(trace.Observations) != nil {
 		return errors.New("React Native rebuild-requests transport trace is incomplete")
 	}
-	for index, operation := range []string{"connect", "rebuild", "rebuild", "pull"} {
+	for index, operation := range []string{"connect", "rebuild", "connect", "rebuild", "pull"} {
 		if err := validateTraceOperation(trace.Observations[index], operation); err != nil {
 			return fmt.Errorf("React Native rebuild-requests %s trace is invalid: %w", operation, err)
 		}
@@ -1358,8 +1510,8 @@ func validateRebuildRequestsTransport(scenario scenarios.Scenario, trace traceSn
 		}
 	}
 	first := trace.Observations[1]
-	final := trace.Observations[2]
-	pull := trace.Observations[3]
+	final := trace.Observations[3]
+	pull := trace.Observations[4]
 	firstGeneration, generationErr := requestInteger(first, "client_generation")
 	finalGeneration, finalGenerationErr := requestInteger(final, "client_generation")
 	if generationErr != nil || finalGenerationErr != nil || firstGeneration == 0 || firstGeneration != finalGeneration {
@@ -1598,7 +1750,7 @@ func (c *RebuildRequestsCoordinator) validateState(server scenarios.StateFacts, 
 	}
 	storedChecksum, storedErr := checksumDigest(state.ScopeStates[0].Checksum)
 	localChecksum, localErr := checksumDigest(&state.ScopeStates[0].LocalChecksum)
-	pullFacts, pullErr := decodePullResponseFacts(trace.Observations[3].PullResponseFacts)
+	pullFacts, pullErr := decodePullResponseFacts(trace.Observations[4].PullResponseFacts)
 	if storedErr != nil || localErr != nil || storedChecksum == nil || localChecksum == nil || *storedChecksum != *localChecksum || pullErr != nil || len(pullFacts.ScopeCursorFingerprints) != 1 || pullFacts.ScopeCursorFingerprints[0] != hashFingerprint(*state.ScopeStates[0].Cursor) {
 		return errors.New("React Native rebuild-requests checkpoint is not verified")
 	}

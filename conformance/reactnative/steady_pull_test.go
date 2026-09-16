@@ -1,9 +1,11 @@
 package reactnative
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,10 +63,14 @@ func TestValidateSteadyPullScenarioRejectsContractChanges(t *testing.T) {
 func TestSteadyPullTraceRejectsMeasuredPullWithoutChecksumDelta(t *testing.T) {
 	bootstrap := validBootstrapTrace(testSchema())
 	final := traceSnapshot{
-		Observations: append(append([]transportObservation(nil), bootstrap.Observations...), transportWithPull(
-			"pull", 4, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c",
-		)),
-		SequenceCheckpoint: 4,
+		Observations: append(append([]transportObservation(nil), bootstrap.Observations...),
+			transportObservation{
+				Sequence: 4, OperationClass: "connect", StatusCode: http.StatusOK,
+				DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{}`),
+			},
+			transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c"),
+		),
+		SequenceCheckpoint: 5,
 	}
 	measured, err := steadyPullTrace(final, &bootstrap)
 	if err != nil {
@@ -80,6 +86,85 @@ func TestSteadyPullTraceRejectsMeasuredPullWithoutChecksumDelta(t *testing.T) {
 	}
 	if err := validateSteadyPullTransportIdentities(state, capture, bootstrap, measured); err == nil {
 		t.Fatal("measured pull without one change was accepted")
+	}
+}
+
+func TestSteadyPullRestartAllowsOnlyMaintenanceProgress(t *testing.T) {
+	left := finalCapture{
+		ClientState: json.RawMessage(`{"schema":{"version":1,"hash":"` + strings.Repeat("a", 64) +
+			`"},"scopeStates":[{"scopeID":"scope","cursor":"cursor","generation":1}],"scopeStateCount":1,"provenanceMaintenanceWorkCursor":"1"}`),
+		Pending: json.RawMessage(`[]`), Rejected: json.RawMessage(`[]`),
+		Provenance: json.RawMessage(`[]`), DurableProof: json.RawMessage(`{}`),
+	}
+	right := left
+	right.ClientState = bytes.Replace(left.ClientState, []byte(`"provenanceMaintenanceWorkCursor":"1"`), []byte(`"provenanceMaintenanceWorkCursor":"2"`), 1)
+	if !equalReactNativeSteadyPullDurableState(left, right, true) {
+		t.Fatal("restart rejected maintenance progress")
+	}
+	if equalReactNativeSteadyPullDurableState(left, right, false) {
+		t.Fatal("failed apply accepted changed durable state")
+	}
+	right.ClientState = bytes.Replace(right.ClientState, []byte(`"cursor":"cursor"`), []byte(`"cursor":"changed"`), 1)
+	if equalReactNativeSteadyPullDurableState(left, right, true) {
+		t.Fatal("restart accepted a changed checkpoint")
+	}
+}
+
+func TestSteadyPullFaultTraceRequiresCompleteSuccessfulPullSuffix(t *testing.T) {
+	bootstrap := validBootstrapTrace(testSchema())
+	prior := traceSnapshot{
+		Observations: append(append([]transportObservation(nil), bootstrap.Observations...), transportWithPull(
+			"pull", 4, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c",
+		)),
+		SequenceCheckpoint: 4,
+	}
+	current := traceSnapshot{
+		Observations: append(append([]transportObservation(nil), prior.Observations...),
+			transportObservation{
+				Sequence: 5, OperationClass: "connect", StatusCode: http.StatusOK,
+				DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{}`),
+			},
+			transportWithPull("pull", 6, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-d", "cursor-e"),
+		),
+		SequenceCheckpoint: 6,
+	}
+	if err := validateSteadyPullFaultTrace(current, &prior, steadyPullRowDigest); err != nil {
+		t.Fatalf("validate complete row-digest trace suffix: %v", err)
+	}
+	initial := traceSnapshot{
+		Observations: append(append([]transportObservation(nil), bootstrap.Observations...),
+			transportWithPull("pull", 4, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c"),
+		),
+		SequenceCheckpoint: 4,
+	}
+	if err := validateSteadyPullFaultTrace(initial, &bootstrap, steadyPullMalformedTypedRow); err != nil {
+		t.Fatalf("validate initial sync-now fault trace suffix: %v", err)
+	}
+
+	empty := prior
+	if err := validateSteadyPullFaultTrace(empty, &prior, steadyPullRowDigest); err == nil {
+		t.Fatal("empty row-digest trace suffix was accepted")
+	}
+	changedPrefix := current
+	changedPrefix.Observations = append([]transportObservation(nil), current.Observations...)
+	changedPrefix.Observations[0].StatusCode = 500
+	if err := validateSteadyPullFaultTrace(changedPrefix, &prior, steadyPullRowDigest); err == nil {
+		t.Fatal("changed row-digest trace prefix was accepted")
+	}
+	invalidSuffix := current
+	invalidSuffix.Observations = append([]transportObservation(nil), current.Observations...)
+	invalidSuffix.Observations[len(invalidSuffix.Observations)-1].OperationClass = "push"
+	if err := validateSteadyPullFaultTrace(invalidSuffix, &prior, steadyPullRowDigest); err == nil {
+		t.Fatal("non-pull row-digest trace suffix was accepted")
+	}
+	missingConnect := traceSnapshot{
+		Observations: append(append([]transportObservation(nil), prior.Observations...),
+			transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-c", "cursor-d"),
+		),
+		SequenceCheckpoint: 5,
+	}
+	if err := validateSteadyPullFaultTrace(missingConnect, &prior, steadyPullRowDigest); err == nil {
+		t.Fatal("row-digest retry trace without reconnect was accepted")
 	}
 }
 

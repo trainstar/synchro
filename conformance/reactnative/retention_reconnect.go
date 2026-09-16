@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1180,38 +1181,73 @@ func (c *RetentionReconnectCoordinator) validateFinalCapture(capture finalCaptur
 	return nil
 }
 
-func retentionReconnectFloorCursor(capture finalCapture) (clientScopeState, error) {
+func (c *RetentionReconnectCoordinator) floorScopes(capture finalCapture) ([]clientScopeState, error) {
+	var runtimeScope string
+	if json.Unmarshal(c.runtimeIDs["scope-a"], &runtimeScope) != nil || runtimeScope == "" {
+		return nil, errors.New("React Native retention-reconnect authored scope binding is absent")
+	}
 	state, err := decodeClientState(capture.ClientState)
 	if err != nil {
-		return clientScopeState{}, err
+		return nil, err
 	}
-	if state.ScopeStateCount != 1 || len(state.ScopeStates) != 1 {
-		return clientScopeState{}, fmt.Errorf("React Native retention-reconnect floor cursor count = %d with %d details, want 1", state.ScopeStateCount, len(state.ScopeStates))
+	if state.ScopeStateCount != 2 || len(state.ScopeStates) != 2 {
+		return nil, errors.New("React Native retention-reconnect requires the authored and identity scopes")
 	}
-	floor := state.ScopeStates[0]
-	if floor.ScopeID == "" || floor.Cursor == nil || *floor.Cursor == "" {
-		return clientScopeState{}, errors.New("React Native retention-reconnect compacted floor cursor is absent")
+	var floor, identity clientScopeState
+	for _, scope := range state.ScopeStates {
+		if scope.ScopeID == "" {
+			return nil, errors.New("React Native retention-reconnect scope identity is absent")
+		}
+		if scope.ScopeID == runtimeScope {
+			if floor.ScopeID != "" {
+				return nil, errors.New("React Native retention-reconnect authored scope is duplicated")
+			}
+			floor = scope
+		} else {
+			if identity.ScopeID != "" {
+				return nil, errors.New("React Native retention-reconnect identity scope is duplicated")
+			}
+			identity = scope
+		}
 	}
-	return floor, nil
+	if floor.ScopeID == "" || identity.ScopeID == "" || floor.Cursor == nil || *floor.Cursor == "" {
+		return nil, errors.New("React Native retention-reconnect compacted floor cursor is absent")
+	}
+	return []clientScopeState{floor, identity}, nil
+}
+
+func retentionReconnectCursorFingerprints(scopes []clientScopeState) []string {
+	fingerprints := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if scope.Cursor != nil {
+			fingerprints = append(fingerprints, hashFingerprint(*scope.Cursor))
+		}
+	}
+	sort.Strings(fingerprints)
+	return fingerprints
 }
 
 func (c *RetentionReconnectCoordinator) validateRestartCapture(capture finalCapture) error {
 	if c.finalCapture == nil {
 		return errors.New("React Native retention-reconnect pre-restart capture is unavailable")
 	}
-	before, err := retentionReconnectFloorCursor(*c.finalCapture)
+	before, err := c.floorScopes(*c.finalCapture)
 	if err != nil {
 		return err
 	}
-	after, err := retentionReconnectFloorCursor(capture)
+	after, err := c.floorScopes(capture)
 	if err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(before, after) {
 		return errors.New("React Native retention-reconnect restart changed the durable floor cursor")
 	}
-	if err := validateReadyStatus(capture.Status); err != nil {
-		return fmt.Errorf("React Native retention-reconnect restart status is invalid: %w", err)
+	if err := validateSyncStatusShape(capture.Status); err != nil {
+		return err
+	}
+	var status syncStatus
+	if json.Unmarshal(capture.Status, &status) != nil || status.State != "local_ready" {
+		return errors.New("React Native retention-reconnect restart did not preserve local readiness")
 	}
 	return nil
 }
@@ -1220,16 +1256,20 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 	if c.restartCapture == nil {
 		return errors.New("React Native retention-reconnect restart capture is unavailable")
 	}
-	floor, err := retentionReconnectFloorCursor(*c.restartCapture)
+	floor, err := c.floorScopes(*c.restartCapture)
 	if err != nil {
 		return err
 	}
-	resumed, err := retentionReconnectFloorCursor(capture)
+	resumed, err := c.floorScopes(capture)
 	if err != nil {
 		return err
 	}
-	if floor.ScopeID != resumed.ScopeID {
-		return errors.New("React Native retention-reconnect resumed cursor scope changed")
+	for index := range floor {
+		beforeState, afterState := floor[index], resumed[index]
+		beforeState.Cursor, afterState.Cursor = nil, nil
+		if !reflect.DeepEqual(beforeState, afterState) {
+			return errors.New("React Native retention-reconnect resumed cursor scope changed")
+		}
 	}
 	if err := validateReadyStatus(capture.Status); err != nil {
 		return fmt.Errorf("React Native retention-reconnect floor resume status is invalid: %w", err)
@@ -1238,7 +1278,8 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 	if err != nil {
 		return err
 	}
-	floorFingerprint := hashFingerprint(*floor.Cursor)
+	requestFingerprints := retentionReconnectCursorFingerprints(floor)
+	responseFingerprints := retentionReconnectCursorFingerprints(resumed)
 	connects := 0
 	pulls := 0
 	for _, observed := range trace.Observations {
@@ -1255,9 +1296,11 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 				return fmt.Errorf("React Native retention-reconnect floor resume pull is invalid: %w", err)
 			}
 			response, responseErr := decodePullResponseFacts(observed.PullResponseFacts)
-			if responseErr != nil || !reflect.DeepEqual(observed.CursorFingerprints, []string{floorFingerprint}) ||
+			if responseErr != nil || observed.CursorFingerprintsComplete == nil || !*observed.CursorFingerprintsComplete ||
+				!reflect.DeepEqual(observed.CursorFingerprints, requestFingerprints) ||
 				*response.ChangeCount != 0 || *response.HasMore || *response.RebuildScopeCount != 0 ||
-				!reflect.DeepEqual(response.ScopeCursorFingerprints, []string{hashFingerprint(*resumed.Cursor)}) {
+				*response.ChecksumCount != uint64(len(resumed)) || !*response.ScopeCursorFingerprintsComplete ||
+				!reflect.DeepEqual(response.ScopeCursorFingerprints, responseFingerprints) {
 				return errors.New("React Native retention-reconnect floor-equal pull is invalid")
 			}
 			pulls++

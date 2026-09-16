@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -328,34 +329,65 @@ func TestValidateRetentionReconnectCompactionRequiresActivePin(t *testing.T) {
 func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 	floorCursor := "floor-cursor"
 	resumedCursor := "resumed-cursor"
-	before := retentionReconnectFloorCapture(t, floorCursor, nil)
-	coordinator := &RetentionReconnectCoordinator{finalCapture: &before, restartCapture: &before}
-	if err := coordinator.validateRestartCapture(retentionReconnectFloorCapture(t, floorCursor, nil)); err != nil {
+	identityCursor := "identity-cursor"
+	resumedIdentityCursor := "resumed-identity-cursor"
+	before := retentionReconnectFloorCapture(t, floorCursor, identityCursor, nil)
+	restarted := before
+	restarted.Status = json.RawMessage(`{"state":"local_ready","retry_at":null,"operation":null,"failure":null}`)
+	coordinator := &RetentionReconnectCoordinator{
+		finalCapture: &before, restartCapture: &restarted,
+		runtimeIDs: map[string]json.RawMessage{"scope-a": json.RawMessage(`"runtime-scope"`)},
+	}
+	if err := coordinator.validateRestartCapture(restarted); err != nil {
 		t.Fatalf("validate durable restart floor cursor: %v", err)
 	}
 	complete := true
+	requestFingerprints := []string{hashFingerprint(floorCursor), hashFingerprint(identityCursor)}
+	responseFingerprints := []string{hashFingerprint(resumedCursor), hashFingerprint(resumedIdentityCursor)}
+	sort.Strings(requestFingerprints)
+	sort.Strings(responseFingerprints)
+	responseFacts, err := json.Marshal(map[string]any{
+		"change_count": 0, "has_more": false, "rebuild_scope_count": 0, "checksum_count": 2,
+		"scope_cursor_fingerprints": responseFingerprints, "scope_cursor_fingerprints_complete": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	trace := traceSnapshot{Observations: []transportObservation{
 		{Sequence: 1, OperationClass: "connect", StatusCode: http.StatusOK, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":2}`)},
 		{
-			Sequence: 2, OperationClass: "pull", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: []string{hashFingerprint(floorCursor)}, CursorFingerprintsComplete: &complete,
-			RequestFacts: json.RawMessage(`{"scope_count":1}`), PullResponseFacts: json.RawMessage(`{"change_count":0,"has_more":false,"rebuild_scope_count":0,"checksum_count":1,"scope_cursor_fingerprints":["` + hashFingerprint(resumedCursor) + `"],"scope_cursor_fingerprints_complete":true}`),
+			Sequence: 2, OperationClass: "pull", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: requestFingerprints, CursorFingerprintsComplete: &complete,
+			RequestFacts: json.RawMessage(`{"scope_count":2}`), PullResponseFacts: responseFacts,
 		},
 	}, SequenceCheckpoint: 2}
-	if err := coordinator.validateFloorResumeCapture(retentionReconnectFloorCapture(t, resumedCursor, &trace)); err != nil {
+	if err := coordinator.validateFloorResumeCapture(retentionReconnectFloorCapture(t, resumedCursor, resumedIdentityCursor, &trace)); err != nil {
 		t.Fatalf("validate floor-equal retention resume: %v", err)
 	}
-	changed := retentionReconnectFloorCapture(t, "changed-cursor", nil)
+	changed := retentionReconnectFloorCapture(t, "changed-cursor", identityCursor, nil)
+	changed.Status = restarted.Status
 	if err := coordinator.validateRestartCapture(changed); err == nil {
 		t.Fatal("durable restart accepted a changed floor cursor")
 	}
+	changed = retentionReconnectFloorCapture(t, floorCursor, "changed-identity-cursor", nil)
+	changed.Status = restarted.Status
+	if err := coordinator.validateRestartCapture(changed); err == nil {
+		t.Fatal("durable restart accepted a changed identity cursor")
+	}
+	trace.Observations[1].CursorFingerprints = []string{hashFingerprint(floorCursor)}
+	if err := coordinator.validateFloorResumeCapture(retentionReconnectFloorCapture(t, resumedCursor, resumedIdentityCursor, &trace)); err == nil {
+		t.Fatal("floor resume omitted the identity cursor")
+	}
 }
 
-func retentionReconnectFloorCapture(t *testing.T, cursor string, trace *traceSnapshot) finalCapture {
+func retentionReconnectFloorCapture(t *testing.T, cursor, identityCursor string, trace *traceSnapshot) finalCapture {
 	t.Helper()
 	state, err := json.Marshal(inspectedClientState{
-		Schema:                          &clientSchema{Version: 1, Hash: strings.Repeat("a", 64)},
-		ScopeStates:                     []clientScopeState{{ScopeID: "runtime-scope", Cursor: &cursor, Generation: 1}},
-		ScopeStateCount:                 1,
+		Schema: &clientSchema{Version: 1, Hash: strings.Repeat("a", 64)},
+		ScopeStates: []clientScopeState{
+			{ScopeID: "runtime-identity", Cursor: &identityCursor, Generation: 1},
+			{ScopeID: "runtime-scope", Cursor: &cursor, Generation: 1},
+		},
+		ScopeStateCount:                 2,
 		ProvenanceMaintenanceWorkCursor: "cursor",
 	})
 	if err != nil {

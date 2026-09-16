@@ -77,6 +77,7 @@ func TestValidateMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testin
 		Pending:     json.RawMessage(`[]`),
 		Rejected:    json.RawMessage(`[]`),
 		Provenance:  json.RawMessage(`[]`),
+		Trace:       multiScopeProvenanceNoProgressTrace(t, "cursor"),
 	}
 	after := before
 	after.Rows = json.RawMessage(`[{"id":"row-a","value":"after"}]`)
@@ -92,6 +93,7 @@ func TestValidateMultiScopeProvenanceNoProgressIgnoresOnlyMaintenanceCursor(t *t
 		Pending:     json.RawMessage(`[]`),
 		Rejected:    json.RawMessage(`[]`),
 		Provenance:  json.RawMessage(`[]`),
+		Trace:       multiScopeProvenanceNoProgressTrace(t, "cursor"),
 	}
 	after := before
 	after.ClientState = multiScopeProvenanceClientState(t, "2", 0)
@@ -123,11 +125,59 @@ func TestMultiScopeProvenanceCaptureUsesBoundedRuntimeRowSelectors(t *testing.T)
 	}
 }
 
+func TestMultiScopeProvenanceNoProgressBindsRenewedCursorsToTheServer(t *testing.T) {
+	before := finalCapture{
+		Rows: json.RawMessage(`[]`), Pending: json.RawMessage(`[]`),
+		Rejected: json.RawMessage(`[]`), Provenance: json.RawMessage(`[]`),
+		ClientState: multiScopeProvenanceClientState(t, "1", 0),
+	}
+	after := before
+	state, err := decodeClientState(before.ClientState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewedCursor := "renewed-cursor"
+	state.ScopeStates[0].Cursor = &renewedCursor
+	after.ClientState, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after.Trace = multiScopeProvenanceNoProgressTrace(t, renewedCursor)
+	if err := validateMultiScopeProvenanceNoProgress(before, after); err != nil {
+		t.Fatalf("server cursor renewal was rejected: %v", err)
+	}
+	after.Trace = multiScopeProvenanceNoProgressTrace(t, "another-cursor")
+	if err := validateMultiScopeProvenanceNoProgress(before, after); err == nil {
+		t.Fatal("cursor without a matching server response was accepted")
+	}
+}
+
+func multiScopeProvenanceNoProgressTrace(t *testing.T, cursor string) json.RawMessage {
+	t.Helper()
+	complete := true
+	raw, err := json.Marshal(traceSnapshot{
+		SequenceCheckpoint: 1,
+		Observations: []transportObservation{{
+			Sequence: 1, OperationClass: "pull", StatusCode: 200, DurationNanoseconds: 1,
+			RequestFacts: json.RawMessage(`{"scope_count":1}`), CursorFingerprintsComplete: &complete,
+			CursorFingerprints: []string{hashFingerprint("cursor")},
+			PullResponseFacts: json.RawMessage(`{"change_count":0,"has_more":false,"rebuild_scope_count":0,"checksum_count":1,"scope_cursor_fingerprints":["` +
+				hashFingerprint(cursor) + `"],"scope_cursor_fingerprints_complete":true}`),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func multiScopeProvenanceClientState(t *testing.T, maintenanceCursor string, applicationRows uint64) json.RawMessage {
 	t.Helper()
+	cursor := "cursor"
 	encoded, err := json.Marshal(inspectedClientState{
 		Schema:                          &clientSchema{Version: 1, Hash: strings.Repeat("a", 64)},
-		ScopeStates:                     []clientScopeState{},
+		ScopeStates:                     []clientScopeState{{ScopeID: "scope-a", Cursor: &cursor, Generation: 1}},
+		ScopeStateCount:                 1,
 		ScopeRows:                       []clientScopeRow{},
 		RebuildAttempts:                 []rebuildAttempt{},
 		ApplicationRowCount:             applicationRows,

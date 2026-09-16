@@ -1,4 +1,6 @@
-import { by, device, element, expect } from 'detox';
+import { by, element } from 'detox';
+
+import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
 
 type ExchangeResponse = {
   schema_version: number;
@@ -142,18 +144,10 @@ async function exchange(endpoint: string, token: string, sequence: number, rawRe
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
   if (requiresProcessRelaunch(command)) {
-    await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
-    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-    await expect(element(by.id('conformance-harness'))).toBeVisible();
+    await launchCorpusApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
   }
   const serialized = JSON.stringify(command);
-  await element(by.id('conformance-command-input')).replaceText(serialized);
-  const input = await element(by.id('conformance-command-input')).getAttributes();
-  if (input.text !== serialized) {
-    throw new Error('React Native conformance command input changed');
-  }
-  await element(by.id('conformance-command-input')).tapReturnKey();
-  await element(by.id('btn-conformance-execute')).tap();
+  await submitCorpusCommand(serialized);
 
   const deadline = Date.now() + 45000;
   while (Date.now() < deadline) {
@@ -172,18 +166,13 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   throw new Error('React Native conformance command did not finish');
 }
 
-it('executes the push-response-loss coordinator sequence', async () => {
+it('executes the push-response-loss coordinator sequence', () => runCorpusCommandLoop(async () => {
   const { endpoint, token, stageCount } = coordinatorConfiguration();
-  await device.launchApp({
+  await launchCorpusApp({
     newInstance: true,
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
-  // The coordinator holds sync responses on purpose, and Detox on iOS
-  // waits for network idle before each UI action. The held request must
-  // not count toward idleness or every UI step stalls behind it.
-  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
-  await expect(element(by.id('conformance-harness'))).toBeVisible();
 
   let rawResult = 'null';
   let commandCount = 0;
@@ -207,4 +196,4 @@ it('executes the push-response-loss coordinator sequence', async () => {
     }
   }
   throw new Error('React Native push-response-loss coordinator did not complete');
-}, 600000);
+}), 600000);
