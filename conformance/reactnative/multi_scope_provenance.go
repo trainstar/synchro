@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -881,12 +882,24 @@ func validateMultiScopeProvenanceRestart(prior actionProcessIdentity, raw json.R
 }
 
 func validateMultiScopeProvenanceNoProgress(before, after finalCapture) error {
+	beforeState, err := decodeClientState(before.ClientState)
+	if err != nil {
+		return err
+	}
+	afterState, err := decodeClientState(after.ClientState)
+	if err != nil {
+		return err
+	}
+	beforeState.ProvenanceMaintenanceWorkCursor = ""
+	afterState.ProvenanceMaintenanceWorkCursor = ""
+	if !reflect.DeepEqual(beforeState, afterState) {
+		return errors.New("React Native multi-scope provenance post-restart synchronization changed client state")
+	}
 	for _, value := range []struct {
 		name        string
 		beforeValue json.RawMessage
 		afterValue  json.RawMessage
 	}{
-		{"client state", before.ClientState, after.ClientState},
 		{"application rows", before.Rows, after.Rows},
 		{"pending mutations", before.Pending, after.Pending},
 		{"rejected mutations", before.Rejected, after.Rejected},

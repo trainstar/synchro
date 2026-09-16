@@ -73,7 +73,7 @@ func TestValidateMultiScopeProvenanceRestartRequiresNewProcessAndSameDatabase(t 
 func TestValidateMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testing.T) {
 	before := finalCapture{
 		Rows:        json.RawMessage(`[{"id":"row-a","value":"before"}]`),
-		ClientState: json.RawMessage(`{"scope_states":[]}`),
+		ClientState: multiScopeProvenanceClientState(t, "1", 1),
 		Pending:     json.RawMessage(`[]`),
 		Rejected:    json.RawMessage(`[]`),
 		Provenance:  json.RawMessage(`[]`),
@@ -82,6 +82,25 @@ func TestValidateMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testin
 	after.Rows = json.RawMessage(`[{"id":"row-a","value":"after"}]`)
 	if err := validateMultiScopeProvenanceNoProgress(before, after); err == nil {
 		t.Fatal("post-restart application row change was accepted")
+	}
+}
+
+func TestValidateMultiScopeProvenanceNoProgressIgnoresOnlyMaintenanceCursor(t *testing.T) {
+	before := finalCapture{
+		Rows:        json.RawMessage(`[]`),
+		ClientState: multiScopeProvenanceClientState(t, "1", 0),
+		Pending:     json.RawMessage(`[]`),
+		Rejected:    json.RawMessage(`[]`),
+		Provenance:  json.RawMessage(`[]`),
+	}
+	after := before
+	after.ClientState = multiScopeProvenanceClientState(t, "2", 0)
+	if err := validateMultiScopeProvenanceNoProgress(before, after); err != nil {
+		t.Fatalf("maintenance-only progress was rejected: %v", err)
+	}
+	after.ClientState = multiScopeProvenanceClientState(t, "2", 1)
+	if err := validateMultiScopeProvenanceNoProgress(before, after); err == nil {
+		t.Fatal("application row count change was accepted")
 	}
 }
 
@@ -102,6 +121,22 @@ func TestMultiScopeProvenanceCaptureUsesBoundedRuntimeRowSelectors(t *testing.T)
 	if !reflect.DeepEqual(selectors, want) {
 		t.Fatalf("multi-scope row selectors = %#v, want %#v", selectors, want)
 	}
+}
+
+func multiScopeProvenanceClientState(t *testing.T, maintenanceCursor string, applicationRows uint64) json.RawMessage {
+	t.Helper()
+	encoded, err := json.Marshal(inspectedClientState{
+		Schema:                          &clientSchema{Version: 1, Hash: strings.Repeat("a", 64)},
+		ScopeStates:                     []clientScopeState{},
+		ScopeRows:                       []clientScopeRow{},
+		RebuildAttempts:                 []rebuildAttempt{},
+		ApplicationRowCount:             applicationRows,
+		ProvenanceMaintenanceWorkCursor: maintenanceCursor,
+	})
+	if err != nil {
+		t.Fatalf("encode multi-scope client state: %v", err)
+	}
+	return encoded
 }
 
 func TestNewMultiScopeProvenanceCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {

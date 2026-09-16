@@ -36,7 +36,7 @@ function coordinatorConfiguration(): { endpoint: string; token: string; stageCou
   const configuredURL = process.env.SYNCHRO_RN_COORDINATOR_URL;
   const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
   const stageCount = Number(process.env.SYNCHRO_RN_COORDINATOR_STAGE_COUNT);
-  if (!configuredURL || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || stageCount !== 14) {
+  if (!configuredURL || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !Number.isSafeInteger(stageCount) || stageCount < 2) {
     throw new Error('React Native retention-reconnect coordinator configuration is invalid');
   }
 
@@ -135,6 +135,7 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   if (requiresProcessRelaunch(command)) {
     await device.terminateApp();
     await device.launchApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+    await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
     await expect(element(by.id('conformance-harness'))).toBeVisible();
   }
   const serialized = JSON.stringify(command);
@@ -179,6 +180,7 @@ it('executes the retention-reconnect coordinator sequence', async () => {
     delete: true,
     launchArgs: { synchroConformance: '1' },
   });
+  await device.setURLBlacklist(['.*127\\.0\\.0\\.1.*', '.*localhost.*']);
   await expect(element(by.id('conformance-harness'))).toBeVisible();
 
   let rawResult = 'null';

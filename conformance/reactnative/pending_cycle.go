@@ -840,7 +840,9 @@ func (c *PendingCycleCoordinator) advanceLocked(ctx context.Context, sequence ui
 		if err := c.waitForCapturePending(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
-		response.Command = c.command("observer", "await-step", map[string]any{"client_key": c.clientKey, "call_id": pendingCycleCallID}, []scenarios.StepID{pendingCycleCapturePendingStepID})
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": c.clientKey, "call_id": pendingCycleCallID, "wait_for_completion": true,
+		}, []scenarios.StepID{pendingCycleCapturePendingStepID})
 	case pendingCycleStageCapturePendingObserved:
 		response.Command = c.captureCommand()
 	case pendingCycleStageAfterInitialPush:
