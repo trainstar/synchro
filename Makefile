@@ -1515,7 +1515,7 @@ test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
 		cd conformance; \
 		SYNCHRO_RN_DETOX_CONFIGURATION="$$configuration" GOFLAGS= GOWORK=off \
 			go run ./cmd/testresult suite -- go test -tags reactnativeintegration -json ./reactnative \
-			-count=1 -timeout=120m -run "^TestRealReactNativeCorpus$$platform$$" -args --provision --install
+			-count=1 -timeout=120m -run "^TestRealReactNativeCorpus$$platform$$" $(GO_TEST_ARGS) -args --provision --install
 
 test-rn-e2e-android:
 	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-android-build
