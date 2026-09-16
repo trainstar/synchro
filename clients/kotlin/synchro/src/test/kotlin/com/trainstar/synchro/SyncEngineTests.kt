@@ -308,9 +308,6 @@ class SyncEngineTests {
     fun lifecycleRejectsAnUnlistedSelfTransition() {
         val (engine, db) = makeSyncEngine()
         try {
-            db.writeTransaction { connection ->
-                SynchroMeta.transitionClientLifecycleState(connection, SyncLifecycleState.LOCAL_READY)
-            }
             val error = assertThrows(SynchroError.InvalidStateTransition::class.java) {
                 db.writeTransaction { connection ->
                     SynchroMeta.transitionClientLifecycleState(connection, SyncLifecycleState.LOCAL_READY)
@@ -2671,7 +2668,7 @@ class SyncEngineTests {
         try {
             engine.start()
 
-            assertTrue(statuses.contains("local_ready"))
+            assertFalse(statuses.contains("local_ready"))
             assertTrue(statuses.contains("connecting"))
             assertTrue(statuses.contains("pulling"))
             assertEquals("ready", statuses.last())
@@ -3093,8 +3090,8 @@ class SyncEngineTests {
             }
             assertTrue(observed.any {
                 it is SyncEvent.StateChanged &&
-                    it.change.from == SyncLifecycleState.UNINITIALIZED &&
-                    it.change.to == SyncLifecycleState.LOCAL_READY
+                    it.change.from == SyncLifecycleState.LOCAL_READY &&
+                    it.change.to == SyncLifecycleState.CONNECTING
             })
 
             val applying = observed.filterIsInstance<SyncEvent.SchemaApplying>().single()

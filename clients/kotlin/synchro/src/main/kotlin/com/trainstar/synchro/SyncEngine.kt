@@ -89,11 +89,25 @@ internal class SyncEngine(
     private var lifecycleGeneration = 0L
 
     init {
-        val durable = database.readTransaction { db -> SynchroMeta.getClientState(db) }
+        val durable = database.writeTransaction { db ->
+            val opened = SynchroMeta.getClientState(db)
+            if (opened.failure == null || opened.errorAcknowledged) {
+                when (opened.lifecycleState) {
+                    SyncLifecycleState.LOCAL_READY,
+                    SyncLifecycleState.STOPPED -> Unit
+                    else -> SynchroMeta.transitionClientLifecycleState(
+                        db,
+                        SyncLifecycleState.LOCAL_READY,
+                        processRecovery = true,
+                    )
+                }
+            }
+            SynchroMeta.getClientState(db)
+        }
         currentStatus = when {
             durable.failure != null && !durable.errorAcknowledged -> SyncStatus.Error(durable.failure)
             durable.lifecycleState == SyncLifecycleState.STOPPED -> SyncStatus.Stopped
-            else -> SyncStatus.Uninitialized
+            else -> SyncStatus.LocalReady
         }
     }
 
@@ -166,11 +180,15 @@ internal class SyncEngine(
             val localReadyAlreadyPersisted = database.readTransaction { db ->
                 SynchroMeta.getClientState(db).lifecycleState == SyncLifecycleState.LOCAL_READY
             }
-            transitionTo(
-                SyncStatus.LocalReady,
-                processRecovery = currentStatus.state == SyncLifecycleState.UNINITIALIZED,
-                persistedStateAlreadyApplied = localReadyAlreadyPersisted,
-            )
+            if (currentStatus.state != SyncLifecycleState.LOCAL_READY) {
+                transitionTo(
+                    SyncStatus.LocalReady,
+                    processRecovery = currentStatus.state == SyncLifecycleState.UNINITIALIZED,
+                    persistedStateAlreadyApplied = localReadyAlreadyPersisted,
+                )
+            } else if (!localReadyAlreadyPersisted) {
+                throw SynchroError.InvalidResponse("local-ready initialization was not persisted")
+            }
             bindClientIdentityBeforeConnect()
 
             // Create a fresh scope
@@ -1135,7 +1153,7 @@ internal class SyncEngine(
         val connectSchema = resolveConnectSchema(response)
         if (schemaReset) validateSchemaResetResponse(response)
         val lifecycleManaged = synchronized(lifecycleLock) {
-            currentStatus.state != SyncLifecycleState.UNINITIALIZED
+            started.get()
         }
         val migration = schemaManager.prepareConnectMigration(
             response = response,
