@@ -868,7 +868,14 @@ func (c *SeededEmptyStartupCoordinator) seedControlCommand(corrupt bool) *seeded
 		seed := corruptSeedAssetName
 		runtime.SeedDatabasePath = &seed
 	}
-	return &seededEmptyStartupCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: "client", Command: "open", Parameters: parameters}}, Runtime: runtime}
+	return &seededEmptyStartupCommand{
+		SchemaVersion: 1,
+		Action: conformanceManifest{
+			Action: conformanceAction{Actor: "client", Command: "open", Parameters: parameters},
+			Steps:  []conformanceStep{},
+		},
+		Runtime: runtime,
+	}
 }
 
 func containsSeededStartupFingerprint(values []string, expected string) bool {

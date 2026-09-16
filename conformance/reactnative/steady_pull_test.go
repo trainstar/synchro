@@ -83,6 +83,43 @@ func TestSteadyPullTraceRejectsMeasuredPullWithoutChecksumDelta(t *testing.T) {
 	}
 }
 
+func TestSteadyPullFaultTraceRequiresCompleteSuccessfulPullSuffix(t *testing.T) {
+	bootstrap := validBootstrapTrace(testSchema())
+	prior := traceSnapshot{
+		Observations: append(append([]transportObservation(nil), bootstrap.Observations...), transportWithPull(
+			"pull", 4, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-b", "cursor-c",
+		)),
+		SequenceCheckpoint: 4,
+	}
+	current := traceSnapshot{
+		Observations: append(append([]transportObservation(nil), prior.Observations...),
+			transportWithPull("pull", 5, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-c", "cursor-d"),
+			transportWithPull("pull", 6, requestFacts(1, testSchema(), 1, 1, "", ""), "cursor-d", "cursor-e"),
+		),
+		SequenceCheckpoint: 6,
+	}
+	if err := validateSteadyPullFaultTrace(current, &prior, steadyPullRowDigest); err != nil {
+		t.Fatalf("validate complete row-digest trace suffix: %v", err)
+	}
+
+	empty := prior
+	if err := validateSteadyPullFaultTrace(empty, &prior, steadyPullRowDigest); err == nil {
+		t.Fatal("empty row-digest trace suffix was accepted")
+	}
+	changedPrefix := current
+	changedPrefix.Observations = append([]transportObservation(nil), current.Observations...)
+	changedPrefix.Observations[0].StatusCode = 500
+	if err := validateSteadyPullFaultTrace(changedPrefix, &prior, steadyPullRowDigest); err == nil {
+		t.Fatal("changed row-digest trace prefix was accepted")
+	}
+	invalidSuffix := current
+	invalidSuffix.Observations = append([]transportObservation(nil), current.Observations...)
+	invalidSuffix.Observations[len(invalidSuffix.Observations)-1].OperationClass = "push"
+	if err := validateSteadyPullFaultTrace(invalidSuffix, &prior, steadyPullRowDigest); err == nil {
+		t.Fatal("non-pull row-digest trace suffix was accepted")
+	}
+}
+
 func TestSteadyPullFinalEvidenceAcceptsOmittedDurabilityCounts(t *testing.T) {
 	steadyScenario := loadSteadyPullAuthoredScenario(t)
 	warmScenario := loadAuthoredScenario(t)

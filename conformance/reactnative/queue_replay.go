@@ -218,6 +218,7 @@ const (
 	queueReplayStageRestartedBeforeSchema
 	queueReplayStageSchemaBoundary
 	queueReplayStageResponseLossBegun
+	queueReplayStageResponseLossPushReady
 	queueReplayStageResponseLoss
 	queueReplayStageResponseLossCapture
 	queueReplayStageRestartedAfterLoss
@@ -413,7 +414,7 @@ func (c *QueueReplayCoordinator) ExchangeCount() int {
 func (c *QueueReplayCoordinator) exchangeCountLocked() int {
 	count := 14 // main open/bootstrap/captures, nine successor-proof commands, complete response
 	for _, workload := range c.steps {
-		count += queueReplayLocalBatchCount(workload) + 7 // write batches, restart, schema check, begin loss, await loss, trace, restart, replay
+		count += queueReplayLocalBatchCount(workload) + 8 // write batches, restart, schema check, begin loss, push barrier, await loss, trace, restart, replay
 	}
 	if len(c.steps) > 1 {
 		count += len(c.steps) - 1 // retain the prior replay trace before each later restart
@@ -790,6 +791,24 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err := c.validateResponseLossCallBegun(envelope.Result); err != nil {
 			return err
 		}
+	case queueReplayStageResponseLossPushReady:
+		if err := validateActionResult(envelope.Result, "awaited"); err != nil {
+			return err
+		}
+		var members map[string]json.RawMessage
+		if err := decodeStrictMembers(envelope.Result, &members, 3, "queue-replay push observation"); err != nil {
+			return err
+		}
+		if err := validateSyncStatusShape(members["status"]); err != nil {
+			return err
+		}
+		var status syncStatus
+		if json.Unmarshal(members["status"], &status) != nil || status.State != "pushing" {
+			return errors.New("React Native queue-replay call did not reach push preparation")
+		}
+		if err := c.validateProcess(members["process"]); err != nil {
+			return err
+		}
 	case queueReplayStageResponseLoss:
 		if err := c.validateResponseLossCallCompleted(envelope.Result); err != nil {
 			return err
@@ -950,6 +969,11 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		response.Command = c.command("client", "begin-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID(), "method": "reset-schema-and-start"}, nil)
 		c.stage = queueReplayStageResponseLossBegun
 	case queueReplayStageResponseLossBegun:
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": c.clientKey, "call_id": c.responseLossCallID(), "wait_for_status": "pushing",
+		}, nil)
+		c.stage = queueReplayStageResponseLossPushReady
+	case queueReplayStageResponseLossPushReady:
 		if err := c.waitForResponseLossPush(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -1627,6 +1651,8 @@ func (stage queueReplayStage) String() string {
 		return "schema-boundary"
 	case queueReplayStageResponseLossBegun:
 		return "response-loss-begun"
+	case queueReplayStageResponseLossPushReady:
+		return "response-loss-push-ready"
 	case queueReplayStageResponseLoss:
 		return "response-loss"
 	case queueReplayStageResponseLossCapture:

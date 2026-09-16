@@ -242,6 +242,7 @@ type SteadyPullCoordinator struct {
 	stage         steadyPullExchangeStage
 	nextSeq       uint64
 	bootstrap     *traceSnapshot
+	faultTrace    *traceSnapshot
 	pristine      *finalCapture
 	finalResult   *finalCapture
 	restartResult *finalCapture
@@ -637,6 +638,7 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 		c.bootstrap = &trace
+		c.faultTrace = &trace
 		c.pristine = &capture
 		return nil
 	case steadyPullStageFaultSynchronize:
@@ -659,12 +661,13 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err != nil {
 			return err
 		}
-		if err := validateSteadyPullFaultTrace(trace, c.bootstrap, c.faultIndex); err != nil {
+		if err := validateSteadyPullFaultTrace(trace, c.faultTrace, steadyPullFaults[c.faultIndex]); err != nil {
 			return err
 		}
 		if c.pristine == nil || !equalReactNativeSteadyPullDurableState(*c.pristine, capture) {
 			return fmt.Errorf("React Native steady-pull %s fault changed durable rows or cursor state", steadyPullFaults[c.faultIndex])
 		}
+		c.faultTrace = &trace
 		c.faultIndex++
 		return nil
 	case steadyPullStageFinalCapture:
@@ -679,7 +682,7 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err != nil {
 			return err
 		}
-		if err := validateSteadyPullFinalCapture(c.config.Scenario, capture, c.bootstrap); err != nil {
+		if err := validateSteadyPullFinalCapture(c.config.Scenario, capture, c.bootstrap, c.faultTrace); err != nil {
 			return err
 		}
 		c.finalResult = &capture
@@ -906,25 +909,34 @@ func (c *SteadyPullCoordinator) steadyPullFaultCaptureCommand() *conformanceComm
 	return c.command("observer", "capture", parameters, nil)
 }
 
-func validateSteadyPullFaultTrace(trace traceSnapshot, bootstrap *traceSnapshot, faultIndex int) error {
-	if bootstrap == nil || faultIndex < 0 || faultIndex >= len(steadyPullFaults) {
+func validateSteadyPullFaultTrace(trace traceSnapshot, prior *traceSnapshot, fault steadyPullFault) error {
+	if prior == nil || fault == "" {
 		return errors.New("React Native steady-pull fault trace context is invalid")
 	}
-	expectedCount := len(bootstrap.Observations) + faultIndex + 1
-	if trace.Overflowed || len(trace.Observations) != expectedCount || trace.SequenceCheckpoint != uint64(expectedCount) {
-		return fmt.Errorf("React Native steady-pull %s fault trace is incomplete", steadyPullFaults[faultIndex])
+	if prior.Overflowed || trace.Overflowed ||
+		prior.SequenceCheckpoint != uint64(len(prior.Observations)) ||
+		trace.SequenceCheckpoint != uint64(len(trace.Observations)) ||
+		len(trace.Observations) <= len(prior.Observations) {
+		return fmt.Errorf(
+			"React Native steady-pull %s fault trace is incomplete: prior=%d/%d current=%d/%d",
+			fault,
+			len(prior.Observations),
+			prior.SequenceCheckpoint,
+			len(trace.Observations),
+			trace.SequenceCheckpoint,
+		)
 	}
 	if err := validateTraceSequence(trace.Observations); err != nil {
 		return err
 	}
-	for index, observation := range bootstrap.Observations {
+	for index, observation := range prior.Observations {
 		if !transportObservationsEqual(trace.Observations[index], observation) {
-			return errors.New("React Native steady-pull bootstrap trace changed during a fault")
+			return fmt.Errorf("React Native steady-pull %s fault changed prior trace evidence", fault)
 		}
 	}
-	for _, observation := range trace.Observations[len(bootstrap.Observations):] {
+	for _, observation := range trace.Observations[len(prior.Observations):] {
 		if err := validateTraceOperation(observation, "pull"); err != nil || observation.StatusCode != http.StatusOK {
-			return fmt.Errorf("React Native steady-pull %s fault trace is invalid", steadyPullFaults[faultIndex])
+			return fmt.Errorf("React Native steady-pull %s fault trace is invalid", fault)
 		}
 	}
 	return nil
@@ -1331,7 +1343,7 @@ func (c *SteadyPullCoordinator) resolveIdentities(metadata durableMetadata) ([]b
 	if err != nil {
 		return nil, err
 	}
-	measured, err := steadyPullTrace(trace, c.bootstrap)
+	measured, err := steadyPullTrace(trace, c.faultTrace)
 	if err != nil {
 		return nil, err
 	}
@@ -1461,26 +1473,26 @@ func validateSteadyPullWireObservation(scenario scenarios.Scenario, stepID strin
 	return fmt.Errorf("React Native steady-pull wire expectation %s is absent", stepID)
 }
 
-func steadyPullTrace(final traceSnapshot, bootstrap *traceSnapshot) ([]transportObservation, error) {
-	if bootstrap == nil {
-		return nil, errors.New("React Native steady-pull bootstrap trace is unavailable")
+func steadyPullTrace(final traceSnapshot, prior *traceSnapshot) ([]transportObservation, error) {
+	if prior == nil {
+		return nil, errors.New("React Native steady-pull prior trace is unavailable")
 	}
-	expectedCount := len(bootstrap.Observations) + len(steadyPullFaults) + 1
-	legacyCount := len(bootstrap.Observations) + 1
-	if bootstrap.Overflowed || len(bootstrap.Observations) != 3 || final.Overflowed ||
-		len(final.Observations) != expectedCount && len(final.Observations) != legacyCount ||
+	expectedCount := len(prior.Observations) + 1
+	if prior.Overflowed || final.Overflowed ||
+		prior.SequenceCheckpoint != uint64(len(prior.Observations)) ||
+		len(final.Observations) != expectedCount ||
 		final.SequenceCheckpoint != uint64(len(final.Observations)) {
 		return nil, errors.New("React Native steady-pull trace is incomplete")
 	}
 	if err := validateTraceSequence(final.Observations); err != nil {
 		return nil, err
 	}
-	for index, observation := range bootstrap.Observations {
+	for index, observation := range prior.Observations {
 		if !transportObservationsEqual(final.Observations[index], observation) {
-			return nil, errors.New("React Native steady-pull bootstrap trace changed after its checkpoint")
+			return nil, errors.New("React Native steady-pull prior trace changed after its checkpoint")
 		}
 	}
-	for _, observation := range final.Observations[len(bootstrap.Observations):] {
+	for _, observation := range final.Observations[len(prior.Observations):] {
 		if err := validateTraceOperation(observation, "pull"); err != nil {
 			return nil, fmt.Errorf("React Native steady-pull measured trace is invalid: %w", err)
 		}
@@ -1488,7 +1500,12 @@ func steadyPullTrace(final traceSnapshot, bootstrap *traceSnapshot) ([]transport
 	return final.Observations[len(final.Observations)-1:], nil
 }
 
-func validateSteadyPullFinalCapture(scenario scenarios.Scenario, capture finalCapture, bootstrap *traceSnapshot) error {
+func validateSteadyPullFinalCapture(
+	scenario scenarios.Scenario,
+	capture finalCapture,
+	bootstrap *traceSnapshot,
+	prior *traceSnapshot,
+) error {
 	state, err := decodeClientState(capture.ClientState)
 	if err != nil {
 		return err
@@ -1500,7 +1517,7 @@ func validateSteadyPullFinalCapture(scenario scenarios.Scenario, capture finalCa
 	if err != nil {
 		return err
 	}
-	measured, err := steadyPullTrace(trace, bootstrap)
+	measured, err := steadyPullTrace(trace, prior)
 	if err != nil {
 		return err
 	}

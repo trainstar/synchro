@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +107,42 @@ func TestNewPushResponseLossCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	}
 	if coordinator.ExchangeCount() != 12 {
 		t.Fatalf("exchange count = %d, want 12", coordinator.ExchangeCount())
+	}
+}
+
+func TestPushResponseLossIdentityPhasesDeferRuntimeReplayAliases(t *testing.T) {
+	identities := loadPushResponseLossAuthoredScenario(t).NativeIdentityAliases
+	tests := []struct {
+		phase pushResponseLossIdentityPhase
+		want  []string
+	}{
+		{
+			phase: pushResponseLossIdentityPrepare,
+			want:  []string{"current-schema", "items-table"},
+		},
+		{
+			phase: pushResponseLossIdentityCapture,
+			want:  []string{"response-loss-primary-key"},
+		},
+		{
+			phase: pushResponseLossIdentityReplay,
+			want:  []string{"response-loss-batch", "response-loss-mutation"},
+		},
+	}
+	for _, test := range tests {
+		aliases, err := pushResponseLossAliasesForPhase(identities, test.phase)
+		if err != nil {
+			t.Fatalf("select push-response-loss identity phase %d: %v", test.phase, err)
+		}
+		actual := make([]string, 0, len(aliases))
+		for _, alias := range aliases {
+			actual = append(actual, alias.Alias)
+		}
+		sort.Strings(actual)
+		sort.Strings(test.want)
+		if !reflect.DeepEqual(actual, test.want) {
+			t.Fatalf("push-response-loss identity phase %d aliases = %v, want %v", test.phase, actual, test.want)
+		}
 	}
 }
 

@@ -74,6 +74,30 @@ func TestNewSeededEmptyStartupCoordinatorRejectsUnknownPlatform(t *testing.T) {
 	}
 }
 
+func TestSeededEmptyStartupControlSerializesEmptySteps(t *testing.T) {
+	coordinator := &SeededEmptyStartupCoordinator{
+		database:   "seed-control",
+		clients:    []seededEmptyStartupClient{{key: "client-a"}},
+		authTokens: map[string]string{"client-a": "token-a"},
+	}
+	encoded, err := json.Marshal(coordinator.seedControlCommand(true))
+	if err != nil {
+		t.Fatalf("encode seeded control command: %v", err)
+	}
+	var command map[string]any
+	if err := json.Unmarshal(encoded, &command); err != nil {
+		t.Fatalf("decode seeded control command: %v", err)
+	}
+	action, ok := command["action"].(map[string]any)
+	if !ok {
+		t.Fatalf("seeded control action = %#v", command["action"])
+	}
+	steps, ok := action["steps"].([]any)
+	if !ok || len(steps) != 0 || !strings.Contains(string(encoded), `"steps":[]`) {
+		t.Fatalf("seeded control steps = %#v serialized=%s", action["steps"], encoded)
+	}
+}
+
 func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *testing.T) {
 	clients, err := seededEmptyStartupClients(loadSeededEmptyStartupAuthoredScenario(t))
 	if err != nil {

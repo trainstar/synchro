@@ -564,6 +564,14 @@ func NewPushResponseLossCoordinator(config PushResponseLossCoordinatorConfig) (*
 
 type pushResponseLossIdentity struct{ userID, clientID string }
 
+type pushResponseLossIdentityPhase uint8
+
+const (
+	pushResponseLossIdentityPrepare pushResponseLossIdentityPhase = iota
+	pushResponseLossIdentityCapture
+	pushResponseLossIdentityReplay
+)
+
 func pushResponseLossClientIdentity(scenario scenarios.Scenario) (pushResponseLossIdentity, error) {
 	var payload struct {
 		AuthenticatedUserID string `json:"authenticated_user_id"`
@@ -616,7 +624,7 @@ func (c *PushResponseLossCoordinator) Prepare(ctx context.Context) error {
 	step := c.steps[pushResponseLossStepOrder[0]]
 	step.Operation = local
 	c.steps[pushResponseLossStepOrder[0]] = step
-	if err := c.bindServerIdentities(false); err != nil {
+	if err := c.bindServerIdentities(pushResponseLossIdentityPrepare); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -867,7 +875,7 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 		if err := c.bindCommittedPush(); err != nil {
 			return exchangeResponse{}, err
 		}
-		if err := c.bindServerIdentities(true); err != nil {
+		if err := c.bindServerIdentities(pushResponseLossIdentityCapture); err != nil {
 			return exchangeResponse{}, err
 		}
 		c.releaseInitialResponse()
@@ -892,6 +900,9 @@ func (c *PushResponseLossCoordinator) advanceLocked(ctx context.Context, sequenc
 			return exchangeResponse{}, err
 		}
 		if err := c.runControllerReplays(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		if err := c.bindServerIdentities(pushResponseLossIdentityReplay); err != nil {
 			return exchangeResponse{}, err
 		}
 		parameters, err := c.pushResponseLossCaptureParameters()
@@ -1106,12 +1117,10 @@ func (c *PushResponseLossCoordinator) validateTerminalSynchronized(raw json.RawM
 	return validatePushResponseLossProcess(members["process"], c.process)
 }
 
-func (c *PushResponseLossCoordinator) bindServerIdentities(primary bool) error {
-	aliases := make([]scenarios.NativeIdentityAlias, 0, len(c.identities))
-	for _, alias := range c.identities {
-		if alias.Kind == "schema" || alias.Kind == "scope" || alias.Kind == "table" || primary && (alias.Kind == "primary-key" || alias.Kind == "batch-id" || alias.Kind == "mutation-id") {
-			aliases = append(aliases, alias)
-		}
+func (c *PushResponseLossCoordinator) bindServerIdentities(phase pushResponseLossIdentityPhase) error {
+	aliases, err := pushResponseLossAliasesForPhase(c.identities, phase)
+	if err != nil {
+		return err
 	}
 	values, err := c.config.Controller.IdentityValues(aliases)
 	if err != nil {
@@ -1126,10 +1135,53 @@ func (c *PushResponseLossCoordinator) bindServerIdentities(primary bool) error {
 			c.primaryKey = value.ApplicationIdentifier
 		}
 	}
-	if c.tableName == "" || primary && c.primaryKey == "" {
+	switch phase {
+	case pushResponseLossIdentityPrepare:
+		if c.tableName == "" {
+			return errors.New("React Native push-response-loss runtime table identity is unavailable")
+		}
+	case pushResponseLossIdentityCapture:
+		if c.primaryKey == "" || len(c.runtimeIDs["response-loss-primary-key"]) == 0 {
+			return errors.New("React Native push-response-loss runtime primary-key identity is unavailable")
+		}
+	case pushResponseLossIdentityReplay:
+		if len(c.runtimeIDs["response-loss-batch"]) == 0 || len(c.runtimeIDs["response-loss-mutation"]) == 0 {
+			return errors.New("React Native push-response-loss runtime replay identities are unavailable")
+		}
+	default:
+		return errors.New("React Native push-response-loss identity phase is invalid")
+	}
+	if c.tableName == "" {
 		return errors.New("React Native push-response-loss runtime application identities are unavailable")
 	}
 	return nil
+}
+
+func pushResponseLossAliasesForPhase(
+	identities []scenarios.NativeIdentityAlias,
+	phase pushResponseLossIdentityPhase,
+) ([]scenarios.NativeIdentityAlias, error) {
+	aliases := make([]scenarios.NativeIdentityAlias, 0, len(identities))
+	for _, alias := range identities {
+		include := false
+		switch phase {
+		case pushResponseLossIdentityPrepare:
+			include = alias.Kind == "schema" || alias.Kind == "scope" || alias.Kind == "table"
+		case pushResponseLossIdentityCapture:
+			include = alias.Kind == "primary-key"
+		case pushResponseLossIdentityReplay:
+			include = alias.Kind == "batch-id" || alias.Kind == "mutation-id"
+		default:
+			return nil, errors.New("React Native push-response-loss identity phase is invalid")
+		}
+		if include {
+			aliases = append(aliases, alias)
+		}
+	}
+	if len(aliases) == 0 {
+		return nil, errors.New("React Native push-response-loss identity phase has no aliases")
+	}
+	return aliases, nil
 }
 func (c *PushResponseLossCoordinator) bindCommittedPush() error {
 	operation, err := pushResponseLossAppliedOperation(c.steps[pushResponseLossStepOrder[1]].Operation)
