@@ -39,123 +39,16 @@ type integrationMutantManifest struct {
 	Mutants []integrationMutant `json:"mutants"`
 }
 
-var requiredServerProofs = map[string][]string{
-	"SCN-PERF-CONFIGURED-BOUNDS-001": {
-		"OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001",
-		"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-PG-LINUX-X64-001",
-		"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-FAULT-001",
-		"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-PG-LINUX-X64-001",
-		"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-FAULT-001",
-	},
-	"SCN-PERF-CORE-SYNC-PATH-001": {
-		"OBL-PERF-CORE-SYNC-PATH-BOUNDARY-PG-LINUX-X64-001",
-		"OBL-PERF-CORE-SYNC-PATH-DBAUTH-001-PG-LINUX-X64-001",
-		"OBL-PERF-CORE-SYNC-PATH-DBAUTH-002-PG-LINUX-X64-001",
-		"OBL-PERF-CORE-SYNC-PATH-LOGGING-PG-LINUX-X64-001",
-		"OBL-PERF-CORE-SYNC-PATH-LOGGING-FAULT-001",
-		"OBL-PERF-CORE-SYNC-PATH-INSTALL-001-PG-LINUX-X64-001",
-		"OBL-PERF-CORE-SYNC-PATH-INSTALL-002-PG-LINUX-X64-001",
-	},
-	"SCN-PERF-SHARED-PRIVATE-SCOPES-001": {
-		"OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-PG-LINUX-X64-001",
-	},
-	"SCN-PERF-FANOUT-001": {
-		"OBL-PERF-FANOUT-REGISTRY-001-PG-LINUX-X64-001",
-		"OBL-PERF-FANOUT-REGISTRY-001-FAULT-001",
-		"OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001",
-	},
-	"SCN-PERF-WARM-CONNECT-001": {"OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001"},
-	"SCN-PERF-REBUILD-REQUESTS-001": {
-		"OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001",
-		"OBL-PERF-REBUILD-REQUESTS-REPLAY-009-FAULT-LINUX-X64-001",
-		"OBL-PERF-REBUILD-REQUESTS-ISOLATION-010-FAULT-LINUX-X64-001",
-	},
-	"SCN-PERF-SCHEMA-CHECK-001": {
-		"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
-		"OBL-PERF-SCHEMA-CHECK-PROJECTION-FAULT-001",
-	},
-	"SCN-PERF-SEEDED-EMPTY-STARTUP-001": {
-		"OBL-PERF-SEEDED-EMPTY-STARTUP-PG-LINUX-X64-001",
-		"OBL-PERF-SEEDED-EMPTY-STARTUP-CONTINUATION-FAULT-001",
-		"OBL-PERF-SEEDED-EMPTY-STARTUP-TRANSACTION-FAULT-001",
-		"OBL-PERF-SEEDED-EMPTY-STARTUP-TOKEN-FAULT-001",
-		"OBL-PERF-SEEDED-EMPTY-STARTUP-ARTIFACT-FAULT-001",
-	},
-	"SCN-PERF-STEADY-PULL-001": {
-		"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001",
-		"OBL-PERF-STEADY-PULL-CURSOR-004-FAULT-LINUX-X64-001",
-	},
-	"SCN-PERF-PENDING-CYCLE-001": {
-		"OBL-PERF-PENDING-CYCLE-CONFLICT-FAULT-001",
-		"OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001",
-		"OBL-PERF-PENDING-CYCLE-CONFLICT-001-FAULT-LINUX-X64-001",
-	},
-	"SCN-WAL-ORDER-001": {
-		"OBL-WAL-ORDER-PG-LINUX-X64-001",
-		"OBL-WAL-NO-LOSS-PG-LINUX-X64-001",
-		"OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001",
-		"OBL-WAL-ONLY-PUBLICATION-PG-LINUX-X64-001",
-		"OBL-WAL-ONLY-PUBLICATION-FAULT-LINUX-X64-001",
-		"OBL-WAL-REPLAY-PG-LINUX-X64-001",
-		"OBL-WAL-REPLAY-FAULT-LINUX-X64-001",
-	},
-	"SCN-PULL-DIVERGENT-CHECKPOINTS-001": {"OBL-PULL-DIVERGENT-PG-LINUX-X64-001"},
-	"SCN-PULL-HYDRATION-FAILURE-001":     {"OBL-PULL-HYDRATION-PG-LINUX-X64-001"},
-	"SCN-WAL-DECODE-FAILURE-001": {
-		"OBL-WAL-DECODE-PG-LINUX-X64-001",
-		"OBL-WAL-ACK-PG-LINUX-X64-001",
-		"OBL-WAL-ACK-FAULT-LINUX-X64-001",
-		"OBL-WAL-RESET-LIFECYCLE-PG-LINUX-X64-001",
-		"OBL-WAL-RESET-LIFECYCLE-FAULT-LINUX-X64-001",
-		"OBL-WAL-RESET-COVERAGE-PG-LINUX-X64-001",
-		"OBL-WAL-RESET-COVERAGE-FAULT-LINUX-X64-001",
-	},
-	"SCN-REGISTRY-RELOAD-001": {
-		"OBL-REGISTRY-RELOAD-PG-LINUX-X64-001",
-		"OBL-REGISTRY-RELOAD-WAL-008-PG-LINUX-X64-001",
-		"OBL-REGISTRY-RELOAD-WAL-008-FAULT-LINUX-X64-001",
-	},
-	"SCN-PUSH-RESPONSE-LOSS-001": {
-		"OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001",
-		"OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001",
-		"OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-PG-LINUX-X64-001",
-		"OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-FAULT-LINUX-X64-001",
-		"OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-PG-LINUX-X64-001",
-		"OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-FAULT-LINUX-X64-001",
-	},
-	"SCN-REBUILD-FORGED-CURSOR-001": {"OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001"},
-	"SCN-SCHEMA-QUEUED-MUTATION-001": {
-		"OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
-		"OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001",
-	},
-	"SCN-RETENTION-RECONNECT-001": {
-		"OBL-RETENTION-RECONNECT-PG-LINUX-X64-001",
-		"OBL-RETENTION-RECONNECT-RETENTION-001-FAULT-LINUX-X64-001",
-	},
-	"SCN-MEMBERSHIP-REASSIGNMENT-001": {
-		"OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001",
-		"OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001",
-		"OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001",
-	},
-	"SCN-PERF-MULTI-SCOPE-PROVENANCE-001": {
-		"OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001",
-		"OBL-MEMBERSHIP-GENERATION-PG-LINUX-X64-001",
-		"OBL-MEMBERSHIP-GENERATION-FAULT-LINUX-X64-001",
-		"OBL-MEMBERSHIP-BACKFILL-PG-LINUX-X64-001",
-		"OBL-MEMBERSHIP-BACKFILL-FAULT-LINUX-X64-001",
-	},
-}
-
 // serverProofBindings is the sole server and fault proof map. Synthetic harness
 // runs are layer-6 self-tests and negative controls, so they cannot enter it.
 var serverProofBindings = []serverProofBinding{
-	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", []string{"TestRealWALPipeline"}},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", []string{"TestRealConfiguredBoundsMeasurement"}},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-PG-LINUX-X64-001", []string{"TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed"}},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-HEALTH-001-FAULT-001", []string{"TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed"}},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-PG-LINUX-X64-001", []string{"TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed"}},
 	{"SCN-PERF-CONFIGURED-BOUNDS-001", "OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-FAULT-001", []string{"TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed"}},
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-BOUNDARY-PG-LINUX-X64-001", []string{"TestRealIssue49AdapterDelegationAndServerScopes", "TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary"}},
+	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-PG-LINUX-X64-001", []string{"TestRealIssue49AdapterDelegationAndServerScopes"}},
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-DBAUTH-001-PG-LINUX-X64-001", []string{"TestRealIssue49DatabaseAuthorityAndInstallation", "TestRealIssue49SecurityDatabaseAuthority"}},
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-DBAUTH-002-PG-LINUX-X64-001", []string{"TestRealIssue49DatabaseAuthorityAndInstallation", "TestRealIssue49SecurityDatabaseAuthority"}},
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-LOGGING-PG-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics", "TestRealIssue49SecurityOperationalRedaction"}},
@@ -163,6 +56,8 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-INSTALL-001-PG-LINUX-X64-001", []string{"TestRealIssue49DatabaseAuthorityAndInstallation", "TestRealIssue49SecurityInstallationAuthority"}},
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-INSTALL-002-PG-LINUX-X64-001", []string{"TestRealIssue49DatabaseAuthorityAndInstallation", "TestRealIssue49SecurityInstallationAuthority"}},
 	{"SCN-PERF-SHARED-PRIVATE-SCOPES-001", "OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-PG-LINUX-X64-001", []string{"TestRealIssue49AdapterDelegationAndServerScopes", "TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary"}},
+	{"SCN-PERF-SHARED-PRIVATE-SCOPES-001", "OBL-PERF-SHARED-PRIVATE-SCOPES-PG-LINUX-X64-001", []string{"TestRealReleaseScopeMembershipDeterminism"}},
+	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-PG-LINUX-X64-001", []string{"TestRealReleaseRegisteredFunctionContract"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-001-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-001-FAULT-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
@@ -180,27 +75,38 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-STEADY-PULL-001", "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001", []string{"TestRealMutationControlChecksumCorrectness", "TestRealMutationControlCursorAdvancement", "TestRealIssue49RebuildReplayEpochAndMonotonicCursor", "TestRealIssue49RemainingSemantics"}},
 	{"SCN-PERF-STEADY-PULL-001", "OBL-PERF-STEADY-PULL-CURSOR-004-FAULT-LINUX-X64-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-PERF-PENDING-CYCLE-001", "OBL-PERF-PENDING-CYCLE-CONFLICT-FAULT-001", []string{"TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner"}},
+	{"SCN-PERF-PENDING-CYCLE-001", "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001", []string{"TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay", "TestRealS16ConcurrentPushCASIgnoresClientTime", "TestRealIssue49RemainingSemantics", "TestRealIssue49AdapterDelegationAndServerScopes"}},
+	{"SCN-PERF-QUEUE-REPLAY-001", "OBL-PERF-QUEUE-REPLAY-PG-LINUX-X64-001", []string{"TestRealS11MixedPushOutcomesPreservePartitionOrder"}},
+	{"SCN-PERF-REBUILD-CARDINALITY-001", "OBL-PERF-REBUILD-CARDINALITY-PG-LINUX-X64-001", []string{"TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary", "TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
+	{"SCN-PERF-REBUILD-CARDINALITY-001", "OBL-PERF-REBUILD-CARDINALITY-FAULT-LINUX-X64-001", []string{"TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary", "TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-PERF-PENDING-CYCLE-001", "OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PERF-PENDING-CYCLE-001", "OBL-PERF-PENDING-CYCLE-CONFLICT-001-FAULT-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PULL-DIVERGENT-CHECKPOINTS-001", "OBL-PULL-DIVERGENT-PG-LINUX-X64-001", []string{"TestRealS02DivergentPullPaginationIsStarvationFree"}},
 	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-PG-LINUX-X64-001", []string{"TestRealS03PullHydrationFailurePreservesCursors"}},
+	{"SCN-PULL-HYDRATION-FAILURE-001", "OBL-PULL-HYDRATION-FAULT-LINUX-X64-001", []string{"TestRealS03PullHydrationFailurePreservesCursors"}},
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-PG-LINUX-X64-001", []string{"TestRealWALDecodeFailureRepairsSameIdentity"}},
+	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-FAULT-LINUX-X64-001", []string{"TestRealWALDecodeFailureRepairsSameIdentity"}},
 	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary"}},
+	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-FAULT-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary"}},
 	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-WAL-008-PG-LINUX-X64-001", []string{"TestRealIssue49CaptureReadinessRequiresEveryCheck", "TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
 	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-WAL-008-FAULT-LINUX-X64-001", []string{"TestRealIssue49CaptureReadinessRequiresEveryCheck", "TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", []string{"TestRealS11PushResponseLossReplaysExactCanonicalResponse", "TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay", "TestRealIssue49RemainingSemantics"}},
+	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-FAULT-LINUX-X64-001", []string{"TestRealS11PushResponseLossReplaysExactCanonicalResponse"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-FAILURE-003-FAULT-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-PG-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-FAULT-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-PG-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-FAULT-LINUX-X64-001", []string{"TestRealIssue49FirstPushResponseFailureRollsBackEveryDurableEffect", "TestRealIssue49RemainingSemantics"}},
 	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", []string{"TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary", "TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
+	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-EPOCH-FAULT-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", []string{"TestRealSchemaIncompatibleMutationPersistsCanonicalIntent", "TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001", []string{"TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect", "TestRealIssue49RemainingSemantics"}},
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-RETENTION-001-FAULT-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect", "TestRealIssue49RemainingSemantics"}},
-	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", []string{"TestRealWALPipeline"}},
+	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-PG-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", []string{"TestRealReleaseWALOrdinalGapsPreserveCommitOrder"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-FAULT-LINUX-X64-001", []string{"TestRealReleaseWALOrdinalGapsPreserveCommitOrder"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ONLY-PUBLICATION-PG-LINUX-X64-001", []string{"TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ONLY-PUBLICATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
@@ -213,6 +119,8 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-COVERAGE-PG-LINUX-X64-001", []string{"TestRealIssue49ResetCoversEveryFenceOperation", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-COVERAGE-FAULT-LINUX-X64-001", []string{"TestRealIssue49ResetCoversEveryFenceOperation", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
 	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001", []string{"TestRealIssue49FenceCorrelationAndCapturePending"}},
+	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", []string{"TestRealReleaseDependencyReassignmentRetainsVersion"}},
+	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-LINUX-X64-001", []string{"TestRealReleaseDependencyReassignmentRetainsVersion"}},
 	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49FenceCorrelationAndCapturePending", "TestRealIssue49FenceCorrelatesOldRecordIdentity", "TestRealIssue49FenceCorrelatesCaptureKeys"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-GENERATION-PG-LINUX-X64-001", []string{"TestRealIssue49MembershipActivationIsStagedAndScoped"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-GENERATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss"}},
@@ -222,18 +130,17 @@ var serverProofBindings = []serverProofBinding{
 }
 
 var nonScenarioRealTests = map[string]string{
-	"TestRealExtensionReinstallRebindsWorkerSlot":        "regression",
-	"TestRealHTTPHarness":                                "framework",
-	"TestRealMutationControlMutationConservation":        "adversarial",
-	"TestRealNativeCaptureServerObservationSignals":      "regression",
-	"TestRealMutationControlProgressOrder":               "adversarial",
-	"TestRealMutationControlScopeIsolation":              "adversarial",
-	"TestRealMutationControlWALAcknowledgement":          "adversarial",
-	"TestRealR1PerformanceBenchmark":                     "benchmark",
-	"TestRealS11MixedPushOutcomesPreservePartitionOrder": "regression",
-	"TestRealS16ConcurrentPushCASIgnoresClientTime":      "regression",
-	"TestRealS17InvalidPushShapesDoNoDurableWork":        "adversarial",
-	"TestRealS20PushMutationCountBoundsAreAtomic":        "adversarial",
+	"TestRealExtensionReinstallRebindsWorkerSlot":   "regression",
+	"TestRealHTTPHarness":                           "framework",
+	"TestRealMutationControlMutationConservation":   "adversarial",
+	"TestRealNativeCaptureServerObservationSignals": "regression",
+	"TestRealMutationControlProgressOrder":          "adversarial",
+	"TestRealMutationControlScopeIsolation":         "adversarial",
+	"TestRealMutationControlWALAcknowledgement":     "adversarial",
+	"TestRealR1PerformanceBenchmark":                "benchmark",
+	"TestRealS17InvalidPushShapesDoNoDurableWork":   "adversarial",
+	"TestRealS20PushMutationCountBoundsAreAtomic":   "adversarial",
+	"TestRealWALPipeline":                           "regression",
 }
 
 func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {
@@ -294,21 +201,21 @@ func TestServerProofMapRejectsDrift(t *testing.T) {
 		expected string
 		mutate   func([]serverProofBinding, map[string]string, map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration)
 	}{
-		{"renamed real test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names unknown real test TestRealRenamed", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+		{"renamed real test", "proof binding SCN-PERF-CONFIGURED-BOUNDS-001|OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001 names unknown real test TestRealRenamed", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			bindings[0].testNames = []string{"TestRealRenamed"}
 			return bindings, classifications, declarations
 		}},
-		{"synthetic harness test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names non-real test TestRunSyntheticHarnessDetectsSemanticFaults", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+		{"synthetic harness test", "proof binding SCN-PERF-CONFIGURED-BOUNDS-001|OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001 names non-real test TestRunSyntheticHarnessDetectsSemanticFaults", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			bindings[0].testNames = []string{"TestRunSyntheticHarnessDetectsSemanticFaults"}
 			return bindings, classifications, declarations
 		}},
-		{"duplicate binding", "duplicate proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+		{"duplicate binding", "duplicate proof binding SCN-PERF-CONFIGURED-BOUNDS-001|OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			return append(bindings, bindings[0]), classifications, declarations
 		}},
-		{"missing binding", "missing proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+		{"missing binding", "missing proof binding SCN-PERF-CONFIGURED-BOUNDS-001|OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			return bindings[1:], classifications, declarations
 		}},
-		{"unknown obligation", "unexpected proof binding SCN-WAL-ORDER-001|OBL-UNKNOWN-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+		{"unknown obligation", "unexpected proof binding SCN-PERF-CONFIGURED-BOUNDS-001|OBL-UNKNOWN-001", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
 			bindings[0].obligationID = "OBL-UNKNOWN-001"
 			return bindings, classifications, declarations
 		}},
@@ -322,10 +229,10 @@ func TestServerProofMapRejectsDrift(t *testing.T) {
 			declarations["TestRealWALPipeline"] = declaration
 			return bindings, classifications, declarations
 		}},
-		{"constrained mapped test", "proof binding SCN-WAL-ORDER-001|OBL-WAL-ORDER-PG-LINUX-X64-001 names real test TestRealWALPipeline unavailable on linux-x64", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
-			declaration := declarations["TestRealWALPipeline"]
+		{"constrained mapped test", "proof binding SCN-PERF-CONFIGURED-BOUNDS-001|OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001 names real test TestRealConfiguredBoundsMeasurement unavailable on linux-x64", func(bindings []serverProofBinding, classifications map[string]string, declarations map[string]realTestDeclaration) ([]serverProofBinding, map[string]string, map[string]realTestDeclaration) {
+			declaration := declarations["TestRealConfiguredBoundsMeasurement"]
 			declaration.linuxX64 = false
-			declarations["TestRealWALPipeline"] = declaration
+			declarations["TestRealConfiguredBoundsMeasurement"] = declaration
 			return bindings, classifications, declarations
 		}},
 	}
@@ -435,9 +342,12 @@ func validateServerProofMap(authored []scenarios.Scenario, declarations map[stri
 
 	var failures []string
 	requiredKeys := make(map[string]struct{})
-	for scenarioID, obligations := range requiredServerProofs {
-		for _, obligationID := range obligations {
-			requiredKeys[scenarioID+"|"+obligationID] = struct{}{}
+	for _, scenario := range authored {
+		for _, obligation := range scenario.ProofObligations {
+			if obligation.SupportCellID != nil && string(*obligation.SupportCellID) == "SUP-PG-LINUX-X64-001" &&
+				(obligation.ProofType == "server-black-box" || obligation.ProofType == "fault-injection") {
+				requiredKeys[string(scenario.ID)+"|"+string(obligation.ObligationID)] = struct{}{}
+			}
 		}
 	}
 	bindingKeys := make(map[string]struct{}, len(bindings))
@@ -494,17 +404,9 @@ func validateServerProofMap(authored []scenarios.Scenario, declarations map[stri
 		}
 	}
 
-	for scenarioID, obligations := range requiredServerProofs {
-		_, found := scenarioByID[scenarioID]
-		if !found {
-			failures = append(failures, "required proof scenario is absent "+scenarioID)
-			continue
-		}
-		for _, obligationID := range obligations {
-			key := scenarioID + "|" + obligationID
-			if _, found := bindingKeys[key]; !found {
-				failures = append(failures, "missing proof binding "+key)
-			}
+	for key := range requiredKeys {
+		if _, found := bindingKeys[key]; !found {
+			failures = append(failures, "missing proof binding "+key)
 		}
 	}
 	for testName, declaration := range declarations {

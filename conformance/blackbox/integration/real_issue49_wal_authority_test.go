@@ -986,6 +986,7 @@ func TestRealIssue49FenceCorrelationAndCapturePending(t *testing.T) {
 // TestRealIssue49AdapterDelegationAndServerScopes proves SYNC-BOUNDARY-001 and
 // SYNC-SCOPE-005 at all public synchronization endpoints.
 func TestRealIssue49AdapterDelegationAndServerScopes(t *testing.T) {
+	assertCoreSyncBoundary(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	harness, token := provisionRealProofHarness(t, ctx)

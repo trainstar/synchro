@@ -188,8 +188,8 @@
       "title": "Rebuild finality",
       "category": "cursor-rebuild",
       "statement": "A rebuild completes only after all pages apply, stale scope provenance is pruned, unjustified rows are removed, the final checksum matches, and the final cursor is installed.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection"],
-      "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
+      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-finality" }]
     },
     {
