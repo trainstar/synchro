@@ -15,6 +15,49 @@ import packaged_smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 class PackagedSmokeStructureTests(unittest.TestCase):
+    def test_summary_rejects_self_consistent_but_wrong_release_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest_path = root / "release-manifest.json"
+            roles = ["pg-extension", "adapter", "seed-tool", "kotlin-maven", "react-native-npm"]
+            hashes = {role: str(index + 1) * 64 for index, role in enumerate(roles)}
+            packaged_smoke.write_json(manifest_path, {
+                "source": {"commit": packaged_smoke.source_commit(REPO_ROOT)},
+                "distributions": [
+                    {"role": role, "kind": "file", "sha256": digest}
+                    for role, digest in hashes.items()
+                ],
+            })
+            manifest_hash = packaged_smoke.hash_files([manifest_path])[0]
+            cells = {
+                "SUP-PG-LINUX-X64-001": [hashes[role] for role in roles[:3]],
+                "SUP-IOS-MIN-001": [manifest_hash],
+                "SUP-IOS-CURRENT-001": [manifest_hash],
+                "SUP-ANDROID-MIN-001": [hashes["kotlin-maven"]],
+                "SUP-ANDROID-CURRENT-001": [hashes["kotlin-maven"]],
+                "SUP-RN-IOS-CURRENT-001": [manifest_hash, hashes["react-native-npm"]],
+                "SUP-RN-ANDROID-CURRENT-001": [hashes["kotlin-maven"], hashes["react-native-npm"]],
+            }
+            summary = {
+                "schema_version": 1,
+                "source_commit": packaged_smoke.source_commit(REPO_ROOT),
+                "artifact_hashes": sorted({h for hs in cells.values() for h in hs}),
+                "status": "passed",
+                "obligations": [
+                    {"id": f"smoke/{cell}/{operation}", "kind": "smoke", "status": "passed",
+                     "terminal": True, "test_count": 1, "artifact_hashes": hs}
+                    for cell, hs in cells.items() for operation in packaged_smoke.SMOKE_OPERATIONS
+                ],
+            }
+            summary_path = root / "summary.json"
+            packaged_smoke.write_json(summary_path, summary)
+            packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
+            summary["obligations"][0]["artifact_hashes"] = ["f" * 64]
+            summary["artifact_hashes"].append("f" * 64)
+            packaged_smoke.write_json(summary_path, summary)
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "does not match sealed"):
+                packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
+
     def test_dry_summary_and_mutations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-structure.") as raw_directory:
             directory = Path(raw_directory)

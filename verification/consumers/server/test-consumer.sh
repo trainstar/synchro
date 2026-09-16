@@ -74,6 +74,12 @@ make_url() {
 }
 admin_url=$(make_url "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")
 adapter_url=$(make_url "$SYNCHRO_CONFORMANCE_ADAPTER_USER" "$SYNCHRO_CONFORMANCE_ADAPTER_PASSWORD_FILE")
+if [ "$SYNCHRO_CONFORMANCE_OPERATOR_USER" = "$SYNCHRO_CONFORMANCE_WORKER_USER" ]; then
+  echo "projection bootstrap requires distinct operator and worker users" >&2
+  exit 1
+fi
+operator_url=$(make_url "$SYNCHRO_CONFORMANCE_OPERATOR_USER" "$SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE")
+worker_url=$(make_url "$SYNCHRO_CONFORMANCE_WORKER_USER" "$SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE")
 DATABASE_URL="$admin_url" "$provisioner" prepare --repo-root "$repo_root"
 
 start_adapter() {
@@ -90,6 +96,97 @@ killed_pid=$adapter_pid
 kill -9 "$adapter_pid"; wait "$adapter_pid" 2>/dev/null || true; adapter_pid=
 start_adapter
 go run "$repo_root/verification/consumers/server/public_smoke.go" --url "$listen_url" --jwt-secret-file "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" --phase resume --adapter-pid "$adapter_pid" --state-dir "$work_dir/protocol-state" --output "$work_dir/resume.json"
+bootstrap_row_id=00000000-0000-4000-8000-000000009501
+PGDATABASE="$admin_url" "$pg18_bindir/psql" -Xq -v ON_ERROR_STOP=1 -v bootstrap_row_id="$bootstrap_row_id" >/dev/null <<'SQL'
+INSERT INTO public.cf_late_registration (id, owner_id, value)
+VALUES (:'bootstrap_row_id', 'diagnostic-user', 'packaged-projection-bootstrap');
+
+SELECT synchro.synchro_register_table(
+  'public.cf_late_registration',
+  'public.cf_late_registration_membership',
+  'single_scope',
+  'id', 'updated_at', 'deleted_at', 'enabled'
+);
+SQL
+registry_generation=$(
+  PGDATABASE="$admin_url" "$pg18_bindir/psql" -XAtq -v ON_ERROR_STOP=1 <<'SQL'
+SELECT registry.registry_generation
+FROM synchro.sync_registry registry
+JOIN synchro.sync_registry_generations generation
+  ON generation.generation = registry.registry_generation
+WHERE generation.state = 'pending'
+  AND generation.validated
+  AND registry.physical_schema = 'public'
+  AND registry.physical_relation = 'cf_late_registration'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM synchro.sync_schema_manifest manifest
+    WHERE manifest.registry_generation = registry.registry_generation
+  )
+ORDER BY registry.registry_generation DESC
+LIMIT 1;
+SQL
+)
+case "$registry_generation" in
+  ''|*[!0-9]*) echo "projection bootstrap registry generation is invalid" >&2; exit 1 ;;
+esac
+DATABASE_URL="$operator_url" WORKER_DATABASE_URL="$worker_url" \
+  timeout 120 "$adapter" projection-bootstrap --registry-generation "$registry_generation" \
+  >"$work_dir/projection-bootstrap.json"
+test -s "$work_dir/projection-bootstrap.json"
+bootstrap_valid=$(
+  PGDATABASE="$admin_url" "$pg18_bindir/psql" -XAtq -v ON_ERROR_STOP=1 \
+    -v registry_generation="$registry_generation" -v bootstrap_row_id="$bootstrap_row_id" <<'SQL'
+WITH target AS (
+  SELECT registry.relation_id
+  FROM synchro.sync_registry registry
+  WHERE registry.registry_generation = :'registry_generation'::bigint
+    AND registry.physical_schema = 'public'
+    AND registry.physical_relation = 'cf_late_registration'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM synchro.sync_registry_generations generation
+    WHERE generation.generation = :'registry_generation'::bigint
+      AND generation.state = 'active'
+      AND generation.validated
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM synchro.sync_schema_manifest manifest
+    WHERE manifest.registry_generation = :'registry_generation'::bigint
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM synchro.sync_stream_resets reset
+    WHERE reset.operation_kind = 'projection_bootstrap'
+      AND reset.target_registry_generation = :'registry_generation'::bigint
+      AND reset.lifecycle = 'activated'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM public.cf_late_registration source
+    WHERE source.id = :'bootstrap_row_id'::uuid
+      AND source.owner_id = 'diagnostic-user'
+      AND source.value = 'packaged-projection-bootstrap'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM synchro.sync_captured_rows captured
+    JOIN target ON target.relation_id = captured.relation_id
+    WHERE captured.record_id = :'bootstrap_row_id'
+      AND NOT captured.deleted
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM synchro.sync_bucket_edges edge
+    JOIN target ON target.relation_id = edge.relation_id
+    WHERE edge.record_id = :'bootstrap_row_id'
+      AND edge.bucket_id = 'user:diagnostic-user'
+  );
+SQL
+)
+test "$bootstrap_valid" = t
 DATABASE_URL="$admin_url" "$seed" --output "$work_dir/seed.sqlite"
 test -s "$work_dir/seed.sqlite"
 set -- python3 "$tool" complete-server-cell --repo-root "$repo_root" --cell "$cell_id" --output "$cell_result" --initial "$work_dir/initial.json" --resume "$work_dir/resume.json" --killed-pid "$killed_pid" --artifact "$extension_archive" --artifact "$adapter" --artifact "$seed"

@@ -460,6 +460,74 @@ def central_upload(bundle: Path, name: str) -> str:
     return identifier
 
 
+def central_recovery_action(deployment_state: str) -> str:
+    if deployment_state in {"PENDING", "VALIDATING"}:
+        return "wait"
+    if deployment_state in {"VALIDATED", "FAILED"}:
+        return "replace"
+    if deployment_state in {"PUBLISHING", "PUBLISHED"}:
+        return "continue"
+    raise PublicationError("Central deployment state is unsupported for recovery")
+
+
+def list_central_deployments(name: str, *, page_size: int = 100) -> dict[str, Any]:
+    deployments: list[dict[str, Any]] = []
+    page = 0
+    expected_page_count: int | None = None
+    expected_total: int | None = None
+    while True:
+        query = urllib.parse.urlencode({
+            "deploymentName": name,
+            "page": page,
+            "size": page_size,
+            "sortField": "deploymentName",
+            "sortDirection": "asc",
+        })
+        value = central_json(f"/deployments?{query}", method="GET")
+        if not isinstance(value, dict):
+            raise PublicationError("Central deployment list response is invalid")
+        items = value.get("deployments")
+        response_page = value.get("page")
+        response_page_size = value.get("pageSize")
+        page_count = value.get("pageCount")
+        total = value.get("totalResultCount")
+        if (
+            not isinstance(items, list)
+            or any(not isinstance(item, dict) for item in items)
+            or isinstance(response_page, bool)
+            or not isinstance(response_page, int)
+            or response_page != page
+            or isinstance(response_page_size, bool)
+            or not isinstance(response_page_size, int)
+            or response_page_size <= 0
+            or isinstance(page_count, bool)
+            or not isinstance(page_count, int)
+            or page_count < 0
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+        ):
+            raise PublicationError("Central deployment list response is invalid")
+        if expected_page_count is None:
+            expected_page_count = page_count
+            expected_total = total
+        elif page_count != expected_page_count or total != expected_total:
+            raise PublicationError("Central deployment list changed during pagination")
+        deployments.extend(items)
+        if page_count == 0 or page + 1 >= page_count:
+            break
+        page += 1
+    if expected_total is None or len(deployments) != expected_total:
+        raise PublicationError("Central deployment list is incomplete")
+    return {
+        "deployments": deployments,
+        "page": 0,
+        "pageSize": page_size,
+        "pageCount": expected_page_count,
+        "totalResultCount": expected_total,
+    }
+
+
 def observe_public(identity: dict[str, Any], repository: str, token: str | None) -> dict[str, Any]:
     if repository != "trainstar/synchro":
         raise PublicationError("publication repository is invalid")
@@ -594,6 +662,8 @@ def main() -> int:
     central_upload_parser.add_argument("--bundle", type=Path, required=True)
     central_upload_parser.add_argument("--name", required=True)
     central_upload_parser.add_argument("--output", type=Path, required=True)
+    central_recovery_parser = subparsers.add_parser("central-recovery-action")
+    central_recovery_parser.add_argument("--state", required=True)
     central_publish_parser = subparsers.add_parser("central-publish")
     central_publish_parser.add_argument("--deployment-id", required=True)
     central_drop_parser = subparsers.add_parser("central-drop")
@@ -623,14 +693,15 @@ def main() -> int:
         elif args.command == "central-select":
             write_json(args.output, select_central(load_json(args.input, "Central deployments"), args.name))
         elif args.command == "central-list":
-            query = urllib.parse.urlencode({"deploymentName": args.name, "pageSize": 100})
-            write_json(args.output, central_json(f"/deployments?{query}", method="GET"))
+            write_json(args.output, list_central_deployments(args.name))
         elif args.command == "central-status":
             query = urllib.parse.urlencode({"id": args.deployment_id})
             write_json(args.output, central_json(f"/status?{query}"))
         elif args.command == "central-upload":
             identifier = central_upload(args.bundle.resolve(), args.name)
             write_json(args.output, {"deployment_id": identifier})
+        elif args.command == "central-recovery-action":
+            print(central_recovery_action(args.state))
         elif args.command == "central-publish":
             central_request(f"/deployment/{urllib.parse.quote(args.deployment_id, safe='')}")
         elif args.command == "central-drop":

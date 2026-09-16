@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -239,6 +241,20 @@ class PublicationStateTests(unittest.TestCase):
         with self.assertRaisesRegex(release_publish.PublicationError, "incomplete assets"):
             release_publish.classify_publication(self.identity, state)
 
+    def test_recovered_public_github_release_does_not_publish_again(self) -> None:
+        for latest, expected_status in ((False, "public"), (True, "public-latest")):
+            with self.subTest(latest=latest):
+                state = self.state()
+                state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
+                state["github"] = {
+                    "draft": False,
+                    "latest": latest,
+                    "assets": self.identity["github_assets"],
+                }
+                result = release_publish.classify_publication(self.identity, state)
+                self.assertEqual(result["github"], expected_status)
+                self.assertEqual(result["next_operation"], "publish-maven")
+
     def test_selects_one_deterministic_central_deployment(self) -> None:
         value = {"deployments": [{"deploymentId": "one", "deploymentName": "wanted", "deploymentState": "VALIDATED"}]}
         self.assertEqual(
@@ -253,6 +269,63 @@ class PublicationStateTests(unittest.TestCase):
         ]}
         with self.assertRaisesRegex(release_publish.PublicationError, "duplicate"):
             release_publish.select_central(value, "wanted")
+
+    def test_central_recovery_waits_for_unsettled_deployments(self) -> None:
+        for state in ("PENDING", "VALIDATING"):
+            with self.subTest(state=state):
+                self.assertEqual(release_publish.central_recovery_action(state), "wait")
+
+    def test_central_recovery_replaces_only_unpublished_settled_deployments(self) -> None:
+        for state in ("VALIDATED", "FAILED"):
+            with self.subTest(state=state):
+                self.assertEqual(release_publish.central_recovery_action(state), "replace")
+
+    def test_central_recovery_never_replaces_irreversible_deployments(self) -> None:
+        for state in ("PUBLISHING", "PUBLISHED"):
+            with self.subTest(state=state):
+                self.assertEqual(release_publish.central_recovery_action(state), "continue")
+
+    @mock.patch.object(release_publish, "central_json")
+    def test_lists_every_central_page_with_documented_size_parameter(self, central_json: mock.Mock) -> None:
+        central_json.side_effect = [
+            {
+                "deployments": [{"deploymentId": "one", "deploymentName": "wanted-a", "deploymentState": "VALIDATED"}],
+                "page": 0,
+                "pageSize": 1,
+                "pageCount": 2,
+                "totalResultCount": 2,
+            },
+            {
+                "deployments": [{"deploymentId": "two", "deploymentName": "wanted", "deploymentState": "VALIDATED"}],
+                "page": 1,
+                "pageSize": 1,
+                "pageCount": 2,
+                "totalResultCount": 2,
+            },
+        ]
+        value = release_publish.list_central_deployments("wanted")
+        self.assertEqual(release_publish.select_central(value, "wanted")["deployment_id"], "two")
+        self.assertEqual(central_json.call_count, 2)
+        for page, call in enumerate(central_json.call_args_list):
+            path = call.args[0]
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            self.assertEqual(query["deploymentName"], ["wanted"])
+            self.assertEqual(query["page"], [str(page)])
+            self.assertEqual(query["size"], ["100"])
+            self.assertNotIn("pageSize", query)
+            self.assertEqual(call.kwargs, {"method": "GET"})
+
+    @mock.patch.object(release_publish, "central_json")
+    def test_rejects_partial_central_pagination(self, central_json: mock.Mock) -> None:
+        central_json.return_value = {
+            "deployments": [],
+            "page": 0,
+            "pageSize": 100,
+            "pageCount": 1,
+            "totalResultCount": 1,
+        }
+        with self.assertRaisesRegex(release_publish.PublicationError, "incomplete"):
+            release_publish.list_central_deployments("wanted")
 
     def receipt(self, digest: str = "6" * 64, attempt: str = "2") -> dict[str, str]:
         return {
@@ -339,6 +412,16 @@ class PublicationStateTests(unittest.TestCase):
                 self.artifact(),
                 self.manifest(attempt=3),
                 "123",
+                now=datetime(2026, 9, 14, tzinfo=timezone.utc),
+            )
+
+    def test_receipt_rejects_wrong_recovery_run(self) -> None:
+        with self.assertRaisesRegex(release_publish.PublicationError, "another workflow run"):
+            release_publish.verify_sealed_receipt(
+                self.receipt(),
+                self.artifact(),
+                self.manifest(),
+                "124",
                 now=datetime(2026, 9, 14, tzinfo=timezone.utc),
             )
 
