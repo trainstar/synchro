@@ -674,11 +674,11 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		library="$$out$$pkglibdir/synchro_pg.$$suffix"; \
 		control="$$out$$sharedir/extension/synchro_pg.control"; \
 		sql="$$out$$sharedir/extension/synchro_pg--$(CURRENT_VERSION).sql"; \
-		test -f "$$library" && test -f "$$control" && test -f "$$sql"; \
+		test -f "$$library" && test -f "$$control" && test -f "$$sql" || { echo "pgrx package omitted a required extension file" >&2; exit 1; }; \
 		perl -pi -e 's/[ \t]+$$//' "$$sql"; \
 		perl -0pi -e 's/\n+\z/\n/' "$$sql"; \
-		cmp -s extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql "$$sql"; \
-		cmp -s extensions/synchro-pg/synchro_pg.control "$$control"; \
+		cmp -s extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql "$$sql" || { echo "packaged PostgreSQL SQL differs from the tracked artifact. Run make generate-pg-sql" >&2; exit 1; }; \
+		cmp -s extensions/synchro-pg/synchro_pg.control "$$control" || { echo "packaged PostgreSQL control file differs from the tracked artifact" >&2; exit 1; }; \
 		library_path="$${library#"$$out"/}"; \
 		control_path="$${control#"$$out"/}"; \
 		sql_path="$${sql#"$$out"/}"; \
