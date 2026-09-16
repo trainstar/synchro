@@ -226,6 +226,78 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(row?["ship_address"] as String?, "second")
     }
 
+    func testPushRetryRejectsHistoricalSchemaConflictAfterResponseLoss() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+            params: [
+                "w1", "First", "u1", "2026-01-01T10:00:00.000Z",
+                "w2", "Second", "u1", "2026-01-01T10:00:00.000Z",
+            ]
+        )
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: sessionConfiguration)
+        defer {
+            MockURLProtocol.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        let config = SynchroConfig(
+            dbPath: db.path,
+            serverURL: URL(string: "http://test.local")!,
+            authProvider: { "test-token" },
+            clientID: "test-device",
+            appVersion: "1.0.0"
+        )
+        let httpClient = HttpClient(config: config, session: session)
+        var requestCount = 0
+        MockURLProtocol.requestHandler = { _ in
+            requestCount += 1
+            throw URLError(.networkConnectionLost)
+        }
+
+        do {
+            _ = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "test-device",
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable]
+            )
+            XCTFail("expected response loss")
+        } catch is RetryableError {
+        }
+        XCTAssertEqual(requestCount, 1)
+
+        let conflictingSchema = try JSONEncoder.synchroEncoder().encode([customTable])
+        try db.writeTransaction { connection in
+            try connection.execute(
+                sql: """
+                    UPDATE _synchro_schema_archive
+                    SET schema_json = ?
+                    WHERE schema_version = 1 AND schema_hash = ?
+                    """,
+                arguments: [String(decoding: conflictingSchema, as: UTF8.self), protocolTestSchemaHash]
+            )
+        }
+
+        do {
+            _ = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "test-device",
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable]
+            )
+            XCTFail("expected historical schema conflict")
+        } catch SynchroError.invalidResponse {
+        }
+        XCTAssertEqual(requestCount, 1)
+    }
+
     func testPushCompletionClearsMatchingDurableBackoffWithCommittedState() async throws {
         let (db, _, processor) = try makeTestEnv()
         _ = try db.execute(

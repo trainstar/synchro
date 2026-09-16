@@ -10,6 +10,7 @@ import com.trainstar.synchro.inspection.ScopeRowInspection
 import com.trainstar.synchro.inspection.ScopeStateInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
+import java.io.IOException
 import java.util.UUID
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
@@ -82,7 +83,7 @@ class InspectionTests {
         val config = prepareClientConfig()
         val firstClient = SynchroClient(config, context)
         try {
-            assertSame(SyncStatus.Uninitialized, firstClient.getSyncStatus())
+            assertSame(SyncStatus.LocalReady, firstClient.getSyncStatus())
             firstClient.execute(
                 "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
                 arrayOf("o1", "first authored", "2026-01-01T00:00:00.000000Z"),
@@ -132,6 +133,108 @@ class InspectionTests {
         } finally {
             restartedClient.close()
             context.deleteDatabase(config.dbPath)
+        }
+    }
+
+    @Test
+    fun publicInitializationRestoresExactDurableLifecycleAndWork() {
+        val freshConfig = SynchroConfig(
+            dbPath = "synchro_initial_fresh_${UUID.randomUUID()}.sqlite",
+            serverURL = "http://localhost:8080",
+            authProvider = { "test-token" },
+            clientID = "fresh-device",
+            appVersion = "1.0.0",
+        )
+        val fresh = SynchroClient(freshConfig, context)
+        try {
+            assertSame(SyncStatus.LocalReady, fresh.getSyncStatus())
+        } finally {
+            fresh.close()
+            context.deleteDatabase(freshConfig.dbPath)
+        }
+
+        val stoppedConfig = prepareClientConfig()
+        withInternalDatabase(stoppedConfig) { database ->
+            database.writeTransaction { db ->
+                SynchroMeta.transitionClientLifecycleState(db, SyncLifecycleState.STOPPED)
+            }
+        }
+        val stopped = SynchroClient(stoppedConfig, context)
+        try {
+            assertSame(SyncStatus.Stopped, stopped.getSyncStatus())
+        } finally {
+            stopped.close()
+            context.deleteDatabase(stoppedConfig.dbPath)
+        }
+
+        val failureConfig = prepareClientConfig()
+        val failure = SyncFailure(
+            operation = SyncOperationKind.CONNECTING,
+            code = SyncFailureCode.UPGRADE_REQUIRED,
+            retryable = false,
+            message = "The installed schema requires an explicit synchronized reset.",
+            recoveryAction = SyncRecoveryAction.SCHEMA_RESET,
+        )
+        withInternalDatabase(failureConfig) { database ->
+            database.writeTransaction { db ->
+                SynchroMeta.transitionClientLifecycleState(db, SyncLifecycleState.LOCAL_READY)
+                SynchroMeta.recordBlockingError(db, failure)
+            }
+        }
+        val blocked = SynchroClient(failureConfig, context)
+        try {
+            val status = blocked.getSyncStatus()
+            assertTrue(status is SyncStatus.Error)
+            assertEquals(failure, (status as SyncStatus.Error).failure)
+        } finally {
+            blocked.close()
+            context.deleteDatabase(failureConfig.dbPath)
+        }
+
+        val backoffConfig = prepareClientConfig()
+        val exactRequest = "{\"client_id\":\"inspection-device\",\"scope\":\"orders:user\"}"
+        withInternalDatabase(backoffConfig) { database ->
+            database.writeTransaction { db ->
+                for (state in listOf(
+                    SyncLifecycleState.LOCAL_READY,
+                    SyncLifecycleState.CONNECTING,
+                    SyncLifecycleState.READY,
+                    SyncLifecycleState.PULLING,
+                    SyncLifecycleState.BACKOFF,
+                )) {
+                    SynchroMeta.transitionClientLifecycleState(db, state)
+                }
+            }
+            DurableBackoffStore.persist(
+                database = database,
+                error = RetryableError(
+                    underlying = SynchroError.NetworkError(IOException("offline")),
+                    retryAfter = null,
+                    interruptedOperation = RetryOperation.PULLING,
+                    workIdentity = exactRequest,
+                    retryClassification = RetryClassification.NETWORK,
+                ),
+                currentTimeMillis = 1_000L,
+                fallbackDelaySeconds = { 2.0 },
+            )
+        }
+        val withBackoff = SynchroClient(backoffConfig, context)
+        try {
+            assertSame(SyncStatus.LocalReady, withBackoff.getSyncStatus())
+            withInternalDatabase(backoffConfig) { database ->
+                assertEquals(
+                    SyncLifecycleState.LOCAL_READY,
+                    database.readTransaction { db -> SynchroMeta.getClientState(db).lifecycleState },
+                )
+                val retained = requireNotNull(DurableBackoffStore.load(database))
+                assertEquals(RetryOperation.PULLING, retained.resumeState)
+                assertEquals(exactRequest, retained.workIdentity)
+                assertEquals(1L, retained.attemptCount)
+                assertEquals(3_000L, retained.nextRetryAtMs)
+            }
+        } finally {
+            withBackoff.close()
+            context.deleteDatabase(backoffConfig.dbPath)
         }
     }
 
