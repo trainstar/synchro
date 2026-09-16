@@ -867,7 +867,7 @@ func (c *PendingCycleCoordinator) advanceLocked(ctx context.Context, sequence ui
 		if err := c.waitForRetryPull(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
-		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": pendingCycleCallID}, []scenarios.StepID{pendingCyclePullStepID})
+		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": pendingCycleCallID, "completion": c.steps[pendingCyclePullStepID].NativeBinding.Completion}, []scenarios.StepID{pendingCyclePullStepID})
 	case pendingCycleStageInitialPull:
 		response.Command = c.captureCommand()
 	case pendingCycleStageAfterInitialPull:

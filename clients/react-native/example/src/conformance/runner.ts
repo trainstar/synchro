@@ -336,10 +336,7 @@ export class PublicConformanceRunner {
     const clientKey = requireClientKey(command);
     const parameters = command.action.action.parameters;
     const method = requireSynchronizeMethod(parameters.method);
-    const completion = parameters.completion;
-    if (completion !== undefined && completion !== 'idle' && completion !== 'blocked' && completion !== 'error') {
-      throw new ConformanceCommandError('invalid_command');
-    }
+    const completion = requireCompletion(parameters.completion);
     const session = this.requireSession(clientKey);
     if (session.pendingSynchronization !== null) {
       throw new ConformanceCommandError('invalid_command');
@@ -396,13 +393,16 @@ export class PublicConformanceRunner {
   private async awaitCall(command: ConformanceCommand): Promise<ConformanceActionResult> {
     const clientKey = requireClientKey(command);
     const callID = requireCallID(command.action.action.parameters.call_id);
+    const completion = requireCompletion(command.action.action.parameters.completion);
     const call = this.calls.get(callID);
     if (call === undefined || call.clientKey !== clientKey) {
       throw new ConformanceCommandError('invalid_command');
     }
     const client = await this.activate(clientKey);
     await call.task;
-    const observation = await this.waitForCompletion(client, call.task, true, call);
+    const observation = await this.waitForCompletion(
+      client, call.task, completion === undefined || completion === 'blocked', call
+    );
     call.unsubscribeStatus();
     this.calls.delete(callID);
     return {
@@ -705,6 +705,13 @@ export class PublicConformanceRunner {
       throw new ConformanceCommandError('execution_failed', new Error(`command result exceeds its byte bound: ${describeBoundFailure(error)}`));
     }
   }
+}
+
+function requireCompletion(value: unknown): SynchronizeCompletion | undefined {
+  if (value === undefined || value === 'idle' || value === 'blocked' || value === 'error') {
+    return value;
+  }
+  throw new ConformanceCommandError('invalid_command');
 }
 
 function requirePairedRuntimeConnection(runtime: ConformanceCommand['runtime']): void {

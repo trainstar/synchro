@@ -981,7 +981,7 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 			_ = c.releaseResponseLossPush()
 			return exchangeResponse{}, err
 		}
-		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID()}, nil)
+		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID(), "completion": "blocked"}, nil)
 		c.stage = queueReplayStageResponseLoss
 	case queueReplayStageResponseLoss:
 		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"request-trace"}}, nil)

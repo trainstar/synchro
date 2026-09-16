@@ -336,6 +336,39 @@ func TestPushResponseLossDurableCapturePreservesSealedLocalIntent(t *testing.T) 
 	}
 }
 
+func TestPushResponseLossObservesBackoffWithoutCompletingTheManagedCall(t *testing.T) {
+	process := actionProcessIdentity{
+		ProcessID: "original-process", DatabaseIdentityFingerprint: strings.Repeat("a", 64),
+	}
+	coordinator := &PushResponseLossCoordinator{
+		stage: pushResponseLossStagePreRestartCapture, process: &process,
+	}
+	for _, test := range []struct {
+		name      string
+		state     string
+		operation any
+		retryAt   any
+		wantError bool
+	}{
+		{"push backoff", "backoff", "pushing", "2026-09-16T00:00:00Z", false},
+		{"active retry is not backoff evidence", "pushing", nil, nil, true},
+		{"idle is not backoff evidence", "ready", nil, nil, true},
+		{"wrong interrupted operation", "backoff", "pulling", "2026-09-16T00:00:00Z", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := resultEnvelopeForTest(map[string]any{
+				"kind": "awaited", "process": process,
+				"status": map[string]any{
+					"state": test.state, "retry_at": test.retryAt, "operation": test.operation, "failure": nil,
+				},
+			})
+			if err := coordinator.acceptResultLocked(result); (err != nil) != test.wantError {
+				t.Fatalf("backoff observation error = %v, want error = %t", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestPushResponseLossProxyWritesInvalidInitialResponseStart(t *testing.T) {
 	committed := make(chan struct{}, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

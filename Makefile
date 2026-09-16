@@ -1467,6 +1467,10 @@ test-rn-e2e-android-build:
 	@$(MAKE) rn-watchman-reset
 	@$(MAKE) rn-android-emulator-reset
 	@$(MAKE) rn-e2e-server-seed
+	@$(MAKE) rn-android-build
+
+.PHONY: rn-android-build
+rn-android-build:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)

@@ -939,10 +939,7 @@ func (c *RetentionReconnectCoordinator) advanceLocked(ctx context.Context, seque
 		if err := c.prepareRenewal(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
-		// The managed start retries its sealed durable batch without another
-		// public call. Wait for that recovery before returning await-call. The
-		// runner reports backoff as terminal, so returning earlier would make
-		// the automatic renewal appear as another blocked completion.
+		// Observe the required renewal before awaiting the same call's terminal recovery.
 		if err := c.waitForRenewedConnect(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -950,7 +947,7 @@ func (c *RetentionReconnectCoordinator) advanceLocked(ctx context.Context, seque
 		// retryable fault. Awaiting that same task lets the client perform its
 		// automatic expired-generation recovery without creating a second path.
 		response.Command = c.command("client", "await-call", map[string]any{
-			"client_key": c.main.clientID, "call_id": c.initialCallID,
+			"client_key": c.main.clientID, "call_id": c.initialCallID, "completion": "idle",
 		}, []scenarios.StepID{retentionReconnectStepOrder[6], retentionReconnectStepOrder[7]})
 		c.stage = retentionReconnectStageRenewed
 	case retentionReconnectStageRenewed:
