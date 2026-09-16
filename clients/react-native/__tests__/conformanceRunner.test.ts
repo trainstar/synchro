@@ -296,6 +296,39 @@ describe('PublicConformanceRunner call lifecycle', () => {
     }
   });
 
+  it.each(['await-step', 'await-call'])('retains backoff before a delayed %s command arrives', async (action) => {
+    jest.useFakeTimers();
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',
+    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.start.mockImplementation(async () => {
+        emitNativeEvent('onStatusChange', JSON.parse(BACKOFF_STATUS));
+        mockNativeModule.getSyncStatus.mockResolvedValue(PULLING_STATUS);
+        emitNativeEvent('onStatusChange', JSON.parse(PULLING_STATUS));
+      });
+      await runner.execute(command('client', 'begin-call', 'client-a', { call_id: 'delayed-call', method: 'start' }));
+      const result = runner.execute(command(
+        action === 'await-step' ? 'observer' : 'client', action, 'client-a',
+        { call_id: 'delayed-call', ...(action === 'await-step' ? { wait_for_completion: true } : {}) }
+      ));
+      const assertion = expect(result).resolves.toMatchObject({
+        status: { state: 'backoff', operation: 'pulling', retry_at: '2026-09-16T00:00:00.000Z' },
+      });
+      await Promise.all([jest.advanceTimersByTimeAsync(540000), assertion]);
+
+      if (action === 'await-step') {
+        mockNativeModule.getSyncStatus.mockResolvedValue(READY_STATUS);
+        await expect(runner.execute(command('client', 'await-call', 'client-a', { call_id: 'delayed-call' })))
+          .resolves.toMatchObject({ completion: 'idle', status: { state: 'ready' } });
+      }
+    } finally {
+      await runner.close();
+      jest.useRealTimers();
+    }
+  });
+
   it('observes blocked synchronization before its managed invocation finishes', async () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',

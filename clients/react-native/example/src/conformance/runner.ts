@@ -169,6 +169,8 @@ interface ClientSession {
 interface ClientCall {
   clientKey: string;
   task: Promise<Error | undefined>;
+  backoff: { status: SyncStatus | null };
+  unsubscribeStatus: () => void;
 }
 
 interface CompletionObservation {
@@ -227,6 +229,7 @@ export class PublicConformanceRunner {
   async close(): Promise<void> {
     const sessions = [...this.sessions.values()];
     const calls = [...this.calls.values()];
+    calls.forEach((call) => call.unsubscribeStatus());
     for (const session of sessions) {
       session.unsubscribeEvents?.();
       if (session.client !== null) {
@@ -370,11 +373,18 @@ export class PublicConformanceRunner {
     }
     const client = await this.activate(clientKey);
     const method = requireSynchronizeMethod(parameters.method);
+    // Host commands can arrive after the native retry has left backoff.
+    const backoff: ClientCall['backoff'] = { status: null };
+    const unsubscribeStatus = client.onStatusChange((status) => {
+      if (status.status === 'backoff' && backoff.status === null) {
+        backoff.status = status;
+      }
+    });
     const task = this.invokeSynchronizeMethod(client, method).then(
       () => undefined,
       (error: unknown) => toError(error)
     );
-    this.calls.set(callID, { clientKey, task });
+    this.calls.set(callID, { clientKey, task, backoff, unsubscribeStatus });
     return {
       kind: 'call-begun',
       call_id: callID,
@@ -392,7 +402,8 @@ export class PublicConformanceRunner {
     }
     const client = await this.activate(clientKey);
     await call.task;
-    const observation = await this.waitForCompletion(client, call.task);
+    const observation = await this.waitForCompletion(client, call.task, true, call);
+    call.unsubscribeStatus();
     this.calls.delete(callID);
     return {
       kind: 'call-completed',
@@ -452,10 +463,11 @@ export class PublicConformanceRunner {
       throw new ConformanceCommandError('invalid_command');
     }
     const client = await this.activate(clientKey);
+    const call = callID === undefined ? undefined : this.calls.get(requireCallID(callID));
     let status: SyncStatus;
     if (waitForStatus !== undefined) {
       let invocationError: Error | undefined;
-      this.calls.get(requireCallID(callID))?.task.then((error) => { invocationError = error; });
+      call?.task.then((error) => { invocationError = error; });
       const deadline = Date.now() + COMPLETION_TIMEOUT_MS;
       do {
         status = await client.getSyncStatus();
@@ -472,7 +484,7 @@ export class PublicConformanceRunner {
       } while (true);
     } else {
       status = waitForCompletion === true
-        ? (await this.waitForCompletion(client, this.calls.get(requireCallID(callID))?.task)).status
+        ? (await this.waitForCompletion(client, call?.task, true, call)).status
         : await client.getSyncStatus();
     }
     return {
@@ -632,7 +644,8 @@ export class PublicConformanceRunner {
   private async waitForCompletion(
     client: SynchroClient,
     task?: Promise<Error | undefined>,
-    stopAtBackoff = true
+    stopAtBackoff = true,
+    call?: ClientCall
   ): Promise<CompletionObservation> {
     let settled = task === undefined;
     let invocationError: Error | undefined;
@@ -645,17 +658,20 @@ export class PublicConformanceRunner {
     while (Date.now() < deadline) {
       const status = await client.getSyncStatus();
       lastStatus = status.status;
-      if (invocationError !== undefined) {
+      if (invocationError !== undefined || status.status === 'error') {
         return { completion: 'error', status };
+      }
+      if (stopAtBackoff && call?.backoff.status) {
+        const observed = call.backoff.status;
+        call.backoff.status = null;
+        return { completion: 'blocked', status: observed };
       }
       if (status.status === 'ready' && settled) {
         return { completion: 'idle', status };
       }
       if (status.status === 'backoff' && stopAtBackoff) {
+        if (call !== undefined) call.backoff.status = null;
         return { completion: 'blocked', status };
-      }
-      if (status.status === 'error') {
-        return { completion: 'error', status };
       }
       await sleep(POLL_INTERVAL_MS);
     }
