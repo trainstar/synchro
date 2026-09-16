@@ -462,3 +462,29 @@ func TestPendingCycleTraceHonorsCapturePendingRetry(t *testing.T) {
 		})
 	}
 }
+func TestPendingCycleLocalResultAllowsOnlyTriggeredDeleteWithoutDirectChanges(t *testing.T) {
+	process := &actionProcessIdentity{ProcessID: "process", DatabaseIdentityFingerprint: strings.Repeat("a", 64)}
+	coordinator := &PendingCycleCoordinator{
+		process: process,
+		stage:   pendingCycleStageDeleteLocalWrite,
+	}
+	coordinator.target.DeletedAtField = "deleted_at"
+	raw, err := json.Marshal(map[string]any{"kind": "local-action", "rows_affected": 0, "process": process})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.validateLocalResult(raw); err != nil {
+		t.Fatalf("triggered soft delete was rejected: %v", err)
+	}
+	for _, stage := range []pendingCycleStage{pendingCycleStageInitialLocalWrite, pendingCycleStageUpdateLocalWrite} {
+		coordinator.stage = stage
+		if err := coordinator.validateLocalResult(raw); err == nil {
+			t.Fatal("non-delete statement without direct changes was accepted")
+		}
+	}
+	coordinator.stage = pendingCycleStageDeleteLocalWrite
+	coordinator.target.DeletedAtField = ""
+	if err := coordinator.validateLocalResult(raw); err == nil {
+		t.Fatal("hard delete without direct changes was accepted")
+	}
+}

@@ -351,7 +351,7 @@ export class PublicConformanceRunner {
     } else {
       await task;
     }
-    const observation = await this.waitForCompletion(client, task);
+    const observation = await this.waitForCompletion(client, task, completion === undefined || completion === 'blocked');
     return {
       kind: 'synchronized',
       completion: observation.completion,
@@ -631,7 +631,8 @@ export class PublicConformanceRunner {
 
   private async waitForCompletion(
     client: SynchroClient,
-    task?: Promise<Error | undefined>
+    task?: Promise<Error | undefined>,
+    stopAtBackoff = true
   ): Promise<CompletionObservation> {
     let settled = task === undefined;
     let invocationError: Error | undefined;
@@ -650,7 +651,7 @@ export class PublicConformanceRunner {
       if (status.status === 'ready' && settled) {
         return { completion: 'idle', status };
       }
-      if (status.status === 'backoff') {
+      if (status.status === 'backoff' && stopAtBackoff) {
         return { completion: 'blocked', status };
       }
       if (status.status === 'error') {

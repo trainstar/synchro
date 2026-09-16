@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -121,12 +122,8 @@ func TestPushResponseLossIdentityPhasesDeferRuntimeReplayAliases(t *testing.T) {
 			want:  []string{"current-schema", "items-table"},
 		},
 		{
-			phase: pushResponseLossIdentityCapture,
-			want:  []string{"response-loss-primary-key"},
-		},
-		{
 			phase: pushResponseLossIdentityReplay,
-			want:  []string{"response-loss-batch", "response-loss-mutation"},
+			want:  []string{"response-loss-batch", "response-loss-mutation", "response-loss-primary-key"},
 		},
 	}
 	for _, test := range tests {
@@ -143,6 +140,199 @@ func TestPushResponseLossIdentityPhasesDeferRuntimeReplayAliases(t *testing.T) {
 		if !reflect.DeepEqual(actual, test.want) {
 			t.Fatalf("push-response-loss identity phase %d aliases = %v, want %v", test.phase, actual, test.want)
 		}
+	}
+}
+
+func TestPushResponseLossCaptureSelectionUsesBoundLocalInput(t *testing.T) {
+	valid := scenarios.Operation{
+		ContractOperation: "local",
+		Name:              "write",
+		Payload: json.RawMessage(
+			`{"authenticated_user_id":"user-a","table_id":"runtime_items","operation":"insert","pk":{"runtime_id":"runtime-row"},"columns":{"runtime_value":"value"},"client_version":"v1"}`,
+		),
+	}
+	field, recordID, err := pushResponseLossCaptureSelection(valid, "runtime_items")
+	if err != nil || field != "runtime_id" || recordID != "runtime-row" {
+		t.Fatalf("bound local capture selection = %q/%q, %v", field, recordID, err)
+	}
+	for name, operation := range map[string]scenarios.Operation{
+		"wrong table": func() scenarios.Operation {
+			changed := valid
+			changed.Payload = bytes.Replace(valid.Payload, []byte(`"runtime_items"`), []byte(`"other_items"`), 1)
+			return changed
+		}(),
+		"ambiguous key": func() scenarios.Operation {
+			changed := valid
+			changed.Payload = bytes.Replace(valid.Payload, []byte(`"runtime_id":"runtime-row"`), []byte(`"runtime_id":"runtime-row","other_id":"other-row"`), 1)
+			return changed
+		}(),
+		"empty key": func() scenarios.Operation {
+			changed := valid
+			changed.Payload = bytes.Replace(valid.Payload, []byte(`"runtime-row"`), []byte(`""`), 1)
+			return changed
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := pushResponseLossCaptureSelection(operation, "runtime_items"); err == nil {
+				t.Fatal("invalid bound local capture selection was accepted")
+			}
+		})
+	}
+}
+
+func TestPushResponseLossFormalIdentitiesMatchCaptureAndSealedInput(t *testing.T) {
+	valid := []blackbox.NativeIdentityValue{
+		{
+			Alias:                 "response-loss-primary-key",
+			RuntimeValue:          json.RawMessage(`"runtime-row"`),
+			ApplicationIdentifier: "runtime_id",
+		},
+		{Alias: "response-loss-batch", RuntimeValue: json.RawMessage(`"runtime-batch"`)},
+		{Alias: "response-loss-mutation", RuntimeValue: json.RawMessage(`"runtime-mutation"`)},
+	}
+	for _, value := range valid {
+		if err := validatePushResponseLossFormalIdentity(
+			value,
+			"runtime_id",
+			"runtime-row",
+			"runtime-batch",
+			"runtime-mutation",
+		); err != nil {
+			t.Fatalf("validate formal identity %s: %v", value.Alias, err)
+		}
+	}
+	for name, value := range map[string]blackbox.NativeIdentityValue{
+		"primary selection": {
+			Alias:                 "response-loss-primary-key",
+			RuntimeValue:          json.RawMessage(`"other-row"`),
+			ApplicationIdentifier: "runtime_id",
+		},
+		"batch input":    {Alias: "response-loss-batch", RuntimeValue: json.RawMessage(`"other-batch"`)},
+		"mutation input": {Alias: "response-loss-mutation", RuntimeValue: json.RawMessage(`"other-mutation"`)},
+		"unknown alias":  {Alias: "other", RuntimeValue: json.RawMessage(`"runtime"`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validatePushResponseLossFormalIdentity(
+				value,
+				"runtime_id",
+				"runtime-row",
+				"runtime-batch",
+				"runtime-mutation",
+			); err == nil {
+				t.Fatal("mismatched formal identity was accepted")
+			}
+		})
+	}
+}
+
+func TestPushResponseLossDurableCapturePreservesSealedLocalIntent(t *testing.T) {
+	coordinator := &PushResponseLossCoordinator{
+		tableName:           "runtime_items",
+		capturePrimaryKey:   "runtime_id",
+		capturePrimaryKeyID: "runtime-field-id",
+		captureRecordID:     "runtime-row",
+		sealedBatchID:       "runtime-batch",
+		sealedMutationIDs:   []string{"runtime-mutation"},
+	}
+	state := json.RawMessage(`{
+		"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"scopeStates":[{
+			"scopeID":"runtime-scope",
+			"cursor":"runtime-cursor",
+			"checksum":"runtime-checksum",
+			"localChecksum":"runtime-checksum",
+			"generation":1
+		}],
+		"scopeRows":[],
+		"rebuildAttempts":[],
+		"applicationRowCount":1,
+		"mutationLedgerCount":1,
+		"mutationOutcomeCount":0,
+		"sealedBatchCount":1,
+		"rejectedMutationCount":0,
+		"scopeStateCount":1,
+		"scopeRowCount":0,
+		"provenanceCount":0,
+		"rowMetadataCount":0,
+		"rebuildAttemptCount":0,
+		"rebuildReceiptCount":1,
+		"provenanceMaintenanceWorkCursor":"0"
+	}`)
+	pending := json.RawMessage(`[{
+		"mutationID":"runtime-mutation",
+		"tableName":"runtime_items",
+		"recordID":"runtime-row",
+		"primaryKeyFieldID":"runtime-field-id",
+		"operation":"insert",
+		"status":"sealed",
+		"sealedBatchID":"runtime-batch",
+		"sealedOrdinal":0
+	}]`)
+	valid := finalCapture{
+		ClientState: state,
+		Pending:     pending,
+		Rejected:    json.RawMessage(`[]`),
+		Status:      json.RawMessage(`{}`),
+		Provenance:  json.RawMessage(`[]`),
+		Trace:       json.RawMessage(`{"observations":[],"overflowed":false,"sequence_checkpoint":0}`),
+		DurableProof: json.RawMessage(`{
+			"row_metadata":null,
+			"rebuild_receipt_proofs":[{
+				"rebuild_id_fingerprint":"rebuild-fingerprint",
+				"page_count":1,
+				"returned_record_count":0,
+				"request_chain_valid":true,
+				"records_in_canonical_order":true,
+				"row_checksums_valid":true,
+				"scope_checksum_valid":true,
+				"final_checksum_matches_local":true
+			}]
+		}`),
+		Rows: json.RawMessage(`[{"runtime_id":"runtime-row","runtime_value":"value"}]`),
+	}
+	if _, err := coordinator.validateDurableCapture(valid); err != nil {
+		t.Fatalf("validate preserved sealed local intent: %v", err)
+	}
+	retrying := valid
+	retrying.Status = json.RawMessage(`{"state":"pushing","retry_at":null,"operation":null,"failure":null}`)
+	if err := coordinator.validatePreRestartCapture(retrying); err != nil {
+		t.Fatalf("held managed retry was rejected: %v", err)
+	}
+	retrying.Status = json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`)
+	if err := coordinator.validatePreRestartCapture(retrying); err == nil {
+		t.Fatal("unacknowledged sealed request was accepted as ready")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*finalCapture)
+	}{
+		{"scope row", func(capture *finalCapture) {
+			capture.ClientState = bytes.Replace(capture.ClientState, []byte(`"scopeRowCount":0`), []byte(`"scopeRowCount":1`), 1)
+		}},
+		{"missing pending", func(capture *finalCapture) {
+			capture.Pending = json.RawMessage(`[]`)
+		}},
+		{"changed sealed identity", func(capture *finalCapture) {
+			capture.Pending = bytes.Replace(capture.Pending, []byte(`"runtime-batch"`), []byte(`"other-batch"`), 1)
+		}},
+		{"false provenance", func(capture *finalCapture) {
+			capture.Provenance = json.RawMessage(`[{"scopeID":"scope-a"}]`)
+		}},
+		{"false base", func(capture *finalCapture) {
+			capture.DurableProof = json.RawMessage(`{"row_metadata":{},"rebuild_receipt_proofs":[]}`)
+		}},
+		{"changed empty-scope checksum", func(capture *finalCapture) {
+			capture.DurableProof = bytes.Replace(capture.DurableProof, []byte(`"final_checksum_matches_local":true`), []byte(`"final_checksum_matches_local":false`), 1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capture := valid
+			test.mutate(&capture)
+			if _, err := coordinator.validateDurableCapture(capture); err == nil {
+				t.Fatal("invalid preserved local intent was accepted")
+			}
+		})
 	}
 }
 

@@ -351,6 +351,7 @@ help:
 	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
 	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
 	@echo "  rn-ios-build          - Build the iOS conformance app without starting a server"
+	@echo "  rn-ios-bundle         - Rebundle JavaScript-only changes in an existing iOS test app"
 	@echo "  test-rn-warm-connect-ios - Run direct React Native warm-connect through the iOS bridge"
 	@echo "  test-rn-performance-android - Run direct React Native steady-pull through the Android bridge"
 	@echo "  test-rn-pending-cycle-ios - Run direct React Native pending-cycle through the iOS bridge"
@@ -1428,9 +1429,22 @@ rn-android-emulator-reset:
 		sleep 5; \
 	fi
 
-.PHONY: rn-ios-build
+.PHONY: rn-ios-build rn-ios-bundle
 rn-ios-build: rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+
+rn-ios-bundle:
+	@set -eu; \
+		project="$(CURDIR)/clients/react-native/example"; \
+		products="$$project/ios/build/Build/Products/Debug-iphonesimulator"; \
+		app="$$products/SynchroReactNativeExample.app"; \
+		test -d "$$app" || { echo "Run rn-ios-build before bundling JavaScript-only changes" >&2; exit 1; }; \
+		cd "$$project"; \
+		CONFIGURATION=Debug PLATFORM_NAME=iphonesimulator FORCE_BUNDLING=1 SKIP_BUNDLING= \
+			CONFIGURATION_BUILD_DIR="$$products" UNLOCALIZED_RESOURCES_FOLDER_PATH=SynchroReactNativeExample.app \
+			PROJECT_ROOT="$$project" PODS_ROOT="$$project/ios/Pods" NODE_BINARY="$$(command -v node)" \
+			./node_modules/react-native/scripts/react-native-xcode.sh; \
+		codesign --force --sign - "$$app"
 
 test-rn-e2e-ios-build:
 	@$(MAKE) rn-e2e-server-seed

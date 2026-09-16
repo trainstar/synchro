@@ -88,8 +88,11 @@ function protocolStep(): ScenarioStep {
 describe('PublicConformanceRunner call lifecycle', () => {
   beforeEach(() => {
     resetNativeModuleMockState();
-    mockNativeModule.initialize.mockResolvedValue(undefined);
-    mockNativeModule.getSyncStatus.mockResolvedValue(READY_STATUS);
+    mockNativeModule.initialize.mockReset().mockResolvedValue(undefined);
+    mockNativeModule.start.mockReset().mockResolvedValue(undefined);
+    mockNativeModule.stop.mockReset().mockResolvedValue(undefined);
+    mockNativeModule.close.mockReset().mockResolvedValue(undefined);
+    mockNativeModule.getSyncStatus.mockReset().mockResolvedValue(READY_STATUS);
   });
 
   it('rejects create mode when the database survives a runner relaunch', async () => {
@@ -362,6 +365,23 @@ describe('PublicConformanceRunner call lifecycle', () => {
       await expect(runner.execute(command('observer', 'await-step', 'client-a', {
         call_id: 'queue-call', wait_for_status: 'unknown',
       }))).rejects.toMatchObject({ code: 'invalid_command' });
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it.each(['idle', 'error'])('waits through retryable backoff for %s completion without forcing the result', async (completion) => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0',
+    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.getSyncStatus
+        .mockResolvedValueOnce(BACKOFF_STATUS)
+        .mockResolvedValueOnce(READY_STATUS);
+      await expect(runner.execute(command('client', 'synchronize-step', 'client-a', {
+        method: 'start', completion,
+      }))).resolves.toMatchObject({ kind: 'synchronized', completion: 'idle', status: { state: 'ready' } });
     } finally {
       await runner.close();
     }

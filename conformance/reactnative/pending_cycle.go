@@ -368,7 +368,6 @@ const (
 	pendingCycleStageDeleteLocalWrite
 	pendingCycleStageBeforeDelete
 	pendingCycleStageDeletePushed
-	pendingCycleStageAfterDelete
 	pendingCycleStageComplete
 )
 
@@ -505,7 +504,18 @@ func (c *PendingCycleCoordinator) Prepare(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	localWrite, err := c.config.Controller.ApplicationWrite(c.steps[pendingCycleLocalWriteStepID].Operation)
+	authoredWrite := c.steps[pendingCycleLocalWriteStepID].Operation
+	var authoredTable struct {
+		TableID string `json:"table_id"`
+	}
+	if json.Unmarshal(authoredWrite.Payload, &authoredTable) != nil || authoredTable.TableID == "" {
+		return errors.New("React Native pending-cycle authored table identity is invalid")
+	}
+	deletedAtField, err := c.config.Controller.ApplicationDeletedAtField(authoredTable.TableID)
+	if err != nil {
+		return fmt.Errorf("resolve React Native pending-cycle deleted-at field: %w", err)
+	}
+	localWrite, err := c.config.Controller.ApplicationWrite(authoredWrite)
 	if err != nil {
 		return fmt.Errorf("bind React Native pending mutation to the application schema: %w", err)
 	}
@@ -517,6 +527,7 @@ func (c *PendingCycleCoordinator) Prepare(ctx context.Context) error {
 		return fmt.Errorf("decode React Native pending-cycle runtime target: %w", err)
 	}
 	c.target = target
+	c.target.DeletedAtField = deletedAtField
 	c.target.UnprotectedAuthoredRecordID = authoredRecordID
 	c.target.UnprotectedRecordID = runtimeRecordID
 	c.target.UnprotectedValue = unprotectedValue
@@ -851,6 +862,8 @@ func (c *PendingCycleCoordinator) advanceLocked(ctx context.Context, sequence ui
 		}
 		response.Command = c.captureCommand()
 	case pendingCycleStageBeforePull:
+		// Release the retry only after its pre-pull local snapshot is recorded.
+		c.signalInitialPullMaterialized()
 		if err := c.waitForRetryPull(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
@@ -945,7 +958,6 @@ func (c *PendingCycleCoordinator) materializeInitialPull(ctx context.Context) er
 	if err := c.bindRuntimeIdentities(true); err != nil {
 		return err
 	}
-	c.signalInitialPullMaterialized()
 	return nil
 }
 
@@ -958,7 +970,10 @@ func (c *PendingCycleCoordinator) validateLocalResult(raw json.RawMessage) error
 		return err
 	}
 	var rows uint64
-	if json.Unmarshal(members["rows_affected"], &rows) != nil || rows == 0 {
+	// The soft-delete trigger updates the row, then ignores the physical DELETE.
+	// The following capture proves the tombstone and durable delete intent.
+	softDelete := c.stage == pendingCycleStageDeleteLocalWrite && c.target.DeletedAtField != ""
+	if json.Unmarshal(members["rows_affected"], &rows) != nil || rows == 0 && !softDelete {
 		return errors.New("React Native pending-cycle local write affected no rows")
 	}
 	return c.validateProcess(members["process"])
@@ -1058,8 +1073,16 @@ func (c *PendingCycleCoordinator) validateSynchronizedResult(raw json.RawMessage
 		return err
 	}
 	var actualCompletion string
-	if json.Unmarshal(members["completion"], &actualCompletion) != nil || actualCompletion != completion || validateSyncStatusShape(members["status"]) != nil {
+	if json.Unmarshal(members["completion"], &actualCompletion) != nil || validateSyncStatusShape(members["status"]) != nil {
 		return errors.New("React Native pending-cycle synchronized result is invalid")
+	}
+	if actualCompletion != completion {
+		var status syncStatus
+		if err := json.Unmarshal(members["status"], &status); err != nil {
+			return err
+		}
+		return fmt.Errorf("React Native pending-cycle completion=%s want=%s state=%s operation=%s",
+			actualCompletion, completion, status.State, status.Operation)
 	}
 	return c.validateProcess(members["process"])
 }
@@ -1502,18 +1525,33 @@ func pendingCycleNativeState(target scenarios.PendingCycleNativeTarget, process 
 	}
 
 	for _, row := range rows {
+		isTarget := rowUsesRuntimePrimary(row, target.PrimaryKeyField, target.RecordID)
+		isUnprotected := rowUsesRuntimePrimary(row, target.PrimaryKeyField, target.UnprotectedRecordID)
+		if !isTarget && !isUnprotected {
+			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle application row differs from its targets")
+		}
+		if target.DeletedAtField != "" {
+			deletedAt, present := row[target.DeletedAtField]
+			if !present || !json.Valid(deletedAt) {
+				return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle deleted-at inspection is invalid")
+			}
+			if !isJSONNull(deletedAt) {
+				result.ApplicationRowCount--
+				continue
+			}
+		}
 		var value string
 		if json.Unmarshal(row[target.ValueField], &value) != nil || value == "" {
 			return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle application row value is invalid")
 		}
 		switch {
-		case rowUsesRuntimePrimary(row, target.PrimaryKeyField, target.RecordID):
+		case isTarget:
 			if result.TargetRowPresent {
 				return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle target row is duplicated")
 			}
 			result.TargetRowPresent = true
 			result.TargetRowValue = value
-		case rowUsesRuntimePrimary(row, target.PrimaryKeyField, target.UnprotectedRecordID):
+		case isUnprotected:
 			if result.UnprotectedRowPresent {
 				return scenarios.PendingCycleNativeState{}, errors.New("React Native pending-cycle unprotected row is duplicated")
 			}
