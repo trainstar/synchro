@@ -89,4 +89,4 @@ it('executes the rebuild-requests coordinator sequence', () => runCorpusCommandL
     result = await execute(next.command);
   }
   throw new Error('React Native rebuild-requests coordinator did not complete');
-}), 600000);
+}));

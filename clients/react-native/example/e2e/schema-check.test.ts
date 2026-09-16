@@ -197,4 +197,4 @@ it('executes the schema-check coordinator sequence', () => runCorpusCommandLoop(
     result = await execute(next.command);
   }
   throw new Error(`React Native schema-check coordinator did not complete after ${stageCount} exchanges`);
-}), 600000);
+}));

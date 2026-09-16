@@ -72,4 +72,4 @@ it('executes the forged-cursor coordinator sequence', () => runCorpusCommandLoop
     result = await execute(next.command);
   }
   throw new Error('React Native forged-cursor coordinator did not complete');
-}), 120_000);
+}));

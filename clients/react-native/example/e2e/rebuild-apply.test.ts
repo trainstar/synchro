@@ -84,4 +84,4 @@ it('executes the rebuild-apply coordinator sequence', () => runCorpusCommandLoop
     }
   }
   throw new Error(`React Native rebuild-apply coordinator stopped at sequence=${stoppedAt} versus stage_count=${stageCount}: no complete response`);
-}), REBUILD_APPLY_COMMAND_TIMEOUT_MS);
+}));

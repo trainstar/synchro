@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,13 +99,16 @@ func runRealReactNativeWarmConnect(t *testing.T, platform string) {
 
 	t.Run("assertion", func(t *testing.T) {
 		resultPath := filepath.Join(t.TempDir(), fmt.Sprintf("react-native-%s-warm-connect.json", platform))
-		command := exec.CommandContext(
+		command, err := newCorpusDetoxCommand(
 			runContext,
-			"npx", "detox", "test", "e2e/warm-connect.test.ts",
+			"test", "e2e/warm-connect.test.ts",
 			"--config-path", "./.detoxrc.warm-connect.js",
 			"--configuration", detoxConfiguration,
 			"--json", "--outputFile", resultPath,
 		)
+		if err != nil {
+			t.Fatalf("create React Native %s warm-connect Detox command: %v", platform, err)
+		}
 		command.Dir = filepath.Join(repositoryRoot, "clients", "react-native", "example")
 		for _, assignment := range os.Environ() {
 			if strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_URL=") || strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_TOKEN=") {

@@ -31,6 +31,17 @@ Layers six and seven allow layers one through five to stay small. Do not replace
 
 The authored scenario corpus is an executable contract input. Each scenario is schema-valid and independently authored from the normative specification.
 
+## React Native Journeys
+
+Run the complete corpora with `make test-rn-scenarios-ios` and `make test-rn-scenarios-android`.
+
+Each journey's Go context owns its aggregate deadline. Jest receives the remaining scenario budget.
+Readiness, exchange, and command deadlines remain separate. Do not add independent whole-journey timeout overrides.
+
+Use `await-step` to observe retry backoff while a managed call continues.
+Use `await-call` with explicit `idle` or `error` completion to await terminal recovery.
+An observed backoff does not prove that the public call has returned.
+
 ## Real PostgreSQL Scenarios
 
 Run the real PostgreSQL black-box tests with:

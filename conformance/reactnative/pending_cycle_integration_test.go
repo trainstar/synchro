@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,13 +93,16 @@ func runRealReactNativePendingCycle(t *testing.T, platform string) {
 
 	t.Run("assertion", func(t *testing.T) {
 		resultPath := filepath.Join(t.TempDir(), fmt.Sprintf("react-native-%s-pending-cycle.json", platform))
-		command := exec.CommandContext(
+		command, err := newCorpusDetoxCommand(
 			runContext,
-			"npx", "detox", "test", "e2e/pending-cycle.test.ts",
+			"test", "e2e/pending-cycle.test.ts",
 			"--config-path", "./.detoxrc.steady-pull.js",
 			"--configuration", detoxConfiguration,
 			"--json", "--outputFile", resultPath,
 		)
+		if err != nil {
+			t.Fatalf("create React Native %s pending-cycle Detox command: %v", platform, err)
+		}
 		command.Dir = filepath.Join(repositoryRoot, "clients", "react-native", "example")
 		for _, assignment := range os.Environ() {
 			if strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_URL=") || strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_TOKEN=") {

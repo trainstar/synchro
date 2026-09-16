@@ -89,4 +89,4 @@ it('executes the schema-queued-mutation coordinator sequence', () => runCorpusCo
     result = await execute(next.command);
   }
   throw new Error(`React Native schema-queued-mutation coordinator did not complete after ${stageCount} exchanges`);
-}), 600000);
+}));
