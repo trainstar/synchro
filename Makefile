@@ -824,6 +824,7 @@ release-run-support-cell:
 		SUP-PG-LINUX-X64-001) \
 			test -d "$(RELEASE_PG18_BIN_DIR)" || { echo "RELEASE_PG18_BIN_DIR is required" >&2; exit 1; }; \
 			test -x "$(RELEASE_PROVISIONER)" || { echo "RELEASE_PROVISIONER is required" >&2; exit 1; }; \
+			chmod u+x "$$release/artifacts/synchrod-pg-linux-x64-$(VERSION)" "$$release/artifacts/synchro-seed-linux-x64-$(VERSION)"; \
 			python3 verification/packaged_smoke.py begin-cell --repo-root "$(CURDIR)" \
 				--cell "$(SUPPORT_CELL_ID)" --output "$(RELEASE_EVIDENCE_DIR)/cells/$(SUPPORT_CELL_ID).json"; \
 			hashes="$$(python3 scripts/release-artifacts.py print-payload-hashes --release-dir "$$release" --version "$(VERSION)" \
@@ -868,7 +869,7 @@ test-release-publish:
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_release_publish
 
 test-server-consumer-helper:
-	cd verification/consumers/server && GO111MODULE=off go test -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
 
 test-consumer-go:
 	sh verification/consumers/go/test-consumer.sh "$(CURDIR)" "$(CURRENT_VERSION)"
@@ -1408,19 +1409,7 @@ rn-watchman-reset:
 	fi
 
 rn-ios-pods:
-	cd clients/react-native/example/ios && \
-		STAMP=.synchro-pods.stamp; \
-		SOURCE_DIGEST="$$( ( \
-			shasum -a 256 ../../package.json; \
-			find ../../src -type f \( -name '*.ts' -o -name '*.tsx' \) -exec shasum -a 256 {} +; \
-			find ../../../../clients/swift/Sources/Synchro -type f -name '*.swift' -exec shasum -a 256 {} +; \
-			find ../../ios -type f \( -name '*.swift' -o -name '*.m' -o -name '*.mm' -o -name '*.h' -o -name '*.cpp' \) -exec shasum -a 256 {} + \
-		) | LC_ALL=C sort | shasum -a 256 | cut -d ' ' -f 1)"; \
-		if [ ! -f "$$STAMP" ] || [ ! -f Pods/Manifest.lock ] || [ ! -f SynchroReactNativeExample.xcworkspace/contents.xcworkspacedata ] || ! cmp -s Podfile.lock Pods/Manifest.lock || [ Podfile -nt "$$STAMP" ] || [ Podfile.lock -nt "$$STAMP" ] || [ ../../SynchroReactNative.podspec -nt "$$STAMP" ] || [ ../../../../Synchro.podspec -nt "$$STAMP" ] || ! grep -qx "$$SOURCE_DIGEST" "$$STAMP"; then \
-			pod install && printf '%s\n' "$$SOURCE_DIGEST" > "$$STAMP"; \
-		else \
-			echo "React Native iOS pods already match Podfile.lock"; \
-		fi
+	cd clients/react-native/example/ios && pod install
 
 rn-android-emulator-reset:
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
@@ -1448,6 +1437,7 @@ test-rn-e2e-ios-run:
 	cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS) --json --outputFile artifacts/ios-test-results.json
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/ios-test-results.json
+	@$(MAKE) --no-print-directory test-rn-scenarios-ios
 
 test-rn-e2e-ios:
 	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-ios-build
@@ -1511,6 +1501,21 @@ test-rn-e2e-android-run: android-emulator-prepare
 		fi; \
 		exit "$$status"
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/android-test-results.json
+	@$(MAKE) --no-print-directory test-rn-scenarios-android
+
+.PHONY: test-rn-scenarios-ios test-rn-scenarios-android
+test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
+	@set -eu; \
+		case "$@" in \
+			test-rn-scenarios-ios) platform=IOS; configuration=ios.sim.debug ;; \
+			test-rn-scenarios-android) platform=Android; configuration="$(RN_ANDROID_DETOX_CONFIG)"; \
+				export ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)"; \
+				export JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ;; \
+		esac; \
+		cd conformance; \
+		SYNCHRO_RN_DETOX_CONFIGURATION="$$configuration" GOFLAGS= GOWORK=off \
+			go run ./cmd/testresult suite -- go test -tags reactnativeintegration -json ./reactnative \
+			-count=1 -timeout=120m -run "^TestRealReactNativeCorpus$$platform$$" -args --provision --install
 
 test-rn-e2e-android:
 	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-android-build

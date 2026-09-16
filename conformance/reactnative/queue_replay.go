@@ -350,16 +350,8 @@ func (c *QueueReplayCoordinator) Prepare(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	assignment, insert, update, targets, err := c.queueSuccessorPlan()
-	if err != nil {
-		return err
-	}
 	c.mu.Lock()
 	c.steps = workloads
-	c.successorAssignment = assignment
-	c.successorInsert = insert
-	c.successorUpdate = update
-	c.successorTargets = targets
 	c.prepared = true
 	c.mu.Unlock()
 	return nil
@@ -993,6 +985,14 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		if err := c.completeLocked(ctx); err != nil {
 			return exchangeResponse{}, err
 		}
+		assignment, insert, update, targets, err := c.queueSuccessorPlan()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		c.successorAssignment = assignment
+		c.successorInsert = insert
+		c.successorUpdate = update
+		c.successorTargets = targets
 		if observation, err := c.config.Controller.ApplyStep(ctx, c.successorAssignment); err != nil || observation.Disposition != "success" {
 			return exchangeResponse{}, fmt.Errorf("assign React Native queue successor proof scope: %w", nativeResultError(err, observation.Disposition))
 		}
