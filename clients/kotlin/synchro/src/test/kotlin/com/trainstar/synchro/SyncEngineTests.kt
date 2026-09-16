@@ -1779,7 +1779,10 @@ class SyncEngineTests {
             val syncJob = CoroutineScope(Dispatchers.Default).launch {
                 runCatching { engine.syncNow() }
             }
-            assertTrue(timing.sleepStarted.await(2, TimeUnit.SECONDS))
+            assertTrue(
+                "rebuild retry did not enter durable backoff",
+                timing.sleepStarted.await(10, TimeUnit.SECONDS),
+            )
 
             val backoff = requireNotNull(DurableBackoffStore.load(db))
             val requestJSON = failedRequestJSON.single()

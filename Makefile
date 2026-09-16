@@ -406,11 +406,11 @@ set-version:
 
 build:
 	@mkdir -p "$(dir $(BINARY))"
-	cd api/go && GOWORK=off go build -o ../../$(BINARY) ./cmd/synchrod-pg
+	cd api/go && GOWORK=off go build -o "$(abspath $(BINARY))" ./cmd/synchrod-pg
 
 build-seed:
 	@mkdir -p "$(dir $(SEED_BINARY))"
-	cd api/go && GOWORK=off go build -o ../../$(SEED_BINARY) ./cmd/synchro-seed
+	cd api/go && GOWORK=off go build -o "$(abspath $(SEED_BINARY))" ./cmd/synchro-seed
 
 build-check:
 	cd api/go && GOWORK=off go build ./...
