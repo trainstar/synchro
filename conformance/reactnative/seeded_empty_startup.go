@@ -872,7 +872,6 @@ func (c *SeededEmptyStartupCoordinator) seedControlCommand(corrupt bool) *seeded
 		SchemaVersion: 1,
 		Action: conformanceManifest{
 			Action: conformanceAction{Actor: "client", Command: "open", Parameters: parameters},
-			Steps:  []conformanceStep{},
 		},
 		Runtime: runtime,
 	}

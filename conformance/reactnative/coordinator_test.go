@@ -13,6 +13,34 @@ import (
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
+func TestConformanceManifestAlwaysSerializesStepArrays(t *testing.T) {
+	step := conformanceStep{Operation: conformanceOperation{
+		ContractOperation: "connect", Name: "request", Payload: json.RawMessage(`{}`),
+	}}
+	for name, steps := range map[string][]conformanceStep{
+		"nil": nil, "empty": {}, "populated": {step},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(conformanceManifest{Steps: steps})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded struct {
+				Steps []json.RawMessage `json:"steps"`
+			}
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.Steps == nil || len(decoded.Steps) != len(steps) {
+				t.Fatalf("manifest did not preserve its step array: %s", encoded)
+			}
+			if len(steps) == 1 && !bytes.Equal(decoded.Steps[0], []byte(`{"operation":{"contract_operation":"connect","name":"request","payload":{}}}`)) {
+				t.Fatalf("manifest changed its operation: %s", decoded.Steps[0])
+			}
+		})
+	}
+}
+
 func TestExchangeRejectsMalformedAndDuplicateMembers(t *testing.T) {
 	coordinator := newUnitCoordinator(t)
 	defer closeUnitCoordinator(t, coordinator)
