@@ -7,9 +7,14 @@ import argparse
 import base64
 import hashlib
 import hmac
+import http.server
 import json
+import math
 import os
 import re
+import secrets
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -25,6 +30,10 @@ CELL_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_VERSION = 1
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+APP_RESULT_PATH = "/result"
+APP_RESULT_MAX_BYTES = 4096
+APP_RESULT_MAX_ERROR_LENGTH = 512
+APP_RESULT_READ_TIMEOUT_SECONDS = 5.0
 PUBLIC_CONSUMER_FORBIDDEN = (
     "@_spi(Inspection)",
     "SynchroInspection",
@@ -175,6 +184,237 @@ def required_integer(value: object, field: str, minimum: int = 0) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
         raise EvidenceError(f"{field} must be an integer greater than or equal to {minimum}")
     return value
+
+
+def decode_app_result(raw: bytes) -> dict[str, object]:
+    def reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, member in pairs:
+            if key in value:
+                raise EvidenceError("application phase result repeats a JSON member")
+            value[key] = member
+        return value
+
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_members)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvidenceError("application phase result is malformed") from error
+    return validate_app_result(value)
+
+
+def validate_app_result(value: object, expected_phase: str | None = None) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise EvidenceError("application phase result must be an object")
+    expected_keys = {
+        "schema_version",
+        "phase",
+        "status",
+        "pending_change_count",
+        "error",
+    }
+    if set(value) != expected_keys:
+        raise EvidenceError("application phase result has invalid members")
+    schema_version = value.get("schema_version")
+    phase = value.get("phase")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != 1
+        or not isinstance(phase, str)
+        or phase not in {"initial", "resume"}
+    ):
+        raise EvidenceError("application phase result has invalid identity")
+    if expected_phase is not None and phase != expected_phase:
+        raise EvidenceError(f"application phase result is for {phase}, expected {expected_phase}")
+    status = value.get("status")
+    if not isinstance(status, str) or status not in {"passed", "failed"}:
+        raise EvidenceError("application phase result has invalid status")
+    pending_count = value.get("pending_change_count")
+    if pending_count is not None:
+        required_integer(pending_count, "application pending count")
+    error = value.get("error")
+    if status == "passed":
+        if pending_count is None or error is not None:
+            raise EvidenceError("passed application phase result is incomplete")
+    elif (
+        not isinstance(error, str)
+        or not error
+        or len(error) > APP_RESULT_MAX_ERROR_LENGTH
+    ):
+        raise EvidenceError("failed application phase result has invalid error detail")
+    return value
+
+
+def app_result_path(results_dir: Path, phase: str) -> Path:
+    if phase not in {"initial", "resume"}:
+        raise EvidenceError("application result phase is invalid")
+    return results_dir / f"{phase}.json"
+
+
+class AppResultHTTPServer(http.server.HTTPServer):
+    def __init__(self, address: tuple[str, int], results_dir: Path, token: str):
+        super().__init__(address, AppResultRequestHandler)
+        self.results_dir = results_dir
+        self.token = token
+
+
+class AppResultRequestHandler(http.server.BaseHTTPRequestHandler):
+    server: AppResultHTTPServer
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(APP_RESULT_READ_TIMEOUT_SECONDS)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def respond(self, status: int) -> None:
+        body = b'{"status":"accepted"}' if status < 300 else b'{"status":"rejected"}'
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        self.respond(405)
+
+    def do_POST(self) -> None:
+        if self.path != APP_RESULT_PATH:
+            self.respond(404)
+            return
+        authorization = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        supplied = authorization[len(prefix):] if authorization.startswith(prefix) else ""
+        if not supplied or not hmac.compare_digest(supplied.encode("utf-8"), self.server.token.encode("ascii")):
+            self.respond(401)
+            return
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self.respond(415)
+            return
+        raw_length = self.headers.get("Content-Length")
+        try:
+            content_length = int(raw_length) if raw_length is not None else 0
+        except ValueError:
+            content_length = 0
+        if content_length <= 0 or content_length > APP_RESULT_MAX_BYTES:
+            self.respond(413)
+            return
+        try:
+            raw = self.rfile.read(content_length)
+            if len(raw) != content_length:
+                raise EvidenceError("application phase result body is incomplete")
+            result = decode_app_result(raw)
+        except (socket.timeout, TimeoutError):
+            self.respond(408)
+            return
+        except EvidenceError:
+            self.respond(400)
+            return
+
+        phase = str(result["phase"])
+        target = app_result_path(self.server.results_dir, phase)
+        if target.exists():
+            try:
+                existing = validate_app_result(load_json(target, f"{phase} application phase result"))
+            except EvidenceError:
+                self.respond(409)
+                return
+            self.respond(200 if existing == result else 409)
+            return
+
+        initial_path = app_result_path(self.server.results_dir, "initial")
+        resume_path = app_result_path(self.server.results_dir, "resume")
+        if resume_path.exists():
+            self.respond(409)
+            return
+        if initial_path.exists():
+            try:
+                initial = validate_app_result(load_json(initial_path, "initial application phase result"), "initial")
+            except EvidenceError:
+                self.respond(409)
+                return
+            expected_phase = "resume" if initial["status"] == "passed" else None
+        else:
+            expected_phase = "initial"
+        if phase != expected_phase:
+            self.respond(409)
+            return
+        write_json(target, result, mode=0o600)
+        self.respond(201)
+
+
+def create_app_result_server(results_dir: Path) -> AppResultHTTPServer:
+    try:
+        results_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise EvidenceError("application result directory must be fresh") from error
+    collector_token = secrets.token_urlsafe(32)
+    return AppResultHTTPServer(("127.0.0.1", 0), results_dir, collector_token)
+
+
+def run_app_result_collector(ready_path: Path, results_dir: Path) -> None:
+    server = create_app_result_server(results_dir)
+    host, port = server.server_address
+    write_json(
+        ready_path,
+        {
+            "schema_version": 1,
+            "url": f"http://{host}:{port}{APP_RESULT_PATH}",
+            "token": server.token,
+        },
+        mode=0o600,
+    )
+    stopped = False
+
+    def stop_collector(_signal: int, _frame: object) -> None:
+        nonlocal stopped
+        stopped = True
+
+    signal.signal(signal.SIGINT, stop_collector)
+    signal.signal(signal.SIGTERM, stop_collector)
+    server.timeout = 0.5
+    try:
+        while not stopped:
+            server.handle_request()
+    finally:
+        server.server_close()
+
+
+def await_app_result(
+    result_path: Path,
+    phase: str,
+    pid: int,
+    output: Path,
+    timeout_seconds: float,
+) -> None:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or timeout_seconds > 600:
+        raise EvidenceError("application result timeout is outside the supported bound")
+    deadline = time.monotonic() + timeout_seconds
+    while not result_path.is_file():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise EvidenceError(f"{phase} application phase result is missing")
+        time.sleep(min(0.1, remaining))
+    result = validate_app_result(load_json(result_path, f"{phase} application phase result"), phase)
+    if result["status"] != "passed":
+        raise EvidenceError(f"{phase} application reported failure: {result['error']}")
+    pending_count = required_integer(result["pending_change_count"], f"{phase} application pending count")
+    if phase == "initial" and pending_count != 1:
+        raise EvidenceError("initial application did not report one durable pending change")
+    if phase == "resume" and pending_count != 0:
+        raise EvidenceError("resume application did not report a drained durable queue")
+    write_json(
+        output,
+        {
+            "schema_version": 1,
+            "phase": phase,
+            "status": "passed",
+            "pid": required_integer(pid, f"{phase} pid", 1),
+            "pending_change_count": pending_count,
+        },
+    )
 
 
 def validate_phase(path: Path, expected_phase: str) -> dict[str, object]:
@@ -644,8 +884,53 @@ def smoke_config(cell_id: str, platform: str) -> dict[str, str | int]:
     }
 
 
-def write_config(cell_id: str, platform: str, output: Path) -> None:
-    write_json(output, smoke_config(cell_id, platform), mode=0o600)
+def write_config(
+    cell_id: str,
+    platform: str,
+    output: Path,
+    collector_ready: Path | None = None,
+) -> None:
+    result = smoke_config(cell_id, platform)
+    if collector_ready is not None:
+        try:
+            mode = collector_ready.stat().st_mode & 0o777
+        except OSError as error:
+            raise EvidenceError(f"application result collector configuration is missing: {error}") from error
+        if mode != 0o600:
+            raise EvidenceError("application result collector configuration must have mode 0600")
+        collector = load_json(collector_ready, "application result collector configuration")
+        if (
+            not isinstance(collector, dict)
+            or set(collector) != {"schema_version", "url", "token"}
+            or collector.get("schema_version") != 1
+            or isinstance(collector.get("schema_version"), bool)
+        ):
+            raise EvidenceError("application result collector configuration is invalid")
+        result_url = collector.get("url")
+        result_token = collector.get("token")
+        if not isinstance(result_url, str) or not isinstance(result_token, str):
+            raise EvidenceError("application result collector configuration is invalid")
+        parsed_result = urlsplit(result_url)
+        try:
+            result_port = parsed_result.port
+        except ValueError as error:
+            raise EvidenceError("application result collector URL has an invalid port") from error
+        if (
+            parsed_result.scheme != "http"
+            or parsed_result.hostname not in {"127.0.0.1", "localhost"}
+            or result_port is None
+            or parsed_result.path != APP_RESULT_PATH
+            or parsed_result.query
+            or parsed_result.fragment
+            or parsed_result.username
+            or parsed_result.password
+            or len(result_token) < 32
+            or len(result_token) > 256
+        ):
+            raise EvidenceError("application result collector configuration is invalid")
+        result["result_url"] = result_url
+        result["result_token"] = result_token
+    write_json(output, result, mode=0o600)
 
 
 def write_typescript(value: dict[str, object], output: Path) -> None:
@@ -693,19 +978,6 @@ def set_config_phase(path: Path, phase: str, output: Path) -> None:
     write_json(output, value, mode=0o600)
 
 
-def write_phase(path: Path, phase: str, pid: int, pending_count: int) -> None:
-    write_json(
-        path,
-        {
-            "schema_version": 1,
-            "phase": phase,
-            "status": "passed",
-            "pid": pid,
-            "pending_change_count": pending_count,
-        },
-    )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -749,6 +1021,7 @@ def parse_args() -> argparse.Namespace:
     config = subparsers.add_parser("config")
     config.add_argument("--cell", required=True)
     config.add_argument("--platform", required=True)
+    config.add_argument("--collector-ready", type=Path)
     config.add_argument("--output", type=Path, required=True)
 
     config_ts = subparsers.add_parser("config-to-typescript")
@@ -764,11 +1037,16 @@ def parse_args() -> argparse.Namespace:
     set_phase.add_argument("--phase", choices=("initial", "resume"), required=True)
     set_phase.add_argument("--output", type=Path, required=True)
 
-    phase = subparsers.add_parser("phase-result")
-    phase.add_argument("--output", type=Path, required=True)
-    phase.add_argument("--phase", choices=("initial", "resume"), required=True)
-    phase.add_argument("--pid", type=int, required=True)
-    phase.add_argument("--pending-count", type=int, required=True)
+    collector = subparsers.add_parser("result-collector")
+    collector.add_argument("--ready", type=Path, required=True)
+    collector.add_argument("--results-dir", type=Path, required=True)
+
+    await_result = subparsers.add_parser("await-app-result")
+    await_result.add_argument("--result", type=Path, required=True)
+    await_result.add_argument("--phase", choices=("initial", "resume"), required=True)
+    await_result.add_argument("--pid", type=int, required=True)
+    await_result.add_argument("--output", type=Path, required=True)
+    await_result.add_argument("--timeout-seconds", type=float, required=True)
 
     public_imports = subparsers.add_parser("public-import-check")
     public_imports.add_argument("--consumer-root", type=Path, action="append", required=True)
@@ -801,15 +1079,28 @@ def main() -> int:
         elif args.command == "dry-run":
             dry_summary(args.repo_root.resolve(), args.output.resolve())
         elif args.command == "config":
-            write_config(args.cell, args.platform, args.output.resolve())
+            write_config(
+                args.cell,
+                args.platform,
+                args.output.resolve(),
+                args.collector_ready.resolve() if args.collector_ready is not None else None,
+            )
         elif args.command == "config-to-typescript":
             config_to_typescript(args.config.resolve(), args.output.resolve())
         elif args.command == "config-value":
             config_value(args.config.resolve(), args.field)
         elif args.command == "set-config-phase":
             set_config_phase(args.config.resolve(), args.phase, args.output.resolve())
-        elif args.command == "phase-result":
-            write_phase(args.output.resolve(), args.phase, args.pid, args.pending_count)
+        elif args.command == "result-collector":
+            run_app_result_collector(args.ready.resolve(), args.results_dir.resolve())
+        elif args.command == "await-app-result":
+            await_app_result(
+                args.result.resolve(),
+                args.phase,
+                args.pid,
+                args.output.resolve(),
+                args.timeout_seconds,
+            )
         elif args.command == "public-import-check":
             for consumer_root in args.consumer_root:
                 validate_public_consumer_sources(consumer_root.resolve())

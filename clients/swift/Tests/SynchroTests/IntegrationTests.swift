@@ -232,7 +232,7 @@ final class IntegrationTests: XCTestCase {
         addTeardownBlock { await self.stopAndClose(reader) }
         try await reader.start()
         try await waitForCondition {
-            try await reader.syncNow()
+            try await self.syncAndWaitForScheduledRetry(reader)
             let row = try reader.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])
             return (row?["ship_address"] as? String) == #"{"street":"Bootstrap Ave"}"#
         }
@@ -273,7 +273,7 @@ final class IntegrationTests: XCTestCase {
         )?["deleted_at"] as? String
         XCTAssertNotNil(expectedDeletedAt)
         try await waitForCondition {
-            try await clientB.syncNow()
+            try await self.syncAndWaitForScheduledRetry(clientB)
             let row = try clientB.queryOne("SELECT deleted_at FROM orders WHERE id = ?", params: [orderID])
             return (row?["deleted_at"] as? String) == expectedDeletedAt
         }
