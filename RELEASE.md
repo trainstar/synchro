@@ -168,6 +168,10 @@ Synchro has no numeric performance guarantee. Performance budgets remain deferre
 Never move tags or replace published bytes.
 Recovery never rebuilds or republishes an existing package version.
 
+Before publication, source or dependency corrections require a new candidate.
+Retain the failed candidate unchanged and repeat every required gate.
+Its package results do not certify the new candidate.
+
 ## References
 
 - [Support policy](docs/src/content/docs/reference/support-policy.mdx)

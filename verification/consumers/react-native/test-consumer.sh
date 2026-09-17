@@ -70,7 +70,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 npx --yes @react-native-community/cli@20.0.0 init SynchroConsumer \
-  --version 0.83.0 \
+  --version 0.83.10 \
   --directory "$work_dir/app" \
   --pm npm \
   --skip-install

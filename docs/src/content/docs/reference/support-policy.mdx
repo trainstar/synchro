@@ -28,6 +28,11 @@ PostgreSQL 14, 15, 16, and 17 are excluded. Existing build features or incidenta
 
 The React Native package supports `react-native >=0.83.0 <0.84.0` and the compatible React 19 line. React Native verification exercises both current bridge paths over the native SDKs. Native engine cells provide minimum operating system coverage.
 
+Current package consumers pin React Native 0.83.10.
+Use React Native 0.83.5 or later in the supported line with Xcode 26.4 or later.
+Earlier patches use an incompatible fmt release.
+The [upstream correction](https://github.com/react/react-native/commit/faeef2b90a56633ad44289b994d31e7ce590b145) updates fmt to 12.1.0.
+
 ## Validation Hosts
 
 macOS hosts Apple toolchain and Swift scenario execution. A host role does not create a PostgreSQL support cell.
