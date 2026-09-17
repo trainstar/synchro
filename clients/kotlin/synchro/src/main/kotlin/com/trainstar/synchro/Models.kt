@@ -52,6 +52,103 @@ enum class SyncLifecycleState(val wireName: String) {
     STOPPED("stopped"),
 }
 
+internal object LifecycleTransitions {
+    fun requireAllowed(
+        from: SyncLifecycleState,
+        to: SyncLifecycleState,
+        processRecovery: Boolean = false,
+    ) {
+        val recoveryTransition = processRecovery && to == SyncLifecycleState.LOCAL_READY &&
+            from in RECOVERABLE_PROCESS_STATES
+        if (to !in LEGAL_TRANSITIONS.getValue(from) && !recoveryTransition) {
+            throw SynchroError.InvalidStateTransition(from, to)
+        }
+    }
+
+    private val LEGAL_TRANSITIONS = mapOf(
+        SyncLifecycleState.UNINITIALIZED to setOf(
+            SyncLifecycleState.LOCAL_READY,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.LOCAL_READY to setOf(
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.CONNECTING to setOf(
+            SyncLifecycleState.SCHEMA_APPLYING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.SCHEMA_APPLYING to setOf(
+            SyncLifecycleState.READY,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.READY to setOf(
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.PUSHING,
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.PUSHING to setOf(
+            SyncLifecycleState.PUSHING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.PULLING to setOf(
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.REBUILDING to setOf(
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.BACKOFF to setOf(
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.PUSHING,
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.ERROR to setOf(
+            SyncLifecycleState.LOCAL_READY,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.STOPPED to setOf(SyncLifecycleState.LOCAL_READY),
+    )
+
+    private val RECOVERABLE_PROCESS_STATES = setOf(
+        SyncLifecycleState.CONNECTING,
+        SyncLifecycleState.SCHEMA_APPLYING,
+        SyncLifecycleState.READY,
+        SyncLifecycleState.PUSHING,
+        SyncLifecycleState.PULLING,
+        SyncLifecycleState.REBUILDING,
+        SyncLifecycleState.BACKOFF,
+    )
+}
+
 /** A bounded, stable diagnostic for a durable client failure. */
 enum class SyncOperationKind(val wireName: String) {
     OPENING("opening"),

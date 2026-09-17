@@ -457,9 +457,13 @@ internal class SyncEngine(
     }
 
     private suspend fun awaitLoopWakeup(retryWakeups: ReceiveChannel<RetryWakeup>): ScheduledLoopWork {
-        val wakeup = withTimeoutOrNull((config.syncInterval * 1000).toLong()) {
+        val wakeup = if (config.syncInterval == 0.0) {
             retryWakeups.receive()
-        } ?: return ScheduledLoopWork(DurableBackoffStore.load(database), shouldRun = true)
+        } else {
+            withTimeoutOrNull((config.syncInterval * 1000).toLong().coerceAtLeast(1L)) {
+                retryWakeups.receive()
+            } ?: return ScheduledLoopWork(DurableBackoffStore.load(database), shouldRun = true)
+        }
         if (!isCurrentLifecycleGeneration(wakeup.generation)) {
             return ScheduledLoopWork(null, shouldRun = false)
         }
@@ -616,7 +620,7 @@ internal class SyncEngine(
         initialBackoff: DurableBackoffRecord? = null,
         retryWakeupGeneration: Long? = null,
     ) {
-        var attempt = 0
+        var attempt = 0L
         var lastError: Exception? = null
         var backoff = initialBackoff
 
@@ -1513,9 +1517,7 @@ internal class SyncEngine(
         val previous: SyncStatus
         synchronized(lifecycleLock) {
             previous = currentStatus
-            if (status.state !in LifecycleTransitions.LEGAL_TRANSITIONS.getValue(previous.state)) {
-                throw SynchroError.InvalidStateTransition(previous.state, status.state)
-            }
+            LifecycleTransitions.requireAllowed(previous.state, status.state)
             database.writeTransaction { db ->
                 val durableState = SynchroMeta.getClientState(db).lifecycleState
                 val statusWasPersistedByRecovery = persistedStateAlreadyApplied ||
@@ -1600,81 +1602,6 @@ internal class SyncEngine(
     }
 
     private fun isApplicationForeground(): Boolean = synchronized(lifecycleLock) { appInForeground }
-
-    private object LifecycleTransitions {
-        val LEGAL_TRANSITIONS = mapOf(
-            SyncLifecycleState.UNINITIALIZED to setOf(
-                SyncLifecycleState.LOCAL_READY,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.LOCAL_READY to setOf(
-                SyncLifecycleState.CONNECTING,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.CONNECTING to setOf(
-                SyncLifecycleState.SCHEMA_APPLYING,
-                SyncLifecycleState.READY,
-                SyncLifecycleState.BACKOFF,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.SCHEMA_APPLYING to setOf(
-                SyncLifecycleState.READY,
-                SyncLifecycleState.REBUILDING,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.READY to setOf(
-                SyncLifecycleState.CONNECTING,
-                SyncLifecycleState.PUSHING,
-                SyncLifecycleState.PULLING,
-                SyncLifecycleState.REBUILDING,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.PUSHING to setOf(
-                SyncLifecycleState.PUSHING,
-                SyncLifecycleState.READY,
-                SyncLifecycleState.PULLING,
-                SyncLifecycleState.CONNECTING,
-                SyncLifecycleState.BACKOFF,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.PULLING to setOf(
-                SyncLifecycleState.PULLING,
-                SyncLifecycleState.READY,
-                SyncLifecycleState.REBUILDING,
-                SyncLifecycleState.CONNECTING,
-                SyncLifecycleState.BACKOFF,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.REBUILDING to setOf(
-                SyncLifecycleState.REBUILDING,
-                SyncLifecycleState.READY,
-                SyncLifecycleState.CONNECTING,
-                SyncLifecycleState.BACKOFF,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.BACKOFF to setOf(
-                SyncLifecycleState.CONNECTING,
-                SyncLifecycleState.PUSHING,
-                SyncLifecycleState.PULLING,
-                SyncLifecycleState.REBUILDING,
-                SyncLifecycleState.ERROR,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.ERROR to setOf(
-                SyncLifecycleState.LOCAL_READY,
-                SyncLifecycleState.STOPPED,
-            ),
-            SyncLifecycleState.STOPPED to setOf(SyncLifecycleState.LOCAL_READY),
-        )
-    }
 }
 
 class CallbackCancellable(private var onCancel: (() -> Unit)?) : Cancellable {

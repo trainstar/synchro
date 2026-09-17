@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -15,6 +16,44 @@ import org.robolectric.annotation.Config
 @Config(sdk = [28])
 class ApplicationSqlBoundaryTests {
     private val context = ApplicationProvider.getApplicationContext<Context>()
+
+    @Test
+    fun ddlComparisonPreservesQuotedContentAndNormalizesOnlyOutsideWhitespace() {
+        for (quoted in listOf("'a  b'", "\"a  b\"", "`a  b`", "[a  b]", "'a''  b'", "\"a\"\"  b\"", "`a``  b`")) {
+            assertEquals("SELECT $quoted", SQLiteSchema.canonicalDDL(" \n SELECT\t $quoted \r\n"))
+            assertNotEquals(
+                SQLiteSchema.canonicalDDL("SELECT $quoted"),
+                SQLiteSchema.canonicalDDL("SELECT ${quoted.replace("  ", " ")}"),
+            )
+        }
+        assertEquals("SELECT 'a\n\tb', \"x\n y\"", SQLiteSchema.canonicalDDL("\nSELECT  'a\n\tb',  \"x\n y\"\t"))
+    }
+
+    @Test
+    fun applicationWritesRejectWhitespaceChangesInsideTriggerLiterals() {
+        val dbName = databaseName()
+        val database = SynchroDatabase.open(context, dbName)
+        try {
+            val table = protocolOrdersSchemaManifest().localTables().single().copy(tableID = "table  orders")
+            installTestSchema(database, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(table))
+            val sql = "INSERT INTO orders (id, ship_address, user_id, updated_at) " +
+                "VALUES (?, 'Address', 'u1', '2026-01-01T00:00:00.000000Z')"
+            database.applicationExecute(sql, arrayOf("captured"))
+            assertEquals("table  orders", database.queryOne("SELECT table_id FROM _synchro_pending_changes")?.get("table_id"))
+
+            val trigger = SQLiteSchema.expectedCDCTriggerSQL(table).getValue("_synchro_cdc_insert_orders")
+            database.execute("DROP TRIGGER _synchro_cdc_insert_orders")
+            database.execute(trigger.replace("'table  orders'", "'table orders'"))
+            assertThrows(IllegalStateException::class.java) {
+                database.applicationExecute(sql, arrayOf("blocked"))
+            }
+            assertEquals(listOf("captured"), database.query("SELECT id FROM orders").map { it["id"] })
+            assertEquals(1L, database.queryOne("SELECT COUNT(*) AS count FROM _synchro_pending_changes")?.get("count"))
+        } finally {
+            database.close()
+            context.deleteDatabase(dbName)
+        }
+    }
 
     @Test
     fun applicationSqlRejectsMetadataAliasesCtesAndDdl() {

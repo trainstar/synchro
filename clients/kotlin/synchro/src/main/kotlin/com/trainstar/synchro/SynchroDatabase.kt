@@ -846,23 +846,28 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     fun <T> applicationReadTransaction(block: (ApplicationReadTransaction) -> T): T =
-        readTransaction { db -> block(ApplicationReadTransaction(db)) }
+        readTransaction { db ->
+            withApplicationTransactionScope {
+                val transaction = ApplicationReadTransaction(db)
+                try {
+                    block(transaction)
+                } finally {
+                    transaction.invalidate()
+                }
+            }
+        }
 
     fun <T> applicationTransaction(block: (ApplicationTransaction) -> T): T {
         var changedTables = emptySet<String>()
         val result = writeTransaction { db ->
-            val transaction = ApplicationTransaction(this, db)
-            val previousDepth = applicationTransactionDepth.get() ?: 0
-            applicationTransactionDepth.set(previousDepth + 1)
-            try {
-                val value = block(transaction)
-                changedTables = transaction.changedTables()
-                value
-            } finally {
-                if (previousDepth == 0) {
-                    applicationTransactionDepth.remove()
-                } else {
-                    applicationTransactionDepth.set(previousDepth)
+            withApplicationTransactionScope {
+                val transaction = ApplicationTransaction(this, db)
+                try {
+                    val value = block(transaction)
+                    changedTables = transaction.changedTables()
+                    value
+                } finally {
+                    transaction.invalidate()
                 }
             }
         }
@@ -886,24 +891,31 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
 
         var changedTables = emptySet<String>()
         val result = writeTransaction { db ->
-            val transaction = ApplicationTransaction(this, db)
-            val previousDepth = applicationTransactionDepth.get() ?: 0
-            val statementToken = UUID.randomUUID().toString()
-            applicationTransactionDepth.set(previousDepth + 1)
-            try {
-                installCaptureContext(db, statementToken, tableName, operationName, columnNames)
-                val value = block(transaction)
-                changedTables = transaction.changedTables()
-                value
-            } finally {
+            withApplicationTransactionScope {
+                val transaction = ApplicationTransaction(this, db)
+                val statementToken = UUID.randomUUID().toString()
                 try {
-                    clearCaptureContext(db, statementToken)
+                    val table = ApplicationWriteGuard.loadSyncedTables(db)
+                        .singleOrNull {
+                            SQLiteHelpers.canonicalIdentifier(it.tableName) == SQLiteHelpers.canonicalIdentifier(tableName)
+                        }
+                    installCaptureContext(
+                        db,
+                        statementToken,
+                        table?.tableName ?: tableName,
+                        operationName,
+                        columnNames.map { name ->
+                            table?.columns?.singleOrNull {
+                                SQLiteHelpers.canonicalIdentifier(it.name) == SQLiteHelpers.canonicalIdentifier(name)
+                            }?.name ?: name
+                        },
+                    )
+                    val value = block(transaction)
+                    changedTables = transaction.changedTables()
+                    value
                 } finally {
-                    if (previousDepth == 0) {
-                        applicationTransactionDepth.remove()
-                    } else {
-                        applicationTransactionDepth.set(previousDepth)
-                    }
+                    transaction.invalidate()
+                    clearCaptureContext(db, statementToken)
                 }
             }
         }
@@ -972,20 +984,38 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         columnNames: List<String>?,
         block: () -> T,
     ): T {
-        if (hasCaptureContext(db)) return block()
+        val hasContext = db.rawQuery(
+            "SELECT table_name, operation FROM _synchro_capture_context WHERE singleton = 1",
+            null,
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) {
+                false
+            } else {
+                require(SQLiteHelpers.canonicalIdentifier(cursor.getString(0)) == SQLiteHelpers.canonicalIdentifier(tableName)) {
+                    "authored write context targets a different table"
+                }
+                require(cursor.getString(1) == operation) {
+                    "authored write context targets a different operation"
+                }
+                true
+            }
+        }
+        if (hasContext) return block()
         val table = ApplicationWriteGuard.loadSyncedTables(db)
-            .singleOrNull { it.tableName.equals(tableName, ignoreCase = true) }
+            .singleOrNull {
+                SQLiteHelpers.canonicalIdentifier(it.tableName) == SQLiteHelpers.canonicalIdentifier(tableName)
+            }
             ?: return block()
         val statementToken = UUID.randomUUID().toString()
         val writableColumns = table.columns.filter { it.writable }
-        val requestedColumns = columnNames?.map { it.lowercase(Locale.ROOT) }?.toSet()
+        val requestedColumns = columnNames?.map(SQLiteHelpers::canonicalIdentifier)?.toSet()
         installCaptureContext(
             db = db,
             statementToken = statementToken,
             tableName = table.tableName,
             operation = operation,
             columnNames = writableColumns
-                .filter { requestedColumns == null || it.name.lowercase(Locale.ROOT) in requestedColumns }
+                .filter { requestedColumns == null || SQLiteHelpers.canonicalIdentifier(it.name) in requestedColumns }
                 .map { it.name },
         )
         return try {
@@ -995,10 +1025,19 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         }
     }
 
-    private fun hasCaptureContext(db: SQLiteDatabase): Boolean = db.rawQuery(
-        "SELECT 1 FROM _synchro_capture_context WHERE singleton = 1 LIMIT 1",
-        null,
-    ).use { it.moveToFirst() }
+    private fun <T> withApplicationTransactionScope(block: () -> T): T {
+        val previousDepth = applicationTransactionDepth.get() ?: 0
+        applicationTransactionDepth.set(previousDepth + 1)
+        return try {
+            block()
+        } finally {
+            if (previousDepth == 0) {
+                applicationTransactionDepth.remove()
+            } else {
+                applicationTransactionDepth.set(previousDepth)
+            }
+        }
+    }
 
     internal fun requireOutsideApplicationTransaction(operation: String) {
         check((applicationTransactionDepth.get() ?: 0) == 0) {
@@ -1258,44 +1297,70 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 }
 
-/** A read-only application transaction. It never exposes SQLiteDatabase. */
+private class ApplicationTransactionLifetime {
+    private val owningThread = Thread.currentThread()
+    @Volatile
+    private var active = true
+
+    fun requireActive() {
+        check(active) { "application transaction callback has ended" }
+        check(Thread.currentThread() === owningThread) { "application transaction belongs to another thread" }
+    }
+
+    fun invalidate() {
+        active = false
+    }
+}
+
+/** A read-only handle for the callback and its owning thread. */
 class ApplicationReadTransaction internal constructor(
     private val database: SQLiteDatabase,
 ) {
+    private val lifetime = ApplicationTransactionLifetime()
+
     fun query(sql: String, params: Array<out Any?>? = null): List<Row> {
+        lifetime.requireActive()
         ApplicationSql.authorizeRead(sql)
         return queryWithTypedBindings(database, sql, params)
     }
 
     fun queryOne(sql: String, params: Array<out Any?>? = null): Row? {
+        lifetime.requireActive()
         ApplicationSql.authorizeRead(sql)
         return queryOneWithTypedBindings(database, sql, params)
     }
+
+    @JvmSynthetic
+    internal fun invalidate() = lifetime.invalidate()
 }
 
 /**
  * An application transaction contains only guarded local SQL. The internal
  * SQLite handle remains private, so an application cannot change metadata or
- * remove capture triggers.
+ * remove capture triggers. The handle belongs to its callback and owning thread.
  */
 class ApplicationTransaction internal constructor(
     private val owner: SynchroDatabase,
     private val database: SQLiteDatabase,
 ) {
+    private val lifetime = ApplicationTransactionLifetime()
     private val changed = linkedSetOf<String>()
     private var triggerSetValidated = false
 
     fun query(sql: String, params: Array<out Any?>? = null): List<Row> {
+        lifetime.requireActive()
         ApplicationSql.authorizeRead(sql)
         return queryWithTypedBindings(database, sql, params)
     }
 
     fun queryOne(sql: String, params: Array<out Any?>? = null): Row? {
+        lifetime.requireActive()
         ApplicationSql.authorizeRead(sql)
         return queryOneWithTypedBindings(database, sql, params)
     }
 
     fun execute(sql: String, params: Array<out Any?>? = null): ExecResult {
+        lifetime.requireActive()
         val statement = ApplicationSql.authorizeWrite(sql)
         val target = requireNotNull(statement.writeTarget)
         ApplicationWriteGuard.requireWritableTarget(
@@ -1322,10 +1387,18 @@ class ApplicationTransaction internal constructor(
         return ExecResult(rowsAffected = changes)
     }
 
-    fun executeBatch(statements: List<SQLStatement>): Int =
-        statements.sumOf { statement -> execute(statement.sql, statement.params).rowsAffected }
+    fun executeBatch(statements: List<SQLStatement>): Int {
+        lifetime.requireActive()
+        return statements.sumOf { statement -> execute(statement.sql, statement.params).rowsAffected }
+    }
 
-    internal fun changedTables(): Set<String> = changed.toSet()
+    internal fun changedTables(): Set<String> {
+        lifetime.requireActive()
+        return changed.toSet()
+    }
+
+    @JvmSynthetic
+    internal fun invalidate() = lifetime.invalidate()
 }
 
 /**
