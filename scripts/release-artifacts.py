@@ -361,13 +361,17 @@ def validate_signed_maven_payloads(root: Path, version: str) -> list[str]:
     version_file = re.compile(
         rf"^{re.escape(base)}(?:\.aar|\.pom|\.module|-sources\.jar|-javadoc\.jar)(?:\.asc)?(?:\.(?:md5|sha1|sha256|sha512))?$"
     )
-    metadata_file = re.compile(r"^fit/trainstar/synchro/maven-metadata\.xml(?:\.(?:md5|sha1|sha256|sha512))?$")
-    if any(not name.startswith(artifact_root) or not (version_file.fullmatch(name) or metadata_file.fullmatch(name)) for name in files):
+    if any(not name.startswith(artifact_root) or not version_file.fullmatch(name) for name in files):
         raise ReleaseError("Maven release bundle contains an unexpected coordinate entry")
     return files
 
 
 def prepare_maven_repository(root: Path, version: str) -> None:
+    files = regular_files(root)
+    metadata_file = re.compile(r"^fit/trainstar/synchro/maven-metadata\.xml(?:\.(?:md5|sha1|sha256|sha512))?$")
+    for relative in files:
+        if metadata_file.fullmatch(relative):
+            (root / relative).unlink()
     files = validate_signed_maven_payloads(root, version)
     checksum_suffixes = (".md5", ".sha1", ".sha256", ".sha512")
     originals = [relative for relative in files if not relative.endswith(checksum_suffixes)]

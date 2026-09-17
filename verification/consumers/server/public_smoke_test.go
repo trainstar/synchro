@@ -93,6 +93,7 @@ func TestRequestAddsPublicHeaders(t *testing.T) {
 
 func TestPullRetriesOnlyCapturePending(t *testing.T) {
 	requests := 0
+	state := smokePullState()
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requests++
 		if requests == 1 {
@@ -100,30 +101,182 @@ func TestPullRetriesOnlyCapturePending(t *testing.T) {
 			_, _ = response.Write([]byte(`{"error":{"code":"capture_pending"}}`))
 			return
 		}
+		_ = json.NewEncoder(response).Encode(pullPage(state, []any{smokePulledCustomer(state)}, false, nil))
+	}))
+	defer server.Close()
+
+	if err := pullUntilCustomerDelivered(
+		context.Background(),
+		server.Client(),
+		"token",
+		server.URL,
+		state,
+	); err != nil {
+		t.Fatalf("pull until customer delivered: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("request count = %d, want 2", requests)
+	}
+}
+
+func TestPullRequiresExactAuthoredCustomer(t *testing.T) {
+	state := smokePullState()
+	wrongValue := smokePulledCustomer(state)
+	wrongValue["row"].(map[string]any)[state.Fields["balance"]] = "1"
+	missingValue := smokePulledCustomer(state)
+	delete(missingValue["row"].(map[string]any), state.Fields["name"])
+	wrongRow := smokePulledCustomer(state)
+	wrongRow["pk"] = map[string]any{state.PrimaryKeyID: "another-customer"}
+	wrongRowPrimaryKey := smokePulledCustomer(state)
+	wrongRowPrimaryKey["row"].(map[string]any)[state.PrimaryKeyID] = "another-customer"
+	rebuildOnly := pullPage(state, []any{}, false, nil)
+	rebuildOnly["rebuild"] = []any{"scope:customer"}
+
+	tests := []struct {
+		name string
+		page map[string]any
+	}{
+		{name: "empty", page: pullPage(state, []any{}, false, nil)},
+		{name: "wrong row", page: pullPage(state, []any{wrongRow}, false, nil)},
+		{name: "wrong row primary key", page: pullPage(state, []any{wrongRowPrimaryKey}, false, nil)},
+		{name: "wrong value", page: pullPage(state, []any{wrongValue}, false, nil)},
+		{name: "missing value", page: pullPage(state, []any{missingValue}, false, nil)},
+		{name: "rebuild only", page: rebuildOnly},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				_ = json.NewEncoder(response).Encode(test.page)
+			}))
+			defer server.Close()
+
+			if err := pullUntilCustomerDelivered(
+				context.Background(),
+				server.Client(),
+				"token",
+				server.URL,
+				state,
+			); err == nil {
+				t.Fatal("pull without the exact authored customer passed")
+			}
+		})
+	}
+}
+
+func TestPullFollowsCursorDeltasUntilAuthoredCustomer(t *testing.T) {
+	state := smokePullState()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		var body struct {
+			Scopes map[string]scopeCursor `json:"scopes"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode pull request: %v", err)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if requests == 1 {
+			if body.Scopes["scope:customer"].Cursor == nil ||
+				*body.Scopes["scope:customer"].Cursor != "baseline-cursor" {
+				t.Errorf("first pull cursor = %#v", body.Scopes)
+			}
+			_ = json.NewEncoder(response).Encode(
+				pullPage(state, []any{}, true, map[string]string{"scope:customer": "page-one"}),
+			)
+			return
+		}
+		if body.Scopes["scope:customer"].Cursor == nil ||
+			*body.Scopes["scope:customer"].Cursor != "page-one" {
+			t.Errorf("second pull cursor = %#v", body.Scopes)
+		}
+		_ = json.NewEncoder(response).Encode(pullPage(state, []any{smokePulledCustomer(state)}, false, nil))
+	}))
+	defer server.Close()
+
+	if err := pullUntilCustomerDelivered(
+		context.Background(),
+		server.Client(),
+		"token",
+		server.URL,
+		state,
+	); err != nil {
+		t.Fatalf("pull until customer delivered: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("request count = %d, want 2", requests)
+	}
+	if state.Scopes["scope:customer"].Cursor == nil ||
+		*state.Scopes["scope:customer"].Cursor != "baseline-cursor" {
+		t.Fatal("paginated pull changed the persisted baseline cursor")
+	}
+}
+
+func TestBootstrapIncrementalCursorsFollowsRebuildContinuation(t *testing.T) {
+	state := smokePullState()
+	state.Scopes["scope:customer"] = scopeCursor{Cursor: nil}
+	requests := 0
+	var rebuildID string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		var body struct {
+			Scope     string  `json:"scope"`
+			RebuildID string  `json:"rebuild_id"`
+			Cursor    *string `json:"cursor"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode rebuild request: %v", err)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body.Scope != "scope:customer" {
+			t.Errorf("rebuild scope = %q", body.Scope)
+		}
+		if requests == 1 {
+			rebuildID = body.RebuildID
+			if body.Cursor != nil {
+				t.Errorf("first rebuild cursor = %q", *body.Cursor)
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"scope":    body.Scope,
+				"records":  []any{},
+				"cursor":   "rebuild-page-one",
+				"has_more": true,
+			})
+			return
+		}
+		if body.RebuildID != rebuildID || body.Cursor == nil || *body.Cursor != "rebuild-page-one" {
+			t.Errorf("continuation request = %#v", body)
+		}
 		_ = json.NewEncoder(response).Encode(map[string]any{
-			"changes":           []any{},
-			"scope_set_version": 1,
-			"scope_cursors":     map[string]string{},
-			"scope_updates":     map[string]any{"add": []any{}, "remove": []any{}},
-			"rebuild":           []any{},
-			"has_more":          false,
-			"checksums":         map[string]any{},
+			"scope":              body.Scope,
+			"records":            []any{},
+			"cursor":             nil,
+			"has_more":           false,
+			"final_scope_cursor": "incremental-baseline",
+			"checksum": map[string]any{
+				"algorithm": "sha256",
+				"version":   1,
+				"encoding":  "hex",
+				"digest":    strings.Repeat("b", 64),
+			},
 		})
 	}))
 	defer server.Close()
 
-	state := clientState{
-		ClientID:        smokeClientID,
-		Generation:      1,
-		ScopeSetVersion: 1,
-		Schema:          schemaRef{Version: 1, Hash: strings.Repeat("a", 64)},
-		Scopes:          map[string]scopeCursor{},
+	bootstrapped, err := bootstrapIncrementalCursors(
+		context.Background(),
+		server.Client(),
+		"token",
+		server.URL,
+		state,
+	)
+	if err != nil {
+		t.Fatalf("bootstrap incremental cursors: %v", err)
 	}
-	if err := pullUntilReady(context.Background(), server.Client(), "token", server.URL, state); err != nil {
-		t.Fatalf("pull until ready: %v", err)
-	}
-	if requests != 2 {
-		t.Fatalf("request count = %d, want 2", requests)
+	if requests != 2 || bootstrapped.Scopes["scope:customer"].Cursor == nil ||
+		*bootstrapped.Scopes["scope:customer"].Cursor != "incremental-baseline" {
+		t.Fatalf("bootstrapped state = %#v after %d requests", bootstrapped.Scopes, requests)
 	}
 }
 
@@ -153,5 +306,64 @@ func TestRequireAcceptedPushRejectsTerminalOutcome(t *testing.T) {
 		}`
 	if err := requireAcceptedPush([]byte(rejected)); err == nil {
 		t.Fatal("terminally rejected push passed")
+	}
+}
+
+func smokePullState() clientState {
+	baseline := "baseline-cursor"
+	return clientState{
+		ClientID:        smokeClientID,
+		Generation:      1,
+		ScopeSetVersion: 1,
+		Schema:          schemaRef{Version: 1, Hash: strings.Repeat("a", 64)},
+		Scopes: map[string]scopeCursor{
+			"scope:customer": {Cursor: &baseline},
+		},
+		TableID:      "table-customers",
+		PrimaryKeyID: "field-id",
+		Fields: map[string]string{
+			"user_id":   "field-user",
+			"name":      "field-name",
+			"balance":   "field-balance",
+			"is_active": "field-active",
+		},
+	}
+}
+
+func smokePulledCustomer(state clientState) map[string]any {
+	return map[string]any{
+		"scope": "scope:customer",
+		"table": state.TableID,
+		"op":    "upsert",
+		"pk": map[string]any{
+			state.PrimaryKeyID: smokeRowID,
+		},
+		"row": map[string]any{
+			state.PrimaryKeyID:        smokeRowID,
+			state.Fields["user_id"]:   smokeUserID,
+			state.Fields["name"]:      "Packaged server consumer",
+			state.Fields["balance"]:   "0",
+			state.Fields["is_active"]: true,
+		},
+	}
+}
+
+func pullPage(
+	state clientState,
+	changes []any,
+	hasMore bool,
+	scopeCursors map[string]string,
+) map[string]any {
+	if scopeCursors == nil {
+		scopeCursors = map[string]string{}
+	}
+	return map[string]any{
+		"changes":           changes,
+		"scope_set_version": state.ScopeSetVersion,
+		"scope_cursors":     scopeCursors,
+		"scope_updates":     map[string]any{"add": []any{}, "remove": []any{}},
+		"rebuild":           []any{},
+		"has_more":          hasMore,
+		"checksums":         map[string]any{},
 	}
 }

@@ -101,6 +101,9 @@ The corpus rejects missing scenario runners before execution.
 
 Release builds distributions once. Package checks and publication use the identical sealed payloads.
 
+Maven bundles contain only version-specific artifacts, signatures, and checksums.
+Maven Central owns repository-level version metadata.
+
 Artifact transfers can remove file permissions. Verification checks payload bytes and binary format.
 Execution boundaries restore executable permissions after verification.
 
@@ -116,6 +119,7 @@ It has no publication credentials and performs no public operation.
 
 The Package gate owns the full five-operation lifecycle.
 The consumer's terminal result owns phase completion. An empty queue alone cannot certify success.
+Native and React Native consumers report resume success only after stop and close finish.
 
 The Public gate does not repeat that lifecycle.
 It verifies public GitHub assets, Maven files, and the npm tarball against sealed identities.

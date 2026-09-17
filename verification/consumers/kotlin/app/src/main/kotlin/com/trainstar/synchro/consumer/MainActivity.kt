@@ -130,9 +130,9 @@ class MainActivity : Activity() {
         }
         val pendingAfterResume = client.pendingChangeCount()
         check(pendingAfterResume == 0)
-        writePhaseResult(phase, pendingAfterResume)
         client.stop()
         client.close()
+        writePhaseResult(phase, pendingAfterResume)
     }
 
     private suspend fun runAndWaitForScheduledPullRetry(

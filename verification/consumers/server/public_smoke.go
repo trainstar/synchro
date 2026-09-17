@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -99,6 +101,22 @@ type pullResponse struct {
 	Rebuild         []string          `json:"rebuild"`
 	HasMore         bool              `json:"has_more"`
 	ScopeSetVersion int64             `json:"scope_set_version"`
+}
+
+type pullChange struct {
+	Scope string                     `json:"scope"`
+	Table string                     `json:"table"`
+	Op    string                     `json:"op"`
+	PK    map[string]json.RawMessage `json:"pk"`
+	Row   map[string]json.RawMessage `json:"row"`
+}
+
+type rebuildResponse struct {
+	Scope            string            `json:"scope"`
+	Records          []json.RawMessage `json:"records"`
+	Cursor           json.RawMessage   `json:"cursor"`
+	HasMore          bool              `json:"has_more"`
+	FinalScopeCursor *string           `json:"final_scope_cursor"`
 }
 
 type pushResponseSummary struct {
@@ -252,6 +270,18 @@ func pullPayload(state clientState) map[string]any {
 	}
 }
 
+func rebuildPayload(state clientState, scopeID, rebuildID string, cursor *string) map[string]any {
+	return map[string]any{
+		"client_id":         state.ClientID,
+		"client_generation": state.Generation,
+		"schema":            state.Schema,
+		"scope":             scopeID,
+		"rebuild_id":        rebuildID,
+		"cursor":            cursor,
+		"limit":             100,
+	}
+}
+
 func newRequest(ctx context.Context, token, url string, body []byte) (*http.Request, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -307,42 +337,207 @@ func requireAcceptedPush(body []byte) error {
 	return nil
 }
 
-func pullUntilReady(
+func newRebuildID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	value[6] = value[6]&0x0f | 0x40
+	value[8] = value[8]&0x3f | 0x80
+	encoded := hex.EncodeToString(value[:])
+	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" +
+		encoded[16:20] + "-" + encoded[20:32], nil
+}
+
+func bootstrapIncrementalCursors(
+	ctx context.Context,
+	client *http.Client,
+	token string,
+	baseURL string,
+	state clientState,
+) (clientState, error) {
+	for scopeID, scope := range state.Scopes {
+		if scope.Cursor != nil {
+			continue
+		}
+		rebuildID, err := newRebuildID()
+		if err != nil {
+			return clientState{}, errors.New("generate rebuild ID failed")
+		}
+		var continuation *string
+		for {
+			status, body, err := postJSON(
+				ctx,
+				client,
+				token,
+				baseURL+"/sync/rebuild",
+				rebuildPayload(state, scopeID, rebuildID, continuation),
+			)
+			if err != nil {
+				return clientState{}, err
+			}
+			if err := requireOK(status, "rebuild"); err != nil {
+				return clientState{}, err
+			}
+			var response rebuildResponse
+			if err := json.Unmarshal(body, &response); err != nil {
+				return clientState{}, fmt.Errorf("decode rebuild response: %w", err)
+			}
+			if response.Scope != scopeID || response.Records == nil || len(response.Cursor) == 0 {
+				return clientState{}, errors.New("rebuild response is incomplete")
+			}
+			if response.HasMore {
+				var next string
+				if err := json.Unmarshal(response.Cursor, &next); err != nil || next == "" ||
+					response.FinalScopeCursor != nil {
+					return clientState{}, errors.New("intermediate rebuild response is invalid")
+				}
+				continuation = &next
+				continue
+			}
+			if !bytes.Equal(bytes.TrimSpace(response.Cursor), []byte("null")) ||
+				response.FinalScopeCursor == nil || *response.FinalScopeCursor == "" {
+				return clientState{}, errors.New("final rebuild response has no incremental cursor")
+			}
+			finalCursor := *response.FinalScopeCursor
+			state.Scopes[scopeID] = scopeCursor{Cursor: &finalCursor}
+			break
+		}
+	}
+	return state, nil
+}
+
+func pullUntilCustomerDelivered(
 	ctx context.Context,
 	client *http.Client,
 	token string,
 	baseURL string,
 	state clientState,
 ) error {
-	deadline := time.Now().Add(30 * time.Second)
+	pullContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	state.Scopes = maps.Clone(state.Scopes)
+
 	for {
-		status, body, err := postJSON(ctx, client, token, baseURL+"/sync/pull", pullPayload(state))
+		status, body, err := postJSON(
+			pullContext,
+			client,
+			token,
+			baseURL+"/sync/pull",
+			pullPayload(state),
+		)
 		if err != nil {
 			return err
 		}
-		if status == http.StatusOK {
-			var response pullResponse
-			if err := json.Unmarshal(body, &response); err != nil {
-				return fmt.Errorf("decode pull response: %w", err)
+		if status == http.StatusServiceUnavailable && capturePending(body) {
+			select {
+			case <-pullContext.Done():
+				return errors.New("pull remained capture_pending")
+			case <-time.After(100 * time.Millisecond):
 			}
-			if response.ScopeSetVersion < 0 || response.Changes == nil ||
-				response.ScopeCursors == nil || response.Rebuild == nil {
-				return errors.New("pull response is incomplete")
+			continue
+		}
+		if err := requireOK(status, "pull"); err != nil {
+			return err
+		}
+
+		var response pullResponse
+		if err := json.Unmarshal(body, &response); err != nil {
+			return fmt.Errorf("decode pull response: %w", err)
+		}
+		if response.ScopeSetVersion != state.ScopeSetVersion || response.Changes == nil ||
+			response.ScopeCursors == nil || response.Rebuild == nil {
+			return errors.New("pull response is incomplete")
+		}
+		if len(response.Rebuild) != 0 {
+			return errors.New("incremental pull requested an unexpected rebuild")
+		}
+		for _, rawChange := range response.Changes {
+			delivered, err := isAuthoredCustomerUpsert(rawChange, state)
+			if err != nil {
+				return err
 			}
-			return nil
+			if delivered {
+				return nil
+			}
 		}
-		if status != http.StatusServiceUnavailable || !capturePending(body) {
-			return fmt.Errorf("pull returned HTTP %d", status)
+		if !response.HasMore {
+			return errors.New("pull did not deliver the authored customer")
 		}
-		if time.Now().After(deadline) {
-			return errors.New("pull remained capture_pending")
+		progressed, err := applyScopeCursorDeltas(state.Scopes, response.ScopeCursors)
+		if err != nil {
+			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		if !progressed {
+			return errors.New("paginated pull did not advance a scope cursor")
 		}
 	}
+}
+
+func applyScopeCursorDeltas(scopes map[string]scopeCursor, deltas map[string]string) (bool, error) {
+	progressed := false
+	for scopeID, cursor := range deltas {
+		current, found := scopes[scopeID]
+		if !found || cursor == "" {
+			return false, errors.New("pull returned an invalid scope cursor")
+		}
+		if current.Cursor == nil || *current.Cursor != cursor {
+			progressed = true
+		}
+		next := cursor
+		scopes[scopeID] = scopeCursor{Cursor: &next}
+	}
+	return progressed, nil
+}
+
+func isAuthoredCustomerUpsert(rawChange json.RawMessage, state clientState) (bool, error) {
+	var change pullChange
+	if err := json.Unmarshal(rawChange, &change); err != nil {
+		return false, fmt.Errorf("decode pull change: %w", err)
+	}
+	if change.Table != state.TableID {
+		return false, nil
+	}
+	rawPrimaryKey, found := change.PK[state.PrimaryKeyID]
+	if !found {
+		return false, nil
+	}
+	var rowID string
+	if err := json.Unmarshal(rawPrimaryKey, &rowID); err != nil {
+		return false, errors.New("customer primary key is invalid")
+	}
+	if rowID != smokeRowID {
+		return false, nil
+	}
+	if len(change.PK) != 1 {
+		return false, errors.New("authored customer primary key is not exact")
+	}
+	if _, found := state.Scopes[change.Scope]; !found {
+		return false, errors.New("authored customer came from an unassigned scope")
+	}
+	if change.Op != "upsert" || change.Row == nil {
+		return false, errors.New("authored customer was not delivered as an upsert")
+	}
+	expectedStrings := map[string]string{
+		state.PrimaryKeyID:      smokeRowID,
+		state.Fields["user_id"]: smokeUserID,
+		state.Fields["name"]:    "Packaged server consumer",
+		state.Fields["balance"]: "0",
+	}
+	for fieldID, expected := range expectedStrings {
+		var actual string
+		if raw, found := change.Row[fieldID]; !found ||
+			json.Unmarshal(raw, &actual) != nil || actual != expected {
+			return false, errors.New("authored customer string value changed")
+		}
+	}
+	var active bool
+	if raw, found := change.Row[state.Fields["is_active"]]; !found ||
+		json.Unmarshal(raw, &active) != nil || !active {
+		return false, errors.New("authored customer activity value changed")
+	}
+	return true, nil
 }
 
 func capturePending(body []byte) bool {
@@ -457,6 +652,10 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		state, err = bootstrapIncrementalCursors(ctx, client, token, *baseURL, state)
+		if err != nil {
+			return fmt.Errorf("bootstrap scope cursors: %w", err)
+		}
 		pushRequest, err = json.Marshal(pushPayload(state))
 		if err != nil {
 			return errors.New("encode push request failed")
@@ -509,7 +708,7 @@ func run(ctx context.Context, args []string) error {
 		replayEqual = &equal
 	}
 
-	if err := pullUntilReady(ctx, client, token, *baseURL, state); err != nil {
+	if err := pullUntilCustomerDelivered(ctx, client, token, *baseURL, state); err != nil {
 		return err
 	}
 	return writeJSON(*output, phaseResult{
