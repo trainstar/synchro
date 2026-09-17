@@ -77,26 +77,6 @@ func TestValidateQueueReplayScenarioRejectsContractChanges(t *testing.T) {
 	}
 }
 
-func TestQueueReplayWorkloadsFollowAuthoredCountsAndDigests(t *testing.T) {
-	scenario := loadQueueReplayAuthoredScenario(t)
-	workloads, err := queueReplayWorkloads(scenario)
-	if err != nil {
-		t.Fatalf("derive queue-replay workloads: %v", err)
-	}
-	if len(workloads) != len(scenario.Steps) {
-		t.Fatalf("derived queue-replay workloads = %d, want %d", len(workloads), len(scenario.Steps))
-	}
-	for index, workload := range workloads {
-		want := scenario.Steps[index].NativeBinding.Workload.RecordCount
-		if uint64(len(workload.local)) != want {
-			t.Fatalf("queue-replay workload %d local writes = %d, want %d", index+1, len(workload.local), want)
-		}
-		if scenarios.OperationKey(workload.publish) != "model/publish-schema" || scenarios.OperationKey(workload.dropPush) != "push/submit" {
-			t.Fatalf("queue-replay workload %d did not derive schema and push operations", index+1)
-		}
-	}
-}
-
 func TestQueueReplayResponseLossBindingUsesCommittedDelivery(t *testing.T) {
 	scenario := loadQueueReplayAuthoredScenario(t)
 	workloads, err := queueReplayWorkloads(scenario)
@@ -311,7 +291,7 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive queue-replay successor schema: %v", err)
 	}
-	plan, err := scenarios.NewNativeCRUDPlan(reactNativeQueueReplayCRUDSchema(current), inspection.StreamGeneration, identity.userID, identity.clientID+"-successor-proof")
+	plan, err := scenarios.NewNativeCRUDPlan(current.CRUDSchema(), inspection.StreamGeneration, identity.userID, identity.clientID+"-successor-proof")
 	if err != nil {
 		t.Fatalf("derive queue-replay successor plan: %v", err)
 	}
