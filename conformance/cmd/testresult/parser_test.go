@@ -143,6 +143,43 @@ func TestClassifyTestResultRejectsUnfinishedAssertionDescendant(t *testing.T) {
 	}
 }
 
+func TestClassifyTestResultRejectsSkippedAssertionDescendants(t *testing.T) {
+	const target = "TestRequiredControl"
+	for _, test := range []struct {
+		name    string
+		final   string
+		sibling bool
+		want    result
+	}{
+		{name: "passing parent", final: "pass", want: resultSkip},
+		{name: "failing sibling", final: "fail", sibling: true, want: resultPackageSetupFailure},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			events := []string{
+				`{"Action":"start","Package":"example/integration"}`,
+				`{"Action":"run","Package":"example/integration","Test":"TestRequiredControl"}`,
+				`{"Action":"run","Package":"example/integration","Test":"TestRequiredControl/assertion"}`,
+				`{"Action":"run","Package":"example/integration","Test":"TestRequiredControl/assertion/required-case"}`,
+				`{"Action":"skip","Package":"example/integration","Test":"TestRequiredControl/assertion/required-case"}`,
+			}
+			if test.sibling {
+				events = append(events,
+					`{"Action":"run","Package":"example/integration","Test":"TestRequiredControl/assertion/other-case"}`,
+					`{"Action":"fail","Package":"example/integration","Test":"TestRequiredControl/assertion/other-case"}`,
+				)
+			}
+			events = append(events,
+				`{"Action":"`+test.final+`","Package":"example/integration","Test":"TestRequiredControl/assertion"}`,
+				`{"Action":"`+test.final+`","Package":"example/integration","Test":"TestRequiredControl"}`,
+				`{"Action":"`+test.final+`","Package":"example/integration"}`,
+			)
+			if got := classifyTestResult(strings.NewReader(eventStream(events...)), target); got != test.want {
+				t.Fatalf("classifyTestResult() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestClassifyTestResultRejectsPassingAssertionWithFailedDescendant(t *testing.T) {
 	const target = "TestRealIssue49Proof/assertion#04"
 	input := eventStream(

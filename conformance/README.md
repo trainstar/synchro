@@ -85,6 +85,8 @@ The gate copies the current worktree into isolated temporary directories. It app
 
 Each mutant must compile and fail its approved focused PostgreSQL 18 test. A surviving mutant, stale patch, build failure, or harness failure fails the gate.
 
+A skipped assertion or descendant fails the gate, even when another selected descendant fails.
+
 Scheduled validation runs every manifest mutant through `make test-integration-mutants-broad`.
 
 The WAL mutant uses the real packaged extension and black-box environment. It requires the same `SYNCHRO_CONFORMANCE_*` variables as `make test-blackbox`.
