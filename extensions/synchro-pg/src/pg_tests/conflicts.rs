@@ -472,9 +472,9 @@
 
         Spi::run("ALTER TABLE test_orders ADD COLUMN legacy_note TEXT").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -487,9 +487,9 @@
 
         Spi::run("ALTER TABLE test_orders DROP COLUMN legacy_note").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -756,9 +756,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_checked_orders', 'test_checked_orders', ARRAY['user_id']
+             );
+             SELECT tests.register_test_table(
                  'test_checked_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_checked_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_checked_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled'
              )",
@@ -820,7 +823,7 @@
     }
 
     #[pg_test]
-    fn test_push_json_source_field_returns_valid_row_checksum() {
+    fn test_push_json_and_bytes_preserve_canonical_values() {
         setup_test_tables();
         Spi::run(
             "CREATE TABLE IF NOT EXISTS test_json_orders (
@@ -828,15 +831,20 @@
                 user_id TEXT NOT NULL,
                 document JSONB NOT NULL,
                 optional_document JSONB,
+                payload BYTEA NOT NULL,
+                optional_payload BYTEA DEFAULT '\\x01',
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 deleted_at TIMESTAMPTZ
             )",
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_json_orders', 'test_json_orders', ARRAY['user_id']
+             );
+             SELECT tests.register_test_table(
                  'test_json_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_json_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_json_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled'
              )",
@@ -864,6 +872,8 @@
                     ("user_id", json!(user_id)),
                     ("document", json!(document)),
                     ("optional_document", serde_json::Value::Null),
+                    ("payload", json!("AP8")),
+                    ("optional_payload", serde_json::Value::Null),
                 ]),
             )],
         );
@@ -874,8 +884,75 @@
             Some(document)
         );
         assert!(outcome["server_row"][field_id("test_json_orders", "optional_document")].is_null());
+        assert_eq!(outcome["server_row"][field_id("test_json_orders", "payload")], "AP8");
+        assert_eq!(
+            outcome["server_row"].get(field_id("test_json_orders", "optional_payload")),
+            Some(&Value::Null)
+        );
+        let stored: Option<bool> = Spi::get_one_with_args(
+            "SELECT payload = '\\x00ff'::bytea AND optional_payload IS NULL
+             FROM test_json_orders WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .unwrap();
+        assert_eq!(stored, Some(true));
         assert_checksum_object(outcome);
         assert_row_outcome_matches_source(outcome, "test_json_orders", record_id);
+
+        let mut version = outcome["server_version"].as_str().unwrap().to_string();
+        for (label, value) in [
+            ("bytes-empty", json!("")),
+            ("bytes-value", json!("AP8")),
+            ("bytes-null", Value::Null),
+        ] {
+            let response = push_client(
+                user_id,
+                client_id,
+                label,
+                vec![push_mutation(
+                    (user_id, client_id),
+                    label,
+                    "test_json_orders",
+                    "update",
+                    record_id,
+                    Some(&version),
+                    Some(&[("optional_payload", value.clone())]),
+                )],
+            );
+            let outcome = &response.json["accepted"][0];
+            assert_eq!(outcome["status"], "applied");
+            assert_eq!(
+                outcome["server_row"].get(field_id("test_json_orders", "optional_payload")),
+                Some(&value)
+            );
+            assert_row_outcome_matches_source(outcome, "test_json_orders", record_id);
+            version = outcome["server_version"].as_str().unwrap().to_string();
+        }
+
+        let before = source_wire_record("test_json_orders", record_id);
+        let epoch_before = accepted_write_epoch(user_id, client_id);
+        for (label, field, value) in [
+            ("required-bytes-null", "payload", Value::Null),
+            ("bytes-invalid", "optional_payload", json!("AA==")),
+        ] {
+            let response = push_client(
+                user_id,
+                client_id,
+                label,
+                vec![push_mutation(
+                    (user_id, client_id),
+                    label,
+                    "test_json_orders",
+                    "update",
+                    record_id,
+                    Some(&version),
+                    Some(&[(field, value)]),
+                )],
+            );
+            assert_eq!(response.json["rejected"][0]["code"], "validation_failed");
+            assert_eq!(source_wire_record("test_json_orders", record_id), before);
+            assert_eq!(accepted_write_epoch(user_id, client_id), epoch_before);
+        }
     }
 
     #[pg_test]
@@ -948,13 +1025,28 @@
             Some("invalid_request")
         );
 
+        let count_mutations = (0..1_001)
+            .map(|index| {
+                let mut mutation = valid.clone();
+                mutation["mutation_id"] = json!(test_uuid(&format!("count-boundary:{index}")));
+                mutation
+            })
+            .collect::<Vec<_>>();
+        let at_limit: synchro_core::contract::PushRequest = serde_json::from_value(push_request(
+            user_id,
+            client_id,
+            "valid-count",
+            count_mutations[..1_000].to_vec(),
+        ))
+        .unwrap();
+        assert_eq!(at_limit.validate(), Ok(()));
         let too_many = execute_push(
             user_id,
             &push_request(
                 user_id,
                 client_id,
                 "invalid-count",
-                vec![valid.clone(); 1_001],
+                count_mutations,
             ),
         );
         assert_eq!(

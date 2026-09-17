@@ -1056,11 +1056,7 @@ func appendCanonicalJSONString(output *[]byte, value string) {
 }
 
 func sortJSONKeys(keys []string) {
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && compareUTF16(keys[j], keys[j-1]) < 0; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
+	sort.Slice(keys, func(i, j int) bool { return compareUTF16(keys[i], keys[j]) < 0 })
 }
 
 func compareUTF16(left, right string) int {
@@ -1203,17 +1199,9 @@ func writeText(writer byteWriter, value string) {
 }
 
 func sortColumnsByFieldID(columns []localSchemaColumn) {
-	for i := 1; i < len(columns); i++ {
-		for j := i; j > 0 && bytes.Compare([]byte(columns[j].FieldID), []byte(columns[j-1].FieldID)) < 0; j-- {
-			columns[j], columns[j-1] = columns[j-1], columns[j]
-		}
-	}
+	sort.Slice(columns, func(i, j int) bool { return columns[i].FieldID < columns[j].FieldID })
 }
 
 func sortDigestRows(rows []seedDigestRow) {
-	for i := 1; i < len(rows); i++ {
-		for j := i; j > 0 && bytes.Compare(rows[j].identity, rows[j-1].identity) < 0; j-- {
-			rows[j], rows[j-1] = rows[j-1], rows[j]
-		}
-	}
+	sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].identity, rows[j].identity) < 0 })
 }

@@ -1438,16 +1438,13 @@ fn resolve_membership_function(
     let fixed_path = row
         .get_by_name::<bool, &str>("fixed_path")?
         .unwrap_or(false);
-    #[cfg(feature = "pg_test")]
-    let legacy_test_function = schema == "tests";
-    #[cfg(not(feature = "pg_test"))]
-    let legacy_test_function = false;
     if !returns_set
         || volatility != "s"
         || security_definer
         || language != "sql"
         || function_kind != "f"
-        || (!legacy_test_function && (!parsed_body || !fixed_path))
+        || !parsed_body
+        || !fixed_path
     {
         pgrx::error!("membership function does not meet the deterministic contract");
     }
@@ -1536,10 +1533,6 @@ fn validate_registered_function_dependencies(
     client: &SpiClient<'_>,
     function: &RegisteredFunction,
 ) -> Result<(), spi::Error> {
-    #[cfg(feature = "pg_test")]
-    if function.schema == "tests" {
-        return Ok(());
-    }
     let valid = client
         .select(
             "SELECT
@@ -4021,10 +4014,6 @@ fn validate_generation_function_projections(
         .iter()
         .filter(|registration| registration.is_synced())
     {
-        #[cfg(feature = "pg_test")]
-        if target.membership_function.schema == "tests" {
-            continue;
-        }
         for (physical_oid, columns) in
             function_projection_dependencies(client, target.membership_function.oid)?
         {

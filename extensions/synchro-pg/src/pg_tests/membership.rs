@@ -1106,33 +1106,182 @@ fn membership_function_limits_rows_before_rust_rejection() {
 }
 
 #[pg_test]
+fn membership_test_schema_enforces_production_validation() {
+    for case in ["valid", "unparsed", "search_path", "live_table", "undeclared_field"] {
+        let fixture = registration_fixture(true, "enabled", true);
+        let table = &fixture.table;
+        let function = &fixture.function;
+        Spi::run(&format!(
+            "ALTER TABLE public.{table} ADD COLUMN private_note TEXT;
+             SELECT synchro.synchro_prepare_projection_view(
+                 'public.{table}', '{table}', ARRAY['id', 'private_note']
+             );
+             ALTER FUNCTION public.{function}(UUID) SET SCHEMA tests;
+             GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker"
+        ))
+        .expect("prepare membership validation fixture");
+        let definition = match case {
+            "unparsed" => format!(
+                "SET search_path = pg_catalog, synchro
+                 AS $$SELECT 'registration' FROM synchro_projection.{table}
+                      WHERE record_id = p_key::text$$"
+            ),
+            "search_path" => format!(
+                "SET search_path = pg_catalog, public
+                 BEGIN ATOMIC
+                     SELECT 'registration' FROM synchro_projection.{table}
+                     WHERE record_id = p_key::text;
+                 END"
+            ),
+            "live_table" => format!(
+                "SET search_path = pg_catalog, synchro
+                 BEGIN ATOMIC
+                     SELECT 'registration' FROM public.{table} WHERE id = p_key;
+                 END"
+            ),
+            "undeclared_field" => format!(
+                "SET search_path = pg_catalog, synchro
+                 BEGIN ATOMIC
+                     SELECT private_note #>> '{{}}' FROM synchro_projection.{table}
+                     WHERE record_id = p_key::text;
+                 END"
+            ),
+            "valid" => format!(
+                "SET search_path = pg_catalog, synchro
+                 BEGIN ATOMIC
+                     SELECT 'registration' FROM synchro_projection.{table}
+                     WHERE record_id = p_key::text;
+                 END"
+            ),
+            _ => unreachable!(),
+        };
+        Spi::run(&format!(
+            "CREATE OR REPLACE FUNCTION tests.{function}(p_key UUID)
+             RETURNS SETOF text LANGUAGE SQL STABLE SECURITY INVOKER {definition}"
+        ))
+        .expect("define membership validation case");
+        let registration = format!(
+            "synchro.synchro_register_table(
+                 'public.{table}', 'tests.{function}', 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'enabled', ARRAY['private_note']
+             )"
+        );
+        if case == "valid" {
+            Spi::run(&format!("SELECT {registration}"))
+                .expect("register production-valid test membership");
+            assert_eq!(fixture_registry_count(&fixture), 1);
+            Spi::run(&format!("SELECT synchro.synchro_unregister_table('{table}')"))
+                .expect("unregister valid membership fixture");
+        } else {
+            Spi::run(&format!(
+                "DO $test$
+                 DECLARE rejected boolean := false;
+                 BEGIN
+                     BEGIN
+                         PERFORM {registration};
+                     EXCEPTION WHEN OTHERS THEN
+                         rejected := true;
+                     END;
+                     IF NOT rejected THEN
+                         RAISE EXCEPTION 'invalid membership accepted: {case}';
+                     END IF;
+                 END
+                 $test$"
+            ))
+            .expect("reject invalid test membership");
+            assert_eq!(fixture_registry_count(&fixture), 0, "{case}");
+        }
+        Spi::run(&format!(
+            "DROP FUNCTION tests.{function}(UUID);
+             DROP TABLE public.{table}"
+        ))
+        .expect("remove membership validation fixture");
+    }
+}
+
+#[pg_test]
+fn membership_uses_captured_values_instead_of_live_rows() {
+    setup_test_tables();
+    let record_id = "d7000000-0000-4000-8000-000000000001";
+    Spi::run_with_args(
+        "INSERT INTO test_orders (id, user_id) VALUES ($1::uuid, 'captured-owner')",
+        &[record_id.into()],
+    )
+    .expect("insert projection membership source");
+    insert_changelog("user:captured-owner", "test_orders", record_id, 1);
+    Spi::run_with_args(
+        "UPDATE test_orders SET user_id = 'later-owner' WHERE id = $1::uuid",
+        &[record_id.into()],
+    )
+    .expect("change live membership source");
+    let scopes = Spi::connect(|client| {
+        let registry = crate::registry::load_registry_from_client(client)?;
+        let registration = registry
+            .iter()
+            .find(|registration| registration.table_name == "test_orders")
+            .expect("projection membership registration");
+        crate::bucketing::resolve_membership(client, registration, record_id)
+    })
+    .expect("resolve captured membership");
+    assert_eq!(scopes, vec!["user:captured-owner"]);
+}
+
+#[pg_test]
 fn membership_accepts_empty_string_primary_key() {
     Spi::run(
         "CREATE TABLE test_empty_string_pk (
              id TEXT PRIMARY KEY,
              value TEXT NOT NULL
          );
-         SELECT tests.register_legacy_test_table(
+         SELECT synchro.synchro_prepare_projection_view(
+             'public.test_empty_string_pk', 'test_empty_string_pk', ARRAY['id']
+         );
+         SELECT tests.register_test_table(
              'test_empty_string_pk',
-             $$SELECT ARRAY['global'] FROM test_empty_string_pk WHERE id = $1::text$$,
+             $$SELECT 'global' FROM synchro_projection.test_empty_string_pk WHERE record_id = p_key::text$$,
              'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only'
          )",
     )
     .expect("register empty string primary-key fixture");
     activate_pending_registry_for_test();
+    let user_id = "empty-key-user";
+    let client_id = "empty-key-client";
+    register_shared_scope("global", false);
+    register_client(user_id, client_id);
     Spi::run("INSERT INTO test_empty_string_pk (id, value) VALUES ('', 'empty key')")
         .expect("insert empty string primary key");
+    insert_edge("test_empty_string_pk", "", "global");
+    insert_changelog("global", "test_empty_string_pk", "", 1);
     let scopes = Spi::connect(|client| {
         let registry = crate::registry::load_registry_from_client(client)?;
         let registration = registry
             .iter()
             .find(|registration| registration.physical_relation == "test_empty_string_pk")
             .expect("empty string primary-key registration");
+        assert!(crate::bucketing::resolve_membership(client, registration, "absent")?.is_empty());
         crate::bucketing::resolve_membership(client, registration, "")
     })
     .expect("resolve empty string primary-key membership");
 
     assert_eq!(scopes, vec!["global"]);
+    let response = pull_client(
+        user_id,
+        client_id,
+        1,
+        json!({"global": scope_cursor_ref(user_id, client_id, "global", 0)}),
+        100,
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    let changes = response["changes"].as_array().expect("empty-key pull changes");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(
+        changes[0]["pk"].get(field_id("test_empty_string_pk", "id")),
+        Some(&json!(""))
+    );
+    assert_eq!(
+        changes[0]["row"].get(field_id("test_empty_string_pk", "value")),
+        Some(&json!("empty key"))
+    );
 }
 
 #[pg_test]

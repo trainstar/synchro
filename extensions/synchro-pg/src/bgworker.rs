@@ -1952,7 +1952,6 @@ fn materialize_candidate(
     bootstrap: &CandidateBootstrap,
     transaction: &WalTransaction,
 ) -> Result<(), String> {
-    let commit_lsn = transaction.commit_lsn;
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
             validate_candidate_binding(client, bootstrap, true)?;
@@ -2074,9 +2073,6 @@ fn materialize_candidate(
             }
             Ok(())
         })
-    })
-    .inspect_err(|_| {
-        let _ = commit_lsn;
     })
 }
 
@@ -3152,11 +3148,6 @@ fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<()
             }
             Ok(())
         })
-    })
-    .map_err(|failure| match failure {
-        PollFailure::Poison(failure) => PollFailure::Poison(failure),
-        PollFailure::Transient(stage) => PollFailure::Transient(stage),
-        PollFailure::ActivationBarrier => PollFailure::ActivationBarrier,
     })
 }
 

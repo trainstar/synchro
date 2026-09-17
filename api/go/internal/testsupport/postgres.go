@@ -66,7 +66,7 @@ func UniqueName(t testing.TB, prefix string) string {
 	reserved := len(cleanPrefix) + len(separator) + len(separator) + len(hash)
 	available := maxIdentifierBytes - reserved
 	if available < 1 {
-		cleanPrefix = cleanPrefix[:maxIdentifierBytes-len(separator)-len(hash)-1]
+		cleanPrefix = cleanPrefix[:maxIdentifierBytes-2*len(separator)-len(hash)-1]
 		available = 1
 	}
 	if len(cleanTestName) > available {

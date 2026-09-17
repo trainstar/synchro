@@ -2328,9 +2328,9 @@ mod tests {
 
     #[pg_extern]
     #[allow(clippy::too_many_arguments)]
-    fn register_legacy_test_table(
+    fn register_test_table(
         p_table_name: &str,
-        p_bucket_sql: &str,
+        p_membership_sql: &str,
         p_composition: &str,
         p_pk_column: default!(&str, "'id'"),
         p_updated_at_col: default!(&str, "'updated_at'"),
@@ -2339,8 +2339,8 @@ mod tests {
         p_exclude_columns: default!(Vec<String>, "'{}'"),
         p_sync_columns: default!(Vec<String>, "'{}'"),
     ) {
-        let function_suffix = format!("{:x}", Sha256::digest(p_bucket_sql.as_bytes()));
-        let function_name = format!("legacy_membership_{}", &function_suffix[..16]);
+        let function_suffix = format!("{:x}", Sha256::digest(p_membership_sql.as_bytes()));
+        let function_name = format!("test_membership_{}", &function_suffix[..16]);
         let physical_table_name = format!("public.{p_table_name}");
         Spi::connect_mut(|client| {
             let primary_key_type = client
@@ -2356,7 +2356,7 @@ mod tests {
                 )?
                 .first()
                 .get_by_name::<String, &str>("sql_type")?
-                .expect("legacy test primary-key type");
+                .expect("test primary-key type");
             let has_deleted_at = client
                 .select(
                     "SELECT EXISTS (
@@ -2372,32 +2372,29 @@ mod tests {
                 )?
                 .first()
                 .get_by_name::<bool, &str>("has_deleted_at")?
-                .expect("legacy test deleted_at state");
+                .expect("test deleted_at state");
             let relation_privileges = match (p_push_policy, has_deleted_at) {
                 ("read_only", _) => "SELECT",
                 ("enabled", true) => "SELECT, INSERT, UPDATE",
                 ("enabled", false) => "SELECT, INSERT, UPDATE, DELETE",
-                _ => pgrx::error!("invalid legacy test push policy"),
+                _ => pgrx::error!("invalid test push policy"),
             };
-            let body = format!(
-                "SELECT unnest(COALESCE(scope_ids, ARRAY[]::text[])) FROM ({p_bucket_sql}) AS membership(scope_ids)"
-            );
             let ddl = client
                 .select(
                     "SELECT pg_catalog.format(
-                         'CREATE OR REPLACE FUNCTION tests.%I(p_key %s) RETURNS SETOF text LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, public AS %L',
+                         'CREATE OR REPLACE FUNCTION tests.%I(p_key %s) RETURNS SETOF text LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro BEGIN ATOMIC %s; END',
                          $1, $2, $3
                      ) AS ddl",
                     None,
                     &[
                         function_name.as_str().into(),
                         primary_key_type.as_str().into(),
-                        body.as_str().into(),
+                        p_membership_sql.into(),
                     ],
             )?
             .first()
             .get_by_name::<String, &str>("ddl")?
-            .expect("legacy test membership DDL");
+            .expect("test membership DDL");
             client.update(&ddl, None, &[])?;
             let revoke_function_public = client
                 .select(
@@ -2413,7 +2410,7 @@ mod tests {
                 )?
                 .first()
                 .get_by_name::<String, &str>("ddl")?
-                .expect("legacy test membership public revoke DDL");
+                .expect("test membership public revoke DDL");
             client.update(&revoke_function_public, None, &[])?;
             let grant_function = client
                 .select(
@@ -2429,7 +2426,7 @@ mod tests {
                 )?
                 .first()
                 .get_by_name::<String, &str>("ddl")?
-                .expect("legacy test membership grant DDL");
+                .expect("test membership grant DDL");
             client.update(&grant_function, None, &[])?;
             client.update(
                 "GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker",
@@ -2447,7 +2444,7 @@ mod tests {
                 )?
                 .first()
                 .get_by_name::<String, &str>("ddl")?
-                .expect("legacy test relation revoke DDL");
+                .expect("test relation revoke DDL");
             client.update(&revoke, None, &[])?;
             let grant = client
                 .select(
@@ -2460,7 +2457,7 @@ mod tests {
                 )?
                 .first()
                 .get_by_name::<String, &str>("ddl")?
-                .expect("legacy test relation grant DDL");
+                .expect("test relation grant DDL");
             client.update(&grant, None, &[])?;
             let rls = client
                 .select(
@@ -2479,7 +2476,7 @@ mod tests {
                 )?
                 .first()
                 .get_by_name::<String, &str>("ddl")?
-                .expect("legacy test owner RLS policy DDL");
+                .expect("test owner RLS policy DDL");
             client.update(&rls, None, &[])?;
             let function_identity = format!("tests.{function_name}");
             client.update(
@@ -2501,7 +2498,7 @@ mod tests {
             )?;
             Ok::<_, pgrx::spi::Error>(())
         })
-        .expect("register legacy test table");
+        .expect("register test table");
     }
 
     fn activate_pending_registry_for_test() {
@@ -2630,13 +2627,13 @@ mod tests {
         )
         .unwrap();
 
-        // Register tables for sync. Bucket SQL must cast $1 to the PK type
-        // explicitly because SPI prepared statements pass text parameters and
-        // PG does not implicit-cast text to uuid.
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                'public.test_orders', 'test_orders', ARRAY['user_id']
+             );
+             SELECT tests.register_test_table(
                 'test_orders',
-                $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id', 'updated_at', 'deleted_at', 'enabled',
                 ARRAY['internal_notes']
@@ -2645,9 +2642,12 @@ mod tests {
         .unwrap();
 
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                'public.test_products', 'test_products', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                 'test_products',
-                $$SELECT ARRAY['global'] FROM test_products WHERE id = $1::uuid$$,
+                $$SELECT 'global' FROM synchro_projection.test_products WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id', 'updated_at', 'deleted_at', 'read_only'
             )",
@@ -2655,9 +2655,12 @@ mod tests {
         .unwrap();
 
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                'public.test_bare_items', 'test_bare_items', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                 'test_bare_items',
-                $$SELECT ARRAY['global'] FROM test_bare_items WHERE id = $1::uuid$$,
+                $$SELECT 'global' FROM synchro_projection.test_bare_items WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id', 'updated_at', 'deleted_at', 'enabled'
             )",
@@ -2693,9 +2696,12 @@ mod tests {
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                'public.test_sync_columns_items', 'test_sync_columns_items', ARRAY['user_id']
+             );
+             SELECT tests.register_test_table(
                 'test_sync_columns_items',
-                $$SELECT ARRAY['user:' || user_id] FROM test_sync_columns_items WHERE id = $1::uuid$$,
+                $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_sync_columns_items WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id',
                 'updated_at',
@@ -2739,9 +2745,12 @@ mod tests {
         .unwrap();
 
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                'public.test_portable_type_contract', 'test_portable_type_contract', ARRAY['user_id']
+             );
+             SELECT tests.register_test_table(
                 p_table_name := 'test_portable_type_contract',
-                p_bucket_sql := $$SELECT ARRAY['user:' || user_id] FROM test_portable_type_contract WHERE id = $1::uuid$$,
+                p_membership_sql := $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_portable_type_contract WHERE record_id = p_key::text$$,
                 p_composition := 'single_scope',
                 p_pk_column := 'id',
                 p_updated_at_col := 'updated_at',

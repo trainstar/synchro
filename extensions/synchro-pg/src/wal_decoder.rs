@@ -1137,9 +1137,10 @@ mod tests {
             ],
         )]);
         assert!(first.feed(&relation(7, "public", "items", b'f')).is_err());
-        let mut fresh = decoder(7, "public", "items");
-        assert!(fresh.feed(&[b'S']).is_err());
-        assert!(fresh.feed(&[b'Z']).is_err());
+        for tag in [b'S', b'Z'] {
+            let mut fresh = decoder(7, "public", "items");
+            assert!(fresh.feed(&[tag]).is_err());
+        }
     }
 
     #[test]

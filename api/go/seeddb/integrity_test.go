@@ -14,8 +14,8 @@ func TestVerifyPortableSeedRecordUsesProtocolThreeDigest(t *testing.T) {
 		TableID:   "tbl_items",
 		TableName: "items",
 		Columns: []localSchemaColumn{
-			{FieldID: "fld_id", Name: "id", LogicalType: "string", IsPrimaryKey: true},
 			{FieldID: "fld_title", Name: "title", LogicalType: "string"},
+			{FieldID: "fld_id", Name: "id", LogicalType: "string", IsPrimaryKey: true},
 		},
 	}
 	record := portableSeedRecord{
@@ -62,6 +62,18 @@ func TestVerifyPortableSeedRecordUsesProtocolThreeDigest(t *testing.T) {
 	record.ServerVersion = "changed"
 	if _, _, err := verifyPortableSeedRecord(env, table, record); err == nil {
 		t.Fatal("changed server version retained the row digest")
+	}
+}
+
+func TestCanonicalJSONOrdersKeysByUTF16(t *testing.T) {
+	raw := map[string]any{"\ue000": true, "\U00010000": false, "a": nil}
+	got, err := canonicalJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\"a\":null,\"\U00010000\":false,\"\ue000\":true}"
+	if string(got) != want {
+		t.Fatalf("canonical JSON = %q, want %q", got, want)
 	}
 }
 

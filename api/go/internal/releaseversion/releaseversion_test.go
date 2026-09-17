@@ -2,6 +2,7 @@ package releaseversion
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ func TestValidate(t *testing.T) {
 		}
 	}
 
-	invalid := []string{"v1.2.3", "1.2", "1.2.x", "1.2.3-beta"}
+	invalid := []string{"v1.2.3", "1.2", "1.2.x", "1.2.3-beta", "01.2.3", "1.02.3", "1.2.03", "00.0.0"}
 	for _, version := range invalid {
 		if err := Validate(version); err == nil {
 			t.Fatalf("Validate(%q) unexpectedly succeeded", version)
@@ -50,6 +51,10 @@ func TestSetSyncsAndChecksVersionedSurfaces(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "extensions/Cargo.toml"), `version = "1.4.5"`)
 	assertFileContains(t, filepath.Join(root, "extensions/synchro-pg/synchro_pg.control"), `default_version = '1.4.5'`)
 	assertFileContains(t, filepath.Join(root, "conformance/artifacts/inventory.json"), `"release": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/requirements.json"), `"release": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/requirements.json"), `"protocol_version": 3`)
+	assertFileContains(t, filepath.Join(root, "conformance/support-matrix.json"), `"release": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/support-matrix.json"), `"schema_version": 1`)
 
 	if _, err := os.Stat(filepath.Join(root, "extensions/synchro-pg/sql/synchro_pg--1.4.5.sql")); err != nil {
 		t.Fatalf("expected PostgreSQL install SQL to be renamed: %v", err)
@@ -101,6 +106,127 @@ func TestCheckFailsOnTagMismatch(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsDistributionCatalogDrift(t *testing.T) {
+	for _, path := range []string{"conformance/artifacts/inventory.json", "conformance/requirements.json", "conformance/support-matrix.json"} {
+		t.Run(path, func(t *testing.T) {
+			root := newFixtureRepo(t)
+			if err := Sync(root); err != nil {
+				t.Fatal(err)
+			}
+			writeFixtureFile(t, root, path, "{\n  \"release\": \"9.9.9\",\n  \"protocol_version\": 3\n}\n")
+			if err := Check(root, ""); err == nil || !strings.Contains(err.Error(), path) {
+				t.Fatalf("Check did not identify catalog drift: %v", err)
+			}
+			if err := Sync(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := Check(root, ""); err != nil {
+				t.Fatal(err)
+			}
+			assertFileContains(t, filepath.Join(root, path), `"protocol_version": 3`)
+		})
+	}
+}
+
+func TestNextVersionPassesSupportPolicyAndRequirementsSchema(t *testing.T) {
+	repoRoot, err := FindRepoRoot(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := newFixtureRepo(t)
+	const schemaPath = "conformance/schemas/requirements-v2.schema.json"
+	for _, path := range []string{"conformance/requirements.json", "conformance/support-matrix.json", schemaPath} {
+		data, err := os.ReadFile(filepath.Join(repoRoot, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFixtureFile(t, root, path, string(data))
+	}
+	if err := Set(root, "0.4.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(root, "v0.4.0"); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import Ajv2020 from "ajv/dist/2020.js";
+import { supportPolicyErrors } from "./scripts/validators/support-policy.mjs";
+
+const root = process.argv[1];
+const read = (file) => JSON.parse(fs.readFileSync(path.join(root, file), "utf8"));
+const release = fs.readFileSync(path.join(root, "VERSION"), "utf8").trim();
+const requirements = read("conformance/requirements.json");
+const support = read("conformance/support-matrix.json");
+const schema = read("conformance/schemas/requirements-v2.schema.json");
+const ajv = new Ajv2020({ allErrors: true, strict: false, validateSchema: true });
+const validate = ajv.compile(schema);
+assert.equal(validate(requirements), true, JSON.stringify(validate.errors));
+assert.deepEqual(supportPolicyErrors(requirements, support, release), []);
+
+const staleRequirements = { ...requirements, release: "0.3.0" };
+assert.equal(validate(staleRequirements), false);
+assert(validate.errors.some((error) => error.instancePath === "/release" && error.keyword === "const"));
+assert(supportPolicyErrors(staleRequirements, support, release).length > 0);
+assert(supportPolicyErrors(requirements, { ...support, release: "0.3.0" }, release).length > 0);
+
+for (const file of ["requirements.json", "support-matrix.json"]) {
+  const original = JSON.parse(fs.readFileSync(path.join("..", "conformance", file), "utf8"));
+  const updated = read(path.join("conformance", file));
+  original.release = updated.release;
+  assert.deepEqual(updated, original);
+}
+const originalSchema = JSON.parse(fs.readFileSync("../conformance/schemas/requirements-v2.schema.json", "utf8"));
+originalSchema.properties.release.const = release;
+assert.deepEqual(schema, originalSchema);
+`
+	command := exec.Command("node", "--input-type=module", "-e", script, root)
+	command.Dir = filepath.Join(repoRoot, "docs")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("next-version support and schema validation failed: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, schemaPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := strings.Replace(string(data), `"release": { "const": "0.4.0" }`, `"release": { "const": "0.3.0" }`, 1)
+	writeFixtureFile(t, root, schemaPath, stale)
+	if err := Check(root, ""); err == nil || !strings.Contains(err.Error(), schemaPath) {
+		t.Fatalf("Check did not identify schema release drift: %v", err)
+	}
+	if err := Sync(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(root, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFindRepoRootSupportsGitDirectoryAndWorktreeFile(t *testing.T) {
+	for _, worktree := range []bool{false, true} {
+		root := t.TempDir()
+		start := filepath.Join(root, "api", "go")
+		mustMkdirAll(t, start)
+		if worktree {
+			writeFixtureFile(t, root, ".git", "gitdir: /checkout/.git/worktrees/linked\n")
+		} else {
+			mustMkdirAll(t, filepath.Join(root, ".git"))
+		}
+		got, err := FindRepoRoot(start)
+		if err != nil || got != root {
+			t.Fatalf("FindRepoRoot(worktree=%v) = %q, %v", worktree, got, err)
+		}
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, root, ".git", "not a Git worktree marker\n")
+	if got, err := FindRepoRoot(root); err == nil {
+		t.Fatalf("accepted invalid Git marker at %q", got)
+	}
+}
+
 func newFixtureRepo(t *testing.T) string {
 	t.Helper()
 
@@ -115,6 +241,9 @@ func newFixtureRepo(t *testing.T) string {
 	writeFixtureFile(t, root, "extensions/Cargo.toml", "[workspace]\nresolver = \"2\"\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2021\"\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/synchro_pg.control", "comment = 'fixture'\ndefault_version = '0.1.0'\n")
 	writeFixtureFile(t, root, "conformance/artifacts/inventory.json", "{\n  \"release\": \"0.1.0\",\n  \"artifacts\": []\n}\n")
+	writeFixtureFile(t, root, "conformance/requirements.json", "{\n  \"release\": \"0.1.0\",\n  \"protocol_version\": 3\n}\n")
+	writeFixtureFile(t, root, "conformance/support-matrix.json", "{\n  \"release\": \"0.1.0\",\n  \"schema_version\": 1\n}\n")
+	writeFixtureFile(t, root, "conformance/schemas/requirements-v2.schema.json", "{\n  \"properties\": {\n    \"release\": { \"const\": \"0.1.0\" },\n    \"schema_version\": { \"const\": 2 }\n  }\n}\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/sql/synchro_pg--0.1.0.sql", "-- install script\n")
 	writeFixtureFile(t, root, "VERSION", "0.2.0\n")
 

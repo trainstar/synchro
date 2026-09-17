@@ -34,18 +34,12 @@ func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, _, ok := decodeJSONBodyObject(w, r, connectRequestMembers...)
+	raw, members, ok := decodeJSONBodyObject(w, r, connectRequestMembers...)
 	if !ok {
 		return
 	}
 
-	var req ConnectRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.ClientID == "" {
-		writeJSONError(w, http.StatusBadRequest, "client_id is required")
+	if !requireStringMember(w, members, "client_id") {
 		return
 	}
 
@@ -81,18 +75,12 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, _, ok := decodeJSONBodyObject(w, r, pullRequestMembers...)
+	raw, members, ok := decodeJSONBodyObject(w, r, pullRequestMembers...)
 	if !ok {
 		return
 	}
 
-	var req PullRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.ClientID == "" {
-		writeJSONError(w, http.StatusBadRequest, "client_id is required")
+	if !requireStringMember(w, members, "client_id") {
 		return
 	}
 	resp, err := h.queryJSONB(
@@ -127,18 +115,12 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, _, ok := decodeJSONBodyObject(w, r, pushRequestMembers...)
+	raw, members, ok := decodeJSONBodyObject(w, r, pushRequestMembers...)
 	if !ok {
 		return
 	}
 
-	var req PushRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.ClientID == "" {
-		writeJSONError(w, http.StatusBadRequest, "client_id is required")
+	if !requireStringMember(w, members, "client_id") {
 		return
 	}
 
@@ -174,22 +156,12 @@ func (h *Handler) serveRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, _, ok := decodeJSONBodyObject(w, r, rebuildRequestMembers...)
+	raw, members, ok := decodeJSONBodyObject(w, r, rebuildRequestMembers...)
 	if !ok {
 		return
 	}
 
-	var req RebuildRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.ClientID == "" {
-		writeJSONError(w, http.StatusBadRequest, "client_id is required")
-		return
-	}
-	if req.Scope == "" {
-		writeJSONError(w, http.StatusBadRequest, "scope is required")
+	if !requireStringMember(w, members, "client_id") || !requireStringMember(w, members, "scope") {
 		return
 	}
 	resp, err := h.queryJSONB(
@@ -309,6 +281,21 @@ func decodeJSONBodyObject(w http.ResponseWriter, r *http.Request, allowedMembers
 	}
 
 	return raw, body, true
+}
+
+func requireStringMember(w http.ResponseWriter, members map[string]json.RawMessage, name string) bool {
+	var value string
+	if raw, exists := members[name]; exists {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return false
+		}
+	}
+	if value == "" {
+		writeJSONError(w, http.StatusBadRequest, name+" is required")
+		return false
+	}
+	return true
 }
 
 func requireJSONMediaType(w http.ResponseWriter, r *http.Request) bool {

@@ -1008,8 +1008,9 @@ func verifySQLiteSchema(ctx context.Context, db *sql.DB, tables []localSchemaTab
 	expectedTriggers := make(map[string]string, len(tables)*3)
 	for _, table := range tables {
 		statements := cdcTriggerSQL(table)
-		for _, statement := range statements[3:] {
-			name := triggerName(statement)
+		for index, operation := range []string{"insert", "update", "delete"} {
+			statement := statements[index+3]
+			name := "_synchro_cdc_" + operation + "_" + table.TableName
 			expectedTriggers[name] = strings.TrimSpace(statement)
 		}
 	}
@@ -1069,14 +1070,6 @@ func verifySQLiteTable(ctx context.Context, db *sql.DB, table localSchemaTable) 
 		return fmt.Errorf("iterating sqlite seed table %s: %w", table.TableName, err)
 	}
 	return nil
-}
-
-func triggerName(statement string) string {
-	parts := strings.Fields(statement)
-	if len(parts) < 3 {
-		return ""
-	}
-	return strings.Trim(parts[2], `"`)
 }
 
 func sameStringSet(left, right map[string]struct{}) bool {
@@ -1854,6 +1847,8 @@ func upsertPortableRecord(ctx context.Context, tx *sql.Tx, table localSchemaTabl
 			quoteIdentifier(primaryKeyColumn(table)),
 			strings.Join(assignments, ", "),
 		)
+	} else {
+		sqlText += fmt.Sprintf(" ON CONFLICT (%s) DO NOTHING", quoteIdentifier(primaryKeyColumn(table)))
 	}
 
 	if _, err := tx.ExecContext(ctx, sqlText, values...); err != nil {
@@ -1904,12 +1899,18 @@ func sqliteValue(column localSchemaColumn, raw any) (any, error) {
 			return int64(0), nil
 		}
 		return nil, fmt.Errorf("unsupported boolean value %T", raw)
-	case "int", "int64":
+	case "int":
 		value, ok := raw.(json.Number)
 		if ok {
 			return value.Int64()
 		}
 		return nil, fmt.Errorf("unsupported integer value %T", raw)
+	case "int64":
+		value, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("unsupported int64 value %T", raw)
+		}
+		return strconv.ParseInt(value, 10, 64)
 	case "float":
 		value, ok := raw.(json.Number)
 		if ok {

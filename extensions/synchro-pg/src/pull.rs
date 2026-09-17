@@ -914,7 +914,7 @@ fn query_scope_candidates(
             _ => return Err("changelog table is malformed".to_string()),
         };
         let record_id: String = match row.get_by_name::<String, &str>("record_id") {
-            Ok(Some(v)) if !v.is_empty() => v,
+            Ok(Some(v)) => v,
             _ => return Err("changelog record identity is malformed".to_string()),
         };
         let op_i16: i16 = row
@@ -1308,7 +1308,6 @@ pub(crate) fn hydrate_records(
         let id: String = row
             .get_by_name::<String, &str>("id")
             .map_err(|error| format!("reading hydrated row identity: {error}"))?
-            .filter(|value| !value.is_empty())
             .ok_or_else(|| "hydrated row identity is missing".to_string())?;
         let data_str: String = row
             .get_by_name::<String, &str>("data")
