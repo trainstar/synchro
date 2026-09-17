@@ -905,8 +905,10 @@ build-kotlin-conformance-app:
 test-swift-unit:
 	rm -rf clients/swift/.build/test-results/unit.xcresult
 	mkdir -p clients/swift/.build/test-results
-	cd clients/swift && $(SWIFTPM_GIT_ENV) xcodebuild test -quiet -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath .build/test-results/unit.xcresult
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/unit.xcresult
+	@status=0; \
+		(cd clients/swift && $(SWIFTPM_GIT_ENV) xcodebuild test -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath .build/test-results/unit.xcresult) || status=$$?; \
+		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/unit.xcresult) || status=$$?; \
+		exit "$$status"
 
 test-client-schema-identity: conformance-mod-download
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
@@ -962,6 +964,10 @@ test-swift-scenarios: conformance-mod-download build-swift-native-runner build-s
 			-run '^TestRealSwiftScenarios$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-swift: test-swift-warm-connect test-swift-scenarios
+	@$(MAKE) --no-print-directory test-swift-integration
+
+.PHONY: test-swift-integration
+test-swift-integration:
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
@@ -981,15 +987,19 @@ test-swift: test-swift-warm-connect test-swift-scenarios
 		plutil -insert "$$environment_path.SYNCHRO_TEST_URL" -string "$(SYNCHRO_TEST_URL)" "$$xctestrun"; \
 		plutil -insert "$$environment_path.SYNCHRO_TEST_JWT_SECRET" -string "$(SYNCHRO_TEST_JWT_SECRET)" "$$xctestrun"; \
 		plutil -insert "$$environment_path.SYNCHRO_TEST_SEED_PATH" -string "$(CLIENT_INTEGRATION_SEED)" "$$xctestrun"; \
-		xcodebuild test-without-building -quiet -xctestrun "$$xctestrun" -destination 'platform=macOS' -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath clients/swift/.build/test-results/integration.xcresult
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/integration.xcresult
+		status=0; \
+		xcodebuild test-without-building -xctestrun "$$xctestrun" -destination 'platform=macOS' -skip-testing:SynchroTests/ClientSchemaIdentityTests $(SWIFT_TEST_ARGS) -resultBundlePath clients/swift/.build/test-results/integration.xcresult || status=$$?; \
+		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/integration.xcresult) || status=$$?; \
+		exit "$$status"
 
 test-kotlin-unit:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=unit :synchro:test
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
+	@status=0; \
+		(cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=unit :synchro:test) || status=$$?; \
+		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results) || status=$$?; \
+		exit "$$status"
 
 test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)

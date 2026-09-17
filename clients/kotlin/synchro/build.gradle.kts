@@ -123,6 +123,7 @@ val integrationTestPatterns = listOf(
 )
 
 tasks.withType<Test>().configureEach {
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     when (providers.gradleProperty("synchroTestSuite").orNull) {
         "unit" -> {
             filter {
