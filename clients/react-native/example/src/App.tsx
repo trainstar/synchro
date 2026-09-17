@@ -583,11 +583,7 @@ function StandardApp() {
           await requireRejection(() => NativeSynchro.createTable(table, columns, invalid));
         }
       }
-      const partial = await client.queryOne(
-        'SELECT name FROM sqlite_master WHERE type = ? AND name = ?',
-        ['table', table]
-      );
-      if (partial !== null) throw new Error('Malformed schema input created a table');
+      // A partial table makes this fail without querying reserved SQLite metadata.
       await NativeSynchro.createTable(table, columns, '{"ifNotExists":false,"withoutRowid":true}');
       await NativeSynchro.alterTable(
         table,
