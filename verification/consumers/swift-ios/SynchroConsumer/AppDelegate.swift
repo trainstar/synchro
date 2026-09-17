@@ -230,13 +230,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         guard pendingAfterResume == 0 else {
             throw CocoaError(.fileWriteUnknown)
         }
+        await client.stop()
+        try await client.close()
         try writePhaseResult(
             phase: smoke.phase,
             pendingCount: pendingAfterResume,
             documents: documents
         )
-        await client.stop()
-        try await client.close()
     }
 
     private func writePhaseResult(phase: String, pendingCount: Int, documents: URL) throws {
