@@ -1975,25 +1975,52 @@ public class SynchroModuleImpl: NSObject {
     }
 
     private func parseColumns(_ json: String) throws -> [ColumnDef] {
-        let data = json.data(using: .utf8)!
-        let array = try JSONSerialization.jsonObject(with: data) as! [[String: Any]]
-        return array.map { item in
+        struct Column: Decodable {
+            let name: String
+            let type: String
+            let nullable: Bool?
+            let defaultValue: String?
+            let primaryKey: Bool?
+        }
+        let columns: [Column]
+        do {
+            columns = try JSONDecoder().decode([Column].self, from: Data(json.utf8))
+        } catch is DecodingError {
+            throw NSError(
+                domain: "SynchroModule",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid schema columns"]
+            )
+        }
+        return columns.map { item in
             ColumnDef(
-                name: item["name"] as! String,
-                type: item["type"] as! String,
-                nullable: item["nullable"] as? Bool ?? true,
-                defaultValue: item["defaultValue"] as? String,
-                primaryKey: item["primaryKey"] as? Bool ?? false
+                name: item.name,
+                type: item.type,
+                nullable: item.nullable ?? true,
+                defaultValue: item.defaultValue,
+                primaryKey: item.primaryKey ?? false
             )
         }
     }
 
     private func parseTableOptions(_ json: String) throws -> Synchro.TableOptions {
-        let data = json.data(using: .utf8)!
-        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        struct Options: Decodable {
+            let ifNotExists: Bool?
+            let withoutRowid: Bool?
+        }
+        let options: Options
+        do {
+            options = try JSONDecoder().decode(Options.self, from: Data(json.utf8))
+        } catch is DecodingError {
+            throw NSError(
+                domain: "SynchroModule",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid table options"]
+            )
+        }
         return Synchro.TableOptions(
-            ifNotExists: dict["ifNotExists"] as? Bool ?? true,
-            withoutRowid: dict["withoutRowid"] as? Bool ?? false
+            ifNotExists: options.ifNotExists ?? true,
+            withoutRowid: options.withoutRowid ?? false
         )
     }
 

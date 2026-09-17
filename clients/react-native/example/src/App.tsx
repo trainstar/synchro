@@ -8,12 +8,13 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SynchroClient } from '@trainstar/synchro-react-native';
+import { SynchroClient, TransactionTimeoutError } from '@trainstar/synchro-react-native';
 import type {
   ConflictEvent,
   SyncEvent,
 } from '@trainstar/synchro-react-native';
 import { ConformanceHarness } from './conformance/ConformanceHarness';
+import NativeSynchro from '../../src/NativeSynchro';
 
 const SYNCHRO_TEST_URL =
   Platform.OS === 'android'
@@ -38,6 +39,7 @@ type ResultKey =
   | 'readTx'
   | 'txTimeout'
   | 'txRecovery'
+  | 'schemaDecode'
   | 'start'
   | 'lifecycle'
   | 'pushPull'
@@ -64,6 +66,7 @@ function createEmptyResults(): Results {
     readTx: null,
     txTimeout: null,
     txRecovery: null,
+    schemaDecode: null,
     start: null,
     lifecycle: null,
     pushPull: null,
@@ -506,18 +509,98 @@ function StandardApp() {
   const runTxTimeout = useCallback(async () => {
     try {
       await ensureLocalTable();
-      await client.writeTransaction(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 6000));
-      });
-      update('txTimeout', false);
-    } catch (error: any) {
-      update(
-        'txTimeout',
-        error?.code === 'TRANSACTION_TIMEOUT' ||
-          String(error?.message ?? '').includes('timeout')
+      const sentinelID = uuid();
+      let timedOut = false;
+      try {
+        await client.writeTransaction(async (tx) => {
+          await tx.execute(
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+            [sentinelID, 'must-rollback', null]
+          );
+          await new Promise((resolve) => setTimeout(resolve, 6000));
+        });
+      } catch (error) {
+        if (!(error instanceof TransactionTimeoutError)) throw error;
+        timedOut = true;
+      }
+      const sentinel = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [sentinelID]
       );
+      const committedID = uuid();
+      await client.writeTransaction(async (tx) => {
+        await tx.execute(
+          'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+          [committedID, 'after-timeout', null]
+        );
+      });
+      const committed = await client.queryOne(
+        'SELECT name FROM test_items WHERE id = ?',
+        [committedID]
+      );
+      update('txTimeout', timedOut && sentinel === null && committed?.name === 'after-timeout');
+    } catch (error) {
+      captureError('txTimeout', error);
+      update('txTimeout', false);
     }
-  }, [client, ensureLocalTable, update]);
+  }, [captureError, client, ensureLocalTable, update]);
+
+  const runSchemaDecode = useCallback(async () => {
+    try {
+      await ensureInitialized();
+      const table = `schema_decode_${uuid().replace(/-/g, '')}`;
+      const columns = '[{"name":"id","type":"TEXT","primaryKey":true}]';
+      const requireRejection = async (operation: () => Promise<void>) => {
+        try {
+          await operation();
+        } catch (error) {
+          if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'UNKNOWN') {
+            return;
+          }
+          throw error;
+        }
+        throw new Error('Malformed schema input was accepted');
+      };
+      for (const invalid of ['null', '{}', '[', '[null]', '["column"]', '[{}]', '[{"name":"id"}]', '[{"type":"TEXT"}]']) {
+        await requireRejection(() => NativeSynchro.createTable(table, invalid, null));
+        await requireRejection(() => NativeSynchro.alterTable(table, invalid));
+      }
+      for (const invalid of ['null', '[]', '"options"', '{']) {
+        await requireRejection(() => NativeSynchro.createTable(table, columns, invalid));
+      }
+      if (Platform.OS === 'ios') {
+        for (const invalid of [
+          '[{"name":1,"type":"TEXT"}]',
+          '[{"name":"id","type":false}]',
+          '[{"name":"id","type":"TEXT","nullable":1}]',
+          '[{"name":"id","type":"TEXT","primaryKey":"true"}]',
+          '[{"name":"id","type":"TEXT","defaultValue":1}]',
+        ]) {
+          await requireRejection(() => NativeSynchro.createTable(table, invalid, null));
+          await requireRejection(() => NativeSynchro.alterTable(table, invalid));
+        }
+        for (const invalid of ['{"ifNotExists":1}', '{"withoutRowid":"true"}']) {
+          await requireRejection(() => NativeSynchro.createTable(table, columns, invalid));
+        }
+      }
+      const partial = await client.queryOne(
+        'SELECT name FROM sqlite_master WHERE type = ? AND name = ?',
+        ['table', table]
+      );
+      if (partial !== null) throw new Error('Malformed schema input created a table');
+      await NativeSynchro.createTable(table, columns, '{"ifNotExists":false,"withoutRowid":true}');
+      await NativeSynchro.alterTable(
+        table,
+        '[{"name":"note","type":"TEXT","nullable":false,"defaultValue":"\'default-note\'"}]'
+      );
+      await client.execute(`INSERT INTO "${table}" (id) VALUES (?)`, ['valid']);
+      const row = await client.queryOne(`SELECT note FROM "${table}" WHERE id = ?`, ['valid']);
+      update('schemaDecode', row?.note === 'default-note');
+    } catch (error) {
+      captureError('schemaDecode', error);
+      update('schemaDecode', false);
+    }
+  }, [captureError, client, ensureInitialized, update]);
 
   const runTxRecovery = useCallback(async () => {
     try {
@@ -1202,6 +1285,9 @@ function StandardApp() {
           </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runTxRecovery} testID="btn-txRecovery">
             <Text>Tx Recovery</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSchemaDecode} testID="btn-schemaDecode">
+            <Text>Schema Decoding</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runStart} testID="btn-start">
             <Text>Start Sync</Text>
