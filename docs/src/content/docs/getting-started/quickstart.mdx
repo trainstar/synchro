@@ -72,6 +72,8 @@ make synchrod-pg-test-start
 ```
 
 The default test server URL is `http://localhost:8091`.
+Startup refuses an occupied port. Stop signals only the verified adapter owner.
+Use `make synchrod-pg-test-serve` for a foreground server owned by your terminal or test process.
 
 Stop it when you are done:
 

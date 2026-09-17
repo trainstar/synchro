@@ -18,13 +18,6 @@ export default defineConfig({
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/trainstar/synchro' },
 			],
-			head: [
-				{
-					tag: 'script',
-					attrs: { type: 'module' },
-					content: `import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; mermaid.initialize({ startOnLoad: true, theme: 'dark' });`,
-				},
-			],
 			sidebar: [
 				{
 					label: 'Overview',

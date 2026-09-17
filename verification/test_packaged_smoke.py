@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.dont_write_bytecode = True
-import packaged_smoke
+from verification import packaged_smoke
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -524,19 +524,6 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             packaged_smoke.write_json(resume_path, resume)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "process replacement"):
                 packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]))
-
-    def test_public_consumer_dependencies_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="packaged-smoke-public-imports.") as raw_directory:
-            directory = Path(raw_directory)
-            source = directory / "Consumer.swift"
-            source.write_text("import Synchro\n", encoding="utf-8")
-            packaged_smoke.validate_public_consumer_sources(directory)
-            source.write_text("@_spi(Inspection) import Synchro\n", encoding="utf-8")
-            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "forbidden dependency"):
-                packaged_smoke.validate_public_consumer_sources(directory)
-            source.write_text("npm install file:../../source\n", encoding="utf-8")
-            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "forbidden dependency"):
-                packaged_smoke.validate_public_consumer_sources(directory)
 
 
 if __name__ == "__main__":

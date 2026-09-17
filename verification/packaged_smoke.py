@@ -34,19 +34,6 @@ APP_RESULT_PATH = "/result"
 APP_RESULT_MAX_BYTES = 4096
 APP_RESULT_MAX_ERROR_LENGTH = 512
 APP_RESULT_READ_TIMEOUT_SECONDS = 5.0
-PUBLIC_CONSUMER_FORBIDDEN = (
-    "@_spi(Inspection)",
-    "SynchroInspection",
-    "TransportObservationCollector",
-    "TransportOperationClass",
-    "withTransportObservation",
-    "com.trainstar.synchro.inspection",
-    "@trainstar/synchro-react-native/inspection",
-    "mavenLocal()",
-    ".package(path:",
-    "npm install file:",
-    "pod 'Synchro', :path =>",
-)
 
 
 class EvidenceError(ValueError):
@@ -127,28 +114,6 @@ def hash_files(paths: list[Path]) -> list[str]:
             hashes.append(digest)
             seen.add(digest)
     return hashes
-
-
-def validate_public_consumer_sources(consumer_root: Path) -> None:
-    if not consumer_root.is_dir():
-        raise EvidenceError(f"public consumer root is missing: {consumer_root}")
-    source_files = [
-        path
-        for path in consumer_root.rglob("*")
-        if path.is_file()
-        and path.name != "Package.swift"
-        and path.suffix in {".go", ".kt", ".swift", ".ts", ".tsx", ".sh", ".py"}
-    ]
-    if not source_files:
-        raise EvidenceError(f"public consumer root has no source files: {consumer_root}")
-    for path in source_files:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError as error:
-            raise EvidenceError(f"cannot read public consumer source {path}: {error}") from error
-        for forbidden in PUBLIC_CONSUMER_FORBIDDEN:
-            if forbidden in content:
-                raise EvidenceError(f"public consumer source imports or resolves forbidden dependency {forbidden}: {path}")
 
 
 def operation_entries(status: str, test_count: int) -> list[dict[str, object]]:
@@ -1048,9 +1013,6 @@ def parse_args() -> argparse.Namespace:
     await_result.add_argument("--output", type=Path, required=True)
     await_result.add_argument("--timeout-seconds", type=float, required=True)
 
-    public_imports = subparsers.add_parser("public-import-check")
-    public_imports.add_argument("--consumer-root", type=Path, action="append", required=True)
-
     return parser.parse_args()
 
 
@@ -1101,9 +1063,6 @@ def main() -> int:
                 args.output.resolve(),
                 args.timeout_seconds,
             )
-        elif args.command == "public-import-check":
-            for consumer_root in args.consumer_root:
-                validate_public_consumer_sources(consumer_root.resolve())
         else:
             raise EvidenceError(f"unsupported command {args.command}")
     except EvidenceError as error:

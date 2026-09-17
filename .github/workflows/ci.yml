@@ -134,9 +134,6 @@ jobs:
     name: candidate server
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
-    concurrency:
-      group: candidate-server-installation
-      cancel-in-progress: false
     env:
       GOWORK: 'off'
       PGRX_VERSION: '0.17.0'

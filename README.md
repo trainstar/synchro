@@ -117,6 +117,9 @@ make synchrod-pg-test-start
 ```
 
 The default local test URL is `http://localhost:8091`.
+Startup refuses an occupied port and stops its own child if readiness fails.
+The ownership file contains a private control identity, not a PID to signal.
+Use `make synchrod-pg-test-serve` when a parent process must own the server lifetime.
 
 Stop it when you are done:
 

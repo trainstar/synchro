@@ -52,6 +52,10 @@ A worker must request a cross-owner change instead of editing another lane's fil
 Shared conformance inputs and build wiring stay with the primary.
 Workers must not regenerate another lane's artifacts or run broad formatters outside their ownership.
 
+After a lane returns its implementation, the primary can transfer a bounded unused file set to that existing worker.
+Record the transfer before editing. Keep at most four workers and one editor per file.
+The primary retains design and acceptance ownership for transferred shared work.
+
 ## Sequence
 
 1. Commit this plan and record all 53 IDs and owned parts in the execution ledger.
@@ -97,3 +101,18 @@ The session ledger tracks individual finding parts. It does not replace the comm
 
 The user changed worker execution to CLI-native tasks on 2026-09-17.
 Preserve partial edits from the stopped external workers. Review and validate them before acceptance.
+
+## Integrated implementation decisions
+
+- Swift adds local migration `synchro_v16_capture_storage_validation` to upgrade existing capture triggers.
+- Swift's existing migration journal adds `relax_nullability` for atomic physical constraint changes.
+- Go seeds retain their existing v1-v8 migration history and SQLite version 6.
+- Each native installer upgrades its private seed copy before validation. Do not claim later native migrations already ran in exported seeds.
+- Server-only soak marks in-memory client observations as reference-only. Such observations cannot establish native restart history.
+- Python gates require executed tests and reject skips and expected failures.
+- The adapter supervisor retains its actual child handle. Stop uses its private control identity instead of signaling a stored PID.
+- Source checks for native scenarios use independent provisioned fixtures when previous tests change registrations or assignments.
+
+Shared input construction deletes the three Go queue builders.
+The Markdown fence fixture has two concrete consumers: the Go contract scanner and JavaScript documentation scanner.
+Its new cases replace the incorrect short-closing-fence assumption instead of adding another Markdown parser.

@@ -375,11 +375,10 @@ Serialize publication with one repository-wide concurrency group.
 12. Upload the signed Maven bundle with `USER_MANAGED`.
 13. Record its deployment ID before requesting publication.
 14. Require `VALIDATED`, publish that deployment, and verify public Maven files and consumption.
-15. Publish the sealed npm tarball after native dependency checks pass.
+15. Publish the sealed npm tarball as specified in [RELEASE.md](../../../RELEASE.md#automated-release-sequence).
 16. Verify public npm identity and clean iOS/Android consumer behavior.
-17. Mark GitHub and npm latest only after every required public check passes.
+17. Mark GitHub latest only after every required public check passes.
 
-Use a non-default npm dist-tag until final public verification succeeds.
 GitHub drafts cannot prove anonymous download access.
 Public verification requires publication, so cross-registry publication is not an atomic transaction.
 Do not describe partial publication as a completed release.
