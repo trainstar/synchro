@@ -194,8 +194,6 @@ def validate_elf_x64(path: Path) -> None:
         raise ReleaseError(f"Linux executable is not little-endian ELF64: {path}")
     if int.from_bytes(header[18:20], "little") != 62:
         raise ReleaseError(f"Linux executable is not x86-64: {path}")
-    if not path.stat().st_mode & stat.S_IXUSR:
-        raise ReleaseError(f"Linux executable is not executable: {path}")
 
 
 def archive_extension(source: Path, output: Path) -> None:
@@ -469,6 +467,8 @@ def write_server_metadata(output: Path, source_commit: str, binaries: list[tuple
     for staging_path, path in sorted(binaries):
         safe_relative(staging_path, "server binary staging path")
         validate_elf_x64(path)
+        if not path.stat().st_mode & stat.S_IXUSR:
+            raise ReleaseError(f"Linux build output is not executable: {path}")
         records.append({
             "staging_path": staging_path,
             "format": "ELF64",
@@ -871,9 +871,9 @@ def materialize_adapter_layout(release_dir: Path, version: str, inventory: Path,
     source = release_dir / record["path"]
     target = output / "synchrod-pg"
     shutil.copyfile(source, target)
-    os.chmod(target, source.stat().st_mode & 0o777)
     if file_sha256(target) != record["sha256"]:
         raise ReleaseError("materialized adapter does not match the sealed manifest")
+    os.chmod(target, 0o755)
     write_atomic(output / "synchrod-pg.sha256", record["sha256"] + "\n")
 
 

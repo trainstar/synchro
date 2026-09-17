@@ -101,6 +101,9 @@ The corpus rejects missing scenario runners before execution.
 
 Release builds distributions once. Package checks and publication use the identical sealed payloads.
 
+Artifact transfers can remove file permissions. Verification checks payload bytes and binary format.
+Execution boundaries restore executable permissions after verification.
+
 Candidate Swift and React Native iOS jobs use independent host-local PostgreSQL instances.
 
 The `publish` job waits for `package-gate` and the protected `release` approval.

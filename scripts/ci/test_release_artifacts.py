@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -212,9 +213,20 @@ class ReleaseArtifactsTests(unittest.TestCase):
 
     def test_stage_and_verify_exact_distribution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            release_dir, arguments = self.seal(Path(directory))
+            arguments = self.make_fixture(Path(directory))
+            for root in (arguments["server_dir"], arguments["packages_dir"]):
+                for path in root.rglob("*"):
+                    if path.is_file():
+                        path.chmod(0o644)
+            release_artifacts.stage_release(**arguments)
+            release_dir = arguments["release_dir"]
+            for path in release_dir.rglob("*"):
+                if path.is_file():
+                    path.chmod(0o644)
             records = release_artifacts.verify_release(release_dir, VERSION, arguments["inventory_path"], arguments["support_matrix"], COMMIT)
             self.assertEqual(len(records), 5)
+            for record in records:
+                self.assertFalse(os.access(release_dir / record["path"], os.X_OK))
             files = sorted(path.relative_to(release_dir).as_posix() for path in release_dir.rglob("*") if path.is_file())
             self.assertEqual(files, [
                 "SHA256SUMS", f"artifacts/adapter-{VERSION}", f"artifacts/extension-{VERSION}.tar.gz",
@@ -236,6 +248,33 @@ class ReleaseArtifactsTests(unittest.TestCase):
             sums = (release_dir / release_artifacts.CHECKSUMS_NAME).read_text(encoding="utf-8")
             self.assertIn("  release-manifest.json\n", sums)
             self.assertNotIn("  SHA256SUMS\n", sums)
+
+    def test_server_metadata_rejects_nonexecutable_build_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = self.make_fixture(Path(directory))
+            adapter = arguments["server_dir"] / f"adapter/adapter-{VERSION}"
+            seed = arguments["server_dir"] / f"seed/seed-{VERSION}"
+            adapter.chmod(0o644)
+            with mock.patch.object(release_artifacts, "dependency_output", return_value={
+                "tool": "ldd", "exit_code": 0, "output": [],
+            }):
+                with self.assertRaises(release_artifacts.ReleaseError):
+                    release_artifacts.write_server_metadata(
+                        Path(directory) / "metadata.json", COMMIT,
+                        [(f"adapter/adapter-{VERSION}", adapter), (f"seed/seed-{VERSION}", seed)],
+                    )
+
+    def test_downloaded_binary_still_requires_x64_elf(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "downloaded-adapter"
+            arm = bytearray(elf_x64())
+            arm[18:20] = (183).to_bytes(2, "little")
+            for payload in (b"not an ELF file", bytes(arm)):
+                with self.subTest(payload=payload[:20].hex()):
+                    path.write_bytes(payload)
+                    path.chmod(0o644)
+                    with self.assertRaises(release_artifacts.ReleaseError):
+                        release_artifacts.validate_payload(path, "adapter", VERSION)
 
     def test_verify_rejects_one_byte_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -344,6 +383,9 @@ class ReleaseArtifactsTests(unittest.TestCase):
     def test_adapter_layout_uses_sealed_manifest_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             release_dir, arguments = self.seal(Path(directory))
+            for path in release_dir.rglob("*"):
+                if path.is_file():
+                    path.chmod(0o644)
             output = Path(directory) / "adapter-layout"
             release_artifacts.materialize_adapter_layout(
                 release_dir, VERSION, arguments["inventory_path"], arguments["support_matrix"], output,
