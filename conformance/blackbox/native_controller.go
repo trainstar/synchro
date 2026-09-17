@@ -2,6 +2,7 @@ package blackbox
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -9,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"net/http"
 	"reflect"
 	"sort"
@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/observer"
 	"github.com/trainstar/synchro/conformance/scenarios"
+	"github.com/trainstar/synchro/conformance/vectors"
 )
 
 const (
@@ -1520,7 +1522,8 @@ func (c *NativeController) BindApplicationPush(operation scenarios.Operation) er
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
 		return errors.New("decode native application push failed")
 	}
-	if !validNativeIdentity(payload.AuthenticatedUserID) || payload.Delivery != "apply" || payload.CommitLSN == "" || payload.EndLSN == "" || compareNativeLSN(payload.CommitLSN, payload.EndLSN) >= 0 || len(payload.Request.Mutations) == 0 {
+	order, validLSN := compareNativeLSN(payload.CommitLSN, payload.EndLSN)
+	if !validNativeIdentity(payload.AuthenticatedUserID) || payload.Delivery != "apply" || !validLSN || order >= 0 || len(payload.Request.Mutations) == 0 {
 		return errors.New("native application push transaction identity is invalid")
 	}
 
@@ -2298,7 +2301,7 @@ func bindNativeTransaction(payload nativeCommitPayload, installation *nativeInst
 	if installation == nil || payload.StreamGeneration != installation.authoredStream || payload.CommitLSN == "" || payload.EndLSN == "" {
 		return nil, errors.New("native source transaction identity is invalid")
 	}
-	if compareNativeLSN(payload.CommitLSN, payload.EndLSN) >= 0 {
+	if order, valid := compareNativeLSN(payload.CommitLSN, payload.EndLSN); !valid || order >= 0 {
 		return nil, errors.New("native source transaction LSN range is invalid")
 	}
 	result := &nativeTransactionBinding{AuthoredStream: payload.StreamGeneration, AuthoredCommitLSN: payload.CommitLSN, AuthoredEndLSN: payload.EndLSN}
@@ -3136,7 +3139,15 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 		return NativeStepObservation{}, errors.New("native source transaction was not committed through this controller")
 	}
 	for _, other := range c.transactions {
-		if other.AuthoredStream == stream && !other.Materialized && compareNativeLSN(other.AuthoredCommitLSN, commit) < 0 {
+		if other.AuthoredStream != stream || other.Materialized {
+			continue
+		}
+		order, valid := compareNativeLSN(other.AuthoredCommitLSN, commit)
+		if !valid {
+			c.mu.Unlock()
+			return NativeStepObservation{}, errors.New("native source transaction position is invalid")
+		}
+		if order < 0 {
 			code := "source_transaction_predecessor_pending"
 			c.mu.Unlock()
 			return NativeStepObservation{Disposition: "error", ErrorCode: &code}, nil
@@ -3469,8 +3480,11 @@ func (c *NativeController) validateRuntimeTransactionOrder(ctx context.Context, 
 	}
 	c.mu.Unlock()
 	for _, other := range others {
-		authoredOrder := compareNativeLSN(other.AuthoredCommitLSN, current.AuthoredCommitLSN)
-		runtimeOrder := compareNativeLSN(other.RuntimeCommitLSN, current.RuntimeCommitLSN)
+		authoredOrder, authoredValid := compareNativeLSN(other.AuthoredCommitLSN, current.AuthoredCommitLSN)
+		runtimeOrder, runtimeValid := compareNativeLSN(other.RuntimeCommitLSN, current.RuntimeCommitLSN)
+		if !authoredValid || !runtimeValid {
+			return errors.New("native WAL commit position is invalid")
+		}
 		if authoredOrder != 0 && runtimeOrder != 0 && authoredOrder != runtimeOrder {
 			return errors.New("authored WAL commit order does not match runtime commit order")
 		}
@@ -3489,7 +3503,19 @@ func (c *NativeController) acknowledgeContiguousPrefix(ctx context.Context, oper
 	c.mu.Lock()
 	var latest *nativeTransactionBinding
 	for _, transaction := range c.transactions {
-		if transaction.AuthoredStream == payload.StreamGeneration && transaction.Materialized && (latest == nil || compareNativeLSN(latest.AuthoredEndLSN, transaction.AuthoredEndLSN) < 0) {
+		if transaction.AuthoredStream != payload.StreamGeneration || !transaction.Materialized {
+			continue
+		}
+		if latest == nil {
+			latest = transaction
+			continue
+		}
+		order, valid := compareNativeLSN(latest.AuthoredEndLSN, transaction.AuthoredEndLSN)
+		if !valid {
+			c.mu.Unlock()
+			return NativeStepObservation{}, errors.New("native acknowledgement position is invalid")
+		}
+		if order < 0 {
 			latest = transaction
 		}
 	}
@@ -3631,16 +3657,26 @@ func captureNativeRegistryAndStream(ctx context.Context, tx *sql.Tx, installatio
 		return errors.New("native runtime registry or stream binding changed")
 	}
 	facts.Registry = &scenarios.RegistryFact{CurrentGeneration: installation.authoredRegistryGeneration}
-	latest := latestNativeTransaction(transactions)
+	latest, err := latestNativeTransaction(transactions)
+	if err != nil {
+		return err
+	}
 	stream := scenarios.StreamFact{MaterializedStreamGeneration: installation.authoredStream, MaterializedKind: "generation_start"}
 	if latest != nil {
-		if !materializedCommit.Valid || compareNativeLSN(materializedCommit.String, latest.RuntimeCommitLSN) < 0 {
+		order, valid := compareNativeLSN(materializedCommit.String, latest.RuntimeCommitLSN)
+		if !materializedCommit.Valid || !valid || order < 0 {
 			return errors.New("native runtime materialized position is behind the authored binding")
 		}
 		stream.MaterializedKind = "transaction_end"
 		stream.MaterializedCommitLSN = latest.AuthoredCommitLSN
-		if acknowledgedEnd.Valid && compareNativeLSN(acknowledgedEnd.String, latest.RuntimeEndLSN) >= 0 {
-			stream.AcknowledgedEndLSN = latest.AuthoredEndLSN
+		if acknowledgedEnd.Valid {
+			order, valid := compareNativeLSN(acknowledgedEnd.String, latest.RuntimeEndLSN)
+			if !valid {
+				return errors.New("native runtime acknowledgement position is invalid")
+			}
+			if order >= 0 {
+				stream.AcknowledgedEndLSN = latest.AuthoredEndLSN
+			}
 		}
 	}
 	facts.Stream = &stream
@@ -3681,6 +3717,23 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 	scopeRows := make(map[string]uint64)
 	scopeVersions := make(map[string][]string)
 	facts.RowScopeEdges = make([]scenarios.RowScopeEdgeFact, 0)
+	var manifest vectors.Manifest
+	if len(records) != 0 {
+		var rawManifest []byte
+		if err := tx.QueryRowContext(ctx, `
+			SELECT (canonical_manifest_body::jsonb || jsonb_build_object('schema_hash', schema_hash))::text
+			FROM synchro.sync_schema_manifest
+			WHERE schema_version = $1 AND schema_hash = $2`,
+			installation.currentRuntimeSchema.Version, installation.currentRuntimeSchema.Hash,
+		).Scan(&rawManifest); err != nil {
+			return errors.New("read native captured-row schema failed")
+		}
+		var err error
+		manifest, err = vectors.ParseManifest(rawManifest)
+		if err != nil {
+			return errors.New("native captured-row schema is invalid")
+		}
+	}
 	for _, record := range records {
 		var rowData []byte
 		var runtimeVersion, runtimeChecksum string
@@ -3697,6 +3750,18 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 		}
 		if err := validateNativeRuntimeRow(record, rowData); err != nil {
 			return err
+		}
+		var fields map[string]json.RawMessage
+		if err := jsonstrict.Decode(rowData, &fields); err != nil {
+			return errors.New("decode native captured-row digest input failed")
+		}
+		row := vectors.Row{PK: fields[record.Table.RuntimePrimary]}
+		for fieldID, value := range fields {
+			row.Fields = append(row.Fields, vectors.RowField{FieldID: fieldID, Value: value})
+		}
+		digest, err := vectors.RowDigest(manifest, record.Table.RuntimeID, row, runtimeVersion)
+		if err != nil || hex.EncodeToString(digest[:]) != runtimeChecksum {
+			return errors.New("native runtime captured row checksum is invalid")
 		}
 		facts.Rows = append(facts.Rows, scenarios.RowFact{
 			TableID:           record.Table.AuthoredID,
@@ -4149,41 +4214,41 @@ func nativeScopeCursorKey(client, scope string) string {
 	return client + "\x00" + scope
 }
 
-func compareNativeLSN(left, right string) int {
+func compareNativeLSN(left, right string) (int, bool) {
 	leftValue, leftOK := parseNativeLSN(left)
 	rightValue, rightOK := parseNativeLSN(right)
-	if leftOK && rightOK {
-		return leftValue.Cmp(rightValue)
+	if !leftOK || !rightOK {
+		return 0, false
 	}
-	return strings.Compare(left, right)
+	return cmp.Compare(leftValue, rightValue), true
 }
 
-func parseNativeLSN(value string) (*big.Int, bool) {
-	if value == "" {
-		return nil, false
+func parseNativeLSN(value string) (uint64, bool) {
+	if strings.Contains(value, "/") {
+		return observer.ParsePostgreSQLLSN(value)
 	}
-	base := 10
-	digits := value
-	if before, after, found := strings.Cut(value, "/"); found {
-		base = 16
-		digits = before + after
-	}
-	result := new(big.Int)
-	parsed, ok := result.SetString(digits, base)
-	return parsed, ok
+	result, err := strconv.ParseUint(value, 10, 64)
+	return result, err == nil
 }
 
-func latestNativeTransaction(values []*nativeTransactionBinding) *nativeTransactionBinding {
+func latestNativeTransaction(values []*nativeTransactionBinding) (*nativeTransactionBinding, error) {
 	var latest *nativeTransactionBinding
 	for _, value := range values {
 		if !value.Materialized {
 			continue
 		}
-		if latest == nil || compareNativeLSN(latest.AuthoredCommitLSN, value.AuthoredCommitLSN) < 0 {
+		if _, valid := parseNativeLSN(value.AuthoredCommitLSN); !valid {
+			return nil, errors.New("native materialized transaction position is invalid")
+		}
+		if latest == nil {
+			latest = value
+			continue
+		}
+		if order, _ := compareNativeLSN(latest.AuthoredCommitLSN, value.AuthoredCommitLSN); order < 0 {
 			latest = value
 		}
 	}
-	return latest
+	return latest, nil
 }
 
 func nativeJSONEqual(left, right []byte) bool {

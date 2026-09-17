@@ -3,7 +3,8 @@ package invariants
 import (
 	"sort"
 	"strconv"
-	"strings"
+
+	"github.com/trainstar/synchro/conformance/observer"
 )
 
 type checkpointHistoryKey struct {
@@ -35,9 +36,10 @@ type cursorIdentityKey struct {
 }
 
 type issuedTerminalCursor struct {
-	sequence     uint64
-	relation     CursorPositionObservation
-	acknowledged bool
+	sequence         uint64
+	exchangeSequence uint64
+	relation         CursorPositionObservation
+	acknowledged     bool
 }
 
 type orderedPosition struct {
@@ -134,7 +136,11 @@ func CheckCursorMonotonicity(observations []Observation) ([]Violation, error) {
 					continue
 				}
 				knownCursors[key] = relation
-				issued[key] = issuedTerminalCursor{sequence: observation.Sequence, relation: relation}
+				if _, found := issued[key]; !found {
+					issued[key] = issuedTerminalCursor{
+						sequence: observation.Sequence, exchangeSequence: exchange.Sequence, relation: relation,
+					}
+				}
 			}
 		}
 
@@ -167,7 +173,9 @@ func CheckCursorMonotonicity(observations []Observation) ([]Violation, error) {
 				generation: cursor.Generation, cursor: cursor.RawCursor,
 			}
 			issuedCursor, found := issued[key]
-			if !found || !sameCursorPosition(issuedCursor.relation, cursor) {
+			if !found || !sameCursorPosition(issuedCursor.relation, cursor) ||
+				issuedCursor.sequence > observation.Sequence ||
+				(issuedCursor.sequence == observation.Sequence && issuedCursor.exchangeSequence >= exchange.Sequence) {
 				violations = append(violations, cursorScopeViolation(
 					observation.Sequence, exchange.Sequence, RuleCursorPositionUnbound, cursor.ClientID, cursor.ScopeID,
 				))
@@ -482,19 +490,7 @@ func parseOrderedPosition(position PositionObservation) (orderedPosition, bool) 
 }
 
 func parsePostgreSQLLSN(value string) (uint64, bool) {
-	parts := strings.Split(value, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return 0, false
-	}
-	high, err := strconv.ParseUint(parts[0], 16, 32)
-	if err != nil {
-		return 0, false
-	}
-	low, err := strconv.ParseUint(parts[1], 16, 32)
-	if err != nil {
-		return 0, false
-	}
-	return high<<32 | low, true
+	return observer.ParsePostgreSQLLSN(value)
 }
 
 func compareOrderedPosition(left, right orderedPosition) int {

@@ -27,6 +27,33 @@ func TestNativeControllerApplyRejectsWorkloadMacro(t *testing.T) {
 	}
 }
 
+func TestNativeLSNComparisonPreservesWordBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		left  string
+		right string
+		order int
+	}{
+		{"0/FFFFFFFF", "1/0", -1},
+		{"1/0", "0/FFFFFFFF", 1},
+		{"4294967296", "1/0", 0},
+		{"0001/0000000A", "1/A", 0},
+		{"FFFFFFFF/FFFFFFFF", "18446744073709551615", 0},
+	} {
+		order, valid := compareNativeLSN(test.left, test.right)
+		if !valid || order != test.order {
+			t.Fatalf("compareNativeLSN(%q, %q) = %d, %t", test.left, test.right, order, valid)
+		}
+	}
+	for _, invalid := range []string{"", "-1", "1.5", "1/", "/1", "1/2/3", "1/G", "100000000/0", "0/100000000", "18446744073709551616"} {
+		if _, valid := compareNativeLSN(invalid, "1/0"); valid {
+			t.Fatalf("invalid left position %q was accepted", invalid)
+		}
+		if _, valid := compareNativeLSN("1/0", invalid); valid {
+			t.Fatalf("invalid right position %q was accepted", invalid)
+		}
+	}
+}
+
 func TestNativeControllerCaptureReportsPendingApplicationPushResolutionError(t *testing.T) {
 	controller := &NativeController{
 		harness:      &Harness{socketDir: t.TempDir(), port: 1},

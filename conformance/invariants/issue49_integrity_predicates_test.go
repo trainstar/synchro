@@ -46,50 +46,6 @@ type issue49TypedRow struct {
 	Fields         []issue49TypedFieldValue
 }
 
-type issue49MalformedTypedRow struct {
-	Kind    string
-	Row     issue49TypedRow
-	Applied bool
-}
-
-type issue49CanonicalRowObservation struct {
-	Row             issue49TypedRow
-	ExpectedBodyHex string
-	Implementations map[string]string
-	Malformed       []issue49MalformedTypedRow
-}
-
-func issue49CanonicalTypedRowsValid(observation issue49CanonicalRowObservation) bool {
-	body, ok := issue49CanonicalRowBody(observation.Row)
-	if !ok || hex.EncodeToString(body) != observation.ExpectedBodyHex {
-		return false
-	}
-	wantImplementations := []string{"postgresql", "swift", "kotlin", "react-native"}
-	if len(observation.Implementations) != len(wantImplementations) {
-		return false
-	}
-	for _, implementation := range wantImplementations {
-		if observation.Implementations[implementation] != observation.ExpectedBodyHex {
-			return false
-		}
-	}
-	wantMalformed := []string{"unknown", "duplicate", "omitted", "mistyped", "alias", "alternate-case", "physical-type", "primary-key-mismatch"}
-	if len(observation.Malformed) != len(wantMalformed) {
-		return false
-	}
-	seen := make(map[string]struct{}, len(observation.Malformed))
-	for _, malformed := range observation.Malformed {
-		if _, duplicate := seen[malformed.Kind]; duplicate {
-			return false
-		}
-		seen[malformed.Kind] = struct{}{}
-		if _, ok := issue49CanonicalRowBody(malformed.Row); ok || malformed.Applied {
-			return false
-		}
-	}
-	return hasExactKeys(seen, wantMalformed...)
-}
-
 func issue49CanonicalRowBody(row issue49TypedRow) ([]byte, bool) {
 	if row.TableID == "" || row.PrimaryFieldID == "" || len(row.Manifest) == 0 || len(row.Fields) != len(row.Manifest) {
 		return nil, false

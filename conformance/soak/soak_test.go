@@ -3,6 +3,7 @@ package soak
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -57,6 +58,140 @@ func TestGeneratorDeterminismAcrossSeeds(t *testing.T) {
 	}
 }
 
+func TestGeneratorSelectsOnlyExecutableRecipes(t *testing.T) {
+	plan, err := Generate(42, Config{OperationCount: MaximumOperationCount, FaultRate: 100}, testCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, operation := range plan.Operations {
+		if err := ValidateFaultOperation(operation); err != nil {
+			t.Fatal(err)
+		}
+		if operation.FaultPlan == nil {
+			continue
+		}
+		id := string(operation.FaultPlan.ControlID)
+		seen[id] = true
+		if id != "CTRL-FAILURE-001" && id != "CTRL-WAL-004" {
+			t.Fatalf("unsupported control %s", id)
+		}
+		if operation.Kind == OperationConnect {
+			t.Fatal("connect selected a push/pull response loss")
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("selected recipes = %v", seen)
+	}
+	for _, change := range []func(*Operation){
+		func(op *Operation) { op.FaultPlan.Injection.Operator = "delay" },
+		func(op *Operation) { op.FaultPlan.Injection.Target = "connect" },
+		func(op *Operation) { op.FaultPlan.ControlID = "CTRL-FAILURE-002" },
+		func(op *Operation) { op.Kind = OperationConnect },
+	} {
+		operation := plan.Operations[1]
+		fault := *operation.FaultPlan
+		operation.FaultPlan = &fault
+		change(&operation)
+		if err := ValidateFaultOperation(operation); !errors.Is(err, ErrInvalidPlan) {
+			t.Fatalf("unsupported recipe error = %v", err)
+		}
+	}
+}
+
+func TestCaptureRejectsCrossPairedWireAndFalseBindings(t *testing.T) {
+	plan, err := Generate(3, Config{OperationCount: MinimumCoverageOperations, FaultRate: 0}, testCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := plan.Operations[2]
+	capture := captureForOperation(operation, "native-process")
+	if err := validateObservationCapture(operation, capture, nil); err != nil {
+		t.Fatalf("valid separate exchanges: %v", err)
+	}
+	for name, mutate := range map[string]func(*ObservationCapture){
+		"ack-request-with-earlier-response": func(c *ObservationCapture) {
+			c.WireExchanges[0].RequestBody = c.WireExchanges[1].RequestBody
+		},
+		"response-from-other-call": func(c *ObservationCapture) {
+			c.WireExchanges[0].ResponseBody = c.WireExchanges[1].ResponseBody
+		},
+		"rewritten-authenticated-identity": func(c *ObservationCapture) {
+			c.WireExchanges[0].RequestBody = append(c.WireExchanges[0].RequestBody, ' ')
+		},
+		"wrong-endpoint":    func(c *ObservationCapture) { c.WireExchanges[0].Transport.Path = "/sync/connect" },
+		"same-sequence-ack": func(c *ObservationCapture) { c.CursorAcknowledgements[0].ExchangeSequence = 1 },
+		"ack-before-issuance": func(c *ObservationCapture) {
+			c.WireExchanges[0].Sequence = 4
+			c.PullResults[0].ExchangeSequence = 4
+		},
+		"wrong-ack-cursor": func(c *ObservationCapture) { c.CursorAcknowledgements[0].Cursor.RawCursor = "other-cursor" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := captureForOperation(operation, "native-process")
+			mutate(&candidate)
+			if err := validateObservationCapture(operation, candidate, nil); !errors.Is(err, ErrCaptureIncomplete) {
+				t.Fatalf("invalid binding error = %v", err)
+			}
+		})
+	}
+}
+
+func TestCaptureReferenceStateCannotProveNativeDurability(t *testing.T) {
+	plan, err := Generate(3, Config{OperationCount: MinimumCoverageOperations}, testCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := plan.Operations[5]
+	capture := captureForOperation(operation, "invented-process")
+	capture.Clients[0].ReferenceOnly = true
+	if err := validateObservationCapture(operation, capture, nil); !errors.Is(err, ErrCaptureIncomplete) {
+		t.Fatalf("invented native identity error = %v", err)
+	}
+	capture.Clients[0].Process = nil
+	if err := validateObservationCapture(operation, capture, nil); err != nil {
+		t.Fatalf("reference capture: %v", err)
+	}
+	capture.Clients[0].RestartBoundary = true
+	if err := validateObservationCapture(operation, capture, nil); !errors.Is(err, ErrCaptureIncomplete) {
+		t.Fatalf("false native restart error = %v", err)
+	}
+	capture.Clients[0].RestartBoundary = false
+	capture.Clients[0].ReferenceOnly = false
+	if err := validateObservationCapture(operation, capture, nil); !errors.Is(err, ErrCaptureIncomplete) {
+		t.Fatalf("native capture without identity error = %v", err)
+	}
+}
+
+func TestCaptureFaultRequiresObservedOperationAndExactRecovery(t *testing.T) {
+	plan, err := Generate(42, Config{OperationCount: MinimumCoverageOperations, FaultRate: 100}, testCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := plan.Operations[1]
+	for name, mutate := range map[string]func(*ObservationCapture){
+		"unactivated":             func(c *ObservationCapture) { c.FaultActivation.Activated = false },
+		"wrong-target":            func(c *ObservationCapture) { c.FaultActivation.Target = "connect" },
+		"wrong-operation":         func(c *ObservationCapture) { c.WireExchanges[0].OperationClass = "connect" },
+		"no-lost-response":        func(c *ObservationCapture) { c.WireExchanges[0].ResponseStatus = 503 },
+		"new-request-on-recovery": func(c *ObservationCapture) { c.WireExchanges[1].RequestBody = []byte(`{}`) },
+		"same-exchange": func(c *ObservationCapture) {
+			c.FaultActivation.RecoveryExchangeSequence = c.FaultActivation.ExchangeSequence
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := captureForOperation(operation, "native-process")
+			if err := validateObservationCapture(operation, candidate, nil); err != nil {
+				t.Fatal(err)
+			}
+			mutate(&candidate)
+			if err := validateObservationCapture(operation, candidate, nil); !errors.Is(err, ErrCaptureIncomplete) {
+				t.Fatalf("fault error = %v", err)
+			}
+		})
+	}
+}
+
 func TestGeneratorRejectsShortCoverageConfiguration(t *testing.T) {
 	_, err := Generate(1, Config{OperationCount: MinimumCoverageOperations - 1}, testCatalog(t))
 	if !errors.Is(err, ErrInvalidConfig) {
@@ -91,7 +226,7 @@ func TestAssembleObservationCarriesRedoneFacts(t *testing.T) {
 	capture := ObservationCapture{
 		CursorPositions:        []invariants.CursorPositionObservation{position},
 		PullResults:            []invariants.PullResultObservation{{ExchangeSequence: 1, UserID: "user-a", ClientID: "client-a", Cursors: []invariants.CursorPositionObservation{position}}},
-		CursorAcknowledgements: []invariants.CursorAcknowledgementObservation{{ExchangeSequence: 1, Cursor: position}},
+		CursorAcknowledgements: []invariants.CursorAcknowledgementObservation{{ExchangeSequence: 2, Cursor: position}},
 		ServerRowIdentities:    []invariants.ServerRowIdentityObservation{{TableID: "table", CanonicalWireJSON: `"pk"`, RowIdentity: []byte("identity")}},
 	}
 	observation := AssembleObservation(7, capture)
@@ -122,18 +257,22 @@ func TestRunRejectsNoopExchangeBeforeCheckers(t *testing.T) {
 	}
 }
 
-func TestRestartBoundaryMatchesUserAndClient(t *testing.T) {
+func TestWALRestartCannotClaimClientReplacement(t *testing.T) {
 	operation := Operation{Sequence: 2, Kind: OperationProcessDeath, UserID: "user-a", ClientID: "client-a", ScopeID: "scope-a"}
 	prior := []invariants.Observation{{Clients: []invariants.ClientObservation{
 		{State: scenarios.ClientDurabilityFact{UserID: "user-a", ClientID: "client-a"}},
 		{State: scenarios.ClientDurabilityFact{UserID: "user-b", ClientID: "client-a"}},
 	}}}
 	clients := []invariants.ClientObservation{
-		{State: scenarios.ClientDurabilityFact{UserID: "user-a", ClientID: "client-a"}, Scopes: []invariants.ClientScopeObservation{{ScopeID: "scope-a"}}, Process: &invariants.ProcessIdentityObservation{ProcessID: "new-a"}, RestartBoundary: true, Complete: true},
+		{State: scenarios.ClientDurabilityFact{UserID: "user-a", ClientID: "client-a"}, Scopes: []invariants.ClientScopeObservation{{ScopeID: "scope-a"}}, Process: &invariants.ProcessIdentityObservation{ProcessID: "same-a"}, Complete: true},
 		{State: scenarios.ClientDurabilityFact{UserID: "user-b", ClientID: "client-a"}, Scopes: []invariants.ClientScopeObservation{{ScopeID: "scope-b"}}, Process: &invariants.ProcessIdentityObservation{ProcessID: "same-b"}, Complete: true},
 	}
 	if err := validateCaptureClients(operation, clients, prior); err != nil {
-		t.Fatalf("validate multi-user restart boundary: %v", err)
+		t.Fatalf("validate unchanged clients during WAL restart: %v", err)
+	}
+	clients[0].RestartBoundary = true
+	if err := validateCaptureClients(operation, clients, prior); !errors.Is(err, ErrCaptureIncomplete) {
+		t.Fatalf("invented client restart error = %v", err)
 	}
 }
 
@@ -585,11 +724,7 @@ func (changingProcessHarness) Execute(_ context.Context, operation Operation) (O
 type stableHarness struct{}
 
 func (stableHarness) Execute(_ context.Context, operation Operation) (ObservationCapture, error) {
-	processID := "pid-stable"
-	if operation.Sequence >= 6 {
-		processID = "pid-restarted"
-	}
-	return captureForOperation(operation, processID), nil
+	return captureForOperation(operation, "pid-stable"), nil
 }
 
 func (scriptedHarness) Execute(context.Context, Operation) (ObservationCapture, error) {
@@ -613,16 +748,47 @@ func captureForOperation(operation Operation, processID string) ObservationCaptu
 		capture.WireExchanges = []invariants.WireExchangeObservation{stablePushExchange(operation)}
 	case OperationPull:
 		capture.WireExchanges, capture.PullResults, capture.CursorAcknowledgements = stablePullExchanges(operation, positions, rowDigest, scopeDigest)
+	case OperationProcessDeath:
+		capture.WireExchanges = []invariants.WireExchangeObservation{}
 	default:
-		capture.WireExchanges = []invariants.WireExchangeObservation{{Sequence: 1, OperationClass: operationExchangeClass(operation.Kind), ResponseStatus: 200, RequestBody: mustJSON(map[string]any{"user_id": operation.UserID, "client_id": operation.ClientID, "scope_id": operation.ScopeID}), ResponseBody: []byte(`{}`)}}
+		capture.WireExchanges = []invariants.WireExchangeObservation{{Sequence: 1, OperationClass: operationExchangeClass(operation), ResponseStatus: 200, RequestBody: mustJSON(map[string]any{"client_id": operation.ClientID, "scope_id": operation.ScopeID}), ResponseBody: []byte(`{}`)}}
 	}
 	if operation.FaultPlan != nil {
-		capture.FaultActivation = &FaultActivationObservation{ControlID: string(operation.FaultPlan.ControlID), Target: operation.ClientID, Activated: true, CleanedUp: true}
+		capture.FaultActivation = &FaultActivationObservation{ControlID: string(operation.FaultPlan.ControlID), Target: operation.FaultPlan.Injection.Target, Activated: true, CleanedUp: true}
+		if operation.Kind != OperationProcessDeath {
+			lost := capture.WireExchanges[0]
+			lost.ResponseStatus = 0
+			lost.ResponseBody = nil
+			lost.ExpectMutationConservation = false
+			lost.ExpectChecksumConvergence = false
+			lost.ExpectScopeIsolation = false
+			for i := range capture.WireExchanges {
+				capture.WireExchanges[i].Sequence++
+			}
+			for i := range capture.PullResults {
+				capture.PullResults[i].ExchangeSequence++
+			}
+			for i := range capture.CursorAcknowledgements {
+				capture.CursorAcknowledgements[i].ExchangeSequence++
+			}
+			capture.WireExchanges = append([]invariants.WireExchangeObservation{lost}, capture.WireExchanges...)
+			capture.FaultActivation.ExchangeSequence = 1
+			capture.FaultActivation.RecoveryExchangeSequence = 2
+		}
 	}
-	if operation.Kind == OperationProcessDeath {
-		capture.Clients[0].RestartBoundary = true
+	for index := range capture.WireExchanges {
+		bindFixtureTransport(operation, &capture.WireExchanges[index])
 	}
 	return capture
+}
+
+func bindFixtureTransport(operation Operation, exchange *invariants.WireExchangeObservation) {
+	request := sha256.Sum256(exchange.RequestBody)
+	response := sha256.Sum256(exchange.ResponseBody)
+	exchange.Transport = &invariants.WireTransportObservation{
+		UserID: operation.UserID, ClientID: operation.ClientID, Method: "POST", Path: "/sync/" + exchange.OperationClass,
+		RequestSHA256: hex.EncodeToString(request[:]), ResponseSHA256: hex.EncodeToString(response[:]),
+	}
 }
 
 func stableDurableCapture(operation Operation, processID string) (vectors.Manifest, []invariants.ClientObservation, scenarios.StateFacts, []invariants.ServerRowIdentityObservation, []invariants.CursorPositionObservation, []invariants.OperatorCheckpointObservation, [32]byte, [32]byte) {
@@ -683,7 +849,7 @@ func stablePushExchange(operation Operation) invariants.WireExchangeObservation 
 	batchID := "00000000-0000-4000-8000-000000000061"
 	pk := map[string]any{stablePKFieldID: "row-push"}
 	columns := map[string]any{stableValueFieldID: "value-push"}
-	request := map[string]any{"authenticated_user_id": operation.UserID, "client_id": operation.ClientID, "scope_id": operation.ScopeID, "client_generation": 1, "batch_id": batchID, "schema": schema, "mutations": []any{map[string]any{"mutation_id": mutationID, "table": stableTableID, "pk": pk, "authored_schema": schema, "op": "insert", "client_version": "2032-01-02T03:04:05.000000Z", "columns": columns}}}
+	request := map[string]any{"client_id": operation.ClientID, "client_generation": 1, "batch_id": batchID, "schema": schema, "mutations": []any{map[string]any{"mutation_id": mutationID, "table": stableTableID, "pk": pk, "authored_schema": schema, "op": "insert", "client_version": "2032-01-02T03:04:05.000000Z", "columns": columns}}}
 	outcome := map[string]any{"mutation_id": mutationID, "status": "applied", "table": stableTableID, "pk": pk, "outcome_schema": schema, "server_row": columns, "server_version": "00000000-0000-4000-8000-000000000063", "row_checksum": map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": digest}}
 	response := map[string]any{"batch_id": batchID, "accepted": []any{outcome}, "rejected": []any{}}
 	return invariants.WireExchangeObservation{Sequence: 1, OperationClass: "push", ResponseStatus: 200, RequestBody: mustJSON(request), ResponseBody: mustJSON(response), ExpectMutationConservation: true}
@@ -694,17 +860,20 @@ func stablePullExchanges(operation Operation, positions []invariants.CursorPosit
 	other := otherScope(selected)
 	selectedCursor := positions[0].RawCursor
 	otherCursor := positions[1].RawCursor
-	request := map[string]any{"user_id": operation.UserID, "client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": selectedCursor}, other: map[string]any{"cursor": otherCursor}}}
+	request := map[string]any{"client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": "earlier-selected"}, other: map[string]any{"cursor": "earlier-other"}}}
 	row := map[string]any{stablePKFieldID: "row-authored", stableValueFieldID: "value-authored"}
 	response := map[string]any{"changes": []any{map[string]any{"scope": selected, "table": stableTableID, "pk": map[string]any{stablePKFieldID: "row-authored"}, "row": row, "server_version": stableServerVersion, "row_checksum": map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": hex.EncodeToString(rowDigest[:])}}}, "scope_cursors": map[string]any{selected: selectedCursor, other: otherCursor}, "scope_updates": map[string]any{"add": []any{}, "remove": []any{}}, "rebuild": []any{}, "has_more": false, "checksums": map[string]any{selected: map[string]any{"algorithm": "sha256", "version": 1, "encoding": "hex", "digest": hex.EncodeToString(scopeDigest[:])}}}
-	zeroRequest := map[string]any{"user_id": operation.UserID, "client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": selectedCursor}}}
+	ackRequest := map[string]any{"client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": selectedCursor}, other: map[string]any{"cursor": otherCursor}}}
+	ackResponse := map[string]any{"changes": []any{}, "scope_cursors": map[string]any{selected: selectedCursor, other: otherCursor}, "scope_updates": map[string]any{"add": []any{}, "remove": []any{}}, "rebuild": []any{}, "has_more": false}
+	zeroRequest := map[string]any{"client_id": operation.ClientID, "scopes": map[string]any{selected: map[string]any{"cursor": selectedCursor}}}
 	zeroResponse := map[string]any{"changes": []any{}, "scope_cursors": map[string]any{selected: selectedCursor}, "scope_updates": map[string]any{"add": []any{}, "remove": []any{}}, "rebuild": []any{}, "has_more": false}
 	checksumExchange := invariants.WireExchangeObservation{Sequence: 1, OperationClass: "pull", ResponseStatus: 200, RequestBody: mustJSON(request), ResponseBody: mustJSON(response), ExpectChecksumConvergence: true}
-	scopeExchange := invariants.WireExchangeObservation{Sequence: 2, OperationClass: "pull", ResponseStatus: 200, RequestBody: mustJSON(zeroRequest), ResponseBody: mustJSON(zeroResponse), ExpectScopeIsolation: true}
+	ackExchange := invariants.WireExchangeObservation{Sequence: 2, OperationClass: "pull", ResponseStatus: 200, RequestBody: mustJSON(ackRequest), ResponseBody: mustJSON(ackResponse)}
+	scopeExchange := invariants.WireExchangeObservation{Sequence: 3, OperationClass: "pull", ResponseStatus: 200, RequestBody: mustJSON(zeroRequest), ResponseBody: mustJSON(zeroResponse), ExpectScopeIsolation: true}
 	change := invariants.PullChangeIdentityObservation{ScopeID: selected, TableID: stableTableID, PrimaryKeyFieldID: stablePKFieldID, PrimaryKey: json.RawMessage(`"row-authored"`)}
 	result := invariants.PullResultObservation{ExchangeSequence: 1, UserID: operation.UserID, ClientID: operation.ClientID, Changes: []invariants.PullChangeIdentityObservation{change}, Cursors: append([]invariants.CursorPositionObservation(nil), positions...)}
-	acknowledgements := []invariants.CursorAcknowledgementObservation{{ExchangeSequence: 1, Cursor: positions[0]}, {ExchangeSequence: 1, Cursor: positions[1]}}
-	return []invariants.WireExchangeObservation{checksumExchange, scopeExchange}, []invariants.PullResultObservation{result}, acknowledgements
+	acknowledgements := []invariants.CursorAcknowledgementObservation{{ExchangeSequence: 2, Cursor: positions[0]}, {ExchangeSequence: 2, Cursor: positions[1]}}
+	return []invariants.WireExchangeObservation{checksumExchange, ackExchange, scopeExchange}, []invariants.PullResultObservation{result}, acknowledgements
 }
 
 func mustJSON(value any) []byte {

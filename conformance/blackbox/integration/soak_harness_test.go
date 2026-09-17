@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,7 +46,6 @@ type liveSoakHarness struct {
 	closed                bool
 	identitySequence      uint64
 	clientVersionSequence uint64
-	processGeneration     uint64
 	schemaTransition      uint64
 	corruptNextChecksum   bool
 	authoredTable         map[string]any
@@ -55,7 +56,10 @@ type liveSoakHarness struct {
 	rows                map[string]soakHeldRow
 	scopeRows           map[string]map[string]struct{}
 	authoritativeDigest map[string][32]byte
-	databaseFingerprint string
+	faultOperation      *soak.Operation
+	faultRequestClass   string
+	faultActivation     *soak.FaultActivationObservation
+	faultWires          []invariants.WireExchangeObservation
 }
 
 type soakProtocolClient struct {
@@ -101,6 +105,11 @@ type soakHeldRow struct {
 
 type soakRecordedCall struct {
 	metadata blackbox.ExchangeMetadata
+	sequence uint64
+	method   string
+	path     string
+	userID   string
+	clientID string
 }
 
 func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) (*liveSoakHarness, error) {
@@ -153,12 +162,10 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 		client:              (blackbox.Client{BaseURL: server.AdapterURL(), Tokens: tokenProvider}).WithRecorder(recorder, soakBodyLimit),
 		seed:                seed,
 		root:                attachmentRoot,
-		processGeneration:   1,
 		corruptNextChecksum: corruptChecksum,
 		rows:                make(map[string]soakHeldRow),
 		scopeRows:           make(map[string]map[string]struct{}),
 		authoritativeDigest: make(map[string][32]byte),
-		databaseFingerprint: lowerSHA256("soak-database:" + soakClientID),
 		protocol: soakProtocolClient{
 			Schema: map[string]any{"version": 0, "hash": ""},
 			Scopes: make(map[string]string),
@@ -304,15 +311,22 @@ func (h *liveSoakHarness) Execute(ctx context.Context, operation soak.Operation)
 	}
 
 	wires := make([]invariants.WireExchangeObservation, 0, 4)
-	activation, faultWire, err := h.activateOperationFault(ctx, operation)
-	if err != nil {
+	if err := soak.ValidateFaultOperation(operation); err != nil {
 		return soak.ObservationCapture{}, err
 	}
-	if faultWire != nil {
-		wires = append(wires, *faultWire)
+	h.faultOperation = &operation
+	h.faultWires = nil
+	h.faultActivation = nil
+	h.faultRequestClass = "soak-push"
+	if operation.Kind == soak.OperationPull {
+		h.faultRequestClass = "soak-pull-control"
+	} else if operation.Kind == soak.OperationWireFault && operation.WireOperation == soak.OperationPull {
+		h.faultRequestClass = "soak-wire-fault-pull"
 	}
+	defer func() { h.faultOperation = nil }()
 
 	var pullResult *soakPullCapture
+	var err error
 	switch operation.Kind {
 	case soak.OperationConnect:
 		call, err := h.connect(ctx, "soak-connect")
@@ -369,19 +383,45 @@ func (h *liveSoakHarness) Execute(ctx context.Context, operation soak.Operation)
 		if err := h.executeProcessDeath(ctx); err != nil {
 			return soak.ObservationCapture{}, err
 		}
-		h.processGeneration++
+		h.faultActivation = &soak.FaultActivationObservation{
+			ControlID: string(operation.FaultPlan.ControlID), Target: operation.FaultPlan.Injection.Target,
+			Activated: true, CleanedUp: true,
+		}
 	case soak.OperationWireFault:
-		if faultWire == nil {
-			return soak.ObservationCapture{}, errors.New("wire-fault operation did not activate a wire fault")
+		if operation.WireOperation == soak.OperationPush {
+			_, _, err = h.submitInsert(ctx, operation.ScopeID, "wire-fault")
+		} else {
+			var response blackbox.Response
+			var body map[string]any
+			response, body, _, err = h.pull(ctx, h.protocol.Scopes, "soak-wire-fault-pull")
+			if err == nil && response.Status != http.StatusOK {
+				err = errors.New("soak wire-fault pull did not recover")
+			}
+			if err == nil {
+				_, err = h.applyPullResponse(body)
+			}
+			if err == nil {
+				err = h.drainPulls(ctx)
+			}
+		}
+		if err != nil {
+			return soak.ObservationCapture{}, err
 		}
 	default:
 		return soak.ObservationCapture{}, fmt.Errorf("unsupported live soak operation %q", operation.Kind)
 	}
 
-	for index := range wires {
-		wires[index].Sequence = uint64(index + 1)
+	for _, faultWire := range h.faultWires {
+		found := false
+		for _, wire := range wires {
+			found = found || wire.Sequence == faultWire.Sequence
+		}
+		if !found {
+			wires = append(wires, faultWire)
+		}
 	}
-	capture, err := h.capture(ctx, operation, wires, activation)
+	sort.Slice(wires, func(i, j int) bool { return wires[i].Sequence < wires[j].Sequence })
+	capture, err := h.capture(ctx, operation, wires, h.faultActivation)
 	if err != nil {
 		return soak.ObservationCapture{}, err
 	}
@@ -397,9 +437,10 @@ func (h *liveSoakHarness) Execute(ctx context.Context, operation soak.Operation)
 }
 
 type soakPullCapture struct {
-	wires           []invariants.WireExchangeObservation
-	change          invariants.PullChangeIdentityObservation
-	responseCursors map[string]string
+	wires                   []invariants.WireExchangeObservation
+	change                  invariants.PullChangeIdentityObservation
+	responseCursors         map[string]string
+	acknowledgementSequence uint64
 }
 
 func (p *soakPullCapture) bind(positions []invariants.CursorPositionObservation, wires []invariants.WireExchangeObservation) (invariants.PullResultObservation, []invariants.CursorAcknowledgementObservation, error) {
@@ -416,7 +457,7 @@ func (p *soakPullCapture) bind(positions []invariants.CursorPositionObservation,
 		}
 		mainSequence = wire.Sequence
 	}
-	if mainSequence == 0 {
+	if mainSequence == 0 || p.acknowledgementSequence <= mainSequence {
 		return invariants.PullResultObservation{}, nil, errors.New("soak pull capture has no checksum exchange")
 	}
 	cursors := make([]invariants.CursorPositionObservation, 0, len(p.responseCursors))
@@ -439,7 +480,7 @@ func (p *soakPullCapture) bind(positions []invariants.CursorPositionObservation,
 	}
 	acknowledgements := make([]invariants.CursorAcknowledgementObservation, len(cursors))
 	for index, cursor := range cursors {
-		acknowledgements[index] = invariants.CursorAcknowledgementObservation{ExchangeSequence: mainSequence, Cursor: cursor}
+		acknowledgements[index] = invariants.CursorAcknowledgementObservation{ExchangeSequence: p.acknowledgementSequence, Cursor: cursor}
 	}
 	return result, acknowledgements, nil
 }
@@ -460,7 +501,7 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 	if err != nil {
 		return soak.ObservationCapture{}, err
 	}
-	client, err := h.captureClient(operation.Kind == soak.OperationProcessDeath)
+	client, err := h.captureClient()
 	if err != nil {
 		return soak.ObservationCapture{}, err
 	}
@@ -480,7 +521,7 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 	return capture, nil
 }
 
-func (h *liveSoakHarness) captureClient(restart bool) (invariants.ClientObservation, error) {
+func (h *liveSoakHarness) captureClient() (invariants.ClientObservation, error) {
 	rows := make([]invariants.ClientRowObservation, 0, len(h.rows))
 	rowKeys := make([]string, 0, len(h.rows))
 	for key := range h.rows {
@@ -535,6 +576,7 @@ func (h *liveSoakHarness) captureClient(restart bool) (invariants.ClientObservat
 	checkpointCount := uint64(len(stateCheckpoints))
 	zero := uint64(0)
 	return invariants.ClientObservation{
+		ReferenceOnly: true,
 		State: scenarios.ClientDurabilityFact{
 			UserID:          soakUserID,
 			ClientID:        soakClientID,
@@ -548,12 +590,7 @@ func (h *liveSoakHarness) captureClient(restart bool) (invariants.ClientObservat
 		Rows:      rows,
 		Scopes:    scopes,
 		ScopeRows: scopeRows,
-		Process: &invariants.ProcessIdentityObservation{
-			ProcessID:                   fmt.Sprintf("soak-protocol-process-%d", h.processGeneration),
-			DatabaseIdentityFingerprint: h.databaseFingerprint,
-		},
-		RestartBoundary: restart,
-		Complete:        true,
+		Complete:  true,
 	}, nil
 }
 
@@ -1025,24 +1062,36 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 		return nil, errors.New("soak selected-scope control did not terminate empty")
 	}
 	h.protocol.Scopes = responseCursors
-	mainWire, err := h.wireFromCalls(operation, ackCall, mainCall, false, true, false)
+	mainWire, err := h.wireFromCall(operation, mainCall, false, true, false)
 	if err != nil {
 		return nil, err
 	}
 	if h.corruptNextChecksum {
-		mainWire.ResponseBody, err = corruptPullRowChecksum(mainWire.ResponseBody)
-		if err != nil {
-			return nil, err
+		keys := make([]string, 0, len(h.rows))
+		for key := range h.rows {
+			keys = append(keys, key)
 		}
+		sort.Strings(keys)
+		if len(keys) == 0 {
+			return nil, errors.New("soak checksum control has no held row")
+		}
+		row := h.rows[keys[0]]
+		row.Digest[0] ^= 1
+		h.rows[keys[0]] = row
 		h.corruptNextChecksum = false
+	}
+	ackWire, err := h.wireFromCall(operation, ackCall, false, false, false)
+	if err != nil {
+		return nil, err
 	}
 	zeroWire, err := h.wireFromCall(operation, zeroCall, false, false, true)
 	if err != nil {
 		return nil, err
 	}
 	return &soakPullCapture{
-		wires:  []invariants.WireExchangeObservation{mainWire, zeroWire},
+		wires:  []invariants.WireExchangeObservation{mainWire, ackWire, zeroWire},
 		change: identity, responseCursors: responseCursors,
+		acknowledgementSequence: ackCall.sequence,
 	}, nil
 }
 
@@ -1287,11 +1336,12 @@ func (h *liveSoakHarness) transitionSchema(ctx context.Context) (soakRecordedCal
 		return soakRecordedCall{}, errors.New("soak schema transition did not succeed")
 	}
 	h.authoredTable = table
-	call, err := h.loadManifest(ctx, "soak-schema-transition")
+	_, err = h.loadManifest(ctx, "soak-schema-transition")
 	if err != nil {
 		return soakRecordedCall{}, err
 	}
-	if _, err := h.connect(ctx, "soak-schema-reconnect"); err != nil {
+	call, err := h.connect(ctx, "soak-schema-reconnect")
+	if err != nil {
 		return soakRecordedCall{}, err
 	}
 	for _, scopeID := range h.scopeIDs() {
@@ -1311,71 +1361,161 @@ func (h *liveSoakHarness) executeProcessDeath(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("execute soak WAL process death: %w", err)
 	}
-	if !observation.WorkerExitedBeforeAcknowledgement || !observation.WorkerRestarted {
-		return errors.New("soak WAL process death did not cross the required restart boundary")
+	return validateSoakWALRestart(observation)
+}
+
+func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) error {
+	if !observation.WorkerExitedBeforeAcknowledgement || !observation.WorkerRestarted ||
+		!observation.PriorProgress.SlotMatchesProgress ||
+		len(observation.BeforeRestart.Records) != 1 || len(observation.AfterRestart.Records) != 1 ||
+		observation.BeforeRestart.ContiguousAcknowledged || observation.BeforeRestart.BlockingPoison ||
+		!observation.AfterRestart.WorkerRunning || observation.AfterRestart.BlockingPoison ||
+		!observation.AfterRestart.ContiguousAcknowledged ||
+		!observation.AfterRestart.AcknowledgementMatchesObservedEnd || !observation.AfterRestart.SlotMatchesObservedEnd {
+		return errors.New("soak WAL restart lacks an observed replay boundary")
+	}
+	before := observation.BeforeRestart.Records[0]
+	after := observation.AfterRestart.Records[0]
+	if before.RecordID == "" || before.RowVersion == "" || before.CommitLSN == "" || before.EndLSN == "" ||
+		before.CommitLSN == before.EndLSN || before.FenceCoverage != "materialized" ||
+		before.ReplayCount != 0 || after.ReplayCount != 1 ||
+		observation.BeforeRestart.AcknowledgedEndLSN != observation.PriorProgress.AcknowledgedEndLSN ||
+		observation.BeforeRestart.SlotConfirmedFlushLSN != observation.PriorProgress.SlotConfirmedFlushLSN ||
+		observation.AfterRestart.AcknowledgedEndLSN != before.EndLSN {
+		return errors.New("soak WAL restart acknowledgement is invalid")
+	}
+	after.ReplayCount = before.ReplayCount
+	expectedStages := blackbox.WALRecordStageObservation{
+		FenceCount: 1, EventCount: 1, ProjectionCount: 1, CapturedCount: 1, EdgeCount: 1, ChangeCount: 1,
+	}
+	if before != after || observation.BeforeStages != expectedStages || observation.AfterStages != expectedStages {
+		return errors.New("soak WAL replay changed its durable result")
 	}
 	return nil
 }
 
-func (h *liveSoakHarness) activateOperationFault(ctx context.Context, operation soak.Operation) (*soak.FaultActivationObservation, *invariants.WireExchangeObservation, error) {
-	if operation.FaultPlan == nil {
-		return nil, nil, nil
+func validateSoakFaultRequest(operation soak.Operation, request blackbox.Request) error {
+	if err := soak.ValidateFaultOperation(operation); err != nil {
+		return err
 	}
-	activation := &soak.FaultActivationObservation{
-		ControlID: string(operation.FaultPlan.ControlID), Target: operation.FaultPlan.Injection.Target, Activated: true,
+	kind := operation.Kind
+	if kind == soak.OperationWireFault {
+		kind = operation.WireOperation
 	}
-	if operation.Kind == soak.OperationProcessDeath {
-		activation.CleanedUp = true
-		return activation, nil, nil
+	if operation.FaultPlan == nil || operation.FaultPlan.Injection.Mechanism != "wire-fault" ||
+		request.Method != http.MethodPost || request.Path != "/sync/"+string(kind) {
+		return errors.New("soak fault does not target the executed push or pull")
 	}
-	owner, err := faults.NewController(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create soak fault controller: %w", err)
-	}
-	options := soakWireOptions(operation.FaultPlan.Injection.Operator)
-	wireFault, err := faults.NewWireFault(ctx, owner, http.DefaultTransport, options)
-	if err != nil {
-		_ = owner.Close()
-		return nil, nil, fmt.Errorf("create soak wire fault: %w", err)
-	}
-	faultClient := h.client
-	faultClient.HTTP = &http.Client{Transport: wireFault, Timeout: 30 * time.Second}
-	payload := map[string]any{
-		"client_id": soakClientID, "platform": "conformance-soak", "app_version": "0.3.0",
-		"protocol_version": 3, "schema": h.protocol.Schema, "scope_set_version": h.protocol.ScopeSetVersion,
-		"known_scopes": map[string]any{},
-	}
-	offset := h.recorder.Len()
-	_, _ = faultClient.Do(ctx, blackbox.Request{
-		Method: http.MethodPost, Path: "/sync/connect", Headers: http.Header{"Content-Type": []string{"application/json"}},
-		Body: mustMarshalJSON(payload), Class: "soak-wire-fault",
-	})
-	call, captureErr := h.recordedCall(offset)
-	closeErr := errors.Join(wireFault.Close(), owner.Close())
-	if captureErr != nil || closeErr != nil {
-		return nil, nil, errors.Join(captureErr, closeErr)
-	}
-	activation.CleanedUp = true
-	wire, err := h.wireFromCall(operation, call, false, false, false)
-	if err != nil {
-		return nil, nil, err
-	}
-	return activation, &wire, nil
+	return nil
 }
 
-func soakWireOptions(operator string) faults.WireOptions {
-	switch operator {
-	case "crash":
-		return faults.WireOptions{Mode: faults.WireResponseLoss}
-	case "delay":
-		return faults.WireOptions{Mode: faults.WireTimeout}
-	case "duplicate":
-		return faults.WireOptions{Mode: faults.WireDuplicate}
-	case "replay":
-		return faults.WireOptions{Mode: faults.WireReplay, ReplayCount: 2}
-	default:
-		return faults.WireOptions{Mode: faults.WireTemporaryUnavailable}
+func responseLossRequest(
+	ctx context.Context,
+	client blackbox.Client,
+	request blackbox.Request,
+	observe func(context.Context) ([]byte, error),
+) (blackbox.Response, error) {
+	owner, err := faults.NewController(ctx)
+	if err != nil {
+		return blackbox.Response{}, err
 	}
+	upstream := http.DefaultTransport
+	if client.HTTP != nil && client.HTTP.Transport != nil {
+		upstream = client.HTTP.Transport
+	}
+	wireFault, err := faults.NewWireFault(ctx, owner, upstream, faults.WireOptions{Mode: faults.WireResponseLoss})
+	if err != nil {
+		return blackbox.Response{}, errors.Join(err, owner.Close())
+	}
+	faultClient := client
+	faultClient.HTTP = &http.Client{Transport: wireFault, Timeout: 30 * time.Second}
+	_, lossErr := faultClient.Do(ctx, request)
+	closeErr := errors.Join(wireFault.Close(), owner.Close())
+	if !errors.Is(lossErr, faults.ErrResponseLost) || closeErr != nil {
+		return blackbox.Response{}, errors.Join(errors.New("soak response-loss boundary was not completed"), lossErr, closeErr)
+	}
+	beforeRetry, err := observe(ctx)
+	if err != nil {
+		return blackbox.Response{}, fmt.Errorf("observe state after response loss: %w", err)
+	}
+	response, err := client.Do(ctx, request)
+	if err != nil {
+		return blackbox.Response{}, fmt.Errorf("recover lost response: %w", err)
+	}
+	if response.Status != http.StatusOK {
+		return blackbox.Response{}, errors.New("soak response-loss recovery did not succeed")
+	}
+	afterRetry, err := observe(ctx)
+	if err != nil {
+		return blackbox.Response{}, fmt.Errorf("observe recovered state: %w", err)
+	}
+	if !bytes.Equal(beforeRetry, afterRetry) {
+		return blackbox.Response{}, errors.New("soak exact retry changed durable server state")
+	}
+	return response, nil
+}
+
+func (h *liveSoakHarness) retryState(ctx context.Context, request blackbox.Request) ([]byte, error) {
+	if request.Path == "/sync/pull" {
+		checkpoints, err := h.server.Operator().ObserveClientCheckpoints(ctx, soakClientID)
+		if err != nil {
+			return nil, err
+		}
+		for index := range checkpoints {
+			// Last-contact time can change on retry without advancing a checkpoint.
+			checkpoints[index].UpdatedAt = ""
+		}
+		return json.Marshal(checkpoints)
+	}
+	var payload struct {
+		Mutations []struct {
+			Table string            `json:"table"`
+			PK    map[string]string `json:"pk"`
+		} `json:"mutations"`
+	}
+	if json.Unmarshal(request.Body, &payload) != nil || len(payload.Mutations) != 1 || len(payload.Mutations[0].PK) != 1 {
+		return nil, errors.New("soak retry requires one observed mutation")
+	}
+	tableName := ""
+	for name, table := range h.protocol.Tables {
+		if table.ID == payload.Mutations[0].Table {
+			tableName = name
+		}
+	}
+	if tableName == "" {
+		return nil, errors.New("soak retry table is not installed")
+	}
+	var recordID string
+	for _, value := range payload.Mutations[0].PK {
+		recordID = value
+	}
+	if tableName == "cf_items" {
+		if err := h.waitForWALRecord(ctx, tableName, recordID); err != nil {
+			return nil, err
+		}
+	}
+	pipeline, err := h.server.Operator().ObserveWALRecordsForTable(ctx, tableName, []string{recordID})
+	if err != nil {
+		return nil, err
+	}
+	stages, err := h.server.Operator().ObserveWALRecordStages(ctx, tableName, []string{recordID})
+	if err != nil {
+		return nil, err
+	}
+	facts, err := h.native.Capture(ctx, nil, []string{"server-state"})
+	if err != nil {
+		return nil, err
+	}
+	if len(facts) != 1 {
+		return nil, errors.New("soak retry server capture is incomplete")
+	}
+	return json.Marshal(struct {
+		Records       []blackbox.WALRecordObservation
+		Stages        blackbox.WALRecordStageObservation
+		BatchCount    *uint64
+		MutationCount *uint64
+		Outcomes      []scenarios.MutationOutcomeIdentityFact
+	}{pipeline.Records, stages, facts[0].StateFacts.BatchCount, facts[0].StateFacts.MutationCount, facts[0].StateFacts.MutationOutcomes})
 }
 
 func (h *liveSoakHarness) doJSON(ctx context.Context, client *blackbox.Client, method, path, requestClass string, payload any) (blackbox.Response, map[string]any, soakRecordedCall, error) {
@@ -1383,14 +1523,51 @@ func (h *liveSoakHarness) doJSON(ctx context.Context, client *blackbox.Client, m
 	if payload != nil {
 		body = mustMarshalJSON(payload)
 	}
-	offset := h.recorder.Len()
-	response, err := client.Do(ctx, blackbox.Request{
+	request := blackbox.Request{
 		Method: method, Path: path, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: body, Class: requestClass,
-	})
+	}
+	if h.faultOperation != nil && h.faultOperation.FaultPlan != nil &&
+		h.faultOperation.FaultPlan.Injection.Mechanism == "wire-fault" && h.faultActivation == nil &&
+		requestClass == h.faultRequestClass {
+		if err := validateSoakFaultRequest(*h.faultOperation, request); err != nil {
+			return blackbox.Response{}, nil, soakRecordedCall{}, err
+		}
+		offset := h.recorder.Len()
+		response, err := responseLossRequest(ctx, *client, request, func(ctx context.Context) ([]byte, error) {
+			return h.retryState(ctx, request)
+		})
+		if err != nil {
+			return blackbox.Response{}, nil, soakRecordedCall{}, err
+		}
+		records, err := h.recorder.Snapshot(offset)
+		if err != nil || len(records) != 2 {
+			return blackbox.Response{}, nil, soakRecordedCall{}, errors.New("soak response loss must record two original exchanges")
+		}
+		for index, record := range records {
+			call := h.recordedMetadata(offset+index, request, record)
+			wire, err := h.wireFromCall(*h.faultOperation, call, false, false, false)
+			if err != nil {
+				return blackbox.Response{}, nil, soakRecordedCall{}, err
+			}
+			h.faultWires = append(h.faultWires, wire)
+		}
+		h.faultActivation = &soak.FaultActivationObservation{
+			ControlID: string(h.faultOperation.FaultPlan.ControlID), Target: h.faultOperation.FaultPlan.Injection.Target,
+			Activated: true, CleanedUp: true,
+			ExchangeSequence: uint64(offset + 1), RecoveryExchangeSequence: uint64(offset + 2),
+		}
+		var object map[string]any
+		if json.Unmarshal(response.Body, &object) != nil || object == nil {
+			return blackbox.Response{}, nil, soakRecordedCall{}, errors.New("decode recovered soak response failed")
+		}
+		return response, object, h.recordedMetadata(offset+1, request, records[1]), nil
+	}
+	offset := h.recorder.Len()
+	response, err := client.Do(ctx, request)
 	if err != nil {
 		return blackbox.Response{}, nil, soakRecordedCall{}, fmt.Errorf("execute soak HTTP request %s: %w", path, err)
 	}
-	call, err := h.recordedCall(offset)
+	call, err := h.recordedCall(offset, request)
 	if err != nil {
 		return blackbox.Response{}, nil, soakRecordedCall{}, err
 	}
@@ -1401,7 +1578,7 @@ func (h *liveSoakHarness) doJSON(ctx context.Context, client *blackbox.Client, m
 	return response, object, call, nil
 }
 
-func (h *liveSoakHarness) recordedCall(offset int) (soakRecordedCall, error) {
+func (h *liveSoakHarness) recordedCall(offset int, request blackbox.Request) (soakRecordedCall, error) {
 	records, err := h.recorder.Snapshot(offset)
 	if err != nil {
 		return soakRecordedCall{}, fmt.Errorf("snapshot soak recorder: %w", err)
@@ -1409,29 +1586,42 @@ func (h *liveSoakHarness) recordedCall(offset int) (soakRecordedCall, error) {
 	if len(records) != 1 {
 		return soakRecordedCall{}, fmt.Errorf("soak recorder captured %d exchanges, want 1", len(records))
 	}
-	return soakRecordedCall{metadata: records[0]}, nil
+	return h.recordedMetadata(offset, request, records[0]), nil
+}
+
+func (h *liveSoakHarness) recordedMetadata(offset int, request blackbox.Request, metadata blackbox.ExchangeMetadata) soakRecordedCall {
+	return soakRecordedCall{
+		metadata: metadata, sequence: uint64(offset + 1), method: request.Method, path: request.Path,
+		userID: soakUserID, clientID: soakClientID,
+	}
 }
 
 func (h *liveSoakHarness) wireFromCall(operation soak.Operation, call soakRecordedCall, mutation, checksum, isolation bool) (invariants.WireExchangeObservation, error) {
-	return h.wireFromCalls(operation, call, call, mutation, checksum, isolation)
-}
-
-func (h *liveSoakHarness) wireFromCalls(operation soak.Operation, requestCall, responseCall soakRecordedCall, mutation, checksum, isolation bool) (invariants.WireExchangeObservation, error) {
-	requestBody, err := h.attachment(requestCall.metadata.RequestAttachmentID)
+	if call.sequence == 0 || call.userID != operation.UserID || call.clientID != operation.ClientID {
+		return invariants.WireExchangeObservation{}, errors.New("soak recorded session identity does not match its operation")
+	}
+	records, err := h.recorder.Snapshot(int(call.sequence) - 1)
+	if err != nil || len(records) == 0 || !reflect.DeepEqual(records[0], call.metadata) {
+		return invariants.WireExchangeObservation{}, errors.New("soak exchange does not match one original recorder entry")
+	}
+	requestBody, err := h.attachment(call.metadata.RequestAttachmentID)
 	if err != nil {
 		return invariants.WireExchangeObservation{}, err
 	}
-	responseBody, err := h.attachment(responseCall.metadata.ResponseAttachmentID)
+	responseBody, err := h.attachment(call.metadata.ResponseAttachmentID)
 	if err != nil {
 		return invariants.WireExchangeObservation{}, err
 	}
-	requestBody, err = bindWireTarget(requestBody, operation)
-	if err != nil {
-		return invariants.WireExchangeObservation{}, err
+	if call.method != http.MethodPost || (call.path != "/sync/connect" && call.path != "/sync/push" && call.path != "/sync/pull" && call.path != "/sync/rebuild") {
+		return invariants.WireExchangeObservation{}, errors.New("soak wire endpoint is not a supported operation")
 	}
 	return invariants.WireExchangeObservation{
-		OperationClass: string(operation.Kind), RequestBody: requestBody,
-		ResponseStatus: responseCall.metadata.Status, ResponseBody: responseBody,
+		Sequence: call.sequence, OperationClass: strings.TrimPrefix(call.path, "/sync/"), RequestBody: requestBody,
+		ResponseStatus: call.metadata.Status, ResponseBody: responseBody,
+		Transport: &invariants.WireTransportObservation{
+			Method: call.method, Path: call.path, UserID: call.userID, ClientID: call.clientID,
+			RequestSHA256: call.metadata.RequestBodySHA256, ResponseSHA256: call.metadata.ResponseBodySHA256,
+		},
 		ExpectMutationConservation: mutation, ExpectChecksumConvergence: checksum, ExpectScopeIsolation: isolation,
 	}, nil
 }
@@ -1449,52 +1639,6 @@ func (h *liveSoakHarness) attachment(id string) ([]byte, error) {
 		return nil, errors.New("soak recorder attachment exceeds its bound")
 	}
 	return body, nil
-}
-
-func bindWireTarget(raw []byte, operation soak.Operation) ([]byte, error) {
-	object := make(map[string]any)
-	if len(strings.TrimSpace(string(raw))) != 0 {
-		if err := json.Unmarshal(raw, &object); err != nil {
-			return nil, errors.New("decode soak request attachment failed")
-		}
-	}
-	object["authenticated_user_id"] = operation.UserID
-	if _, present := object["client_id"]; !present {
-		object["client_id"] = operation.ClientID
-	}
-	if _, present := object["scopes"]; !present {
-		object["scope_id"] = operation.ScopeID
-	}
-	return json.Marshal(object)
-}
-
-func corruptPullRowChecksum(raw []byte) ([]byte, error) {
-	var response map[string]any
-	if err := json.Unmarshal(raw, &response); err != nil {
-		return nil, errors.New("decode soak checksum fault response failed")
-	}
-	changes, ok := response["changes"].([]any)
-	if !ok || len(changes) != 1 {
-		return nil, errors.New("soak checksum fault has no unique pull change")
-	}
-	change, ok := changes[0].(map[string]any)
-	if !ok {
-		return nil, errors.New("soak checksum fault change is invalid")
-	}
-	checksum, ok := change["row_checksum"].(map[string]any)
-	if !ok {
-		return nil, errors.New("soak checksum fault descriptor is invalid")
-	}
-	digest, ok := checksum["digest"].(string)
-	if !ok || len(digest) != sha256.Size*2 {
-		return nil, errors.New("soak checksum fault digest is invalid")
-	}
-	replacement := byte('0')
-	if digest[0] == replacement {
-		replacement = '1'
-	}
-	checksum["digest"] = string(replacement) + digest[1:]
-	return json.Marshal(response)
 }
 
 func checksumDigest(raw any) ([32]byte, error) {

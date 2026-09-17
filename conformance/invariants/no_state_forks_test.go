@@ -15,6 +15,68 @@ func TestCheckNoStateForksAcceptsOrdinaryCaptureAndRestartBoundary(t *testing.T)
 	assertNoViolations(t, violations, err)
 }
 
+func TestCheckNoStateForksRejectsReferenceProcessClaims(t *testing.T) {
+	reference := stateForkClientFixture("unused")
+	reference.ReferenceOnly = true
+	reference.Process = nil
+	violations, err := CheckNoStateForks([]Observation{{Sequence: 1, Clients: []ClientObservation{reference}}})
+	assertNoViolations(t, violations, err)
+
+	for _, test := range []struct {
+		name    string
+		process *ProcessIdentityObservation
+		restart bool
+		rules   []RuleID
+	}{
+		{name: "process-only", process: stateForkClientFixture("invented").Process, rules: []RuleID{RuleStateForkProcessIdentityInvalid}},
+		{name: "restart-only", restart: true, rules: []RuleID{RuleStateForkCaptureIncomplete}},
+		{name: "process-and-restart", process: stateForkClientFixture("invented").Process, restart: true, rules: []RuleID{RuleStateForkCaptureIncomplete, RuleStateForkProcessIdentityInvalid}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			claim := reference
+			claim.Process = test.process
+			claim.RestartBoundary = test.restart
+			violations, err := CheckNoStateForks([]Observation{{Sequence: 1, Clients: []ClientObservation{claim}}})
+			if len(violations) != len(test.rules) {
+				t.Fatalf("violations = %+v, want rules %v", violations, test.rules)
+			}
+			for i, rule := range test.rules {
+				assertCaughtRule(t, violations[i:i+1], err, rule)
+			}
+		})
+	}
+}
+
+func TestCheckNoStateForksReferenceCannotReplaceNativeHistory(t *testing.T) {
+	reference := stateForkClientFixture("unused")
+	reference.ReferenceOnly = true
+	reference.Process = nil
+	for _, test := range []struct {
+		name        string
+		priorNative bool
+		restart     bool
+		rule        RuleID
+	}{
+		{name: "reference-is-not-a-durable-prior", restart: true, rule: RuleStateForkCaptureIncomplete},
+		{name: "reference-cannot-hide-process-replacement", priorNative: true, rule: RuleStateForkProcessReplacedUnexpectedly},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observations := []Observation{}
+			if test.priorNative {
+				observations = append(observations, Observation{Sequence: 1, Clients: []ClientObservation{stateForkClientFixture("before")}})
+			}
+			current := stateForkClientFixture("after")
+			current.RestartBoundary = test.restart
+			observations = append(observations,
+				Observation{Sequence: 2, Clients: []ClientObservation{reference}},
+				Observation{Sequence: 3, Clients: []ClientObservation{current}},
+			)
+			violations, err := CheckNoStateForks(observations)
+			assertCaughtRule(t, violations, err, test.rule)
+		})
+	}
+}
+
 func TestCheckNoStateForksCatchesEachRule(t *testing.T) {
 	tests := []struct {
 		name   string

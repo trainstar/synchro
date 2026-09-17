@@ -241,8 +241,8 @@ func validateRunPlan(plan Plan) error {
 		if err := validateOperationInput(operation); err != nil {
 			return fmt.Errorf("%w: operation %d input: %w", ErrInvalidPlan, index+1, err)
 		}
-		if operation.FaultPlan != nil && !faultSupportsOperation(operation.Kind, *operation.FaultPlan) {
-			return fmt.Errorf("%w: operation %d fault has no supported trigger", ErrInvalidPlan, index+1)
+		if err := ValidateFaultOperation(operation); err != nil {
+			return err
 		}
 	}
 	return nil

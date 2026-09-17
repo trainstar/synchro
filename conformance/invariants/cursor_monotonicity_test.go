@@ -19,6 +19,91 @@ func TestCheckCursorMonotonicityAcceptsBoundResultsAndAcknowledgements(t *testin
 	assertNoViolations(t, violations, err)
 }
 
+func TestCheckCursorMonotonicityRequiresIssuanceBeforeAcknowledgement(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		issued       uint64
+		acknowledged uint64
+		valid        bool
+	}{
+		{name: "later-request", issued: 1, acknowledged: 2, valid: true},
+		{name: "same-exchange", issued: 1, acknowledged: 1},
+		{name: "earlier-request", issued: 2, acknowledged: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := cursorMonotonicityFixture(t)
+			observation := fixture[1]
+			observation.Sequence = 1
+			issuance := fixture[0].WireExchanges[0]
+			issuance.Sequence = test.issued
+			acknowledgement := observation.WireExchanges[0]
+			acknowledgement.Sequence = test.acknowledged
+			observation.PullResults = fixture[0].PullResults
+			observation.PullResults[0].ExchangeSequence = test.issued
+			for i := range observation.CursorAcknowledgements {
+				observation.CursorAcknowledgements[i].ExchangeSequence = test.acknowledged
+			}
+			if test.issued == test.acknowledged {
+				// The mutant cross-pairs an acknowledgment request with its issuing response.
+				issuance.RequestBody = acknowledgement.RequestBody
+				observation.WireExchanges = []WireExchangeObservation{issuance}
+			} else {
+				observation.WireExchanges = []WireExchangeObservation{acknowledgement, issuance}
+			}
+			violations, err := CheckCursorMonotonicity([]Observation{observation})
+			if test.valid {
+				assertNoViolations(t, violations, err)
+			} else {
+				assertCursorAcknowledgementOrderFailure(t, violations, err)
+			}
+		})
+	}
+}
+
+func TestCheckCursorMonotonicityRetainsEarlierIssuanceWhenCursorRepeats(t *testing.T) {
+	fixture := cursorMonotonicityFixture(t)
+	observation := fixture[1]
+	observation.Sequence = 1
+	reissued := fixture[0].WireExchanges[0]
+	reissued.Sequence = 3
+	observation.WireExchanges = append(observation.WireExchanges, fixture[0].WireExchanges[0], reissued)
+	issuance := fixture[0].PullResults[0]
+	observation.PullResults = []PullResultObservation{issuance}
+	issuance.ExchangeSequence = 3
+	observation.PullResults = append(observation.PullResults, issuance)
+	violations, err := CheckCursorMonotonicity([]Observation{observation})
+	assertNoViolations(t, violations, err)
+}
+
+func TestCheckCursorMonotonicityOrdersObservationsBeforeLocalExchangeSequences(t *testing.T) {
+	observations := cursorMonotonicityFixture(t)
+	observations[0].WireExchanges[0].Sequence = 10
+	observations[0].PullResults[0].ExchangeSequence = 10
+	observations[1].WireExchanges[0].Sequence = 1
+	for i := range observations[1].CursorAcknowledgements {
+		observations[1].CursorAcknowledgements[i].ExchangeSequence = 1
+	}
+	violations, err := CheckCursorMonotonicity(observations)
+	assertNoViolations(t, violations, err)
+
+	observations[0].Sequence, observations[1].Sequence = 2, 1
+	observations[1].Operator = nil
+	violations, err = CheckCursorMonotonicity(observations)
+	assertCursorAcknowledgementOrderFailure(t, violations, err)
+}
+
+func assertCursorAcknowledgementOrderFailure(t *testing.T, violations []Violation, err error) {
+	t.Helper()
+	// Each scope has an unbound acknowledgment and an unacknowledged issued cursor.
+	rules := []RuleID{RuleCursorPositionUnbound, RuleCursorPositionUnbound, RuleCursorTerminalAcknowledgement, RuleCursorTerminalAcknowledgement}
+	if len(violations) != len(rules) {
+		t.Fatalf("violations = %+v, want rules %v", violations, rules)
+	}
+	for i, rule := range rules {
+		assertCaughtRule(t, violations[i:i+1], err, rule)
+	}
+}
+
 func TestCheckCursorMonotonicityCatchesEachRule(t *testing.T) {
 	tests := []struct {
 		name   string
