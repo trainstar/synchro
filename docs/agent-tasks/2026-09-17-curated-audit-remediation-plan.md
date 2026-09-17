@@ -9,6 +9,7 @@
 
 - Resolve all 53 findings. Do not silently drop or defer difficult items.
 - Use four bounded implementation workers. Every worker uses Astra, without a fast variant.
+- Use CLI-native task workers only. Do not invoke OpenCode or its dispatch seats.
 - The primary owns shared verification, tooling, integration, GitHub writes, commits, and final acceptance.
 - Give each worker exclusive file ownership and exact finding IDs.
 - Use the existing audit evidence. Do not repeat a repository-wide audit.
@@ -93,3 +94,6 @@ Each finding must retain:
 
 This plan and #105 are the persistent authority if a session or worker context changes.
 The session ledger tracks individual finding parts. It does not replace the committed plan or issue.
+
+The user changed worker execution to CLI-native tasks on 2026-09-17.
+Preserve partial edits from the stopped external workers. Review and validate them before acceptance.
