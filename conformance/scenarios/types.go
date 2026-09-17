@@ -190,7 +190,7 @@ type ModelExpectation struct {
 }
 
 // StateFacts is a closed partial projection of contract-relevant durable state.
-// Omitted families are not part of the expectation.
+// Nil families are omitted. Explicit empty slices require empty observations.
 type StateFacts struct {
 	TransactionCount *uint64                       `json:"transaction_count,omitempty"`
 	RowCount         *uint64                       `json:"row_count,omitempty"`
@@ -199,16 +199,16 @@ type StateFacts struct {
 	BatchCount       *uint64                       `json:"batch_count,omitempty"`
 	MutationCount    *uint64                       `json:"mutation_count,omitempty"`
 	ConfiguredLimits *ConfiguredLimitsFact         `json:"configured_limits,omitempty"`
-	Transactions     []TransactionFact             `json:"transactions,omitempty"`
+	Transactions     []TransactionFact             `json:"transactions,omitzero"`
 	Registry         *RegistryFact                 `json:"registry,omitempty"`
 	Stream           *StreamFact                   `json:"stream,omitempty"`
-	Rows             []RowFact                     `json:"rows,omitempty"`
-	Scopes           []ScopeFact                   `json:"scopes,omitempty"`
-	MutationOutcomes []MutationOutcomeIdentityFact `json:"mutation_outcomes,omitempty"`
-	RowScopeEdges    []RowScopeEdgeFact            `json:"row_scope_edges,omitempty"`
-	Poison           []PoisonFact                  `json:"poison,omitempty"`
-	Rebuilds         []RebuildFact                 `json:"rebuilds,omitempty"`
-	Clients          []ClientDurabilityFact        `json:"clients,omitempty"`
+	Rows             []RowFact                     `json:"rows,omitzero"`
+	Scopes           []ScopeFact                   `json:"scopes,omitzero"`
+	MutationOutcomes []MutationOutcomeIdentityFact `json:"mutation_outcomes,omitzero"`
+	RowScopeEdges    []RowScopeEdgeFact            `json:"row_scope_edges,omitzero"`
+	Poison           []PoisonFact                  `json:"poison,omitzero"`
+	Rebuilds         []RebuildFact                 `json:"rebuilds,omitzero"`
+	Clients          []ClientDurabilityFact        `json:"clients,omitzero"`
 }
 
 type ConfiguredLimitsFact struct {
@@ -301,10 +301,10 @@ type ClientDurabilityFact struct {
 	OutcomeCount        *uint64               `json:"outcome_count,omitempty"`
 	SealedBatchCount    *uint64               `json:"sealed_batch_count,omitempty"`
 	RebuildAttemptCount *uint64               `json:"rebuild_attempt_count,omitempty"`
-	Provenance          []ProvenanceFact      `json:"provenance,omitempty"`
-	Checkpoints         []CheckpointFact      `json:"checkpoints,omitempty"`
-	Queue               []QueuedMutationFact  `json:"queue,omitempty"`
-	Outcomes            []MutationOutcomeFact `json:"outcomes,omitempty"`
+	Provenance          []ProvenanceFact      `json:"provenance,omitzero"`
+	Checkpoints         []CheckpointFact      `json:"checkpoints,omitzero"`
+	Queue               []QueuedMutationFact  `json:"queue,omitzero"`
+	Outcomes            []MutationOutcomeFact `json:"outcomes,omitzero"`
 }
 
 type SchemaFact struct {

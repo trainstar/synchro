@@ -35,11 +35,18 @@ function headings(source) {
   let fence = null;
 
   for (const line of source.split(/\r?\n/)) {
-    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fenceMatch) {
-      const marker = fenceMatch[1][0];
-      if (fence === marker) fence = null;
-      else if (fence === null) fence = marker;
+      const [, marker, rest] = fenceMatch;
+      if (fence === null) {
+        if (marker[0] !== "`" || !rest.includes("`")) fence = marker;
+      } else if (
+        marker[0] === fence[0] &&
+        marker.length >= fence.length &&
+        /^[\t ]*$/.test(rest)
+      ) {
+        fence = null;
+      }
       continue;
     }
     if (fence !== null) continue;

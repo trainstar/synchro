@@ -365,6 +365,11 @@ func (state eventState) result() result {
 			return resultMalformedOutput
 		}
 	}
+	for _, descendantState := range state.descendants {
+		if descendantState == "skip" {
+			return resultSkip
+		}
+	}
 	if state.targetFinal == "skip" || state.assertionFinal == "skip" {
 		if state.packageFinal == "fail" {
 			return resultPackageSetupFailure

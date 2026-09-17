@@ -376,17 +376,19 @@ func parseMarkdownHeadings(document string) []markdownHeading {
 	var headings []markdownHeading
 	used := make(map[string]struct{})
 	slugCounts := make(map[string]int)
-	var fence rune
+	var fence string
 	for _, line := range strings.Split(strings.ReplaceAll(document, "\r\n", "\n"), "\n") {
-		if marker, ok := markdownFenceMarker(line); ok {
-			if fence == marker {
-				fence = 0
-			} else if fence == 0 {
-				fence = marker
+		if marker, rest, ok := markdownFenceMarker(line); ok {
+			if fence == "" {
+				if marker[0] != '`' || !strings.Contains(rest, "`") {
+					fence = marker
+				}
+			} else if marker[0] == fence[0] && len(marker) >= len(fence) && strings.Trim(rest, " \t") == "" {
+				fence = ""
 			}
 			continue
 		}
-		if fence != 0 {
+		if fence != "" {
 			continue
 		}
 		level, text, ok := atxHeading(line)
@@ -410,17 +412,21 @@ func parseMarkdownHeadings(document string) []markdownHeading {
 	return headings
 }
 
-func markdownFenceMarker(line string) (rune, bool) {
-	line, ok := trimLeadingMarkdownWhitespace(line)
-	if !ok || len(line) < 3 || (line[0] != '`' && line[0] != '~') {
-		return 0, false
+func markdownFenceMarker(line string) (string, string, bool) {
+	indent := len(line) - len(strings.TrimLeft(line, " "))
+	if indent > 3 {
+		return "", "", false
 	}
-	marker := rune(line[0])
+	line = line[indent:]
+	if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
+		return "", "", false
+	}
+	marker := line[0]
 	width := 0
-	for width < len(line) && line[width] == byte(marker) {
+	for width < len(line) && line[width] == marker {
 		width++
 	}
-	return marker, width >= 3
+	return line[:width], line[width:], width >= 3
 }
 
 func atxHeading(line string) (int, string, bool) {

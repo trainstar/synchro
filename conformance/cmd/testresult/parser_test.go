@@ -129,6 +129,35 @@ func TestClassifyTestResultAcceptsSelectedAssertionDescendants(t *testing.T) {
 	}
 }
 
+func TestClassifyTestResultRejectsSkippedAssertionDescendants(t *testing.T) {
+	const target = "TestRealIssue49Proof/assertion#04"
+	for _, outcome := range []string{"pass", "fail"} {
+		t.Run(outcome, func(t *testing.T) {
+			events := []string{
+				`{"Action":"start","Package":"example/integration"}`,
+				`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+				`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+				`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/required"}`,
+				`{"Action":"skip","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/required"}`,
+			}
+			if outcome == "fail" {
+				events = append(events,
+					`{"Action":"run","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/other"}`,
+					`{"Action":"fail","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04/other"}`,
+				)
+			}
+			events = append(events,
+				`{"Action":"`+outcome+`","Package":"example/integration","Test":"TestRealIssue49Proof/assertion#04"}`,
+				`{"Action":"`+outcome+`","Package":"example/integration","Test":"TestRealIssue49Proof"}`,
+				`{"Action":"`+outcome+`","Package":"example/integration"}`,
+			)
+			if got := classifyTestResult(strings.NewReader(eventStream(events...)), target); got != resultSkip {
+				t.Fatalf("classifyTestResult() = %q, want %q", got, resultSkip)
+			}
+		})
+	}
+}
+
 func TestClassifyTestResultRejectsUnfinishedAssertionDescendant(t *testing.T) {
 	const target = "TestRealIssue49Proof/assertion#04"
 	input := eventStream(

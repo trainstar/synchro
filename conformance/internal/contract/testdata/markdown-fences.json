@@ -1,0 +1,42 @@
+[
+  {
+    "name": "short backtick fence",
+    "source": "````text\n```\n### Hidden\n````\n### Visible\n",
+    "anchors": ["visible"]
+  },
+  {
+    "name": "short tilde fence",
+    "source": "~~~~text\n~~~\n### Hidden\n~~~~\n### Visible\n",
+    "anchors": ["visible"]
+  },
+  {
+    "name": "longer closing fence",
+    "source": "```text\n### Hidden\n`````\n### Visible\n",
+    "anchors": ["visible"]
+  },
+  {
+    "name": "different fence character",
+    "source": "````text\n~~~~\n### Hidden\n````\n### Visible\n",
+    "anchors": ["visible"]
+  },
+  {
+    "name": "closing fence has text",
+    "source": "````text\n```` trailing\n### Hidden\n````\n### Visible\n",
+    "anchors": ["visible"]
+  },
+  {
+    "name": "invalid backtick info string",
+    "source": "```lang`invalid\n### Visible\n",
+    "anchors": ["visible"]
+  },
+  {
+    "name": "four spaces are code indentation",
+    "source": "    ```text\n### Visible\n",
+    "anchors": ["visible"]
+  },
+  {
+    "name": "tab is code indentation",
+    "source": "\t```text\n### Visible\n",
+    "anchors": ["visible"]
+  }
+]

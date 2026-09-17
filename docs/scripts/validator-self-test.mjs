@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { readFileSync } from "node:fs";
 
 import {
   artifactInventorySemanticErrors,
@@ -79,6 +80,18 @@ export function runValidatorSelfTests() {
     isDeepStrictEqual([...markdownAnchorsAtLevel(markdown, 3)], ["child-code"]),
     "Markdown level filtering accepted another heading level",
   );
+  const fenceCases = parseJsonStrict(
+    readFileSync(
+      new URL("../../conformance/internal/contract/testdata/markdown-fences.json", import.meta.url),
+    ),
+  );
+  requireSelfTest(fenceCases.length > 0, "Markdown fence cases are missing");
+  for (const test of fenceCases) {
+    requireSelfTest(
+      isDeepStrictEqual([...markdownAnchors(test.source)], test.anchors),
+      `Markdown fence boundary failed: ${test.name}`,
+    );
+  }
 
   requireSelfTest(
     duplicateLogicalIdErrors(
