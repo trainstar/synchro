@@ -611,9 +611,12 @@ func validateTraceSequence(observations []transportObservation) error {
 }
 
 func validateTraceOperation(observation transportObservation, operation string) error {
-	if observation.OperationClass != operation || observation.StatusCode != 200 ||
-		observation.DurationNanoseconds == 0 || observation.DurationNanoseconds > warmConnectMaximumSafeInteger || !hasJSONValue(observation.RequestFacts) {
-		return errors.New("operation facts are absent or invalid")
+	classMatches := observation.OperationClass == operation
+	durationValid := observation.DurationNanoseconds > 0 && observation.DurationNanoseconds <= warmConnectMaximumSafeInteger
+	requestFactsPresent := hasJSONValue(observation.RequestFacts)
+	if !classMatches || observation.StatusCode != 200 || !durationValid || !requestFactsPresent {
+		return fmt.Errorf("operation facts are absent or invalid: class_matches=%t status=%d duration_valid=%t request_facts_present=%t",
+			classMatches, observation.StatusCode, durationValid, requestFactsPresent)
 	}
 	if err := validateBoundedJSON(observation.RequestFacts, maximumExchangeBytes); err != nil {
 		return err
