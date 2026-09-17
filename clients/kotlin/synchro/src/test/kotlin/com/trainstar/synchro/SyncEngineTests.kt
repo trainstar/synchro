@@ -3,13 +3,19 @@ package com.trainstar.synchro
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -1495,7 +1501,7 @@ class SyncEngineTests {
             val syncJob = CoroutineScope(Dispatchers.Default).launch {
                 runCatching { engine.syncNow() }
             }
-            assertTrue(timing.sleepStarted.await(2, TimeUnit.SECONDS))
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
 
             val backoff = requireNotNull(DurableBackoffStore.load(db))
             val batch = requireNotNull(
@@ -1521,6 +1527,27 @@ class SyncEngineTests {
             timing.releaseAt(61_000L)
             engine.stop()
         }
+    }
+
+    @Test
+    fun blockingRetryTimingRequiresEveryDeadlineAndPreservesCancellation() = runTest {
+        val timing = BlockingRetryTiming(1_000L)
+        val first = async { timing.sleep(1_000L) }
+        assertEquals(2_000L, timing.awaitNextSleep(2, TimeUnit.SECONDS))
+        assertFalse(first.isCompleted)
+        timing.releaseAt(2_000L)
+        first.await()
+
+        val second = async { timing.sleep(1_000L) }
+        assertEquals(3_000L, timing.awaitNextSleep(2, TimeUnit.SECONDS))
+        assertFalse(second.isCompleted)
+        timing.releaseAt(3_000L)
+        second.await()
+
+        val cancelled = async { timing.sleep(1_000L) }
+        assertEquals(4_000L, timing.awaitNextSleep(2, TimeUnit.SECONDS))
+        cancelled.cancelAndJoin()
+        assertTrue(cancelled.isCancelled)
     }
 
     @Test
@@ -1574,10 +1601,7 @@ class SyncEngineTests {
             )
 
             assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is RetryableError)
-            assertTrue(
-                "the managed loop must wait for the durable retry before the ordinary interval",
-                timing.sleepStarted.await(2, TimeUnit.SECONDS),
-            )
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
 
             val backoff = requireNotNull(DurableBackoffStore.load(db))
             val sealedBatch = requireNotNull(
@@ -1633,7 +1657,7 @@ class SyncEngineTests {
             )
 
             assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is RetryableError)
-            assertTrue(timing.sleepStarted.await(2, TimeUnit.SECONDS))
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
             val retained = requireNotNull(DurableBackoffStore.load(db))
 
             engine.stop()
@@ -1700,7 +1724,7 @@ class SyncEngineTests {
 
         try {
             engine.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.countDown() }))
-            assertTrue(timing.sleepStarted.await(2, TimeUnit.SECONDS))
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
             assertEquals(0, server!!.requestCount)
             assertNotNull(DurableBackoffStore.load(db))
 
@@ -1731,7 +1755,7 @@ class SyncEngineTests {
         )
 
         engine.start()
-        assertTrue(timing.sleepStarted.await(2, TimeUnit.SECONDS))
+        timing.awaitNextSleep(2, TimeUnit.SECONDS)
         engine.stop()
 
         val retained = requireNotNull(DurableBackoffStore.load(db))
@@ -1745,7 +1769,7 @@ class SyncEngineTests {
     fun testRebuildBackoffStoresExactRequestAndRetainsAttempt() = runTest {
         val timing = BlockingRetryTiming(5_000L)
         val failRebuild = AtomicBoolean(false)
-        val failedRequestJSON = mutableListOf<String>()
+        val failedRequestJSON = java.util.Collections.synchronizedList(mutableListOf<String>())
         val (engine, db) = makeIntegrationEnv(
             maxRetryAttempts = 1,
             retryTiming = timing,
@@ -1776,28 +1800,43 @@ class SyncEngineTests {
             val syncJob = CoroutineScope(Dispatchers.Default).launch {
                 runCatching { engine.syncNow() }
             }
-            assertTrue(
-                "rebuild retry did not enter durable backoff",
-                timing.sleepStarted.await(10, TimeUnit.SECONDS),
-            )
+            timing.awaitNextSleep(10, TimeUnit.SECONDS)
 
             val backoff = requireNotNull(DurableBackoffStore.load(db))
-            val requestJSON = failedRequestJSON.single()
+            val requestJSON = synchronized(failedRequestJSON) { failedRequestJSON.single() }
             val request = Json.decodeFromString<RebuildRequest>(requestJSON)
             val attempt = db.readTransaction { connection ->
                 SynchroMeta.getRebuildAttempt(connection, scopeID)
             }
             assertEquals(RetryOperation.REBUILDING, backoff.resumeState)
             assertEquals(requestJSON, backoff.workIdentity)
+            assertEquals(1L, backoff.attemptCount)
             assertEquals(request.rebuildID, attempt?.rebuildID)
             assertEquals(receiptCountBeforeFailure, db.query("SELECT * FROM _synchro_rebuild_page_receipts").size)
 
-            timing.releaseAt(35_000L)
+            timing.releaseAt(backoff.nextRetryAtMs)
             syncJob.join()
-            assertEquals(2, failedRequestJSON.size)
-            assertEquals(failedRequestJSON[0], failedRequestJSON[1])
+            timing.awaitNextSleep(10, TimeUnit.SECONDS)
+            val secondBackoff = requireNotNull(DurableBackoffStore.load(db))
+            val afterExplicitRetry = synchronized(failedRequestJSON) { failedRequestJSON.toList() }
+            val retainedAttempt = db.readTransaction { connection ->
+                SynchroMeta.getRebuildAttempt(connection, scopeID)
+            }
+            assertEquals(2, afterExplicitRetry.size)
+            assertEquals(afterExplicitRetry[0], afterExplicitRetry[1])
+            assertEquals(requestJSON, secondBackoff.workIdentity)
+            assertEquals(2L, secondBackoff.attemptCount)
+            assertEquals(attempt, retainedAttempt)
+            assertEquals(receiptCountBeforeFailure, db.query("SELECT * FROM _synchro_rebuild_page_receipts").size)
+
+            timing.releaseAt(secondBackoff.nextRetryAtMs)
+            val laterDeadline = timing.awaitNextSleep(10, TimeUnit.SECONDS)
+            val afterManagedRetry = synchronized(failedRequestJSON) { failedRequestJSON.toList() }
+            assertEquals(3, afterManagedRetry.size)
+            assertTrue(afterManagedRetry.all { it == requestJSON })
+            assertTrue(laterDeadline > timing.currentTimeMillis())
+            engine.stop()
         } finally {
-            timing.releaseAt(35_000L)
             engine.stop()
         }
     }
@@ -3191,22 +3230,28 @@ class SyncEngineTests {
     }
 
     private class BlockingRetryTiming(initialTimeMillis: Long) : RetryTiming {
-        @Volatile
-        private var currentTimeMillis = initialTimeMillis
-        private val release = CompletableDeferred<Unit>()
-        val sleepStarted = CountDownLatch(1)
+        private val clock = MutableStateFlow(initialTimeMillis)
+        private val sleepRequests = Channel<Long>(Channel.UNLIMITED)
 
-        override fun currentTimeMillis(): Long = currentTimeMillis
+        override fun currentTimeMillis(): Long = clock.value
         override fun jitterFraction(): Double = 0.0
 
         override suspend fun sleep(delayMillis: Long) {
-            sleepStarted.countDown()
-            release.await()
+            val deadline = clock.value + delayMillis
+            sleepRequests.send(deadline)
+            clock.first { it >= deadline }
         }
 
+        suspend fun awaitNextSleep(timeout: Long, unit: TimeUnit): Long =
+            withContext(Dispatchers.Default) {
+                withTimeout(unit.toMillis(timeout)) {
+                    sleepRequests.receive()
+                }
+            }
+
         fun releaseAt(timeMillis: Long) {
-            currentTimeMillis = timeMillis
-            release.complete(Unit)
+                require(timeMillis >= clock.value) { "retry clock cannot move backward" }
+                clock.value = timeMillis
         }
     }
 
