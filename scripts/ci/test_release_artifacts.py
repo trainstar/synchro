@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -116,14 +117,21 @@ class ReleaseArtifactsTests(unittest.TestCase):
                         import io
                         archive.addfile(info, io.BytesIO(b"x"))
 
-    def make_maven(self, source: Path, output: Path, pom_version: str = VERSION, missing_signature: str = "") -> None:
+    def write_maven_repository(
+        self,
+        source: Path,
+        pom_version: str = VERSION,
+        missing_signature: str = "",
+    ) -> None:
         base = source / f"fit/trainstar/synchro/{VERSION}/synchro-{VERSION}"
-        for suffix in (".pom", ".aar", "-sources.jar", "-javadoc.jar"):
+        for suffix in (".pom", ".aar", ".module", "-sources.jar", "-javadoc.jar"):
             payload = Path(str(base) + suffix)
             payload.parent.mkdir(parents=True, exist_ok=True)
             data = suffix + "\n"
             if suffix == ".pom":
                 data = f"<project><groupId>fit.trainstar</groupId><artifactId>synchro</artifactId><version>{pom_version}</version></project>\n"
+            elif suffix == ".module":
+                data = json.dumps({"formatVersion": "1.1", "component": {"group": "fit.trainstar", "module": "synchro", "version": VERSION}}) + "\n"
             payload.write_bytes(data.encode())
             if suffix != missing_signature:
                 packet = b"\xc2\x08fixture!"
@@ -133,6 +141,28 @@ class ReleaseArtifactsTests(unittest.TestCase):
                     "-----END PGP SIGNATURE-----", "",
                 ])
                 Path(str(payload) + ".asc").write_text(armored, encoding="ascii")
+        metadata = source / "fit/trainstar/synchro/maven-metadata.xml"
+        metadata.write_text(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<metadata><groupId>fit.trainstar</groupId><artifactId>synchro</artifactId>"
+            f"<versioning><latest>{VERSION}</latest><release>{VERSION}</release>"
+            f"<versions><version>{VERSION}</version></versions>"
+            "<lastUpdated>20260917070720</lastUpdated></versioning></metadata>\n",
+            encoding="utf-8",
+        )
+        for suffix, algorithm in (
+            (".md5", "md5"),
+            (".sha1", "sha1"),
+            (".sha256", "sha256"),
+            (".sha512", "sha512"),
+        ):
+            Path(str(metadata) + suffix).write_text(
+                hashlib.new(algorithm, metadata.read_bytes()).hexdigest() + "\n",
+                encoding="ascii",
+            )
+
+    def make_maven(self, source: Path, output: Path, pom_version: str = VERSION, missing_signature: str = "") -> None:
+        self.write_maven_repository(source, pom_version, missing_signature)
         release_artifacts.prepare_maven_repository(source, VERSION)
         release_artifacts.archive_maven(source, output, VERSION)
 
@@ -338,6 +368,68 @@ class ReleaseArtifactsTests(unittest.TestCase):
             md5.write_text("A" * 32 + "\n", encoding="ascii")
             with self.assertRaisesRegex(release_artifacts.ReleaseError, "checksum is invalid"):
                 release_artifacts.archive_maven(repository, root / "mutated.zip", VERSION)
+
+    def test_maven_preparation_removes_gradle_repository_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            self.write_maven_repository(repository)
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "unexpected coordinate entry"):
+                release_artifacts.validate_signed_maven_payloads(repository, VERSION)
+
+            release_artifacts.prepare_maven_repository(repository, VERSION)
+            repository_metadata = {
+                f"fit/trainstar/synchro/maven-metadata.xml{suffix}"
+                for suffix in ("", ".md5", ".sha1", ".sha256", ".sha512")
+            }
+            for relative in repository_metadata:
+                self.assertFalse((repository / relative).exists())
+            bundle = root / "bundle.zip"
+            release_artifacts.archive_maven(repository, bundle, VERSION)
+            release_artifacts.validate_maven_archive(bundle, VERSION)
+            with zipfile.ZipFile(bundle) as archive:
+                names = set(archive.namelist())
+            self.assertFalse(names.intersection(repository_metadata))
+            self.assertTrue(
+                all(name.startswith(f"fit/trainstar/synchro/{VERSION}/") for name in names)
+            )
+            self.assertIn(f"fit/trainstar/synchro/{VERSION}/synchro-{VERSION}.module", names)
+            self.assertIn(f"fit/trainstar/synchro/{VERSION}/synchro-{VERSION}.module.asc", names)
+
+    def test_maven_preparation_rejects_symlinked_parent_before_metadata_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            external = root / "external"
+            self.write_maven_repository(external)
+            metadata = external / "fit/trainstar/synchro/maven-metadata.xml"
+            original = metadata.read_bytes()
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / "fit").symlink_to(external / "fit", target_is_directory=True)
+
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "symbolic link"):
+                release_artifacts.prepare_maven_repository(repository, VERSION)
+            self.assertEqual(metadata.read_bytes(), original)
+            self.assertTrue(Path(str(metadata) + ".sha512").is_file())
+
+    def test_maven_archive_rejects_changed_versioned_bytes_and_unexpected_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            changed = root / "changed"
+            self.write_maven_repository(changed)
+            release_artifacts.prepare_maven_repository(changed, VERSION)
+            changed_aar = changed / f"fit/trainstar/synchro/{VERSION}/synchro-{VERSION}.aar"
+            changed_aar.write_bytes(b"changed versioned payload\n")
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "checksum is invalid"):
+                release_artifacts.archive_maven(changed, root / "changed.zip", VERSION)
+
+            unexpected = root / "unexpected"
+            self.write_maven_repository(unexpected)
+            release_artifacts.prepare_maven_repository(unexpected, VERSION)
+            extra = unexpected / f"fit/trainstar/synchro/{VERSION}/unexpected.txt"
+            extra.write_text("unexpected\n", encoding="utf-8")
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "unexpected coordinate entry"):
+                release_artifacts.archive_maven(unexpected, root / "unexpected.zip", VERSION)
 
     def test_verify_rejects_wrong_source_tag(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
