@@ -91,11 +91,17 @@ start_adapter() {
 }
 start_adapter
 mkdir -p "$work_dir/protocol-state"
-go run "$repo_root/verification/consumers/server/public_smoke.go" --url "$listen_url" --jwt-secret-file "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" --phase initial --adapter-pid "$adapter_pid" --state-dir "$work_dir/protocol-state" --output "$work_dir/initial.json"
+make --no-print-directory -C "$repo_root" server-consumer-smoke-phase \
+  SERVER_SMOKE_URL="$listen_url" SERVER_SMOKE_JWT_SECRET_FILE="$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" \
+  SERVER_SMOKE_PHASE=initial SERVER_SMOKE_ADAPTER_PID="$adapter_pid" \
+  SERVER_SMOKE_STATE_DIR="$work_dir/protocol-state" SERVER_SMOKE_OUTPUT="$work_dir/initial.json"
 killed_pid=$adapter_pid
 kill -9 "$adapter_pid"; wait "$adapter_pid" 2>/dev/null || true; adapter_pid=
 start_adapter
-go run "$repo_root/verification/consumers/server/public_smoke.go" --url "$listen_url" --jwt-secret-file "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" --phase resume --adapter-pid "$adapter_pid" --state-dir "$work_dir/protocol-state" --output "$work_dir/resume.json"
+make --no-print-directory -C "$repo_root" server-consumer-smoke-phase \
+  SERVER_SMOKE_URL="$listen_url" SERVER_SMOKE_JWT_SECRET_FILE="$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" \
+  SERVER_SMOKE_PHASE=resume SERVER_SMOKE_ADAPTER_PID="$adapter_pid" \
+  SERVER_SMOKE_STATE_DIR="$work_dir/protocol-state" SERVER_SMOKE_OUTPUT="$work_dir/resume.json"
 bootstrap_row_id=00000000-0000-4000-8000-000000009501
 PGDATABASE="$admin_url" "$pg18_bindir/psql" -Xq -v ON_ERROR_STOP=1 -v bootstrap_row_id="$bootstrap_row_id" >/dev/null <<'SQL'
 INSERT INTO public.cf_late_registration (id, owner_id, value)
