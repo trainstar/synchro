@@ -2,6 +2,7 @@
 	help \
 	version-print \
 	version-check \
+	test-version-contract \
 	version-sync \
 	set-version \
 	build \
@@ -277,6 +278,7 @@ help:
 	@echo "Available targets:"
 	@echo "  version-print         - Print the canonical repo version from VERSION"
 	@echo "  version-check         - Verify every public release surface matches VERSION"
+	@echo "  test-version-contract - Validate next-release metadata with docs dependencies"
 	@echo "  version-sync          - Sync versioned metadata from VERSION"
 	@echo "  set-version           - Set VERSION=X.Y.Z and sync public metadata"
 	@echo "  build                 - Build the synchrod-pg adapter binary"
@@ -398,6 +400,9 @@ version-print:
 
 version-check:
 	@cd api/go && GOWORK=off go run ./cmd/synchro-version check $(if $(EXPECTED_TAG),--expected-tag "$(EXPECTED_TAG)")
+
+test-version-contract:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../api/go -- go test -tags releasecontract -json -count=1 -run '^TestNextVersionPassesSupportPolicyAndRequirementsSchema$$' ./internal/releaseversion
 
 version-sync:
 	@cd api/go && GOWORK=off go run ./cmd/synchro-version sync

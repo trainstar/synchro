@@ -6,7 +6,7 @@ on:
     branches: [dev]
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -54,7 +54,9 @@ jobs:
       - uses: ./.github/actions/setup-pgrx-pg18
 
       - name: Validate contract and metadata
-        run: make verify-contract version-check release-npm-dry-run
+        run: |
+          make verify-contract
+          make test-version-contract version-check release-npm-dry-run
 
       - name: Build portable sources
         run: make build-check build-seed build-conformance

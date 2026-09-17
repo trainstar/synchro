@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -46,8 +47,8 @@ def configuration() -> tuple[Path, str, str, float, str]:
     if parsed.scheme != "http" or parsed.username or parsed.password or not parsed.hostname or not parsed.port:
         raise RuntimeError("adapter readiness URL is invalid")
     timeout = float(os.environ.get("SYNCHROD_ADAPTER_READY_ATTEMPTS", "30"))
-    if not 0 < timeout <= 300:
-        raise RuntimeError("adapter readiness timeout is outside 0..300 seconds")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("adapter readiness timeout must be finite and positive")
     identity = {name: os.environ[name] for name in names if name != "SYNCHROD_ADAPTER_LOG_FILE"}
     identity["MIN_CLIENT_VERSION"] = os.environ.get("MIN_CLIENT_VERSION", "")
     with binary.open("rb") as stream:

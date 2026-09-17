@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.request
 
 from scripts.ci import adapter_process
@@ -145,6 +146,14 @@ class AdapterProcessTests(unittest.TestCase):
         self.assertEqual(self.invoke("status").returncode, 0)
         self.binary.write_text(FIXTURE_SERVER + "\n# rebuilt fixture\n")
         self.assertNotEqual(self.invoke("start").returncode, 0)
+
+    def test_readiness_timeout_preserves_explicit_operator_budgets(self) -> None:
+        with mock.patch.dict(os.environ, {**self.environment, "SYNCHROD_ADAPTER_READY_ATTEMPTS": "600"}):
+            self.assertEqual(adapter_process.configuration()[3], 600)
+        for invalid in ("0", "-1", "nan", "inf"):
+            with mock.patch.dict(os.environ, {**self.environment, "SYNCHROD_ADAPTER_READY_ATTEMPTS": invalid}):
+                with self.assertRaises(RuntimeError):
+                    adapter_process.configuration()
 
 
 if __name__ == "__main__":
