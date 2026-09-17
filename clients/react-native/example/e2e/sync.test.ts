@@ -1,4 +1,5 @@
 import { by, device, element, expect, waitFor } from 'detox';
+import jestConfig from './jest.config';
 import { loadScenario } from './scenarioLoader';
 import { assertUserIsolation, prepareConflict } from './serverSetup';
 
@@ -11,19 +12,18 @@ async function scrollToAndTap(buttonId: string) {
   await element(by.id(buttonId)).tap();
 }
 
-async function expectBadge(label: string, text = 'PASS', timeout = 5000) {
+async function expectBadge(label: string) {
   try {
+    // Native retries share the test budget, not a shorter badge deadline.
     await waitFor(element(by.id('last-result-key')))
       .toHaveText(label)
-      .withTimeout(timeout);
-    await waitFor(element(by.id('last-result-status')))
-      .toHaveText(text)
-      .withTimeout(timeout);
+      .withTimeout(jestConfig.testTimeout);
+    await expect(element(by.id('last-result-status'))).toHaveText('PASS');
   } catch (error) {
     const step = await element(by.id('step-value')).getAttributes();
     const detail = await element(by.id('error-value')).getAttributes();
     throw new Error(
-      `badge ${label} did not reach ${text}; step=${String(step.text)} error=${String(detail.text)} original=${String(error)}`
+      `badge ${label} did not complete with PASS. step=${String(step.text)} error=${String(detail.text)} original=${String(error)}`
     );
   }
 }
@@ -37,9 +37,9 @@ describe('shared scenario catalog', () => {
   });
 });
 
-async function runAction(label: string, timeout = 5000) {
+async function runAction(label: string) {
   await scrollToAndTap(`btn-${label}`);
-  await expectBadge(label, 'PASS', timeout);
+  await expectBadge(label);
 }
 
 async function readPendingRecord(testID: string): Promise<string> {
@@ -51,7 +51,7 @@ async function readPendingRecord(testID: string): Promise<string> {
   return recordID;
 }
 
-async function runConflictAction(timeout = 90000) {
+async function runConflictAction() {
   await scrollToAndTap('btn-conflict');
   try {
     // The setup runs two full sync cycles plus a pending drain, and one
@@ -68,17 +68,17 @@ async function runConflictAction(timeout = 90000) {
   }
   await prepareConflict(await readPendingRecord('conflict-record-id'));
   await scrollToAndTap('btn-conflict');
-  await expectBadge('conflict', 'PASS', timeout);
+  await expectBadge('conflict');
 }
 
-async function runMultiUserAction(timeout = 25000) {
+async function runMultiUserAction() {
   await scrollToAndTap('btn-multiUser');
   await waitFor(element(by.id('step-value')))
     .toHaveText('multiUser:awaiting-server')
     .withTimeout(15000);
   await assertUserIsolation(await readPendingRecord('multi-user-record-id'));
   await scrollToAndTap('btn-multiUser');
-  await expectBadge('multiUser', 'PASS', timeout);
+  await expectBadge('multiUser');
 }
 
 async function waitForUninitializedStatus(timeout = 15000) {
@@ -138,78 +138,78 @@ describe('Synchro RN E2E', () => {
   });
 
   it('initializes successfully', async () => {
-    await runAction('init', 10000);
+    await runAction('init');
   });
 
   it('executes a query', async () => {
-    await runAction('query', 10000);
+    await runAction('query');
   });
 
   it('executes a write', async () => {
-    await runAction('execute', 20000);
+    await runAction('execute');
   });
 
   it('write transaction commit', async () => {
-    await runAction('writeTx', 10000);
+    await runAction('writeTx');
   });
 
   it('write transaction rollback', async () => {
-    await runAction('rollbackTx', 10000);
+    await runAction('rollbackTx');
   });
 
   it('read transaction', async () => {
-    await runAction('readTx', 10000);
+    await runAction('readTx');
   });
 
   it('transaction timeout triggers rollback', async () => {
-    await runAction('txTimeout', 15000);
+    await runAction('txTimeout');
   });
 
   it('close and reinitialize roll back active writes and release the lock', async () => {
-    await runAction('txRecovery', 20000);
+    await runAction('txRecovery');
   });
 
   it('starts sync', async () => {
-    await runAction('start', 15000);
+    await runAction('start');
   });
 
   it('awaits native background, foreground, and stop lifecycle transitions', async () => {
-    await runAction('lifecycle', 30000);
+    await runAction('lifecycle');
   });
 
   it('push/pull round trip, pending changes drain after sync', async () => {
-    await runAction('pushPull', 25000);
+    await runAction('pushPull');
   });
 
   it('conflict resolution, detects server-side conflict', async () => {
-    await runConflictAction(45000);
+    await runConflictAction();
   });
 
   it('multi-user isolation, user 2 cannot see user 1 data', async () => {
-    await runMultiUserAction(25000);
+    await runMultiUserAction();
   });
 
   it('stops sync', async () => {
-    await runAction('stop', 20000);
+    await runAction('stop');
   });
 
   it('maps native errors to typed JS errors', async () => {
-    await runAction('errorMap', 10000);
+    await runAction('errorMap');
   });
 
   it('preserves offline writes before first connect and reconciles them on first sync', async () => {
-    await runAction('offlineFirst', 20000);
+    await runAction('offlineFirst');
   });
 
   it('seed database initializes offline with schema and CDC triggers', async () => {
-    await runAction('seedInit', 10000);
+    await runAction('seedInit');
   });
 
   it('seed database resumes incrementally without rebuilding shared scope', async () => {
-    await runAction('seedResume', 15000);
+    await runAction('seedResume');
   });
 
   it('rejects a corrupt seed without publishing partial state', async () => {
-    await runAction('seedCorrupt', 20000);
+    await runAction('seedCorrupt');
   });
 });

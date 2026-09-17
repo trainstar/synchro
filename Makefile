@@ -1450,13 +1450,16 @@ test-rn-e2e-ios-build:
 	@$(MAKE) rn-e2e-server-seed
 	@$(MAKE) --no-print-directory rn-ios-build
 
-test-rn-e2e-ios-run:
+test-rn-e2e-ios-run: test-rn-e2e-ios-smoke
+	@$(MAKE) --no-print-directory test-rn-scenarios-ios
+
+.PHONY: test-rn-e2e-ios-smoke
+test-rn-e2e-ios-smoke:
 	rm -f clients/react-native/example/artifacts/ios-test-results.json
 	mkdir -p clients/react-native/example/artifacts
 	cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS) --json --outputFile artifacts/ios-test-results.json
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/ios-test-results.json
-	@$(MAKE) --no-print-directory test-rn-scenarios-ios
 
 test-rn-e2e-ios:
 	@$(MAKE) DETOX_ARGS="$(DETOX_ARGS)" test-rn-e2e-ios-build

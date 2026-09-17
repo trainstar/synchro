@@ -42,6 +42,10 @@ Use `await-step` to observe retry backoff while a managed call continues.
 Use `await-call` with explicit `idle` or `error` completion to await terminal recovery.
 An observed backoff does not prove that the public call has returned.
 
+Use `make test-rn-e2e-ios-smoke` for focused smoke validation.
+Smoke result observers use the existing Jest test budget.
+Native waits, readiness checks, and controller handoffs keep their own bounds.
+
 ## Real PostgreSQL Scenarios
 
 Run the real PostgreSQL black-box tests with:
