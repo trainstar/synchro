@@ -1540,7 +1540,8 @@ android-emulator-prepare:
 		"$$@" shell dumpsys window | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; \
 		exit 1
 
-test-rn-e2e-android-run: android-emulator-prepare
+.PHONY: test-rn-e2e-android-smoke
+test-rn-e2e-android-smoke: android-emulator-prepare
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -f clients/react-native/example/artifacts/android-test-results.json
@@ -1561,6 +1562,8 @@ test-rn-e2e-android-run: android-emulator-prepare
 		fi; \
 		exit "$$status"
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/android-test-results.json
+
+test-rn-e2e-android-run: test-rn-e2e-android-smoke
 	@$(MAKE) --no-print-directory test-rn-scenarios-android
 
 .PHONY: test-rn-scenarios-ios test-rn-scenarios-android
