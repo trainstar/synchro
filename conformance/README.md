@@ -56,6 +56,8 @@ make test-blackbox
 
 The integration package runs direct semantic tests against packaged PostgreSQL and adapter artifacts. The scenario catalog separately binds the authored scenario bytes. Server tests do not satisfy native-client proof obligations.
 
+Use `make server-consumer-smoke-phase` with its `SERVER_SMOKE_*` inputs to diagnose the public HTTP probe.
+
 After extension source changes, run `make generate-pg-sql` and commit any generated SQL changes.
 Required pull-request CI runs `make check-pg-sql` before changes reach Candidate packaging.
 

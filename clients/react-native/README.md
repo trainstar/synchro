@@ -4,7 +4,7 @@ React Native TurboModule bridge for Synchro. The package wraps the native Swift 
 
 ## Requirements
 
-- React Native `0.83.x`
+- React Native `0.83.x`. Use `0.83.5` or later with Xcode `26.4` or later.
 - iOS `16.0+`
 - Android `minSdk 24`
 - Node `20+`

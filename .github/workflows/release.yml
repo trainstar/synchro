@@ -333,8 +333,8 @@ jobs:
               {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "26.5", "xcode": "26.6"}},
               {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04"}},
               {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04"}},
-              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "26.5", "react_native": "0.83.0", "xcode": "26.6"}},
-              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04", "react_native": "0.83.0"}},
+              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "26.5", "react_native": "0.83.10", "xcode": "26.6"}},
+              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04", "react_native": "0.83.10"}},
           ]
           Path("dist/release-inputs/support-environments.json").write_text(json.dumps(cells, indent=2, sort_keys=True) + "\n")
           PY

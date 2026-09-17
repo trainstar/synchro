@@ -873,6 +873,13 @@ test-release-publish:
 test-server-consumer-helper:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
 
+.PHONY: server-consumer-smoke-phase
+server-consumer-smoke-phase:
+	GOWORK=off go run verification/consumers/server/public_smoke.go \
+		--url "$(SERVER_SMOKE_URL)" --jwt-secret-file "$(SERVER_SMOKE_JWT_SECRET_FILE)" \
+		--phase "$(SERVER_SMOKE_PHASE)" --adapter-pid "$(SERVER_SMOKE_ADAPTER_PID)" \
+		--state-dir "$(SERVER_SMOKE_STATE_DIR)" --output "$(SERVER_SMOKE_OUTPUT)"
+
 test-consumer-go:
 	sh verification/consumers/go/test-consumer.sh "$(CURDIR)" "$(CURRENT_VERSION)"
 

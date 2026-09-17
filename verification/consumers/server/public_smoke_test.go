@@ -26,8 +26,8 @@ func TestParseInitialConnectBindsWritableCustomerFields(t *testing.T) {
 					{"name": "name", "field_id": "field-name", "writable": true},
 					{"name": "balance", "field_id": "field-balance", "writable": true},
 					{"name": "is_active", "field_id": "field-active", "writable": true},
-					{"name": "created_at", "field_id": "field-created", "writable": true},
-					{"name": "updated_at", "field_id": "field-updated", "writable": true}
+					{"name": "created_at", "field_id": "field-created", "writable": false},
+					{"name": "updated_at", "field_id": "field-updated", "writable": false}
 				]
 			}]
 		}
@@ -41,6 +41,21 @@ func TestParseInitialConnectBindsWritableCustomerFields(t *testing.T) {
 	}
 	if len(state.Scopes) != 1 || state.Fields["name"] != "field-name" {
 		t.Fatalf("customer fields or scopes = %#v", state)
+	}
+	request := pushPayload(state)
+	mutation := request["mutations"].([]any)[0].(map[string]any)
+	columns := mutation["columns"].(map[string]any)
+	if len(columns) != 4 || columns["field-user"] != smokeUserID ||
+		columns["field-name"] != "Packaged server consumer" ||
+		columns["field-balance"] != "0" || columns["field-active"] != true {
+		t.Fatalf("push contains fields outside the writable customer input: %#v", columns)
+	}
+	if mutation["client_version"] != smokeTime {
+		t.Fatal("push lost its mutation timestamp")
+	}
+	changed := strings.Replace(body, `"field_id": "field-name", "writable": true`, `"field_id": "field-name", "writable": false`, 1)
+	if _, err := parseInitialConnect([]byte(changed), smokeClientID); err == nil {
+		t.Fatal("missing writable customer input was accepted")
 	}
 }
 

@@ -178,8 +178,6 @@ func bindCustomers(tables []tableDefinition) (string, string, map[string]string,
 			"name",
 			"balance",
 			"is_active",
-			"created_at",
-			"updated_at",
 		} {
 			if fields[name] == "" {
 				return "", "", nil, fmt.Errorf("customers field %q is not writable", name)
@@ -233,12 +231,10 @@ func pushPayload(state clientState) map[string]any {
 				"op":              "insert",
 				"client_version":  smokeTime,
 				"columns": map[string]any{
-					state.Fields["user_id"]:    smokeUserID,
-					state.Fields["name"]:       "Packaged server consumer",
-					state.Fields["balance"]:    "0",
-					state.Fields["is_active"]:  true,
-					state.Fields["created_at"]: smokeTime,
-					state.Fields["updated_at"]: smokeTime,
+					state.Fields["user_id"]:   smokeUserID,
+					state.Fields["name"]:      "Packaged server consumer",
+					state.Fields["balance"]:   "0",
+					state.Fields["is_active"]: true,
 				},
 			},
 		},
