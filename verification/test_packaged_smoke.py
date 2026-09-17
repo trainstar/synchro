@@ -4,17 +4,91 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
+import socket
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
+from unittest import mock
 
 sys.dont_write_bytecode = True
 import packaged_smoke
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 class PackagedSmokeStructureTests(unittest.TestCase):
+    def start_app_result_collector(
+        self,
+        directory: Path,
+    ) -> tuple[packaged_smoke.AppResultHTTPServer, str]:
+        server = packaged_smoke.create_app_result_server(directory)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(stop)
+        host, port = server.server_address
+        return server, f"http://{host}:{port}{packaged_smoke.APP_RESULT_PATH}"
+
+    def post_app_result(
+        self,
+        url: str,
+        token: str,
+        value: object,
+    ) -> int:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(value).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code
+            finally:
+                error.close()
+
+    def post_raw_app_result(
+        self,
+        url: str,
+        token: str,
+        value: bytes,
+    ) -> int:
+        request = urllib.request.Request(
+            url,
+            data=value,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code
+            finally:
+                error.close()
+
     def test_summary_rejects_self_consistent_but_wrong_release_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -83,6 +157,45 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             self.assertTrue(all(item["terminal"] is True for item in summary["obligations"]))
             self.assertTrue(all(item["status"] == "failed" for item in summary["obligations"]))
 
+    def test_smoke_config_reads_private_collector_configuration(self) -> None:
+        environment = {
+            "SYNCHRO_TEST_URL": "http://127.0.0.1:8080",
+            "SYNCHRO_PACKAGED_SMOKE_TOKEN": "server-token",
+        }
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-config.") as raw_directory:
+            directory = Path(raw_directory)
+            ready = directory / "collector.json"
+            output = directory / "config.json"
+            collector = {
+                "schema_version": 1,
+                "url": "http://127.0.0.1:9876/result",
+                "token": "t" * 43,
+            }
+            packaged_smoke.write_json(ready, collector, mode=0o600)
+            with mock.patch.dict(os.environ, environment):
+                ordinary = packaged_smoke.smoke_config("SUP-IOS-MIN-001", "ios")
+                self.assertNotIn("result_url", ordinary)
+                self.assertNotIn("result_token", ordinary)
+                packaged_smoke.write_config(
+                    "SUP-RN-IOS-CURRENT-001",
+                    "react-native-ios",
+                    output,
+                    ready,
+                )
+            collected = packaged_smoke.load_json(output, "collected config")
+            self.assertEqual(collected["result_url"], collector["url"])
+            self.assertEqual(collected["result_token"], collector["token"])
+
+            ready.chmod(0o644)
+            with mock.patch.dict(os.environ, environment):
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "mode 0600"):
+                    packaged_smoke.write_config(
+                        "SUP-RN-IOS-CURRENT-001",
+                        "react-native-ios",
+                        output,
+                        ready,
+                    )
+
     def test_extra_cell_evidence_fails(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-extra-cell.") as raw_directory:
             directory = Path(raw_directory)
@@ -99,8 +212,14 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             resume = directory / "resume.json"
             artifact = directory / "artifact.bin"
             output = directory / "cell.json"
-            packaged_smoke.write_phase(initial, "initial", 101, 1)
-            packaged_smoke.write_phase(resume, "resume", 202, 0)
+            packaged_smoke.write_json(initial, {
+                "schema_version": 1, "phase": "initial", "status": "passed",
+                "pid": 101, "pending_change_count": 1,
+            })
+            packaged_smoke.write_json(resume, {
+                "schema_version": 1, "phase": "resume", "status": "passed",
+                "pid": 202, "pending_change_count": 0,
+            })
             artifact.write_bytes(b"packaged artifact")
 
             cell_id = packaged_smoke.required_cells(REPO_ROOT)[0]
@@ -126,7 +245,10 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     packaged_smoke.source_commit(REPO_ROOT),
                 )
 
-            packaged_smoke.write_phase(resume, "resume", 101, 0)
+            packaged_smoke.write_json(resume, {
+                "schema_version": 1, "phase": "resume", "status": "passed",
+                "pid": 101, "pending_change_count": 0,
+            })
             with self.assertRaisesRegex(
                 packaged_smoke.EvidenceError,
                 "resume reused the killed consumer process",
@@ -142,6 +264,199 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     [packaged_smoke.hash_files([artifact])[0]],
                 )
 
+    def test_app_result_collector_rejects_wrong_identity_and_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-app-result.") as raw_directory:
+            directory = Path(raw_directory) / "results"
+            server, url = self.start_app_result_collector(directory)
+            initial = {
+                "schema_version": 1,
+                "phase": "initial",
+                "status": "passed",
+                "pending_change_count": 1,
+                "error": None,
+            }
+            resume = {
+                "schema_version": 1,
+                "phase": "resume",
+                "status": "passed",
+                "pending_change_count": 0,
+                "error": None,
+            }
+            self.assertEqual(self.post_app_result(url, f"wrong-{server.token}", initial), 401)
+            self.assertEqual(self.post_app_result(url, "\u00e9" * 43, initial), 401)
+            self.assertEqual(self.post_app_result(url, server.token, resume), 409)
+            self.assertEqual(
+                self.post_app_result(url, server.token, {**initial, "unexpected": True}),
+                400,
+            )
+            self.assertEqual(
+                self.post_app_result(url, server.token, {**initial, "padding": "x" * 5000}),
+                413,
+            )
+            self.assertEqual(
+                self.post_raw_app_result(
+                    url,
+                    server.token,
+                    b'{"schema_version":1,"schema_version":1,"phase":"initial","status":"passed","pending_change_count":1,"error":null}',
+                ),
+                400,
+            )
+            for malformed in (
+                {**initial, "schema_version": True},
+                {**initial, "phase": []},
+                {**initial, "status": {}},
+            ):
+                self.assertEqual(self.post_app_result(url, server.token, malformed), 400)
+            self.assertEqual(self.post_app_result(url, server.token, initial), 201)
+            self.assertEqual(
+                self.post_app_result(
+                    url,
+                    server.token,
+                    {**initial, "status": "failed", "pending_change_count": 0, "error": "late failure"},
+                ),
+                409,
+            )
+            self.assertEqual(
+                packaged_smoke.load_json(directory / "initial.json", "initial result"),
+                initial,
+            )
+
+    def test_app_result_collector_requires_fresh_result_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-app-stale.") as raw_directory:
+            directory = Path(raw_directory) / "results"
+            directory.mkdir()
+            packaged_smoke.write_json(directory / "initial.json", {
+                "schema_version": 1,
+                "phase": "initial",
+                "status": "passed",
+                "pending_change_count": 1,
+                "error": None,
+            })
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "must be fresh"):
+                packaged_smoke.create_app_result_server(directory)
+
+    def test_app_result_collector_bounds_connection_reads(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-app-timeout.") as raw_directory:
+            directory = Path(raw_directory) / "results"
+            with mock.patch.object(packaged_smoke, "APP_RESULT_READ_TIMEOUT_SECONDS", 0.05):
+                server, _ = self.start_app_result_collector(directory)
+                host, port = server.server_address
+                with socket.create_connection((host, port), timeout=5) as connection:
+                    request = (
+                        "POST /result HTTP/1.1\r\n"
+                        f"Host: {host}:{port}\r\n"
+                        f"Authorization: Bearer {server.token}\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Content-Length: 100\r\n"
+                        "\r\n"
+                    )
+                    connection.sendall(request.encode("ascii"))
+                    response = connection.recv(4096)
+            self.assertIn(b"408 Request Timeout", response)
+            self.assertFalse((directory / "initial.json").exists())
+
+    def test_failed_app_completion_after_empty_queue_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-app-failure.") as raw_directory:
+            directory = Path(raw_directory) / "results"
+            server, url = self.start_app_result_collector(directory)
+            initial = {
+                "schema_version": 1,
+                "phase": "initial",
+                "status": "passed",
+                "pending_change_count": 1,
+                "error": None,
+            }
+            failed_resume = {
+                "schema_version": 1,
+                "phase": "resume",
+                "status": "failed",
+                "pending_change_count": 0,
+                "error": "client close failed",
+            }
+            self.assertEqual(self.post_app_result(url, server.token, initial), 201)
+            self.assertEqual(self.post_app_result(url, server.token, failed_resume), 201)
+            output = directory / "resume-phase.json"
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "application reported failure"):
+                packaged_smoke.await_app_result(
+                    directory / "resume.json",
+                    "resume",
+                    202,
+                    output,
+                    0.1,
+                )
+            self.assertFalse(output.exists())
+
+    def test_missing_app_result_fails_within_its_bound(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-app-missing.") as raw_directory:
+            directory = Path(raw_directory)
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "phase result is missing"):
+                packaged_smoke.await_app_result(
+                    directory / "initial.json",
+                    "initial",
+                    101,
+                    directory / "phase.json",
+                    0.01,
+                )
+            for timeout in (float("nan"), float("inf"), float("-inf")):
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "outside the supported bound"):
+                    packaged_smoke.await_app_result(
+                        directory / "initial.json",
+                        "initial",
+                        101,
+                        directory / "phase.json",
+                        timeout,
+                    )
+
+    def test_truthful_app_results_keep_counts_and_receive_host_pids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-app-success.") as raw_directory:
+            directory = Path(raw_directory) / "results"
+            server, url = self.start_app_result_collector(directory)
+            self.assertGreaterEqual(len(server.token), 32)
+            initial = {
+                "schema_version": 1,
+                "phase": "initial",
+                "status": "passed",
+                "pending_change_count": 1,
+                "error": None,
+            }
+            resume = {
+                "schema_version": 1,
+                "phase": "resume",
+                "status": "passed",
+                "pending_change_count": 0,
+                "error": None,
+            }
+            self.assertEqual(self.post_app_result(url, server.token, initial), 201)
+            self.assertEqual(self.post_app_result(url, server.token, resume), 201)
+            initial_phase = directory / "initial-phase.json"
+            resume_phase = directory / "resume-phase.json"
+            packaged_smoke.await_app_result(
+                directory / "initial.json", "initial", 101, initial_phase, 0.1,
+            )
+            packaged_smoke.await_app_result(
+                directory / "resume.json", "resume", 202, resume_phase, 0.1,
+            )
+            self.assertEqual(
+                packaged_smoke.load_json(initial_phase, "initial phase"),
+                {
+                    "schema_version": 1,
+                    "phase": "initial",
+                    "status": "passed",
+                    "pid": 101,
+                    "pending_change_count": 1,
+                },
+            )
+            self.assertEqual(
+                packaged_smoke.load_json(resume_phase, "resume phase"),
+                {
+                    "schema_version": 1,
+                    "phase": "resume",
+                    "status": "passed",
+                    "pid": 202,
+                    "pending_change_count": 0,
+                },
+            )
+
     def test_required_cells_exclude_tested_development_hosts(self) -> None:
         cells = packaged_smoke.required_cells(REPO_ROOT)
         self.assertNotIn("SUP-MACOS-CURRENT-001", cells)
@@ -153,8 +468,14 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             initial = directory / "initial.json"
             resume = directory / "resume.json"
             artifact = directory / "artifact.bin"
-            packaged_smoke.write_phase(initial, "initial", 101, 1)
-            packaged_smoke.write_phase(resume, "resume", 202, 0)
+            packaged_smoke.write_json(initial, {
+                "schema_version": 1, "phase": "initial", "status": "passed",
+                "pid": 101, "pending_change_count": 1,
+            })
+            packaged_smoke.write_json(resume, {
+                "schema_version": 1, "phase": "resume", "status": "passed",
+                "pid": 202, "pending_change_count": 0,
+            })
             artifact.write_bytes(b"packaged artifact")
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "do not match sealed"):
                 packaged_smoke.complete_cell(

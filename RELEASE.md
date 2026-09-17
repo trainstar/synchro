@@ -115,6 +115,7 @@ The `release-signing` job creates detached signatures only.
 It has no publication credentials and performs no public operation.
 
 The Package gate owns the full five-operation lifecycle.
+The consumer's terminal result owns phase completion. An empty queue alone cannot certify success.
 
 The Public gate does not repeat that lifecycle.
 It verifies public GitHub assets, Maven files, and the npm tarball against sealed identities.

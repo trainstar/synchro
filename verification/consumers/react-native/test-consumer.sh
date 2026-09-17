@@ -54,6 +54,8 @@ installed_platform=
 simulator_udid=
 adb=
 reverse_port=
+collector_reverse_port=
+collector_pid=
 cleanup() {
   case "$installed_platform" in
     ios) xcrun simctl uninstall "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true ;;
@@ -64,6 +66,13 @@ cleanup() {
   esac
   if [ -n "$adb" ] && [ -n "$reverse_port" ]; then
     "$adb" reverse --remove "tcp:$reverse_port" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$adb" ] && [ -n "$collector_reverse_port" ]; then
+    "$adb" reverse --remove "tcp:$collector_reverse_port" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$collector_pid" ]; then
+    kill "$collector_pid" >/dev/null 2>&1 || true
+    wait "$collector_pid" 2>/dev/null || true
   fi
   rm -rf "$work_dir"
 }
@@ -78,10 +87,33 @@ npx --yes @react-native-community/cli@20.0.0 init SynchroConsumer \
 cp "$(dirname "$0")/App.tsx" "$work_dir/app/App.tsx"
 cp "$(dirname "$0")/packagedSmokeConfig.ts" "$work_dir/app/packagedSmokeConfig.ts"
 if [ "$mode" = "smoke" ]; then
+  result_dir="$work_dir/app-results"
+  collector_ready="$work_dir/result-collector.json"
+  python3 "$tool" result-collector \
+    --ready "$collector_ready" \
+    --results-dir "$result_dir" &
+  collector_pid=$!
+  collector_started=0
+  for _ in $(seq 1 30); do
+    if [ -f "$collector_ready" ]; then
+      collector_started=1
+      break
+    fi
+    if ! kill -0 "$collector_pid" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if [ "$collector_started" -ne 1 ]; then
+    printf '%s\n' "Packaged React Native result collector did not start" >&2
+    exit 1
+  fi
   python3 "$tool" config \
     --cell "$cell_id" \
     --platform "react-native-$platform" \
+    --collector-ready "$collector_ready" \
     --output "$work_dir/config.json"
+  collector_url=$(python3 "$tool" config-value --config "$work_dir/config.json" --field result_url)
   python3 "$tool" config-to-typescript \
     --config "$work_dir/config.json" \
     --output "$work_dir/app/packagedSmokeConfig.ts"
@@ -184,40 +216,27 @@ RUBY
     launch_output=$(launch_ios_app "$simulator_udid" dev.synchro.consumer)
     initial_pid=${launch_output##*: }
     case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "React Native iOS initial process id is invalid" >&2; exit 1 ;; esac
-    container=$(xcrun simctl get_app_container "$simulator_udid" dev.synchro.consumer data)
-    pending=0
-    ready=0
-    # A cold Hermes start on a busy runner can pass two minutes before the
-    # first durable write, so the bound covers that envelope.
-    for _ in $(seq 1 240); do
-      if [ -f "$container/Documents/consumer.db" ]; then
-        pending=$(sqlite3 "$container/Documents/consumer.db" "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted','rejected','superseded_before_send','cancelled_before_send');" 2>/dev/null || true)
-        durable=$(sqlite3 "$container/Documents/consumer.db" "SELECT ship_address FROM orders WHERE id = '$(python3 "$tool" config-value --config "$work_dir/config.json" --field order_id)';" 2>/dev/null || true)
-        if [ "$pending" = "1" ] && [ "$durable" = '{"street":"Packaged Durable"}' ]; then
-          ready=1
-          break
-        fi
-      fi
-      if ! kill -0 "$initial_pid" >/dev/null 2>&1; then break; fi
-      sleep 1
-    done
-    if [ "$ready" -ne 1 ]; then
-      # The app names its failure in the simulator log, and the phase leaves
-      # no other trace, so the failure state must be reported or it is lost.
+    if ! python3 "$tool" await-app-result \
+      --result "$result_dir/initial.json" \
+      --phase initial \
+      --pid "$initial_pid" \
+      --output "$work_dir/initial.json" \
+      --timeout-seconds 240; then
       if kill -0 "$initial_pid" >/dev/null 2>&1; then
         printf '%s\n' "initial process $initial_pid is still alive" >&2
       else
         printf '%s\n' "initial process $initial_pid exited" >&2
       fi
-      ls -la "$container/Documents" >&2 || true
-      printf 'pending=%s durable=%s\n' "${pending:-none}" "${durable:-none}" >&2
       xcrun simctl spawn "$simulator_udid" log show --last 5m --style compact \
         --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
         | tail -60 >&2 || true
-      printf '%s\n' "Packaged React Native iOS initial phase did not become ready" >&2
+      printf '%s\n' "Packaged React Native iOS initial application result did not pass" >&2
       exit 1
     fi
-    python3 "$tool" phase-result --output "$work_dir/initial.json" --phase initial --pid "$initial_pid" --pending-count "$pending"
+    if ! kill -0 "$initial_pid" >/dev/null 2>&1; then
+      printf '%s\n' "Packaged React Native iOS initial process exited after reporting its result" >&2
+      exit 1
+    fi
     kill -9 "$initial_pid"
     killed=0
     for _ in $(seq 1 30); do
@@ -235,19 +254,23 @@ RUBY
       printf '%s\n' "Packaged React Native iOS resume reused the killed process" >&2
       exit 1
     fi
-    resumed=0
-    for _ in $(seq 1 120); do
-      pending=$(sqlite3 "$container/Documents/consumer.db" "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted','rejected','superseded_before_send','cancelled_before_send');" 2>/dev/null || true)
-      if [ "$pending" = "0" ]; then resumed=1; break; fi
-      if ! kill -0 "$resume_pid" >/dev/null 2>&1; then break; fi
-      sleep 1
-    done
-    xcrun simctl terminate "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true
-    if [ "$resumed" -ne 1 ]; then
-      printf '%s\n' "Packaged React Native iOS resume phase did not pass" >&2
+    if ! python3 "$tool" await-app-result \
+      --result "$result_dir/resume.json" \
+      --phase resume \
+      --pid "$resume_pid" \
+      --output "$work_dir/resume.json" \
+      --timeout-seconds 120; then
+      xcrun simctl spawn "$simulator_udid" log show --last 5m --style compact \
+        --predicate 'processImagePath CONTAINS "SynchroConsumer"' 2>/dev/null \
+        | tail -60 >&2 || true
+      printf '%s\n' "Packaged React Native iOS resume application result did not pass" >&2
       exit 1
     fi
-    python3 "$tool" phase-result --output "$work_dir/resume.json" --phase resume --pid "$resume_pid" --pending-count 0
+    if ! kill -0 "$resume_pid" >/dev/null 2>&1; then
+      printf '%s\n' "Packaged React Native iOS resume process exited after reporting its result" >&2
+      exit 1
+    fi
+    xcrun simctl terminate "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true
     native_artifact="$artifact_dir/apple/synchro-spm-$version.tar.gz"
     ;;
   android)
@@ -313,6 +336,8 @@ GRADLE
     if [ -n "$reverse_port" ]; then
       "$adb" reverse "tcp:$reverse_port" "tcp:$reverse_port"
     fi
+    collector_reverse_port=$(python3 -c 'import sys, urllib.parse; value=urllib.parse.urlsplit(sys.argv[1]); print(value.port)' "$collector_url")
+    "$adb" reverse "tcp:$collector_reverse_port" "tcp:$collector_reverse_port"
     "$adb" uninstall com.synchroconsumer >/dev/null 2>&1 || true
     "$adb" install "$work_dir/app/android/app/build/outputs/apk/debug/app-debug.apk" >/dev/null
     installed_platform=android
@@ -321,33 +346,20 @@ GRADLE
     "$adb" shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
     initial_pid=$("$adb" shell pidof com.synchroconsumer | tr -d '\r')
     case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "React Native Android initial process id is invalid" >&2; exit 1 ;; esac
-    database="$work_dir/consumer.db"
-    pending=0
-    ready=0
-    order_id=$(python3 "$tool" config-value --config "$work_dir/config.json" --field order_id)
-    copy_android_database() {
-      if "$adb" exec-out run-as com.synchroconsumer cat databases/consumer.db > "$database" 2>/dev/null; then
-        "$adb" exec-out run-as com.synchroconsumer cat databases/consumer.db-wal > "$database-wal" 2>/dev/null || rm -f "$database-wal"
-        "$adb" exec-out run-as com.synchroconsumer cat databases/consumer.db-shm > "$database-shm" 2>/dev/null || rm -f "$database-shm"
-        return 0
-      fi
-      return 1
-    }
-    for _ in $(seq 1 120); do
-      if copy_android_database; then
-        pending=$(sqlite3 "$database" "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted','rejected','superseded_before_send','cancelled_before_send');" 2>/dev/null || true)
-        durable=$(sqlite3 "$database" "SELECT ship_address FROM orders WHERE id = '$order_id';" 2>/dev/null || true)
-        if [ "$pending" = "1" ] && [ "$durable" = '{"street":"Packaged Durable"}' ]; then ready=1; break; fi
-      fi
-      current_pid=$("$adb" shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
-      if [ "$current_pid" != "$initial_pid" ]; then break; fi
-      sleep 1
-    done
-    if [ "$ready" -ne 1 ]; then
-      printf '%s\n' "Packaged React Native Android initial phase did not become ready" >&2
+    if ! python3 "$tool" await-app-result \
+      --result "$result_dir/initial.json" \
+      --phase initial \
+      --pid "$initial_pid" \
+      --output "$work_dir/initial.json" \
+      --timeout-seconds 120; then
+      printf '%s\n' "Packaged React Native Android initial application result did not pass" >&2
       exit 1
     fi
-    python3 "$tool" phase-result --output "$work_dir/initial.json" --phase initial --pid "$initial_pid" --pending-count "$pending"
+    current_pid=$("$adb" shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
+    if [ "$current_pid" != "$initial_pid" ]; then
+      printf '%s\n' "Packaged React Native Android initial process changed after reporting its result" >&2
+      exit 1
+    fi
     set +e
     "$adb" shell run-as com.synchroconsumer kill -9 "$initial_pid"
     kill_status=$?
@@ -370,22 +382,21 @@ GRADLE
       printf '%s\n' "Packaged React Native Android resume reused the killed process" >&2
       exit 1
     fi
-    resumed=0
-    for _ in $(seq 1 120); do
-      if copy_android_database; then
-        pending=$(sqlite3 "$database" "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted','rejected','superseded_before_send','cancelled_before_send');" 2>/dev/null || true)
-        if [ "$pending" = "0" ]; then resumed=1; break; fi
-      fi
-      current_pid=$("$adb" shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
-      if [ "$current_pid" != "$resume_pid" ]; then break; fi
-      sleep 1
-    done
-    "$adb" shell am force-stop com.synchroconsumer
-    if [ "$resumed" -ne 1 ]; then
-      printf '%s\n' "Packaged React Native Android resume phase did not pass" >&2
+    if ! python3 "$tool" await-app-result \
+      --result "$result_dir/resume.json" \
+      --phase resume \
+      --pid "$resume_pid" \
+      --output "$work_dir/resume.json" \
+      --timeout-seconds 120; then
+      printf '%s\n' "Packaged React Native Android resume application result did not pass" >&2
       exit 1
     fi
-    python3 "$tool" phase-result --output "$work_dir/resume.json" --phase resume --pid "$resume_pid" --pending-count 0
+    current_pid=$("$adb" shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
+    if [ "$current_pid" != "$resume_pid" ]; then
+      printf '%s\n' "Packaged React Native Android resume process changed after reporting its result" >&2
+      exit 1
+    fi
+    "$adb" shell am force-stop com.synchroconsumer
     native_artifact="$maven_dir/fit/trainstar/synchro/$version/synchro-$version.aar"
     ;;
 esac

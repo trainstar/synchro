@@ -9,6 +9,8 @@ export interface PackagedSmokeConfig {
   customer_id: string;
   order_id: string;
   phase: 'initial' | 'resume';
+  result_url: string;
+  result_token: string;
 }
 
 declare global {
