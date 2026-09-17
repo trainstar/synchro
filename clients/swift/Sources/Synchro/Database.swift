@@ -4,7 +4,7 @@ import os
 
 public typealias Row = GRDB.Row
 
-private struct ObservedRows: @unchecked Sendable {
+private struct ObservedRows: Equatable, @unchecked Sendable {
     let rows: [Row]
 }
 
@@ -165,6 +165,32 @@ final class SynchroDatabase: @unchecked Sendable {
         }
     }
 
+    func writeSchemaMigrationTransaction<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
+        let result = try dbPool.writeWithoutTransaction { db in
+            let foreignKeys = try Bool.fetchOne(db, sql: "PRAGMA foreign_keys") == true
+            // Table replacement must not execute foreign-key delete actions.
+            try db.execute(sql: "PRAGMA foreign_keys = OFF")
+            let result = Result {
+                try db.beginTransaction(.immediate)
+                do {
+                    try SynchroMeta.setSyncLock(db, locked: true)
+                    let value = try block(db)
+                    try SynchroMeta.setSyncLock(db, locked: false)
+                    try db.checkForeignKeys()
+                    try db.commit()
+                    return value
+                } catch {
+                    try db.rollback()
+                    throw error
+                }
+            }
+            try db.execute(sql: "PRAGMA foreign_keys = \(foreignKeys ? "ON" : "OFF")")
+            return try result.get()
+        }
+        notifyDatabaseChange()
+        return result
+    }
+
     func applicationWriteTransaction<T>(
         _ block: (ApplicationTransaction) throws -> T
     ) throws -> T {
@@ -280,13 +306,22 @@ final class SynchroDatabase: @unchecked Sendable {
 
     func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]?, tables: [String], callback: @escaping ([Row]) -> Void) -> DatabaseCancellable {
         _ = tables
-        if let rows = try? query(sql, params: params) {
-            callback(rows)
-        }
-        return onChange(tables: tables) { [weak self] in
-            guard let self, let rows = try? self.query(sql, params: params) else { return }
-            callback(rows)
-        }
+        let parameters = ObservedQueryParams(values: params)
+        return ValueObservation.tracking { db in
+            ObservedRows(rows: try Row.fetchAll(
+                db, sql: sql, arguments: StatementArguments(parameters.values ?? [])
+            ))
+        }.removeDuplicates().start(
+            in: dbPool,
+            scheduling: .async(onQueue: .main),
+            onError: { _ in
+                Logger(subsystem: "com.trainstar.synchro", category: "database")
+                    .error("Database observation query failed")
+            },
+            onChange: { value in
+                callback(value.rows)
+            }
+        )
     }
 
     // MARK: - Close
@@ -300,6 +335,15 @@ final class SynchroDatabase: @unchecked Sendable {
     }
 
     private func notifyDatabaseChange() {
+        do {
+            // Application writes use another connection. GRDB cannot detect those commits itself.
+            try dbPool.write { db in
+                try db.notifyChanges(in: .fullDatabase)
+            }
+        } catch {
+            Logger(subsystem: "com.trainstar.synchro", category: "database")
+                .error("Database observation notification failed")
+        }
         let callbacks = changeObservers.withLock { Array($0.values) }
         for callback in callbacks {
             callback()
@@ -864,6 +908,20 @@ final class SynchroDatabase: @unchecked Sendable {
                 ON _synchro_pending_changes
                     (table_id, pk_field_id, pk_logical_type, record_id, local_order)
                 """)
+        }
+        migrator.registerMigration("synchro_v16_capture_storage_validation") { db in
+            guard let encoded = try SynchroMeta.get(db, key: .localSchema) else { return }
+            let tables = try JSONDecoder().decode([LocalSchemaTable].self, from: Data(encoded.utf8))
+            guard !tables.isEmpty else { return }
+            guard try SynchroMeta.getInt64(db, key: .schemaVersion) > 0,
+                  let hash = try SynchroMeta.get(db, key: .schemaHash), !hash.isEmpty else {
+                throw SynchroError.invalidResponse(message: "capture upgrade requires verified schema metadata")
+            }
+            for table in tables {
+                for trigger in SQLiteSchema.generateCDCTriggers(table: table) {
+                    try db.execute(sql: trigger)
+                }
+            }
         }
         try migrator.migrate(dbPool)
     }

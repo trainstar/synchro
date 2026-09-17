@@ -211,6 +211,7 @@ final class SyncEngine: @unchecked Sendable {
     // MARK: - Lifecycle
 
     func start(options: SyncOptions? = nil) async throws {
+        try config.validate()
         await waitForUnfinishedStop()
         let generation = try reserveStart()
         cycleGate.beginGeneration(generation)
@@ -833,6 +834,9 @@ final class SyncEngine: @unchecked Sendable {
         let intervalNanoseconds = UInt64(config.syncInterval * 1_000_000_000)
         let idleTask = Task<Bool, Never> {
             do {
+                while intervalNanoseconds == 0 {
+                    try await Task.sleep(nanoseconds: RetryTiming.maximumSleepChunkNanoseconds)
+                }
                 try await Task.sleep(nanoseconds: intervalNanoseconds)
                 return true
             } catch {
@@ -1303,11 +1307,6 @@ final class SyncEngine: @unchecked Sendable {
 
         let requestBody = try httpClient.connectRequestBody(request)
         let response = try await httpClient.connect(request: request, requestBody: requestBody)
-        try response.validate(
-            existingScopes: request.knownScopes,
-            requestScopeSetVersion: request.scopeSetVersion
-        )
-
         return ConnectOperationResult(response: response, requestBody: requestBody)
     }
 
@@ -1389,7 +1388,7 @@ final class SyncEngine: @unchecked Sendable {
             schemaEvent = nil
         }
 
-        try database.writeSyncLockedTransaction { db in
+        try database.writeSchemaMigrationTransaction { db in
             if schemaChanged {
                 _ = try schemaManager.applyPreparedMigrationInTransaction(db)
             } else {

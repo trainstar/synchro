@@ -102,6 +102,40 @@ final class HttpClientTests: XCTestCase {
         }
     }
 
+    func testConnectValidatesSemanticsForNormalAndExactRetryBodies() async throws {
+        let request = ConnectRequest(
+            clientID: "test-device", platform: "ios", appVersion: "1.0.0", protocolVersion: 3,
+            schema: .init(version: 1, hash: String(repeating: "a", count: 64)),
+            scopeSetVersion: 4, knownScopes: ["known": ScopeCursorRef(cursor: "cursor")]
+        )
+        let encoded = try httpClient.connectRequestBody(request)
+        let exactBody = Data(" \n".utf8) + encoded + Data("\n ".utf8)
+        let valid = """
+        {"server_time":"2026-01-01T00:00:00.000000Z","protocol_version":3,"client_generation":1,"scope_set_version":4,"schema":{"version":1,"hash":"\(String(repeating: "a", count: 64))","action":"none"},"scopes":{"add":[],"remove":[]},"scope_cursor_updates":{}}
+        """
+        let invalid = [
+            valid.replacingOccurrences(of: "\"protocol_version\":3", with: "\"protocol_version\":2"),
+            valid.replacingOccurrences(of: "\"scope_set_version\":4", with: "\"scope_set_version\":3"),
+            valid.replacingOccurrences(of: "\"remove\":[]", with: "\"remove\":[\"unknown\"]"),
+        ]
+        for body in [nil, exactBody] as [Data?] {
+            for responseBody in invalid {
+                MockURLProtocol.requestHandler = { outbound in
+                    XCTAssertEqual(outbound.bodyData(), body ?? encoded)
+                    return (
+                        HTTPURLResponse(url: outbound.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data(responseBody.utf8)
+                    )
+                }
+                do {
+                    _ = try await httpClient.connect(request: request, requestBody: body)
+                    XCTFail("Invalid connect semantics were accepted")
+                } catch is ContractViolation {
+                }
+            }
+        }
+    }
+
     func testSchemaMismatch422() async throws {
         let currentSchema = SchemaRef(version: 2, hash: String(repeating: "b", count: 64))
         let receivedSchema = SchemaRef(version: 1, hash: String(repeating: "a", count: 64))

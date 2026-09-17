@@ -10,6 +10,7 @@ enum SchemaMigrationOperationKind: String, Codable, Sendable {
     case dropTable = "drop_table"
     case createTable = "create_table"
     case addColumn = "add_column"
+    case relaxNullability = "relax_nullability"
     case createIndex = "create_index"
     case reinstallCapture = "reinstall_capture"
     case clearSyncedMaterialization = "clear_synced_materialization"
@@ -87,6 +88,11 @@ struct SchemaMigrationPlan: Codable, Sendable, Equatable {
                 }
                 try validateCompatibleTable(sourceTable, target: targetTable)
                 let sourceFields = Dictionary(uniqueKeysWithValues: sourceTable.columns.map { ($0.fieldID, $0) })
+                if targetTable.columns.contains(where: { field in
+                    field.nullable && sourceFields[field.fieldID]?.nullable == false
+                }) {
+                    operations.append(operation(.relaxNullability, tableID: targetTable.tableID))
+                }
                 for field in targetTable.columns.sorted(by: fieldIDOrder) where sourceFields[field.fieldID] == nil {
                     operations.append(operation(
                         .addColumn,

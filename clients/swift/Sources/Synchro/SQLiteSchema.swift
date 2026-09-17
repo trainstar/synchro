@@ -53,6 +53,78 @@ enum SQLiteSchema {
         return "CREATE \(uniqueness)INDEX IF NOT EXISTS \(SQLiteHelpers.quoteIdentifier(index.name)) ON \(SQLiteHelpers.quoteIdentifier(table.tableName)) (\(columns.joined(separator: ", ")))"
     }
 
+    static func relaxedCreateTableSQL(
+        _ sql: String,
+        tableName: String,
+        nullableColumns: Set<String>
+    ) throws -> String {
+        // Keep local columns, constraints, and quoted SQL unchanged during table replacement.
+        let lexer = try NSRegularExpression(
+            pattern: #"--[^\r\n]*|/\*.*?\*/|"(?:[^"]|"")*"|'(?:[^']|'')*'|`(?:[^`]|``)*`|\[[^\]]*\]|[^\s(),"'`\[\]/-]+|[(),/-]"#,
+            options: [.dotMatchesLineSeparators]
+        )
+        let source = sql as NSString
+        let tokens = lexer.matches(in: sql, range: NSRange(location: 0, length: source.length))
+            .filter {
+                let text = source.substring(with: $0.range)
+                return !text.hasPrefix("--") && !text.hasPrefix("/*")
+            }
+        func text(_ index: Int) -> String { source.substring(with: tokens[index].range) }
+        func keyword(_ index: Int, _ value: String) -> Bool {
+            tokens.indices.contains(index) && text(index).uppercased() == value
+        }
+        guard let opening = tokens.indices.first(where: { text($0) == "(" }) else {
+            throw SynchroError.invalidResponse(message: "schema replacement table definition is invalid")
+        }
+        var depth = 1
+        var columnStart = true
+        var column = ""
+        var removed = Set<String>()
+        var removals: [NSRange] = []
+        var index = opening + 1
+        while index < tokens.count && depth > 0 {
+            let token = text(index)
+            if columnStart {
+                column = token
+                if let first = token.first, ["\"", "'", "`", "["].contains(first) {
+                    let closing = first == "[" ? "]" : String(first)
+                    column = String(token.dropFirst().dropLast())
+                        .replacingOccurrences(of: closing + closing, with: closing)
+                }
+                columnStart = false
+            } else if depth == 1, nullableColumns.contains(column),
+                      keyword(index, "NOT"), keyword(index + 1, "NULL") {
+                let start = index >= 2 && keyword(index - 2, "CONSTRAINT") ? index - 2 : index
+                var end = index + 1
+                if keyword(end + 1, "ON"), keyword(end + 2, "CONFLICT"), tokens.indices.contains(end + 3) {
+                    end += 3
+                }
+                removals.append(NSRange(
+                    location: tokens[start].range.location,
+                    length: NSMaxRange(tokens[end].range) - tokens[start].range.location
+                ))
+                removed.insert(column)
+                index = end
+            }
+            if token == "(" { depth += 1 }
+            if token == ")" { depth -= 1 }
+            if token == "," && depth == 1 { columnStart = true }
+            index += 1
+        }
+        guard depth == 0, removed == nullableColumns else {
+            throw SynchroError.invalidResponse(message: "schema replacement nullability constraints are inconsistent")
+        }
+        let result = NSMutableString(string: sql)
+        for range in removals.reversed() {
+            result.deleteCharacters(in: range)
+        }
+        result.replaceCharacters(
+            in: NSRange(location: 0, length: tokens[opening].range.location),
+            with: "CREATE TABLE \(SQLiteHelpers.quoteIdentifier(tableName)) "
+        )
+        return result as String
+    }
+
     static func generateCDCTriggers(table: LocalSchemaTable) -> [String] {
         let name = table.tableName
         let quoted = SQLiteHelpers.quoteIdentifier(name)
@@ -184,20 +256,20 @@ enum SQLiteSchema {
             let valueBlob: String
             if column.logicalType == "boolean" {
                 valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'boolean' END"
-                valueInteger = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN NULL ELSE CAST(NEW.\(quotedColumn) AS INTEGER) END"
+                valueInteger = "NEW.\(quotedColumn)"
                 valueReal = "NULL"
                 valueText = "NULL"
                 valueBlob = "NULL"
             } else if ["int", "int64"].contains(column.logicalType) {
                 valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'integer' END"
-                valueInteger = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN NULL ELSE CAST(NEW.\(quotedColumn) AS INTEGER) END"
+                valueInteger = "NEW.\(quotedColumn)"
                 valueReal = "NULL"
                 valueText = "NULL"
                 valueBlob = "NULL"
             } else if ["float"].contains(column.logicalType) {
                 valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'real' END"
                 valueInteger = "NULL"
-                valueReal = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN NULL ELSE CAST(NEW.\(quotedColumn) AS REAL) END"
+                valueReal = "NEW.\(quotedColumn)"
                 valueText = "NULL"
                 valueBlob = "NULL"
             } else if column.logicalType == "bytes" {
@@ -210,11 +282,30 @@ enum SQLiteSchema {
                 valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'text' END"
                 valueInteger = "NULL"
                 valueReal = "NULL"
-                valueText = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN NULL ELSE CAST(NEW.\(quotedColumn) AS TEXT) END"
+                valueText = "NEW.\(quotedColumn)"
                 valueBlob = "NULL"
             }
             let changedClause = changed.map { " AND \($0)" } ?? ""
+            let compatibleStorage: String
+            switch column.logicalType {
+            case "boolean", "int", "int64":
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) = 'integer'"
+            case "float":
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) IN ('integer', 'real')"
+            case "bytes":
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) = 'blob'"
+            default:
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) = 'text'"
+            }
             return """
+                SELECT CASE WHEN NEW.\(quotedColumn) IS NOT NULL
+                  AND NOT (\(compatibleStorage))
+                  AND EXISTS (
+                    SELECT 1 FROM _synchro_pending_changes
+                    WHERE local_order = (SELECT MAX(local_order) FROM _synchro_pending_changes)
+                      AND operation <> 'delete'\(changedClause)
+                  )
+                  THEN RAISE(ABORT, 'synchro capture storage type is invalid') END;
                 INSERT INTO _synchro_mutation_values
                     (mutation_id, field_id, logical_type, value_kind, value_integer, value_real, value_text, value_blob)
                 SELECT mutation_id, \(literalFieldID), \(literalType), \(valueKind), \(valueInteger), \(valueReal), \(valueText), \(valueBlob)

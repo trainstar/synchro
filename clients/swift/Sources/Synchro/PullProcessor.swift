@@ -1019,7 +1019,8 @@ final class PullProcessor: @unchecked Sendable {
             .map { "\(SQLiteHelpers.quoteIdentifier($0)) = excluded.\(SQLiteHelpers.quoteIdentifier($0))" }
             .joined(separator: ", ")
 
-        return "INSERT INTO \(quoted) (\(quotedColumns)) VALUES (\(placeholders)) ON CONFLICT (\(quotedPK)) DO UPDATE SET \(updateClauses)"
+        let conflictAction = updateClauses.isEmpty ? "DO NOTHING" : "DO UPDATE SET \(updateClauses)"
+        return "INSERT INTO \(quoted) (\(quotedColumns)) VALUES (\(placeholders)) ON CONFLICT (\(quotedPK)) \(conflictAction)"
     }
 
     private func buildDatabaseValues(
