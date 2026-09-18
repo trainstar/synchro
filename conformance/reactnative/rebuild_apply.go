@@ -673,13 +673,36 @@ func rebuildApplyCountError(clientID, name string, observed, expected uint64) er
 
 func validateRebuildApplyTrace(trace traceSnapshot, workload rebuildApplyWorkload, scopeCount int) error {
 	pages := int((workload.RecordCount + workload.PageSize - 1) / workload.PageSize)
-	if trace.Overflowed || len(trace.Observations) != pages+2 || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || validateTraceSequence(trace.Observations) != nil || validateTraceOperation(trace.Observations[0], "connect") != nil || validateTraceOperation(trace.Observations[len(trace.Observations)-1], "pull") != nil {
-		return errors.New("React Native rebuild-apply trace is invalid")
+	if trace.Overflowed || len(trace.Observations) != pages+2 || trace.SequenceCheckpoint != uint64(len(trace.Observations)) {
+		var operations []string
+		for index, observation := range trace.Observations {
+			if index == 16 {
+				break
+			}
+			class := observation.OperationClass
+			switch class {
+			case "connect", "push", "pull", "rebuild":
+			default:
+				class = "invalid"
+			}
+			operations = append(operations, fmt.Sprintf("%s:%d", class, observation.StatusCode))
+		}
+		return fmt.Errorf("React Native rebuild-apply trace bounds are invalid: overflow=%t observations=%d expected=%d checkpoint=%d operation_prefix=%v",
+			trace.Overflowed, len(trace.Observations), pages+2, trace.SequenceCheckpoint, operations)
+	}
+	if err := validateTraceSequence(trace.Observations); err != nil {
+		return fmt.Errorf("React Native rebuild-apply trace sequence is invalid: %w", err)
+	}
+	if err := validateTraceOperation(trace.Observations[0], "connect"); err != nil {
+		return fmt.Errorf("React Native rebuild-apply connect trace is invalid: %w", err)
+	}
+	if err := validateTraceOperation(trace.Observations[len(trace.Observations)-1], "pull"); err != nil {
+		return fmt.Errorf("React Native rebuild-apply final pull trace is invalid: %w", err)
 	}
 	for index := 0; index < pages; index++ {
 		observation := trace.Observations[index+1]
-		if validateTraceOperation(observation, "rebuild") != nil {
-			return fmt.Errorf("React Native rebuild-apply page %d is invalid", index+1)
+		if err := validateTraceOperation(observation, "rebuild"); err != nil {
+			return fmt.Errorf("React Native rebuild-apply page %d is invalid: %w", index+1, err)
 		}
 		limit, limitErr := requestInteger(observation, "limit")
 		cursor, cursorErr := requestStringOptional(observation, "cursor_fingerprint")
