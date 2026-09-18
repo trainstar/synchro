@@ -1123,6 +1123,21 @@ public struct RebuildRequest: Codable, Sendable, Equatable {
         case cursor
         case limit
     }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(clientID, forKey: .clientID)
+        try container.encode(clientGeneration, forKey: .clientGeneration)
+        try container.encode(schema, forKey: .schema)
+        try container.encode(scope, forKey: .scope)
+        try container.encode(rebuildID, forKey: .rebuildID)
+        if let cursor {
+            try container.encode(cursor, forKey: .cursor)
+        } else {
+            try container.encodeNil(forKey: .cursor)
+        }
+        try container.encode(limit, forKey: .limit)
+    }
 }
 
 public struct RebuildRecord: Codable, Sendable, Equatable {

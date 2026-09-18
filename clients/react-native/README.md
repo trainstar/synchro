@@ -25,6 +25,9 @@ pod install
 
 Android autolinks through the React Native Gradle plugin. No manual `MainApplication` edits are required.
 
+The Android library resolves the native SDK from Maven Central.
+Local Maven resolution is explicit in `example/android/build.gradle` for development.
+
 ## Usage
 
 ```ts
@@ -73,6 +76,14 @@ Events and hooks:
 - `useSyncStatus(client)`
 - `usePendingChanges(client, pollInterval?)`
 
+`useQuery` compares `int64` and `bytes` parameters by tag type and payload.
+Equivalent tag objects do not restart the query or subscription.
+
+`useSyncStatus` subscribes before it reads current native status.
+New events take priority over the initial snapshot.
+Changing clients resets the displayed status until the new client supplies state.
+Snapshot failures reach the React error boundary unless a newer status event has arrived.
+
 ## Transactions
 
 `writeTransaction()` and `readTransaction()` mirror the native SDKs through a bridge-held transaction session.
@@ -109,6 +120,8 @@ Native errors are normalized to typed JS errors, including:
 - `AlreadyStartedError`
 - `NotStartedError`
 - `TransactionTimeoutError`
+
+The iOS schema bridge rejects malformed JSON with the existing `UNKNOWN` error code.
 
 ## Development
 

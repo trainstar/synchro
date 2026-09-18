@@ -1289,7 +1289,7 @@ final class SyncEngineTests: XCTestCase {
             knownScopes: [:],
             seedReceipts: nil
         )
-        let requestJSON = String(data: try JSONEncoder.synchroEncoder().encode(connectRequest), encoding: .utf8)!
+        let requestJSON = " \n" + String(data: try JSONEncoder.synchroEncoder().encode(connectRequest), encoding: .utf8)! + "\n "
         let deadline = Int64(Date().timeIntervalSince1970 * 1_000) + 150
         try database.writeTransaction { db in
             try SynchroMeta.upsertBackoffRecord(
@@ -1310,6 +1310,7 @@ final class SyncEngineTests: XCTestCase {
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
+                XCTAssertEqual(request.bodyData(), Data(requestJSON.utf8))
                 firstConnectAt = Date()
                 reconnectStarted.fulfill()
                 return try self.mockResponse(json: self.connectJSON)

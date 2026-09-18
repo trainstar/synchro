@@ -74,6 +74,66 @@ final class HttpClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testRebuildRequestBodyEncodesRequiredNullCursorAndContinuation() throws {
+        let schemaHash = String(repeating: "a", count: 64)
+        var request = RebuildRequest(
+            clientID: "test-device",
+            clientGeneration: 1,
+            schema: SchemaRef(version: 1, hash: schemaHash),
+            scope: "known",
+            rebuildID: "00000000-0000-4000-8000-000000000001",
+            cursor: nil,
+            limit: 100
+        )
+        let firstPage = Data("""
+        {"client_generation":1,"client_id":"test-device","cursor":null,"limit":100,"rebuild_id":"00000000-0000-4000-8000-000000000001","schema":{"hash":"\(schemaHash)","version":1},"scope":"known"}
+        """.utf8)
+        XCTAssertEqual(try httpClient.rebuildRequestBody(request), firstPage)
+
+        request.cursor = "opaque-continuation"
+        let nextPage = Data("""
+        {"client_generation":1,"client_id":"test-device","cursor":"opaque-continuation","limit":100,"rebuild_id":"00000000-0000-4000-8000-000000000001","schema":{"hash":"\(schemaHash)","version":1},"scope":"known"}
+        """.utf8)
+        XCTAssertEqual(try httpClient.rebuildRequestBody(request), nextPage)
+    }
+
+    func testConnectAndPullRequestBodiesEncodeRequiredKnownScopeNullCursor() throws {
+        let schemaHash = String(repeating: "a", count: 64)
+        let scopes = [
+            "known": ScopeCursorRef(cursor: nil),
+            "resumable": ScopeCursorRef(cursor: "opaque-cursor"),
+        ]
+        let connect = ConnectRequest(
+            clientID: "test-device",
+            clientGeneration: nil,
+            platform: "ios",
+            appVersion: "1.0.0",
+            protocolVersion: 3,
+            schemaReset: nil,
+            schema: SchemaRef(version: 1, hash: schemaHash),
+            scopeSetVersion: 4,
+            knownScopes: scopes,
+            seedReceipts: nil
+        )
+        let connectBody = Data("""
+        {"app_version":"1.0.0","client_id":"test-device","known_scopes":{"known":{"cursor":null},"resumable":{"cursor":"opaque-cursor"}},"platform":"ios","protocol_version":3,"schema":{"hash":"\(schemaHash)","version":1},"scope_set_version":4}
+        """.utf8)
+        XCTAssertEqual(try httpClient.connectRequestBody(connect), connectBody)
+
+        let pull = PullRequest(
+            clientID: "test-device",
+            clientGeneration: 1,
+            schema: connect.schema,
+            scopeSetVersion: 4,
+            scopes: scopes,
+            limit: 100
+        )
+        let pullBody = Data("""
+        {"client_generation":1,"client_id":"test-device","limit":100,"schema":{"hash":"\(schemaHash)","version":1},"scope_set_version":4,"scopes":{"known":{"cursor":null},"resumable":{"cursor":"opaque-cursor"}}}
+        """.utf8)
+        XCTAssertEqual(try httpClient.pullRequestBody(pull), pullBody)
+    }
+
     func testConnectRejectsNoncanonicalSuccessJSON() async throws {
         let responseBody = Data("""
         {"server_time":"2026-03-20T18:22:11Z","protocol_version":3,"client_generation":4.0,"scope_set_version":13,"schema":{"version":8,"hash":"\(String(repeating: "8", count: 64))","action":"none"},"scopes":{"add":[],"remove":[]},"scope_cursor_updates":{}}
@@ -98,6 +158,40 @@ final class HttpClientTests: XCTestCase {
         } catch let error as SynchroError {
             guard case .invalidResponse = error else {
                 return XCTFail("Expected invalid response, got \(error)")
+            }
+        }
+    }
+
+    func testConnectValidatesSemanticsForNormalAndExactRetryBodies() async throws {
+        let request = ConnectRequest(
+            clientID: "test-device", platform: "ios", appVersion: "1.0.0", protocolVersion: 3,
+            schema: .init(version: 1, hash: String(repeating: "a", count: 64)),
+            scopeSetVersion: 4, knownScopes: ["known": ScopeCursorRef(cursor: "cursor")]
+        )
+        let encoded = try httpClient.connectRequestBody(request)
+        let exactBody = Data(" \n".utf8) + encoded + Data("\n ".utf8)
+        let valid = """
+        {"server_time":"2026-01-01T00:00:00.000000Z","protocol_version":3,"client_generation":1,"scope_set_version":4,"schema":{"version":1,"hash":"\(String(repeating: "a", count: 64))","action":"none"},"scopes":{"add":[],"remove":[]},"scope_cursor_updates":{}}
+        """
+        let invalid = [
+            valid.replacingOccurrences(of: "\"protocol_version\":3", with: "\"protocol_version\":2"),
+            valid.replacingOccurrences(of: "\"scope_set_version\":4", with: "\"scope_set_version\":3"),
+            valid.replacingOccurrences(of: "\"remove\":[]", with: "\"remove\":[\"unknown\"]"),
+        ]
+        for body in [nil, exactBody] as [Data?] {
+            for responseBody in invalid {
+                MockURLProtocol.requestHandler = { outbound in
+                    XCTAssertEqual(outbound.bodyData(), body ?? encoded)
+                    return (
+                        HTTPURLResponse(url: outbound.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data(responseBody.utf8)
+                    )
+                }
+                do {
+                    _ = try await httpClient.connect(request: request, requestBody: body)
+                    XCTFail("Invalid connect semantics were accepted")
+                } catch is ContractViolation {
+                }
             }
         }
     }

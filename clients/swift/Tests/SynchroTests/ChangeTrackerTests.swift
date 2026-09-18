@@ -394,6 +394,63 @@ final class ChangeTrackerTests: XCTestCase {
         XCTAssertEqual(retainedFields["blob_value"]?.wireValue, AnyCodable("AAEC"))
     }
 
+    func testIncompatibleCaptureStorageRollsBackRowsAndImmutableIntent() throws {
+        let (db, _, table) = try makeTypedTestEnv()
+        defer { try? db.close() }
+        _ = try db.execute(
+            """
+            INSERT INTO typed_values
+                (id, int64_value, int_value, decimal_value, json_value, bool_value, float_value, blob_value, updated_at)
+            VALUES ('original', ?, 7, '12.34', '{}', 1, 3.5, ?, '2026-01-01T00:00:00.000000Z')
+            """,
+            params: [Int64.max, Data([0, 255])]
+        )
+        let rows = try db.query("SELECT * FROM typed_values", params: nil)
+        let pending = try db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order", params: nil)
+        let captured = try db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id", params: nil)
+        try db.writeTransaction { connection in
+            try connection.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'synchro_v16_capture_storage_validation'")
+            for operation in ["insert", "update", "delete"] {
+                try connection.execute(sql: "DROP TRIGGER _synchro_cdc_\(operation)_typed_values")
+            }
+        }
+        let upgradedDB = try SynchroDatabase(path: db.path)
+        defer { try? upgradedDB.close() }
+        let invalid: [(String, any DatabaseValueConvertible)] = [
+            ("int_value", "not-an-integer"),
+            ("int64_value", 2.5),
+            ("bool_value", "true"),
+            ("float_value", "not-a-float"),
+            ("blob_value", "not-a-blob"),
+            ("decimal_value", Data([0xff])),
+            ("json_value", Data([0xff])),
+            ("nullable_value", Data([0xff])),
+        ]
+        for (column, value) in invalid {
+            let names = table.columns.map(\.name)
+            let selected = names.map { name in
+                name == "id" ? "'invalid'" : name == column ? "?" : SQLiteHelpers.quoteIdentifier(name)
+            }.joined(separator: ", ")
+            let columns = names.map(SQLiteHelpers.quoteIdentifier).joined(separator: ", ")
+            XCTAssertThrowsError(try upgradedDB.execute(
+                "INSERT INTO typed_values (\(columns)) SELECT \(selected) FROM typed_values WHERE id = 'original'",
+                params: [value]
+            ), column)
+            XCTAssertThrowsError(try upgradedDB.applicationWriteTransaction { transaction in
+                try transaction.execute("UPDATE typed_values SET int_value = 8 WHERE id = 'original'")
+                try transaction.execute(
+                    "UPDATE typed_values SET \(SQLiteHelpers.quoteIdentifier(column)) = ? WHERE id = 'original'",
+                    params: [value]
+                )
+            }, column)
+            XCTAssertEqual(try upgradedDB.query("SELECT * FROM typed_values", params: nil), rows, column)
+            XCTAssertEqual(try upgradedDB.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order", params: nil), pending, column)
+            XCTAssertEqual(try upgradedDB.query(
+                "SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id", params: nil
+            ), captured, column)
+        }
+    }
+
     func testSchemaArchiveMismatchRollsBackApplicationWriteAndCapture() throws {
         let (db, tracker, _) = try makeTestEnv()
         try db.writeTransaction { connection in

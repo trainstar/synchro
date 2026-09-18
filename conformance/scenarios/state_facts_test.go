@@ -1,6 +1,9 @@
 package scenarios
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestNormalizeStateFactsPreservesProjectionAndCanonicalizesOrder(t *testing.T) {
 	emptyRows := []RowFact{}
@@ -53,6 +56,72 @@ func TestStateFactsProjectionEqualDistinguishesOmittedAndEmptyLists(t *testing.T
 	}
 	if StateFactsProjectionEqual(StateFacts{Rows: []RowFact{}}, got) {
 		t.Fatal("explicit empty rows accepted a nonempty observation")
+	}
+}
+
+func TestEmptyStateProjectionsSurviveJSONAndScenarioClone(t *testing.T) {
+	observed := StateFacts{
+		Transactions:     []TransactionFact{{StreamGeneration: "stream", CommitLSN: "1", EndLSN: "2"}},
+		Rows:             []RowFact{{TableID: "items", CanonicalWireJSON: `"one"`}},
+		Scopes:           []ScopeFact{{ScopeID: "scope"}},
+		MutationOutcomes: []MutationOutcomeIdentityFact{{UserID: "user", ClientID: "client", MutationID: "mutation"}},
+		RowScopeEdges:    []RowScopeEdgeFact{{TableID: "items", CanonicalWireJSON: `"one"`, ScopeID: "scope"}},
+		Poison:           []PoisonFact{{StreamGeneration: "stream", CommitLSN: "1"}},
+		Rebuilds:         []RebuildFact{{UserID: "user", ClientID: "client", ScopeID: "scope", RebuildID: "rebuild"}},
+		Clients: []ClientDurabilityFact{{
+			UserID:      "user",
+			ClientID:    "client",
+			Provenance:  []ProvenanceFact{{TableID: "items", CanonicalWireJSON: `"one"`}},
+			Checkpoints: []CheckpointFact{{ScopeID: "scope"}},
+			Queue:       []QueuedMutationFact{{MutationID: "mutation", TableID: "items", LocalOrder: 1}},
+			Outcomes:    []MutationOutcomeFact{{MutationID: "mutation", State: "rejected"}},
+		}},
+	}
+	tests := []struct {
+		name string
+		want StateFacts
+	}{
+		{"transactions", StateFacts{Transactions: []TransactionFact{}}},
+		{"rows", StateFacts{Rows: []RowFact{}}},
+		{"scopes", StateFacts{Scopes: []ScopeFact{}}},
+		{"mutation outcomes", StateFacts{MutationOutcomes: []MutationOutcomeIdentityFact{}}},
+		{"scope edges", StateFacts{RowScopeEdges: []RowScopeEdgeFact{}}},
+		{"poison", StateFacts{Poison: []PoisonFact{}}},
+		{"rebuilds", StateFacts{Rebuilds: []RebuildFact{}}},
+		{"clients", StateFacts{Clients: []ClientDurabilityFact{}}},
+		{"client provenance", StateFacts{Clients: []ClientDurabilityFact{{UserID: "user", ClientID: "client", Provenance: []ProvenanceFact{}}}}},
+		{"client checkpoints", StateFacts{Clients: []ClientDurabilityFact{{UserID: "user", ClientID: "client", Checkpoints: []CheckpointFact{}}}}},
+		{"client queue", StateFacts{Clients: []ClientDurabilityFact{{UserID: "user", ClientID: "client", Queue: []QueuedMutationFact{}}}}},
+		{"client outcomes", StateFacts{Clients: []ClientDurabilityFact{{UserID: "user", ClientID: "client", Outcomes: []MutationOutcomeFact{}}}}},
+	}
+	if !StateFactsProjectionEqual(StateFacts{}, observed) {
+		t.Fatal("omitted families rejected an observation")
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded StateFacts
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			cloned, err := Clone(Scenario{
+				Model: ModelSpec{ExpectedState: []ModelExpectation{{StateFacts: &test.want}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, roundTrip := range []StateFacts{decoded, *cloned.Model.ExpectedState[0].StateFacts} {
+				if StateFactsProjectionEqual(roundTrip, observed) {
+					t.Fatal("serialized empty projection accepted nonempty state")
+				}
+				if !StateFactsProjectionEqual(roundTrip, test.want) {
+					t.Fatal("serialized empty projection rejected empty state")
+				}
+			}
+		})
 	}
 }
 

@@ -1,6 +1,9 @@
 package soak
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,10 +69,12 @@ func equalObservationSurfaces(left, right []ObservationSurface) bool {
 
 // FaultActivationObservation records the bounded activation and cleanup of a selected fault.
 type FaultActivationObservation struct {
-	ControlID string `json:"control_id"`
-	Target    string `json:"target"`
-	Activated bool   `json:"activated"`
-	CleanedUp bool   `json:"cleaned_up"`
+	ControlID                string `json:"control_id"`
+	Target                   string `json:"target"`
+	Activated                bool   `json:"activated"`
+	CleanedUp                bool   `json:"cleaned_up"`
+	ExchangeSequence         uint64 `json:"exchange_sequence,omitempty"`
+	RecoveryExchangeSequence uint64 `json:"recovery_exchange_sequence,omitempty"`
 }
 
 // ErrCaptureIncomplete reports a capture that cannot support its operation contract.
@@ -99,13 +104,13 @@ func validateObservationCapture(operation Operation, capture ObservationCapture,
 	if err := validateCaptureCheckpoint(operation, capture.Operator); err != nil {
 		return err
 	}
-	if err := validateFaultActivation(operation, capture.FaultActivation); err != nil {
+	if err := validateFaultActivation(operation, capture.FaultActivation, capture.WireExchanges); err != nil {
 		return err
 	}
 	if err := validateWireExchanges(operation, capture.WireExchanges); err != nil {
 		return err
 	}
-	if err := validateCursorBindings(operation, capture, prior); err != nil {
+	if err := validateCursorBindings(operation, capture); err != nil {
 		return err
 	}
 	if err := validateServerRowIdentities(operation, capture); err != nil {
@@ -153,10 +158,10 @@ func captureHasSurface(capture ObservationCapture, surface ObservationSurface) b
 }
 
 func validateCaptureClients(operation Operation, clients []invariants.ClientObservation, prior []invariants.Observation) error {
-	priorClients := make(map[string]struct{})
+	priorClients := make(map[string]bool)
 	for _, observation := range prior {
 		for _, client := range observation.Clients {
-			priorClients[clientKey(client)] = struct{}{}
+			priorClients[clientKey(client)] = client.ReferenceOnly
 		}
 	}
 	seen := make(map[string]struct{}, len(clients))
@@ -169,17 +174,17 @@ func validateCaptureClients(operation Operation, clients []invariants.ClientObse
 			return fmt.Errorf("%w: operation %d duplicate client", ErrCaptureIncomplete, operation.Sequence)
 		}
 		seen[key] = struct{}{}
-		if !client.Complete || client.Process == nil {
+		if reference, exists := priorClients[key]; exists && reference != client.ReferenceOnly {
+			return fmt.Errorf("%w: client observation source changed", ErrCaptureIncomplete)
+		}
+		if !client.Complete || (!client.ReferenceOnly && client.Process == nil) {
 			return fmt.Errorf("%w: operation %d client %s is not complete", ErrCaptureIncomplete, operation.Sequence, client.State.ClientID)
 		}
-		expectedBoundary := operation.Kind == OperationProcessDeath && client.State.UserID == operation.UserID && client.State.ClientID == operation.ClientID
-		if client.RestartBoundary != expectedBoundary {
-			return fmt.Errorf("%w: operation %d restart boundary for client %s is incorrect", ErrCaptureIncomplete, operation.Sequence, client.State.ClientID)
+		if client.ReferenceOnly && (client.Process != nil || client.RestartBoundary) {
+			return fmt.Errorf("%w: reference state cannot claim native durability", ErrCaptureIncomplete)
 		}
-		if expectedBoundary {
-			if _, exists := priorClients[key]; !exists {
-				return fmt.Errorf("%w: operation %d restart boundary has no prior client capture", ErrCaptureIncomplete, operation.Sequence)
-			}
+		if client.RestartBoundary {
+			return fmt.Errorf("%w: operation %d restart boundary for client %s is incorrect", ErrCaptureIncomplete, operation.Sequence, client.State.ClientID)
 		}
 	}
 	if _, exists := seen[operation.UserID+"\x00"+operation.ClientID]; !exists {
@@ -208,21 +213,46 @@ func validateCaptureCheckpoint(operation Operation, operator *invariants.Operato
 	return fmt.Errorf("%w: operation %d target checkpoint is not captured", ErrCaptureIncomplete, operation.Sequence)
 }
 
-func validateFaultActivation(operation Operation, activation *FaultActivationObservation) error {
+func validateFaultActivation(operation Operation, activation *FaultActivationObservation, wires []invariants.WireExchangeObservation) error {
+	if err := ValidateFaultOperation(operation); err != nil {
+		return err
+	}
 	if operation.FaultPlan == nil {
 		if activation != nil {
 			return fmt.Errorf("%w: operation %d has an unexpected fault activation", ErrCaptureIncomplete, operation.Sequence)
 		}
 		return nil
 	}
-	if activation == nil || !activation.Activated || !activation.CleanedUp || activation.ControlID != string(operation.FaultPlan.ControlID) || activation.Target == "" {
+	if activation == nil || !activation.Activated || !activation.CleanedUp || activation.ControlID != string(operation.FaultPlan.ControlID) || activation.Target != operation.FaultPlan.Injection.Target {
 		return fmt.Errorf("%w: operation %d fault activation is incomplete", ErrCaptureIncomplete, operation.Sequence)
+	}
+	if operation.Kind == OperationProcessDeath {
+		if activation.ExchangeSequence != 0 || activation.RecoveryExchangeSequence != 0 {
+			return fmt.Errorf("%w: WAL restart cannot claim an HTTP fault", ErrCaptureIncomplete)
+		}
+		return nil
+	}
+	var lost, recovered *invariants.WireExchangeObservation
+	for index := range wires {
+		wire := &wires[index]
+		if wire.Sequence == activation.ExchangeSequence {
+			lost = wire
+		}
+		if wire.Sequence == activation.RecoveryExchangeSequence {
+			recovered = wire
+		}
+	}
+	if lost == nil || recovered == nil || lost.Sequence >= recovered.Sequence ||
+		lost.ResponseStatus != 0 || len(lost.ResponseBody) != 0 || recovered.ResponseStatus != 200 ||
+		lost.OperationClass != operationExchangeClass(operation) || recovered.OperationClass != lost.OperationClass ||
+		!bytes.Equal(lost.RequestBody, recovered.RequestBody) {
+		return fmt.Errorf("%w: response loss lacks an exact successful recovery", ErrCaptureIncomplete)
 	}
 	return nil
 }
 
 func validateWireExchanges(operation Operation, exchanges []invariants.WireExchangeObservation) error {
-	expectedClass := operationExchangeClass(operation.Kind)
+	expectedClass := operationExchangeClass(operation)
 	if operation.Kind != OperationProcessDeath && len(exchanges) == 0 {
 		return fmt.Errorf("%w: operation %d has no wire exchange", ErrCaptureIncomplete, operation.Sequence)
 	}
@@ -285,23 +315,43 @@ func validateWireExchanges(operation Operation, exchanges []invariants.WireExcha
 }
 
 func validateWireExchangeTarget(operation Operation, exchange invariants.WireExchangeObservation) error {
+	transport := exchange.Transport
+	if transport == nil || transport.UserID != operation.UserID || transport.ClientID != operation.ClientID ||
+		transport.Method != "POST" || transport.Path != "/sync/"+exchange.OperationClass {
+		return fmt.Errorf("%w: operation %d transport identity or endpoint is invalid", ErrCaptureIncomplete, operation.Sequence)
+	}
+	requestHash := sha256.Sum256(exchange.RequestBody)
+	responseHash := sha256.Sum256(exchange.ResponseBody)
+	if transport.RequestSHA256 != hex.EncodeToString(requestHash[:]) || transport.ResponseSHA256 != hex.EncodeToString(responseHash[:]) {
+		return fmt.Errorf("%w: operation %d wire bytes differ from recorder metadata", ErrCaptureIncomplete, operation.Sequence)
+	}
 	var request struct {
 		UserID              string                     `json:"user_id"`
 		AuthenticatedUserID string                     `json:"authenticated_user_id"`
 		ClientID            string                     `json:"client_id"`
 		ScopeID             string                     `json:"scope_id"`
+		Scope               string                     `json:"scope"`
 		Scopes              map[string]json.RawMessage `json:"scopes"`
+		KnownScopes         map[string]json.RawMessage `json:"known_scopes"`
 	}
 	if err := json.Unmarshal(exchange.RequestBody, &request); err != nil {
 		return fmt.Errorf("%w: operation %d wire exchange target is malformed", ErrCaptureIncomplete, operation.Sequence)
 	}
-	if request.UserID == "" && request.AuthenticatedUserID == "" ||
-		request.UserID != "" && request.UserID != operation.UserID ||
+	if request.UserID != "" && request.UserID != operation.UserID ||
 		request.AuthenticatedUserID != "" && request.AuthenticatedUserID != operation.UserID ||
 		request.ClientID != operation.ClientID {
 		return fmt.Errorf("%w: operation %d wire exchange target identity does not match", ErrCaptureIncomplete, operation.Sequence)
 	}
 	scopeBound := false
+	if request.Scope != "" {
+		if request.Scope != operation.ScopeID {
+			return fmt.Errorf("%w: operation %d rebuild scope does not match", ErrCaptureIncomplete, operation.Sequence)
+		}
+		scopeBound = true
+	}
+	if exchange.OperationClass == "connect" {
+		request.Scopes = request.KnownScopes
+	}
 	if request.ScopeID != "" {
 		if request.ScopeID != operation.ScopeID {
 			return fmt.Errorf("%w: operation %d wire exchange target scope does not match", ErrCaptureIncomplete, operation.Sequence)
@@ -314,14 +364,14 @@ func validateWireExchangeTarget(operation Operation, exchange invariants.WireExc
 		}
 		scopeBound = true
 	}
-	if !scopeBound {
+	if !scopeBound && exchange.OperationClass != "push" {
 		return fmt.Errorf("%w: operation %d wire exchange target scope is missing", ErrCaptureIncomplete, operation.Sequence)
 	}
 	return nil
 }
 
-func operationExchangeClass(kind OperationKind) string {
-	switch kind {
+func operationExchangeClass(operation Operation) string {
+	switch operation.Kind {
 	case OperationConnect:
 		return "connect"
 	case OperationPush:
@@ -331,11 +381,11 @@ func operationExchangeClass(kind OperationKind) string {
 	case OperationRebuild:
 		return "rebuild"
 	case OperationSchemaTransition:
-		return "schema-transition"
+		return "connect"
 	case OperationProcessDeath:
-		return "process-death"
+		return ""
 	case OperationWireFault:
-		return "wire-fault"
+		return string(operation.WireOperation)
 	default:
 		return ""
 	}
@@ -355,7 +405,7 @@ func terminalPullExchange(exchange invariants.WireExchangeObservation) (bool, in
 	return !*response.HasMore, len(response.Changes), nil
 }
 
-func validateCursorBindings(operation Operation, capture ObservationCapture, prior []invariants.Observation) error {
+func validateCursorBindings(operation Operation, capture ObservationCapture) error {
 	if operation.Kind != OperationPull {
 		if len(capture.PullResults) != 0 || len(capture.CursorAcknowledgements) != 0 {
 			return fmt.Errorf("%w: operation %d has unexpected pull facts", ErrCaptureIncomplete, operation.Sequence)
@@ -385,8 +435,17 @@ func validateCursorBindings(operation Operation, capture ObservationCapture, pri
 			return fmt.Errorf("%w: operation %d pull result is duplicated", ErrCaptureIncomplete, operation.Sequence)
 		}
 		pulls[result.ExchangeSequence] = result
+		var issued struct {
+			Cursors map[string]string `json:"scope_cursors"`
+		}
+		if json.Unmarshal(exchange.ResponseBody, &issued) != nil {
+			return fmt.Errorf("%w: pull response is malformed", ErrCaptureIncomplete)
+		}
 		targetCursor := false
 		for _, cursor := range result.Cursors {
+			if issued.Cursors[cursor.ScopeID] != cursor.RawCursor {
+				return fmt.Errorf("%w: cursor was not issued by its recorded response", ErrCaptureIncomplete)
+			}
 			if cursor.UserID != operation.UserID || cursor.ClientID != operation.ClientID {
 				return fmt.Errorf("%w: operation %d pull cursor target does not match", ErrCaptureIncomplete, operation.Sequence)
 			}
@@ -403,11 +462,29 @@ func validateCursorBindings(operation Operation, capture ObservationCapture, pri
 	}
 	acknowledged := make(map[string]struct{}, len(capture.CursorAcknowledgements))
 	for _, acknowledgement := range capture.CursorAcknowledgements {
-		result, exists := pulls[acknowledgement.ExchangeSequence]
-		if !exists || !sameCursorInList(result.Cursors, acknowledgement.Cursor) {
+		exchange, exists := wires[acknowledgement.ExchangeSequence]
+		var request struct {
+			ClientID string `json:"client_id"`
+			Scopes   map[string]struct {
+				Cursor string `json:"cursor"`
+			} `json:"scopes"`
+		}
+		if !exists || exchange.OperationClass != "pull" || exchange.ResponseStatus != 200 ||
+			json.Unmarshal(exchange.RequestBody, &request) != nil ||
+			request.ClientID != acknowledgement.Cursor.ClientID ||
+			request.Scopes[acknowledgement.Cursor.ScopeID].Cursor != acknowledgement.Cursor.RawCursor {
+			return fmt.Errorf("%w: acknowledgement request does not carry its cursor", ErrCaptureIncomplete)
+		}
+		var issuedSequence uint64
+		for sequence, result := range pulls {
+			if sequence > issuedSequence && sequence < acknowledgement.ExchangeSequence && sameCursorInList(result.Cursors, acknowledgement.Cursor) {
+				issuedSequence = sequence
+			}
+		}
+		if issuedSequence == 0 {
 			return fmt.Errorf("%w: operation %d acknowledgement is not bound to a pull result", ErrCaptureIncomplete, operation.Sequence)
 		}
-		key := strconv.FormatUint(acknowledgement.ExchangeSequence, 10) + "\x00" + cursorKey(acknowledgement.Cursor)
+		key := strconv.FormatUint(issuedSequence, 10) + "\x00" + cursorKey(acknowledgement.Cursor)
 		if _, duplicate := acknowledged[key]; duplicate {
 			return fmt.Errorf("%w: operation %d acknowledgement is duplicated", ErrCaptureIncomplete, operation.Sequence)
 		}

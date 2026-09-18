@@ -7,10 +7,11 @@ public struct SynchroConfig: Sendable {
     public let clientID: String
     public let platform: String
     public let appVersion: String
+    /// Seconds between periodic cycles. Zero disables periodic scheduling.
     public let syncInterval: TimeInterval
     public let pushDebounce: TimeInterval
     public let maxRetryAttempts: Int
-    /// Max records per pull page (default 100, server caps at 1000).
+    /// Max records per pull page, from 1 through 1000 (default 100).
     public let pullPageSize: Int
     /// Max pending changes per push batch (default 100).
     public let pushBatchSize: Int
@@ -76,9 +77,24 @@ public struct SynchroConfig: Sendable {
         self.syncInterval = syncInterval
         self.pushDebounce = pushDebounce
         self.maxRetryAttempts = maxRetryAttempts
-        self.pullPageSize = min(pullPageSize, 1000)
+        self.pullPageSize = pullPageSize
         self.pushBatchSize = pushBatchSize
         self.seedDatabasePath = seedDatabasePath
         self.transportObservationCollector = transportObservationCollector
+    }
+
+    func validate() throws {
+        guard (1...1000).contains(pullPageSize), (1...1000).contains(pushBatchSize),
+              maxRetryAttempts >= 0 else {
+            throw SynchroError.invalidResponse(message: "sync configuration limits are invalid")
+        }
+        for interval in [syncInterval, pushDebounce] {
+            let nanoseconds = interval * 1_000_000_000
+            guard interval.isFinite, interval >= 0,
+                  interval == 0 || nanoseconds >= 1,
+                  UInt64(exactly: nanoseconds.rounded(.towardZero)) != nil else {
+                throw SynchroError.invalidResponse(message: "sync configuration timers are invalid")
+            }
+        }
     }
 }

@@ -282,6 +282,38 @@ final class PullProcessorTests: XCTestCase {
         XCTAssertEqual(cp3, 200)
     }
 
+    func testPrimaryKeyOnlyUpsertInsertsAndReplaysWithoutDuplicateRows() throws {
+        let table = SchemaTable(
+            tableName: "keys",
+            updatedAtColumn: "",
+            deletedAtColumn: "",
+            primaryKey: ["id"],
+            columns: [SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true)]
+        )
+        let (db, processor) = try makeTestEnv(schema: table)
+        defer { try? db.close() }
+        try addScopeRow(db, scopeID: "keys", recordID: "key-1", tableName: "keys")
+        for version in ["version-1", "version-2"] {
+            let change = try makeChangeRecord(
+                scope: "keys", schema: table, op: .upsert,
+                pk: ["id": AnyCodable("key-1")],
+                row: ["id": AnyCodable("key-1")],
+                serverVersion: version
+            )
+            try processor.applyScopeChanges(
+                changes: [change], syncedTables: [table],
+                scopeCursors: ["keys": version], checksums: nil,
+                schemaHash: protocolTestSchemaHash
+            )
+            XCTAssertEqual(try db.query("SELECT id FROM keys", params: nil).map { $0["id"] as String }, ["key-1"])
+            XCTAssertEqual(try db.queryOne(
+                "SELECT server_version FROM _synchro_row_versions WHERE table_name = 'keys' AND record_id = 'key-1'",
+                params: nil
+            )?["server_version"] as String?, version)
+            XCTAssertEqual(try pendingChangeCount(db), 0)
+        }
+    }
+
     func testProtectedUpsertPreservesProjectionAndRefreshesServerMetadata() throws {
         for state in ["unsealed", "sealed", "blocked_by_predecessor", "legacy_blocked"] {
             let (db, processor) = try makeTestEnv()

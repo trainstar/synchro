@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -85,6 +84,7 @@ type Config struct {
 type Operation struct {
 	Sequence                    uint64               `json:"sequence"`
 	Kind                        OperationKind        `json:"kind"`
+	WireOperation               OperationKind        `json:"wire_operation,omitempty"`
 	UserID                      string               `json:"user_id"`
 	ClientID                    string               `json:"client_id"`
 	ScopeID                     string               `json:"scope_id"`
@@ -141,14 +141,14 @@ func (g *Generator) Generate() (Plan, error) {
 	if err := g.config.validate(); err != nil {
 		return Plan{}, err
 	}
-	controls := sortedControls(g.catalog.Controls)
-	if len(controls) == 0 {
-		return Plan{}, fmt.Errorf("%w: catalog has no controls", ErrCatalogRequired)
+	controls := make(map[string]faults.Control)
+	for _, control := range g.catalog.Controls {
+		if control.ID == "CTRL-FAILURE-001" || control.ID == "CTRL-WAL-004" {
+			controls[control.ID] = control
+		}
 	}
-	wireControls := controlsWithMechanism(controls, "wire-fault")
-	processControls := controlsWithMechanism(controls, "process-fault")
-	if len(wireControls) == 0 || len(processControls) == 0 {
-		return Plan{}, fmt.Errorf("%w: wire-fault and process-fault controls are required", ErrCatalogRequired)
+	if len(controls) != 2 {
+		return Plan{}, fmt.Errorf("%w: response-loss and WAL-replay controls are required", ErrCatalogRequired)
 	}
 	catalogIdentity, err := catalogIdentityOf(g.catalog)
 	if err != nil {
@@ -172,20 +172,20 @@ func (g *Generator) Generate() (Plan, error) {
 			SchemaVersion:               1 + uint64(random.intn(3)),
 			RequiredObservationSurfaces: requiredObservationSurfaces(kind),
 		}
+		if kind == OperationWireFault {
+			operation.WireOperation = []OperationKind{OperationPush, OperationPull}[random.intn(2)]
+		}
 
 		attachFault := kind == OperationWireFault || kind == OperationProcessDeath
 		if supportsWireFault(kind) && random.percent() < g.config.FaultRate {
 			attachFault = true
 		}
 		if attachFault {
-			selected := wireControls
-			switch kind {
-			case OperationWireFault:
-				selected = wireControls
-			case OperationProcessDeath:
-				selected = processControls
+			controlID := "CTRL-FAILURE-001"
+			if kind == OperationProcessDeath {
+				controlID = "CTRL-WAL-004"
 			}
-			control := selected[random.intn(len(selected))]
+			control := controls[controlID]
 			faultPlan, err := makeFaultPlan(control, sequence)
 			if err != nil {
 				return Plan{}, err
@@ -333,9 +333,9 @@ func (p Plan) validateShape(catalog *faults.Catalog) error {
 			if err := faults.ValidatePlan(*operation.FaultPlan, catalog); err != nil {
 				return fmt.Errorf("%w: operation %d fault: %w", ErrInvalidPlan, index+1, err)
 			}
-			if !faultSupportsOperation(operation.Kind, *operation.FaultPlan) {
-				return fmt.Errorf("%w: operation %d fault has no supported trigger", ErrInvalidPlan, index+1)
-			}
+		}
+		if err := ValidateFaultOperation(operation); err != nil {
+			return err
 		}
 		if index < len(operationKinds) && operation.Kind != operationKinds[index] {
 			return fmt.Errorf("%w: operation %d does not satisfy coverage prefix", ErrInvalidPlan, index+1)
@@ -344,27 +344,9 @@ func (p Plan) validateShape(catalog *faults.Catalog) error {
 	return nil
 }
 
-func sortedControls(controls []faults.Control) []faults.Control {
-	result := append([]faults.Control(nil), controls...)
-	sort.Slice(result, func(left, right int) bool {
-		return result[left].ID < result[right].ID
-	})
-	return result
-}
-
-func controlsWithMechanism(controls []faults.Control, mechanism string) []faults.Control {
-	result := make([]faults.Control, 0, len(controls))
-	for _, control := range controls {
-		if control.Injection.Mechanism == mechanism {
-			result = append(result, control)
-		}
-	}
-	return result
-}
-
 func supportsWireFault(kind OperationKind) bool {
 	switch kind {
-	case OperationConnect, OperationPush, OperationPull, OperationWireFault:
+	case OperationPush, OperationPull, OperationWireFault:
 		return true
 	default:
 		return false
@@ -374,17 +356,43 @@ func supportsWireFault(kind OperationKind) bool {
 func faultSupportsOperation(kind OperationKind, plan scenarios.FaultPlan) bool {
 	switch plan.Injection.Mechanism {
 	case "wire-fault":
-		return supportsWireFault(kind)
+		return supportsWireFault(kind) && plan.ControlID == "CTRL-FAILURE-001" &&
+			plan.FaultID == "FAULT-FAILURE-001" && plan.RequirementID == "SYNC-FAILURE-001" &&
+			plan.Injection.Operator == "crash" && plan.Injection.Target == "pull or push transport response"
 	case "process-fault":
-		return kind == OperationProcessDeath
+		return kind == OperationProcessDeath && plan.ControlID == "CTRL-WAL-004" &&
+			plan.FaultID == "FAULT-WAL-004" && plan.RequirementID == "SYNC-WAL-004" &&
+			plan.Injection.Operator == "crash" && plan.Injection.Target == "source transaction replay boundary"
 	default:
 		return false
 	}
 }
 
+// ValidateFaultOperation rejects recipes that the soak harness cannot execute.
+func ValidateFaultOperation(operation Operation) error {
+	if operation.Kind == OperationWireFault {
+		if operation.WireOperation != OperationPush && operation.WireOperation != OperationPull {
+			return fmt.Errorf("%w: wire fault requires a push or pull operation", ErrInvalidPlan)
+		}
+	} else if operation.WireOperation != "" {
+		return fmt.Errorf("%w: unexpected wire operation", ErrInvalidPlan)
+	}
+	if operation.FaultPlan == nil {
+		if operation.Kind == OperationWireFault || operation.Kind == OperationProcessDeath {
+			return fmt.Errorf("%w: fault operation has no recipe", ErrInvalidPlan)
+		}
+		return nil
+	}
+	if !faultSupportsOperation(operation.Kind, *operation.FaultPlan) {
+		return fmt.Errorf("%w: unsupported fault recipe", ErrInvalidPlan)
+	}
+	return nil
+}
+
 func operationInput(operation Operation) (json.RawMessage, error) {
 	type inputRecord struct {
 		Kind             OperationKind        `json:"kind"`
+		WireOperation    OperationKind        `json:"wire_operation,omitempty"`
 		UserID           string               `json:"user_id"`
 		ClientID         string               `json:"client_id"`
 		ScopeID          string               `json:"scope_id"`
@@ -395,13 +403,16 @@ func operationInput(operation Operation) (json.RawMessage, error) {
 	}
 	record := inputRecord{
 		Kind:             operation.Kind,
+		WireOperation:    operation.WireOperation,
 		UserID:           operation.UserID,
 		ClientID:         operation.ClientID,
 		ScopeID:          operation.ScopeID,
 		SchemaVersion:    operation.SchemaVersion,
 		FaultPlan:        operation.FaultPlan,
-		ProcessTarget:    operation.ClientID,
 		SchemaTransition: operation.SchemaVersion,
+	}
+	if operation.Kind == OperationProcessDeath {
+		record.ProcessTarget = "wal-worker"
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {

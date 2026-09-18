@@ -161,8 +161,12 @@ describe('Synchro RN E2E', () => {
     await runAction('readTx');
   });
 
-  it('transaction timeout triggers rollback', async () => {
+  it('rolls back a timed-out write and commits the next transaction', async () => {
     await runAction('txTimeout');
+  });
+
+  it('rejects malformed schema input without partial changes and accepts valid schema input', async () => {
+    await runAction('schemaDecode');
   });
 
   it('close and reinitialize roll back active writes and release the lock', async () => {

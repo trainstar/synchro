@@ -20,11 +20,16 @@ final class HttpClient: @unchecked Sendable {
         requestBody: Data? = nil
     ) async throws -> ConnectResponse {
         let body = try requestBody ?? connectRequestBody(request)
-        return try await postData(
+        let response: ConnectResponse = try await postData(
             "/sync/connect",
             data: body,
             retryContext: try retryContext(resumeState: .connecting, workIdentity: body)
         )
+        try response.validate(
+            existingScopes: request.knownScopes,
+            requestScopeSetVersion: request.scopeSetVersion
+        )
+        return response
     }
 
     func connectRequestBody(_ request: ConnectRequest) throws -> Data {

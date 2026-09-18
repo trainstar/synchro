@@ -1,38 +1,7 @@
-import { by, element } from 'detox';
-
-import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
-
-type Response = { schema_version: number; sequence: number } & (
-  | { state: 'command'; command: Record<string, unknown> }
-  | { state: 'complete'; command: null }
-);
-
-function configuration(): { endpoint: string; token: string; stageCount: number } {
-  const url = process.env.SYNCHRO_RN_COORDINATOR_URL;
-  const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
-  const stageCount = Number(process.env.SYNCHRO_RN_COORDINATOR_STAGE_COUNT);
-  if (!url || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !Number.isSafeInteger(stageCount) || stageCount < 2) throw new Error('React Native multi-scope provenance coordinator configuration is invalid');
-  const parsed = new URL(url);
-  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || (parsed.pathname !== '' && parsed.pathname !== '/') || parsed.search || parsed.hash) throw new Error('React Native multi-scope provenance coordinator configuration is invalid');
-  return { endpoint: new URL('/exchange', parsed).toString(), token, stageCount };
-}
-
-function response(raw: string, sequence: number): Response {
-  const value = JSON.parse(raw) as Record<string, unknown>;
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(['command', 'schema_version', 'sequence', 'state']) || value.schema_version !== 1 || value.sequence !== sequence || (value.state !== 'command' && value.state !== 'complete') || (value.state === 'command' && (typeof value.command !== 'object' || value.command === null || Array.isArray(value.command))) || (value.state === 'complete' && value.command !== null)) throw new Error('React Native multi-scope provenance coordinator response is invalid');
-  return value as unknown as Response;
-}
-
-async function exchange(endpoint: string, token: string, sequence: number, result: string): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-  try {
-    const reply = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: `{"schema_version":1,"sequence":${sequence},"result":${result}}`, signal: controller.signal });
-    const body = await reply.text();
-    if (!reply.ok) throw new Error(`HTTP ${reply.status}: ${body}`);
-    return response(body, sequence);
-  } finally { clearTimeout(timeout); }
-}
+import {
+  coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
+  launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
+} from './corpus-harness';
 
 function isJSONObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -53,24 +22,16 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   }
   const serialized = JSON.stringify(command);
   await submitCorpusCommand(serialized);
-  const deadline = Date.now() + 120000;
-  while (Date.now() < deadline) {
-    const state = await element(by.id('conformance-command-state')).getAttributes();
-    if (state.text === 'ok' || state.text === 'error') {
-      const raw = String((await element(by.id('conformance-result')).getAttributes()).text ?? '');
-      const envelope = JSON.parse(raw) as { outcome: string; error_code: string | null; error_detail: string | null };
-      if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}${envelope.error_detail === null ? '' : `: ${envelope.error_detail}`}`);
-      return raw;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error('React Native multi-scope provenance command did not finish');
+  const { raw, envelope } = await pollCorpusResult(120000, 'React Native multi-scope provenance command did not finish');
+  if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}${envelope.error_detail === null ? '' : `: ${envelope.error_detail}`}`);
+  return raw;
 }
 
 // This scenario drives six clients through the coordinator, so it needs more
 // than the shared 120 second budget that the slower simulator cannot meet.
 it('executes the multi-scope-provenance coordinator sequence', () => runCorpusCommandLoop(async () => {
-  const { endpoint, token, stageCount } = configuration();
+  const { endpoint, token } = coordinatorConfiguration();
+  const stageCount = coordinatorCount('STAGE_COUNT', 2);
   await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
   let result = 'null';
   for (let sequence = 1; sequence <= stageCount; sequence += 1) {

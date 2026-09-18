@@ -1,6 +1,10 @@
 package com.trainstar.synchro
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
@@ -8,6 +12,7 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 class HttpClientTests {
 
@@ -32,6 +37,88 @@ class HttpClientTests {
     @After
     fun tearDown() {
         server.shutdown()
+    }
+
+    @Test
+    fun rebuildRequestsKeepRequiredNullCursorAndExactRetryBytes() = runTest {
+        for (cursor in listOf(null, "rebuild-page-2")) {
+            val request = RebuildRequest(
+                clientID = "test-device",
+                clientGeneration = 1,
+                schema = SchemaRef(1, "a".repeat(64)),
+                scope = "scope-one",
+                rebuildID = "00000000-0000-4000-8000-000000000001",
+                cursor = cursor,
+                limit = 100,
+            )
+            val body = retryableRequestBody("/sync/rebuild") { httpClient.rebuild(request) }
+            val encoded = Json.parseToJsonElement(body).jsonObject
+            assertEquals(cursor?.let(::JsonPrimitive) ?: JsonNull, encoded["cursor"])
+            val replay = retryableRequestBody("/sync/rebuild") { httpClient.rebuildWithBody(request, body) }
+            assertEquals(body, replay)
+        }
+    }
+
+    @Test
+    fun connectRequestsKeepRequiredScopeCursorsAndOmitOptionalNulls() = runTest {
+        val request = ConnectRequest(
+            clientID = "test-device",
+            platform = "android",
+            appVersion = "1.0.0",
+            protocolVersion = 3,
+            schema = SchemaRef(1, "a".repeat(64)),
+            scopeSetVersion = 1,
+            knownScopes = mapOf(
+                "fresh" to ScopeCursorRef(),
+                "continued" to ScopeCursorRef("scope-cursor"),
+            ),
+        )
+        val body = retryableRequestBody("/sync/connect") { httpClient.connect(request) }
+        val encoded = Json.parseToJsonElement(body).jsonObject
+        assertEquals(
+            Json.parseToJsonElement("""{"fresh":{"cursor":null},"continued":{"cursor":"scope-cursor"}}"""),
+            encoded["known_scopes"],
+        )
+        assertFalse(encoded.containsKey("client_generation"))
+        assertFalse(encoded.containsKey("schema_reset"))
+        assertFalse(encoded.containsKey("seed_receipts"))
+        val replay = retryableRequestBody("/sync/connect") { httpClient.connectExact(request, body) }
+        assertEquals(body, replay)
+    }
+
+    @Test
+    fun pullRequestsKeepRequiredScopeCursorsAndExactRetryBytes() = runTest {
+        val request = PullRequest(
+            clientID = "test-device",
+            clientGeneration = 1,
+            schema = SchemaRef(1, "a".repeat(64)),
+            scopeSetVersion = 1,
+            scopes = mapOf(
+                "fresh" to ScopeCursorRef(),
+                "continued" to ScopeCursorRef("scope-cursor"),
+            ),
+            limit = 100,
+        )
+        val body = retryableRequestBody("/sync/pull") { httpClient.pull(request) }
+        assertEquals(
+            Json.parseToJsonElement("""{"fresh":{"cursor":null},"continued":{"cursor":"scope-cursor"}}"""),
+            Json.parseToJsonElement(body).jsonObject["scopes"],
+        )
+        val replay = retryableRequestBody("/sync/pull") { httpClient.pullExact(request, body) }
+        assertEquals(body, replay)
+    }
+
+    private suspend fun retryableRequestBody(path: String, send: suspend () -> Unit): String {
+        server.enqueue(
+            MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(RETRYABLE_503_ERROR_JSON),
+        )
+        val failure = runCatching { send() }.exceptionOrNull()
+        assertTrue("Expected the authored retryable response", failure is RetryableError)
+        val recorded = requireNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+        assertEquals(path, recorded.path)
+        val body = recorded.body.readUtf8()
+        assertEquals(body, (failure as RetryableError).workIdentity)
+        return body
     }
 
     @Test

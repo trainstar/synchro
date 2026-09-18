@@ -217,12 +217,7 @@ internal object SynchroMeta {
         processRecovery: Boolean = false,
     ) {
         val current = getClientState(db).lifecycleState
-        val allowed = LEGAL_LIFECYCLE_ADJACENCY.getValue(current)
-        val recoveryTransition = processRecovery && state == SyncLifecycleState.LOCAL_READY &&
-            current in RECOVERABLE_PROCESS_STATES
-        if (state !in allowed && !recoveryTransition) {
-            throw SynchroError.InvalidStateTransition(current, state)
-        }
+        LifecycleTransitions.requireAllowed(current, state, processRecovery)
         db.execSQL(
             """
             UPDATE _synchro_client_state
@@ -238,9 +233,7 @@ internal object SynchroMeta {
     internal fun recordBlockingError(db: SQLiteDatabase, failure: SyncFailure) {
         validateMetadata(failure.metadata)
         val current = getClientState(db).lifecycleState
-        if (SyncLifecycleState.ERROR !in LEGAL_LIFECYCLE_ADJACENCY.getValue(current)) {
-            throw SynchroError.InvalidStateTransition(current, SyncLifecycleState.ERROR)
-        }
+        LifecycleTransitions.requireAllowed(current, SyncLifecycleState.ERROR)
         db.execSQL(
             """
             UPDATE _synchro_client_state
@@ -327,89 +320,6 @@ internal object SynchroMeta {
             }
         }
     }
-
-    private val LEGAL_LIFECYCLE_ADJACENCY = mapOf(
-        SyncLifecycleState.UNINITIALIZED to setOf(
-            SyncLifecycleState.LOCAL_READY,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.LOCAL_READY to setOf(
-            SyncLifecycleState.CONNECTING,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.CONNECTING to setOf(
-            SyncLifecycleState.SCHEMA_APPLYING,
-            SyncLifecycleState.READY,
-            SyncLifecycleState.BACKOFF,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.SCHEMA_APPLYING to setOf(
-            SyncLifecycleState.READY,
-            SyncLifecycleState.REBUILDING,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.READY to setOf(
-            SyncLifecycleState.CONNECTING,
-            SyncLifecycleState.PUSHING,
-            SyncLifecycleState.PULLING,
-            SyncLifecycleState.REBUILDING,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.PUSHING to setOf(
-            SyncLifecycleState.PUSHING,
-            SyncLifecycleState.READY,
-            SyncLifecycleState.PULLING,
-            SyncLifecycleState.CONNECTING,
-            SyncLifecycleState.BACKOFF,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.PULLING to setOf(
-            SyncLifecycleState.PULLING,
-            SyncLifecycleState.READY,
-            SyncLifecycleState.REBUILDING,
-            SyncLifecycleState.CONNECTING,
-            SyncLifecycleState.BACKOFF,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.REBUILDING to setOf(
-            SyncLifecycleState.REBUILDING,
-            SyncLifecycleState.READY,
-            SyncLifecycleState.CONNECTING,
-            SyncLifecycleState.BACKOFF,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.BACKOFF to setOf(
-            SyncLifecycleState.CONNECTING,
-            SyncLifecycleState.PUSHING,
-            SyncLifecycleState.PULLING,
-            SyncLifecycleState.REBUILDING,
-            SyncLifecycleState.ERROR,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.ERROR to setOf(
-            SyncLifecycleState.LOCAL_READY,
-            SyncLifecycleState.STOPPED,
-        ),
-        SyncLifecycleState.STOPPED to setOf(SyncLifecycleState.LOCAL_READY),
-    )
-
-    private val RECOVERABLE_PROCESS_STATES = setOf(
-        SyncLifecycleState.CONNECTING,
-        SyncLifecycleState.SCHEMA_APPLYING,
-        SyncLifecycleState.READY,
-        SyncLifecycleState.PUSHING,
-        SyncLifecycleState.PULLING,
-        SyncLifecycleState.REBUILDING,
-        SyncLifecycleState.BACKOFF,
-    )
 
     // MARK: - Scope State
 

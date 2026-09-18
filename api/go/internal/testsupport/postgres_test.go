@@ -39,6 +39,20 @@ func TestQuoteIdentifier(t *testing.T) {
 	}
 }
 
+func TestUniqueNameBoundsLongPrefixes(t *testing.T) {
+	for _, length := range []int{49, 50, 51, 63, 100} {
+		prefix := strings.Repeat("p", length)
+		first := UniqueName(t, prefix)
+		second := UniqueName(t, prefix)
+		if len(first) > 63 || len(second) > 63 {
+			t.Fatalf("prefix length %d produced identifier lengths %d and %d", length, len(first), len(second))
+		}
+		if first == second {
+			t.Fatalf("prefix length %d lost the unique suffix", length)
+		}
+	}
+}
+
 func TestQuoteLiteral(t *testing.T) {
 	got := quoteLiteral("owner's role")
 	if got != `'owner''s role'` {

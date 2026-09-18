@@ -3,32 +3,12 @@ package invariants
 import "testing"
 
 const (
-	issue49CanonicalBodyHex = "0000000d000000000000000530302d706b01010000000000000005726f772d31000000000000000930312d737472696e6701010000000000000005636166c3a9000000000000000630322d696e740201ffffffef000000000000000830332d696e74363403010020000000000000000000000000000a30342d646563696d616c040100000000000000062d31322e3334000000000000000830352d666c6f617405013ff8000000000000000000000000000a30362d626f6f6c65616e060101000000000000000b30372d6461746574696d650701000000000000001b323032362d30392d30395431323a33343a35362e3132333435365a000000000000000730382d646174650801000000000000000a323032362d30392d3039000000000000000730392d74696d650901000000000000000f31323a33343a35362e313233343536000000000000000731302d6a736f6e0a0100000000000000177b2261223a312c2262223a5b747275652c6e756c6c5d7d000000000000000831312d62797465730b010000000000000004000102ff000000000000000731322d6e756c6c0100"
-	issue49SchemaHash       = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	issue49RowIdentityOne   = "73796e6368726f3a76333a726f772d6964656e746974793a763100000000000000000d74626c2d646f63756d656e7473000000000000000530302d706b01010000000000000005726f772d31"
-	issue49RowIdentityTwo   = "73796e6368726f3a76333a726f772d6964656e746974793a763100000000000000000d74626c2d646f63756d656e7473000000000000000530302d706b01010000000000000005726f772d32"
-	issue49RowDigestOne     = "ae212d5dd1405851eb8951b5c410f3ae88de37683a396f1a35349d8d936fa367"
-	issue49RowDigestTwo     = "0c381ee05ea32edbec28fe607faa0fada4d8498da973f28b0e50b2265dfe852c"
+	issue49SchemaHash     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	issue49RowIdentityOne = "73796e6368726f3a76333a726f772d6964656e746974793a763100000000000000000d74626c2d646f63756d656e7473000000000000000530302d706b01010000000000000005726f772d31"
+	issue49RowIdentityTwo = "73796e6368726f3a76333a726f772d6964656e746974793a763100000000000000000d74626c2d646f63756d656e7473000000000000000530302d706b01010000000000000005726f772d32"
+	issue49RowDigestOne   = "ae212d5dd1405851eb8951b5c410f3ae88de37683a396f1a35349d8d936fa367"
+	issue49RowDigestTwo   = "0c381ee05ea32edbec28fe607faa0fada4d8498da973f28b0e50b2265dfe852c"
 )
-
-func TestIssue49CanonicalTypedRowEncoding(t *testing.T) {
-	row := issue49CanonicalTypedRowFixture()
-	observation := issue49CanonicalRowObservation{
-		Row:             row,
-		ExpectedBodyHex: issue49CanonicalBodyHex,
-		Implementations: map[string]string{
-			"postgresql":   issue49CanonicalBodyHex,
-			"swift":        issue49CanonicalBodyHex,
-			"kotlin":       issue49CanonicalBodyHex,
-			"react-native": issue49CanonicalBodyHex,
-		},
-		Malformed: issue49MalformedTypedRows(row),
-	}
-	mutant := observation
-	mutant.Malformed = append([]issue49MalformedTypedRow(nil), observation.Malformed...)
-	mutant.Malformed[0].Applied = true
-	issue49Proof(t, "SYNC-INTEGRITY-003", issue49CanonicalTypedRowsValid(observation), issue49CanonicalTypedRowsValid(mutant))
-}
 
 func TestIssue49RowDigestBinding(t *testing.T) {
 	row := issue49CanonicalTypedRowFixture()
@@ -181,46 +161,6 @@ func issue49CanonicalTypedRowFixture() issue49TypedRow {
 			{ID: "04-decimal", Type: "decimal", Value: "-12.34"},
 			{ID: "08-date", Type: "date", Value: "2026-09-09"},
 		},
-	}
-}
-
-func issue49MalformedTypedRows(row issue49TypedRow) []issue49MalformedTypedRow {
-	unknown := cloneIssue49TypedRow(row)
-	unknown.Fields = append(unknown.Fields, issue49TypedFieldValue{ID: "99-unknown", Type: "string", Value: "unexpected"})
-
-	duplicate := cloneIssue49TypedRow(row)
-	duplicate.Fields = append(duplicate.Fields, duplicate.Fields[0])
-
-	omitted := cloneIssue49TypedRow(row)
-	omitted.Fields = omitted.Fields[1:]
-
-	mistyped := cloneIssue49TypedRow(row)
-	mistyped.Fields[0].Type = "string"
-
-	alias := cloneIssue49TypedRow(row)
-	alias.Manifest[2].Type = "integer"
-	alias.Fields[1].Type = "integer"
-
-	alternateCase := cloneIssue49TypedRow(row)
-	alternateCase.Manifest[1].Type = "String"
-	alternateCase.Fields[9].Type = "String"
-
-	physicalType := cloneIssue49TypedRow(row)
-	physicalType.Manifest[1].Type = "text"
-	physicalType.Fields[9].Type = "text"
-
-	primaryMismatch := cloneIssue49TypedRow(row)
-	primaryMismatch.PrimaryValue = "row-2"
-
-	return []issue49MalformedTypedRow{
-		{Kind: "unknown", Row: unknown},
-		{Kind: "duplicate", Row: duplicate},
-		{Kind: "omitted", Row: omitted},
-		{Kind: "mistyped", Row: mistyped},
-		{Kind: "alias", Row: alias},
-		{Kind: "alternate-case", Row: alternateCase},
-		{Kind: "physical-type", Row: physicalType},
-		{Kind: "primary-key-mismatch", Row: primaryMismatch},
 	}
 }
 

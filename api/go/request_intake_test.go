@@ -120,13 +120,63 @@ func TestRequestIntakeRejectsUnknownTopLevelMembersPerEndpoint(t *testing.T) {
 }
 
 func TestRequestIntakePreservesRawBytes(t *testing.T) {
-	want := []byte(" {\"client_id\" : \"client\"} \n")
-	status, got, ok := runRequestIntake(t, want, "client_id")
+	want := []byte(" {\"client_id\" : \"cl\\u0069ent\"} \n")
+	request := httptest.NewRequest(http.MethodPost, "/sync/connect", bytes.NewReader(want))
+	response := httptest.NewRecorder()
+	got, members, ok := decodeJSONBodyObject(response, request, "client_id")
 	if !ok {
-		t.Fatalf("request was rejected with status %d", status)
+		t.Fatalf("request was rejected with status %d", response.Code)
+	}
+	if !requireStringMember(response, members, "client_id") {
+		t.Fatal("valid identity was rejected")
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("raw body changed from %q to %q", want, got)
+	}
+}
+
+func TestJSONRoutesRejectInvalidIdentityBeforeDatabaseAccess(t *testing.T) {
+	handler := &Handler{db: &sql.DB{}}
+	for _, route := range []struct {
+		name  string
+		serve func(http.ResponseWriter, *http.Request)
+	}{
+		{"connect", handler.serveConnect},
+		{"pull", handler.servePull},
+		{"push", handler.servePush},
+		{"rebuild", handler.serveRebuild},
+	} {
+		for _, body := range []string{
+			`{}`, `{"client_id":null}`, `{"client_id":""}`,
+			`{"client_id":123}`, `{"client_id":[]}`, `{"client_id":{}}`,
+		} {
+			t.Run(route.name+"/"+body, func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodPost, "/sync/"+route.name, strings.NewReader(body))
+				request.Header.Set("Content-Type", "application/json")
+				request = request.WithContext(WithUserID(request.Context(), "user"))
+				response := httptest.NewRecorder()
+				route.serve(response, request)
+				if response.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+				}
+			})
+		}
+	}
+	for _, body := range []string{
+		`{"client_id":"client"}`, `{"client_id":"client","scope":null}`,
+		`{"client_id":"client","scope":""}`, `{"client_id":"client","scope":123}`,
+		`{"client_id":"client","scope":[]}`, `{"client_id":"client","scope":{}}`,
+	} {
+		t.Run("rebuild/"+body, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/sync/rebuild", strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			request = request.WithContext(WithUserID(request.Context(), "user"))
+			response := httptest.NewRecorder()
+			handler.serveRebuild(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+			}
+		})
 	}
 }
 

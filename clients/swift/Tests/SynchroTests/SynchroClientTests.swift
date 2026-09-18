@@ -165,7 +165,7 @@ final class SynchroClientTests: XCTestCase {
                 ON _synchro_rejected_mutations (table_name, record_id)
                 """)
             try db.execute(
-                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?, ?, ?, ?)",
+                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?, ?, ?, ?, ?)",
                 arguments: [
                     "synchro_v9_mutation_ledger",
                     "synchro_v10_rebuild_page_receipts",
@@ -174,6 +174,7 @@ final class SynchroClientTests: XCTestCase {
                     "synchro_v13_scope_text_affinity",
                     "synchro_v14_capture_context",
                     "synchro_v15_pending_protocol_identity_index",
+                    "synchro_v16_capture_storage_validation",
                 ]
             )
         }
@@ -498,13 +499,16 @@ final class SynchroClientTests: XCTestCase {
         let expectation = XCTestExpectation(description: "watch fires with updated data")
         expectation.expectedFulfillmentCount = 2 // initial + after update
 
-        let receivedRows = OSAllocatedUnfairLock(initialState: [[GRDB.Row]]())
+        let receivedValues = OSAllocatedUnfairLock(initialState: [Int]())
         let cancellable = client.watch(
             "SELECT * FROM counters WHERE id = ?",
             params: ["c1"],
             tables: ["counters"]
         ) { rows in
-            receivedRows.withLock { $0.append(rows) }
+            guard let value: Int = rows.first?["value"] else {
+                return XCTFail("The observed counter is missing")
+            }
+            receivedValues.withLock { $0.append(value) }
             expectation.fulfill()
         }
         // Trigger an update
@@ -514,12 +518,9 @@ final class SynchroClientTests: XCTestCase {
 
         wait(for: [expectation], timeout: 3.0)
 
-        let receivedRowsSnapshot = receivedRows.withLock { $0 }
-        XCTAssertGreaterThanOrEqual(receivedRowsSnapshot.count, 2)
-        // Last callback should have the updated value
-        if let lastRows = receivedRowsSnapshot.last, let row = lastRows.first {
-            XCTAssertEqual(row["value"] as Int, 42)
-        }
+        let receivedValuesSnapshot = receivedValues.withLock { $0 }
+        XCTAssertGreaterThanOrEqual(receivedValuesSnapshot.count, 2)
+        XCTAssertEqual(receivedValuesSnapshot.last, 42)
 
         cancellable.cancel()
     }
@@ -562,6 +563,36 @@ final class SynchroClientTests: XCTestCase {
         }
         XCTAssertTrue(observed.withLock { $0 })
         cancellable.cancel()
+    }
+
+    func testWatchObservesWriteDuringInitialCallbackAndStopsAfterCancellation() throws {
+        let client = try SynchroClient(config: makeConfig())
+        addTeardownBlock { try await client.close() }
+        _ = try client.execute("CREATE TABLE watched (value INTEGER)")
+        _ = try client.execute("INSERT INTO watched VALUES (0)")
+        let updated = expectation(description: "write during initial callback is observed")
+        let values = OSAllocatedUnfairLock(initialState: [Int]())
+        let watch = client.watch("SELECT value FROM watched", tables: ["watched"]) { rows in
+            guard let value: Int = rows.first?["value"] else {
+                return XCTFail("The observed row is missing")
+            }
+            values.withLock { $0.append(value) }
+            if value == 0 {
+                do {
+                    _ = try client.execute("UPDATE watched SET value = 1")
+                } catch {
+                    XCTFail("The initial callback write failed: \(error)")
+                }
+            } else if value == 1 {
+                updated.fulfill()
+            }
+        }
+        wait(for: [updated], timeout: 3)
+        XCTAssertEqual(values.withLock { $0 }, [0, 1])
+        watch.cancel()
+        _ = try client.execute("UPDATE watched SET value = 2")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(values.withLock { $0 }, [0, 1])
     }
 
     // MARK: - Schema

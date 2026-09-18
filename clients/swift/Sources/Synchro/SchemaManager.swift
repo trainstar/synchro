@@ -117,7 +117,7 @@ final class SchemaManager: @unchecked Sendable {
             target: try pending.journal.targetManifest.localTables()
         ))
 
-        let recovered = try database.writeSyncLockedTransaction { db -> SchemaMigrationJournal? in
+        let recovered = try database.writeSchemaMigrationTransaction { db -> SchemaMigrationJournal? in
             guard let journal = try SynchroMeta.getSchemaMigrationJournal(db),
                   journal == pending.journal else {
                 throw SynchroError.invalidResponse(message: "schema migration changed during recovery")
@@ -177,7 +177,7 @@ final class SchemaManager: @unchecked Sendable {
         scopeCursorUpdates: [String: String?] = [:],
         affectedScopes: [String] = []
     ) throws {
-        try database.writeTransaction { db in
+        try database.writeSchemaMigrationTransaction { db in
             try reconcileLocalSchemaInTransaction(
                 db,
                 schemaVersion: schemaVersion,
@@ -267,7 +267,7 @@ final class SchemaManager: @unchecked Sendable {
 
     func migrateSchema(newSchema: SchemaResponse) throws {
         let tables = try newSchema.localTables()
-        try database.writeTransaction { db in
+        try database.writeSchemaMigrationTransaction { db in
             try migrateLocalSchemaInTransaction(db, newTables: tables)
             try SynchroMeta.setInt64(db, key: .schemaVersion, value: newSchema.schemaVersion)
             try SynchroMeta.set(db, key: .schemaHash, value: newSchema.schemaHash)
@@ -278,7 +278,7 @@ final class SchemaManager: @unchecked Sendable {
     }
 
     func migrateLocalSchema(newTables: [LocalSchemaTable]) throws {
-        try database.writeTransaction { db in
+        try database.writeSchemaMigrationTransaction { db in
             let version = try SynchroMeta.getInt64(db, key: .schemaVersion)
             let hash = try SynchroMeta.get(db, key: .schemaHash) ?? ""
             guard version > 0, !hash.isEmpty else {
@@ -302,6 +302,7 @@ final class SchemaManager: @unchecked Sendable {
                 let createSQL = SQLiteSchema.generateCreateTableSQL(table: table)
                 try db.execute(sql: createSQL)
             } else {
+                try relaxNullability(db, table: table)
                 let existingColumns = try db.columns(in: table.tableName).map(\.name)
                 let existingSet = Set(existingColumns)
                 for col in table.columns where !existingSet.contains(col.name) {
@@ -426,6 +427,12 @@ final class SchemaManager: @unchecked Sendable {
                 }
                 try addColumn(db, table: table, column: column)
 
+            case .relaxNullability:
+                guard let tableID = operation.tableID, let table = targetByID[tableID] else {
+                    throw SynchroError.invalidResponse(message: "schema migration nullability operation is invalid")
+                }
+                try relaxNullability(db, table: table)
+
             case .createIndex:
                 guard let tableID = operation.tableID,
                       let indexID = operation.indexID,
@@ -474,6 +481,67 @@ final class SchemaManager: @unchecked Sendable {
         try db.execute(sql: sql)
     }
 
+    private func relaxNullability(_ db: GRDB.Database, table: LocalSchemaTable) throws {
+        let nullableNames = Set(table.columns.filter(\.nullable).map(\.name))
+        let relaxedNames = Set(try db.columns(in: table.tableName)
+            .filter { $0.isNotNull && nullableNames.contains($0.name) }.map(\.name))
+        guard !relaxedNames.isEmpty else { return }
+        guard try Bool.fetchOne(db, sql: "PRAGMA foreign_keys") == false,
+              let originalSQL = try String.fetchOne(
+                db, sql: "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+                arguments: [table.tableName]
+              ) else {
+            throw SynchroError.invalidResponse(message: "schema replacement requires a migration transaction")
+        }
+        let temporaryName = "_synchro_migration_\(table.tableID)"
+        let replacementSQL = try SQLiteSchema.relaxedCreateTableSQL(
+            originalSQL, tableName: temporaryName, nullableColumns: relaxedNames
+        )
+        let objects = try String.fetchAll(
+            db,
+            sql: """
+                SELECT sql FROM sqlite_schema
+                WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL
+                ORDER BY type, name
+                """,
+            arguments: [table.tableName]
+        )
+        let quotedTable = SQLiteHelpers.quoteIdentifier(table.tableName)
+        let quotedTemporary = SQLiteHelpers.quoteIdentifier(temporaryName)
+        let physicalColumns = try Row.fetchAll(db, sql: "PRAGMA table_xinfo(\(quotedTable))")
+        var copiedColumns = physicalColumns.filter { ($0["hidden"] as Int) == 0 }.map { $0["name"] as String }
+        let withoutRowID = try Row.fetchAll(db, sql: "PRAGMA table_list")
+            .contains { ($0["name"] as String) == table.tableName && ($0["wr"] as Int) == 1 }
+        if !withoutRowID {
+            let names = Set(copiedColumns.map { $0.lowercased() })
+            if let rowID = ["rowid", "_rowid_", "oid"].first(where: { !names.contains($0) }) {
+                copiedColumns.insert(rowID, at: 0)
+            }
+        }
+        let columns = copiedColumns.map(SQLiteHelpers.quoteIdentifier).joined(separator: ", ")
+        let sequence = try db.tableExists("sqlite_sequence")
+            ? Int64.fetchOne(db, sql: "SELECT seq FROM sqlite_sequence WHERE name = ?", arguments: [table.tableName])
+            : nil
+        try db.execute(sql: replacementSQL)
+        try db.execute(sql: "INSERT INTO \(quotedTemporary) (\(columns)) SELECT \(columns) FROM \(quotedTable)")
+        try db.execute(sql: "DROP TABLE \(quotedTable)")
+        // Legacy rename leaves existing views and foreign-key references bound to the original name.
+        let legacyAlter = try Bool.fetchOne(db, sql: "PRAGMA legacy_alter_table") == true
+        try db.execute(sql: "PRAGMA legacy_alter_table = ON")
+        let rename = Result { try db.execute(sql: "ALTER TABLE \(quotedTemporary) RENAME TO \(quotedTable)") }
+        try db.execute(sql: "PRAGMA legacy_alter_table = \(legacyAlter ? "ON" : "OFF")")
+        try rename.get()
+        for sql in objects {
+            try db.execute(sql: sql)
+        }
+        if let sequence {
+            try db.execute(
+                sql: "UPDATE sqlite_sequence SET seq = ? WHERE name = ?",
+                arguments: [sequence, table.tableName]
+            )
+        }
+    }
+
     private func activateManifest(
         _ db: GRDB.Database,
         manifest: SchemaManifest,
@@ -520,7 +588,8 @@ final class SchemaManager: @unchecked Sendable {
             let columnsByName = Dictionary(uniqueKeysWithValues: columns.map { ($0.name, $0) })
             for expected in table.columns {
                 guard let actual = columnsByName[expected.name],
-                      sqliteAffinity(actual.type) == sqliteAffinity(SQLiteSchema.sqliteType(for: expected.logicalType)) else {
+                      sqliteAffinity(actual.type) == sqliteAffinity(SQLiteSchema.sqliteType(for: expected.logicalType)),
+                      !expected.nullable || !actual.isNotNull else {
                     throw SynchroError.invalidResponse(message: "schema migration physical column is inconsistent")
                 }
             }

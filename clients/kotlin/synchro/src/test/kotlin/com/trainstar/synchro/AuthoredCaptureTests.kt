@@ -211,14 +211,148 @@ class AuthoredCaptureTests {
         }
     }
 
-    private fun clientWithSchema(databaseName: String): SynchroClient {
+    @Test
+    fun authoredContextRejectsAnotherTableBeforeChangingRows() {
+        val databaseName = databaseName()
+        val otherTable = authoredTable.copy(
+            tableID = "table-other",
+            relationID = "relation-other",
+            tableName = "other_rows",
+            primaryKeyFieldID = "other-field-id",
+            columns = authoredTable.columns.map { it.copy(fieldID = "other-${it.fieldID}") },
+        )
+        val client = clientWithSchema(databaseName, listOf(authoredTable, otherTable))
+        try {
+            for (table in listOf("authored_rows", "other_rows")) {
+                client.execute(
+                    "INSERT INTO $table (id, body, updated_at) VALUES ('row-1', 'before', '2026-01-01T00:00:00.000000Z')",
+                )
+            }
+            client.authoredWriteTransaction("authored_rows", Operation.UPDATE, listOf("body")) { transaction ->
+                assertThrows(IllegalArgumentException::class.java) {
+                    transaction.execute("UPDATE other_rows SET body = 'lost' WHERE id = 'row-1'")
+                }
+                assertEquals("before", transaction.queryOne("SELECT body FROM other_rows")?.get("body"))
+                transaction.execute("UPDATE authored_rows SET body = 'captured' WHERE id = 'row-1'")
+            }
+            client.execute("UPDATE other_rows SET body = 'also captured' WHERE id = 'row-1'")
+            assertLedger(
+                databaseName,
+                listOf("insert", "insert", "update", "update"),
+                listOf(listOf("field-body"), listOf("other-field-body"), listOf("field-body"), listOf("other-field-body")),
+            )
+        } finally {
+            client.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun authoredContextRejectsEveryDifferentOperationBeforeSql() {
+        val databaseName = databaseName()
+        val client = clientWithSchema(databaseName)
+        try {
+            client.execute(
+                "INSERT INTO authored_rows (id, body, updated_at) VALUES ('row-1', 'before', '2026-01-01T00:00:00.000000Z')",
+            )
+            val statements = mapOf(
+                Operation.INSERT to
+                    "INSERT INTO authored_rows (id, body, updated_at) VALUES ('row-2', 'lost', '2026-01-01T00:00:00.000000Z')",
+                Operation.UPDATE to "UPDATE authored_rows SET body = 'lost' WHERE id = 'row-1'",
+                Operation.DELETE to "DELETE FROM authored_rows WHERE id = 'row-1'",
+            )
+            for (authoredOperation in statements.keys) {
+                client.authoredWriteTransaction("authored_rows", authoredOperation, listOf("body")) { transaction ->
+                    for ((operation, sql) in statements) {
+                        if (operation != authoredOperation) {
+                            assertThrows(IllegalArgumentException::class.java) { transaction.execute(sql) }
+                        }
+                    }
+                    assertEquals(listOf("before"), transaction.query("SELECT body FROM authored_rows").map { it["body"] })
+                    assertEquals(null, transaction.queryOne("SELECT deleted_at FROM authored_rows")?.get("deleted_at"))
+                }
+            }
+            client.authoredWriteTransaction("authored_rows", Operation.DELETE, emptyList()) { transaction ->
+                transaction.execute("DELETE FROM authored_rows WHERE id = 'row-1'")
+            }
+            assertTrue(client.queryOne("SELECT deleted_at FROM authored_rows")?.get("deleted_at") is String)
+            assertLedger(databaseName, listOf("insert", "delete"), listOf(listOf("field-body"), emptyList()))
+        } finally {
+            client.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun authoredIdentifiersUseSchemaSpellingWithoutCapturingSupportColumns() {
+        val databaseName = databaseName()
+        val client = clientWithSchema(databaseName)
+        try {
+            client.authoredWriteTransaction("AUTHORED_ROWS", "INSERT", listOf("BODY")) { transaction ->
+                transaction.execute(
+                    "INSERT INTO \"Authored_Rows\" (id, body, support_value, updated_at) " +
+                        "VALUES ('row-1', 'authored', 'support', '2026-01-01T00:00:00.000000Z')",
+                )
+            }
+            assertEquals("support", client.queryOne("SELECT support_value FROM authored_rows")?.get("support_value"))
+            assertLedger(databaseName, listOf("insert"), listOf(listOf("field-body")))
+        } finally {
+            client.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun authoredContextKeepsNonAsciiTableNamesDistinct() {
+        val databaseName = databaseName()
+        val lower = authoredTable.copy(tableName = "\u00e9_rows")
+        val upper = authoredTable.copy(
+            tableID = "table-other",
+            relationID = "relation-other",
+            tableName = "\u00c9_rows",
+            primaryKeyFieldID = "other-field-id",
+            columns = authoredTable.columns.map { it.copy(fieldID = "other-${it.fieldID}") },
+        )
+        val client = clientWithSchema(databaseName, listOf(lower, upper))
+        try {
+            for (table in listOf(lower, upper)) {
+                client.authoredWriteTransaction(table.tableName, Operation.INSERT, listOf("body")) { transaction ->
+                    transaction.execute(
+                        "INSERT INTO \"${table.tableName}\" (id, body, updated_at) " +
+                            "VALUES ('row-1', 'before', '2026-01-01T00:00:00.000000Z')",
+                    )
+                }
+            }
+            client.authoredWriteTransaction(lower.tableName, Operation.UPDATE, listOf("body")) { transaction ->
+                assertThrows(IllegalArgumentException::class.java) {
+                    transaction.execute("UPDATE \"${upper.tableName}\" SET body = 'lost' WHERE id = 'row-1'")
+                }
+                assertEquals("before", transaction.queryOne("SELECT body FROM \"${upper.tableName}\"")?.get("body"))
+                transaction.execute("UPDATE \"${lower.tableName}\" SET body = 'captured' WHERE id = 'row-1'")
+            }
+            client.execute("UPDATE \"${upper.tableName}\" SET body = 'also captured' WHERE id = 'row-1'")
+            assertLedger(
+                databaseName,
+                listOf("insert", "insert", "update", "update"),
+                listOf(listOf("field-body"), listOf("other-field-body"), listOf("field-body"), listOf("other-field-body")),
+            )
+        } finally {
+            client.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    private fun clientWithSchema(
+        databaseName: String,
+        tables: List<LocalSchemaTable> = listOf(authoredTable),
+    ): SynchroClient {
         val database = SynchroDatabase.open(context, databaseName)
         try {
             installTestSchema(
                 database,
                 schemaVersion = 1,
                 schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
-                tables = listOf(authoredTable),
+                tables = tables,
             )
         } finally {
             database.close()

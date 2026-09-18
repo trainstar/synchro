@@ -50,6 +50,9 @@ class HttpClient(
         encodeDefaults = true
         explicitNulls = false
     }
+    // Pull and rebuild request cursors are required nullable members, not optional members.
+    @OptIn(ExperimentalSerializationApi::class)
+    private val requiredCursorJSON = Json(json) { explicitNulls = true }
     private val strictJSON = Json { ignoreUnknownKeys = false }
 
     // MARK: - Endpoints
@@ -82,7 +85,7 @@ class HttpClient(
         pullExact(request, pullRequestJSON(request))
 
     internal fun pullRequestJSON(request: PullRequest): String =
-        json.encodeToString(request).also(Integrity::validateCanonicalWireJSON)
+        requiredCursorJSON.encodeToString(request).also(Integrity::validateCanonicalWireJSON)
 
     internal suspend fun pullExact(request: PullRequest, requestJSON: String): PullResponse {
         val validatedRequestJSON = validateExactRequestJSON(request, requestJSON)
@@ -127,7 +130,7 @@ class HttpClient(
     suspend fun rebuild(request: RebuildRequest): RebuildResponse = rebuildWithBody(request).response
 
     internal fun rebuildRequestJSON(request: RebuildRequest): String =
-        json.encodeToString(request).also(Integrity::validateCanonicalWireJSON)
+        requiredCursorJSON.encodeToString(request).also(Integrity::validateCanonicalWireJSON)
 
     internal suspend fun rebuildWithBody(
         request: RebuildRequest,

@@ -33,6 +33,20 @@ func CheckNoStateForks(observations []Observation) ([]Violation, error) {
 	for _, observation := range orderedObservations(observations) {
 		clients := orderedClients(observation.Clients)
 		for _, client := range clients {
+			if client.ReferenceOnly {
+				if client.Process != nil {
+					violations = append(violations, stateForkViolation(
+						observation.Sequence, RuleStateForkProcessIdentityInvalid, client.State.ClientID, "",
+					))
+				}
+				if client.RestartBoundary {
+					violations = append(violations, stateForkViolation(
+						observation.Sequence, RuleStateForkCaptureIncomplete, client.State.ClientID, "current",
+					))
+				}
+				// Reference state cannot establish or replace native durability history.
+				continue
+			}
 			key := processClientKey{userID: client.State.UserID, clientID: client.State.ClientID}
 			prior, found := priorClients[key]
 			priorClients[key] = client

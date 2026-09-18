@@ -1,113 +1,10 @@
-import { by, element } from 'detox';
-
-import { launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand } from './corpus-harness';
-
-type ExchangeResponse = {
-  schema_version: number;
-  sequence: number;
-} & (
-  | { state: 'command'; command: Record<string, unknown> }
-  | { state: 'complete'; command: null }
-);
-
-type ConformanceEnvelope = {
-  schema_version: number;
-  outcome: 'passed' | 'error';
-  result: unknown;
-  error_code: string | null;
-  error_detail: string | null;
-};
-
-const exchangeMembers = ['command', 'schema_version', 'sequence', 'state'];
-const envelopeMembers = ['error_code', 'error_detail', 'outcome', 'result', 'schema_version'];
-
-function exactObject(value: unknown, members: string[]): value is Record<string, unknown> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value) &&
-    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...members].sort())
-  );
-}
+import {
+  coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
+  launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
+} from './corpus-harness';
 
 function isJSONObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function coordinatorConfiguration(): { endpoint: string; token: string; stageCount: number } {
-  const configuredURL = process.env.SYNCHRO_RN_COORDINATOR_URL;
-  const token = process.env.SYNCHRO_RN_COORDINATOR_TOKEN;
-  const stageCount = Number(process.env.SYNCHRO_RN_COORDINATOR_STAGE_COUNT);
-  if (!configuredURL || !token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !Number.isInteger(stageCount) || stageCount < 1 || stageCount > 64) {
-    throw new Error('React Native coordinator configuration is invalid');
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(configuredURL);
-  } catch {
-    throw new Error('React Native coordinator configuration is invalid');
-  }
-  if (
-    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-    !parsed.hostname ||
-    parsed.username !== '' ||
-    parsed.password !== '' ||
-    (parsed.pathname !== '' && parsed.pathname !== '/') ||
-    parsed.search !== '' ||
-    parsed.hash !== ''
-  ) {
-    throw new Error('React Native coordinator configuration is invalid');
-  }
-  return { endpoint: new URL('/exchange', parsed).toString(), token, stageCount };
-}
-
-function parseExchangeResponse(raw: string, sequence: number): ExchangeResponse {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw) as unknown;
-  } catch {
-    throw new Error('React Native coordinator response is invalid');
-  }
-  if (
-    !exactObject(value, exchangeMembers) ||
-    value.schema_version !== 1 ||
-    value.sequence !== sequence ||
-    (value.state !== 'command' && value.state !== 'complete')
-  ) {
-    throw new Error('React Native coordinator response is invalid');
-  }
-  if (value.state === 'command') {
-    if (!isJSONObject(value.command)) {
-      throw new Error('React Native coordinator response is invalid');
-    }
-  } else if (value.command !== null) {
-    throw new Error('React Native coordinator response is invalid');
-  }
-  return value as unknown as ExchangeResponse;
-}
-
-function parseConformanceEnvelope(raw: string): ConformanceEnvelope {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw) as unknown;
-  } catch {
-    throw new Error('React Native conformance envelope is invalid');
-  }
-  if (
-    !exactObject(value, envelopeMembers) ||
-    value.schema_version !== 1 ||
-    (value.outcome !== 'passed' && value.outcome !== 'error')
-  ) {
-    throw new Error('React Native conformance envelope is invalid');
-  }
-  if (
-    (value.outcome === 'passed' && (value.result === null || value.error_code !== null || value.error_detail !== null)) ||
-    (value.outcome === 'error' && (value.result !== null || typeof value.error_code !== 'string' || typeof value.error_detail !== 'string'))
-  ) {
-    throw new Error('React Native conformance envelope is invalid');
-  }
-  return value as unknown as ConformanceEnvelope;
 }
 
 function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
@@ -119,29 +16,6 @@ function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
   return isJSONObject(parameters) && parameters.database_mode === 'reuse';
 }
 
-async function exchange(endpoint: string, token: string, sequence: number, rawResult: string): Promise<ExchangeResponse> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-  try {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: `{"schema_version":1,"sequence":${sequence},"result":${rawResult}}`,
-      signal: controller.signal,
-    });
-    const responseBody = await response.text();
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${responseBody}`);
-    }
-    return parseExchangeResponse(responseBody, sequence);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`React Native coordinator exchange ${sequence} failed: ${detail}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
   if (requiresProcessRelaunch(command)) {
     await launchCorpusApp({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
@@ -149,25 +23,16 @@ async function executeCommand(command: Record<string, unknown>): Promise<string>
   const serialized = JSON.stringify(command);
   await submitCorpusCommand(serialized);
 
-  const deadline = Date.now() + 45000;
-  while (Date.now() < deadline) {
-    const state = await element(by.id('conformance-command-state')).getAttributes();
-    if (state.text === 'ok' || state.text === 'error') {
-      const result = await element(by.id('conformance-result')).getAttributes();
-      const raw = typeof result.text === 'string' ? result.text : '';
-      const envelope = parseConformanceEnvelope(raw);
-      if (envelope.outcome === 'error') {
-        throw new Error(`React Native conformance command failed: ${envelope.error_code}: ${envelope.error_detail}`);
-      }
-      return raw;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  const { raw, envelope } = await pollCorpusResult(45000, 'React Native conformance command did not finish');
+  if (envelope.outcome === 'error') {
+    throw new Error(`React Native conformance command failed: ${envelope.error_code}: ${envelope.error_detail}`);
   }
-  throw new Error('React Native conformance command did not finish');
+  return raw;
 }
 
 it('executes the push-response-loss coordinator sequence', () => runCorpusCommandLoop(async () => {
-  const { endpoint, token, stageCount } = coordinatorConfiguration();
+  const { endpoint, token } = coordinatorConfiguration();
+  const stageCount = coordinatorCount('STAGE_COUNT', 1, 64);
   await launchCorpusApp({
     newInstance: true,
     delete: true,

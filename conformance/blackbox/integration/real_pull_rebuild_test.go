@@ -319,9 +319,8 @@ func TestRealS03PullHydrationFailurePreservesCursors(t *testing.T) {
 	if restoredChange["table"] != change["table"] {
 		t.Fatalf("S-03 source table identity changed: first=%v restored=%v", change["table"], restoredChange["table"])
 	}
-	if afterSuccess := observeCheckpointMap(t, ctx, harness, client.ID); len(afterSuccess) != len(beforeFailure) {
-		t.Fatal("S-03 successful response acknowledged a cursor before presentation")
-	}
+	afterSuccess := observeCheckpointMap(t, ctx, harness, client.ID)
+	assertCheckpointMapsEqual(t, beforeFailure, afterSuccess)
 
 	acknowledgement := pullRealClient(t, ctx, harness, token, client)
 	if changes := requireRealChanges(t, acknowledgement); len(changes) != 0 {

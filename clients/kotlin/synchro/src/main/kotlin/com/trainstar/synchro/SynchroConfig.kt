@@ -11,6 +11,7 @@ data class SynchroConfig(
     val clientID: String,
     val platform: String = "android",
     val appVersion: String,
+    /** Zero disables periodic polling. Explicit sync and durable retry wakeups remain available. */
     val syncInterval: Double = 30.0,
     val pushDebounce: Double = 0.5,
     val maxRetryAttempts: Int = 5,
@@ -22,11 +23,14 @@ data class SynchroConfig(
         private set
 
     init {
+        require(syncInterval.isFinite() && syncInterval >= 0.0) { "syncInterval must be finite and nonnegative" }
+        require(pushDebounce.isFinite() && pushDebounce >= 0.0) { "pushDebounce must be finite and nonnegative" }
+        require(maxRetryAttempts >= 0) { "maxRetryAttempts must be nonnegative" }
         require(pullPageSize in 1..1000) { "pullPageSize must be between 1 and 1000" }
         require(pushBatchSize in 1..1000) { "pushBatchSize must be between 1 and 1000" }
     }
 
-    val effectivePullPageSize: Int get() = pullPageSize.coerceAtMost(1000)
+    val effectivePullPageSize: Int get() = pullPageSize
 
     internal fun withTransportObservationCollector(collector: TransportObservationCollector): SynchroConfig =
         copy().also { it.transportObservationCollector = collector }

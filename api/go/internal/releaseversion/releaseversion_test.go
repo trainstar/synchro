@@ -17,7 +17,7 @@ func TestValidate(t *testing.T) {
 		}
 	}
 
-	invalid := []string{"v1.2.3", "1.2", "1.2.x", "1.2.3-beta"}
+	invalid := []string{"v1.2.3", "1.2", "1.2.x", "1.2.3-beta", "01.2.3", "1.02.3", "1.2.03", "00.0.0"}
 	for _, version := range invalid {
 		if err := Validate(version); err == nil {
 			t.Fatalf("Validate(%q) unexpectedly succeeded", version)
@@ -50,6 +50,10 @@ func TestSetSyncsAndChecksVersionedSurfaces(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "extensions/Cargo.toml"), `version = "1.4.5"`)
 	assertFileContains(t, filepath.Join(root, "extensions/synchro-pg/synchro_pg.control"), `default_version = '1.4.5'`)
 	assertFileContains(t, filepath.Join(root, "conformance/artifacts/inventory.json"), `"release": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/requirements.json"), `"release": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/requirements.json"), `"protocol_version": 3`)
+	assertFileContains(t, filepath.Join(root, "conformance/support-matrix.json"), `"release": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/support-matrix.json"), `"schema_version": 1`)
 
 	if _, err := os.Stat(filepath.Join(root, "extensions/synchro-pg/sql/synchro_pg--1.4.5.sql")); err != nil {
 		t.Fatalf("expected PostgreSQL install SQL to be renamed: %v", err)
@@ -101,6 +105,50 @@ func TestCheckFailsOnTagMismatch(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsDistributionCatalogDrift(t *testing.T) {
+	for _, path := range []string{"conformance/artifacts/inventory.json", "conformance/requirements.json", "conformance/support-matrix.json"} {
+		t.Run(path, func(t *testing.T) {
+			root := newFixtureRepo(t)
+			if err := Sync(root); err != nil {
+				t.Fatal(err)
+			}
+			writeFixtureFile(t, root, path, "{\n  \"release\": \"9.9.9\",\n  \"protocol_version\": 3\n}\n")
+			if err := Check(root, ""); err == nil || !strings.Contains(err.Error(), path) {
+				t.Fatalf("Check did not identify catalog drift: %v", err)
+			}
+			if err := Sync(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := Check(root, ""); err != nil {
+				t.Fatal(err)
+			}
+			assertFileContains(t, filepath.Join(root, path), `"protocol_version": 3`)
+		})
+	}
+}
+
+func TestFindRepoRootSupportsGitDirectoryAndWorktreeFile(t *testing.T) {
+	for _, worktree := range []bool{false, true} {
+		root := t.TempDir()
+		start := filepath.Join(root, "api", "go")
+		mustMkdirAll(t, start)
+		if worktree {
+			writeFixtureFile(t, root, ".git", "gitdir: /checkout/.git/worktrees/linked\n")
+		} else {
+			mustMkdirAll(t, filepath.Join(root, ".git"))
+		}
+		got, err := FindRepoRoot(start)
+		if err != nil || got != root {
+			t.Fatalf("FindRepoRoot(worktree=%v) = %q, %v", worktree, got, err)
+		}
+	}
+	root := t.TempDir()
+	writeFixtureFile(t, root, ".git", "not a Git worktree marker\n")
+	if got, err := FindRepoRoot(root); err == nil {
+		t.Fatalf("accepted invalid Git marker at %q", got)
+	}
+}
+
 func newFixtureRepo(t *testing.T) string {
 	t.Helper()
 
@@ -115,6 +163,9 @@ func newFixtureRepo(t *testing.T) string {
 	writeFixtureFile(t, root, "extensions/Cargo.toml", "[workspace]\nresolver = \"2\"\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2021\"\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/synchro_pg.control", "comment = 'fixture'\ndefault_version = '0.1.0'\n")
 	writeFixtureFile(t, root, "conformance/artifacts/inventory.json", "{\n  \"release\": \"0.1.0\",\n  \"artifacts\": []\n}\n")
+	writeFixtureFile(t, root, "conformance/requirements.json", "{\n  \"release\": \"0.1.0\",\n  \"protocol_version\": 3\n}\n")
+	writeFixtureFile(t, root, "conformance/support-matrix.json", "{\n  \"release\": \"0.1.0\",\n  \"schema_version\": 1\n}\n")
+	writeFixtureFile(t, root, "conformance/schemas/requirements-v2.schema.json", "{\n  \"properties\": {\n    \"release\": { \"const\": \"0.1.0\" },\n    \"schema_version\": { \"const\": 2 }\n  }\n}\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/sql/synchro_pg--0.1.0.sql", "-- install script\n")
 	writeFixtureFile(t, root, "VERSION", "0.2.0\n")
 

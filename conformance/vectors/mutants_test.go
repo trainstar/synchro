@@ -17,6 +17,30 @@ func TestMutantsFailAuthoredVectors(t *testing.T) {
 		}
 		assertMutantDiffers(t, vector, preimage[1:])
 	})
+	for _, test := range []struct {
+		typeName string
+		vectorID string
+	}{
+		{"integer", "VEC-TYPED-INT-ZERO-001"},
+		{"String", "VEC-TYPED-STRING-NFC-001"},
+		{"text", "VEC-TYPED-STRING-NFC-001"},
+	} {
+		t.Run("reject noncanonical portable type "+test.typeName, func(t *testing.T) {
+			vector := vectorByID(t, set, test.vectorID)
+			requireAuthoredPreimage(t, vector)
+			var input struct {
+				FieldSpec FieldSpec `json:"field_spec"`
+				RawJSON   string    `json:"raw_json"`
+			}
+			if err := json.Unmarshal(vector.Input, &input); err != nil {
+				t.Fatalf("decode authored typed-value input: %v", err)
+			}
+			input.FieldSpec.Type = test.typeName
+			if _, err := EncodeTypedValue(input.FieldSpec, json.RawMessage(input.RawJSON)); err == nil {
+				t.Fatalf("EncodeTypedValue accepted noncanonical type %q", test.typeName)
+			}
+		})
+	}
 	t.Run("unframed row identity strings collide", func(t *testing.T) {
 		left := vectorByID(t, set, "VEC-ROW-IDENTITY-LENGTH-COLLISION-A-001")
 		right := vectorByID(t, set, "VEC-ROW-IDENTITY-LENGTH-COLLISION-B-001")

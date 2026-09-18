@@ -260,16 +260,33 @@ object SQLiteSchema {
     internal fun canonicalDDL(source: String): String {
         val output = StringBuilder(source.length)
         var pendingSpace = false
-        source.forEach { character ->
-            if (character.isWhitespace()) {
+        var quote: Char? = null
+        var index = 0
+        while (index < source.length) {
+            val character = source[index++]
+            if (quote != null) {
+                output.append(character)
+                if (character == quote) {
+                    if (quote != ']' && index < source.length && source[index] == quote) {
+                        output.append(source[index++])
+                    } else {
+                        quote = null
+                    }
+                }
+            } else if (character.isWhitespace()) {
                 pendingSpace = output.isNotEmpty()
             } else {
                 if (pendingSpace) output.append(' ')
                 output.append(character)
                 pendingSpace = false
+                quote = when (character) {
+                    '\'', '"', '`' -> character
+                    '[' -> ']'
+                    else -> null
+                }
             }
         }
-        return output.toString().trim()
+        return output.toString()
     }
 
     private fun mutationInsertSQL(
@@ -367,6 +384,11 @@ object SQLiteSchema {
 }
 
 object SQLiteHelpers {
+    /** SQLite folds only ASCII letters when it compares identifiers. */
+    internal fun canonicalIdentifier(name: String): String = buildString(name.length) {
+        name.forEach { append(if (it in 'A'..'Z') it.lowercaseChar() else it) }
+    }
+
     fun quoteIdentifier(name: String): String {
         val escaped = name.replace("\"", "\"\"")
         return "\"$escaped\""

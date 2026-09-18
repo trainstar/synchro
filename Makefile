@@ -2,6 +2,7 @@
 	help \
 	version-print \
 	version-check \
+	test-version-contract \
 	version-sync \
 	set-version \
 	build \
@@ -277,6 +278,7 @@ help:
 	@echo "Available targets:"
 	@echo "  version-print         - Print the canonical repo version from VERSION"
 	@echo "  version-check         - Verify every public release surface matches VERSION"
+	@echo "  test-version-contract - Validate next-release metadata with docs dependencies"
 	@echo "  version-sync          - Sync versioned metadata from VERSION"
 	@echo "  set-version           - Set VERSION=X.Y.Z and sync public metadata"
 	@echo "  build                 - Build the synchrod-pg adapter binary"
@@ -399,6 +401,9 @@ version-print:
 version-check:
 	@cd api/go && GOWORK=off go run ./cmd/synchro-version check $(if $(EXPECTED_TAG),--expected-tag "$(EXPECTED_TAG)")
 
+test-version-contract:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../api/go -- go test -tags releasecontract -json -count=1 -run '^TestNextVersionPassesSupportPolicyAndRequirementsSchema$$' ./internal/releaseversion
+
 version-sync:
 	@cd api/go && GOWORK=off go run ./cmd/synchro-version sync
 
@@ -429,6 +434,10 @@ docs-dev:
 # This target validates the JavaScript-authored contract.
 verify-contract:
 	cd docs && npm ci
+	$(MAKE) --no-print-directory test-docs-contract
+
+.PHONY: test-docs-contract
+test-docs-contract:
 	cd docs && npm run verify:contract
 
 conformance-mod-download:
@@ -497,6 +506,10 @@ test-local-postgres:
 
 test-blackbox-harness:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox -count=1
+
+.PHONY: test-soak-controls
+test-soak-controls:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox/integration -run '^TestSoak(Harness|Fault|WAL|Wire)' -count=1
 
 test-blackbox-components:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./observer -count=1
@@ -864,11 +877,15 @@ release-run-support-cell:
 		esac
 	@$(MAKE) --no-print-directory release-verify VERSION="$(VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"
 
-test-release-artifacts:
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_release_artifacts
+.PHONY: test-python-runner
+test-python-runner:
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_run_python_tests
 
-test-release-publish:
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m unittest scripts.ci.test_release_publish
+test-release-artifacts: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_artifacts
+
+test-release-publish: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_publish
 
 test-server-consumer-helper:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
@@ -1523,7 +1540,8 @@ android-emulator-prepare:
 		"$$@" shell dumpsys window | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; \
 		exit 1
 
-test-rn-e2e-android-run: android-emulator-prepare
+.PHONY: test-rn-e2e-android-smoke
+test-rn-e2e-android-smoke: android-emulator-prepare
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -f clients/react-native/example/artifacts/android-test-results.json
@@ -1544,6 +1562,8 @@ test-rn-e2e-android-run: android-emulator-prepare
 		fi; \
 		exit "$$status"
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/android-test-results.json
+
+test-rn-e2e-android-run: test-rn-e2e-android-smoke
 	@$(MAKE) --no-print-directory test-rn-scenarios-android
 
 .PHONY: test-rn-scenarios-ios test-rn-scenarios-android
@@ -1826,11 +1846,11 @@ test-packaged-smoke:
 		--repo-root "$(CURDIR)" \
 		--summary "$(PACKAGED_SMOKE_EVIDENCE)"
 
-test-packaged-smoke-structure:
+test-packaged-smoke-structure: test-python-runner
 	@mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)"
 	TMPDIR="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" \
-		python3 verification/test_packaged_smoke.py
+		python3 -m scripts.ci.run_python_tests verification.test_packaged_smoke
 
 test-packaged-consumers: test-packaged-smoke-structure test-consumer-swift test-consumer-kotlin test-consumer-rn-ios test-consumer-rn-android
 
@@ -1991,7 +2011,6 @@ local-postgres-stop:
 		fi
 
 test-adapter:
-	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@echo "Running adapter integration tests..."
 	@set -e; \
 	status=0; \
@@ -2002,98 +2021,59 @@ test-adapter:
 	fi; \
 	exit $$status
 
-synchrod-pg-test-start: build build-seed verify-rn-seed
+.PHONY: synchrod-pg-test-serve test-ci-process-lifecycle local-postgres-run
+test-ci-process-lifecycle: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_adapter_process
+
+local-postgres-run: build-local-postgres
+	@mkdir -p "$(LOCAL_POSTGRES_STATE_DIR)"
+	@exec "$(LOCAL_POSTGRES_BINARY)" start \
+		--pg18-bin-dir "$(PGRX_PG_BIN_DIR)" \
+		--extension-artifact "$(CONFORMANCE_EXTENSION_ARTIFACT)" \
+		--adapter-artifact "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" \
+		--state-dir "$(LOCAL_POSTGRES_STATE_DIR)" \
+		--temp-parent "$(CURDIR)/.ignore/r2/tmp" \
+		--url-file "$(LOCAL_POSTGRES_URL_FILE)" \
+		--attach-environment-file "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)" \
+		--listen "$(LOCAL_POSTGRES_LISTEN)"
+
+synchrod-pg-test-start synchrod-pg-test-serve: build build-seed verify-rn-seed
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
-	@set -e; \
-	for PID in $$(lsof -tiTCP:$(SYNCHROD_PG_PORT) -sTCP:LISTEN 2>/dev/null); do \
-		kill "$$PID" 2>/dev/null || true; \
-		sleep 1; \
-		if kill -0 "$$PID" 2>/dev/null; then kill -9 "$$PID" 2>/dev/null || true; fi; \
-	done; \
-	if [ -f "$(SYNCHROD_PG_PID_FILE)" ] && kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
-		echo "synchrod-pg already running"; \
-		exit 0; \
-	fi; \
-	echo "Preparing client integration database..."; \
-	(cd conformance && DATABASE_URL="$(ADAPTER_TEST_URL)" GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..); \
-	echo "Starting synchrod-pg on :$(SYNCHROD_PG_PORT)..."; \
-	MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
+	@set -eu; \
+	export MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
 		DATABASE_URL="$(ADAPTER_TEST_URL)" \
 		JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
 		LISTEN_ADDR=":$(SYNCHROD_PG_PORT)" \
 		SYNCHROD_ADAPTER_BINARY="$(CURDIR)/$(BINARY)" \
 		SYNCHROD_ADAPTER_PID_FILE="$(SYNCHROD_PG_PID_FILE)" \
-		SYNCHROD_ADAPTER_LOG_FILE="$(SYNCHROD_PG_LOG_FILE)" \
-		scripts/ci/start-adapter.sh; \
-	sleep 2; \
-	if ! kill -0 "$$(cat "$(SYNCHROD_PG_PID_FILE)")" 2>/dev/null; then \
-		echo "synchrod-pg failed to start:"; \
-		cat "$(SYNCHROD_PG_LOG_FILE)"; \
-		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
-		exit 1; \
+		SYNCHROD_ADAPTER_LOG_FILE="$(SYNCHROD_PG_LOG_FILE)"; \
+	if python3 -m scripts.ci.adapter_process status; then \
+		if [ "$@" = "synchrod-pg-test-serve" ]; then echo "adapter already has an owner" >&2; exit 1; fi; \
+		echo "synchrod-pg is already ready"; exit 0; \
+	else \
+		status=$$?; test "$$status" -eq 3 || exit "$$status"; \
 	fi; \
-	HTTP_READY=0; \
-	for attempt in $$(seq 1 30); do \
-		if curl -fsS -o /dev/null "http://localhost:$(SYNCHROD_PG_PORT)/sync/schema" 2>/dev/null; then HTTP_READY=1; break; fi; \
-		sleep 1; \
-	done; \
-	if [ "$$HTTP_READY" -ne 1 ]; then \
-		echo "synchrod-pg HTTP schema endpoint did not become ready"; \
-		cat "$(SYNCHROD_PG_LOG_FILE)" 2>/dev/null || true; \
-		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
-		exit 1; \
-	fi; \
+	echo "Preparing client integration database..."; \
+	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..); \
 	if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
 		seed_output="$(REFRESH_RN_SEED_OUTPUT)"; \
 		echo "Refreshing client seed database..."; \
 		if lsof "$$seed_output" "$$seed_output-wal" "$$seed_output-shm" >/dev/null 2>&1; then \
-			echo "client seed database is in use"; \
-			exit 1; \
+			echo "client seed database is in use" >&2; exit 1; \
 		fi; \
 		mkdir -p "$$(dirname "$$seed_output")"; \
-		rm -f "$$seed_output-wal" "$$seed_output-shm"; \
-		DATABASE_URL="$(ADAPTER_TEST_URL)" "$(CURDIR)/$(SEED_BINARY)" --output "$$seed_output" --overwrite || { \
-			cat "$(SYNCHROD_PG_LOG_FILE)" 2>/dev/null || true; \
-			rm -f "$(SYNCHROD_PG_PID_FILE)"; \
-			exit 1; \
-		}; \
+		"$(CURDIR)/$(SEED_BINARY)" --output "$$seed_output" --overwrite; \
 		if [ "$$seed_output" = "$(CURDIR)/clients/react-native/example/seed.db" ]; then \
-			cd "$(CURDIR)/clients/react-native/example"; \
-			shasum -a 256 seed.db > seed.db.sha256; \
+			(cd "$(CURDIR)/clients/react-native/example" && shasum -a 256 seed.db > seed.db.sha256); \
 		fi; \
 	fi; \
-	echo "synchrod-pg running on http://localhost:$(SYNCHROD_PG_PORT)"
+	if [ "$@" = "synchrod-pg-test-serve" ]; then exec python3 -m scripts.ci.adapter_process serve; fi; \
+	python3 -m scripts.ci.adapter_process start
 
 synchrod-pg-test-stop:
-	@STOPPED=0; \
-	if [ -f "$(SYNCHROD_PG_PID_FILE)" ]; then \
-		PID="$$(cat "$(SYNCHROD_PG_PID_FILE)")"; \
-		if kill -0 "$$PID" 2>/dev/null; then \
-			kill "$$PID"; \
-			sleep 1; \
-			if kill -0 "$$PID" 2>/dev/null; then \
-				kill -9 "$$PID" 2>/dev/null || true; \
-			fi; \
-			wait "$$PID" 2>/dev/null || true; \
-			echo "synchrod-pg stopped"; \
-			STOPPED=1; \
-		fi; \
-		rm -f "$(SYNCHROD_PG_PID_FILE)"; \
-	fi; \
-	for PID in $$(lsof -tiTCP:$(SYNCHROD_PG_PORT) -sTCP:LISTEN 2>/dev/null); do \
-		kill "$$PID" 2>/dev/null || true; \
-		sleep 1; \
-		if kill -0 "$$PID" 2>/dev/null; then \
-			kill -9 "$$PID" 2>/dev/null || true; \
-		fi; \
-		wait "$$PID" 2>/dev/null || true; \
-		STOPPED=1; \
-	done; \
-	if [ "$$STOPPED" -eq 0 ]; then \
-		echo "synchrod-pg not running"; \
-	fi
+	@SYNCHROD_ADAPTER_PID_FILE="$(SYNCHROD_PG_PID_FILE)" python3 -m scripts.ci.adapter_process stop
 synchrod-pg-test-restart: synchrod-pg-test-stop
 	@$(MAKE) synchrod-pg-test-start
 
-clean:
+clean: synchrod-pg-test-stop
 	rm -rf bin/ "$(SYNCHROD_PG_PID_FILE)" "$(SYNCHROD_PG_LOG_FILE)"

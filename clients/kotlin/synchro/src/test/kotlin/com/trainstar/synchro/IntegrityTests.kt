@@ -212,12 +212,9 @@ class IntegrityTests {
             executed += 1
             val valid = vector.getValue("valid").jsonPrimitive.content.toBooleanStrict()
             val vectorID = vector.getValue("vector_id").jsonPrimitive.content
-            val result = runCatching { executeVector(vector, kind) }
+            val execute = prepareVector(vector, kind)
             if (valid) {
-                if (result.isFailure) {
-                    throw AssertionError("valid authored vector failed: $vectorID", result.exceptionOrNull())
-                }
-                val output = result.getOrThrow()
+                val output = execute()
                 val expected = vector.getValue("expected").jsonObject
                 assertEquals(vectorID, expected.getValue("canonical_bytes_hex").jsonPrimitive.content, output.preimage.lowerHex())
                 assertEquals(
@@ -227,8 +224,8 @@ class IntegrityTests {
                 )
                 val expectedDigest = expected["expected_sha256"]?.takeUnless { it is kotlinx.serialization.json.JsonNull }?.jsonPrimitive?.content
                 assertEquals(vectorID, expectedDigest, output.digest)
-            } else if (result.isSuccess) {
-                throw AssertionError("invalid authored vector was accepted: $vectorID")
+            } else {
+                assertThrows(vectorID, IllegalArgumentException::class.java) { execute() }
             }
         }
 
@@ -370,7 +367,7 @@ class IntegrityTests {
             isPrimaryKey = fieldID == "field-id",
         )
 
-    private fun executeVector(vector: JsonObject, kind: String): VectorExecution {
+    private fun prepareVector(vector: JsonObject, kind: String): () -> VectorExecution {
         val input = vector.getValue("input").jsonObject
         if (kind == "typed_value") {
             val spec = input.getValue("field_spec").jsonObject
@@ -386,37 +383,46 @@ class IntegrityTests {
                 isPrimaryKey = false,
             )
             val source = input.getValue("raw_json").jsonPrimitive.content
-            return VectorExecution(Integrity.encodedTypedValue(source, field), null)
+            return { VectorExecution(Integrity.encodedTypedValue(source, field), null) }
         }
 
         if (kind == "row_digest") {
             val manifest = Json.decodeFromString<SchemaManifest>(input.getValue("manifest_json").jsonPrimitive.content)
             val tableID = input.getValue("table_id").jsonPrimitive.content
             val table = manifest.localTables().single { it.tableID == tableID }
-            val pkValue = Json.parseToJsonElement(input.getValue("pk_json").jsonPrimitive.content)
-            val pk = JsonObject(mapOf(table.primaryKeyFieldID to pkValue))
-            val row = parseStrictObject(input.getValue("row_json").jsonPrimitive.content)
+            val pkSource = input.getValue("pk_json").jsonPrimitive.content
+            val rowSource = input.getValue("row_json").jsonPrimitive.content
             val serverVersion = input.getValue("server_version").jsonPrimitive.content
-            val preimage = Integrity.rowDigestPreimage(
-                manifest.schemaHash,
-                table,
-                pk,
-                row,
-                serverVersion,
-            ).second
-            val digest = Integrity.rowDigest(manifest.schemaHash, table, pk, row, serverVersion).checksum.digest
-            return VectorExecution(preimage, digest)
+            return {
+                Integrity.validateCanonicalWireJSON(pkSource)
+                Integrity.validateCanonicalWireJSON(rowSource)
+                val pk = JsonObject(mapOf(table.primaryKeyFieldID to Json.parseToJsonElement(pkSource)))
+                val row = Json.parseToJsonElement(rowSource).jsonObject
+                val preimage = Integrity.rowDigestPreimage(
+                    manifest.schemaHash,
+                    table,
+                    pk,
+                    row,
+                    serverVersion,
+                ).second
+                val digest = Integrity.rowDigest(manifest.schemaHash, table, pk, row, serverVersion).checksum.digest
+                VectorExecution(preimage, digest)
+            }
         }
 
         if (kind == "row_identity") {
             val manifest = Json.decodeFromString<SchemaManifest>(input.getValue("manifest_json").jsonPrimitive.content)
             val tableID = input.getValue("table_id").jsonPrimitive.content
             val table = manifest.localTables().single { it.tableID == tableID }
-            val pkValue = Json.parseToJsonElement(input.getValue("pk_json").jsonPrimitive.content)
-            val pk = JsonObject(mapOf(table.primaryKeyFieldID to pkValue))
-            return VectorExecution(Integrity.rowIdentity(table, pk), null)
+            val pkSource = input.getValue("pk_json").jsonPrimitive.content
+            return {
+                Integrity.validateCanonicalWireJSON(pkSource)
+                val pk = JsonObject(mapOf(table.primaryKeyFieldID to Json.parseToJsonElement(pkSource)))
+                VectorExecution(Integrity.rowIdentity(table, pk), null)
+            }
         }
 
+        require(kind == "scope_digest") { "unsupported checksum vector kind" }
         val entries = input.getValue("entries").jsonArray.map { element ->
             val entry = element.jsonObject
             entry.getValue("row_identity_hex").jsonPrimitive.content.decodeLowerHex() to
@@ -427,92 +433,13 @@ class IntegrityTests {
                     entry.getValue("row_digest_hex").jsonPrimitive.content,
                 )
         }
-        val preimage = Integrity.scopeDigestPreimage(
-            input.getValue("schema_hash").jsonPrimitive.content,
-            input.getValue("scope_id").jsonPrimitive.content,
-            entries,
-        )
-        val digest = Integrity.scopeDigest(
-            input.getValue("schema_hash").jsonPrimitive.content,
-            input.getValue("scope_id").jsonPrimitive.content,
-            entries,
-        ).digest
-        return VectorExecution(preimage, digest)
-    }
-
-    private fun parseStrictObject(source: String): JsonObject {
-        rejectDuplicateTopLevelKeys(source)
-        return Json.parseToJsonElement(source).jsonObject
-    }
-
-    private fun rejectDuplicateTopLevelKeys(source: String) {
-        val cursor = Cursor()
-        skipWhitespace(source, cursor)
-        require(cursor.index < source.length && source[cursor.index] == '{') { "row is not an object" }
-        cursor.index += 1
-        val keys = mutableSetOf<String>()
-        while (true) {
-            skipWhitespace(source, cursor)
-            if (cursor.index < source.length && source[cursor.index] == '}') return
-            val token = consumeString(source, cursor)
-            val key = Json.parseToJsonElement(token).jsonPrimitive.content
-            require(keys.add(key)) { "duplicate row field" }
-            skipWhitespace(source, cursor)
-            require(cursor.index < source.length && source[cursor.index] == ':') { "invalid row object" }
-            cursor.index += 1
-            consumeValue(source, cursor)
-            skipWhitespace(source, cursor)
-            if (cursor.index < source.length && source[cursor.index] == ',') {
-                cursor.index += 1
-                continue
-            }
-            require(cursor.index < source.length && source[cursor.index] == '}') { "invalid row object" }
-            return
+        val schemaHash = input.getValue("schema_hash").jsonPrimitive.content
+        val scopeID = input.getValue("scope_id").jsonPrimitive.content
+        return {
+            val preimage = Integrity.scopeDigestPreimage(schemaHash, scopeID, entries)
+            val digest = Integrity.scopeDigest(schemaHash, scopeID, entries).digest
+            VectorExecution(preimage, digest)
         }
-    }
-
-    private fun consumeString(source: String, cursor: Cursor): String {
-        require(cursor.index < source.length && source[cursor.index] == '"') { "invalid JSON string" }
-        val start = cursor.index++
-        while (cursor.index < source.length) {
-            if (source[cursor.index] == '\\') cursor.index += 2
-            else if (source[cursor.index] == '"') {
-                cursor.index += 1
-                return source.substring(start, cursor.index)
-            } else cursor.index += 1
-        }
-        error("unterminated JSON string")
-    }
-
-    private fun consumeValue(source: String, cursor: Cursor) {
-        skipWhitespace(source, cursor)
-        require(cursor.index < source.length) { "missing JSON value" }
-        if (source[cursor.index] == '"') {
-            consumeString(source, cursor)
-            return
-        }
-        if (source[cursor.index] == '{' || source[cursor.index] == '[') {
-            val closers = mutableListOf(if (source[cursor.index] == '{') '}' else ']')
-            cursor.index += 1
-            while (cursor.index < source.length && closers.isNotEmpty()) {
-                when (source[cursor.index]) {
-                    '"' -> consumeString(source, cursor)
-                    '{' -> { closers.add('}'); cursor.index += 1 }
-                    '[' -> { closers.add(']'); cursor.index += 1 }
-                    closers.last() -> { closers.removeAt(closers.lastIndex); cursor.index += 1 }
-                    else -> cursor.index += 1
-                }
-            }
-            require(closers.isEmpty()) { "unterminated JSON value" }
-            return
-        }
-        while (cursor.index < source.length && source[cursor.index] != ',' && source[cursor.index] != '}') {
-            cursor.index += 1
-        }
-    }
-
-    private fun skipWhitespace(source: String, cursor: Cursor) {
-        while (cursor.index < source.length && source[cursor.index].isWhitespace()) cursor.index += 1
     }
 
     private fun String.decodeLowerHex(): ByteArray {
@@ -522,6 +449,5 @@ class IntegrityTests {
 
     private fun ByteArray.lowerHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
-    private data class Cursor(var index: Int = 0)
     private data class VectorExecution(val preimage: ByteArray, val digest: String?)
 }

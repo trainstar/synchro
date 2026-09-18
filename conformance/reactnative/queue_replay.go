@@ -3,8 +3,6 @@ package reactnative
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gowebpki/jcs"
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -1417,7 +1414,7 @@ func (c *QueueReplayCoordinator) rejectedCount() int {
 func queueReplayRejectedCount(workloads []queueReplayWorkload) int {
 	count := 0
 	for _, workload := range workloads {
-		var payload queueReplayWorkloadPayload
+		var payload scenarios.QueueReplayWorkload
 		if json.Unmarshal(workload.step.Operation.Payload, &payload) == nil {
 			count += int(payload.RejectedCount)
 		}
@@ -1554,7 +1551,7 @@ func (c *QueueReplayCoordinator) queueSuccessorPlan() (scenarios.Operation, []sc
 	if err != nil {
 		return scenarios.Operation{}, nil, nil, nil, err
 	}
-	plan, err := scenarios.NewNativeCRUDPlan(reactNativeQueueReplayCRUDSchema(current), inspection.StreamGeneration, c.userID, c.successorClientID)
+	plan, err := scenarios.NewNativeCRUDPlan(current.CRUDSchema(), inspection.StreamGeneration, c.userID, c.successorClientID)
 	if err != nil {
 		return scenarios.Operation{}, nil, nil, nil, err
 	}
@@ -1600,32 +1597,19 @@ func (c *QueueReplayCoordinator) queueSuccessorPlan() (scenarios.Operation, []sc
 	return assignment, boundInsert, boundUpdate, targets, nil
 }
 
-func queueReplayFinalSchema(scenario scenarios.Scenario) (queueReplaySchema, error) {
-	var setup queueReplaySetupPayload
-	if json.Unmarshal(scenario.Model.Setup[0].Payload, &setup) != nil || setup.InitialSchema.Schema.Version == 0 || setup.InitialSchema.Schema.Hash == "" {
-		return queueReplaySchema{}, errors.New("React Native queue successor initial schema is invalid")
+func queueReplayFinalSchema(scenario scenarios.Scenario) (scenarios.QueueReplaySchema, error) {
+	current, err := scenarios.InitialQueueReplaySchema(scenario.Model.Setup[0])
+	if err != nil {
+		return scenarios.QueueReplaySchema{}, err
 	}
-	current := queueReplaySchema{Version: setup.InitialSchema.Schema.Version, Hash: setup.InitialSchema.Schema.Hash, Tables: setup.InitialSchema.Tables}
 	for index, step := range scenario.Steps {
-		_, _, _, next, err := queueReplayOperations(step, current, uint64(index*2+1))
+		inputs, err := scenarios.BuildQueueReplayInputs(step, current, uint64(index*2+1))
 		if err != nil {
-			return queueReplaySchema{}, err
+			return scenarios.QueueReplaySchema{}, err
 		}
-		current = next
+		current = inputs.NextSchema
 	}
 	return current, nil
-}
-
-func reactNativeQueueReplayCRUDSchema(current queueReplaySchema) scenarios.NativeCRUDSchema {
-	tables := make([]scenarios.NativeCRUDSchemaTable, 0, len(current.Tables))
-	for _, table := range current.Tables {
-		fields := make([]scenarios.NativeCRUDSchemaField, 0, len(table.Fields))
-		for _, field := range table.Fields {
-			fields = append(fields, scenarios.NativeCRUDSchemaField{FieldID: field.FieldID, Type: field.Type, PrimaryKey: field.PrimaryKey, Writable: field.Writable})
-		}
-		tables = append(tables, scenarios.NativeCRUDSchemaTable{TableID: table.TableID, PrimaryKeyFieldID: table.PrimaryKeyFieldID, Fields: fields})
-	}
-	return scenarios.NativeCRUDSchema{Version: current.Version, Hash: current.Hash, Tables: tables}
 }
 
 func queueReplayLocalBatchCount(workload queueReplayWorkload) int {
@@ -1831,311 +1815,21 @@ func reactNativeQueuedMutation(value queueReplayPendingMutation) scenarios.Nativ
 	}
 }
 
-type queueReplaySchema struct {
-	Version uint64
-	Hash    string
-	Tables  []queueReplaySchemaTable
-}
-
-type queueReplaySchemaTable struct {
-	TableID           string                   `json:"table_id"`
-	RelationID        string                   `json:"relation_id"`
-	Name              string                   `json:"name"`
-	Composition       string                   `json:"composition"`
-	PrimaryKeyFieldID string                   `json:"primary_key_field_id"`
-	CreatedAtFieldID  *string                  `json:"created_at_field_id"`
-	UpdatedAtFieldID  *string                  `json:"updated_at_field_id"`
-	DeletedAtFieldID  *string                  `json:"deleted_at_field_id"`
-	Fields            []queueReplaySchemaField `json:"fields"`
-	Indexes           []queueReplaySchemaIndex `json:"indexes"`
-}
-
-type queueReplaySchemaField struct {
-	FieldID          string          `json:"field_id"`
-	Name             string          `json:"name"`
-	Type             string          `json:"type"`
-	PrimaryKey       bool            `json:"primary_key"`
-	Nullable         bool            `json:"nullable"`
-	Writable         bool            `json:"writable"`
-	DecimalPrecision any             `json:"decimal_precision"`
-	DecimalScale     any             `json:"decimal_scale"`
-	DefaultWireJSON  json.RawMessage `json:"default_wire_json"`
-}
-
-type queueReplaySchemaIndex struct {
-	IndexID  string   `json:"index_id"`
-	Name     string   `json:"name"`
-	FieldIDs []string `json:"field_ids"`
-	Unique   bool     `json:"unique"`
-}
-
-type queueReplaySetupPayload struct {
-	InitialSchema struct {
-		Schema struct {
-			Version uint64 `json:"version"`
-			Hash    string `json:"hash"`
-		} `json:"schema"`
-		Tables []queueReplaySchemaTable `json:"tables"`
-	} `json:"initial_schema"`
-}
-
-type queueReplayWorkloadPayload struct {
-	Profile       string `json:"profile"`
-	UserID        string `json:"user_id"`
-	ClientID      string `json:"client_id"`
-	TableID       string `json:"table_id"`
-	AcceptedCount uint64 `json:"accepted_count"`
-	RejectedCount uint64 `json:"rejected_count"`
-}
-
 func queueReplayWorkloads(scenario scenarios.Scenario) ([]queueReplayWorkload, error) {
-	var setup queueReplaySetupPayload
-	if json.Unmarshal(scenario.Model.Setup[0].Payload, &setup) != nil || setup.InitialSchema.Schema.Version == 0 || setup.InitialSchema.Schema.Hash == "" || len(setup.InitialSchema.Tables) != 1 {
-		return nil, errors.New("React Native queue-replay initial schema is invalid")
-	}
-	current := queueReplaySchema{Version: setup.InitialSchema.Schema.Version, Hash: setup.InitialSchema.Schema.Hash, Tables: setup.InitialSchema.Tables}
-	workloads := make([]queueReplayWorkload, 0, len(scenario.Steps))
-	for index, step := range scenario.Steps {
-		local, publish, push, next, err := queueReplayOperations(step, current, uint64(index*2+1))
-		if err != nil {
-			return nil, err
-		}
-		workloads = append(workloads, queueReplayWorkload{step: step, local: local, publish: publish, dropPush: push})
-		current = next
-	}
-	return workloads, nil
-}
-
-func queueReplayOperations(step scenarios.Step, current queueReplaySchema, commitLSN uint64) ([]scenarios.Operation, scenarios.Operation, scenarios.Operation, queueReplaySchema, error) {
-	binding := step.NativeBinding
-	if binding == nil || binding.Workload == nil || binding.Workload.AuthoredSchema.Version != current.Version || binding.Workload.AuthoredSchema.Hash != current.Hash {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay step %s schema is invalid", step.ID)
-	}
-	var payload queueReplayWorkloadPayload
-	if json.Unmarshal(step.Operation.Payload, &payload) != nil || payload.Profile != "pending_mutations" || payload.UserID != binding.UserID || payload.ClientID != binding.ClientID || payload.TableID == "" || payload.RejectedCount > binding.Workload.RecordCount || payload.AcceptedCount != binding.Workload.RecordCount-payload.RejectedCount || len(current.Tables) != 1 || len(binding.Workload.Targets) != 1 || binding.Workload.RecordCount == 0 || binding.Workload.BatchSize == 0 {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay step %s workload is invalid", step.ID)
-	}
-	table := current.Tables[0]
-	if table.TableID != payload.TableID || table.PrimaryKeyFieldID != binding.Workload.Targets[0].PrimaryKeyFieldID || binding.Workload.Targets[0].TableID != table.TableID {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay step %s workload target is invalid", step.ID)
-	}
-	rejectedField, acceptedField, err := queueReplayMutationFields(table)
-	if err != nil {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, err
-	}
-	local, err := queueReplayExpandWorkload(step)
-	if err != nil || uint64(len(local)) != binding.Workload.RecordCount {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("expand React Native queue-replay workload %s: %w", step.ID, err)
-	}
-	wire := make([]map[string]any, 0, len(local))
-	rejectedMutations := uint64(0)
-	for ordinal, operation := range local {
-		var value struct {
-			AuthenticatedUserID string            `json:"authenticated_user_id"`
-			ClientID            string            `json:"client_id"`
-			MutationID          string            `json:"mutation_id"`
-			TableID             string            `json:"table_id"`
-			PK                  map[string]string `json:"pk"`
-			AuthoredSchema      struct {
-				Version uint64 `json:"version"`
-				Hash    string `json:"hash"`
-			} `json:"authored_schema"`
-			Operation     string `json:"operation"`
-			ClientVersion string `json:"client_version"`
-			Columns       []struct {
-				FieldID string `json:"field_id"`
-				Value   string `json:"value"`
-			} `json:"columns"`
-		}
-		if json.Unmarshal(operation.Payload, &value) != nil || value.AuthenticatedUserID != binding.UserID || value.ClientID != binding.ClientID || value.MutationID == "" || value.TableID != table.TableID || value.Operation != "insert" || value.ClientVersion != binding.Workload.ClientVersion || value.AuthoredSchema.Version != current.Version || value.AuthoredSchema.Hash != current.Hash || len(value.PK) != 1 || value.PK[table.PrimaryKeyFieldID] == "" {
-			return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d is invalid", ordinal+1)
-		}
-		columns := make(map[string]any, len(value.Columns))
-		for _, column := range value.Columns {
-			if column.FieldID == "" || column.FieldID == table.PrimaryKeyFieldID {
-				return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d field is invalid", ordinal+1)
-			}
-			if _, duplicate := columns[column.FieldID]; duplicate {
-				return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d repeats a field", ordinal+1)
-			}
-			columns[column.FieldID] = column.Value
-		}
-		if len(columns) == 0 || ordinal+1 < len(local) && len(columns) != 1 || ordinal+1 == len(local) && len(columns) != 2 {
-			return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d field count is invalid", ordinal+1)
-		}
-		if _, found := columns[acceptedField.FieldID]; !found {
-			return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d lacks the accepted field", ordinal+1)
-		}
-		if _, found := columns[rejectedField.FieldID]; found {
-			if ordinal+1 != len(local) {
-				return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay local write %d contains the rejection field before the terminal mutation", ordinal+1)
-			}
-			rejectedMutations++
-		}
-		wire = append(wire, map[string]any{"mutation_id": value.MutationID, "table": value.TableID, "pk": value.PK, "authored_schema": map[string]any{"version": value.AuthoredSchema.Version, "hash": value.AuthoredSchema.Hash}, "op": value.Operation, "client_version": value.ClientVersion, "columns": columns})
-	}
-	if rejectedMutations != payload.RejectedCount || uint64(len(local))-rejectedMutations != payload.AcceptedCount {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("React Native queue-replay workload outcome partition is invalid: accepted=%d rejected=%d want_accepted=%d want_rejected=%d", uint64(len(local))-rejectedMutations, rejectedMutations, payload.AcceptedCount, payload.RejectedCount)
-	}
-	next, publish, err := queueReplayNextSchema(current, rejectedField.FieldID, current.Version+1)
-	if err != nil {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, err
-	}
-	batchID := queueReplayUUID("batch", binding.UserID, binding.ClientID, current.Version, binding.Workload.RecordCount)
-	push := scenarios.Operation{ContractOperation: "push", Name: "submit", Payload: queueReplayJSON(map[string]any{"authenticated_user_id": binding.UserID, "request": map[string]any{"client_id": binding.ClientID, "client_generation": 1, "batch_id": batchID, "schema": map[string]any{"version": next.Version, "hash": next.Hash}, "mutations": wire}, "delivery": "drop_after_server", "commit_lsn": strconv.FormatUint(commitLSN, 10), "end_lsn": strconv.FormatUint(commitLSN+1, 10)})}
-	if err := scenarios.ValidateOperation(push); err != nil {
-		return nil, scenarios.Operation{}, scenarios.Operation{}, queueReplaySchema{}, fmt.Errorf("validate React Native queue-replay push: %w", err)
-	}
-	return local, publish, push, next, nil
-}
-
-func queueReplayExpandWorkload(step scenarios.Step) ([]scenarios.Operation, error) {
-	binding := step.NativeBinding
-	if binding == nil || binding.Workload == nil {
-		return nil, fmt.Errorf("step %s has no native workload binding", step.ID)
-	}
-	parameters := binding.Workload
-	kinds := make([]scenarios.NativeWorkloadMutationKind, 0, parameters.RecordCount)
-	for _, kind := range parameters.MutationKinds {
-		for count := uint64(0); count < kind.Count; count++ {
-			kinds = append(kinds, kind)
-		}
-	}
-	if len(kinds) != int(parameters.RecordCount) {
-		return nil, fmt.Errorf("step %s workload mutation kinds do not cover record_count", step.ID)
-	}
-	operations := make([]scenarios.Operation, 0, parameters.RecordCount)
-	for ordinal := uint64(0); ordinal < parameters.RecordCount; ordinal++ {
-		target := parameters.Targets[ordinal%uint64(len(parameters.Targets))]
-		kind := kinds[ordinal]
-		fieldIDs := append([]string(nil), kind.FieldIDs...)
-		sort.Strings(fieldIDs)
-		columns := make([]map[string]string, 0, len(fieldIDs))
-		for _, fieldID := range fieldIDs {
-			columns = append(columns, map[string]string{"field_id": fieldID, "value": fmt.Sprintf("workload-%d-%06d", parameters.Seed, ordinal+1)})
-		}
-		payload, err := json.Marshal(map[string]any{"authenticated_user_id": binding.UserID, "client_id": binding.ClientID, "mutation_id": queueReplayNativeUUID(parameters.Seed, target, ordinal/parameters.BatchSize, ordinal%parameters.BatchSize), "table_id": target.TableID, "pk": map[string]string{target.PrimaryKeyFieldID: fmt.Sprintf("workload-%d-%s-%06d", parameters.Seed, target.ScopeID, ordinal+1)}, "authored_schema": map[string]any{"version": parameters.AuthoredSchema.Version, "hash": parameters.AuthoredSchema.Hash}, "operation": kind.Operation, "client_version": parameters.ClientVersion, "columns": columns})
-		if err != nil {
-			return nil, err
-		}
-		operation := scenarios.Operation{ContractOperation: "local", Name: "write", Payload: payload}
-		if err := scenarios.ValidateOperation(operation); err != nil {
-			return nil, err
-		}
-		operations = append(operations, operation)
-	}
-	encoded, err := json.Marshal(operations)
+	current, err := scenarios.InitialQueueReplaySchema(scenario.Model.Setup[0])
 	if err != nil {
 		return nil, err
 	}
-	digest := sha256.Sum256(encoded)
-	if hex.EncodeToString(digest[:]) != parameters.Expectation.OperationDigest {
-		return nil, fmt.Errorf("step %s generated operation digest does not match expectation", step.ID)
-	}
-	return operations, nil
-}
-
-func queueReplayNativeUUID(seed uint64, target scenarios.NativeWorkloadTarget, batchOrdinal, ordinalInBatch uint64) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("synchro:native-workload:v1:%d:%s:%s:%d:%d", seed, target.ScopeID, target.TableID, batchOrdinal, ordinalInBatch)))
-	digest[6] = digest[6]&0x0f | 0x40
-	digest[8] = digest[8]&0x3f | 0x80
-	encoded := hex.EncodeToString(digest[:16])
-	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
-}
-
-func queueReplayMutationFields(table queueReplaySchemaTable) (queueReplaySchemaField, queueReplaySchemaField, error) {
-	fields := make([]queueReplaySchemaField, 0, len(table.Fields))
-	for _, field := range table.Fields {
-		if !field.PrimaryKey && field.Writable && field.Type == "string" {
-			fields = append(fields, field)
+	workloads := make([]queueReplayWorkload, 0, len(scenario.Steps))
+	for index, step := range scenario.Steps {
+		inputs, err := scenarios.BuildQueueReplayInputs(step, current, uint64(index*2+1))
+		if err != nil {
+			return nil, err
 		}
+		workloads = append(workloads, queueReplayWorkload{step: step, local: inputs.Local, publish: inputs.Publish, dropPush: inputs.DropPush})
+		current = inputs.NextSchema
 	}
-	sort.Slice(fields, func(left, right int) bool { return fields[left].FieldID < fields[right].FieldID })
-	if len(fields) < 2 {
-		return queueReplaySchemaField{}, queueReplaySchemaField{}, errors.New("React Native queue-replay table has fewer than two writable string fields")
-	}
-	return fields[0], fields[1], nil
-}
-
-func queueReplayNextSchema(current queueReplaySchema, removedField string, version uint64) (queueReplaySchema, scenarios.Operation, error) {
-	if len(current.Tables) != 1 {
-		return queueReplaySchema{}, scenarios.Operation{}, errors.New("React Native queue-replay schema has an unexpected table count")
-	}
-	table := current.Tables[0]
-	addedField := "queue_value_" + strconv.FormatUint(version, 10)
-	updated := make([]queueReplaySchemaField, 0, len(table.Fields))
-	for _, field := range table.Fields {
-		if field.FieldID != removedField {
-			updated = append(updated, field)
-		}
-	}
-	updated = append(updated, queueReplaySchemaField{FieldID: addedField, Name: addedField, Type: "string", Nullable: false, Writable: true, DefaultWireJSON: json.RawMessage(`""`)})
-	table.Fields = updated
-	tables := []map[string]any{queueReplayManifestTable(table)}
-	bodyWithoutHash := queueReplayJSON(map[string]any{"parent_schema": map[string]any{"version": current.Version, "hash": current.Hash}, "schema_version": version, "transition_class": "class_4", "compatibility_floor": version, "tables": tables})
-	canonical, err := jcs.Transform(bodyWithoutHash)
-	if err != nil {
-		return queueReplaySchema{}, scenarios.Operation{}, fmt.Errorf("canonicalize React Native queue-replay schema: %w", err)
-	}
-	digest := sha256.Sum256(append([]byte("synchro:v3:schema-manifest:v1\x00"), canonical...))
-	hash := hex.EncodeToString(digest[:])
-	body, err := jcs.Transform(queueReplayJSON(map[string]any{"parent_schema": map[string]any{"version": current.Version, "hash": current.Hash}, "schema_version": version, "schema_hash": hash, "transition_class": "class_4", "compatibility_floor": version, "tables": tables}))
-	if err != nil {
-		return queueReplaySchema{}, scenarios.Operation{}, fmt.Errorf("encode React Native queue-replay schema: %w", err)
-	}
-	next := queueReplaySchema{Version: version, Hash: hash, Tables: []queueReplaySchemaTable{table}}
-	publish := scenarios.Operation{ContractOperation: "model", Name: "publish-schema", Payload: queueReplayJSON(map[string]any{"schema": map[string]any{"version": version, "hash": hash}, "body": string(body), "transition_class": "class_4", "compatibility_floor": version, "tables": []map[string]any{queueReplayProtocolTable(table)}, "affected_scopes": []string{}})}
-	if err := scenarios.ValidateOperation(publish); err != nil {
-		return queueReplaySchema{}, scenarios.Operation{}, fmt.Errorf("validate React Native queue-replay schema publication: %w", err)
-	}
-	return next, publish, nil
-}
-
-func queueReplayProtocolTable(table queueReplaySchemaTable) map[string]any {
-	return map[string]any{"table_id": table.TableID, "relation_id": table.RelationID, "name": table.Name, "composition": table.Composition, "primary_key_field_id": table.PrimaryKeyFieldID, "created_at_field_id": table.CreatedAtFieldID, "updated_at_field_id": table.UpdatedAtFieldID, "deleted_at_field_id": table.DeletedAtFieldID, "fields": queueReplayProtocolFields(table.Fields), "indexes": queueReplayIndexes(table.Indexes)}
-}
-
-func queueReplayManifestTable(table queueReplaySchemaTable) map[string]any {
-	fields := make([]map[string]any, 0, len(table.Fields))
-	for _, field := range table.Fields {
-		fields = append(fields, map[string]any{"field_id": field.FieldID, "name": field.Name, "type": field.Type, "nullable": field.Nullable, "writable": field.Writable})
-	}
-	sort.Slice(fields, func(left, right int) bool {
-		return fields[left]["field_id"].(string) < fields[right]["field_id"].(string)
-	})
-	indexes := queueReplayIndexes(table.Indexes)
-	sort.Slice(indexes, func(left, right int) bool {
-		return indexes[left]["index_id"].(string) < indexes[right]["index_id"].(string)
-	})
-	return map[string]any{"table_id": table.TableID, "relation_id": table.RelationID, "name": table.Name, "composition": table.Composition, "primary_key_field_id": table.PrimaryKeyFieldID, "lifecycle": map[string]any{"created_at_field_id": table.CreatedAtFieldID, "updated_at_field_id": table.UpdatedAtFieldID, "deleted_at_field_id": table.DeletedAtFieldID}, "fields": fields, "indexes": indexes}
-}
-
-func queueReplayProtocolFields(values []queueReplaySchemaField) []map[string]any {
-	result := make([]map[string]any, 0, len(values))
-	for _, field := range values {
-		var defaultValue any
-		if len(field.DefaultWireJSON) != 0 && string(field.DefaultWireJSON) != "null" {
-			_ = json.Unmarshal(field.DefaultWireJSON, &defaultValue)
-		}
-		result = append(result, map[string]any{"field_id": field.FieldID, "name": field.Name, "type": field.Type, "primary_key": field.PrimaryKey, "nullable": field.Nullable, "writable": field.Writable, "decimal_precision": field.DecimalPrecision, "decimal_scale": field.DecimalScale, "default_wire_json": defaultValue})
-	}
-	return result
-}
-
-func queueReplayIndexes(values []queueReplaySchemaIndex) []map[string]any {
-	result := make([]map[string]any, 0, len(values))
-	for _, index := range values {
-		result = append(result, map[string]any{"index_id": index.IndexID, "name": index.Name, "field_ids": index.FieldIDs, "unique": index.Unique})
-	}
-	return result
-}
-
-func queueReplayUUID(kind, userID, clientID string, schemaVersion, ordinal uint64) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("synchro:workload:%s:%s:%s:%d:%d", kind, userID, clientID, schemaVersion, ordinal)))
-	digest[6] = digest[6]&0x0f | 0x40
-	digest[8] = digest[8]&0x3f | 0x80
-	encoded := hex.EncodeToString(digest[:16])
-	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
+	return workloads, nil
 }
 
 func queueReplayJSON(value any) json.RawMessage {

@@ -40,12 +40,16 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.UUID
+import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.coroutines.CoroutineContext
+import kotlin.reflect.full.callSuspend
+import kotlin.reflect.full.declaredFunctions
+import kotlin.reflect.jvm.isAccessible
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -255,15 +259,108 @@ class SyncEngineTests {
     fun lifecycleCallInsideApplicationTransactionFailsBeforeLockAcquisition() {
         val (engine, database) = makeSyncEngine()
 
-        try {
-            val error = assertThrows(IllegalStateException::class.java) {
-                database.applicationTransaction {
-                    runBlocking { engine.stop() }
-                }
+        fun rejectLifecycleCalls() {
+            val operations: List<suspend () -> Unit> = listOf(
+                { engine.start() },
+                { engine.stop() },
+                { engine.shutdown() },
+                { engine.syncNow() },
+                { engine.retry() },
+                { engine.resetSchema() },
+            )
+            for (operation in operations) {
+                assertThrows(IllegalStateException::class.java) { runBlocking { operation() } }
             }
-            assertTrue(error.message.orEmpty().contains("application transaction"))
+            assertThrows(IllegalStateException::class.java) { engine.onApplicationForeground() }
+            assertThrows(IllegalStateException::class.java) { engine.onApplicationBackground() }
+            assertEquals(SyncStatus.LocalReady, engine.getSyncStatus())
+        }
+
+        try {
+            database.applicationTransaction {
+                database.applicationReadTransaction { rejectLifecycleCalls() }
+                rejectLifecycleCalls()
+            }
+            database.applicationReadTransaction { rejectLifecycleCalls() }
+            database.applicationAuthoredWriteTransaction("orders", Operation.INSERT, listOf("ship_address")) {
+                rejectLifecycleCalls()
+            }
         } finally {
             runBlocking { engine.stop() }
+        }
+    }
+
+    @Test
+    fun lifecycleChecksMemoryAndDurableStateSeparately() {
+        val (engine, database) = makeSyncEngine()
+        val statusField = SyncEngine::class.java.getDeclaredField("currentStatus").apply { isAccessible = true }
+        val transition = SyncEngine::class.java.getDeclaredMethod(
+            "transitionTo",
+            SyncStatus::class.java,
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+        ).apply { isAccessible = true }
+        try {
+            database.writeTransaction {
+                SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.CONNECTING)
+            }
+            val memoryFailure = assertThrows(InvocationTargetException::class.java) {
+                transition.invoke(engine, SyncStatus.Ready, false, false)
+            }.cause
+            assertTrue(memoryFailure is SynchroError.InvalidStateTransition)
+            assertEquals(SyncStatus.LocalReady, engine.getSyncStatus())
+            assertEquals(SyncLifecycleState.CONNECTING, database.readTransaction { SynchroMeta.getClientState(it).lifecycleState })
+
+            statusField.set(engine, SyncStatus.Connecting)
+            database.writeTransaction {
+                SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.LOCAL_READY, processRecovery = true)
+            }
+            val durableFailure = assertThrows(InvocationTargetException::class.java) {
+                transition.invoke(engine, SyncStatus.Ready, false, false)
+            }.cause
+            assertTrue(durableFailure is SynchroError.InvalidStateTransition)
+            assertEquals(SyncStatus.Connecting, engine.getSyncStatus())
+            assertEquals(SyncLifecycleState.LOCAL_READY, database.readTransaction { SynchroMeta.getClientState(it).lifecycleState })
+
+            database.writeTransaction {
+                SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.CONNECTING)
+            }
+            transition.invoke(engine, SyncStatus.Ready, false, false)
+            assertEquals(SyncStatus.Ready, engine.getSyncStatus())
+            assertEquals(SyncLifecycleState.READY, database.readTransaction { SynchroMeta.getClientState(it).lifecycleState })
+        } finally {
+            runBlocking { engine.stop() }
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun manualSchedulingWaitsWithoutPollingWhilePositiveIntervalsWake() = runTest {
+        val awaitWakeup = SyncEngine::class.declaredFunctions.single { it.name == "awaitLoopWakeup" }
+            .apply { isAccessible = true }
+        for (interval in listOf(0.0, 0.001, 0.000001)) {
+            val (engine, _) = makeSyncEngine(syncInterval = interval)
+            val wakeups = Channel<Nothing>()
+            val waiting = async { awaitWakeup.callSuspend(engine, wakeups) }
+            try {
+                testScheduler.runCurrent()
+                assertFalse(waiting.isCompleted)
+                testScheduler.advanceTimeBy(1L)
+                testScheduler.runCurrent()
+                if (interval == 0.0) {
+                    assertFalse(waiting.isCompleted)
+                    testScheduler.advanceTimeBy(60_000L)
+                    testScheduler.runCurrent()
+                    assertFalse(waiting.isCompleted)
+                } else {
+                    assertTrue(waiting.isCompleted)
+                    waiting.await()
+                }
+            } finally {
+                waiting.cancelAndJoin()
+                wakeups.close()
+                engine.stop()
+            }
         }
     }
 
@@ -1557,7 +1654,7 @@ class SyncEngineTests {
         val pushCalls = AtomicInteger()
         val retryCompleted = CountDownLatch(1)
         val (engine, db) = makeIntegrationEnv(
-            syncInterval = 3_600.0,
+            syncInterval = 0.0,
             pushDebounce = 3_600.0,
             maxRetryAttempts = 0,
             retryTiming = timing,
@@ -3168,7 +3265,7 @@ class SyncEngineTests {
 
     // MARK: - Helpers
 
-    private fun makeSyncEngine(): Pair<SyncEngine, SynchroDatabase> {
+    private fun makeSyncEngine(syncInterval: Double = 30.0): Pair<SyncEngine, SynchroDatabase> {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val dbName = "synchro_test_${UUID.randomUUID()}.sqlite"
         val config = SynchroConfig(
@@ -3177,6 +3274,7 @@ class SyncEngineTests {
             authProvider = { "token" },
             clientID = "test",
             appVersion = "1.0.0",
+            syncInterval = syncInterval,
             maxRetryAttempts = 3
         )
         val db = databases.open(context, dbName)

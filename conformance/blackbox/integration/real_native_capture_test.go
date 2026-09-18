@@ -278,6 +278,22 @@ func TestRealNativeCaptureServerObservationSignals(t *testing.T) {
 		}
 	}
 	if _, err := database.ExecContext(ctx, `
+		UPDATE synchro.sync_captured_rows
+		SET checksum = set_byte(checksum, 0, get_byte(checksum, 0) # 1)
+		WHERE relation_id = $1::uuid AND record_id = $2`, relationID, runtimeRecord); err != nil {
+		t.Fatalf("corrupt captured-row checksum: %v", err)
+	}
+	requireCaptureFailure("native runtime captured row checksum is invalid", true)
+	if _, err := database.ExecContext(ctx, `
+		UPDATE synchro.sync_captured_rows
+		SET checksum = set_byte(checksum, 0, get_byte(checksum, 0) # 1)
+		WHERE relation_id = $1::uuid AND record_id = $2`, relationID, runtimeRecord); err != nil {
+		t.Fatalf("restore captured-row checksum: %v", err)
+	}
+	if _, err := controller.Capture(ctx, nil, []string{"server-state"}); err != nil {
+		t.Fatalf("capture after checksum restoration: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `
 		DELETE FROM synchro.sync_bucket_edges
 		WHERE table_name = 'cf_items' AND record_id = $1 AND bucket_id = 'cf:global'`, runtimeRecord); err != nil {
 		t.Fatalf("remove authored native capture edge: %v", err)

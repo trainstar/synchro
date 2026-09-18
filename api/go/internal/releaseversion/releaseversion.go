@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-var semverRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+var semverRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 var (
 	synchroPodspecVersionRE         = regexp.MustCompile(`(?m)^  s\.version = ".*"$`)
@@ -23,7 +23,8 @@ var (
 	kotlinCoordinatesRE             = regexp.MustCompile(`(?m)^    coordinates\("fit\.trainstar", "synchro", .*\)$`)
 	cargoWorkspaceVersionRE         = regexp.MustCompile(`(?ms)(\[workspace\.package\]\s+version = ")([^"]+)(")`)
 	controlVersionRE                = regexp.MustCompile(`(?m)^default_version = '.*'$`)
-	artifactInventoryReleaseRE      = regexp.MustCompile(`(?m)^  "release": ".*",$`)
+	distributionReleaseRE           = regexp.MustCompile(`(?m)^  "release": ".*",$`)
+	requirementsSchemaReleaseRE     = regexp.MustCompile(`(?m)^    "release": \{ "const": ".*" \},$`)
 	baseSQLFileRE                   = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+)\.sql$`)
 )
 
@@ -41,8 +42,19 @@ func FindRepoRoot(start string) (string, error) {
 
 	for {
 		gitPath := filepath.Join(current, ".git")
-		if info, err := os.Stat(gitPath); err == nil && info.IsDir() {
-			return current, nil
+		if info, err := os.Stat(gitPath); err == nil {
+			if info.IsDir() {
+				return current, nil
+			}
+			if info.Mode().IsRegular() {
+				data, err := os.ReadFile(gitPath)
+				if err != nil {
+					return "", fmt.Errorf("reading Git worktree marker: %w", err)
+				}
+				if directory, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: "); ok && directory != "" {
+					return current, nil
+				}
+			}
 		}
 
 		parent := filepath.Dir(current)
@@ -83,97 +95,8 @@ func Set(root string, version string) error {
 	return Sync(root)
 }
 
-func Sync(root string) error {
-	version, err := ReadVersion(root)
-	if err != nil {
-		return err
-	}
-
-	replacements := []fileExpectation{
-		{
-			path:     filepath.Join(root, "Synchro.podspec"),
-			pattern:  synchroPodspecVersionRE,
-			expected: fmt.Sprintf(`  s.version = "%s"`, version),
-		},
-		{
-			path:     filepath.Join(root, "Synchro.podspec"),
-			pattern:  synchroPodspecSourceTagRE,
-			expected: `  s.source = { :git => "https://github.com/trainstar/synchro.git", :tag => "v#{s.version}" }`,
-		},
-		{
-			path:     filepath.Join(root, "clients/react-native/package.json"),
-			pattern:  reactNativePackageVersionRE,
-			expected: fmt.Sprintf(`  "version": "%s",`, version),
-		},
-		{
-			path:     filepath.Join(root, "clients/react-native/SynchroReactNative.podspec"),
-			pattern:  reactNativePodspecTagRE,
-			expected: `  s.source       = { :git => "https://github.com/trainstar/synchro.git", :tag => "v#{s.version}" }`,
-		},
-		{
-			path:     filepath.Join(root, "clients/react-native/SynchroReactNative.podspec"),
-			pattern:  reactNativePodspecDependencyRE,
-			expected: `  s.dependency "Synchro", "= #{s.version}"`,
-		},
-		{
-			path:     filepath.Join(root, "clients/react-native/android/build.gradle"),
-			pattern:  reactNativeAndroidVersionRE,
-			expected: fmt.Sprintf(`def defaultSynchroVersion = "%s"`, version),
-		},
-		{
-			path:     filepath.Join(root, "clients/react-native/android/build.gradle"),
-			pattern:  reactNativeAndroidDependencyRE,
-			expected: `  implementation "fit.trainstar:synchro:${resolvedSynchroVersion}"`,
-		},
-		{
-			path:     filepath.Join(root, "clients/kotlin/gradle.properties"),
-			pattern:  kotlinGradlePropertiesVersionRE,
-			expected: fmt.Sprintf(`version=%s`, version),
-		},
-		{
-			path:     filepath.Join(root, "clients/kotlin/synchro/build.gradle.kts"),
-			pattern:  kotlinCoordinatesRE,
-			expected: `    coordinates("fit.trainstar", "synchro", project.version.toString())`,
-		},
-		{
-			path:     filepath.Join(root, "extensions/Cargo.toml"),
-			pattern:  cargoWorkspaceVersionRE,
-			expected: fmt.Sprintf(`${1}%s${3}`, version),
-		},
-		{
-			path:     filepath.Join(root, "extensions/synchro-pg/synchro_pg.control"),
-			pattern:  controlVersionRE,
-			expected: fmt.Sprintf(`default_version = '%s'`, version),
-		},
-		{
-			path:     filepath.Join(root, "conformance/artifacts/inventory.json"),
-			pattern:  artifactInventoryReleaseRE,
-			expected: fmt.Sprintf(`  "release": "%s",`, version),
-		},
-	}
-
-	for _, replacement := range replacements {
-		if err := rewriteFile(replacement.path, replacement.pattern, replacement.expected); err != nil {
-			return err
-		}
-	}
-
-	if err := syncPostgresInstallSQL(root, version); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func Check(root string, expectedTag string) error {
-	version, err := ReadVersion(root)
-	if err != nil {
-		return err
-	}
-
-	var failures []string
-
-	expectations := []fileExpectation{
+func distributionExpectations(root, version string) []fileExpectation {
+	return []fileExpectation{
 		{
 			path:     filepath.Join(root, "Synchro.podspec"),
 			pattern:  synchroPodspecVersionRE,
@@ -231,12 +154,54 @@ func Check(root string, expectedTag string) error {
 		},
 		{
 			path:     filepath.Join(root, "conformance/artifacts/inventory.json"),
-			pattern:  artifactInventoryReleaseRE,
+			pattern:  distributionReleaseRE,
 			expected: fmt.Sprintf(`  "release": "%s",`, version),
 		},
+		{
+			path:     filepath.Join(root, "conformance/requirements.json"),
+			pattern:  distributionReleaseRE,
+			expected: fmt.Sprintf(`  "release": "%s",`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/support-matrix.json"),
+			pattern:  distributionReleaseRE,
+			expected: fmt.Sprintf(`  "release": "%s",`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/schemas/requirements-v2.schema.json"),
+			pattern:  requirementsSchemaReleaseRE,
+			expected: fmt.Sprintf(`    "release": { "const": "%s" },`, version),
+		},
+	}
+}
+
+func Sync(root string) error {
+	version, err := ReadVersion(root)
+	if err != nil {
+		return err
+	}
+	for _, replacement := range distributionExpectations(root, version) {
+		if err := rewriteFile(replacement.path, replacement.pattern, replacement.expected); err != nil {
+			return err
+		}
 	}
 
-	for _, expectation := range expectations {
+	if err := syncPostgresInstallSQL(root, version); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func Check(root string, expectedTag string) error {
+	version, err := ReadVersion(root)
+	if err != nil {
+		return err
+	}
+
+	var failures []string
+
+	for _, expectation := range distributionExpectations(root, version) {
 		ok, actual, checkErr := matchesExpectation(expectation.path, expectation.pattern, expectation.expected)
 		if checkErr != nil {
 			failures = append(failures, checkErr.Error())
@@ -274,7 +239,7 @@ func rewriteFile(path string, pattern *regexp.Regexp, replacement string) error 
 
 	var updated string
 	if pattern == cargoWorkspaceVersionRE {
-		updated = pattern.ReplaceAllString(string(data), replacement)
+		updated = pattern.ReplaceAllString(string(data), "${1}"+replacement+"${3}")
 	} else {
 		updated = pattern.ReplaceAllLiteralString(string(data), replacement)
 	}

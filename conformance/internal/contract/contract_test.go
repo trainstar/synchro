@@ -256,7 +256,7 @@ func TestMarkdownHeadingAnchorsMatchPublishedContract(t *testing.T) {
 		{"Unicode punctuation and emoji", "### Café — emoji 😀\n", []string{"café-emoji-"}, []int{3}},
 		{"ECMAScript full lowercase Turkish I", "### İ\n", []string{"i̇"}, []int{3}},
 		{"whitespace run", "### Many   spaces\n", []string{"many-spaces"}, []int{3}},
-		{"fences", "```md\n### ignored\n```\n### shown\n````\n### ignored-again\n```\n### after\n", []string{"shown", "after"}, []int{3, 3}},
+		{"fences", "```md\n### ignored\n```\n### shown\n````\n### ignored-again\n````\n### after\n", []string{"shown", "after"}, []int{3, 3}},
 		{"four-space non-fence input", "    ### not-a-heading\n   ### selected\n", []string{"selected"}, []int{3}},
 		{"global duplicates", "# Repeat\n## Repeat\n### Repeat\n", []string{"repeat", "repeat-1", "repeat-2"}, []int{1, 2, 3}},
 	} {
@@ -272,6 +272,31 @@ func TestMarkdownHeadingAnchorsMatchPublishedContract(t *testing.T) {
 			}
 			if got, want := headingAnchorsAtLevel(headings, 3), expectedAnchorsAtLevel(test.anchors, test.levels, 3); !equalStrings(got, want) {
 				t.Fatalf("level-three anchors = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestMarkdownFenceBoundaries(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "markdown-fences.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name    string   `json:"name"`
+		Source  string   `json:"source"`
+		Anchors []string `json:"anchors"`
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("Markdown fence cases are missing")
+	}
+	for _, test := range cases {
+		t.Run(test.Name, func(t *testing.T) {
+			if got := headingAnchors(parseMarkdownHeadings(test.Source)); !equalStrings(got, test.Anchors) {
+				t.Fatalf("anchors = %v, want %v", got, test.Anchors)
 			}
 		})
 	}

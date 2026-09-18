@@ -1136,6 +1136,151 @@ final class SchemaManagerTests: XCTestCase {
         XCTAssertTrue(try tableExists(db: database, name: "future_items"))
     }
 
+    func testNullableRelaxationPreservesPhysicalStateIntentAndRollbackAcrossReopen() throws {
+        for withoutRowID in [false, true] {
+            let database = try makeTestDB()
+            defer { try? database.close() }
+            let manager = SchemaManager(database: database)
+            var source = protocolOrdersSchemaManifest()
+            let address = try XCTUnwrap(source.tables[0].fields.firstIndex { $0.name == "ship_address" })
+            source.tables[0].fields[address].nullable = false
+            source.schemaHash = try Integrity.schemaManifestHash(source)
+            try database.writeTransaction { db in
+                try db.execute(sql: """
+                    CREATE TABLE orders (
+                        id TEXT PRIMARY KEY,
+                        ship_address TEXT CONSTRAINT "required address" NOT/*keep*/NULL ON CONFLICT ABORT,
+                        user_id TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        deleted_at TEXT,
+                        local_note TEXT COLLATE NOCASE NOT NULL DEFAULT 'NOT NULL,  local',
+                        local_upper TEXT GENERATED ALWAYS AS (upper(local_note)) VIRTUAL,
+                        CHECK (length(local_note) > 0)
+                    ) \(withoutRowID ? "WITHOUT ROWID" : "")
+                    """)
+            }
+            try manager.createSyncedTables(schema: SchemaResponse(
+                schemaVersion: source.schemaVersion, schemaHash: source.schemaHash,
+                serverTime: Date(), manifest: source
+            ))
+            _ = try database.execute(
+                """
+                INSERT INTO orders (id, ship_address, user_id, updated_at)
+                VALUES ('pending', 'offline', 'user', '2026-01-01T00:00:00.000000Z')
+                """, params: nil
+            )
+            try database.writeSyncLockedTransaction { db in
+                try db.execute(sql: """
+                    INSERT INTO orders (id, ship_address, user_id, updated_at, local_note)
+                    VALUES ('synced', 'server', 'user', '2026-01-01T00:00:00.000000Z', 'server note')
+                    """)
+                try SynchroMeta.upsertRowVersion(
+                    db, tableName: "orders", recordID: "synced",
+                    serverVersion: "server-v1", rowChecksum: nil
+                )
+                try SynchroMeta.upsertScope(db, scopeID: "orders", cursor: "cursor", checksum: nil)
+                try SynchroMeta.upsertScopeRow(
+                    db, scopeID: "orders", tableName: "orders", recordID: "synced",
+                    checksum: String(repeating: "a", count: 64), generation: 0
+                )
+                if !withoutRowID {
+                    try db.execute(sql: "UPDATE orders SET rowid = 77 WHERE id = 'pending'")
+                }
+                try db.execute(sql: """
+                    CREATE TABLE local_details (
+                        id TEXT PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+                        note BLOB NOT NULL
+                    );
+                    INSERT INTO local_details VALUES ('pending', X'00FF');
+                    CREATE TABLE local_events (note TEXT);
+                    CREATE INDEX local_note_index ON orders(local_note COLLATE NOCASE) WHERE local_note <> 'a  b';
+                    CREATE TRIGGER local_order_update AFTER UPDATE ON orders
+                    BEGIN INSERT INTO local_events VALUES ('NOT NULL,  changed'); END;
+                    CREATE VIEW local_order_view AS SELECT id, local_note FROM orders;
+                    """)
+            }
+            XCTAssertThrowsError(try database.execute(
+                "UPDATE orders SET ship_address = NULL WHERE id = 'pending'", params: nil
+            ))
+            let rows = try database.query("SELECT * FROM orders ORDER BY id", params: nil)
+            let pending = try ChangeTracker(database: database).inspectPendingMutations()
+            let values = try database.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id", params: nil)
+            let versions = try database.query("SELECT * FROM _synchro_row_versions", params: nil)
+            let provenance = try database.query("SELECT * FROM _synchro_scope_rows", params: nil)
+            let objects = try database.query(
+                "SELECT type, name, sql FROM sqlite_schema WHERE name LIKE 'local_%' ORDER BY name", params: nil
+            )
+            var target = source
+            target.schemaVersion += 1
+            target.parentSchema = SchemaRef(version: source.schemaVersion, hash: source.schemaHash)
+            target.transitionClass = "class_2"
+            target.tables[0].fields[address].nullable = true
+            target.tables[0].fields.append(ColumnSchema(
+                fieldID: "field-new-note", name: "new_note", type: "string",
+                nullable: true, writable: true, precision: nil, scale: nil
+            ))
+            target.schemaHash = try Integrity.schemaManifestHash(target)
+            let journal = try manager.prepareMigration(
+                targetManifest: target, action: .replace, affectedScopes: [],
+                scopeCursorUpdates: [:], schemaReset: false
+            )
+            XCTAssertEqual(journal.plan.operations.filter { $0.kind == .relaxNullability }.count, 1)
+            let schemaBefore = try database.query("SELECT name, sql FROM sqlite_schema ORDER BY name", params: nil)
+            enum RollbackProbe: Error { case afterDDL }
+            XCTAssertThrowsError(try database.writeSchemaMigrationTransaction { db in
+                _ = try manager.applyPreparedMigrationInTransaction(db)
+                throw RollbackProbe.afterDDL
+            }) { error in
+                guard case RollbackProbe.afterDDL = error else {
+                    return XCTFail("Migration failed before the rollback probe: \(error)")
+                }
+            }
+            XCTAssertEqual(try database.query("SELECT name, sql FROM sqlite_schema ORDER BY name", params: nil), schemaBefore)
+            XCTAssertEqual(try database.query("SELECT * FROM orders ORDER BY id", params: nil), rows)
+            XCTAssertEqual(try manager.activeMigration()?.phase, .prepared)
+            XCTAssertTrue(try database.dbPool.writeWithoutTransaction { try Bool.fetchOne($0, sql: "PRAGMA foreign_keys") == true })
+
+            let reopened = try SynchroDatabase(path: database.path)
+            defer { try? reopened.close() }
+            let reopenedManager = SchemaManager(database: reopened)
+            _ = try reopened.writeSchemaMigrationTransaction { db in
+                try reopenedManager.applyPreparedMigrationInTransaction(db)
+            }
+            let schemaVersion = try reopened.query("PRAGMA schema_version", params: nil)
+            let recovered = try SynchroDatabase(path: database.path)
+            defer { try? recovered.close() }
+            let recoveredManager = SchemaManager(database: recovered)
+            XCTAssertEqual(try recoveredManager.recoverMigrationIfNeeded()?.phase, .applied)
+            XCTAssertEqual(try recovered.query("PRAGMA schema_version", params: nil), schemaVersion)
+            XCTAssertNil(try recoveredManager.activeMigration())
+            XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations(), pending)
+            XCTAssertEqual(try recovered.query(
+                "SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id", params: nil
+            ), values)
+            XCTAssertEqual(try recovered.query("SELECT * FROM _synchro_row_versions", params: nil), versions)
+            XCTAssertEqual(try recovered.query("SELECT * FROM _synchro_scope_rows", params: nil), provenance)
+            XCTAssertEqual(try recovered.query(
+                "SELECT type, name, sql FROM sqlite_schema WHERE name LIKE 'local_%' ORDER BY name", params: nil
+            ), objects)
+            let originalColumns = ["id", "ship_address", "user_id", "updated_at", "deleted_at", "local_note", "local_upper"]
+            XCTAssertEqual(try recovered.query("SELECT \(originalColumns.joined(separator: ", ")) FROM orders ORDER BY id", params: nil), rows)
+            XCTAssertEqual(try recovered.queryOne("SELECT note FROM local_details", params: nil)?["note"] as Data?, Data([0, 255]))
+            XCTAssertEqual(try recovered.query("SELECT * FROM local_order_view", params: nil).count, 2)
+            XCTAssertTrue(try recovered.query("SELECT * FROM local_events", params: nil).isEmpty)
+            if !withoutRowID {
+                XCTAssertEqual(try recovered.queryOne("SELECT rowid FROM orders WHERE id = 'pending'", params: nil)?["rowid"] as Int?, 77)
+            }
+            let addressInfo = try XCTUnwrap(recovered.query("PRAGMA table_info(orders)", params: nil)
+                .first { ($0["name"] as String) == "ship_address" })
+            XCTAssertEqual(addressInfo["notnull"] as Int, 0)
+            _ = try recovered.execute("UPDATE orders SET ship_address = NULL WHERE id = 'pending'", params: nil)
+            XCTAssertNil(try recovered.queryOne("SELECT ship_address FROM orders WHERE id = 'pending'", params: nil)?["ship_address"] as String?)
+            XCTAssertEqual(try recovered.queryOne("SELECT note FROM local_events", params: nil)?["note"] as String?, "NOT NULL,  changed")
+            XCTAssertThrowsError(try recovered.execute("UPDATE orders SET local_note = NULL WHERE id = 'pending'", params: nil))
+            XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations().count, pending.count + 1)
+        }
+    }
+
     func testPreparedMigrationRecoversAfterAbruptReopenWithoutLosingApplicationState() throws {
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("synchro_prepared_migration_\(UUID().uuidString).sqlite")

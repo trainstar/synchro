@@ -144,6 +144,12 @@ The specification, authored requirements, support matrix, and scenarios define e
 
 Use structured results for required gates. Skipped, filtered, and zero-test results fail the gate.
 
+Soak wire records preserve the original request and response from each exchange.
+Cursor issuance and later acknowledgment use separate exchange identities.
+The live server soak executes response loss on push or pull and WAL-worker replay interruption.
+Its in-memory client is reference state, not native process-recovery evidence.
+Native recovery remains covered by the real native scenario gates.
+
 Use `RELEASE.md` for release procedure.
 
 The representative relational corpus under `extensions/testdata/` is the canonical seeded end-to-end fixture source.

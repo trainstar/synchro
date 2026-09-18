@@ -209,7 +209,8 @@ final class IntegrityTests: XCTestCase {
             executed += 1
             let valid = try XCTUnwrap(vector["valid"] as? Bool)
             let vectorID = try XCTUnwrap(vector["vector_id"] as? String)
-            let result = Result { try execute(vector: vector, kind: kind) }
+            let execute = try prepare(vector: vector, kind: kind)
+            let result = Result { try execute() }
             if valid {
                 guard case let .success(output) = result else {
                     if case let .failure(error) = result {
@@ -337,7 +338,7 @@ final class IntegrityTests: XCTestCase {
         )
     }
 
-    private func execute(vector: [String: Any], kind: String) throws -> VectorExecution {
+    private func prepare(vector: [String: Any], kind: String) throws -> () throws -> VectorExecution {
         let input = try XCTUnwrap(vector["input"] as? [String: Any])
         if kind == "typed_value" {
             let spec = try XCTUnwrap(input["field_spec"] as? [String: Any])
@@ -353,7 +354,9 @@ final class IntegrityTests: XCTestCase {
                 isPrimaryKey: false
             )
             let source = try XCTUnwrap(input["raw_json"] as? String)
-            return VectorExecution(preimage: try Integrity.encodedTypedValue(json: source, field: field), digest: nil)
+            return {
+                VectorExecution(preimage: try Integrity.encodedTypedValue(json: source, field: field), digest: nil)
+            }
         }
 
         if kind == "row_digest" {
@@ -362,26 +365,32 @@ final class IntegrityTests: XCTestCase {
             let tableID = try XCTUnwrap(input["table_id"] as? String)
             let table = try XCTUnwrap(try manifest.localTables().first(where: { $0.tableID == tableID }))
             let pkSource = try XCTUnwrap(input["pk_json"] as? String)
-            let pkValue = try JSONSerialization.jsonObject(with: Data(pkSource.utf8), options: [.fragmentsAllowed])
             let rowSource = try XCTUnwrap(input["row_json"] as? String)
-            let rawRow = try strictJSONObject(rowSource)
-            let row = rawRow.mapValues(AnyCodable.init)
             let serverVersion = try XCTUnwrap(input["server_version"] as? String)
-            let preimage = try Integrity.rowDigestPreimage(
-                schemaHash: manifest.schemaHash,
-                table: table,
-                pk: [table.primaryKeyFieldID: AnyCodable(pkValue)],
-                row: row,
-                serverVersion: serverVersion
-            ).preimage
-            let digest = try Integrity.rowDigest(
-                schemaHash: manifest.schemaHash,
-                table: table,
-                pk: [table.primaryKeyFieldID: AnyCodable(pkValue)],
-                row: row,
-                serverVersion: serverVersion
-            ).checksum.digest
-            return VectorExecution(preimage: preimage, digest: digest)
+            return {
+                let pkData = Data(pkSource.utf8)
+                let rowData = Data(rowSource.utf8)
+                try Integrity.validateCanonicalWireJSON(pkData)
+                try Integrity.validateCanonicalWireJSON(rowData)
+                let decoder = JSONDecoder.synchroDecoder()
+                let pk = [table.primaryKeyFieldID: try decoder.decode(AnyCodable.self, from: pkData)]
+                let row = try decoder.decode([String: AnyCodable].self, from: rowData)
+                let preimage = try Integrity.rowDigestPreimage(
+                    schemaHash: manifest.schemaHash,
+                    table: table,
+                    pk: pk,
+                    row: row,
+                    serverVersion: serverVersion
+                ).preimage
+                let digest = try Integrity.rowDigest(
+                    schemaHash: manifest.schemaHash,
+                    table: table,
+                    pk: pk,
+                    row: row,
+                    serverVersion: serverVersion
+                ).checksum.digest
+                return VectorExecution(preimage: preimage, digest: digest)
+            }
         }
 
         if kind == "row_identity" {
@@ -390,11 +399,15 @@ final class IntegrityTests: XCTestCase {
             let tableID = try XCTUnwrap(input["table_id"] as? String)
             let table = try XCTUnwrap(try manifest.localTables().first(where: { $0.tableID == tableID }))
             let pkJSON = try XCTUnwrap(input["pk_json"] as? String)
-            let pkValue = try JSONSerialization.jsonObject(with: Data(pkJSON.utf8), options: [.fragmentsAllowed])
-            return VectorExecution(preimage: try Integrity.rowIdentity(
-                table: table,
-                pk: [table.primaryKeyFieldID: AnyCodable(pkValue)]
-            ), digest: nil)
+            return {
+                let data = Data(pkJSON.utf8)
+                try Integrity.validateCanonicalWireJSON(data)
+                let pkValue = try JSONDecoder.synchroDecoder().decode(AnyCodable.self, from: data)
+                return VectorExecution(preimage: try Integrity.rowIdentity(
+                    table: table,
+                    pk: [table.primaryKeyFieldID: pkValue]
+                ), digest: nil)
+            }
         }
 
         let schemaHash = try XCTUnwrap(input["schema_hash"] as? String)
@@ -408,95 +421,10 @@ final class IntegrityTests: XCTestCase {
                 ChecksumObject(algorithm: "sha256", version: 1, encoding: "hex", digest: digest)
             )
         }
-        let preimage = try Integrity.scopeDigestPreimage(schemaHash: schemaHash, scopeID: scopeID, entries: entries)
-        let digest = try Integrity.scopeDigest(schemaHash: schemaHash, scopeID: scopeID, entries: entries).digest
-        return VectorExecution(preimage: preimage, digest: digest)
-    }
-
-    private func strictJSONObject(_ source: String) throws -> [String: Any] {
-        try rejectDuplicateTopLevelKeys(source)
-        let value = try JSONSerialization.jsonObject(with: Data(source.utf8))
-        return try XCTUnwrap(value as? [String: Any])
-    }
-
-    private func rejectDuplicateTopLevelKeys(_ source: String) throws {
-        let bytes = Array(source.utf8)
-        var index = 0
-        skipWhitespace(bytes, index: &index)
-        guard index < bytes.count, bytes[index] == 123 else { throw IntegrityError.invalidValue("row is not an object") }
-        index += 1
-        var keys = Set<String>()
-        while true {
-            skipWhitespace(bytes, index: &index)
-            if index < bytes.count, bytes[index] == 125 { return }
-            let token = try consumeString(bytes, index: &index)
-            let key = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(token), options: [.fragmentsAllowed]) as? String)
-            guard keys.insert(key).inserted else { throw IntegrityError.invalidValue("duplicate row field") }
-            skipWhitespace(bytes, index: &index)
-            guard index < bytes.count, bytes[index] == 58 else { throw IntegrityError.invalidValue("invalid row object") }
-            index += 1
-            try consumeValue(bytes, index: &index)
-            skipWhitespace(bytes, index: &index)
-            if index < bytes.count, bytes[index] == 44 {
-                index += 1
-                continue
-            }
-            guard index < bytes.count, bytes[index] == 125 else { throw IntegrityError.invalidValue("invalid row object") }
-            return
-        }
-    }
-
-    private func consumeString(_ bytes: [UInt8], index: inout Int) throws -> ArraySlice<UInt8> {
-        guard index < bytes.count, bytes[index] == 34 else { throw IntegrityError.invalidValue("invalid JSON string") }
-        let start = index
-        index += 1
-        while index < bytes.count {
-            if bytes[index] == 92 {
-                index += 2
-            } else if bytes[index] == 34 {
-                index += 1
-                return bytes[start..<index]
-            } else {
-                index += 1
-            }
-        }
-        throw IntegrityError.invalidValue("unterminated JSON string")
-    }
-
-    private func consumeValue(_ bytes: [UInt8], index: inout Int) throws {
-        skipWhitespace(bytes, index: &index)
-        guard index < bytes.count else { throw IntegrityError.invalidValue("missing JSON value") }
-        if bytes[index] == 34 {
-            _ = try consumeString(bytes, index: &index)
-            return
-        }
-        if bytes[index] == 123 || bytes[index] == 91 {
-            var closers: [UInt8] = [bytes[index] == 123 ? 125 : 93]
-            index += 1
-            while index < bytes.count, !closers.isEmpty {
-                if bytes[index] == 34 {
-                    _ = try consumeString(bytes, index: &index)
-                } else if bytes[index] == 123 || bytes[index] == 91 {
-                    closers.append(bytes[index] == 123 ? 125 : 93)
-                    index += 1
-                } else if bytes[index] == closers.last {
-                    closers.removeLast()
-                    index += 1
-                } else {
-                    index += 1
-                }
-            }
-            guard closers.isEmpty else { throw IntegrityError.invalidValue("unterminated JSON value") }
-            return
-        }
-        while index < bytes.count, bytes[index] != 44, bytes[index] != 125 {
-            index += 1
-        }
-    }
-
-    private func skipWhitespace(_ bytes: [UInt8], index: inout Int) {
-        while index < bytes.count, [9, 10, 13, 32].contains(bytes[index]) {
-            index += 1
+        return {
+            let preimage = try Integrity.scopeDigestPreimage(schemaHash: schemaHash, scopeID: scopeID, entries: entries)
+            let digest = try Integrity.scopeDigest(schemaHash: schemaHash, scopeID: scopeID, entries: entries).digest
+            return VectorExecution(preimage: preimage, digest: digest)
         }
     }
 

@@ -410,9 +410,9 @@
         .unwrap();
 
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                 'test_orders',
-                $$SELECT ARRAY['alternate:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                $$SELECT 'alternate:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id', 'updated_at', 'deleted_at', 'enabled',
                 ARRAY['internal_notes']
@@ -460,9 +460,9 @@
         .unwrap();
         Spi::run("ALTER TABLE test_orders ADD COLUMN summary TEXT").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                 'test_orders',
-                $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id', 'updated_at', 'deleted_at', 'enabled',
                 ARRAY['internal_notes']
@@ -525,9 +525,9 @@
 
         Spi::run("ALTER TABLE test_orders DROP COLUMN title").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -583,9 +583,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_key_change', 'test_key_change', ARRAY['id', 'alternate_id']
+             );
+             SELECT tests.register_test_table(
                  'test_key_change',
-                 $$SELECT ARRAY['global'] FROM test_key_change WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_key_change WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -605,9 +608,9 @@
         Spi::run("DROP TRIGGER synchro_capture_fence ON test_key_change").unwrap();
         Spi::run("DROP TRIGGER synchro_capture_truncate_guard ON test_key_change").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_key_change',
-                 $$SELECT ARRAY['global'] FROM test_key_change WHERE alternate_id = $1::text$$,
+                 $$SELECT 'global' FROM synchro_projection.test_key_change WHERE record_id = p_key::text$$,
                  'single_scope',
                  'alternate_id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -643,9 +646,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_recreated_identity', 'test_recreated_identity', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                  'test_recreated_identity',
-                 $$SELECT ARRAY['global'] FROM test_recreated_identity WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_recreated_identity WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -659,7 +665,13 @@
              WHERE g.state = 'pending' AND r.table_name = 'test_recreated_identity'",
         )
         .unwrap();
-        Spi::run("DROP TABLE test_recreated_identity CASCADE").unwrap();
+        Spi::run(
+            "DROP TABLE test_recreated_identity CASCADE;
+             DROP VIEW synchro_projection.test_recreated_identity CASCADE;
+             DELETE FROM synchro.sync_projection_views
+             WHERE view_name = 'test_recreated_identity'",
+        )
+        .unwrap();
         Spi::run(
             "CREATE TABLE test_recreated_identity (
                  id UUID PRIMARY KEY,
@@ -668,9 +680,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_recreated_identity', 'test_recreated_identity_v2', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                  'test_recreated_identity',
-                 $$SELECT ARRAY['global'] FROM test_recreated_identity WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_recreated_identity_v2 WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -754,9 +769,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_activation_manifest', 'test_activation_manifest', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                  'test_activation_manifest',
-                 $$SELECT ARRAY['global'] FROM test_activation_manifest WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_activation_manifest WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -868,9 +886,9 @@
         .unwrap();
         Spi::run("ALTER TABLE test_orders ADD COLUMN optional_note TEXT").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -913,9 +931,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_empty_added_manifest_boundary', 'test_empty_added_manifest_boundary', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                  'test_empty_added_manifest_boundary',
-                 $$SELECT ARRAY['global'] FROM test_empty_added_manifest_boundary WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_empty_added_manifest_boundary WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -939,9 +960,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_empty_added_manifest', 'test_empty_added_manifest', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                  'test_empty_added_manifest',
-                 $$SELECT ARRAY['global'] FROM test_empty_added_manifest WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_empty_added_manifest WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -1011,9 +1035,12 @@
         .unwrap();
         assert_eq!(has_stale_estimate, Some(true));
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_empty_stale_statistics_manifest', 'test_empty_stale_statistics_manifest', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                  'test_empty_stale_statistics_manifest',
-                 $$SELECT ARRAY['global'] FROM test_empty_stale_statistics_manifest WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_empty_stale_statistics_manifest WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -1084,9 +1111,9 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -1228,9 +1255,9 @@
 
         Spi::run("ALTER TABLE test_orders ADD COLUMN optional_class_2_note TEXT").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -1489,9 +1516,9 @@
         .expect("retired class 4 field identity");
 
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  p_table_name := 'test_orders',
-                 p_bucket_sql := $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 p_membership_sql := $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  p_composition := 'single_scope',
                  p_pk_column := 'id',
                  p_updated_at_col := 'updated_at',
@@ -1624,9 +1651,9 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
              )",
@@ -1681,9 +1708,9 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
              )",
@@ -1722,9 +1749,9 @@
         Spi::run("ALTER TABLE test_orders DROP COLUMN deleted_at").unwrap();
         let result = std::panic::catch_unwind(|| {
             Spi::run(
-                "SELECT tests.register_legacy_test_table(
+                "SELECT tests.register_test_table(
                      'test_orders',
-                     $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                     $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                      'single_scope', 'id', 'updated_at', '', 'enabled',
                      ARRAY['internal_notes']
                  )",
@@ -1751,9 +1778,12 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.test_nonempty_added_manifest', 'test_nonempty_added_manifest', ARRAY['id']
+             );
+             SELECT tests.register_test_table(
                  'test_nonempty_added_manifest',
-                 $$SELECT ARRAY['global'] FROM test_nonempty_added_manifest WHERE id = $1::uuid$$,
+                 $$SELECT 'global' FROM synchro_projection.test_nonempty_added_manifest WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'read_only'
              )",
@@ -1836,9 +1866,9 @@
 
         let result = std::panic::catch_unwind(|| {
             Spi::run(
-                "SELECT tests.register_legacy_test_table(
+                "SELECT tests.register_test_table(
                     'test_orders',
-                    $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                    $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                     'single_scope',
                     'id',
                     'updated_at',
@@ -2494,9 +2524,9 @@
 
         Spi::run("ALTER TABLE test_orders ADD COLUMN optional_note TEXT").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -2534,9 +2564,9 @@
         )
         .unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -2563,9 +2593,9 @@
         assert_eq!(class_3["scope_cursor_updates"]["user:user1"], Value::Null);
 
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  p_table_name := 'test_orders',
-                 p_bucket_sql := $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 p_membership_sql := $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  p_composition := 'single_scope',
                  p_pk_column := 'id',
                  p_updated_at_col := 'updated_at',
@@ -2609,9 +2639,9 @@
 
         Spi::run("ALTER TABLE test_orders ADD COLUMN optional_note TEXT").unwrap();
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                  'test_orders',
-                 $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                  'single_scope',
                  'id', 'updated_at', 'deleted_at', 'enabled',
                  ARRAY['internal_notes']
@@ -3196,9 +3226,9 @@
         let before = before.unwrap().0;
 
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                 'test_orders',
-                $$SELECT ARRAY['alt:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                $$SELECT 'alt:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id', 'updated_at', 'deleted_at', 'enabled',
                 ARRAY['internal_notes']
@@ -3322,9 +3352,9 @@
             Spi::run("ALTER TABLE test_orders ADD COLUMN headline TEXT").unwrap();
         }
         Spi::run(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT tests.register_test_table(
                 'test_orders',
-                $$SELECT ARRAY['user:' || user_id] FROM test_orders WHERE id = $1::uuid$$,
+                $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
                 'single_scope',
                 'id', 'updated_at', 'deleted_at', 'enabled',
                 ARRAY['internal_notes']

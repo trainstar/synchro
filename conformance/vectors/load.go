@@ -148,19 +148,14 @@ func validateCatalogEntries(entries []catalogVectorEntry) error {
 	if len(entries) == 0 || len(entries) > maxVectorSets {
 		return fmt.Errorf("vector catalog set count is outside 1..%d", maxVectorSets)
 	}
-	seenIDs := make(map[contract.VectorSetID]struct{}, len(entries))
 	seenPaths := make(map[string]struct{}, len(entries))
 	for index, entry := range entries {
 		if index > 0 && entries[index-1].VectorSetID >= entry.VectorSetID {
 			return errors.New("vector catalog IDs are not strictly ordered")
 		}
-		if _, duplicate := seenIDs[entry.VectorSetID]; duplicate {
-			return fmt.Errorf("duplicate vector_set_id %q", entry.VectorSetID)
-		}
 		if _, duplicate := seenPaths[entry.Path]; duplicate {
 			return fmt.Errorf("duplicate vector-set path %q", entry.Path)
 		}
-		seenIDs[entry.VectorSetID] = struct{}{}
 		seenPaths[entry.Path] = struct{}{}
 		if err := validateVectorPath(entry.Path); err != nil {
 			return err
@@ -196,19 +191,14 @@ func parseVectorSet(entry catalogVectorEntry, source []byte) (VectorSet, error) 
 		return VectorSet{}, errors.New("vector source count does not match catalog")
 	}
 	vectors := make([]Vector, 0, len(values))
-	seenIDs := make(map[string]struct{}, len(values))
 	for index, value := range values {
 		vector, err := parseVector(value)
 		if err != nil {
 			return VectorSet{}, err
 		}
-		if _, duplicate := seenIDs[vector.ID]; duplicate {
-			return VectorSet{}, fmt.Errorf("duplicate vector_id %q", vector.ID)
-		}
 		if index > 0 && vectors[index-1].ID >= vector.ID {
 			return VectorSet{}, errors.New("vector IDs are not strictly ordered")
 		}
-		seenIDs[vector.ID] = struct{}{}
 		vectors = append(vectors, vector)
 	}
 	aggregate, err := parseAggregate(object["aggregate"], vectors)
@@ -221,7 +211,6 @@ func parseVectorSet(entry catalogVectorEntry, source []byte) (VectorSet, error) 
 	return VectorSet{
 		ID: id, Path: entry.Path, SourceSHA256: entry.SourceSHA256,
 		AggregateSHA256: aggregate.SHA256, Vectors: vectors,
-		sourceBytes: append([]byte(nil), source...),
 	}, nil
 }
 

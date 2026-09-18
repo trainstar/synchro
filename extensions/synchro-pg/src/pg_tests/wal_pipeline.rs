@@ -738,9 +738,12 @@
         ))
         .expect("create unbound registration test table");
         Spi::run(&format!(
-            "SELECT tests.register_legacy_test_table(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.{table}', '{table}', ARRAY['user_id']
+             );
+             SELECT tests.register_test_table(
                  '{table}',
-                 $$SELECT ARRAY['user:' || user_id] FROM {table} WHERE id = $1::uuid$$,
+                 $$SELECT 'user:' || (user_id #>> '{{}}') FROM synchro_projection.{table} WHERE record_id = p_key::text$$,
                  'single_scope'
              )"
         ))

@@ -280,6 +280,7 @@ impl SchemaRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeCursorRef {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
 }
 
@@ -293,6 +294,7 @@ impl ScopeCursorRef {
 #[serde(deny_unknown_fields)]
 pub struct ScopeAssignment {
     pub id: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
 }
 
@@ -397,8 +399,11 @@ pub struct IndexSchema {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleSchema {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub created_at_field_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub updated_at_field_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub deleted_at_field_id: Option<String>,
 }
 
@@ -432,6 +437,7 @@ pub enum SchemaTransitionClass {
 pub struct SchemaManifest {
     pub schema_version: i64,
     pub schema_hash: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub parent_schema: Option<SchemaRef>,
     pub transition_class: SchemaTransitionClass,
     pub compatibility_floor: i64,
@@ -1287,6 +1293,7 @@ pub struct RebuildRequest {
     pub schema: SchemaRef,
     pub scope: String,
     pub rebuild_id: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub limit: i64,
 }
@@ -1330,6 +1337,7 @@ impl RebuildRecord {
 pub struct RebuildResponse {
     pub scope: String,
     pub records: Vec<RebuildRecord>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub cursor: Option<String>,
     pub has_more: bool,
     #[serde(
@@ -2521,8 +2529,73 @@ mod tests {
             encoded["tables"][0]["lifecycle"]["created_at_field_id"],
             Value::Null
         );
-        let decoded: SchemaManifest = serde_json::from_value(encoded).unwrap();
+        let decoded: SchemaManifest = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(decoded.validate(), Ok(()));
+        for field in [
+            "created_at_field_id",
+            "updated_at_field_id",
+            "deleted_at_field_id",
+        ] {
+            let mut missing = encoded.clone();
+            missing["tables"][0]["lifecycle"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<SchemaManifest>(missing).is_err(),
+                "{field}"
+            );
+        }
+        let mut missing_parent = encoded;
+        missing_parent
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_schema");
+        assert!(serde_json::from_value::<SchemaManifest>(missing_parent).is_err());
+    }
+
+    #[test]
+    fn cursor_members_require_presence_but_accept_null() {
+        for cursor in [Value::Null, serde_json::json!("opaque-cursor")] {
+            let reference: ScopeCursorRef = serde_json::from_value(serde_json::json!({
+                "cursor": cursor,
+            }))
+            .unwrap();
+            assert_eq!(reference.validate(), Ok(()));
+            let assignment: ScopeAssignment = serde_json::from_value(serde_json::json!({
+                "id": "scope", "cursor": cursor,
+            }))
+            .unwrap();
+            assert_eq!(assignment.validate(), Ok(()));
+        }
+        assert!(serde_json::from_str::<ScopeCursorRef>("{}").is_err());
+        assert!(serde_json::from_str::<ScopeAssignment>(r#"{"id":"scope"}"#).is_err());
+
+        let mut request = serde_json::json!({
+            "client_id": "client", "client_generation": 1, "schema": schema(),
+            "scope": "scope", "rebuild_id": BATCH_ID, "cursor": null, "limit": 10,
+        });
+        assert_eq!(
+            serde_json::from_value::<RebuildRequest>(request.clone())
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+        request.as_object_mut().unwrap().remove("cursor");
+        assert!(serde_json::from_value::<RebuildRequest>(request).is_err());
+
+        let mut response = serde_json::json!({
+            "scope": "scope", "records": [], "cursor": null, "has_more": false,
+            "final_scope_cursor": "opaque-final", "checksum": checksum(),
+        });
+        assert_eq!(
+            serde_json::from_value::<RebuildResponse>(response.clone())
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+        response.as_object_mut().unwrap().remove("cursor");
+        assert!(serde_json::from_value::<RebuildResponse>(response).is_err());
     }
 
     #[test]

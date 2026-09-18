@@ -159,7 +159,6 @@ type VectorSet struct {
 	SourceSHA256    string
 	AggregateSHA256 string
 	Vectors         []Vector
-	sourceBytes     []byte
 }
 
 // Catalog is one validated vector catalog and its bound sources.
@@ -198,7 +197,6 @@ func (c Catalog) Set(id contract.VectorSetID) (VectorSet, bool) {
 		vectors[index] = vector
 	}
 	set.Vectors = vectors
-	set.sourceBytes = append([]byte(nil), set.sourceBytes...)
 	return set, true
 }
 

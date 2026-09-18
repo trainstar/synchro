@@ -19,6 +19,7 @@ public final class SynchroClient: @unchecked Sendable {
     private var closeTask: Task<Void, Error>?
 
     public init(config: SynchroConfig) throws {
+        try config.validate()
         self.config = config
         if let seedPath = config.seedDatabasePath {
             try SeedDatabaseInstaller.installIfNeeded(seedPath: seedPath, databasePath: config.dbPath)
@@ -130,6 +131,7 @@ public final class SynchroClient: @unchecked Sendable {
         DatabaseCancellableWrapper(database.onChange(tables: tables, callback: callback))
     }
 
+    /// Delivers the initial snapshot and changed query results on the main queue.
     public func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]? = nil, tables: [String], callback: @escaping ([Row]) -> Void) -> any Cancellable {
         DatabaseCancellableWrapper(database.watch(sql, params: params, tables: tables, callback: callback))
     }

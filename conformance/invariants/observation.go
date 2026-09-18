@@ -54,11 +54,13 @@ type PositionObservation struct {
 // ClientObservation combines contract durability facts with missing native capture signals.
 // scenarios.ClientDurabilityFact has no complete rows, raw cursors, local digests, or process identity.
 type ClientObservation struct {
-	State     scenarios.ClientDurabilityFact
-	Rows      []ClientRowObservation
-	Scopes    []ClientScopeObservation
-	ScopeRows []ClientScopeRowObservation
-	Process   *ProcessIdentityObservation
+	// ReferenceOnly identifies in-memory protocol state, not a native durable database.
+	ReferenceOnly bool
+	State         scenarios.ClientDurabilityFact
+	Rows          []ClientRowObservation
+	Scopes        []ClientScopeObservation
+	ScopeRows     []ClientScopeRowObservation
+	Process       *ProcessIdentityObservation
 	// A driver must set RestartBoundary after a controlled kill and relaunch since this client's previous capture.
 	RestartBoundary bool
 	// Complete asserts that Rows, Scopes, and ScopeRows contain the complete client state after this observation's operations.
@@ -153,6 +155,8 @@ type WireExchangeObservation struct {
 	RequestBody    []byte
 	ResponseStatus int
 	ResponseBody   []byte
+	// Transport binds original recorder bytes to the executed session and HTTP endpoint.
+	Transport *WireTransportObservation
 	// A driver must set ExpectMutationConservation for a successful push control that the mutation checker must validate.
 	ExpectMutationConservation bool
 	// A driver must set ExpectChecksumConvergence for a successful pull control that the checksum checker must validate.
@@ -160,4 +164,13 @@ type WireExchangeObservation struct {
 	ExpectChecksumConvergence bool
 	// A driver must set ExpectScopeIsolation for a successful zero-change pull control that the scope checker must validate.
 	ExpectScopeIsolation bool
+}
+
+type WireTransportObservation struct {
+	UserID         string
+	ClientID       string
+	Method         string
+	Path           string
+	RequestSHA256  string
+	ResponseSHA256 string
 }
