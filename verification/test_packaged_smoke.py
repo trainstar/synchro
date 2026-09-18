@@ -410,7 +410,8 @@ class PackagedSmokeStructureTests(unittest.TestCase):
     def test_truthful_app_results_keep_counts_and_receive_host_pids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-app-success.") as raw_directory:
             directory = Path(raw_directory) / "results"
-            server, url = self.start_app_result_collector(directory)
+            with mock.patch.object(socket, "getfqdn", side_effect=AssertionError("collector requires reverse DNS")):
+                server, url = self.start_app_result_collector(directory)
             self.assertGreaterEqual(len(server.token), 32)
             initial = {
                 "schema_version": 1,

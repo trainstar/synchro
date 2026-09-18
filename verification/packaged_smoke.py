@@ -15,6 +15,7 @@ import re
 import secrets
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -221,6 +222,11 @@ class AppResultHTTPServer(http.server.HTTPServer):
         super().__init__(address, AppResultRequestHandler)
         self.results_dir = results_dir
         self.token = token
+
+    def server_bind(self) -> None:
+        # A numeric loopback listener must not wait for reverse DNS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class AppResultRequestHandler(http.server.BaseHTTPRequestHandler):
