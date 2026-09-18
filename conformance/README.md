@@ -47,7 +47,7 @@ Smoke result observers use the existing Jest test budget.
 Native waits, readiness checks, and controller handoffs keep their own bounds.
 
 Use `make test-swift-integration` to run XCTest without repeating the scenario corpus.
-`SWIFT_TEST_ARGS` selects diagnostic XCTest cases. Required CI leaves it empty.
+`SWIFT_TEST_ARGS` selects diagnostic XCTest cases in `test-swift-unit` and `test-swift-integration`. Required CI leaves it empty.
 `test-swift-unit`, `test-swift-integration`, and `test-kotlin-unit` parse structured results even when their runners fail.
 
 ## Real PostgreSQL Scenarios

@@ -923,7 +923,7 @@ test-swift-unit:
 	rm -rf clients/swift/.build/test-results/unit.xcresult
 	mkdir -p clients/swift/.build/test-results
 	@status=0; \
-		(cd clients/swift && $(SWIFTPM_GIT_ENV) xcodebuild test -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests -resultBundlePath .build/test-results/unit.xcresult) || status=$$?; \
+		(cd clients/swift && $(SWIFTPM_GIT_ENV) xcodebuild test -scheme Synchro-Package -destination 'platform=macOS' -skip-testing:SynchroTests/IntegrationTests -skip-testing:SynchroTests/SchemaIntegrationTests -skip-testing:SynchroTests/ClientSchemaIdentityTests $(SWIFT_TEST_ARGS) -resultBundlePath .build/test-results/unit.xcresult) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/swift/.build/test-results/unit.xcresult) || status=$$?; \
 		exit "$$status"
 

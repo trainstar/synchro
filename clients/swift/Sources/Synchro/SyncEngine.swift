@@ -283,20 +283,28 @@ final class SyncEngine: @unchecked Sendable {
         try ensureLifecycleActive(generation)
 
         let startupGate = StartupGate()
-        let task = Task { [weak self] in
-            guard let self else {
-                await startupGate.succeed()
-                return
+        // A fast failure must not terminate this generation before its task is registered.
+        let installed = state.withLock { state -> Bool in
+            guard state.started,
+                  !state.closed,
+                  state.lifecycleGeneration == generation else {
+                return false
             }
-            await self.runManagedLoop(
-                startupGate: startupGate,
-                options: options,
-                generation: generation,
-                schemaReset: schemaReset
-            )
+            syncTask = Task { [weak self] in
+                guard let self else {
+                    await startupGate.succeed()
+                    return
+                }
+                await self.runManagedLoop(
+                    startupGate: startupGate,
+                    options: options,
+                    generation: generation,
+                    schemaReset: schemaReset
+                )
+            }
+            return true
         }
-        guard installManagedTask(task, generation: generation) else {
-            task.cancel()
+        guard installed else {
             throw SynchroError.notStarted
         }
         try await startupGate.wait()
@@ -1711,18 +1719,6 @@ final class SyncEngine: @unchecked Sendable {
     private func ensureLifecycleActive(_ generation: Int64) throws {
         guard isLifecycleActive(generation), !Task.isCancelled else {
             throw CancellationError()
-        }
-    }
-
-    private func installManagedTask(_ task: Task<Void, Never>, generation: Int64) -> Bool {
-        state.withLock { state in
-            guard state.started,
-                  !state.closed,
-                  state.lifecycleGeneration == generation else {
-                return false
-            }
-            syncTask = task
-            return true
         }
     }
 
