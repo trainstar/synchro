@@ -43,6 +43,7 @@ Use `await-call` with explicit `idle` or `error` completion to await terminal re
 An observed backoff does not prove that the public call has returned.
 Retention recovery observers require a terminal pull after renewal before sampling readiness.
 Reconnect can report ready before the client restores its scope cursors.
+After an observed push backoff, delayed captures can show an active retry of the same sealed request.
 
 Use `make test-rn-e2e-ios-smoke` for focused smoke validation.
 Smoke result observers use the existing Jest test budget.
