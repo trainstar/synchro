@@ -164,6 +164,41 @@ func TestRebuildApplyClientGenerationUsesEstablishedRequestTrace(t *testing.T) {
 	}
 }
 
+func TestRebuildApplyTraceFailureIdentifiesRejectedInvariant(t *testing.T) {
+	workload := rebuildApplyWorkload{RecordCount: 101, PageSize: 100}
+	tests := []struct {
+		name   string
+		change func(*traceSnapshot)
+		detail string
+	}{
+		{"overflow", func(trace *traceSnapshot) { trace.Overflowed = true }, "overflow=true"},
+		{"missing operation", func(trace *traceSnapshot) { trace.Observations = nil }, "observations=0 expected=4"},
+		{"checkpoint", func(trace *traceSnapshot) { trace.SequenceCheckpoint = 5 }, "checkpoint=5"},
+		{"extra connect", func(trace *traceSnapshot) {
+			trace.Observations = append([]transportObservation{{OperationClass: "connect", StatusCode: 503}}, trace.Observations...)
+		}, "operation_prefix=[connect:503 connect:200 rebuild:200 rebuild:200 pull:200]"},
+		{"sequence gap", func(trace *traceSnapshot) { trace.Observations[1].Sequence = 3 }, "trace sequence"},
+		{"connect status", func(trace *traceSnapshot) { trace.Observations[0].StatusCode = 503 }, "connect trace"},
+		{"page facts", func(trace *traceSnapshot) { trace.Observations[1].RebuildResponseFacts = nil }, "page 1"},
+		{"pull facts", func(trace *traceSnapshot) { trace.Observations[3].PullResponseFacts = nil }, "final pull trace"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			trace, err := captureTraceFromRaw(rebuildApplyCaptureFixture(t, workload).Trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateRebuildApplyTrace(trace, workload, 1); err != nil {
+				t.Fatalf("valid trace was rejected: %v", err)
+			}
+			test.change(&trace)
+			if err := validateRebuildApplyTrace(trace, workload, 1); err == nil || !strings.Contains(err.Error(), test.detail) {
+				t.Fatalf("trace failure = %v, want diagnostic %q", err, test.detail)
+			}
+		})
+	}
+}
+
 func TestRebuildApplyClientGenerationAbsentNamesRequestTraceSource(t *testing.T) {
 	traces := []traceSnapshot{{Observations: []transportObservation{
 		{OperationClass: "connect", RequestFacts: json.RawMessage(`{"schema_version":1}`)},
