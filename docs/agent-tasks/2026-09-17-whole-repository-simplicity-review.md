@@ -2,6 +2,7 @@
 
 **Scope:** Production source at `98b1507537eaa708eab7cf14e3bf8eddc5eb9b7e`, unchanged by the subsequent report commits.
 **Tracking:** #105, with existing issue links below. No issue per finding.
+**Remediation:** 53 implemented, 51 accepted, two awaiting evidence. See the [acceptance results](2026-09-17-curated-audit-remediation-plan.md#acceptance-results).
 
 This replaces the previous 270-record index and its verbose appendix.
 It excludes redesign proposals, historical notes, unsupported operational claims, and duplicate reports of the same problem.
