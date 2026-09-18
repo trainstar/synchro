@@ -1,8 +1,18 @@
 diff --git a/api/go/handlers.go b/api/go/handlers.go
+index 46e6a59..b5e2b7f 100644
 --- a/api/go/handlers.go
 +++ b/api/go/handlers.go
-@@ -95,13 +95,9 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
- 		writeJSONError(w, http.StatusBadRequest, "client_id is required")
+@@ -75,7 +75,7 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	raw, members, ok := decodeJSONBodyObject(w, r, pullRequestMembers...)
++	_, members, ok := decodeJSONBodyObject(w, r, pullRequestMembers...)
+ 	if !ok {
+ 		return
+ 	}
+@@ -83,12 +83,8 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
+ 	if !requireStringMember(w, members, "client_id") {
  		return
  	}
 -	resp, err := h.queryJSONB(
@@ -16,4 +26,3 @@ diff --git a/api/go/handlers.go b/api/go/handlers.go
  	if err != nil {
  		mapSQLError(w, err)
  		return
- 	}

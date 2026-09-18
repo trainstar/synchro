@@ -47,7 +47,7 @@ Smoke result observers use the existing Jest test budget.
 Native waits, readiness checks, and controller handoffs keep their own bounds.
 
 Use `make test-swift-integration` to run XCTest without repeating the scenario corpus.
-`SWIFT_TEST_ARGS` selects diagnostic XCTest cases. Required CI leaves it empty.
+`SWIFT_TEST_ARGS` selects diagnostic XCTest cases in `test-swift-unit` and `test-swift-integration`. Required CI leaves it empty.
 `test-swift-unit`, `test-swift-integration`, and `test-kotlin-unit` parse structured results even when their runners fail.
 
 ## Real PostgreSQL Scenarios
@@ -84,6 +84,8 @@ make test-integration-mutants
 The gate copies the current worktree into isolated temporary directories. It applies seven critical production-source mutations for cursor advancement, WAL acknowledgment, mutation conservation, checksum correctness, scope isolation, progress order, and pull deduplication.
 
 Each mutant must compile and fail its approved focused PostgreSQL 18 test. A surviving mutant, stale patch, build failure, or harness failure fails the gate.
+
+Pull-request source checks run `make test-integration-mutant-manifest` before the full Candidate mutation gate.
 
 Scheduled validation runs every manifest mutant through `make test-integration-mutants-broad`.
 

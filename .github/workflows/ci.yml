@@ -62,7 +62,7 @@ jobs:
         run: make build-check build-seed build-conformance
 
       - name: Run conformance checks
-        run: make lint-conformance test-conformance
+        run: make lint-conformance test-conformance test-integration-mutant-manifest
 
       - name: Run release and recovery controls
         run: make test-release-artifacts test-release-publish test-server-consumer-helper test-packaged-smoke-structure
