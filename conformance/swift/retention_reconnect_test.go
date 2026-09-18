@@ -10,6 +10,44 @@ import (
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
+func TestRetentionReconnectRecoveryRequiresTerminalPullAfterRenewal(t *testing.T) {
+	renewed := transportObservation{Sequence: 2, OperationClass: "connect", StatusCode: 200}
+	if retentionReconnectTerminalPullAfter([]transportObservation{renewed}, renewed.Sequence) {
+		t.Fatal("reconnect alone established completed recovery")
+	}
+	terminal := transportObservation{
+		Sequence: 3, OperationClass: "pull", StatusCode: 200,
+		PullResponseFacts: &transportPullResponseFacts{
+			ChecksumCount: 2, ScopeCursorFingerprintsComplete: true,
+			ScopeCursorFingerprints: []string{strings.Repeat("a", 64), strings.Repeat("b", 64)},
+		},
+	}
+	if !retentionReconnectTerminalPullAfter([]transportObservation{renewed, terminal}, renewed.Sequence) {
+		t.Fatal("terminal post-renewal pull did not establish recovery")
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*transportObservation)
+	}{
+		{"earlier pull", func(value *transportObservation) { value.Sequence = 1 }},
+		{"later reconnect", func(value *transportObservation) { value.OperationClass = "connect" }},
+		{"retryable pull", func(value *transportObservation) { value.StatusCode = 503 }},
+		{"missing facts", func(value *transportObservation) { value.PullResponseFacts = nil }},
+		{"more pages", func(value *transportObservation) { value.PullResponseFacts.HasMore = true }},
+		{"rebuild required", func(value *transportObservation) { value.PullResponseFacts.RebuildScopeCount = 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observation := terminal
+			facts := *terminal.PullResponseFacts
+			observation.PullResponseFacts = &facts
+			test.change(&observation)
+			if retentionReconnectTerminalPullAfter([]transportObservation{renewed, observation}, renewed.Sequence) {
+				t.Fatal("unfinished recovery was accepted")
+			}
+		})
+	}
+}
+
 func TestRetentionReconnectBindingsFollowAuthoredWireCompletions(t *testing.T) {
 	scenario := loadRetentionReconnectScenario(t)
 	steps, err := swiftScenarioStepMap(scenario, retentionReconnectScenarioID, 9)

@@ -22,6 +22,44 @@ func TestRetentionReconnectBindingsFollowAuthoredWireCompletions(t *testing.T) {
 	}
 }
 
+func TestRetentionReconnectRecoveryRequiresTerminalPullAfterRenewal(t *testing.T) {
+	renewed := TransportObservation{Sequence: 2, OperationClass: "connect", StatusCode: 200}
+	if retentionReconnectTerminalPullAfter([]TransportObservation{renewed}, renewed.Sequence) {
+		t.Fatal("reconnect alone established completed recovery")
+	}
+	terminal := TransportObservation{
+		Sequence: 3, OperationClass: "pull", StatusCode: 200,
+		PullResponseFacts: &TransportPullResponseFacts{
+			ChecksumCount: 2, ScopeCursorFingerprintsComplete: true,
+			ScopeCursorFingerprints: []string{strings.Repeat("a", 64), strings.Repeat("b", 64)},
+		},
+	}
+	if !retentionReconnectTerminalPullAfter([]TransportObservation{renewed, terminal}, renewed.Sequence) {
+		t.Fatal("terminal post-renewal pull did not establish recovery")
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*TransportObservation)
+	}{
+		{"earlier pull", func(value *TransportObservation) { value.Sequence = 1 }},
+		{"later reconnect", func(value *TransportObservation) { value.OperationClass = "connect" }},
+		{"retryable pull", func(value *TransportObservation) { value.StatusCode = 503 }},
+		{"missing facts", func(value *TransportObservation) { value.PullResponseFacts = nil }},
+		{"more pages", func(value *TransportObservation) { value.PullResponseFacts.HasMore = true }},
+		{"rebuild required", func(value *TransportObservation) { value.PullResponseFacts.RebuildScopeCount = 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observation := terminal
+			facts := *terminal.PullResponseFacts
+			observation.PullResponseFacts = &facts
+			test.change(&observation)
+			if retentionReconnectTerminalPullAfter([]TransportObservation{renewed, observation}, renewed.Sequence) {
+				t.Fatal("unfinished recovery was accepted")
+			}
+		})
+	}
+}
+
 func TestRetentionReconnectUnsupportedWireDerivesErrorCompletion(t *testing.T) {
 	wire := scenarios.WireExpectation{Action: "unsupported", HTTPStatus: 200}
 	if got := retentionReconnectNativeCompletion(wire); got != "error" {
