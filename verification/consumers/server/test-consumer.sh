@@ -80,6 +80,12 @@ if [ "$SYNCHRO_CONFORMANCE_OPERATOR_USER" = "$SYNCHRO_CONFORMANCE_WORKER_USER" ]
 fi
 operator_url=$(make_url "$SYNCHRO_CONFORMANCE_OPERATOR_USER" "$SYNCHRO_CONFORMANCE_OPERATOR_PASSWORD_FILE")
 worker_url=$(make_url "$SYNCHRO_CONFORMANCE_WORKER_USER" "$SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE")
+admin_password=$(cat "$SYNCHRO_CONFORMANCE_ADMIN_PASSWORD_FILE")
+psql_admin() {
+  PGPASSWORD="$admin_password" "$pg18_bindir/psql" \
+    --dbname "$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" \
+    --username "$SYNCHRO_CONFORMANCE_ADMIN_USER" "$@"
+}
 DATABASE_URL="$admin_url" "$provisioner" prepare --repo-root "$repo_root"
 
 start_adapter() {
@@ -103,7 +109,7 @@ make --no-print-directory -C "$repo_root" server-consumer-smoke-phase \
   SERVER_SMOKE_PHASE=resume SERVER_SMOKE_ADAPTER_PID="$adapter_pid" \
   SERVER_SMOKE_STATE_DIR="$work_dir/protocol-state" SERVER_SMOKE_OUTPUT="$work_dir/resume.json"
 bootstrap_row_id=00000000-0000-4000-8000-000000009501
-PGDATABASE="$admin_url" "$pg18_bindir/psql" -Xq -v ON_ERROR_STOP=1 -v bootstrap_row_id="$bootstrap_row_id" >/dev/null <<'SQL'
+psql_admin -Xq -v ON_ERROR_STOP=1 -v bootstrap_row_id="$bootstrap_row_id" >/dev/null <<'SQL'
 INSERT INTO public.cf_late_registration (id, owner_id, value)
 VALUES (:'bootstrap_row_id', 'diagnostic-user', 'packaged-projection-bootstrap');
 
@@ -115,7 +121,7 @@ SELECT synchro.synchro_register_table(
 );
 SQL
 registry_generation=$(
-  PGDATABASE="$admin_url" "$pg18_bindir/psql" -XAtq -v ON_ERROR_STOP=1 <<'SQL'
+  psql_admin -XAtq -v ON_ERROR_STOP=1 <<'SQL'
 SELECT registry.registry_generation
 FROM synchro.sync_registry registry
 JOIN synchro.sync_registry_generations generation
@@ -141,7 +147,7 @@ DATABASE_URL="$operator_url" WORKER_DATABASE_URL="$worker_url" \
   >"$work_dir/projection-bootstrap.json"
 test -s "$work_dir/projection-bootstrap.json"
 bootstrap_valid=$(
-  PGDATABASE="$admin_url" "$pg18_bindir/psql" -XAtq -v ON_ERROR_STOP=1 \
+  psql_admin -XAtq -v ON_ERROR_STOP=1 \
     -v registry_generation="$registry_generation" -v bootstrap_row_id="$bootstrap_row_id" <<'SQL'
 WITH target AS (
   SELECT registry.relation_id
@@ -167,7 +173,7 @@ SELECT EXISTS (
     FROM synchro.sync_stream_resets reset
     WHERE reset.operation_kind = 'projection_bootstrap'
       AND reset.target_registry_generation = :'registry_generation'::bigint
-      AND reset.lifecycle = 'activated'
+      AND reset.lifecycle = 'cleanup_complete'
   )
   AND EXISTS (
     SELECT 1
@@ -192,7 +198,10 @@ SELECT EXISTS (
   );
 SQL
 )
-test "$bootstrap_valid" = t
+if [ "$bootstrap_valid" != t ]; then
+  echo "projection bootstrap did not complete cleanup and preserve its published row and scope state" >&2
+  exit 1
+fi
 DATABASE_URL="$admin_url" "$seed" --output "$work_dir/seed.sqlite"
 test -s "$work_dir/seed.sqlite"
 set -- python3 "$tool" complete-server-cell --repo-root "$repo_root" --cell "$cell_id" --output "$cell_result" --initial "$work_dir/initial.json" --resume "$work_dir/resume.json" --killed-pid "$killed_pid" --artifact "$extension_archive" --artifact "$adapter" --artifact "$seed"

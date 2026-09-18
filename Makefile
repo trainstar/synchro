@@ -2027,6 +2027,7 @@ test-ci-process-lifecycle: test-python-runner
 
 local-postgres-run: build-local-postgres
 	@mkdir -p "$(LOCAL_POSTGRES_STATE_DIR)"
+	@chmod 700 "$(LOCAL_POSTGRES_STATE_DIR)"
 	@exec "$(LOCAL_POSTGRES_BINARY)" start \
 		--pg18-bin-dir "$(PGRX_PG_BIN_DIR)" \
 		--extension-artifact "$(CONFORMANCE_EXTENSION_ARTIFACT)" \
