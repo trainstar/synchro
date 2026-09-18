@@ -1115,26 +1115,8 @@ func (c *PendingCycleCoordinator) validateCleanupCall(raw json.RawMessage) error
 }
 
 func (c *PendingCycleCoordinator) validateCleanupStatus(raw json.RawMessage, allowActiveRetry bool) error {
-	var status syncStatus
-	if err := validateSyncStatusShape(raw); err != nil || json.Unmarshal(raw, &status) != nil {
-		return errors.New("React Native pending-cycle cleanup status is invalid")
-	}
-	switch {
-	case status.State == "backoff":
-		var operation, retryAt string
-		if json.Unmarshal(status.Operation, &operation) != nil || operation != "pushing" ||
-			json.Unmarshal(status.RetryAt, &retryAt) != nil || !isJSONNull(status.Failure) {
-			return errors.New("React Native pending-cycle cleanup backoff is not a retryable push")
-		}
-		if _, err := time.Parse(time.RFC3339Nano, retryAt); err != nil {
-			return errors.New("React Native pending-cycle cleanup retry deadline is invalid")
-		}
-	case status.State == "pushing" && allowActiveRetry:
-		if !isJSONNull(status.Operation) || !isJSONNull(status.RetryAt) || !isJSONNull(status.Failure) {
-			return errors.New("React Native pending-cycle active retry status is invalid")
-		}
-	default:
-		return fmt.Errorf("React Native pending-cycle cleanup status = %q, want retryable push", status.State)
+	if err := validateRetryablePushStatus(raw, allowActiveRetry); err != nil {
+		return err
 	}
 	return c.validateCleanupFault()
 }

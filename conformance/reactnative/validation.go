@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
@@ -1177,6 +1178,31 @@ func validateReadyStatus(raw json.RawMessage) error {
 	if err := jsonstrict.Decode(raw, &members); err != nil || len(members) != 4 || jsonstrict.Decode(raw, &status) != nil ||
 		status.State != "ready" || !isJSONNull(status.RetryAt) || !isJSONNull(status.Operation) || !isJSONNull(status.Failure) {
 		return errors.New("React Native sync status is not ready")
+	}
+	return nil
+}
+
+func validateRetryablePushStatus(raw json.RawMessage, allowActiveRetry bool) error {
+	var status syncStatus
+	if err := validateSyncStatusShape(raw); err != nil || json.Unmarshal(raw, &status) != nil {
+		return errors.New("React Native retryable push status is invalid")
+	}
+	switch {
+	case status.State == "backoff":
+		var operation, retryAt string
+		if json.Unmarshal(status.Operation, &operation) != nil || operation != "pushing" ||
+			json.Unmarshal(status.RetryAt, &retryAt) != nil || !isJSONNull(status.Failure) {
+			return errors.New("React Native backoff is not a retryable push")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, retryAt); err != nil {
+			return errors.New("React Native push retry deadline is invalid")
+		}
+	case status.State == "pushing" && allowActiveRetry:
+		if !isJSONNull(status.Operation) || !isJSONNull(status.RetryAt) || !isJSONNull(status.Failure) {
+			return errors.New("React Native active push retry status is invalid")
+		}
+	default:
+		return fmt.Errorf("React Native retryable push status = %q", status.State)
 	}
 	return nil
 }

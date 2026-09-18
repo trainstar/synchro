@@ -115,6 +115,49 @@ func TestRetentionReconnectCaptureUsesDistinctRunnerInputAndResultKeys(t *testin
 	}
 }
 
+func TestRetentionReconnectCaptureAllowsRetryOnlyAfterBackoffObservation(t *testing.T) {
+	coordinator := &RetentionReconnectCoordinator{
+		faultArmed: true,
+		stage:      retentionReconnectStageInitialBackoff,
+	}
+	backoff := json.RawMessage(`{"state":"backoff","retry_at":"2026-09-18T00:00:00Z","operation":"pushing","failure":null}`)
+	pushing := json.RawMessage(`{"state":"pushing","retry_at":null,"operation":null,"failure":null}`)
+	if err := coordinator.validatePendingPushStatus(backoff); err != nil {
+		t.Fatalf("initial backoff observation was rejected: %v", err)
+	}
+	if err := coordinator.validatePendingPushStatus(pushing); err == nil {
+		t.Fatal("active push replaced the required initial backoff observation")
+	}
+	coordinator.stage = retentionReconnectStageInitialCaptured
+	if err := coordinator.validatePendingPushStatus(pushing); err != nil {
+		t.Fatalf("active retry after observed backoff was rejected: %v", err)
+	}
+	if err := coordinator.validatePendingPushStatus(json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`)); err == nil {
+		t.Fatal("completed work replaced the required retrying sealed queue")
+	}
+	coordinator.faultArmed = false
+	if err := coordinator.validatePendingPushStatus(pushing); err == nil {
+		t.Fatal("active retry was accepted without the required fault")
+	}
+}
+
+func TestRetentionReconnectSealedRetriesRetainExactBytes(t *testing.T) {
+	coordinator := &RetentionReconnectCoordinator{
+		main:                retentionReconnectClient{clientID: "client-a"},
+		sealedMutationCount: 1,
+	}
+	sealed := []byte(`{"client_id":"client-a","client_generation":1,"batch_id":"batch-a","mutations":[{"mutation_id":"mutation-a"}]}`)
+	if err := coordinator.observeSealedPush(sealed); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.observeSealedPush(sealed); err != nil {
+		t.Fatalf("identical retry was rejected: %v", err)
+	}
+	if err := coordinator.observeSealedPush(append([]byte(" "), sealed...)); err == nil {
+		t.Fatal("changed retry bytes were accepted")
+	}
+}
+
 func TestRetentionReconnectQueueAllowsInspectableRejection(t *testing.T) {
 	coordinator := &RetentionReconnectCoordinator{
 		sealedGeneration:  1,

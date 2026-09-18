@@ -188,10 +188,7 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
-	// The generation has expired, so the batch may now reach the server, where
-	// it is rejected as an expired generation.
-	releaseFault()
-	renewalCall, err := runRetentionReconnectRenewal(ctx, scenario, platform, client, steps, rejectedPush, renew)
+	renewalCall, err := runRetentionReconnectRenewal(ctx, scenario, platform, client, steps, rejectedPush, renew, releaseFault)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
@@ -474,7 +471,7 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 	return RetentionReconnectCall{Completion: call.Completion, Transport: call.transportObservations}, nil
 }
 
-func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client, steps map[scenarios.StepID]scenarios.Step, rejectedPush, renew scenarios.Operation) (RetentionReconnectCall, error) {
+func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client, steps map[scenarios.StepID]scenarios.Step, rejectedPush, renew scenarios.Operation, releaseFault func()) (RetentionReconnectCall, error) {
 	step := steps["STEP-RETENTION-RECONNECT-REJECT-OLD-001"]
 	if step.NativeBinding == nil || step.NativeBinding.CallID == nil {
 		return RetentionReconnectCall{}, errors.New("Swift retention-reconnect renewal call identity is absent")
@@ -495,6 +492,7 @@ func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenar
 	if err != nil {
 		return RetentionReconnectCall{}, err
 	}
+	releaseFault()
 	completion, transport, err := awaitRetentionReconnectRecovery(ctx, scenario, state, checkpoint, retentionReconnectNativeCompletion(wire))
 	if err != nil {
 		return RetentionReconnectCall{}, err
@@ -534,6 +532,16 @@ func retentionReconnectRenewalPair(transport []transportObservation) (transportO
 	return transportObservation{}, transportObservation{}, false
 }
 
+func retentionReconnectTerminalPullAfter(transport []transportObservation, sequence uint64) bool {
+	if len(transport) == 0 {
+		return false
+	}
+	last := transport[len(transport)-1]
+	return last.Sequence > sequence && last.OperationClass == "pull" && last.StatusCode == 200 &&
+		last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore &&
+		last.PullResponseFacts.RebuildScopeCount == 0
+}
+
 // awaitRetentionReconnectRecovery waits for the client to complete its own
 // expired-generation recovery. The client resumes the interrupted push on its
 // durable deadline, the server rejects the expired generation, the client
@@ -548,25 +556,24 @@ func awaitRetentionReconnectRecovery(ctx context.Context, scenario scenarios.Sce
 	defer cancel()
 	ctx = deadline
 	for {
-		snapshot, err := captureRunnerBatch(ctx, state, nil)
-		if err != nil {
-			return "", nil, fmt.Errorf("poll Swift retention-reconnect recovery: %w (runner reported: %s)", err, state.session.stderrReport())
-		}
 		state.mu.Lock()
 		transport, observationErr := state.session.ObservationsAfter(checkpoint)
 		state.mu.Unlock()
 		if observationErr != nil {
 			return "", nil, fmt.Errorf("capture Swift retention-reconnect renewal transport: %w", observationErr)
 		}
+		snapshot, err := captureRunnerBatch(ctx, state, nil)
+		if err != nil {
+			return "", nil, fmt.Errorf("poll Swift retention-reconnect recovery: %w (runner reported: %s)", err, state.session.stderrReport())
+		}
 		status := optionalStringOrNone(snapshot.Status)
-		// Recovery is complete only when the snapshot has no failure and the
-		// native client reports its exact ready status.
+		// Ready is transient after reconnect. Observe the terminal pull before sampling readiness.
 		ready := snapshot.Failure == nil && status == "ready"
 		// The authored call covers the rejected push and the connect that
 		// renews the generation. The client continues its normal loop after
 		// that, so the authored pair is selected rather than the whole window.
 		rejected, renewed, paired := retentionReconnectRenewalPair(transport)
-		if ready && paired {
+		if ready && paired && retentionReconnectTerminalPullAfter(transport, renewed.Sequence) {
 			return want, []transportObservation{rejected, renewed}, nil
 		}
 		select {

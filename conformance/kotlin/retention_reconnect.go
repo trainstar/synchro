@@ -175,8 +175,7 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
-	releaseFault()
-	renewalCall, err := runRetentionReconnectRenewal(ctx, scenario, platform, client, steps, rejectedPush, renew)
+	renewalCall, err := runRetentionReconnectRenewal(ctx, scenario, platform, client, steps, rejectedPush, renew, releaseFault)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
@@ -468,7 +467,7 @@ func runRetentionReconnectInitialCall(ctx context.Context, scenario scenarios.Sc
 	return RetentionReconnectCall{Completion: call.Completion, Call: nil, Transport: call.transportObservations}, nil
 }
 
-func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client, steps map[scenarios.StepID]scenarios.Step, rejectedPush, renew scenarios.Operation) (RetentionReconnectCall, error) {
+func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenario, platform *Platform, client Client, steps map[scenarios.StepID]scenarios.Step, rejectedPush, renew scenarios.Operation, releaseFault func()) (RetentionReconnectCall, error) {
 	step := steps["STEP-RETENTION-RECONNECT-REJECT-OLD-001"]
 	if step.NativeBinding == nil || step.NativeBinding.CallID == nil {
 		return RetentionReconnectCall{}, errors.New("Kotlin Android retention-reconnect renewal call identity is absent")
@@ -484,6 +483,7 @@ func runRetentionReconnectRenewal(ctx context.Context, scenario scenarios.Scenar
 	if err != nil {
 		return RetentionReconnectCall{}, err
 	}
+	releaseFault()
 	completion, transport, err := awaitRetentionReconnectRecovery(ctx, platform, client, state, checkpoint, retentionReconnectNativeCompletion(wire))
 	if err != nil {
 		return RetentionReconnectCall{}, err
@@ -519,28 +519,37 @@ func retentionReconnectRenewalPair(transport []TransportObservation) (TransportO
 	return TransportObservation{}, TransportObservation{}, false
 }
 
+func retentionReconnectTerminalPullAfter(transport []TransportObservation, sequence uint64) bool {
+	if len(transport) == 0 {
+		return false
+	}
+	last := transport[len(transport)-1]
+	return last.Sequence > sequence && last.OperationClass == "pull" && last.StatusCode == 200 &&
+		last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore &&
+		last.PullResponseFacts.RebuildScopeCount == 0
+}
+
 // awaitRetentionReconnectRecovery waits until automatic expired-generation recovery reports ready.
 func awaitRetentionReconnectRecovery(ctx context.Context, platform *Platform, client Client, state *platformClient, checkpoint uint64, want string) (string, []TransportObservation, error) {
 	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	ctx = deadline
 	for {
-		snapshot, err := platform.scenarioSnapshot(ctx, client)
-		if err != nil {
-			return "", nil, fmt.Errorf("poll Kotlin Android retention-reconnect recovery: %w", err)
-		}
 		state.mu.Lock()
 		transport, observationErr := state.session.ObservationsAfter(checkpoint)
 		state.mu.Unlock()
 		if observationErr != nil {
 			return "", nil, fmt.Errorf("capture Kotlin Android retention-reconnect renewal transport: %w", observationErr)
 		}
+		snapshot, err := platform.scenarioSnapshot(ctx, client)
+		if err != nil {
+			return "", nil, fmt.Errorf("poll Kotlin Android retention-reconnect recovery: %w", err)
+		}
 		status := pushResponseLossOptionalString(snapshot.Status)
-		// Recovery is complete only when the snapshot has no failure and the
-		// native client reports its exact ready status.
+		// Ready is transient after reconnect. Observe the terminal pull before sampling readiness.
 		ready := snapshot.Failure == nil && status == "ready"
 		rejected, renewed, paired := retentionReconnectRenewalPair(transport)
-		if ready && paired {
+		if ready && paired && retentionReconnectTerminalPullAfter(transport, renewed.Sequence) {
 			return want, []TransportObservation{rejected, renewed}, nil
 		}
 		select {

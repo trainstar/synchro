@@ -1074,11 +1074,8 @@ func (c *RetentionReconnectCoordinator) validateInitialBackoff(raw json.RawMessa
 	if err := decodeStrictMembers(raw, &members, 3, "retention-reconnect initial backoff result"); err != nil {
 		return err
 	}
-	var status syncStatus
-	var statusMembers map[string]json.RawMessage
-	if err := jsonstrict.Decode(members["status"], &statusMembers); err != nil || len(statusMembers) != 4 ||
-		jsonstrict.Decode(members["status"], &status) != nil || status.State != "backoff" || isJSONNull(status.RetryAt) {
-		return errors.New("React Native retention-reconnect initial call did not retain retryable backoff")
+	if err := c.validatePendingPushStatus(members["status"]); err != nil {
+		return err
 	}
 	return c.validateProcess(members["process"], "initial backoff")
 }
@@ -1137,9 +1134,8 @@ func (c *RetentionReconnectCoordinator) validateInitialCapture(capture finalCapt
 	if err := c.validateQueue(capture); err != nil {
 		return fmt.Errorf("validate React Native retention-reconnect sealed queue: %w", err)
 	}
-	var status syncStatus
-	if err := jsonstrict.Decode(capture.Status, &status); err != nil || status.State != "backoff" {
-		return errors.New("React Native retention-reconnect sealed queue did not remain in backoff")
+	if err := c.validatePendingPushStatus(capture.Status); err != nil {
+		return err
 	}
 	trace, err := retentionReconnectTrace(capture.Trace)
 	if err != nil {
@@ -1154,6 +1150,16 @@ func (c *RetentionReconnectCoordinator) validateInitialCapture(capture finalCapt
 		return errors.New("React Native retention-reconnect initial push trace is absent")
 	}
 	return nil
+}
+
+func (c *RetentionReconnectCoordinator) validatePendingPushStatus(raw json.RawMessage) error {
+	if !c.temporaryFaultActive() {
+		return errors.New("React Native retention-reconnect push fault is not active")
+	}
+	if err := c.proxyFailure("pending push"); err != nil {
+		return err
+	}
+	return validateRetryablePushStatus(raw, c.stage == retentionReconnectStageInitialCaptured)
 }
 
 func (c *RetentionReconnectCoordinator) validateFinalCapture(capture finalCapture) error {
@@ -1993,7 +1999,7 @@ func (c *RetentionReconnectCoordinator) observeSealedPush(raw []byte) error {
 	c.proxyMu.Lock()
 	defer c.proxyMu.Unlock()
 	if len(c.sealedRequest) != 0 {
-		if !semanticRawJSONEqual(c.sealedRequest, raw) {
+		if !bytes.Equal(c.sealedRequest, raw) {
 			return errors.New("React Native retention-reconnect temporary fault received a changed sealed batch")
 		}
 		return nil
