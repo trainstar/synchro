@@ -4,7 +4,7 @@
 **Scope:** All 53 findings in [the curated audit](2026-09-17-whole-repository-simplicity-review.md).
 **Ledger:** #105. Do not create an issue per finding.
 **Starting commit:** `b8709e3a65f3883b09cad2c7464cd4d5ef968dc9`.
-**Current status:** 53 implemented, 51 accepted, two awaiting the evidence specified below.
+**Current status:** All 53 findings are implemented and accepted under the criteria recorded below.
 
 ## Binding rules
 
@@ -121,12 +121,12 @@ Its new cases replace the incorrect short-closing-fence assumption instead of ad
 ## Acceptance results
 
 All 53 findings have implementation corrections.
-Acceptance is complete for 51 findings.
-T05 and T06 remain open because their linked issues require additional evidence.
-Issue #105 remains open until those conditions pass.
+Acceptance is complete for all 53 findings.
+On 2026-09-17, the user approved configuration-review acceptance for T05 and T06.
+The two additional experiments are not remediation or release acceptance conditions.
 
 The implementation ends at `d13753e94dbb553df24e3974a74ffadfad221c17`.
-All changes are local. No code was pushed, and no publication occurred.
+This record does not certify a release or authorize registry publication.
 T08 changed the intentionally ignored local `AGENTS.md` and its linked `CLAUDE.md`, not a tracked repository file.
 
 ### Accepted findings
@@ -151,6 +151,8 @@ The original audit retains each finding's correction and source references.
 | C10 | D | Packaged controls and fresh isolated Android, iOS device, and iOS simulator consumer builds |
 | C05, T07, T08, T09 | A | Consumer checks, package metadata, maintained documentation, and local instruction inspection |
 | T01, T04 | C | Actual release validators and six process-ownership controls |
+| T05 | D | Packaged configuration inspection and successful consumer builds under the approved criterion |
+| T06 | C | Workflow comparison against documented concurrency semantics under the approved criterion |
 
 ### Clean source commits
 
@@ -189,20 +191,31 @@ Packaged builds used `.ignore/remediation/final-consumer-artifacts` and `.ignore
 They prove prepublication builds, not public registry acceptance.
 The default Go release-version tests also passed without Node at commit D.
 
-### Remaining acceptance
+### Approved configuration-review acceptance
 
-| Finding | Existing issue | Required evidence |
+The user approved removing both additional experiments as release-gate acceptance conditions on 2026-09-17.
+Normal CI, required runtime tests, public-artifact verification, and publication controls remain unchanged.
+
+| Finding | Existing issue | Accepted evidence |
 | --- | --- | --- |
-| T05 | #101 | A controlled same-coordinate Maven artifact must not replace the public dependency. Prepublication's exclusive repository does not prove this condition. |
-| T06 | #94 | Hosted workflow results must demonstrate independent push runs, PR cancellation, and queued-run behavior. No push is authorized. |
+| T05 | #101 | Both shipped `mavenLocal()` declarations are removed. The packaged Gradle file matches source. Explicit development resolution and successful packaged builds remain intact. |
+| T06 | #94 | Push groups use unique run IDs. PR groups retain cancellation. The installation lock is removed. Release serialization and local locks remain unchanged. |
 
-The earlier session count of 53 verified findings was too broad.
-Issue reconciliation exposed these conditions and the missing packaged-consumer builds.
-The packaged builds subsequently passed at commit D.
-The corrected count is 51 accepted findings, with two implemented findings awaiting acceptance.
+[Gradle documents local repository declaration](https://docs.gradle.org/current/userguide/declaring_repositories_basics.html#sec:declaring-local-repositories).
+T05 removes implicit library configuration, not repositories that an application explicitly selects.
+A separate same-coordinate substitution experiment is not required for this bounded deletion.
 
-Issues #93, #98, #100, #102, and #103 have complete evidence and are closed.
-Issues #94, #101, and #105 remain open.
+[GitHub documents unique run-ID concurrency groups](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#example-using-a-fallback-value).
+T06 changes group selection, not the scheduler implementation.
+Artificial overlapping pushes and PR updates are not required to accept this configuration correction.
+
+Neither experiment ran. Their removal is an approved acceptance decision, not a claimed passing test.
+The earlier count of 53 verified findings preceded this approval and was too broad.
+Reconciliation correctly reduced acceptance to 51 until the user approved these revised criteria.
+The missing packaged-consumer builds separately passed at commit D.
+
+Issues #93, #94, #98, #100, #101, #102, and #103 now have evidence for their applicable acceptance criteria.
+Issue #105 records all 53 accepted findings.
 The separate oracle-replacement work in #36 remains unchanged.
 
 ### Retained failures and corrections
