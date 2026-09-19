@@ -3136,6 +3136,15 @@ mod tests {
 
         let continuing = continuing_connect_request();
         assert_eq!(continuing.validate(), Ok(()));
+        for generation in [0, 9_007_199_254_740_992] {
+            let mut invalid = continuing.clone();
+            invalid.client_generation = Some(generation);
+            assert!(invalid.validate().is_err());
+        }
+        let mut empty_scope = continuing.clone();
+        empty_scope.known_scopes =
+            BTreeMap::from([(String::new(), ScopeCursorRef { cursor: None })]);
+        assert!(empty_scope.validate().is_err());
         let mut reset_with_generation = continuing.clone();
         reset_with_generation.schema_reset = Some(true);
         assert_eq!(reset_with_generation.validate(), Ok(()));
@@ -3362,12 +3371,18 @@ mod tests {
             limit: 100,
         };
         assert_eq!(pull.validate(), Ok(()));
+        let mut wire = serde_json::to_value(&pull).unwrap();
+        let decoded: PullRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.validate(), Ok(()));
+        wire.as_object_mut().unwrap().remove("scopes").unwrap();
+        assert!(serde_json::from_value::<PullRequest>(wire).is_err());
         for kind in [
             "client",
             "generation",
             "schema",
             "scope-version",
             "scope",
+            "scope-id",
             "limit",
         ] {
             let mut value = pull.clone();
@@ -3378,6 +3393,10 @@ mod tests {
                 "scope-version" => value.scope_set_version = -1,
                 "scope" => {
                     value.scopes.get_mut("documents_shared").unwrap().cursor = Some(String::new())
+                }
+                "scope-id" => {
+                    value.scopes =
+                        BTreeMap::from([(String::new(), ScopeCursorRef { cursor: None })])
                 }
                 _ => value.limit = 0,
             }
