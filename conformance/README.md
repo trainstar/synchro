@@ -44,6 +44,8 @@ An observed backoff does not prove that the public call has returned.
 Retention recovery observers require a terminal pull after renewal before sampling readiness.
 Reconnect can report ready before the client restores its scope cursors.
 After an observed push backoff, delayed captures can show an active retry of the same sealed request.
+Queue replay stops the public client before each offline write wave.
+Long timer settings do not stop managed recovery or foreground-triggered work.
 
 Use `make test-rn-e2e-ios-smoke` for focused smoke validation.
 Smoke result observers use the existing Jest test budget.

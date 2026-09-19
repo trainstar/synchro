@@ -211,6 +211,7 @@ const (
 	queueReplayStageOpen queueReplayStage = iota
 	queueReplayStageOpened
 	queueReplayStageBootstrapped
+	queueReplayStageOfflineStopped
 	queueReplayStageLocalWrite
 	queueReplayStageRestartedBeforeSchema
 	queueReplayStageSchemaBoundary
@@ -411,7 +412,7 @@ func (c *QueueReplayCoordinator) ExchangeCount() int {
 func (c *QueueReplayCoordinator) exchangeCountLocked() int {
 	count := 14 // main open/bootstrap/captures, nine successor-proof commands, complete response
 	for _, workload := range c.steps {
-		count += queueReplayLocalBatchCount(workload) + 8 // write batches, restart, schema check, begin loss, push barrier, await loss, trace, restart, replay
+		count += queueReplayLocalBatchCount(workload) + 9 // stop, write batches, restart, schema check, begin loss, push barrier, await loss, trace, restart, replay
 	}
 	if len(c.steps) > 1 {
 		count += len(c.steps) - 1 // retain the prior replay trace before each later restart
@@ -756,6 +757,11 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err := c.validateSynchronized(envelope.Result, "idle"); err != nil {
 			return err
 		}
+	case queueReplayStageOfflineStopped:
+		if c.process == nil {
+			return errors.New("React Native queue-replay stopped process identity is unavailable")
+		}
+		return validateStoppedLifecycleResult(envelope.Result, *c.process)
 	case queueReplayStageReplay:
 		if err := c.validateSynchronized(envelope.Result, "idle"); err != nil {
 			return err
@@ -934,6 +940,9 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 			c.stage = queueReplayStageCapture
 			break
 		}
+		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
+		c.stage = queueReplayStageOfflineStopped
+	case queueReplayStageOfflineStopped:
 		command, err := c.localCommand()
 		if err != nil {
 			return exchangeResponse{}, err
@@ -990,12 +999,8 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
 		c.stage = queueReplayStageReplay
 	case queueReplayStageReplayCapture:
-		command, err := c.localCommand()
-		if err != nil {
-			return exchangeResponse{}, err
-		}
-		response.Command = command
-		c.stage = queueReplayStageLocalWrite
+		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
+		c.stage = queueReplayStageOfflineStopped
 	case queueReplayStageCapture:
 		if c.finalResult == nil {
 			return exchangeResponse{}, errors.New("React Native queue-replay aggregate capture is unavailable")
@@ -1627,6 +1632,8 @@ func (stage queueReplayStage) String() string {
 		return "opened"
 	case queueReplayStageBootstrapped:
 		return "bootstrapped"
+	case queueReplayStageOfflineStopped:
+		return "offline-stopped"
 	case queueReplayStageLocalWrite:
 		return "local-write"
 	case queueReplayStageRestartedBeforeSchema:
