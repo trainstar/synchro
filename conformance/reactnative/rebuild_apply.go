@@ -660,6 +660,22 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("issue35 trace workload=%d records=%d overflow=%t observations=%d checkpoint=%d\n",
+		c.current, workload.RecordCount, trace.Overflowed, len(trace.Observations), trace.SequenceCheckpoint)
+	for index, observation := range trace.Observations {
+		if index == 16 {
+			break
+		}
+		class := observation.OperationClass
+		switch class {
+		case "connect", "push", "pull", "rebuild":
+		default:
+			class = "invalid"
+		}
+		fmt.Printf("issue35 operation index=%d sequence=%d class=%s status=%d duration_ns=%d facts_valid=%t\n",
+			index, observation.Sequence, class, observation.StatusCode, observation.DurationNanoseconds,
+			validateTraceOperation(observation, class) == nil)
+	}
 	if err := validateRebuildApplyTrace(trace, workload, len(c.steps[c.current].NativeBinding.Workload.Targets)); err != nil {
 		return err
 	}
