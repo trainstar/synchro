@@ -351,6 +351,37 @@ func TestRealIssue49PortableIntegerBoundariesAndCounterOverflow(t *testing.T) {
 		if overflowErr == nil || retainedVersion != maximumSafeInteger || overflowScopeCount != 0 {
 			t.Fatalf("server counter allocated outside the portable range: err=%v version=%d scope_count=%d", overflowErr, retainedVersion, overflowScopeCount)
 		}
+		if _, err := database.ExecContext(ctx, `
+			UPDATE synchro.sync_clients SET client_generation = $1
+			WHERE user_id = 'diagnostic-user' AND client_id = $2`, maximumSafeInteger, client.ID); err != nil {
+			t.Fatalf("stage maximum safe client generation: %v", err)
+		}
+		request := map[string]any{
+			"client_id": client.ID, "client_generation": maximumSafeInteger,
+			"platform": "conformance", "app_version": "0.3.0", "protocol_version": 3,
+			"schema": client.Schema, "scope_set_version": maximumSafeInteger,
+			"known_scopes": map[string]any{},
+		}
+		maximumStatus, maximumGeneration := postConnect(t, ctx, harness.AdapterURL(), token, request)
+		if maximumStatus != http.StatusOK || maximumGeneration["client_generation"] != float64(maximumSafeInteger) {
+			t.Fatalf("maximum safe client generation did not round trip: status=%d response=%#v", maximumStatus, maximumGeneration)
+		}
+		if _, err := database.ExecContext(ctx, `
+			UPDATE synchro.sync_clients SET generation_expires_at = clock_timestamp()
+			WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID); err != nil {
+			t.Fatalf("expire maximum safe client generation: %v", err)
+		}
+		renewalStatus, renewal := postConnect(t, ctx, harness.AdapterURL(), token, request)
+		requireRealProtocolError(t, renewalStatus, renewal, http.StatusInternalServerError, "sync_integrity_failure")
+		var retainedGeneration int64
+		if err := database.QueryRowContext(ctx, `
+			SELECT client_generation FROM synchro.sync_clients
+			WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID).Scan(&retainedGeneration); err != nil {
+			t.Fatalf("observe rejected client generation allocation: %v", err)
+		}
+		if retainedGeneration != maximumSafeInteger {
+			t.Fatalf("rejected renewal changed client generation: %d", retainedGeneration)
+		}
 	})
 }
 
