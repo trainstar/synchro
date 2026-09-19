@@ -230,6 +230,9 @@ func TestRealIssue49WALPoisonBlocksContiguousProgress(t *testing.T) {
 			recoveredPipeline.AcknowledgedEndLSN != recoveredPipeline.SlotConfirmedFlushLSN {
 			t.Fatalf("logical slot did not acknowledge the exact recovered contiguous end LSN: %#v", recoveredPipeline)
 		}
+		if retried, retryErr := harness.Operator().RetryWALPoison(ctx); retryErr != nil || retried {
+			t.Fatalf("completed poison entered ordinary retry: requested=%t err=%v", retried, retryErr)
+		}
 	})
 }
 
