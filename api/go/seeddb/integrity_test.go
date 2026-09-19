@@ -340,6 +340,27 @@ func TestExportManifestRejectsChangedBodyWithStaleHash(t *testing.T) {
 	}
 }
 
+func TestExportManifestRejectsRehashedInvalidExportIdentity(t *testing.T) {
+	portable := validPortableSeedManifest(t, validManifestEnvelope(t))
+	if err := portable.validate(); err != nil {
+		t.Fatalf("valid export manifest failed: %v", err)
+	}
+	for _, exportID := range []string{"", "not-a-uuid", "A1234567-89ab-cdef-0123-456789abcdef", "a123456789abcdef0123456789abcdef"} {
+		t.Run(exportID, func(t *testing.T) {
+			changed := portable
+			changed.ExportID = exportID
+			hash, err := exportManifestDigest(changed)
+			if err != nil {
+				t.Fatalf("hash invalid export manifest: %v", err)
+			}
+			changed.ExportManifestHash = hash
+			if err := changed.validate(); err == nil {
+				t.Fatal("rehashed invalid export identity was accepted")
+			}
+		})
+	}
+}
+
 func TestManifestHashCanonicalizesSemanticallyUnorderedCollections(t *testing.T) {
 	t.Run("fields", func(t *testing.T) {
 		env := validManifestEnvelope(t)

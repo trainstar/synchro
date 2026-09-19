@@ -183,6 +183,27 @@
         .expect("clear oldest unmaterialized commit observation");
 
         Spi::run(
+            "DO $control$
+             BEGIN
+                 INSERT INTO synchro.sync_wal_poison (
+                     stream_generation, commit_lsn, failure_class, failure_detail
+                 )
+                 SELECT stream_generation, '0/1', 'unrecognized_class', 'bounded detail'
+                 FROM synchro.sync_runtime_state WHERE singleton;
+                 RAISE EXCEPTION 'unknown poison failure class was accepted';
+             EXCEPTION WHEN check_violation THEN
+                 NULL;
+             END
+             $control$",
+        )
+        .expect("reject an unrecognized durable poison failure class");
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM synchro.sync_wal_poison")
+                .expect("read poison count after rejection"),
+            Some(0)
+        );
+
+        Spi::run(
             "INSERT INTO synchro.sync_wal_poison (
                  stream_generation, commit_lsn, failure_class, failure_detail, lifecycle
               )

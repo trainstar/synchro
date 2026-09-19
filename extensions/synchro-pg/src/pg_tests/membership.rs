@@ -592,6 +592,28 @@ fn capture_dependency_nonempty_stays_pending() {
     assert_eq!(state.0["active_exposure"], json!(false));
     assert!(state.0["trigger_count"].as_i64().unwrap_or(0) > 0);
     assert!(requires_bootstrap);
+
+    Spi::run(&format!(
+        "DO $control$
+         BEGIN
+             UPDATE synchro.sync_registry_generations
+             SET state = 'active', validated = false, activated_at = clock_timestamp()
+             WHERE generation = {generation};
+             RAISE EXCEPTION 'unvalidated registry activation was accepted';
+         EXCEPTION WHEN check_violation THEN
+             NULL;
+         END
+         $control$"
+    ))
+    .expect("reject unvalidated registry activation");
+    let preserved: pgrx::JsonB = Spi::get_one_with_args(
+        "SELECT jsonb_build_object('state', state, 'validated', validated)
+         FROM synchro.sync_registry_generations WHERE generation = $1",
+        &[generation.into()],
+    )
+    .expect("read rejected registry activation")
+    .expect("registry generation remains present");
+    assert_eq!(preserved.0, json!({"state": "pending", "validated": true}));
 }
 
 #[pg_test]
