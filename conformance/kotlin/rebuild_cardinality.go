@@ -9,7 +9,6 @@ import (
 	"sort"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -94,12 +93,12 @@ func RunRebuildCardinalityScenario(ctx context.Context, scenario scenarios.Scena
 		"rebuild-state",
 	}
 
-	modelResult, err := modelrunner.RunScenario(ctx, scenario)
+	inputs, err := scenarios.BuildRebuildWorkloadInputs(scenario)
 	if err != nil {
-		return RebuildCardinalityResult{}, fmt.Errorf("derive Kotlin Android rebuild-cardinality source operations from the authored model: %w", err)
+		return RebuildCardinalityResult{}, fmt.Errorf("construct Kotlin Android rebuild-cardinality inputs: %w", err)
 	}
-	if !modelResult.Passed || len(modelResult.Steps) != len(scenario.Steps) {
-		return RebuildCardinalityResult{}, errors.New("authored rebuild-cardinality model did not close all workload steps")
+	if len(inputs) != len(scenario.Steps) {
+		return RebuildCardinalityResult{}, errors.New("authored rebuild-cardinality inputs do not cover all workload steps")
 	}
 
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
@@ -112,12 +111,12 @@ func RunRebuildCardinalityScenario(ctx context.Context, scenario scenarios.Scena
 	currentRecordCount := uint64(0)
 	for index, authoredStep := range scenario.Steps {
 		step := steps[authoredStep.ID]
-		modelStep := modelResult.Steps[index]
-		if modelStep.StepID != authoredStep.ID {
-			return RebuildCardinalityResult{}, fmt.Errorf("authored rebuild-cardinality model step %s is bound to %s", authoredStep.ID, modelStep.StepID)
+		input := inputs[index]
+		if input.StepID != authoredStep.ID {
+			return RebuildCardinalityResult{}, fmt.Errorf("authored rebuild-cardinality input step %s is bound to %s", authoredStep.ID, input.StepID)
 		}
 		workload := workloads[authoredStep.ID]
-		expansion, err := executeKotlinRebuildCardinalityExpansion(ctx, controller, modelStep.Expanded, step, workload, currentRecordCount)
+		expansion, err := executeKotlinRebuildCardinalityExpansion(ctx, controller, input.Operations, step, workload, currentRecordCount)
 		if err != nil {
 			return RebuildCardinalityResult{}, fmt.Errorf("execute Kotlin Android rebuild-cardinality source for step %s: %w", authoredStep.ID, err)
 		}
@@ -134,7 +133,7 @@ func RunRebuildCardinalityScenario(ctx context.Context, scenario scenarios.Scena
 		if err != nil {
 			return RebuildCardinalityResult{}, err
 		}
-		call, transport, err := runKotlinRebuildCardinalityCall(ctx, platform, client, modelStep.Expanded, workload, scopeSetVersion)
+		call, transport, err := runKotlinRebuildCardinalityCall(ctx, platform, client, input.Operations, workload, scopeSetVersion)
 		if err != nil {
 			return RebuildCardinalityResult{}, fmt.Errorf("run Kotlin Android rebuild-cardinality client %s: %w", client.ClientID, err)
 		}
@@ -300,8 +299,6 @@ func executeKotlinRebuildCardinalityExpansion(ctx context.Context, controller *b
 	pageCount := 0
 	commitSeen := false
 	materializeSeen := false
-	stageSeen := false
-	activateSeen := false
 	beginSeen := false
 	requestSeen := false
 	applySeen := false
@@ -310,18 +307,8 @@ func executeKotlinRebuildCardinalityExpansion(ctx context.Context, controller *b
 	for _, operation := range operations {
 		key := scenarios.OperationKey(operation)
 		switch key {
-		case "model/stage-registry-membership-generation":
-			if stageSeen || commitSeen || materializeSeen || beginSeen {
-				return rebuildCardinalityExpansion{}, errors.New("workload expansion has an out-of-order membership stage")
-			}
-			stageSeen = true
-		case "model/activate-registry-membership-generation":
-			if !stageSeen || activateSeen || commitSeen || materializeSeen || beginSeen {
-				return rebuildCardinalityExpansion{}, errors.New("workload expansion has an out-of-order membership activation")
-			}
-			activateSeen = true
 		case "model/commit-source-transaction":
-			if commitSeen || materializeSeen || beginSeen || (stageSeen && !activateSeen) {
+			if commitSeen || materializeSeen || beginSeen {
 				return rebuildCardinalityExpansion{}, errors.New("workload expansion has an out-of-order source commit")
 			}
 			if err := validateKotlinRebuildCardinalityCommit(operation, priorRecordCount, workload.RecordCount); err != nil {
@@ -405,7 +392,7 @@ func executeKotlinRebuildCardinalityExpansion(ctx context.Context, controller *b
 			return rebuildCardinalityExpansion{}, fmt.Errorf("workload expansion operation %q is unsupported", key)
 		}
 	}
-	if stageSeen != activateSeen || !commitSeen || !materializeSeen || !beginSeen || !applySeen || !finalizeSeen || requestSeen || pageCount == 0 {
+	if !commitSeen || !materializeSeen || !beginSeen || !applySeen || !finalizeSeen || requestSeen || pageCount == 0 {
 		return rebuildCardinalityExpansion{}, errors.New("workload expansion did not close source and rebuild phases")
 	}
 	return rebuildCardinalityExpansion{PageCount: pageCount}, nil

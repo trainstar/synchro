@@ -31,6 +31,9 @@ Layers six and seven allow layers one through five to stay small. Do not replace
 
 The authored scenario corpus is an executable contract input. Each scenario is schema-valid and independently authored from the normative specification.
 
+Native rebuild-apply and rebuild-cardinality drivers construct deterministic inputs from the authored scenario.
+They do not execute the reference model to generate those inputs or expected runtime results.
+
 ## React Native Journeys
 
 Run the complete corpora with `make test-rn-scenarios-ios` and `make test-rn-scenarios-android`.

@@ -13,7 +13,6 @@ import (
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -234,19 +233,22 @@ func (c *RebuildApplyCoordinator) Prepare(ctx context.Context) error {
 	if err := c.config.Controller.Install(ctx, c.config.Scenario.Model.Setup[0]); err != nil {
 		return fmt.Errorf("install React Native rebuild-apply contract: %w", err)
 	}
-	model, err := modelrunner.RunScenario(ctx, c.config.Scenario)
-	if err != nil || !model.Passed || len(model.Steps) != len(c.config.Scenario.Steps) {
-		return errors.New("derive React Native rebuild-apply source operations")
+	inputs, err := scenarios.BuildRebuildWorkloadInputs(c.config.Scenario)
+	if err != nil {
+		return fmt.Errorf("construct React Native rebuild-apply inputs: %w", err)
+	}
+	if len(inputs) != len(c.config.Scenario.Steps) {
+		return errors.New("React Native rebuild-apply inputs do not cover all workload steps")
 	}
 	for index, step := range c.config.Scenario.Steps {
 		var workload rebuildApplyWorkload
 		if json.Unmarshal(step.Operation.Payload, &workload) != nil {
 			return errors.New("decode React Native rebuild-apply workload")
 		}
-		if model.Steps[index].StepID != step.ID {
-			return errors.New("React Native rebuild-apply model step order changed")
+		if inputs[index].StepID != step.ID {
+			return errors.New("React Native rebuild-apply input step order changed")
 		}
-		c.steps, c.workloads, c.expanded = append(c.steps, step), append(c.workloads, workload), append(c.expanded, model.Steps[index].Expanded)
+		c.steps, c.workloads, c.expanded = append(c.steps, step), append(c.workloads, workload), append(c.expanded, inputs[index].Operations)
 	}
 	if err := c.bindServerIdentities(); err != nil {
 		return err
@@ -750,7 +752,7 @@ func (c *RebuildApplyCoordinator) executeSource(ctx context.Context, operations 
 	committed, materialized, pages := false, false, 0
 	for _, operation := range operations {
 		switch scenarios.OperationKey(operation) {
-		case "model/stage-registry-membership-generation", "model/activate-registry-membership-generation", "local/begin-rebuild", "rebuild/request-page", "local/apply-rebuild-page", "local/finalize-rebuild":
+		case "local/begin-rebuild", "rebuild/request-page", "local/apply-rebuild-page", "local/finalize-rebuild":
 			if scenarios.OperationKey(operation) == "rebuild/request-page" {
 				pages++
 			}

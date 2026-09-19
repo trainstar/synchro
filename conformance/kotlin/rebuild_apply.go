@@ -9,7 +9,6 @@ import (
 	"sort"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -94,12 +93,12 @@ func RunRebuildApplyScenario(ctx context.Context, scenario scenarios.Scenario, c
 		"rebuild-state",
 	}
 
-	modelResult, err := modelrunner.RunScenario(ctx, scenario)
+	inputs, err := scenarios.BuildRebuildWorkloadInputs(scenario)
 	if err != nil {
-		return RebuildApplyResult{}, fmt.Errorf("derive Kotlin Android rebuild-apply source operations from the authored model: %w", err)
+		return RebuildApplyResult{}, fmt.Errorf("construct Kotlin Android rebuild-apply inputs: %w", err)
 	}
-	if !modelResult.Passed || len(modelResult.Steps) != len(scenario.Steps) {
-		return RebuildApplyResult{}, errors.New("authored rebuild-apply model did not close all workload steps")
+	if len(inputs) != len(scenario.Steps) {
+		return RebuildApplyResult{}, errors.New("authored rebuild-apply inputs do not cover all workload steps")
 	}
 
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
@@ -112,12 +111,12 @@ func RunRebuildApplyScenario(ctx context.Context, scenario scenarios.Scenario, c
 	currentRecordCount := uint64(0)
 	for index, authoredStep := range scenario.Steps {
 		step := steps[authoredStep.ID]
-		modelStep := modelResult.Steps[index]
-		if modelStep.StepID != authoredStep.ID {
-			return RebuildApplyResult{}, fmt.Errorf("authored rebuild-apply model step %s is bound to %s", authoredStep.ID, modelStep.StepID)
+		input := inputs[index]
+		if input.StepID != authoredStep.ID {
+			return RebuildApplyResult{}, fmt.Errorf("authored rebuild-apply input step %s is bound to %s", authoredStep.ID, input.StepID)
 		}
 		workload := workloads[authoredStep.ID]
-		expansion, err := executeKotlinRebuildApplyExpansion(ctx, controller, modelStep.Expanded, step, workload, currentRecordCount)
+		expansion, err := executeKotlinRebuildApplyExpansion(ctx, controller, input.Operations, step, workload, currentRecordCount)
 		if err != nil {
 			return RebuildApplyResult{}, fmt.Errorf("execute Kotlin Android rebuild-apply source for step %s: %w", authoredStep.ID, err)
 		}
@@ -134,7 +133,7 @@ func RunRebuildApplyScenario(ctx context.Context, scenario scenarios.Scenario, c
 		if err != nil {
 			return RebuildApplyResult{}, err
 		}
-		call, transport, err := runKotlinRebuildApplyCall(ctx, platform, client, modelStep.Expanded, workload, scopeSetVersion)
+		call, transport, err := runKotlinRebuildApplyCall(ctx, platform, client, input.Operations, workload, scopeSetVersion)
 		if err != nil {
 			return RebuildApplyResult{}, fmt.Errorf("run Kotlin Android rebuild-apply client %s: %w", client.ClientID, err)
 		}
@@ -305,12 +304,6 @@ func executeKotlinRebuildApplyExpansion(ctx context.Context, controller *blackbo
 	for _, operation := range operations {
 		key := scenarios.OperationKey(operation)
 		switch key {
-		case "model/stage-registry-membership-generation", "model/activate-registry-membership-generation":
-			if commitSeen || materializeSeen || beginSeen {
-				return rebuildApplyExpansion{}, fmt.Errorf("workload expansion places %s after source execution", key)
-			}
-			// The Kotlin fixture already uses the authored single-scope source registration.
-			// The model-only membership staging must not mutate it.
 		case "model/commit-source-transaction":
 			if commitSeen || materializeSeen || beginSeen || finalizeSeen {
 				return rebuildApplyExpansion{}, errors.New("workload expansion has more than one source commit")
