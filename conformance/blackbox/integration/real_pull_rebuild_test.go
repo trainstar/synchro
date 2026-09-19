@@ -479,7 +479,16 @@ func TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary(t *testing.T) {
 	requireRealPullChange(t, pullAfterRebuildChanges, "user:diagnostic-user", table, postBoundaryID, "s04-post-boundary")
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 
-	if _, err := admin.ExecContext(ctx, `
+	// Backdate only this fixture, then restore immutability before exercising the public endpoint.
+	expirySetup, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin rebuild expiry control: %v", err)
+	}
+	defer expirySetup.Rollback()
+	if _, err := expirySetup.ExecContext(ctx, "ALTER TABLE synchro.sync_rebuild_sessions DISABLE TRIGGER synchro_rebuild_sessions_immutable"); err != nil {
+		t.Fatalf("prepare rebuild expiry control: %v", err)
+	}
+	if _, err := expirySetup.ExecContext(ctx, `
 		UPDATE synchro.sync_rebuild_sessions
 		SET created_at = transaction_timestamp() - interval '25 hours',
 		    expires_at = transaction_timestamp() - interval '1 hour'
@@ -487,6 +496,12 @@ func TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary(t *testing.T) {
 		client.ID, rebuildID,
 	); err != nil {
 		t.Fatalf("expire completed rebuild session: %v", err)
+	}
+	if _, err := expirySetup.ExecContext(ctx, "ALTER TABLE synchro.sync_rebuild_sessions ENABLE TRIGGER synchro_rebuild_sessions_immutable"); err != nil {
+		t.Fatalf("restore rebuild session immutability: %v", err)
+	}
+	if err := expirySetup.Commit(); err != nil {
+		t.Fatalf("commit rebuild expiry control: %v", err)
 	}
 	expired, err := harness.Operator().ObserveRebuildSession(ctx, client.ID, rebuildID)
 	if err != nil || !expired.Expired {
