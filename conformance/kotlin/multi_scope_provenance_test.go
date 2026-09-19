@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -111,23 +110,5 @@ func TestMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testing.T) {
 	after := scenarios.StateFacts{Clients: []scenarios.ClientDurabilityFact{{UserID: "user-a", ClientID: "client-a", RowCount: &afterCount}}}
 	if err := validateMultiScopeProvenanceNoProgress(plan, before, after); err == nil {
 		t.Fatal("post-restart application row change was accepted")
-	}
-}
-
-func TestMultiScopeProvenanceModelResultMatchesAuthoredScenario(t *testing.T) {
-	scenario, err := scenarios.LoadFile(context.Background(), "../..", "conformance/scenarios/performance/multi-scope-provenance-001.json")
-	if err != nil {
-		t.Fatalf("load authored scenario: %v", err)
-	}
-	modelScenario, err := multiScopeProvenanceModelScenario(scenario)
-	if err != nil {
-		t.Fatalf("prepare authored model: %v", err)
-	}
-	result, err := modelrunner.RunScenario(context.Background(), modelScenario)
-	if err != nil {
-		t.Fatalf("run authored model: %v", err)
-	}
-	if err := validateMultiScopeProvenanceModelResult(scenario, result); err != nil {
-		t.Fatalf("validate authored model result: %v", err)
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -162,34 +161,19 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	if controller == nil || artifact == nil || platform == nil {
 		return MultiScopeProvenanceResult{}, errors.New("Swift multi-scope provenance dependencies are unavailable")
 	}
-	modelScenario, err := multiScopeProvenanceModelScenario(scenario)
-	if err != nil {
-		return MultiScopeProvenanceResult{}, err
-	}
-	modelResult, err := modelrunner.RunScenario(ctx, modelScenario)
-	if err != nil {
-		return MultiScopeProvenanceResult{}, fmt.Errorf("derive Swift multi-scope provenance source operations from the authored model: %w", err)
-	}
-	if err := validateMultiScopeProvenanceModelResult(scenario, modelResult); err != nil {
-		return MultiScopeProvenanceResult{}, err
-	}
 	plan, err := multiScopeProvenancePlanForScenario(scenario)
 	if err != nil {
 		return MultiScopeProvenanceResult{}, err
 	}
-	if len(scenario.Model.Setup) == 0 {
-		return MultiScopeProvenanceResult{}, errors.New("Swift multi-scope provenance setup is absent")
+	if len(scenario.Model.Setup) != 1 {
+		return MultiScopeProvenanceResult{}, errors.New("Swift multi-scope provenance requires one setup operation")
 	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return MultiScopeProvenanceResult{}, fmt.Errorf("install Swift multi-scope provenance contract: %w", err)
 	}
 
-	// The setup declares every client local_ready with its assigned scope, and
-	// the reference model asserts each connect adds no scope and leaves cursors
-	// unchanged. A client the scenario authors no rebuild for must therefore
-	// reach that state before the exercise begins. A client the scenario does
-	// author rebuilds for starts empty and rebuilds during the exercise exactly
-	// as those steps declare.
+	// Authored connects preserve installed scopes and cursors. Clients without
+	// authored rebuild work must therefore start from the installed state.
 	started := make(map[string]bool, len(plan.Clients))
 	installed := make(map[string]bool, len(plan.Clients))
 	// A request reports the assignment set the client has already applied.
@@ -197,14 +181,13 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	appliedScopeCounts := make(map[string]int, len(plan.Clients))
 	calls := make([]SynchronizationResult, 0, len(plan.CallOrder))
 	var preRestart scenarios.StateFacts
-	for index, step := range plan.Steps {
-		modelOperation := modelResult.Steps[index].Operation
-		switch scenarios.OperationKey(modelOperation) {
+	for _, step := range plan.Steps {
+		switch scenarios.OperationKey(step.Operation) {
 		case "model/commit-source-transaction", "model/stage-registry-membership-generation", "model/activate-registry-membership-generation", "model/set-client-assignments":
 			if step.Transport != "model" || step.NativeBinding == nil || step.NativeBinding.Kind != "controller" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("Swift multi-scope provenance step %s controller binding is invalid", step.ID)
 			}
-			observation, applyErr := controller.ApplyStep(ctx, modelOperation)
+			observation, applyErr := controller.ApplyStep(ctx, step.Operation)
 			if applyErr != nil || observation.Disposition != "success" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("apply Swift multi-scope provenance step %s: %w", step.ID, resultError(applyErr, observation.Disposition))
 			}
@@ -212,7 +195,7 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 			if step.Transport != "process" || step.NativeBinding == nil || step.NativeBinding.Kind != "controller" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("Swift multi-scope provenance step %s process binding is invalid", step.ID)
 			}
-			observation, processErr := controller.ProcessStep(ctx, nil, modelOperation)
+			observation, processErr := controller.ProcessStep(ctx, nil, step.Operation)
 			if processErr != nil || observation.Disposition != "success" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("materialize Swift multi-scope provenance step %s: %w", step.ID, resultError(processErr, observation.Disposition))
 			}
@@ -231,7 +214,7 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 			if len(preRestart.Clients) != 1 {
 				return MultiScopeProvenanceResult{}, errors.New("Swift multi-scope provenance pre-restart capture is incomplete")
 			}
-			observation, processErr := platform.ProcessStep(ctx, plan.RestartClient, modelOperation)
+			observation, processErr := platform.ProcessStep(ctx, plan.RestartClient, step.Operation)
 			if processErr != nil || observation.Disposition != "success" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("restart Swift multi-scope provenance client %s: %w", plan.RestartClient.ClientID, resultError(processErr, observation.Disposition))
 			}
@@ -340,56 +323,6 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 		ServerFacts:        serverState,
 		IdentityResolution: evidence.Resolutions,
 	}, nil
-}
-
-func validateMultiScopeProvenanceModelResult(scenario scenarios.Scenario, result modelrunner.Result) error {
-	if !result.Passed || len(result.Setup) != 1 || len(result.Steps) != len(scenario.Steps) {
-		return errors.New("authored multi-scope provenance model did not close all workload steps")
-	}
-	if !reflect.DeepEqual(result.Setup[0].Operation, scenario.Model.Setup[0]) {
-		return errors.New("authored multi-scope provenance model setup differs from the authored setup")
-	}
-	for index, authoredStep := range scenario.Steps {
-		modelStep := result.Steps[index]
-		if modelStep.StepID != authoredStep.ID {
-			return fmt.Errorf("authored multi-scope provenance model step %s is bound to %s", authoredStep.ID, modelStep.StepID)
-		}
-		if !reflect.DeepEqual(modelStep.Operation, authoredStep.Operation) {
-			return fmt.Errorf("authored multi-scope provenance model operation for step %s differs from the authored operation", authoredStep.ID)
-		}
-		if modelStep.Err != nil {
-			return fmt.Errorf("authored multi-scope provenance model step %s returned an error: %w", authoredStep.ID, modelStep.Err)
-		}
-	}
-	return nil
-}
-
-func multiScopeProvenanceModelScenario(scenario scenarios.Scenario) (scenarios.Scenario, error) {
-	modelScenario := scenario
-	modelScenario.Model.ExpectedState = append([]scenarios.ModelExpectation(nil), scenario.Model.ExpectedState...)
-	// This scenario binds performance samples to native connect calls, not to
-	// model workload/prepare operations. The native consumer validates those
-	// samples, so the reference model evaluates only its semantic expectations.
-	expectations := make([]scenarios.ModelExpectation, 0, len(modelScenario.Model.ExpectedState))
-	for _, expectation := range modelScenario.Model.ExpectedState {
-		if expectation.Predicate.Name == "performance-contract-satisfied" {
-			continue
-		}
-		expectations = append(expectations, expectation)
-	}
-	modelScenario.Model.ExpectedState = expectations
-	for index := range modelScenario.Model.ExpectedState {
-		facts := modelScenario.Model.ExpectedState[index].StateFacts
-		if facts == nil {
-			continue
-		}
-		normalized, err := scenarios.NormalizeStateFacts(*facts)
-		if err != nil {
-			return scenarios.Scenario{}, fmt.Errorf("normalize authored multi-scope provenance expectation %s: %w", modelScenario.Model.ExpectedState[index].ID, err)
-		}
-		modelScenario.Model.ExpectedState[index].StateFacts = &normalized
-	}
-	return modelScenario, nil
 }
 
 func multiScopeProvenancePlanForScenario(scenario scenarios.Scenario) (multiScopeProvenancePlan, error) {

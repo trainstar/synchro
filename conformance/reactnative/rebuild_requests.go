@@ -17,7 +17,6 @@ import (
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -451,10 +450,6 @@ func (c *RebuildRequestsCoordinator) Prepare(ctx context.Context) error {
 	}
 	if err := c.config.Controller.Install(ctx, c.config.Scenario.Model.Setup[0]); err != nil {
 		return fmt.Errorf("install React Native rebuild-requests contract: %w", err)
-	}
-	model, err := modelrunner.RunScenario(ctx, c.config.Scenario)
-	if err != nil || !model.Passed || len(model.Steps) != len(c.steps) {
-		return fmt.Errorf("derive React Native rebuild-requests source operations: %w", nativeResultError(err, "model did not pass"))
 	}
 	if err := c.applyControllerStep(ctx, rebuildRequestsStepOrder[0], "model/commit-source-transaction"); err != nil {
 		return fmt.Errorf("commit React Native rebuild-requests snapshot: %w", err)

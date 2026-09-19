@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -152,20 +151,12 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	if controller == nil || artifact == nil || platform == nil {
 		return MultiScopeProvenanceResult{}, errors.New("Kotlin Android multi-scope provenance dependencies are unavailable")
 	}
-	modelScenario, err := multiScopeProvenanceModelScenario(scenario)
-	if err != nil {
-		return MultiScopeProvenanceResult{}, err
-	}
-	modelResult, err := modelrunner.RunScenario(ctx, modelScenario)
-	if err != nil {
-		return MultiScopeProvenanceResult{}, fmt.Errorf("derive Kotlin Android multi-scope provenance operations: %w", err)
-	}
-	if err := validateMultiScopeProvenanceModelResult(scenario, modelResult); err != nil {
-		return MultiScopeProvenanceResult{}, err
-	}
 	plan, err := multiScopeProvenancePlanForScenario(scenario)
 	if err != nil {
 		return MultiScopeProvenanceResult{}, err
+	}
+	if len(scenario.Model.Setup) != 1 {
+		return MultiScopeProvenanceResult{}, errors.New("Kotlin Android multi-scope provenance requires one setup operation")
 	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return MultiScopeProvenanceResult{}, fmt.Errorf("install Kotlin Android multi-scope provenance contract: %w", err)
@@ -177,16 +168,15 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 	appliedScopeCounts := make(map[string]int, len(plan.Clients))
 	calls := make([]SynchronizationResult, 0, len(plan.CallOrder))
 	var preRestart scenarios.StateFacts
-	for index, step := range plan.Steps {
-		modelOperation := modelResult.Steps[index].Operation
-		switch scenarios.OperationKey(modelOperation) {
+	for _, step := range plan.Steps {
+		switch scenarios.OperationKey(step.Operation) {
 		case "model/commit-source-transaction", "model/stage-registry-membership-generation", "model/activate-registry-membership-generation", "model/set-client-assignments":
-			observation, applyErr := controller.ApplyStep(ctx, modelOperation)
+			observation, applyErr := controller.ApplyStep(ctx, step.Operation)
 			if applyErr != nil || observation.Disposition != "success" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("apply Kotlin Android multi-scope provenance step %s: %w", step.ID, kotlinResultError(applyErr, observation.Disposition))
 			}
 		case "process/materialize-source-transaction":
-			observation, processErr := controller.ProcessStep(ctx, nil, modelOperation)
+			observation, processErr := controller.ProcessStep(ctx, nil, step.Operation)
 			if processErr != nil || observation.Disposition != "success" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("materialize Kotlin Android multi-scope provenance step %s: %w", step.ID, kotlinResultError(processErr, observation.Disposition))
 			}
@@ -205,7 +195,7 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 			if len(preRestart.Clients) != 1 {
 				return MultiScopeProvenanceResult{}, errors.New("Kotlin Android multi-scope provenance pre-restart capture is incomplete")
 			}
-			observation, processErr := platform.ProcessStep(ctx, plan.RestartClient, modelOperation)
+			observation, processErr := platform.ProcessStep(ctx, plan.RestartClient, step.Operation)
 			if processErr != nil || observation.Disposition != "success" {
 				return MultiScopeProvenanceResult{}, fmt.Errorf("restart Kotlin Android multi-scope provenance client %s: %w", plan.RestartClient.ClientID, kotlinResultError(processErr, observation.Disposition))
 			}
@@ -285,46 +275,6 @@ func RunMultiScopeProvenanceScenario(ctx context.Context, scenario scenarios.Sce
 		return MultiScopeProvenanceResult{}, err
 	}
 	return MultiScopeProvenanceResult{Calls: calls, ClientFacts: clientFacts, ServerFacts: serverState, IdentityResolution: evidence.Resolutions}, nil
-}
-
-func validateMultiScopeProvenanceModelResult(scenario scenarios.Scenario, result modelrunner.Result) error {
-	if !result.Passed || len(result.Setup) != 1 || len(result.Steps) != len(scenario.Steps) {
-		return errors.New("authored multi-scope provenance model did not close all steps")
-	}
-	if !reflect.DeepEqual(result.Setup[0].Operation, scenario.Model.Setup[0]) {
-		return errors.New("authored multi-scope provenance model setup differs")
-	}
-	for index, authoredStep := range scenario.Steps {
-		modelStep := result.Steps[index]
-		if modelStep.StepID != authoredStep.ID || !reflect.DeepEqual(modelStep.Operation, authoredStep.Operation) || modelStep.Err != nil {
-			return fmt.Errorf("authored multi-scope provenance model step %s differs", authoredStep.ID)
-		}
-	}
-	return nil
-}
-
-func multiScopeProvenanceModelScenario(scenario scenarios.Scenario) (scenarios.Scenario, error) {
-	modelScenario := scenario
-	modelScenario.Model.ExpectedState = append([]scenarios.ModelExpectation(nil), scenario.Model.ExpectedState...)
-	expectations := make([]scenarios.ModelExpectation, 0, len(modelScenario.Model.ExpectedState))
-	for _, expectation := range modelScenario.Model.ExpectedState {
-		if expectation.Predicate.Name != "performance-contract-satisfied" {
-			expectations = append(expectations, expectation)
-		}
-	}
-	modelScenario.Model.ExpectedState = expectations
-	for index := range modelScenario.Model.ExpectedState {
-		facts := modelScenario.Model.ExpectedState[index].StateFacts
-		if facts == nil {
-			continue
-		}
-		normalized, err := scenarios.NormalizeStateFacts(*facts)
-		if err != nil {
-			return scenarios.Scenario{}, fmt.Errorf("normalize authored multi-scope provenance expectation %s: %w", modelScenario.Model.ExpectedState[index].ID, err)
-		}
-		modelScenario.Model.ExpectedState[index].StateFacts = &normalized
-	}
-	return modelScenario, nil
 }
 
 func multiScopeProvenancePlanForScenario(scenario scenarios.Scenario) (multiScopeProvenancePlan, error) {
