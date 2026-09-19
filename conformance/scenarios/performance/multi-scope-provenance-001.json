@@ -4374,7 +4374,7 @@
       "requirement_ids": [
         "SYNC-PROVENANCE-002"
       ],
-      "description": "The eight connect and nine rebuild requests return their canonical successful wire outcomes.",
+      "description": "The authored public synchronization calls and rebuild requests return their canonical successful wire outcomes.",
       "expectation_ids": [
         "EXPECT-PERF-MULTI-SCOPE-PROVENANCE-WIRE-001"
       ],

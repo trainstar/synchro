@@ -38,6 +38,7 @@ Proof metadata binds server, native, fault, and negative-control execution.
 It no longer claims the retired reference-model proof type.
 Authored inputs, expected state, wire expectations, assertions, and negative controls remain independent of implementation output.
 The multi-scope wire assertion binds the existing Swift and Kotlin observed-wire checks.
+Those checks follow the native bindings. A warm synchronization call can pull without another connect request.
 
 ## React Native Journeys
 
