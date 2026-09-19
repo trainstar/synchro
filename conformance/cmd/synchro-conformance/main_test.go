@@ -141,6 +141,7 @@ func repositoryRoot(t *testing.T) string {
 
 func cliScenarioBytes(t *testing.T) []byte {
 	t.Helper()
+	cell := contract.SupportCellID("SUP-PG-LINUX-X64-001")
 	scenario := scenarios.Scenario{
 		SchemaURI:           "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
 		SchemaVersion:       2,
@@ -148,25 +149,27 @@ func cliScenarioBytes(t *testing.T) []byte {
 		Title:               "CLI scenario",
 		RequirementIDs:      []contract.RequirementID{"SYNC-TEST-001"},
 		NormativeReferences: []contract.NormativeReference{{Path: "docs/src/content/docs/spec/04-invariants.mdx", Anchor: "#canonical-time-format"}},
-		ProofTypes:          []string{"reference-model"},
+		ProofTypes:          []string{"server-black-box"},
 		ProofObligations: []scenarios.ProofObligation{{
 			ObligationID:           "OBL-CLI-001",
 			RequirementIDs:         []contract.RequirementID{"SYNC-TEST-001"},
 			AssertionIDs:           []contract.AssertionID{"ASSERT-CLI-001"},
-			ProofType:              "reference-model",
+			ProofType:              "server-black-box",
+			SupportCellID:          &cell,
 			ArtifactInventoryIDs:   []contract.ArtifactInventoryID{"ARTDEF-TEST-001"},
 			PerformanceBudgetIDs:   []contract.BudgetID{},
 			RequiredMeasurementIDs: []contract.MeasurementID{},
 			RequiredVectorSetIDs:   []contract.VectorSetID{},
-			MakeTarget:             "test-conformance-scenarios",
-			Argv:                   []string{"make", "test-conformance-scenarios"},
+			MakeTarget:             "test-blackbox",
+			Argv:                   []string{"make", "test-blackbox"},
 		}},
 		Ownership: []scenarios.Ownership{{
 			ScenarioID:        "SCN-CLI-001",
 			RequirementID:     "SYNC-TEST-001",
 			ProofObligationID: "OBL-CLI-001",
 			AssertionID:       "ASSERT-CLI-001",
-			ProofType:         "reference-model",
+			ProofType:         "server-black-box",
+			SupportCellID:     &cell,
 		}},
 		Model: scenarios.ModelSpec{
 			Setup: []scenarios.Operation{{ContractOperation: "model", Name: "author-state", Payload: json.RawMessage(`{"payload-secret":true}`)}},

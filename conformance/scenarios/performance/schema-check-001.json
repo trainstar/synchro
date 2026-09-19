@@ -34,46 +34,12 @@
     }
   ],
   "proof_types": [
-    "reference-model",
     "server-black-box",
     "native-e2e",
     "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
-    {
-      "obligation_id": "OBL-PERF-SCHEMA-CHECK-RM-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-004",
-        "SYNC-SCHEMA-005",
-        "SYNC-SCHEMA-006",
-        "SYNC-SCHEMA-007",
-        "SYNC-OUTCOME-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-        "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
-        "ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001",
-        "ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001",
-        "ASSERT-PERF-SCHEMA-CHECK-CURSOR-001",
-        "ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001"
-      ],
-      "proof_type": "reference-model",
-      "support_cell_id": null,
-      "artifact_inventory_ids": [
-        "ARTDEF-CONFORMANCE-RUNNER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-conformance",
-      "argv": [
-        "make",
-        "test-conformance"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
     {
       "obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
       "requirement_ids": [
@@ -380,22 +346,6 @@
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RM-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
-      "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-RM-001",
-      "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-DISPATCH-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
-    {
-      "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
-      "requirement_id": "SYNC-SCHEMA-004",
       "proof_obligation_id": "OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "proof_type": "server-black-box",
@@ -529,10 +479,6 @@
       "proof_type": "negative-control",
       "support_cell_id": null
     },
-    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-006","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-RM-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-005","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-SCHEMA-007","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-SCHEMA-CHECK-001","requirement_id":"SYNC-OUTCOME-002","proof_obligation_id":"OBL-PERF-SCHEMA-CHECK-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},

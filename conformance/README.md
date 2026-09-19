@@ -34,6 +34,11 @@ The authored scenario corpus is an executable contract input. Each scenario is s
 Native rebuild-apply and rebuild-cardinality drivers construct deterministic inputs from the authored scenario.
 They do not execute the reference model to generate those inputs or expected runtime results.
 
+Proof metadata binds server, native, fault, and negative-control execution.
+It no longer claims the retired reference-model proof type.
+Authored inputs, expected state, wire expectations, assertions, and negative controls remain independent of implementation output.
+The multi-scope wire assertion binds the existing Swift and Kotlin observed-wire checks.
+
 ## React Native Journeys
 
 Run the complete corpora with `make test-rn-scenarios-ios` and `make test-rn-scenarios-android`.

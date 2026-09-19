@@ -29,37 +29,12 @@
     }
   ],
   "proof_types": [
-    "reference-model",
     "server-black-box",
     "native-e2e",
     "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
-    {
-      "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-RM-001",
-      "requirement_ids": [
-        "SYNC-SCHEMA-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001"
-      ],
-      "proof_type": "reference-model",
-      "support_cell_id": null,
-      "artifact_inventory_ids": [
-        "ARTDEF-CONFORMANCE-RUNNER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-conformance",
-      "argv": [
-        "make",
-        "test-conformance"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
     {
       "obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001",
       "requirement_ids": [
@@ -385,14 +360,6 @@
       "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-CONTROL-001",
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
       "proof_type": "negative-control",
-      "support_cell_id": null
-    },
-    {
-      "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
-      "requirement_id": "SYNC-SCHEMA-003",
-      "proof_obligation_id": "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-RM-001",
-      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-MANIFEST-001",
-      "proof_type": "reference-model",
       "support_cell_id": null
     },
     {

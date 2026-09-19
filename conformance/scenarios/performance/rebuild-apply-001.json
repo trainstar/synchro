@@ -14,36 +14,11 @@
     }
   ],
   "proof_types": [
-    "reference-model",
     "native-e2e",
     "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
-    {
-      "obligation_id": "OBL-PERF-REBUILD-APPLY-RM-001",
-      "requirement_ids": [
-        "SYNC-REBUILD-002"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001"
-      ],
-      "proof_type": "reference-model",
-      "support_cell_id": null,
-      "artifact_inventory_ids": [
-        "ARTDEF-CONFORMANCE-RUNNER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-conformance",
-      "argv": [
-        "make",
-        "test-conformance"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
     {
       "obligation_id": "OBL-PERF-REBUILD-APPLY-MACOS-CURRENT-001",
       "requirement_ids": [
@@ -303,14 +278,6 @@
     }
   ],
   "ownership": [
-    {
-      "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
-      "requirement_id": "SYNC-REBUILD-002",
-      "proof_obligation_id": "OBL-PERF-REBUILD-APPLY-RM-001",
-      "assertion_id": "ASSERT-PERF-REBUILD-APPLY-SEMANTIC-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "requirement_id": "SYNC-REBUILD-002",

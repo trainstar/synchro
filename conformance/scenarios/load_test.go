@@ -926,20 +926,20 @@ func scenarioFixture(id, title string) []byte {
   "normative_references": [
     {"path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-time-format"}
   ],
-  "proof_types": ["reference-model"],
+  "proof_types": ["server-black-box"],
   "proof_obligations": [
     {
       "obligation_id": "OBL-TEST-001",
       "requirement_ids": ["SYNC-TEST-001"],
       "assertion_ids": ["ASSERT-TEST-001"],
-      "proof_type": "reference-model",
+      "proof_type": "server-black-box",
       "support_cell_id": null,
       "artifact_inventory_ids": ["ARTDEF-TEST-001"],
       "performance_budget_ids": [],
       "required_measurement_ids": [],
       "required_vector_set_ids": [],
-      "make_target": "test-conformance-scenarios",
-      "argv": ["make", "test-conformance-scenarios"],
+      "make_target": "test-blackbox",
+      "argv": ["make", "test-blackbox"],
       "fault_plan_id": null,
       "control_id": null
     }
@@ -950,7 +950,7 @@ func scenarioFixture(id, title string) []byte {
       "requirement_id": "SYNC-TEST-001",
       "proof_obligation_id": "OBL-TEST-001",
       "assertion_id": "ASSERT-TEST-001",
-      "proof_type": "reference-model",
+      "proof_type": "server-black-box",
       "support_cell_id": null
     }
   ],

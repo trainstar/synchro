@@ -80,7 +80,6 @@ var predicateByOracle = map[string]string{
 }
 
 var proofTargetPolicy = map[string]map[string]struct{}{
-	"reference-model":  {"test-conformance": {}},
 	"server-black-box": {"test-blackbox": {}},
 	"native-e2e": {
 		"test-swift": {}, "test-kotlin": {}, "test-rn-e2e-ios": {}, "test-rn-e2e-android": {},
@@ -251,8 +250,6 @@ func ValidateAllWithVectors(scenarios []Scenario, bundle *contract.Bundle, vecto
 						expectedKeys[fmt.Sprintf("%s|%s|%s", requirementID, proofType, cell)] = struct{}{}
 					}
 				}
-			case "reference-model":
-				expectedKeys[fmt.Sprintf("%s|%s|null", requirementID, proofType)] = struct{}{}
 			case "negative-control":
 				// Catalog control ownership is validated independently below.
 			case "fault-injection":
@@ -987,9 +984,7 @@ func (v *scenarioValidator) validateTargetsAndArtifacts() {
 				v.add("%s obligation %s target %s requires artifact role %s", v.scenario.ID, obligation.ObligationID, obligation.MakeTarget, role)
 			}
 		}
-		if obligation.ProofType == "reference-model" && !stringSetEqual(keysOfStringSet(roles), []string{"conformance-runner"}) {
-			v.add("%s obligation %s reference-model proof requires only the independent conformance-runner artifact", v.scenario.ID, obligation.ObligationID)
-		} else if obligation.MakeTarget != "test-conformance" {
+		if obligation.MakeTarget != "test-conformance" {
 			for role := range roles {
 				if _, allowed := targetAllowedRoles[obligation.MakeTarget][role]; !allowed {
 					v.add("%s obligation %s target %s does not permit artifact role %s", v.scenario.ID, obligation.ObligationID, obligation.MakeTarget, role)
@@ -1120,8 +1115,6 @@ func (v *scenarioValidator) validateRequiredProofs() {
 						v.requireProofKey(requirementID, proofType, &cellID, obligationsByKey)
 					}
 				}
-			case "reference-model":
-				v.requireProofKey(requirementID, proofType, nil, obligationsByKey)
 			case "negative-control":
 				// Catalog control ownership is validated independently.
 			case "fault-injection":

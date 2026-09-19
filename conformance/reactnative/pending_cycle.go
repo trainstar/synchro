@@ -225,10 +225,6 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-PENDING-CYCLE-SCOPE-006", "CTRL-SCOPE-006") {
 				obligations[id]++
 			}
-		case "OBL-PERF-PENDING-CYCLE-CONFLICT-001-RM-001":
-			if proofTargetMatches(obligation, "reference-model", "", "test-conformance", "", "") {
-				obligations[id]++
-			}
 		case "OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001":
 			if proofTargetMatches(obligation, "server-black-box", "SUP-PG-LINUX-X64-001", "test-blackbox", "", "") {
 				obligations[id]++
@@ -248,7 +244,6 @@ func ValidatePendingCycleScenario(scenario scenarios.Scenario) error {
 		obligations["OBL-PERF-PENDING-CYCLE-CONTROL-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-SCOPE-006-FAULT-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-SCOPE-006-CONTROL-001"] != 1 ||
-		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-RM-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-FAULT-LINUX-X64-001"] != 1 ||
 		obligations["OBL-PERF-PENDING-CYCLE-CONFLICT-001-CONTROL-001"] != 1 {

@@ -515,7 +515,7 @@ func TestValidateRejectsSemanticMutants(t *testing.T) {
 			s.ProofObligations = append(s.ProofObligations, duplicate)
 			s.Ownership = append(s.Ownership, Ownership{ScenarioID: s.ID, RequirementID: "SYNC-TIME-001", ProofObligationID: duplicate.ObligationID, AssertionID: duplicate.AssertionIDs[0], ProofType: duplicate.ProofType, SupportCellID: duplicate.SupportCellID})
 		}, "duplicate obligation proof key"},
-		{"extra non-required reference-model proof", authoredTimeScenario, func(s *Scenario) {
+		{"retired reference-model proof", authoredTimeScenario, func(s *Scenario) {
 			s.ProofTypes = append(s.ProofTypes, "reference-model")
 			obligation := ProofObligation{ObligationID: "OBL-TIME-EXTRA-MODEL-001", RequirementIDs: []contract.RequirementID{"SYNC-TIME-001"}, AssertionIDs: []contract.AssertionID{"ASSERT-TIME-PG-001"}, ProofType: "reference-model", SupportCellID: nil, ArtifactInventoryIDs: []contract.ArtifactInventoryID{"ARTDEF-CONFORMANCE-RUNNER-001"}, PerformanceBudgetIDs: []contract.BudgetID{}, RequiredMeasurementIDs: []contract.MeasurementID{}, RequiredVectorSetIDs: []contract.VectorSetID{}, MakeTarget: "test-conformance", Argv: []string{"make", "test-conformance"}, FaultPlanID: nil, ControlID: nil}
 			s.ProofObligations = append(s.ProofObligations, obligation)
