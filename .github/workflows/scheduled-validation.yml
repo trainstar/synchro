@@ -108,8 +108,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -memory 6144 -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             make android-emulator-prepare
-            make test-rn-scenarios-android GO_TEST_ARGS="-v -count=1 -failfast -p 1 -run 'TestRealReactNativeCorpusAndroid/SCN-PERF-(MULTI-SCOPE-PROVENANCE|PENDING-CYCLE|QUEUE-REPLAY)-001'"
-            make test-rn-scenarios-android GO_TEST_ARGS="-v -count=12 -failfast -p 1 -run TestRealReactNativeCorpusAndroid/SCN-PERF-REBUILD-APPLY-001"
+            set +e; make test-rn-scenarios-android GO_TEST_ARGS="-v -count=1 -failfast -p 1 -run 'TestRealReactNativeCorpusAndroid/SCN-PERF-(MULTI-SCOPE-PROVENANCE|PENDING-CYCLE|QUEUE-REPLAY)-001'"; predecessor_status=$?; make test-rn-scenarios-android GO_TEST_ARGS="-v -count=12 -failfast -p 1 -run TestRealReactNativeCorpusAndroid/SCN-PERF-REBUILD-APPLY-001"; trace_status=$?; printf 'diagnostic predecessor_exit=%s rebuild_exit=%s\n' "$predecessor_status" "$trace_status"; test "$predecessor_status" -eq 0 && test "$trace_status" -eq 0
 
       - name: Stop local fixture
         if: always()

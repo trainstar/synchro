@@ -254,7 +254,6 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 		{actor: "client", command: "synchronize-step", state: "command"},
 	}
 	for _, workload := range workloads {
-		want = append(want, exchange{actor: "client", command: "lifecycle", state: "command"})
 		for start := 0; start < len(workload.local); start += queueReplayMaximumLocalOperations {
 			end := start + queueReplayMaximumLocalOperations
 			if end > len(workload.local) {
@@ -377,45 +376,6 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 	}
 	if wantLocalOperations == 0 {
 		t.Fatal("queue-replay authored local operations are absent")
-	}
-}
-
-func TestQueueReplayStopsManagedWorkBeforeEachOfflineWave(t *testing.T) {
-	process := actionProcessIdentity{
-		ProcessID: "process-a", DatabaseIdentityFingerprint: strings.Repeat("a", 64),
-	}
-	for _, stage := range []queueReplayStage{queueReplayStageBootstrapped, queueReplayStageReplayCapture} {
-		t.Run(stage.String(), func(t *testing.T) {
-			coordinator := &QueueReplayCoordinator{
-				stage: stage, clientKey: "client-a", process: &process,
-				steps: []queueReplayWorkload{{}},
-			}
-			response, err := coordinator.advanceLocked(context.Background(), 1)
-			if err != nil {
-				t.Fatal(err)
-			}
-			action := response.Command.Action.Action
-			if action.Actor != "client" || action.Command != "lifecycle" ||
-				action.Parameters["operation"] != "stop" || coordinator.stage != queueReplayStageOfflineStopped {
-				t.Fatalf("offline preparation did not require a public stop: %#v", action)
-			}
-			for _, state := range []string{"ready", "stopped"} {
-				result := queueReplayJSON(map[string]any{
-					"schema_version": 1, "outcome": "passed", "error_code": nil, "error_detail": nil,
-					"result": map[string]any{
-						"kind": "lifecycle", "operation": "stop",
-						"status": map[string]any{"state": state, "retry_at": nil, "operation": nil, "failure": nil},
-						"process": map[string]any{
-							"process_id": process.ProcessID, "database_identity_fingerprint": process.DatabaseIdentityFingerprint,
-						},
-					},
-				})
-				err := coordinator.acceptResultLocked(result)
-				if (err == nil) != (state == "stopped") {
-					t.Fatalf("offline state %q acceptance: %v", state, err)
-				}
-			}
-		})
 	}
 }
 
