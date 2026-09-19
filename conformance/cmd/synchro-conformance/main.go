@@ -2,24 +2,16 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"unicode/utf8"
 
-	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/blackbox/syntheticproof"
-	"github.com/trainstar/synchro/conformance/execution"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -45,8 +37,6 @@ func run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "catalog":
 		return runCatalog(ctx, args[1:])
-	case "blackbox":
-		return runBlackbox(ctx, args[1:])
 	default:
 		return errors.New("unknown command")
 	}
@@ -79,126 +69,6 @@ func runCatalog(ctx context.Context, args []string) error {
 		return operationError(ctx, "catalog check", err)
 	}
 	return nil
-}
-
-func runBlackbox(ctx context.Context, args []string) error {
-	flags := newFlagSet("blackbox")
-	repoRoot := flags.String("repo-root", "", "repository root")
-	mode := flags.String("mode", "", "black-box mode")
-	if err := flags.Parse(args); err != nil {
-		return errors.New("blackbox flags are invalid")
-	}
-	if flags.NArg() != 0 {
-		return errors.New("blackbox does not accept positional arguments")
-	}
-	if *repoRoot == "" {
-		return errors.New("blackbox requires --repo-root PATH")
-	}
-	switch *mode {
-	case "harness":
-		return runSyntheticHarness(ctx, *repoRoot)
-	case "strict":
-		return errors.New("strict protocol 3 black-box execution is unavailable")
-	default:
-		return errors.New("blackbox requires --mode harness or strict")
-	}
-}
-
-func runSyntheticHarness(ctx context.Context, repoRoot string) error {
-	attachmentRoot, err := os.MkdirTemp("", "synchro-conformance-harness-")
-	if err != nil {
-		return operationError(ctx, "blackbox harness initialize", err)
-	}
-	defer os.RemoveAll(attachmentRoot)
-	fixtures := []syntheticHarnessFixture{
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticCompliant, wantPass: true},
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticOmitMutation},
-		{path: "conformance/scenarios/performance/steady-pull-001.json", fault: syntheticproof.SyntheticConstantChecksum},
-		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", fault: syntheticproof.SyntheticDuplicateDelivery},
-		{path: "conformance/scenarios/server/pull-divergent-checkpoints-001.json", fault: syntheticproof.SyntheticWrongScope},
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticReplayCorruption},
-		{path: "conformance/scenarios/performance/pending-cycle-001.json", fault: syntheticproof.SyntheticWrongStatus},
-	}
-	for _, fixture := range fixtures {
-		scenario, err := scenarios.LoadFile(ctx, repoRoot, fixture.path)
-		if err != nil {
-			return operationError(ctx, "blackbox harness load", err)
-		}
-		obligation, err := serverBlackboxObligation(scenario)
-		if err != nil {
-			return operationError(ctx, "blackbox harness load", err)
-		}
-		if err := runSyntheticScenario(ctx, scenario, obligation, fixture, attachmentRoot); err != nil {
-			return operationError(ctx, "blackbox harness execute", err)
-		}
-	}
-	return nil
-}
-
-type syntheticHarnessFixture struct {
-	path     string
-	fault    syntheticproof.SyntheticFault
-	wantPass bool
-}
-
-func serverBlackboxObligation(scenario scenarios.Scenario) (scenarios.ProofObligation, error) {
-	for _, obligation := range scenario.ProofObligations {
-		if obligation.ProofType == "server-black-box" && obligation.MakeTarget == "test-blackbox" {
-			return obligation, nil
-		}
-	}
-	return scenarios.ProofObligation{}, errors.New("authored scenario has no server black-box obligation")
-}
-
-func runSyntheticScenario(ctx context.Context, scenario scenarios.Scenario, obligation scenarios.ProofObligation, fixture syntheticHarnessFixture, attachmentRoot string) error {
-	var secret [32]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		return errors.New("create synthetic token secret failed")
-	}
-	provider, err := blackbox.NewHS256TokenProvider(secret[:], blackbox.Claims{"sub": "synthetic-user", "aud": "conformance-harness"})
-	if err != nil {
-		return errors.New("create synthetic token provider failed")
-	}
-	token, err := provider.Token(ctx)
-	if err != nil {
-		return errors.New("create synthetic token failed")
-	}
-	system, err := syntheticproof.NewSyntheticSystem(ctx, scenario, syntheticproof.SyntheticOptions{ExpectedToken: token, Fault: fixture.fault})
-	if err != nil {
-		return err
-	}
-	defer system.Close()
-	runner, err := syntheticproof.NewRunner(syntheticproof.RunnerConfig{
-		Client:           &blackbox.Client{BaseURL: system.BaseURL(), HTTP: &http.Client{}, Tokens: provider},
-		Recorder:         blackbox.RecorderConfig{AttachmentRoot: filepath.Join(attachmentRoot, string(scenario.ID)), MaxRecords: 256, MaxRawBodyBytes: 1 << 20},
-		ArtifactBindings: syntheticArtifactBindings(obligation),
-	})
-	if err != nil {
-		return errors.New("create synthetic black-box runner failed")
-	}
-	result, runErr := runner.Run(ctx, scenario, obligation)
-	if fixture.wantPass && (runErr != nil || !result.Passed) {
-		return errors.New("compliant synthetic black-box scenario did not pass")
-	}
-	if !fixture.wantPass && (runErr == nil || result.Passed || result.Failure.Kind != syntheticproof.FailureSemantic || !system.FaultApplied()) {
-		return errors.New("synthetic black-box fault did not cause a semantic detection")
-	}
-	return nil
-}
-
-func syntheticArtifactBindings(obligation scenarios.ProofObligation) []execution.ArtifactBinding {
-	bindings := make([]execution.ArtifactBinding, len(obligation.ArtifactInventoryIDs))
-	for index, inventoryID := range obligation.ArtifactInventoryIDs {
-		digest := sha256.Sum256([]byte(fmt.Sprintf("synthetic-artifact-%d", index)))
-		bindings[index] = execution.ArtifactBinding{
-			InventoryID: string(inventoryID),
-			ArtifactID:  fmt.Sprintf("ART-SYNTHETIC-%03d", index+1),
-			Path:        fmt.Sprintf("synthetic/artifact-%03d", index+1),
-			Size:        int64(index + 1),
-			SHA256:      hex.EncodeToString(digest[:]),
-		}
-	}
-	return bindings
 }
 
 func newFlagSet(name string) *flag.FlagSet {

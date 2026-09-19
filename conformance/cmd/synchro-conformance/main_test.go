@@ -27,8 +27,7 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 		{"missing mode", []string{"catalog", "--repo-root", "."}, "catalog requires exactly one"},
 		{"both modes", []string{"catalog", "--repo-root", ".", "--write", "--check"}, "catalog requires exactly one"},
 		{"positional extra", []string{"catalog", "--repo-root", ".", "--check", "extra"}, "does not accept positional"},
-		{"blackbox missing mode", []string{"blackbox", "--repo-root", "."}, "blackbox requires --mode"},
-		{"blackbox invalid mode", []string{"blackbox", "--repo-root", ".", "--mode", "other"}, "blackbox requires --mode"},
+		{"retired blackbox command", []string{"blackbox", "--repo-root", ".", "--mode", "harness"}, "unknown command"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -37,20 +36,6 @@ func TestRunRejectsInvalidCommandsAndFlags(t *testing.T) {
 				t.Fatalf("run error = %v, want %q", err, test.want)
 			}
 		})
-	}
-}
-
-func TestRunStrictBlackboxFailsClosedWithoutReleaseEvidence(t *testing.T) {
-	err := run(context.Background(), []string{"blackbox", "--repo-root", repositoryRoot(t), "--mode", "strict"})
-	if err == nil || !strings.Contains(err.Error(), "strict protocol 3 black-box execution is unavailable") {
-		t.Fatalf("strict black-box result = %v", err)
-	}
-}
-
-func TestRunSyntheticHarnessDetectsSemanticFaults(t *testing.T) {
-	err := run(context.Background(), []string{"blackbox", "--repo-root", repositoryRoot(t), "--mode", "harness"})
-	if err != nil {
-		t.Fatalf("run synthetic harness: %v", err)
 	}
 }
 

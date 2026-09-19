@@ -99,19 +99,14 @@ Scheduled validation runs every manifest mutant through `make test-integration-m
 
 The WAL mutant uses the real packaged extension and black-box environment. It requires the same `SYNCHRO_CONFORMANCE_*` variables as `make test-blackbox`.
 
-## Synthetic Harness Proof
+## Independent Semantic Checks
 
-Run the loopback synthetic harness with:
+Use `make test-conformance-invariants` for the invariant checkers and their negative controls.
+Use `make test-blackbox` for the real extension-backed server tests.
+The `synchro-conformance` CLI manages the authored catalog.
 
-```text
-synchro-conformance blackbox --repo-root PATH --mode harness
-```
-
-This command proves that the protocol 3 harness detects and compares typed HTTP behavior. It uses a synthetic reference system. It is not real adapter, extension, or PostgreSQL proof.
-
-The harness output supports harness self-tests. It is not real adapter, extension, or PostgreSQL proof.
-
-Strict real protocol 3 black-box execution is unavailable. The `blackbox --mode strict` command fails closed.
+The removed synthetic HTTP wrapper used the reference model for both expected and observed results.
+Its fault classes remain covered by the independent checker controls and real protocol tests.
 
 ## Fixture Format
 
