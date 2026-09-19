@@ -4,6 +4,33 @@ import os
 @testable @_spi(Inspection) import Synchro
 
 final class SyncEngineTests: XCTestCase {
+    func testRecoveryWithoutBlockingFailureRejectsWithoutChangingState() async throws {
+        let (engine, database) = try makeSyncEngine()
+        for stopped in [false, true] {
+            if stopped {
+                await engine.stop()
+            }
+            let before = engine.getSyncStatus()
+            XCTAssertNil(try engine.getBlockingFailure())
+            for resetSchema in [false, true] {
+                do {
+                    if resetSchema {
+                        try await engine.resetSchemaAndStart()
+                    } else {
+                        try await engine.retryAfterError()
+                    }
+                    XCTFail("Recovery without a blocking failure succeeded")
+                } catch SynchroError.notStarted {
+                } catch {
+                    XCTFail("Recovery returned an unexpected error: \(error)")
+                }
+                XCTAssertEqual(engine.getSyncStatus(), before)
+                XCTAssertNil(try engine.getBlockingFailure())
+            }
+        }
+        try database.close()
+    }
+
     func testCallbackRegistrationAndCancellation() async throws {
         let (engine, _) = try makeSyncEngine()
 

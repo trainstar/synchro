@@ -67,6 +67,24 @@ class SyncEngineTests {
     // MARK: - Unit Tests
 
     @Test
+    fun recoveryWithoutBlockingFailureRejectsWithoutChangingState() = runTest {
+        val (engine, database) = makeSyncEngine()
+        for (stopped in listOf(false, true)) {
+            if (stopped) engine.stop()
+            val before = database.readTransaction { SynchroMeta.getClientState(it) }
+            val status = engine.getSyncStatus()
+            for (resetSchema in listOf(false, true)) {
+                val failure = runCatching {
+                    if (resetSchema) engine.resetSchema() else engine.retry()
+                }.exceptionOrNull()
+                assertTrue(failure is SynchroError.InvalidResponse)
+                assertEquals(before, database.readTransaction { SynchroMeta.getClientState(it) })
+                assertEquals(status, engine.getSyncStatus())
+            }
+        }
+    }
+
+    @Test
     fun testCallbackRegistrationAndCancellation() = runBlocking {
         val (engine, _) = makeSyncEngine()
 

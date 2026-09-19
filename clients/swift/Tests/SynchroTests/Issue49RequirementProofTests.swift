@@ -812,6 +812,11 @@ final class Issue49RequirementProofTests: XCTestCase {
             .error: [.localReady, .stopped],
             .stopped: [.localReady],
         ]
+        for unknown in ["", "unknown", "READY"] {
+            XCTAssertNil(SyncStatus(rawValue: unknown))
+            let encoded = try JSONEncoder().encode(unknown)
+            XCTAssertThrowsError(try JSONDecoder().decode(SyncStatus.self, from: encoded))
+        }
         for current in SyncStatus.allCases {
             for next in SyncStatus.allCases {
                 XCTAssertEqual(
