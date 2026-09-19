@@ -10,6 +10,45 @@ import (
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
+func TestWireExpectationRejectsMissingAndMismatchedObservations(t *testing.T) {
+	code, wrongCode := "temporary_unavailable", "auth_required"
+	retryable, terminal := true, false
+	scenario := scenarios.Scenario{WireExpectations: []scenarios.WireExpectation{
+		{StepID: "STEP-ERROR-001", HTTPStatus: 503, Retryable: true, ErrorCode: &code},
+	}}
+	observed := TransportObservation{OperationClass: "pull", StatusCode: 503, Retryable: &retryable, ErrorCode: &code}
+	result := SynchronizationResult{transportObservations: []TransportObservation{observed}}
+	if err := validateKotlinWireExpectation(scenario, "STEP-ERROR-001", "pull", result); err != nil {
+		t.Fatalf("matching observed error failed: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*TransportObservation)
+	}{
+		{"status", func(value *TransportObservation) { value.StatusCode = 200 }},
+		{"retryability", func(value *TransportObservation) { value.Retryable = &terminal }},
+		{"missing retryability", func(value *TransportObservation) { value.Retryable = nil }},
+		{"canonical code", func(value *TransportObservation) { value.ErrorCode = &wrongCode }},
+		{"missing code", func(value *TransportObservation) { value.ErrorCode = nil }},
+		{"missing operation", func(value *TransportObservation) { value.OperationClass = "connect" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := observed
+			test.change(&changed)
+			result := SynchronizationResult{transportObservations: []TransportObservation{changed}}
+			if err := validateKotlinWireExpectation(scenario, "STEP-ERROR-001", "pull", result); err == nil {
+				t.Fatal("mismatched observed wire result passed")
+			}
+		})
+	}
+	if err := validateKotlinWireExpectation(scenario, "STEP-ABSENT-001", "pull", result); err == nil {
+		t.Fatal("missing authored expectation passed")
+	}
+	if err := validateKotlinWireExpectation(scenario, "STEP-ERROR-001", "pull", SynchronizationResult{}); err == nil {
+		t.Fatal("missing executed exchange passed")
+	}
+}
+
 func TestRetentionReconnectBindingsFollowAuthoredWireCompletions(t *testing.T) {
 	scenario := loadRetentionReconnectScenario(t)
 	steps, err := kotlinScenarioStepMap(scenario, retentionReconnectScenarioID, 9)

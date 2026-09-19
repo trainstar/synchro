@@ -155,16 +155,7 @@ func validateKotlinWireExpectation(scenario scenarios.Scenario, stepID, operatio
 	if err != nil {
 		return err
 	}
-	for _, expected := range scenario.WireExpectations {
-		if expected.StepID != scenarios.StepID(stepID) {
-			continue
-		}
-		if observed.StatusCode != expected.HTTPStatus || observed.Retryable == nil || *observed.Retryable != expected.Retryable || !equalKotlinOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
-			return fmt.Errorf("Kotlin Android wire result %s differs from its authored expectation", stepID)
-		}
-		return nil
-	}
-	return fmt.Errorf("Kotlin Android wire expectation %s is absent", stepID)
+	return validateKotlinWireObservation(scenario, stepID, observed)
 }
 
 func validateKotlinSteadyPullBaselineShape(result SynchronizationResult) bool {

@@ -9,6 +9,43 @@ import (
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
+func TestWireExpectationRejectsMissingAndMismatchedObservations(t *testing.T) {
+	code, wrongCode := "temporary_unavailable", "auth_required"
+	scenario := scenarios.Scenario{WireExpectations: []scenarios.WireExpectation{
+		{StepID: "STEP-ERROR-001", HTTPStatus: 503, Retryable: true, ErrorCode: &code},
+	}}
+	observed := transportObservation{OperationClass: "pull", StatusCode: 503, Retryable: true, ErrorCode: &code}
+	result := SynchronizationResult{transportObservations: []transportObservation{observed}}
+	if err := validateSwiftWireExpectation(scenario, "STEP-ERROR-001", "pull", result); err != nil {
+		t.Fatalf("matching observed error failed: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*transportObservation)
+	}{
+		{"status", func(value *transportObservation) { value.StatusCode = 200 }},
+		{"retryability", func(value *transportObservation) { value.Retryable = false }},
+		{"canonical code", func(value *transportObservation) { value.ErrorCode = &wrongCode }},
+		{"missing code", func(value *transportObservation) { value.ErrorCode = nil }},
+		{"missing operation", func(value *transportObservation) { value.OperationClass = "connect" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := observed
+			test.change(&changed)
+			result := SynchronizationResult{transportObservations: []transportObservation{changed}}
+			if err := validateSwiftWireExpectation(scenario, "STEP-ERROR-001", "pull", result); err == nil {
+				t.Fatal("mismatched observed wire result passed")
+			}
+		})
+	}
+	if err := validateSwiftWireExpectation(scenario, "STEP-ABSENT-001", "pull", result); err == nil {
+		t.Fatal("missing authored expectation passed")
+	}
+	if err := validateSwiftWireExpectation(scenario, "STEP-ERROR-001", "pull", SynchronizationResult{}); err == nil {
+		t.Fatal("missing executed exchange passed")
+	}
+}
+
 func TestSeededEmptyStartupDirectBindingGroupsRemainClosed(t *testing.T) {
 	root := filepath.Join("..", "..")
 	scenario, err := scenarios.LoadFile(context.Background(), root, "conformance/scenarios/performance/seeded-empty-startup-001.json")
