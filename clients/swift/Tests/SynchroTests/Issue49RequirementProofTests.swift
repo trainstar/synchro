@@ -520,6 +520,21 @@ final class Issue49RequirementProofTests: XCTestCase {
             finalScopeCursor: nil,
             checksum: nil
         )
+        var duplicateResponse = firstResponse
+        duplicateResponse.records = [record, record]
+        XCTAssertThrowsError(try restarted.applyScopeRebuildPage(
+            attempt: attempt,
+            request: firstRequest,
+            requestBody: try wireData(firstRequest),
+            response: duplicateResponse,
+            responseBody: try wireData(duplicateResponse),
+            syncedTables: [table]
+        ))
+        XCTAssertEqual(
+            try reopened.readTransaction { try SynchroMeta.getRebuildAttempt($0, scopeID: targetScope) },
+            attempt
+        )
+        XCTAssertTrue(try reopened.query("SELECT * FROM _synchro_rebuild_page_receipts", params: nil).isEmpty)
         let continued = try restarted.applyScopeRebuildPage(
             attempt: attempt,
             request: firstRequest,

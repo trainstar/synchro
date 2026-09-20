@@ -517,6 +517,19 @@ class Issue49RequirementProofTests {
             null,
             null,
         )
+        val duplicateResponse = firstResponse.copy(records = listOf(record, record))
+        assertThrows(Exception::class.java) {
+            restarted.applyScopeRebuildPage(
+                attempt,
+                firstRequest,
+                wireJSON.encodeToString(firstRequest),
+                duplicateResponse,
+                wireJSON.encodeToString(duplicateResponse),
+                listOf(table),
+            )
+        }
+        assertEquals(attempt, reopened.readTransaction { SynchroMeta.getRebuildAttempt(it, targetScope) })
+        assertTrue(reopened.query("SELECT * FROM _synchro_rebuild_page_receipts").isEmpty())
         val continued = restarted.applyScopeRebuildPage(
             attempt,
             firstRequest,
