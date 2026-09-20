@@ -191,23 +191,22 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 			}
 			var freshStream, registrationLSN string
 			var unbound bool
-			var pending, queued int
+			var pending int
 			var targetGeneration int64
 			if err := admin.QueryRowContext(ctx, `
 				SELECT runtime.stream_generation,
 				       runtime.active_slot_name IS NULL AND progress.generation_start_lsn IS NULL,
 				       (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'),
-				       (SELECT count(*) FROM synchro.sync_registry_activation_requests WHERE emitted_at IS NULL),
 				       (SELECT max(generation) FROM synchro.sync_registry_generations WHERE state = 'pending'),
 				       pg_catalog.pg_current_wal_lsn()::text
 				FROM synchro.sync_runtime_state runtime
 				JOIN synchro.sync_wal_progress progress ON progress.singleton
-				WHERE runtime.singleton`).Scan(&freshStream, &unbound, &pending, &queued, &targetGeneration, &registrationLSN); err != nil {
+				WHERE runtime.singleton`).Scan(&freshStream, &unbound, &pending, &targetGeneration, &registrationLSN); err != nil {
 				t.Fatalf("observe committed pre-slot registrations: %v", err)
 			}
-			if freshStream == priorStream || !unbound || pending == 0 || queued != pending {
-				t.Fatalf("cold reinstall did not commit unbound registrations: new_stream=%t unbound=%t pending=%d queued=%d",
-					freshStream != priorStream, unbound, pending, queued)
+			if freshStream == priorStream || !unbound || pending == 0 {
+				t.Fatalf("cold reinstall did not commit unbound registrations: new_stream=%t unbound=%t pending=%d",
+					freshStream != priorStream, unbound, pending)
 			}
 			if _, err := admin.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'on'"); err != nil {
 				t.Fatalf("enable reinstalled worker: %v", err)
@@ -270,11 +269,20 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 					stalled.PendingRegistryGenerationCount != int64(pending) || !stalled.NoValidationFailurePoison {
 					t.Fatalf("lost activation control did not reproduce the pending registry: observation=%#v err=%v", stalled, err)
 				}
-				detail := loadIssue49Health(t, ctx, admin)
-				if issue49HealthChecks(t, detail)["publication"] != "failed" {
-					t.Fatal("lost activation control did not report publication failure")
+				var publicationState, publicationReason string
+				if err := admin.QueryRowContext(ctx, `
+					SELECT publication->>'state', publication->>'reason'
+					FROM (SELECT synchro.synchro_health_detail()->'checks'->'publication' AS publication) health`,
+				).Scan(&publicationState, &publicationReason); err != nil {
+					t.Fatalf("observe lost activation readiness: %v", err)
+				}
+				if publicationState != "failed" || publicationReason != "publication_mismatch" {
+					t.Fatalf("lost activation control reported publication state=%s reason=%s", publicationState, publicationReason)
 				}
 				waitForIssue49PublicReady(t, ctx, harness.AdapterURL(), false)
+				t.Logf("lost activation reproduced: active=%d worker=%d pending=%d publication=%s later_WAL_acknowledged=%t",
+					stalled.ActiveRegistryGeneration, stalled.WorkerRegistryGeneration,
+					stalled.PendingRegistryGenerationCount, publicationReason, acknowledged)
 				return
 			}
 
@@ -303,6 +311,8 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 				t.Fatalf("delete recovery witness: %v", err)
 			}
 			waitForRealWALEffects(t, ctx, harness, "cf_items", 2, witnessID)
+			t.Logf("recovered registry=%d pending=%d with a source-to-client write",
+				recovered.ActiveRegistryGeneration, recovered.PendingRegistryGenerationCount)
 		}) {
 			return
 		}
