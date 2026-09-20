@@ -159,6 +159,8 @@ Use structured results for required gates. Skipped, filtered, and zero-test resu
 
 Soak wire records preserve the original request and response from each exchange.
 Cursor issuance and later acknowledgment use separate exchange identities.
+WAL records and durable progress share one read-only repeatable-read observation transaction.
+Worker and replication-slot status remain live observations.
 The live server soak executes response loss on push or pull and WAL-worker replay interruption.
 Its in-memory client is reference state, not native process-recovery evidence.
 Native recovery remains covered by the real native scenario gates.
