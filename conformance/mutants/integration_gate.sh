@@ -13,7 +13,7 @@ case "${INTEGRATION_MUTANTS_BROAD:-0}" in
 	0|1) ;;
 	*) printf '%s\n' 'INTEGRATION_MUTANTS_BROAD must be 0 or 1' >&2; exit 1 ;;
 esac
-run_root=$(mktemp -d "$scratch_parent/synchro-integration-mutants.XXXXXX")
+run_root=$(mktemp -d "${scratch_parent%/}/synchro-integration-mutants.XXXXXX")
 # Failure logs stay inside the repository so an agent or operator can read them.
 # A system temp directory is outside the sandbox and cannot be inspected after a
 # failing run, which makes the gate's output useless exactly when it matters.
