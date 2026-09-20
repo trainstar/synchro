@@ -274,9 +274,9 @@ func TestCheckRejectsProtectedDirectAndTransitiveEdges(t *testing.T) {
 	}
 }
 
-func TestDefaultPolicyProtectsModelRunnerAndStrictReleasePackages(t *testing.T) {
+func TestDefaultPolicyProtectsInvariantAndStrictReleasePackages(t *testing.T) {
 	for _, packagePath := range []string{
-		modulePath + "/modelrunner",
+		modulePath + "/invariants",
 		modulePath + "/execution",
 	} {
 		if !containsExact(defaultProtected, packagePath) {
@@ -320,9 +320,7 @@ func TestDiagnosticBlackboxImporterClassificationIsExact(t *testing.T) {
 	blackbox := modulePath + "/blackbox"
 	approved := []string{
 		modulePath + "/blackbox/integration",
-		modulePath + "/blackbox/syntheticproof",
 		modulePath + "/cmd/synchro-local-postgres",
-		modulePath + "/cmd/synchro-conformance",
 		modulePath + "/kotlin",
 		modulePath + "/reactnative",
 		modulePath + "/swift",
@@ -341,7 +339,7 @@ func TestDiagnosticBlackboxImporterClassificationIsExact(t *testing.T) {
 		})
 	}
 
-	unclassified := modulePath + "/blackbox/syntheticproof/unclassified"
+	unclassified := modulePath + "/blackbox/integration/unclassified"
 	if err := checkBlackboxImporters(map[string][]string{unclassified: {blackbox}}); err == nil {
 		t.Fatal("unclassified package below a diagnostic package was accepted")
 	}

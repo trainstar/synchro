@@ -113,6 +113,8 @@ The `synchro-conformance` CLI manages the authored catalog.
 
 The removed synthetic HTTP wrapper used the reference model for both expected and observed results.
 Its fault classes remain covered by the independent checker controls and real protocol tests.
+The `reference/` and `modelrunner/` interpreters and their model-only Make target are removed.
+The existing deletion-contract tables retain every original check and its proof home or reason for retirement.
 
 ## Fixture Format
 
