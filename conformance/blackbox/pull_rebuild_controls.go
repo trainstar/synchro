@@ -149,7 +149,12 @@ func (executor *OperatorExecutor) ObserveWALRecordsForTable(
 	}
 	defer database.Close()
 
-	rows, err := database.QueryContext(ctx, `
+	snapshot, err := database.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return WALPipelineObservation{}, errors.New("begin WAL observation snapshot failed")
+	}
+	defer snapshot.Rollback()
+	rows, err := snapshot.QueryContext(ctx, `
 		SELECT c.record_id,
 		       c.commit_lsn::text,
 		       transaction.end_lsn::text,
@@ -197,7 +202,7 @@ func (executor *OperatorExecutor) ObserveWALRecordsForTable(
 		return WALPipelineObservation{}, errors.New("read WAL record observations failed")
 	}
 
-	if err := database.QueryRowContext(ctx, `
+	if err := snapshot.QueryRowContext(ctx, `
 		WITH observed AS (
 			SELECT max(transaction.end_lsn) AS maximum_end_lsn
 			FROM synchro.sync_changelog c
@@ -222,6 +227,9 @@ func (executor *OperatorExecutor) ObserveWALRecordsForTable(
 		&observation.ContiguousAcknowledged,
 	); err != nil {
 		return WALPipelineObservation{}, errors.New("read WAL pipeline observation failed")
+	}
+	if err := snapshot.Commit(); err != nil {
+		return WALPipelineObservation{}, errors.New("complete WAL observation snapshot failed")
 	}
 	return observation, nil
 }
