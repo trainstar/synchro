@@ -159,12 +159,14 @@ export function ConformanceHarness({
       >
         {state}
       </Text>
+      {/* Avoid full-paragraph cache copies when Android lays out large JSON. */}
       <Text
         accessibilityLabel="Conformance command response"
         accessibilityLiveRegion="polite"
         selectable
         style={styles.result}
         testID="conformance-result"
+        textBreakStrategy="simple"
       >
         {resultText}
       </Text>
