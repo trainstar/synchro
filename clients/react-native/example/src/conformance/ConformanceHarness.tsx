@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -159,17 +160,17 @@ export function ConformanceHarness({
       >
         {state}
       </Text>
-      {/* Avoid full-paragraph cache copies when Android lays out large JSON. */}
-      <Text
-        accessibilityLabel="Conformance command response"
-        accessibilityLiveRegion="polite"
-        selectable
-        style={styles.result}
-        testID="conformance-result"
-        textBreakStrategy="simple"
-      >
-        {resultText}
-      </Text>
+      {/* Wrapping large JSON retains full-paragraph copies in Android's text cache. */}
+      <ScrollView horizontal style={styles.result}>
+        <Text
+          accessibilityLabel="Conformance command response"
+          accessibilityLiveRegion="polite"
+          selectable
+          testID="conformance-result"
+        >
+          {resultText}
+        </Text>
+      </ScrollView>
     </View>
   );
 }

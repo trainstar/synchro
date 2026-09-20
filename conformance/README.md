@@ -44,9 +44,9 @@ Those checks follow the native bindings. A warm synchronization call can pull wi
 
 Run the complete corpora with `make test-rn-scenarios-ios` and `make test-rn-scenarios-android`.
 
-The example harness uses simple Android line breaking for its raw JSON response view.
-This prevents high-quality paragraph layout from retaining large copies of the response in the native text cache.
-The displayed and inspected response stays complete. Do not truncate it or relax the command and response bounds.
+The example harness displays raw JSON responses without wrapping in a horizontal scroll view.
+Wrapping a large paragraph can retain many full-text copies in Android's native line-layout cache.
+Scroll horizontally to inspect the complete response. Selection, inspection, and the command and response bounds remain unchanged.
 
 Each journey's Go context owns its aggregate deadline. Jest receives the remaining scenario budget.
 Readiness, exchange, and command deadlines remain separate. Do not add independent whole-journey timeout overrides.
