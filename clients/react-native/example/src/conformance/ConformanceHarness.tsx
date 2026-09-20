@@ -160,17 +160,19 @@ export function ConformanceHarness({
       >
         {state}
       </Text>
-      {/* Wrapping large JSON retains full-paragraph copies in Android's text cache. */}
-      <ScrollView horizontal style={styles.result}>
-        <Text
-          accessibilityLabel="Conformance command response"
-          accessibilityLiveRegion="polite"
-          selectable
-          testID="conformance-result"
-        >
-          {resultText}
-        </Text>
-      </ScrollView>
+      {/* New responses must not reuse a narrow placeholder text layout. */}
+      {(state === 'ok' || state === 'error') && (
+        <ScrollView horizontal style={styles.result}>
+          <Text
+            accessibilityLabel="Conformance command response"
+            accessibilityLiveRegion="polite"
+            selectable
+            testID="conformance-result"
+          >
+            {resultText}
+          </Text>
+        </ScrollView>
+      )}
     </View>
   );
 }

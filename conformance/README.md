@@ -46,6 +46,8 @@ Run the complete corpora with `make test-rn-scenarios-ios` and `make test-rn-sce
 
 The example harness displays raw JSON responses without wrapping in a horizontal scroll view.
 Wrapping a large paragraph can retain many full-text copies in Android's native line-layout cache.
+Only completed commands expose the response view.
+This avoids reflowing a new response at the prior placeholder's narrow layout width.
 Scroll horizontally to inspect the complete response. Selection, inspection, and the command and response bounds remain unchanged.
 
 Each journey's Go context owns its aggregate deadline. Jest receives the remaining scenario budget.
