@@ -367,10 +367,60 @@ func TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary(t *testing.T) {
 		{scopeID: "user:diagnostic-user", table: table, recordID: firstID, value: "s04-first"},
 		{scopeID: "user:diagnostic-user", table: table, recordID: lastID, value: "s04-last"},
 	})
+	beforeInvalidPull := observeCheckpointMap(t, ctx, harness, client.ID)
+	status, invalidPull := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, client.Scopes, 1001))
+	requireRealProtocolError(t, status, invalidPull, http.StatusBadRequest, "invalid_request")
+	assertCheckpointMapsEqual(t, beforeInvalidPull, observeCheckpointMap(t, ctx, harness, client.ID))
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 	beforeRebuild := observeCheckpointMap(t, ctx, harness, client.ID)
+	admin := openIssue49Admin(t, ctx, harness)
+	var acknowledgedAt time.Time
+	if err := admin.QueryRowContext(ctx, `
+		SELECT last_acknowledged_at FROM synchro.sync_clients
+		WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID,
+	).Scan(&acknowledgedAt); err != nil {
+		t.Fatalf("observe acknowledged client activity: %v", err)
+	}
+	connectRequest := map[string]any{
+		"client_id": client.ID, "client_generation": client.Generation,
+		"platform": "conformance", "app_version": "0.3.0", "protocol_version": 3,
+		"schema": client.Schema, "scope_set_version": client.ScopeSetVersion, "known_scopes": client.Scopes,
+	}
+	status, connected := postConnect(t, ctx, harness.AdapterURL(), token, connectRequest)
+	if status != http.StatusOK {
+		t.Fatalf("current-schema reconnect failed: status=%d response=%#v", status, connected)
+	}
+	assertCheckpointMapsEqual(t, beforeRebuild, observeCheckpointMap(t, ctx, harness, client.ID))
+	connectRequest["scope_set_version"] = client.ScopeSetVersion + 1
+	status, futureScope := postConnect(t, ctx, harness.AdapterURL(), token, connectRequest)
+	requireRealProtocolError(t, status, futureScope, http.StatusBadRequest, "invalid_request")
+	assertCheckpointMapsEqual(t, beforeRebuild, observeCheckpointMap(t, ctx, harness, client.ID))
+	var afterConnectActivity time.Time
+	if err := admin.QueryRowContext(ctx, `
+		SELECT last_acknowledged_at FROM synchro.sync_clients
+		WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID,
+	).Scan(&afterConnectActivity); err != nil {
+		t.Fatalf("observe client activity after reconnect controls: %v", err)
+	}
+	if !afterConnectActivity.Equal(acknowledgedAt) {
+		t.Fatal("connect changed acknowledged client activity")
+	}
 
 	rebuildID := "00000000-0000-4000-8000-00000000b221"
+	status, invalidRebuild := requestRealRebuildPage(t, ctx, harness, token, client, "user:diagnostic-user", rebuildID, nil, 1001)
+	requireRealProtocolError(t, status, invalidRebuild, http.StatusBadRequest, "invalid_request")
+	var invalidSessions int
+	if err := admin.QueryRowContext(ctx, `
+		SELECT count(*) FROM synchro.sync_rebuild_sessions
+		WHERE user_id = 'diagnostic-user' AND client_id = $1 AND rebuild_id = $2::uuid`,
+		client.ID, rebuildID,
+	).Scan(&invalidSessions); err != nil {
+		t.Fatalf("observe invalid rebuild allocation: %v", err)
+	}
+	if invalidSessions != 0 {
+		t.Fatal("invalid rebuild limit allocated a session")
+	}
+	assertCheckpointMapsEqual(t, beforeRebuild, observeCheckpointMap(t, ctx, harness, client.ID))
 	status, firstPage := requestRealRebuildPage(t, ctx, harness, token, client, "user:diagnostic-user", rebuildID, nil, 1)
 	if status != http.StatusOK {
 		t.Fatalf("S-04 first rebuild page status = %d: %#v", status, firstPage)
@@ -391,6 +441,10 @@ func TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary(t *testing.T) {
 	}
 	if firstBoundary.PageLimit != 1 || firstBoundary.StagedRowCount != 2 || firstBoundary.BoundaryPositionKind != "transaction_end" {
 		t.Fatalf("S-04 rebuild session boundary is invalid: %#v", firstBoundary)
+	}
+	for _, cursor := range []any{nil, continuation} {
+		status, changedLimit := requestRealRebuildPage(t, ctx, harness, token, client, "user:diagnostic-user", rebuildID, cursor, 2)
+		requireRealProtocolError(t, status, changedLimit, http.StatusBadRequest, "invalid_request")
 	}
 	checkpointBeforeForge := observeCheckpointMap(t, ctx, harness, client.ID)
 
@@ -455,6 +509,43 @@ func TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary(t *testing.T) {
 	}
 	requireRealPullChange(t, pullAfterRebuildChanges, "user:diagnostic-user", table, postBoundaryID, "s04-post-boundary")
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
+
+	// Backdate only this fixture, then restore immutability before exercising the public endpoint.
+	expirySetup, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin rebuild expiry control: %v", err)
+	}
+	defer expirySetup.Rollback()
+	if _, err := expirySetup.ExecContext(ctx, "ALTER TABLE synchro.sync_rebuild_sessions DISABLE TRIGGER synchro_rebuild_sessions_immutable"); err != nil {
+		t.Fatalf("prepare rebuild expiry control: %v", err)
+	}
+	if _, err := expirySetup.ExecContext(ctx, `
+		UPDATE synchro.sync_rebuild_sessions
+		SET created_at = transaction_timestamp() - interval '25 hours',
+		    expires_at = transaction_timestamp() - interval '1 hour'
+		WHERE user_id = 'diagnostic-user' AND client_id = $1 AND rebuild_id = $2::uuid`,
+		client.ID, rebuildID,
+	); err != nil {
+		t.Fatalf("expire completed rebuild session: %v", err)
+	}
+	if _, err := expirySetup.ExecContext(ctx, "ALTER TABLE synchro.sync_rebuild_sessions ENABLE TRIGGER synchro_rebuild_sessions_immutable"); err != nil {
+		t.Fatalf("restore rebuild session immutability: %v", err)
+	}
+	if err := expirySetup.Commit(); err != nil {
+		t.Fatalf("commit rebuild expiry control: %v", err)
+	}
+	expired, err := harness.Operator().ObserveRebuildSession(ctx, client.ID, rebuildID)
+	if err != nil || !expired.Expired {
+		t.Fatalf("expired rebuild control is invalid: expired=%t err=%v", expired.Expired, err)
+	}
+	beforeExpiredReplay := observeCheckpointMap(t, ctx, harness, client.ID)
+	status, expiredReplay := requestRealRebuildPage(t, ctx, harness, token, client, "user:diagnostic-user", rebuildID, nil, 1)
+	requireRealProtocolError(t, status, expiredReplay, http.StatusConflict, "rebuild_restart_required")
+	afterExpiredReplay, err := harness.Operator().ObserveRebuildSession(ctx, client.ID, rebuildID)
+	if err != nil || afterExpiredReplay != expired {
+		t.Fatalf("expired rebuild replay changed its session: before=%#v after=%#v err=%v", expired, afterExpiredReplay, err)
+	}
+	assertCheckpointMapsEqual(t, beforeExpiredReplay, observeCheckpointMap(t, ctx, harness, client.ID))
 }
 
 func pullRealClientWithLimit(

@@ -15,6 +15,32 @@ import (
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
+func TestRetentionReconnectWireRejectsMismatchedObservedResponses(t *testing.T) {
+	code := "temporary_unavailable"
+	wire := scenarios.WireExpectation{HTTPStatus: 503, Retryable: true, ErrorCode: &code}
+	body := []byte(`{"error":{"code":"temporary_unavailable","retryable":true}}`)
+	if err := retentionReconnectValidateHTTPWire(503, body, wire); err != nil {
+		t.Fatalf("matching observed error failed: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		status int
+		body   []byte
+	}{
+		{"status", 200, body},
+		{"retryability", 503, []byte(`{"error":{"code":"temporary_unavailable","retryable":false}}`)},
+		{"canonical code", 503, []byte(`{"error":{"code":"auth_required","retryable":true}}`)},
+		{"missing code", 503, []byte(`{"error":{"retryable":true}}`)},
+		{"missing response", 503, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := retentionReconnectValidateHTTPWire(test.status, test.body, wire); err == nil {
+				t.Fatal("mismatched observed wire response passed")
+			}
+		})
+	}
+}
+
 func TestValidateRetentionReconnectScenarioAcceptsAuthoredContract(t *testing.T) {
 	if err := ValidateRetentionReconnectScenario(loadRetentionReconnectAuthoredScenario(t)); err != nil {
 		t.Fatalf("validate authored retention-reconnect scenario: %v", err)

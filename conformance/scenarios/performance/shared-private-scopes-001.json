@@ -13,35 +13,10 @@
     {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#no-arbitrary-client-defined-replication-model"}
   ],
   "proof_types": [
-    "reference-model",
     "server-black-box",
     "negative-control"
   ],
   "proof_obligations": [
-    {
-      "obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-RM-001",
-      "requirement_ids": [
-        "SYNC-SCOPE-003"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-SHARED-PRIVATE-SCOPES-SEMANTIC-001"
-      ],
-      "proof_type": "reference-model",
-      "support_cell_id": null,
-      "artifact_inventory_ids": [
-        "ARTDEF-CONFORMANCE-RUNNER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-conformance",
-      "argv": [
-        "make",
-        "test-conformance"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
     {
       "obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-PG-LINUX-X64-001",
       "requirement_ids": [
@@ -99,14 +74,6 @@
     {"obligation_id":"OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-CONTROL-001","requirement_ids":["SYNC-SCOPE-005"],"assertion_ids":["ASSERT-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005","control_id":"CTRL-SCOPE-005"}
   ],
   "ownership": [
-    {
-      "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
-      "requirement_id": "SYNC-SCOPE-003",
-      "proof_obligation_id": "OBL-PERF-SHARED-PRIVATE-SCOPES-RM-001",
-      "assertion_id": "ASSERT-PERF-SHARED-PRIVATE-SCOPES-SEMANTIC-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
       "requirement_id": "SYNC-SCOPE-003",

@@ -48,8 +48,7 @@ var defaultProtected = []string{
 	modulePath + "/internal/contract",
 	modulePath + "/vectors",
 	modulePath + "/scenarios",
-	modulePath + "/reference",
-	modulePath + "/modelrunner",
+	modulePath + "/invariants",
 	modulePath + "/barriers",
 	modulePath + "/faults",
 	modulePath + "/observer",
@@ -59,9 +58,7 @@ var defaultProtected = []string{
 
 var diagnosticBlackboxImporters = map[string]struct{}{
 	modulePath + "/blackbox/integration":       {},
-	modulePath + "/blackbox/syntheticproof":    {},
 	modulePath + "/cmd/synchro-local-postgres": {},
-	modulePath + "/cmd/synchro-conformance":    {},
 	modulePath + "/kotlin":                     {},
 	modulePath + "/reactnative":                {},
 	modulePath + "/swift":                      {},

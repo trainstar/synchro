@@ -1334,7 +1334,7 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 	}
 }
 
-func TestPublishVerifiedSQLiteOutputRejectsArtifactCorruption(t *testing.T) {
+func TestVerifySQLiteOutputRejectsArtifactCorruption(t *testing.T) {
 	db := testPostgres(t)
 	tableName, scopeID := registerSeedTestTableForScope(t, db, "test_seed_verified_publication", "seed-verification")
 	registerSharedScope(t, db, scopeID, true)
@@ -1442,12 +1442,8 @@ func TestPublishVerifiedSQLiteOutputRejectsArtifactCorruption(t *testing.T) {
 			copySeedArtifact(t, originalPath, temporaryPath)
 			test.mutate(t, temporaryPath)
 
-			destinationPath := filepath.Join(directory, strings.ReplaceAll(test.name, " ", "-")+"-published.db")
 			if err := verifySQLiteOutput(ctx, temporaryPath, env, tables, portable, seedSnapshotComplete); err == nil {
-				t.Fatal("published a corrupt seed artifact")
-			}
-			if _, err := os.Stat(destinationPath); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("corrupt artifact changed destination: %v", err)
+				t.Fatal("accepted a corrupt seed artifact")
 			}
 		})
 	}

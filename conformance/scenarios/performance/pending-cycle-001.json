@@ -79,47 +79,12 @@
     }
   ],
   "proof_types": [
-    "reference-model",
     "server-black-box",
     "native-e2e",
     "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
-    {
-      "obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
-      "requirement_ids": [
-        "SYNC-MUTATION-002",
-        "SYNC-CONFLICT-002",
-        "SYNC-TIME-002",
-        "SYNC-VOCAB-001",
-        "SYNC-CRUD-001",
-        "SYNC-SCOPE-006"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-        "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
-        "ASSERT-PERF-PENDING-CYCLE-TIME-001",
-        "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
-        "ASSERT-PERF-PENDING-CYCLE-CRUD-001",
-        "ASSERT-PERF-PENDING-CYCLE-SCOPE-006"
-      ],
-      "proof_type": "reference-model",
-      "support_cell_id": null,
-      "artifact_inventory_ids": [
-        "ARTDEF-CONFORMANCE-RUNNER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-conformance",
-      "argv": [
-        "make",
-        "test-conformance"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
     {
       "obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
       "requirement_ids": [
@@ -588,20 +553,11 @@
     {"obligation_id":"OBL-PERF-PENDING-CYCLE-CURSOR-003-CONTROL-001","requirement_ids":["SYNC-CURSOR-003"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CURSOR-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CURSOR-003","control_id":"CTRL-CURSOR-003"},
     {"obligation_id":"OBL-PERF-PENDING-CYCLE-BOUNDARY-003-CONTROL-001","requirement_ids":["SYNC-BOUNDARY-003"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-BOUNDARY-003"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-BOUNDARY-003","control_id":"CTRL-BOUNDARY-003"},
     {"obligation_id":"OBL-PERF-PENDING-CYCLE-CRUD-002-CONTROL-001","requirement_ids":["SYNC-CRUD-002"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CRUD-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001","ARTDEF-SWIFT-SPM-001","ARTDEF-COCOAPODS-001","ARTDEF-KOTLIN-MAVEN-001","ARTDEF-RN-NPM-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CRUD-002","control_id":"CTRL-CRUD-002"},
-    {"obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-RM-001","requirement_ids":["SYNC-CONFLICT-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CAS-001"],"proof_type":"reference-model","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":null,"control_id":null},
     {"obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001","requirement_ids":["SYNC-CONFLICT-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CAS-001"],"proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":null,"control_id":null},
     {"obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-FAULT-LINUX-X64-001","requirement_ids":["SYNC-CONFLICT-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CAS-001"],"proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001","artifact_inventory_ids":["ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-blackbox","argv":["make","test-blackbox"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CONFLICT-ATOMIC-001","control_id":"CTRL-CONFLICT-001"},
     {"obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-CONTROL-001","requirement_ids":["SYNC-CONFLICT-001"],"assertion_ids":["ASSERT-PERF-PENDING-CYCLE-CAS-001"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-integration-mutants","argv":["make","test-integration-mutants"],"fault_plan_id":"FPL-PERF-PENDING-CYCLE-CONFLICT-ATOMIC-001","control_id":"CTRL-CONFLICT-001"}
   ],
   "ownership": [
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-MUTATION-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-SEMANTIC-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-MUTATION-002",
@@ -733,14 +689,6 @@
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-CONFLICT-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-CONFLICT-002",
       "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-CONFLICT-001",
       "proof_type": "server-black-box",
@@ -757,26 +705,10 @@
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "requirement_id": "SYNC-TIME-002",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-TIME-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-TIME-002",
       "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001",
       "assertion_id": "ASSERT-PERF-PENDING-CYCLE-TIME-001",
       "proof_type": "server-black-box",
       "support_cell_id": "SUP-PG-LINUX-X64-001"
-    },
-    {
-      "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
-      "requirement_id": "SYNC-VOCAB-001",
-      "proof_obligation_id": "OBL-PERF-PENDING-CYCLE-RM-001",
-      "assertion_id": "ASSERT-PERF-PENDING-CYCLE-VOCAB-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
@@ -791,7 +723,6 @@
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-LOCALSQL-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-LOCALSQL-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-LOCALSQL-001","proof_type":"negative-control","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RM-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-001","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
@@ -809,7 +740,6 @@
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-VERSION-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-VERSION-002-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-VERSION-002","proof_type":"negative-control","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RM-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-SCOPE-006","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-SCOPE-006","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-SCOPE-006","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-SCOPE-006","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-SCOPE-006","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
@@ -838,7 +768,6 @@
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-IOS-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-IOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CRUD-002","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CRUD-002-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CRUD-002","proof_type":"negative-control","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CONFLICT-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-RM-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CAS-001","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CONFLICT-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CAS-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CONFLICT-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-FAULT-LINUX-X64-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CAS-001","proof_type":"fault-injection","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-PENDING-CYCLE-001","requirement_id":"SYNC-CONFLICT-001","proof_obligation_id":"OBL-PERF-PENDING-CYCLE-CONFLICT-001-CONTROL-001","assertion_id":"ASSERT-PERF-PENDING-CYCLE-CAS-001","proof_type":"negative-control","support_cell_id":null}

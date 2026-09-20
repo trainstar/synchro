@@ -17,7 +17,7 @@
       "title": "Opaque scope cursors",
       "category": "protocol",
       "statement": "Clients preserve non-null server-issued scope cursors without parsing, ordering, or assigning semantic meaning to their encoding, and reserve null for no usable resumable state.",
-      "required_proof_types": ["reference-model", "native-e2e"],
+      "required_proof_types": ["native-e2e"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-cursor-invariant" }]
     },
@@ -26,7 +26,7 @@
       "title": "Opaque server versions",
       "category": "protocol",
       "statement": "Clients preserve server_version as an opaque optimistic-precondition and reconciliation token without sorting, incrementing, or parsing it.",
-      "required_proof_types": ["reference-model", "native-e2e"],
+      "required_proof_types": ["native-e2e"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-server-version-invariant" }]
     },
@@ -44,7 +44,7 @@
       "title": "Monotonic scope set version",
       "category": "scope",
       "statement": "scope_set_version moves forward only when the authoritative assigned scope set changes.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-set-version-monotonicity" }]
     },
@@ -71,7 +71,7 @@
       "title": "Synchro-owned row CRUD",
       "category": "data-correctness",
       "statement": "The Synchro protocol handles create, update, and delete operations for every registered synced table.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#synced-crud-authority" }]
     },
@@ -80,7 +80,7 @@
       "title": "Mutation outcome conservation",
       "category": "data-correctness",
       "statement": "Every local mutation remains pending or reaches one durable accepted, server-rejected, superseded-before-send, cancelled-before-send, or blocked-by-predecessor outcome, and every local outcome remains inspectable and linked.",
-      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "required_proof_types": ["native-e2e", "fault-injection"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-silent-mutation-loss" }]
     },
@@ -89,7 +89,7 @@
       "title": "Canonical mutation reconciliation",
       "category": "data-correctness",
       "statement": "Clients reconcile accepted and rejected mutations to any authoritative row state and server version returned by the server.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-server-outcome" }]
     },
@@ -98,7 +98,7 @@
       "title": "No duplicate local intent",
       "category": "data-correctness",
       "statement": "Replay and read-your-own-write reconciliation never apply one logical local action twice.",
-      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "required_proof_types": ["native-e2e", "fault-injection"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#no-duplicate-local-intent" }]
     },
@@ -143,7 +143,7 @@
       "title": "Deterministic scope membership",
       "category": "scope",
       "statement": "Repeated evaluation of the same authoritative row and server state produces the same set of scope instances.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-scope-membership" }]
     },
@@ -152,7 +152,7 @@
       "title": "Scope-local rebuild",
       "category": "cursor-rebuild",
       "statement": "Rebuilding one scope leaves unrelated local scope data and local-only data intact.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-local-rebuild" }]
     },
@@ -161,7 +161,7 @@
       "title": "Per-scope cursor apply ordering",
       "category": "cursor-rebuild",
       "statement": "A scope cursor advances only after all corresponding incremental changes for that scope are durably and successfully applied locally.",
-      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "required_proof_types": ["native-e2e", "fault-injection"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#per-scope-cursor-correctness" }]
     },
@@ -170,7 +170,7 @@
       "title": "Progress and integrity separation",
       "category": "cursor-rebuild",
       "statement": "A valid cursor alone never marks local materialization healthy; health also requires independent authoritative checksum verification.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#progress-and-integrity-separation" }]
     },
@@ -188,7 +188,7 @@
       "title": "Rebuild finality",
       "category": "cursor-rebuild",
       "statement": "A rebuild completes only after all pages apply, stale scope provenance is pruned, unjustified rows are removed, the final checksum matches, and the final cursor is installed.",
-      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "required_proof_types": ["native-e2e", "fault-injection"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-finality" }]
     },
@@ -197,7 +197,7 @@
       "title": "Preserve overlapping data during rebuild",
       "category": "cursor-rebuild",
       "statement": "Rebuilding one scope never deletes a local row while another valid scope provenance edge remains.",
-      "required_proof_types": ["reference-model", "native-e2e"],
+      "required_proof_types": ["native-e2e"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#rebuild-does-not-erase-valid-overlapping-data" }]
     },
@@ -251,7 +251,7 @@
       "title": "Accurate multi-scope provenance",
       "category": "local-metadata",
       "statement": "For multi-scope tables, local metadata records exactly the scopes that currently justify each local row.",
-      "required_proof_types": ["reference-model", "native-e2e"],
+      "required_proof_types": ["native-e2e"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#provenance-correctness" }]
     },
@@ -377,7 +377,7 @@
       "title": "Canonical operation vocabulary",
       "category": "protocol",
       "statement": "Push accepts only insert, update, and delete, while pull emits only upsert and delete; push create, push upsert, implicit resurrection, and every other operation are rejected.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-operation-vocabulary" }]
     },
@@ -395,7 +395,7 @@
       "title": "Commit-safe WAL order",
       "category": "change-capture",
       "statement": "Within one stream generation, the worker orders source transactions by commit LSN and events by pre-filter source ordinal, never by sequence, timestamp, notification, table name, or poll order.",
-      "required_proof_types": ["reference-model", "server-black-box", "fault-injection"],
+      "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#commit-safe-wal-order" }]
     },
@@ -467,7 +467,7 @@
       "title": "Exact batch replay",
       "category": "data-correctness",
       "statement": "A completed batch replay with the same scoped identity and fingerprint returns the original HTTP status and exact canonical response without mutation work, while a different fingerprint returns 409 idempotency_conflict without mutation work.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection"],
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#exact-batch-replay" }]
     },
@@ -476,7 +476,7 @@
       "title": "Mutation replay across batches",
       "category": "data-correctness",
       "statement": "When a mutation identity appears in a different new batch, an equal fingerprint contributes its exact stored outcome without re-execution, while a different fingerprint fails the whole request with 409 idempotency_conflict.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#mutation-replay-across-batches" }]
     },
@@ -503,7 +503,7 @@
       "title": "Complete mutation outcome partition",
       "category": "data-correctness",
       "statement": "An HTTP 200 first execution places every requested mutation exactly once in accepted or rejected, preserves request-relative order within each array, and uses only the specified statuses and required fields.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#complete-mutation-outcome-partition" }]
     },
@@ -512,7 +512,7 @@
       "title": "Atomic version compare-and-swap",
       "category": "data-correctness",
       "statement": "Update and delete lock row and version identity, verify byte-for-byte base-version equality, and atomically perform source and version-fence transitions, while insert atomically reserves an absent row identity.",
-      "required_proof_types": ["reference-model", "server-black-box", "fault-injection"],
+      "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-version-compare-and-swap" }]
     },
@@ -521,7 +521,7 @@
       "title": "Concurrent update-delete conservation",
       "category": "data-correctness",
       "statement": "Of concurrent update and delete attempts using the same current base version, at most one applies, every loser receives the current authoritative conflict outcome, and the winning transition is preserved.",
-      "required_proof_types": ["reference-model", "server-black-box", "fault-injection"],
+      "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#concurrent-update-delete-conservation" }]
     },
@@ -530,7 +530,7 @@
       "title": "Client time has no conflict authority",
       "category": "data-correctness",
       "statement": "client_version is a diagnostic RFC 3339 UTC timestamp and never affects conflict choice, row version, source updated_at, write order, or outcomes when client time is equal, past, or future.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#client-time-has-no-conflict-authority" }]
     },
@@ -566,7 +566,7 @@
       "title": "Per-scope pull eligibility",
       "category": "cursor-rebuild",
       "statement": "For one read-consistent boundary, the server resolves and deduplicates every valid scope's complete eligible candidate stream before applying the global page limit.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#per-scope-pull-eligibility" }]
     },
@@ -575,7 +575,7 @@
       "title": "Deterministic cross-scope pull merge",
       "category": "cursor-rebuild",
       "statement": "The server merges per-scope candidate streams by the specified typed tuple, computes has_more from every remaining stream head, and makes starvation-free progress at each finite boundary.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-cross-scope-pull-merge" }]
     },
@@ -584,7 +584,7 @@
       "title": "Explicit pull candidate outcomes",
       "category": "cursor-rebuild",
       "statement": "Every selected pull candidate yields one canonical upsert or delete from its WAL-captured projection, or the whole page fails without cursor, checksum, or checkpoint advancement.",
-      "required_proof_types": ["reference-model", "server-black-box", "fault-injection"],
+      "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#explicit-pull-candidate-outcomes" }]
     },
@@ -593,7 +593,7 @@
       "title": "Scope-inclusive typed deduplication",
       "category": "cursor-rebuild",
       "statement": "Pull deduplicates by the typed tuple of scope ID, logical table ID, and primary key, retaining the greatest eligible stream position for that key within its scope without cross-scope collapse.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-inclusive-typed-deduplication" }]
     },
@@ -611,7 +611,7 @@
       "title": "Complete cursor bindings",
       "category": "cursor-rebuild",
       "statement": "Every incremental cursor authenticates all required identity, generation, scope, schema, retention, stream-position, issue-time, and key bindings and distinguishes stale authenticated state from forged or misbound state.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#complete-cursor-bindings" }]
     },
@@ -620,7 +620,7 @@
       "title": "Immutable rebuild snapshot",
       "category": "cursor-rebuild",
       "statement": "The first rebuild request atomically stages one complete immutable snapshot and digest at boundary B, and every later page reads only that stage without live requery or mutable ordering.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection"],
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#immutable-rebuild-snapshot" }]
     },
@@ -638,7 +638,7 @@
       "title": "Post-boundary change delivery",
       "category": "cursor-rebuild",
       "statement": "Writes, deletes, and membership changes after rebuild boundary B stay out of the staged snapshot and remain eligible for incremental delivery after the client presents the final cursor.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#post-boundary-change-delivery" }]
     },
@@ -665,7 +665,7 @@
       "title": "Canonical typed row encoding",
       "category": "data-correctness",
       "statement": "The same immutable manifest and complete authoritative row produce identical canonical typed bytes on every implementation, and receivers reject unknown, duplicate, omitted, mistyped, primary-key-mismatched, aliased, alternate-case, or physical-database type forms before apply.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#canonical-typed-row-encoding" }]
     },
@@ -674,7 +674,7 @@
       "title": "Row digest binding",
       "category": "data-correctness",
       "statement": "Every row-bearing push outcome, pull change, rebuild record, and seed record carries an opaque server version and a SHA-256 digest binding the exact schema hash, logical table, typed primary key, complete canonical row, server version, and required domains; version or digest failure prevents reconciliation and cursor advancement.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#row-digest-binding" }]
     },
@@ -683,7 +683,7 @@
       "title": "Scope digest binding",
       "category": "data-correctness",
       "statement": "Every authoritative scope digest is the specified streaming SHA-256 over the exact schema, scope ID, cardinality, and canonically sorted row-identity and row-digest pairs, and no duplicate, omission, altered pairing, or implementation-defined aggregate is accepted.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-digest-binding" }]
     },
@@ -692,7 +692,7 @@
       "title": "Complete terminal checksum maps",
       "category": "cursor-rebuild",
       "statement": "A nonterminal pull page omits checksums, while a terminal page includes exactly the complete active scope set after updates, including rebuild scopes and excluding removed scopes; any invalid map fails the page without cursor advancement.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#complete-terminal-checksum-maps" }]
     },
@@ -701,7 +701,7 @@
       "title": "Legal client state transitions",
       "category": "local-metadata",
       "statement": "Clients permit only the complete state adjacency map, and unknown states or unlisted transitions fail as non-retryable local contract errors without mutating durable sync state.",
-      "required_proof_types": ["reference-model", "native-e2e"],
+      "required_proof_types": ["native-e2e"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#legal-client-state-transitions" }]
     },
@@ -710,7 +710,7 @@
       "title": "Semantic version precedence",
       "category": "protocol",
       "statement": "Application and minimum-client versions parse and compare exactly by Semantic Versioning 2.0.0, while protocol negotiation remains the separate integer 3 and malformed or leading-v versions are rejected.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#semantic-version-precedence" }]
     },
@@ -809,7 +809,7 @@
       "title": "Deterministic scope function contract",
       "category": "scope",
       "statement": "Membership, impact, and assignment functions satisfy the registered signatures and restrictions, including schema qualification, LANGUAGE SQL, STABLE, SECURITY INVOKER, declared dependencies, and positive bounds, before activation and throughout use.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-scope-function-contract" }]
     },
@@ -818,7 +818,7 @@
       "title": "Dependency-driven membership propagation",
       "category": "scope",
       "statement": "Every declared external dependency change uses its impact function over old and new state to reevaluate every affected source row, including removals, revocations, reassignment, and deletion.",
-      "required_proof_types": ["reference-model", "server-black-box", "fault-injection"],
+      "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#dependency-driven-membership-propagation" }]
     },
@@ -845,7 +845,7 @@
       "title": "Immutable schema manifest",
       "category": "schema",
       "statement": "A published schema manifest body, hash, positive version, class, compatibility floor, composition, table IDs, and field IDs are stored atomically and never changed in place or served from a live catalog under an existing identity.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection"],
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#immutable-schema-manifest" }]
     },
@@ -854,7 +854,7 @@
       "title": "Deterministic schema class dispatch",
       "category": "schema",
       "statement": "Connect applies exact per-client Class 1 through Class 4 dispatch and queue-preserving explicit reset after unsupported, including replace when Class 3 affects no assigned scope; push, pull, and rebuild require the exact current manifest, and protocol version 3 never emits fetch or partial schema-mismatch work.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-schema-class-dispatch" }]
     },
@@ -863,7 +863,7 @@
       "title": "Durable scope retention floor",
       "category": "cursor-rebuild",
       "statement": "Each scope retains a durable inclusive resume floor and lineage even when no effects remain; cursors below the floor rebuild, while otherwise valid cursors at or above an ordinarily advanced floor remain eligible.",
-      "required_proof_types": ["reference-model", "server-black-box", "fault-injection"],
+      "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#durable-scope-retention-floor" }]
     },
@@ -890,7 +890,7 @@
       "title": "Strict positive limits",
       "category": "protocol",
       "statement": "Every request, push body, mutation count, mutation size, column count, compaction, backfill, fanout, and impact limit stays within its positive fixed or configured maximum; push limits fail before ledger allocation, and no invalid value is defaulted, clamped, or truncated.",
-      "required_proof_types": ["reference-model", "server-black-box"],
+      "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#strict-positive-limits" }]
     },
@@ -899,7 +899,7 @@
       "title": "Pre-wire mutation dependency resolution",
       "category": "local-metadata",
       "statement": "Same-row intent without a legal server precondition is normalized or blocked before transmission, every original action remains linked and inspectable, no fabricated base version is sent, and an unsealed insert followed by delete creates no transient server row.",
-      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "required_proof_types": ["native-e2e", "fault-injection"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#pre-wire-mutation-dependency-resolution" }]
     },
@@ -917,7 +917,7 @@
       "title": "Portable wire integer range",
       "category": "protocol",
       "statement": "Every protocol-envelope JSON integer is exactly representable in the portable safe-integer range with its required sign, server counter allocation fails before overflow, and opaque-token decimal-string counters remain distinct from envelope integers.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#portable-wire-integer-range" }]
     },
@@ -926,7 +926,7 @@
       "title": "Mutation outcome schema binding",
       "category": "data-correctness",
       "statement": "Every mutation outcome binds the immutable schema used for classification and checksum encoding; replay preserves that historical binding, clients verify with that manifest, and unsafe projection into current local schema cannot discard outcomes or later intent.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#mutation-outcome-schema-binding" }]
     },
@@ -953,7 +953,7 @@
       "title": "Effect-level pull progress",
       "category": "cursor-rebuild",
       "statement": "Each derived scope effect has a deterministic persisted delivery ordinal under its source event, and cursors stop and resume between sibling effects without replay loops, skips, or changing WAL replay identity.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#effect-level-pull-progress" }]
     },
@@ -962,7 +962,7 @@
       "title": "Accepted write invalidates older rebuild",
       "category": "cursor-rebuild",
       "statement": "Rebuild sessions bind a durable client accepted-write epoch, accepted first execution advances it atomically, and every later page or replay with an older epoch returns rebuild_restart_required without records or progress.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e", "fault-injection"],
+      "required_proof_types": ["server-black-box", "native-e2e", "fault-injection"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#accepted-write-invalidates-older-rebuild" }]
     },
@@ -971,7 +971,7 @@
       "title": "Causally bound Class 3 projection bootstrap",
       "category": "schema",
       "statement": "Class 3 data absent from active projections is staged from one permanent candidate-slot exported snapshot, caught up through the main worker's matching barrier, and atomically activated with manifest, generations, projections, and invalidation; failure cannot expose partial state.",
-      "required_proof_types": ["reference-model", "server-black-box", "fault-injection"],
+      "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#causally-bound-class-3-projection-bootstrap" }]
     },
@@ -980,7 +980,7 @@
       "title": "Crash-safe client schema migration",
       "category": "schema",
       "statement": "Before DDL, clients persist the verified target manifest and deterministic typed migration plan; restart resumes without schema fetch or repeated DDL, preserves queues and local data, and rejects every inconsistent physical, reference, body, plan, or phase state.",
-      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "required_proof_types": ["native-e2e", "fault-injection"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#crash-safe-client-schema-migration" }]
     },
@@ -989,7 +989,7 @@
       "title": "Scope cleanup preserves pending intent",
       "category": "data-correctness",
       "statement": "Assignment removal, seed cleanup, and rebuild pruning delete server provenance and unprotected cache state without creating a mutation, while every row protected by unresolved authored intent remains application-visible until normal reconciliation or explicit policy resolves it.",
-      "required_proof_types": ["reference-model", "native-e2e", "fault-injection"],
+      "required_proof_types": ["native-e2e", "fault-injection"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#scope-cleanup-preserves-pending-intent" }]
     },
@@ -998,7 +998,7 @@
       "title": "Schema cursor continuity",
       "category": "schema",
       "statement": "Connect reissues an otherwise valid historical cursor at the same position under the current schema only for scopes unaffected by the complete compatible lineage, nulls affected or stale scopes, and clients atomically install only the server-issued replacement with target-manifest activation.",
-      "required_proof_types": ["reference-model", "server-black-box", "native-e2e"],
+      "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#schema-cursor-continuity" }]
     }

@@ -54,28 +54,12 @@
     }
   ],
   "proof_types": [
-    "reference-model",
     "server-black-box",
     "native-e2e",
     "fault-injection",
     "negative-control"
   ],
   "proof_obligations": [
-    {
-      "obligation_id": "OBL-PERF-STEADY-PULL-RM-001",
-      "requirement_ids": ["SYNC-CURSOR-002", "SYNC-INTEGRITY-001", "SYNC-INTEGRITY-003", "SYNC-INTEGRITY-004", "SYNC-INTEGRITY-005", "SYNC-INTEGRITY-006", "SYNC-PULL-005"],
-      "assertion_ids": ["ASSERT-PERF-STEADY-PULL-CURSOR-002", "ASSERT-PERF-STEADY-PULL-INTEGRITY-001", "ASSERT-PERF-STEADY-PULL-INTEGRITY-003", "ASSERT-PERF-STEADY-PULL-INTEGRITY-004", "ASSERT-PERF-STEADY-PULL-INTEGRITY-005", "ASSERT-PERF-STEADY-PULL-INTEGRITY-006", "ASSERT-PERF-STEADY-PULL-PULL-005"],
-      "proof_type": "reference-model",
-      "support_cell_id": null,
-      "artifact_inventory_ids": ["ARTDEF-CONFORMANCE-RUNNER-001"],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-conformance",
-      "argv": ["make", "test-conformance"],
-      "fault_plan_id": null,
-      "control_id": null
-    },
     {
       "obligation_id": "OBL-PERF-STEADY-PULL-PG-LINUX-X64-001",
       "requirement_ids": [
@@ -559,12 +543,6 @@
       "proof_type": "negative-control",
       "support_cell_id": null
     },
-    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-CURSOR-002","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-CURSOR-002","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"reference-model","support_cell_id":null},
-    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-001","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-001","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-003","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-003","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
@@ -601,7 +579,6 @@
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-004","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-004","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-005","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-INTEGRITY-006","proof_obligation_id":"OBL-PERF-STEADY-PULL-RN-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-INTEGRITY-006","proof_type":"native-e2e","support_cell_id":"SUP-RN-ANDROID-CURRENT-001"},
-    {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-PULL-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-RM-001","assertion_id":"ASSERT-PERF-STEADY-PULL-PULL-005","proof_type":"reference-model","support_cell_id":null},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-PULL-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-PG-LINUX-X64-001","assertion_id":"ASSERT-PERF-STEADY-PULL-PULL-005","proof_type":"server-black-box","support_cell_id":"SUP-PG-LINUX-X64-001"},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-PULL-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-MACOS-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-PULL-005","proof_type":"native-e2e","support_cell_id":"SUP-MACOS-CURRENT-001"},
     {"scenario_id":"SCN-PERF-STEADY-PULL-001","requirement_id":"SYNC-PULL-005","proof_obligation_id":"OBL-PERF-STEADY-PULL-ANDROID-CURRENT-001","assertion_id":"ASSERT-PERF-STEADY-PULL-PULL-005","proof_type":"native-e2e","support_cell_id":"SUP-ANDROID-CURRENT-001"},

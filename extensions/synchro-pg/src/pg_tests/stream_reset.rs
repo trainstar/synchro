@@ -663,6 +663,23 @@
         )
         .expect("verify projection bootstrap candidate boundary");
 
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET materialized_commit_lsn = NULL, materialized_end_lsn = NULL,
+                 acknowledged_end_lsn = NULL WHERE singleton",
+        )
+        .expect("hold main materialization behind the activation barrier");
+        let early_activation = Spi::connect_mut(|client| {
+            crate::stream_reset::activate_projection_bootstrap_for_test(client, &bootstrap_id)
+        });
+        assert!(early_activation.is_err());
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET materialized_commit_lsn = '0/20', materialized_end_lsn = '0/30',
+                 acknowledged_end_lsn = '0/30' WHERE singleton",
+        )
+        .expect("restore main materialization at the activation barrier");
+
         Spi::run_with_args(
             "CREATE TEMP TABLE bootstrap_edge_backup ON COMMIT DROP AS
              SELECT * FROM synchro.sync_stream_reset_membership_edges

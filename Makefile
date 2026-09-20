@@ -24,7 +24,6 @@
 	check-conformance-catalog \
 	test-conformance-scenarios \
 	test-vectors \
-	test-reference \
 	test-conformance-faults \
 	test-invariants \
 	test-conformance-invariants \
@@ -301,7 +300,6 @@ help:
 	@echo "  check-conformance-catalog - Check the deterministic scenario catalog"
 	@echo "  test-conformance-scenarios - Test strict scenario loading and catalog generation"
 	@echo "  test-vectors          - Test canonical protocol 3 vectors"
-	@echo "  test-reference        - Test the independent protocol 3 reference model"
 	@echo "  test-conformance-invariants - Test the invariant engine and soak driver"
 	@echo "  soak                  - Run the bounded seeded desktop soak"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
@@ -476,13 +474,10 @@ check-conformance-catalog:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-conformance catalog --repo-root .. --check
 
 test-conformance-scenarios:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./scenarios/... ./modelrunner ./cmd/synchro-conformance -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./scenarios/... ./cmd/synchro-conformance -count=1
 
 test-vectors:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./vectors -count=1
-
-test-reference:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./reference -count=1
 
 test-conformance-faults:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./barriers ./faults -count=1
@@ -721,7 +716,7 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-reference test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
 release-stage-server: version-check
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }

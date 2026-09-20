@@ -26,14 +26,19 @@ It exists because checkbox five requires that the engine "demonstrably covers" t
 A demonstration requires an enumerated contract.
 R3.1 produces that contract.
 
-## Ship Dependency
+## Current Sequencing
 
-The parent gates R3.4 and R3.5 behind the v0.3.0 release: "Do not start the deletion work before v0.3.0 ships."
-The release work itself is not R3 scope.
-The master plan names it "Phase 6: Certify And Promote v0.3.0" in `docs/superpowers/plans/2026-07-17-synchro-v0.3.0-verified-rc.md` at line 617, as amended by the remediation plan.
-That work remains recorded and required: `rc-check-pg18` implementation, one-shot candidate artifact staging with hashes, the executed 72-hour soak, fault injection, non-superuser isolation scenarios, canaries, a real consumer integration, the evidence bundle, the tag, publication, and the `main` replacement.
-R3.2 and R3.3 build the invariant engine and the soak driver that the release certification executes.
-Nothing is built twice, and nothing from the certification scope is dropped by this plan.
+On 2026-09-19, issue #36 became the next implementation task after the authorized closeout of #35 and #115.
+R3.4 and R3.5 now execute before publication and before work on the next issue.
+This replaces the previous post-tag ordering, not the coverage or deletion requirements.
+
+Use the existing invariant engine, authored scenarios, and real integration tests.
+Do not create another model interpreter or replace independent expected values with implementation output.
+Keep this issue open until migration, deletion, and integrated validation pass.
+
+`RELEASE.md` controls release operation.
+Any new source requires its own applicable validation before publication.
+This work does not authorize publication or restore the superseded 72-hour release requirement.
 
 ## Freeze Finding
 
@@ -123,9 +128,9 @@ Build the generative workload driver that runs the invariant engine continuously
 - A demonstrated injected defect is caught, replayed from its seed, and minimized into a scenario.
 - Zero-skip enforcement covers the soak gate.
 
-# Phase R3.4: Migration (post-tag)
+# Phase R3.4: Migration
 
-Blocked until the v0.3.0 tag exists on a certified commit.
+Execute under issue #36 before publication, according to the current sequencing decision.
 
 ## Tasks
 
@@ -139,7 +144,7 @@ Blocked until the v0.3.0 tag exists on a certified commit.
 - Every migrated invariant has a passing negative control.
 - `make validation-check` passes on the integrated commit.
 
-# Phase R3.5: Deletion (post-tag, after R3.4)
+# Phase R3.5: Deletion (after R3.4)
 
 ## Tasks
 

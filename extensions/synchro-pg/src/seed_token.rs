@@ -307,8 +307,8 @@ mod tests {
     }
 
     #[test]
-    fn page_token_rejects_mac_only_corruption() {
-        let payload = SeedPagePayload {
+    fn page_token_rejects_mac_corruption_and_invalid_export_identity() {
+        let mut payload = SeedPagePayload {
             kind: "portable_seed_page".to_string(),
             version: 1,
             key_id: "seed-page-v1".to_string(),
@@ -330,14 +330,31 @@ mod tests {
 
         assert!(verify_page(&token, TEST_SECRET).is_ok());
         assert!(verify_page(&corrupted, TEST_SECRET).is_err());
+        for export_id in [
+            "",
+            "not-a-uuid",
+            "A1234567-89ab-cdef-0123-456789abcdef",
+            "a123456789abcdef0123456789abcdef",
+        ] {
+            payload.export_id = export_id.to_string();
+            assert!(issue_page(&payload, TEST_SECRET).is_err());
+            let bytes = canonical_payload(&payload).expect("encode invalid page payload");
+            let mac = sign(PAGE_DOMAIN, TEST_SECRET, &bytes).expect("sign invalid page payload");
+            let token = format!(
+                "{PAGE_PREFIX}.{}.{}",
+                URL_SAFE_NO_PAD.encode(bytes),
+                URL_SAFE_NO_PAD.encode(mac)
+            );
+            assert!(verify_page(&token, TEST_SECRET).is_err());
+        }
     }
 
     #[test]
-    fn continuation_receipt_rejects_mac_only_corruption() {
+    fn continuation_receipt_rejects_mac_corruption_and_invalid_export_identity() {
         let checksum = ChecksumObject::new(
             Sha256Digest::from_lower_hex(&"3".repeat(64)).expect("test checksum"),
         );
-        let payload = SeedContinuationPayload {
+        let mut payload = SeedContinuationPayload {
             kind: "portable_seed_continuation".to_string(),
             version: 1,
             key_id: "seed-continuation-v1".to_string(),
@@ -359,5 +376,23 @@ mod tests {
 
         assert!(verify_continuation(&token, TEST_SECRET).is_ok());
         assert!(verify_continuation(&corrupted, TEST_SECRET).is_err());
+        for export_id in [
+            "",
+            "not-a-uuid",
+            "A1234567-89ab-cdef-0123-456789abcdef",
+            "a123456789abcdef0123456789abcdef",
+        ] {
+            payload.export_id = export_id.to_string();
+            assert!(issue_continuation(&payload, TEST_SECRET).is_err());
+            let bytes = canonical_payload(&payload).expect("encode invalid receipt payload");
+            let mac = sign(CONTINUATION_DOMAIN, TEST_SECRET, &bytes)
+                .expect("sign invalid receipt payload");
+            let token = format!(
+                "{CONTINUATION_PREFIX}.{}.{}",
+                URL_SAFE_NO_PAD.encode(bytes),
+                URL_SAFE_NO_PAD.encode(mac)
+            );
+            assert!(verify_continuation(&token, TEST_SECRET).is_err());
+        }
     }
 }

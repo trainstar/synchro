@@ -15,36 +15,11 @@
     {"path":"docs/src/content/docs/spec/04-invariants.mdx","anchor":"#finite-capture-lag"}
   ],
   "proof_types": [
-    "reference-model",
     "server-black-box",
     "negative-control",
     "fault-injection"
   ],
   "proof_obligations": [
-    {
-      "obligation_id": "OBL-PERF-CONFIGURED-BOUNDS-RM-001",
-      "requirement_ids": [
-        "SYNC-LIMIT-001"
-      ],
-      "assertion_ids": [
-        "ASSERT-PERF-CONFIGURED-BOUNDS-SEMANTIC-001"
-      ],
-      "proof_type": "reference-model",
-      "support_cell_id": null,
-      "artifact_inventory_ids": [
-        "ARTDEF-CONFORMANCE-RUNNER-001"
-      ],
-      "performance_budget_ids": [],
-      "required_measurement_ids": [],
-      "required_vector_set_ids": [],
-      "make_target": "test-conformance",
-      "argv": [
-        "make",
-        "test-conformance"
-      ],
-      "fault_plan_id": null,
-      "control_id": null
-    },
     {
       "obligation_id": "OBL-PERF-CONFIGURED-BOUNDS-PG-LINUX-X64-001",
       "requirement_ids": [
@@ -107,14 +82,6 @@
     {"obligation_id":"OBL-PERF-CONFIGURED-BOUNDS-HEALTH-002-CONTROL-001","requirement_ids":["SYNC-HEALTH-002"],"assertion_ids":["ASSERT-PERF-CONFIGURED-BOUNDS-HEALTH-002"],"proof_type":"negative-control","support_cell_id":null,"artifact_inventory_ids":["ARTDEF-CONFORMANCE-RUNNER-001","ARTDEF-PG-EXTENSION-001","ARTDEF-ADAPTER-001"],"performance_budget_ids":[],"required_measurement_ids":[],"required_vector_set_ids":[],"make_target":"test-conformance","argv":["make","test-conformance"],"fault_plan_id":"FPL-PERF-CONFIGURED-BOUNDS-HEALTH-002","control_id":"CTRL-HEALTH-002"}
   ],
   "ownership": [
-    {
-      "scenario_id": "SCN-PERF-CONFIGURED-BOUNDS-001",
-      "requirement_id": "SYNC-LIMIT-001",
-      "proof_obligation_id": "OBL-PERF-CONFIGURED-BOUNDS-RM-001",
-      "assertion_id": "ASSERT-PERF-CONFIGURED-BOUNDS-SEMANTIC-001",
-      "proof_type": "reference-model",
-      "support_cell_id": null
-    },
     {
       "scenario_id": "SCN-PERF-CONFIGURED-BOUNDS-001",
       "requirement_id": "SYNC-LIMIT-001",

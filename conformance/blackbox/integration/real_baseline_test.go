@@ -584,6 +584,9 @@ func TestRealWALPipeline(t *testing.T) {
 	if poison.WALLagSeconds < 0 {
 		t.Fatalf("WAL poison lag is invalid: %#v", poison)
 	}
+	if retried, retryErr := harness.Operator().RetryWALPoison(ctx); retryErr != nil || retried {
+		t.Fatalf("truncate poison entered ordinary retry: requested=%t err=%v", retried, retryErr)
+	}
 	interrupted, err := harness.Operator().CreateInterruptedStreamReset(ctx)
 	if err != nil {
 		t.Fatalf("create interrupted stream reset: %v", err)

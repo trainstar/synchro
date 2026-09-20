@@ -12,6 +12,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -24,56 +25,105 @@ class LifecycleDurabilityTests {
     private val context = ApplicationProvider.getApplicationContext<Context>()
 
     @Test
-    fun preparedMigrationJournalRecoversAfterDatabaseReopen() {
+    fun unknownLifecycleRejectsInitializationAndTransitionWithoutChangingState() {
         val dbName = databaseName()
         try {
-            val target = targetManifest()
             val first = SynchroDatabase.open(context, dbName)
             try {
-                val schemaManager = SchemaManager(first)
-                installTestSchema(
-                    first,
-                    schemaVersion = 1,
-                    schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
-                    tables = protocolOrdersSchemaManifest().localTables(),
-                )
-                val journal = schemaManager.prepareConnectMigration(
-                    response = migrationResponse(target),
-                    targetTables = target.localTables(),
-                    resetMaterialization = false,
-                )
-                assertNotNull(journal)
-                assertEquals(
-                    "prepared",
-                    first.queryOne("SELECT phase FROM _synchro_migration_journal")?.get("phase"),
-                )
+                first.writeTransaction {
+                    it.execSQL("UPDATE _synchro_client_state SET lifecycle_state = 'unknown' WHERE singleton = 1")
+                }
             } finally {
                 first.close()
             }
-
-            val recovered = SynchroDatabase.open(context, dbName)
+            val reopened = SynchroDatabase.open(context, dbName)
             try {
-                SchemaManager(recovered).recoverPendingMigration()
-                assertEquals(
-                    2L,
-                    recovered.readTransaction { db -> SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION) },
+                val before = reopened.queryOne("SELECT * FROM _synchro_client_state WHERE singleton = 1")
+                val config = SynchroConfig(
+                    dbPath = dbName,
+                    serverURL = "http://test.local",
+                    authProvider = { "unused" },
+                    clientID = "unknown-state-client",
+                    appVersion = "0.3.0",
                 )
-                assertEquals(
-                    target.schemaHash,
-                    recovered.readTransaction { db -> SynchroMeta.get(db, MetaKey.SCHEMA_HASH) },
-                )
-                assertTrue(
-                    recovered.query("PRAGMA table_info(orders)").map { it.getValue("name") }.contains("notes"),
-                )
-                assertEquals(
-                    "ddl_applied",
-                    recovered.queryOne("SELECT phase FROM _synchro_migration_journal")?.get("phase"),
-                )
+                val tracker = ChangeTracker(reopened)
+                assertThrows(SynchroError.InvalidResponse::class.java) {
+                    SyncEngine(
+                        config, reopened, HttpClient(config), SchemaManager(reopened),
+                        tracker, PullProcessor(reopened), PushProcessor(reopened, tracker),
+                    )
+                }
+                assertEquals(before, reopened.queryOne("SELECT * FROM _synchro_client_state WHERE singleton = 1"))
+                assertThrows(SynchroError.InvalidResponse::class.java) {
+                    reopened.writeTransaction {
+                        SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.LOCAL_READY)
+                    }
+                }
+                assertEquals(before, reopened.queryOne("SELECT * FROM _synchro_client_state WHERE singleton = 1"))
             } finally {
-                recovered.close()
+                reopened.close()
             }
         } finally {
             context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test
+    fun preparedMigrationJournalRecoversAfterDatabaseReopen() {
+        for (transition in listOf("class_2", "class_3")) {
+            val dbName = databaseName()
+            try {
+                val target = targetManifest(transition)
+                val first = SynchroDatabase.open(context, dbName)
+                try {
+                    val schemaManager = SchemaManager(first)
+                    installTestSchema(
+                        first,
+                        schemaVersion = 1,
+                        schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                        tables = protocolOrdersSchemaManifest().localTables(),
+                    )
+                    val journal = schemaManager.prepareConnectMigration(
+                        response = migrationResponse(target),
+                        targetTables = target.localTables(),
+                        resetMaterialization = false,
+                    )
+                    assertNotNull(journal)
+                    assertEquals(
+                        "prepared",
+                        first.queryOne("SELECT phase FROM _synchro_migration_journal")?.get("phase"),
+                    )
+                } finally {
+                    first.close()
+                }
+
+                val recovered = SynchroDatabase.open(context, dbName)
+                try {
+                    SchemaManager(recovered).recoverPendingMigration()
+                    assertEquals(
+                        2L,
+                        recovered.readTransaction { db -> SynchroMeta.getInt64(db, MetaKey.SCHEMA_VERSION) },
+                    )
+                    assertEquals(
+                        target.schemaHash,
+                        recovered.readTransaction { db -> SynchroMeta.get(db, MetaKey.SCHEMA_HASH) },
+                    )
+                    assertTrue(
+                        recovered.query("PRAGMA table_info(orders)").map { it.getValue("name") }.contains("notes"),
+                    )
+                    val journal = recovered.queryOne("SELECT * FROM _synchro_migration_journal")
+                    assertEquals("ddl_applied", journal?.get("phase"))
+                    assertEquals("replace", journal?.get("action"))
+                    assertEquals(1L, journal?.get("source_schema_version"))
+                    assertEquals(PROTOCOL_TEST_SCHEMA_HASH, journal?.get("source_schema_hash"))
+                    assertEquals(2L, journal?.get("target_schema_version"))
+                    assertEquals(target.schemaHash, journal?.get("target_schema_hash"))
+                } finally {
+                    recovered.close()
+                }
+            } finally {
+                context.deleteDatabase(dbName)
+            }
         }
     }
 
@@ -507,13 +557,13 @@ class LifecycleDurabilityTests {
         schemaDefinition = target,
     )
 
-    private fun targetManifest(): SchemaManifest {
+    private fun targetManifest(transitionClass: String = "class_3"): SchemaManifest {
         val draft = protocolOrdersSchemaManifest(
             includeNotes = true,
             schemaVersion = 2,
             parentSchema = SchemaRef(1, PROTOCOL_TEST_SCHEMA_HASH),
-            transitionClass = "class_3",
-            compatibilityFloor = 2,
+            transitionClass = transitionClass,
+            compatibilityFloor = if (transitionClass == "class_2") 1 else 2,
         )
         return draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
     }

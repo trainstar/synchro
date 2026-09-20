@@ -31,6 +31,15 @@ Layers six and seven allow layers one through five to stay small. Do not replace
 
 The authored scenario corpus is an executable contract input. Each scenario is schema-valid and independently authored from the normative specification.
 
+Native rebuild-apply and rebuild-cardinality drivers construct deterministic inputs from the authored scenario.
+They do not execute the reference model to generate those inputs or expected runtime results.
+
+Proof metadata binds server, native, fault, and negative-control execution.
+It no longer claims the retired reference-model proof type.
+Authored inputs, expected state, wire expectations, assertions, and negative controls remain independent of implementation output.
+The multi-scope wire assertion binds the existing Swift and Kotlin observed-wire checks.
+Those checks follow the native bindings. A warm synchronization call can pull without another connect request.
+
 ## React Native Journeys
 
 Run the complete corpora with `make test-rn-scenarios-ios` and `make test-rn-scenarios-android`.
@@ -96,19 +105,16 @@ Scheduled validation runs every manifest mutant through `make test-integration-m
 
 The WAL mutant uses the real packaged extension and black-box environment. It requires the same `SYNCHRO_CONFORMANCE_*` variables as `make test-blackbox`.
 
-## Synthetic Harness Proof
+## Independent Semantic Checks
 
-Run the loopback synthetic harness with:
+Use `make test-conformance-invariants` for the invariant checkers and their negative controls.
+Use `make test-blackbox` for the real extension-backed server tests.
+The `synchro-conformance` CLI manages the authored catalog.
 
-```text
-synchro-conformance blackbox --repo-root PATH --mode harness
-```
-
-This command proves that the protocol 3 harness detects and compares typed HTTP behavior. It uses a synthetic reference system. It is not real adapter, extension, or PostgreSQL proof.
-
-The harness output supports harness self-tests. It is not real adapter, extension, or PostgreSQL proof.
-
-Strict real protocol 3 black-box execution is unavailable. The `blackbox --mode strict` command fails closed.
+The removed synthetic HTTP wrapper used the reference model for both expected and observed results.
+Its fault classes remain covered by the independent checker controls and real protocol tests.
+The `reference/` and `modelrunner/` interpreters and their model-only Make target are removed.
+The existing deletion-contract tables retain every original check and its proof home or reason for retirement.
 
 ## Fixture Format
 
@@ -153,6 +159,8 @@ Use structured results for required gates. Skipped, filtered, and zero-test resu
 
 Soak wire records preserve the original request and response from each exchange.
 Cursor issuance and later acknowledgment use separate exchange identities.
+WAL records and durable progress share one read-only repeatable-read observation transaction.
+Worker and replication-slot status remain live observations.
 The live server soak executes response loss on push or pull and WAL-worker replay interruption.
 Its in-memory client is reference state, not native process-recovery evidence.
 Native recovery remains covered by the real native scenario gates.

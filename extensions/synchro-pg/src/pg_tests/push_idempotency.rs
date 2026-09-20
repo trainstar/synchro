@@ -30,6 +30,11 @@
         );
         let first = execute_push(user_id, &request);
         assert_eq!(first.json["accepted"][0]["status"], "applied");
+        Spi::run_with_args(
+            "UPDATE test_orders SET title = 'later authority' WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .expect("change source authority after the completed push");
         let source_before = source_wire_record("test_orders", record_id);
         let fence_count_before: Option<i64> = Spi::get_one_with_args(
             "SELECT count(*) FROM sync_write_fences WHERE user_id = $1 AND client_id = $2",

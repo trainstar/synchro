@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -314,16 +313,16 @@ func (c *RebuildCardinalityCoordinator) Prepare(ctx context.Context) error {
 	if err := c.config.Controller.Install(ctx, c.config.Scenario.Model.Setup[0]); err != nil {
 		return fmt.Errorf("install React Native rebuild-cardinality contract: %w", err)
 	}
-	model, err := modelrunner.RunScenario(ctx, c.config.Scenario)
+	inputs, err := scenarios.BuildRebuildWorkloadInputs(c.config.Scenario)
 	if err != nil {
 		return fmt.Errorf("derive React Native rebuild-cardinality source operations: %w", err)
 	}
-	if !model.Passed || len(model.Steps) != len(c.config.Scenario.Steps) {
-		return errors.New("authored rebuild-cardinality model did not close all workload steps")
+	if len(inputs) != len(c.config.Scenario.Steps) {
+		return errors.New("authored rebuild-cardinality inputs do not cover all workload steps")
 	}
 	for index, step := range c.config.Scenario.Steps {
-		if model.Steps[index].StepID != step.ID {
-			return fmt.Errorf("React Native rebuild-cardinality model step %s is bound to %s", step.ID, model.Steps[index].StepID)
+		if inputs[index].StepID != step.ID {
+			return fmt.Errorf("React Native rebuild-cardinality input step %s is bound to %s", step.ID, inputs[index].StepID)
 		}
 		workload, err := decodeRebuildCardinalityWorkload(step)
 		if err != nil {
@@ -331,7 +330,7 @@ func (c *RebuildCardinalityCoordinator) Prepare(ctx context.Context) error {
 		}
 		c.steps = append(c.steps, step)
 		c.workloads = append(c.workloads, workload)
-		c.expanded = append(c.expanded, model.Steps[index].Expanded)
+		c.expanded = append(c.expanded, inputs[index].Operations)
 		if c.config.AuthToken != "" {
 			c.authTokens[step.NativeBinding.ClientID] = c.config.AuthToken
 			continue
@@ -792,25 +791,14 @@ func (c *RebuildCardinalityCoordinator) executeSource(ctx context.Context, opera
 	}
 	pageCount := 0
 	commitSeen, materializeSeen := false, false
-	stageSeen, activateSeen := false, false
 	beginSeen, requestSeen := false, false
 	applySeen, finalizeSeen := false, false
 	currentRebuildID := ""
 	for _, operation := range operations {
 		key := scenarios.OperationKey(operation)
 		switch key {
-		case "model/stage-registry-membership-generation":
-			if stageSeen || commitSeen || materializeSeen || beginSeen {
-				return fmt.Errorf("React Native rebuild-cardinality step %s membership stage is out of order", step.ID)
-			}
-			stageSeen = true
-		case "model/activate-registry-membership-generation":
-			if !stageSeen || activateSeen || commitSeen || materializeSeen || beginSeen {
-				return fmt.Errorf("React Native rebuild-cardinality step %s membership activation is out of order", step.ID)
-			}
-			activateSeen = true
 		case "model/commit-source-transaction":
-			if commitSeen || materializeSeen || beginSeen || stageSeen && !activateSeen {
+			if commitSeen || materializeSeen || beginSeen {
 				return fmt.Errorf("React Native rebuild-cardinality step %s source commit is out of order", step.ID)
 			}
 			if err := validateRebuildCardinalityCommit(operation, prior, workload.RecordCount); err != nil {
@@ -903,9 +891,9 @@ func (c *RebuildCardinalityCoordinator) executeSource(ctx context.Context, opera
 		}
 	}
 	wantPages := int((workload.RecordCount + workload.PageSize - 1) / workload.PageSize)
-	if stageSeen != activateSeen || !commitSeen || !materializeSeen || !beginSeen || !applySeen || !finalizeSeen ||
+	if !commitSeen || !materializeSeen || !beginSeen || !applySeen || !finalizeSeen ||
 		requestSeen || pageCount != wantPages {
-		return fmt.Errorf("React Native rebuild-cardinality step %s source expansion is incomplete: pages=%d want=%d staged=%t activated=%t committed=%t materialized=%t begun=%t applied=%t finalized=%t request_pending=%t", step.ID, pageCount, wantPages, stageSeen, activateSeen, commitSeen, materializeSeen, beginSeen, applySeen, finalizeSeen, requestSeen)
+		return fmt.Errorf("React Native rebuild-cardinality step %s source expansion is incomplete: pages=%d want=%d committed=%t materialized=%t begun=%t applied=%t finalized=%t request_pending=%t", step.ID, pageCount, wantPages, commitSeen, materializeSeen, beginSeen, applySeen, finalizeSeen, requestSeen)
 	}
 	return nil
 }

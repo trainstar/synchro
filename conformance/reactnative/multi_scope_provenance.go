@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
-	"github.com/trainstar/synchro/conformance/modelrunner"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -231,12 +230,6 @@ func (c *MultiScopeProvenanceCoordinator) Prepare(ctx context.Context) error {
 			return errors.New("mint React Native multi-scope provenance adapter bearer token")
 		}
 		c.authTokens[call.key] = token
-	}
-	modelScenario := c.config.Scenario
-	modelScenario.Model.ExpectedState = multiScopeProvenanceSemanticExpectations(modelScenario.Model.ExpectedState)
-	model, err := modelrunner.RunScenario(ctx, modelScenario)
-	if err != nil || !model.Passed || len(model.Steps) != len(c.config.Scenario.Steps) {
-		return errors.New("validate React Native multi-scope provenance authored model")
 	}
 	if err := c.config.Controller.Install(ctx, c.config.Scenario.Model.Setup[0]); err != nil {
 		return fmt.Errorf("install React Native multi-scope provenance contract: %w", err)
@@ -965,16 +958,6 @@ func multiScopeProvenanceExpected(scenario scenarios.Scenario) *scenarios.StateF
 	}
 	return nil
 }
-func multiScopeProvenanceSemanticExpectations(values []scenarios.ModelExpectation) []scenarios.ModelExpectation {
-	result := make([]scenarios.ModelExpectation, 0, len(values))
-	for _, value := range values {
-		if value.Predicate.Name != "performance-contract-satisfied" {
-			result = append(result, value)
-		}
-	}
-	return result
-}
-
 func validateMultiScopeProvenanceCapture(capture finalCapture) error {
 	if _, err := decodeRows(capture.Rows); err != nil {
 		return err

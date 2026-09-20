@@ -2253,6 +2253,30 @@ mod tests {
     }
 
     #[test]
+    fn connect_wire_requires_known_scopes_for_fresh_and_continuing_clients() {
+        for continuing in [false, true] {
+            let mut wire = serde_json::json!({
+                "client_id": "test-device",
+                "platform": "android",
+                "app_version": "0.3.0",
+                "protocol_version": 3,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {}
+            });
+            if continuing {
+                wire["client_generation"] = serde_json::json!(1);
+                wire["schema"] = serde_json::json!({ "version": 1, "hash": HASH_A });
+                wire["scope_set_version"] = serde_json::json!(1);
+            }
+            let valid: ConnectRequest = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(valid.validate(), Ok(()));
+            wire.as_object_mut().unwrap().remove("known_scopes");
+            assert!(serde_json::from_value::<ConnectRequest>(wire).is_err());
+        }
+    }
+
+    #[test]
     fn push_request_rejects_invalid_uuid_duplicate_identity_and_operation_shapes() {
         let mut request = push_request();
         request.batch_id = "018F2B5E-7C42-7A1D-9D31-8A95BD674001".into();
@@ -3112,6 +3136,15 @@ mod tests {
 
         let continuing = continuing_connect_request();
         assert_eq!(continuing.validate(), Ok(()));
+        for generation in [0, 9_007_199_254_740_992] {
+            let mut invalid = continuing.clone();
+            invalid.client_generation = Some(generation);
+            assert!(invalid.validate().is_err());
+        }
+        let mut empty_scope = continuing.clone();
+        empty_scope.known_scopes =
+            BTreeMap::from([(String::new(), ScopeCursorRef { cursor: None })]);
+        assert!(empty_scope.validate().is_err());
         let mut reset_with_generation = continuing.clone();
         reset_with_generation.schema_reset = Some(true);
         assert_eq!(reset_with_generation.validate(), Ok(()));
@@ -3338,12 +3371,18 @@ mod tests {
             limit: 100,
         };
         assert_eq!(pull.validate(), Ok(()));
+        let mut wire = serde_json::to_value(&pull).unwrap();
+        let decoded: PullRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.validate(), Ok(()));
+        wire.as_object_mut().unwrap().remove("scopes").unwrap();
+        assert!(serde_json::from_value::<PullRequest>(wire).is_err());
         for kind in [
             "client",
             "generation",
             "schema",
             "scope-version",
             "scope",
+            "scope-id",
             "limit",
         ] {
             let mut value = pull.clone();
@@ -3354,6 +3393,10 @@ mod tests {
                 "scope-version" => value.scope_set_version = -1,
                 "scope" => {
                     value.scopes.get_mut("documents_shared").unwrap().cursor = Some(String::new())
+                }
+                "scope-id" => {
+                    value.scopes =
+                        BTreeMap::from([(String::new(), ScopeCursorRef { cursor: None })])
                 }
                 _ => value.limit = 0,
             }

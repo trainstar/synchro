@@ -461,7 +461,6 @@
     "proofType": {
       "type": "string",
       "enum": [
-        "reference-model",
         "server-black-box",
         "native-e2e",
         "fault-injection",

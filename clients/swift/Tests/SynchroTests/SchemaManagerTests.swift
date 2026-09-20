@@ -1335,6 +1335,17 @@ final class SchemaManagerTests: XCTestCase {
         let recovered = try XCTUnwrap(recoveredManager.recoverMigrationIfNeeded())
 
         XCTAssertEqual(recovered.phase, .applied)
+        XCTAssertEqual(recovered.action, .replace)
+        XCTAssertEqual(recovered.source, SchemaRef(version: 1, hash: sourceManifest.schemaHash))
+        XCTAssertEqual(recovered.target, SchemaRef(version: 2, hash: targetManifest.schemaHash))
+        XCTAssertEqual(
+            try recoveredDatabase.readTransaction { try SynchroMeta.getInt64($0, key: .schemaVersion) },
+            2
+        )
+        XCTAssertEqual(
+            try recoveredDatabase.readTransaction { try SynchroMeta.get($0, key: .schemaHash) },
+            targetManifest.schemaHash
+        )
         XCTAssertTrue(try recoveredDatabase.query("PRAGMA table_info(orders)", params: nil)
             .contains { ($0["name"] as String?) == "notes" })
         XCTAssertEqual(

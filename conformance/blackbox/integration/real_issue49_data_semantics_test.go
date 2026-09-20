@@ -351,6 +351,77 @@ func TestRealIssue49PortableIntegerBoundariesAndCounterOverflow(t *testing.T) {
 		if overflowErr == nil || retainedVersion != maximumSafeInteger || overflowScopeCount != 0 {
 			t.Fatalf("server counter allocated outside the portable range: err=%v version=%d scope_count=%d", overflowErr, retainedVersion, overflowScopeCount)
 		}
+		if _, err := database.ExecContext(ctx, `
+			UPDATE synchro.sync_clients SET accepted_write_epoch = $1
+			WHERE user_id = 'diagnostic-user' AND client_id = $2`, maximumSafeInteger, client.ID); err != nil {
+			t.Fatalf("stage maximum safe accepted-write epoch: %v", err)
+		}
+		recordID := "00000000-0000-4000-8d00-000000000050"
+		table := requireRealTable(t, client, "cf_items")
+		ownerField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id")
+		pushRequest := phase4PushPayload(
+			client, "00000000-0000-4000-8d00-000000000051",
+			[]map[string]any{phase4InsertMutation(
+				client, table, ownerField, "00000000-0000-4000-8d00-000000000052", recordID, "epoch-overflow",
+			)},
+		)
+		pushStatus, pushed := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", pushRequest)
+		requireRealProtocolError(t, pushStatus, pushed, http.StatusInternalServerError, "sync_integrity_failure")
+		pushState, err := harness.Operator().ObserveDiagnosticPush(ctx, client.ID, []string{recordID})
+		if err != nil {
+			t.Fatalf("observe rejected accepted-write epoch allocation: %v", err)
+		}
+		if pushState.AcceptedWriteEpoch != maximumSafeInteger || pushState.BatchCount != 0 ||
+			pushState.MutationCount != 0 || pushState.SourceRowCount != 0 {
+			t.Fatalf("accepted-write epoch overflow committed partial work: %#v", pushState)
+		}
+		if _, err := database.ExecContext(ctx, `
+			UPDATE synchro.sync_clients SET accepted_write_epoch = $1
+			WHERE user_id = 'diagnostic-user' AND client_id = $2`, maximumSafeInteger-1, client.ID); err != nil {
+			t.Fatalf("stage the last legal accepted-write epoch increment: %v", err)
+		}
+		pushStatus, pushed = postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", pushRequest)
+		if pushStatus != http.StatusOK || len(requireOutcomeList(t, pushed, "accepted")) != 1 {
+			t.Fatalf("last legal accepted-write epoch increment failed: status=%d response=%#v", pushStatus, pushed)
+		}
+		pushState, err = harness.Operator().ObserveDiagnosticPush(ctx, client.ID, []string{recordID})
+		if err != nil || pushState.AcceptedWriteEpoch != maximumSafeInteger || pushState.BatchCount != 1 ||
+			pushState.MutationCount != 1 || pushState.SourceRowCount != 1 {
+			t.Fatalf("last legal accepted-write epoch increment did not commit once: state=%#v err=%v", pushState, err)
+		}
+		if _, err := database.ExecContext(ctx, `
+			UPDATE synchro.sync_clients
+			SET client_generation = $1, generation_expires_at = clock_timestamp()
+			WHERE user_id = 'diagnostic-user' AND client_id = $2`, maximumSafeInteger-1, client.ID); err != nil {
+			t.Fatalf("stage the last legal client generation increment: %v", err)
+		}
+		request := map[string]any{
+			"client_id": client.ID, "client_generation": maximumSafeInteger - 1,
+			"platform": "conformance", "app_version": "0.3.0", "protocol_version": 3,
+			"schema": client.Schema, "scope_set_version": maximumSafeInteger,
+			"known_scopes": map[string]any{},
+		}
+		maximumStatus, maximumGeneration := postConnect(t, ctx, harness.AdapterURL(), token, request)
+		if maximumStatus != http.StatusOK || maximumGeneration["client_generation"] != float64(maximumSafeInteger) {
+			t.Fatalf("last legal client generation increment failed: status=%d response=%#v", maximumStatus, maximumGeneration)
+		}
+		request["client_generation"] = maximumSafeInteger
+		if _, err := database.ExecContext(ctx, `
+			UPDATE synchro.sync_clients SET generation_expires_at = clock_timestamp()
+			WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID); err != nil {
+			t.Fatalf("expire maximum safe client generation: %v", err)
+		}
+		renewalStatus, renewal := postConnect(t, ctx, harness.AdapterURL(), token, request)
+		requireRealProtocolError(t, renewalStatus, renewal, http.StatusInternalServerError, "sync_integrity_failure")
+		var retainedGeneration int64
+		if err := database.QueryRowContext(ctx, `
+			SELECT client_generation FROM synchro.sync_clients
+			WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID).Scan(&retainedGeneration); err != nil {
+			t.Fatalf("observe rejected client generation allocation: %v", err)
+		}
+		if retainedGeneration != maximumSafeInteger {
+			t.Fatalf("rejected renewal changed client generation: %d", retainedGeneration)
+		}
 	})
 }
 
