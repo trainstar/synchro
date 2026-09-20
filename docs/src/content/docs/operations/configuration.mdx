@@ -32,3 +32,36 @@ The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one s
 Each readiness limit must be a positive integer. A zero value makes its readiness check fail with `invalid_limit`.
 
 Use stricter positive limits when your service-level objectives require faster failure detection.
+
+## Development database reinstalls
+
+A running worker does not by itself prove that registry activation succeeded.
+Registrations can commit while the worker is disabled, before its replacement logical slot exists.
+Their original activation messages then precede the new slot boundary.
+Synchro preserves these requests and emits new transactional activation messages when the initial slot binds.
+Normal WAL processing activates the pending generations.
+
+Older builds without this replay can remain at registry generation 1 while later WAL advances.
+Publication readiness then reports `publication_mismatch` because the pending relations are not in the active registry.
+Restarting the already-bound worker does not recover messages that precede its slot.
+Do not force activation by editing internal tables or changing the slot boundary.
+
+The procedure below applies only to disposable development databases with empty registered source tables.
+It deletes synchronization metadata, schema identities, cursor keys, and client registrations.
+It is not a production upgrade or a data-preserving recovery procedure.
+Use current, matching extension library and SQL artifacts.
+
+1. Stop application writes.
+2. Set `synchro.auto_start = off`.
+3. Restart PostgreSQL.
+4. Verify that the configured replication slot is inactive.
+5. Drop that inactive slot.
+6. Recreate `synchro_pg` and its configured explicit publication in one transaction.
+7. Restore the application's grants, policies, projection views, membership functions, and registrations.
+8. Set `synchro.auto_start = on`.
+9. Restart PostgreSQL.
+10. Verify canonical readiness, no pending registry generations, and matching active and worker registry generations.
+11. Verify that a new source write reaches a reinitialized test client.
+
+Nonempty relations require the [projection bootstrap procedure](/synchro/spec/05-schema-evolution/).
+Their pending generations must not activate until the existing-data baseline and required WAL catch-up have been verified.
