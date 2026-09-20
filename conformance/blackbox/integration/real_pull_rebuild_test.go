@@ -373,11 +373,42 @@ func TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary(t *testing.T) {
 	assertCheckpointMapsEqual(t, beforeInvalidPull, observeCheckpointMap(t, ctx, harness, client.ID))
 	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 	beforeRebuild := observeCheckpointMap(t, ctx, harness, client.ID)
+	admin := openIssue49Admin(t, ctx, harness)
+	var acknowledgedAt time.Time
+	if err := admin.QueryRowContext(ctx, `
+		SELECT last_acknowledged_at FROM synchro.sync_clients
+		WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID,
+	).Scan(&acknowledgedAt); err != nil {
+		t.Fatalf("observe acknowledged client activity: %v", err)
+	}
+	connectRequest := map[string]any{
+		"client_id": client.ID, "client_generation": client.Generation,
+		"platform": "conformance", "app_version": "0.3.0", "protocol_version": 3,
+		"schema": client.Schema, "scope_set_version": client.ScopeSetVersion, "known_scopes": client.Scopes,
+	}
+	status, connected := postConnect(t, ctx, harness.AdapterURL(), token, connectRequest)
+	if status != http.StatusOK {
+		t.Fatalf("current-schema reconnect failed: status=%d response=%#v", status, connected)
+	}
+	assertCheckpointMapsEqual(t, beforeRebuild, observeCheckpointMap(t, ctx, harness, client.ID))
+	connectRequest["scope_set_version"] = client.ScopeSetVersion + 1
+	status, futureScope := postConnect(t, ctx, harness.AdapterURL(), token, connectRequest)
+	requireRealProtocolError(t, status, futureScope, http.StatusBadRequest, "invalid_request")
+	assertCheckpointMapsEqual(t, beforeRebuild, observeCheckpointMap(t, ctx, harness, client.ID))
+	var afterConnectActivity time.Time
+	if err := admin.QueryRowContext(ctx, `
+		SELECT last_acknowledged_at FROM synchro.sync_clients
+		WHERE user_id = 'diagnostic-user' AND client_id = $1`, client.ID,
+	).Scan(&afterConnectActivity); err != nil {
+		t.Fatalf("observe client activity after reconnect controls: %v", err)
+	}
+	if !afterConnectActivity.Equal(acknowledgedAt) {
+		t.Fatal("connect changed acknowledged client activity")
+	}
 
 	rebuildID := "00000000-0000-4000-8000-00000000b221"
 	status, invalidRebuild := requestRealRebuildPage(t, ctx, harness, token, client, "user:diagnostic-user", rebuildID, nil, 1001)
 	requireRealProtocolError(t, status, invalidRebuild, http.StatusBadRequest, "invalid_request")
-	admin := openIssue49Admin(t, ctx, harness)
 	var invalidSessions int
 	if err := admin.QueryRowContext(ctx, `
 		SELECT count(*) FROM synchro.sync_rebuild_sessions
