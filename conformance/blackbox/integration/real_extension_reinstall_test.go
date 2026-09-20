@@ -135,7 +135,6 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 	}
 	waitForRealWALEffects(t, ctx, harness, "cf_items", 2, afterID)
 
-	admin := openIssue49Admin(t, ctx, harness)
 	for index, cycle := range []struct {
 		name          string
 		disableReplay bool
@@ -145,6 +144,7 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 		{"repeated reinstall", false},
 	} {
 		if !t.Run(cycle.name, func(t *testing.T) {
+			admin := openIssue49Admin(t, ctx, harness)
 			priorPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
 			if err != nil {
 				t.Fatalf("observe worker before cold reinstall: %v", err)
@@ -156,9 +156,13 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 			if _, err := admin.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'off'"); err != nil {
 				t.Fatalf("disable worker for cold reinstall: %v", err)
 			}
+			if err := admin.Close(); err != nil {
+				t.Fatalf("close administrator connection before worker detachment: %v", err)
+			}
 			if err := harness.RestartPostgres(ctx); err != nil {
 				t.Fatalf("restart isolated PostgreSQL without worker: %v", err)
 			}
+			admin = openIssue49Admin(t, ctx, harness)
 			if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", harness.Names().ReplicationSlot); err != nil {
 				t.Fatalf("drop inactive prior slot: %v", err)
 			}
@@ -208,9 +212,13 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 			if _, err := admin.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'on'"); err != nil {
 				t.Fatalf("enable reinstalled worker: %v", err)
 			}
+			if err := admin.Close(); err != nil {
+				t.Fatalf("close administrator connection before worker startup: %v", err)
+			}
 			if err := harness.RestartPostgres(ctx); err != nil {
 				t.Fatalf("restart isolated PostgreSQL with worker: %v", err)
 			}
+			admin = openIssue49Admin(t, ctx, harness)
 			cold := blackbox.ExtensionReinstallResult{PriorWorkerPID: priorPID, ReinstallLSN: registrationLSN}
 			if cycle.disableReplay {
 				bound := false
