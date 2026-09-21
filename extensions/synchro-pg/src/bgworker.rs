@@ -18,6 +18,7 @@ use crate::registry::{
     load_registry_generation_for_worker, load_registry_generation_from_client,
     MembershipDependency, RegistrationKind, TableRegistration,
 };
+use crate::spi_helpers::{jsonb_batches, jsonb_payload_parameters, required_record_id};
 use crate::wal_decoder::{
     ColumnInfo, RelationKey, TupleImage, TupleValue, WalDecoder, WalEvent, WalTransaction,
     BEGIN_MSG, MAX_TRANSACTION_BYTES,
@@ -2629,9 +2630,7 @@ fn candidate_membership_records(
 ) -> Result<Vec<CandidateMembershipRecord>, String> {
     let mut records = Vec::with_capacity(rows.len());
     for row in rows {
-        let record_id = optional_text(&row, "record_id")?
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "candidate membership row identity is missing".to_string())?;
+        let record_id = required_record_id(&row)?;
         let row_version = optional_text(&row, "row_version")?
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "candidate membership row version is missing".to_string())?;
@@ -4095,26 +4094,25 @@ fn validate_fence_rows(
           AND (fence.transaction_xid::text::numeric % 4294967296) = $2
           AND {coverage_predicate}"
     );
-    let mut values = vec![
-        pgrx::JsonB(serde_json::Value::Array(rows.to_vec())).into(),
-        i64::from(transaction.xid).into(),
-    ];
     let commit_lsn = format_lsn(transaction.commit_lsn);
-    if let FenceTarget::Candidate {
-        source_stream_generation,
-        source_registry_generation,
-        target_registry_generation,
-    } = target
-    {
-        values.extend([
-            source_stream_generation.into(),
-            commit_lsn.as_str().into(),
-            source_registry_generation.into(),
-            target_registry_generation.into(),
-        ]);
-    }
     for batch in rows.chunks(JSONB_BATCH_SIZE) {
-        values[0] = pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into();
+        let mut values = vec![
+            pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+            i64::from(transaction.xid).into(),
+        ];
+        if let FenceTarget::Candidate {
+            source_stream_generation,
+            source_registry_generation,
+            target_registry_generation,
+        } = target
+        {
+            values.extend([
+                source_stream_generation.into(),
+                commit_lsn.as_str().into(),
+                source_registry_generation.into(),
+                target_registry_generation.into(),
+            ]);
+        }
         let count = client
             .select(&query, None, &values)
             .map_err(|_| "loading fence failed".to_string())?
@@ -4528,26 +4526,23 @@ fn convert_capture_dependency_key_batches(
         );
         let query = format!(
             "SELECT input.item_index, to_jsonb(projected) AS row_data
-             FROM jsonb_to_recordset($1::jsonb) AS input(item_index bigint, raw jsonb)
+             FROM unnest($1::bigint[], $2::jsonb[]) AS input(item_index, raw)
              CROSS JOIN LATERAL jsonb_populate_record(NULL::{relation}, input.raw) AS projected
              ORDER BY input.item_index"
         );
-        for batch in indexes.chunks(JSONB_BATCH_SIZE) {
-            let input = batch
+        for batch in jsonb_batches(&indexes, JSONB_BATCH_SIZE, |index| &pending[*index].raw)? {
+            let item_indexes = batch
                 .iter()
                 .map(|index| {
-                    serde_json::json!({
-                        "item_index": i64::try_from(*index).unwrap_or(i64::MAX),
-                        "raw": pending[*index].raw.clone(),
-                    })
+                    i64::try_from(*index).map_err(|_| "capture key index is invalid".to_string())
                 })
+                .collect::<Result<Vec<_>, _>>()?;
+            let payloads = batch
+                .iter()
+                .map(|index| pgrx::JsonB(pending[*index].raw.clone()))
                 .collect::<Vec<_>>();
             let rows = client
-                .select(
-                    &query,
-                    None,
-                    &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
-                )
+                .select(&query, None, &[item_indexes.into(), payloads.into()])
                 .map_err(|_| "canonicalizing capture dependency key batch failed".to_string())?;
             if rows.len() != batch.len() {
                 return Err("canonical capture dependency key batch count differs".to_string());
@@ -4634,27 +4629,24 @@ fn convert_synced_after_batches(
         );
         let query = format!(
             "SELECT input.item_index, {} AS row_data
-             FROM jsonb_to_recordset($1::jsonb) AS input(item_index bigint, raw jsonb)
+             FROM unnest($1::bigint[], $2::jsonb[]) AS input(item_index, raw)
              CROSS JOIN LATERAL jsonb_populate_record(NULL::{relation}, input.raw) AS projected
              ORDER BY input.item_index",
             crate::pull::synced_row_projection_sql(registration, "projected"),
         );
-        for batch in indexes.chunks(JSONB_BATCH_SIZE) {
-            let input = batch
+        for batch in jsonb_batches(&indexes, JSONB_BATCH_SIZE, |index| &pending[*index].raw)? {
+            let item_indexes = batch
                 .iter()
                 .map(|index| {
-                    serde_json::json!({
-                        "item_index": i64::try_from(*index).unwrap_or(i64::MAX),
-                        "raw": pending[*index].raw.clone(),
-                    })
+                    i64::try_from(*index).map_err(|_| "captured row index is invalid".to_string())
                 })
+                .collect::<Result<Vec<_>, _>>()?;
+            let payloads = batch
+                .iter()
+                .map(|index| pgrx::JsonB(pending[*index].raw.clone()))
                 .collect::<Vec<_>>();
             let rows = client
-                .select(
-                    &query,
-                    None,
-                    &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
-                )
+                .select(&query, None, &[item_indexes.into(), payloads.into()])
                 .map_err(|_| "canonicalizing captured row batch failed".to_string())?;
             if rows.len() != batch.len() {
                 return Err("canonical captured row batch count differs".to_string());
@@ -4745,26 +4737,23 @@ fn convert_capture_after_batches(
         );
         let query = format!(
             "SELECT input.item_index, to_jsonb(projected) AS row_data
-             FROM jsonb_to_recordset($1::jsonb) AS input(item_index bigint, raw jsonb)
+             FROM unnest($1::bigint[], $2::jsonb[]) AS input(item_index, raw)
              CROSS JOIN LATERAL jsonb_populate_record(NULL::{relation}, input.raw) AS projected
              ORDER BY input.item_index"
         );
-        for batch in indexes.chunks(JSONB_BATCH_SIZE) {
-            let input = batch
+        for batch in jsonb_batches(&indexes, JSONB_BATCH_SIZE, |index| &pending[*index].raw)? {
+            let item_indexes = batch
                 .iter()
                 .map(|index| {
-                    serde_json::json!({
-                        "item_index": i64::try_from(*index).unwrap_or(i64::MAX),
-                        "raw": pending[*index].raw.clone(),
-                    })
+                    i64::try_from(*index).map_err(|_| "capture row index is invalid".to_string())
                 })
+                .collect::<Result<Vec<_>, _>>()?;
+            let payloads = batch
+                .iter()
+                .map(|index| pgrx::JsonB(pending[*index].raw.clone()))
                 .collect::<Vec<_>>();
             let rows = client
-                .select(
-                    &query,
-                    None,
-                    &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
-                )
+                .select(&query, None, &[item_indexes.into(), payloads.into()])
                 .map_err(|_| "canonicalizing capture dependency row batch failed".to_string())?;
             if rows.len() != batch.len() {
                 return Err("canonical capture dependency row batch count differs".to_string());
@@ -4850,7 +4839,11 @@ fn write_synced_projection_batches(
     let ProjectionTarget::Active { stream_generation } = target else {
         return Ok(());
     };
-    for batch in rows.chunks(JSONB_BATCH_SIZE) {
+    for batch in jsonb_batches(rows, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
         let inserted = client
             .update(
                 "INSERT INTO synchro.sync_captured_projections (
@@ -4860,11 +4853,11 @@ fn write_synced_projection_batches(
                  )
                  SELECT $2, $3::pg_lsn, input.event_ordinal, input.relation_id::uuid,
                         input.image_kind, input.registry_generation, input.record_id,
-                        input.row_data, input.row_version::uuid,
+                        ($4::jsonb[])[input.payload_index], input.row_version::uuid,
                         decode(input.checksum_hex, 'hex'), input.deleted
                  FROM jsonb_to_recordset($1::jsonb) AS input(
                      event_ordinal bigint, relation_id text, image_kind text,
-                     registry_generation bigint, record_id text, row_data jsonb,
+                     registry_generation bigint, record_id text, payload_index integer,
                      row_version text, checksum_hex text, deleted boolean
                  )
                  ORDER BY input.event_ordinal,
@@ -4872,9 +4865,10 @@ fn write_synced_projection_batches(
                  RETURNING record_id",
                 None,
                 &[
-                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    metadata.into(),
                     stream_generation.into(),
                     format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
                 ],
             )
             .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
@@ -4895,7 +4889,11 @@ fn write_capture_projection_batches(
     let ProjectionTarget::Active { stream_generation } = target else {
         return Ok(());
     };
-    for batch in rows.chunks(JSONB_BATCH_SIZE) {
+    for batch in jsonb_batches(rows, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
         let inserted = client
             .update(
                 "INSERT INTO synchro.sync_capture_dependency_projections (
@@ -4904,10 +4902,10 @@ fn write_capture_projection_batches(
                  )
                  SELECT $2, $3::pg_lsn, input.event_ordinal, input.relation_id::uuid,
                         input.image_kind, input.registry_generation, input.capture_key,
-                        input.row_data, input.deleted
+                        ($4::jsonb[])[input.payload_index], input.deleted
                  FROM jsonb_to_recordset($1::jsonb) AS input(
                      event_ordinal bigint, relation_id text, image_kind text,
-                     registry_generation bigint, capture_key jsonb, row_data jsonb,
+                     registry_generation bigint, capture_key jsonb, payload_index integer,
                      deleted boolean
                  )
                  ORDER BY input.event_ordinal,
@@ -4915,9 +4913,10 @@ fn write_capture_projection_batches(
                  RETURNING relation_id",
                 None,
                 &[
-                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    metadata.into(),
                     stream_generation.into(),
                     format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
                 ],
             )
             .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
@@ -4936,7 +4935,11 @@ fn write_synced_current_batches(
     upserts: &[serde_json::Value],
     deletes: &[serde_json::Value],
 ) -> Result<(), PoisonFailure> {
-    for batch in upserts.chunks(JSONB_BATCH_SIZE) {
+    for batch in jsonb_batches(upserts, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
         let inserted = match target {
             ProjectionTarget::Active { stream_generation } => client.update(
                 "INSERT INTO synchro.sync_captured_rows (
@@ -4944,11 +4947,11 @@ fn write_synced_current_batches(
                      source_stream_generation, source_commit_lsn, source_event_ordinal,
                      registry_generation, updated_at
                  )
-                 SELECT input.relation_id::uuid, input.record_id, input.row_data,
+                 SELECT input.relation_id::uuid, input.record_id, ($4::jsonb[])[input.payload_index],
                         input.row_version::uuid, decode(input.checksum_hex, 'hex'), input.deleted,
                         $2, $3::pg_lsn, input.event_ordinal, input.registry_generation, now()
                  FROM jsonb_to_recordset($1::jsonb) AS input(
-                     relation_id text, record_id text, row_data jsonb, row_version text,
+                     relation_id text, record_id text, payload_index integer, row_version text,
                      checksum_hex text, deleted boolean, event_ordinal bigint,
                      registry_generation bigint
                  )
@@ -4966,9 +4969,10 @@ fn write_synced_current_batches(
                  RETURNING record_id",
                 None,
                 &[
-                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    metadata.into(),
                     stream_generation.into(),
                     format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
                 ],
             ),
             ProjectionTarget::Candidate {
@@ -4979,11 +4983,11 @@ fn write_synced_current_batches(
                      reset_id, relation_id, record_id, row_data, row_version,
                      checksum, deleted, registry_generation, staged_at
                  )
-                 SELECT $2::uuid, input.relation_id::uuid, input.record_id, input.row_data,
+                 SELECT $2::uuid, input.relation_id::uuid, input.record_id, ($4::jsonb[])[input.payload_index],
                         input.row_version::uuid, decode(input.checksum_hex, 'hex'),
                         input.deleted, $3, now()
                  FROM jsonb_to_recordset($1::jsonb) AS input(
-                     relation_id text, record_id text, row_data jsonb, row_version text,
+                     relation_id text, record_id text, payload_index integer, row_version text,
                      checksum_hex text, deleted boolean, event_ordinal bigint,
                      registry_generation bigint
                  )
@@ -4997,9 +5001,10 @@ fn write_synced_current_batches(
                  RETURNING record_id",
                 None,
                 &[
-                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    metadata.into(),
                     bootstrap_id.into(),
                     registry_generation.into(),
+                    payloads.into(),
                 ],
             ),
         }
@@ -5062,7 +5067,11 @@ fn write_capture_current_batches(
     upserts: &[serde_json::Value],
     deletes: &[serde_json::Value],
 ) -> Result<(), PoisonFailure> {
-    for batch in upserts.chunks(JSONB_BATCH_SIZE) {
+    for batch in jsonb_batches(upserts, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
         let inserted = match target {
             ProjectionTarget::Active { stream_generation } => client.update(
                 "INSERT INTO synchro.sync_capture_dependency_rows (
@@ -5070,11 +5079,11 @@ fn write_capture_current_batches(
                      source_stream_generation, source_commit_lsn, source_event_ordinal,
                      source_reset_id, registry_generation, updated_at
                  )
-                 SELECT input.relation_id::uuid, input.capture_key, input.row_data, false,
+                 SELECT input.relation_id::uuid, input.capture_key, ($4::jsonb[])[input.payload_index], false,
                         $2, $3::pg_lsn, input.event_ordinal, NULL,
                         input.registry_generation, now()
                  FROM jsonb_to_recordset($1::jsonb) AS input(
-                     relation_id text, capture_key jsonb, row_data jsonb,
+                     relation_id text, capture_key jsonb, payload_index integer,
                      event_ordinal bigint, registry_generation bigint
                  )
                  ON CONFLICT (relation_id, capture_key) DO UPDATE SET
@@ -5089,9 +5098,10 @@ fn write_capture_current_batches(
                  RETURNING relation_id",
                 None,
                 &[
-                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    metadata.into(),
                     stream_generation.into(),
                     format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
                 ],
             ),
             ProjectionTarget::Candidate {
@@ -5103,9 +5113,9 @@ fn write_capture_current_batches(
                      registry_generation, staged_at
                  )
                  SELECT $2::uuid, input.relation_id::uuid, input.capture_key,
-                        input.row_data, false, $3, now()
+                        ($4::jsonb[])[input.payload_index], false, $3, now()
                  FROM jsonb_to_recordset($1::jsonb) AS input(
-                     relation_id text, capture_key jsonb, row_data jsonb,
+                     relation_id text, capture_key jsonb, payload_index integer,
                      event_ordinal bigint, registry_generation bigint
                  )
                  ON CONFLICT (reset_id, relation_id, capture_key) DO UPDATE SET
@@ -5116,9 +5126,10 @@ fn write_capture_current_batches(
                  RETURNING relation_id",
                 None,
                 &[
-                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    metadata.into(),
                     bootstrap_id.into(),
                     registry_generation.into(),
+                    payloads.into(),
                 ],
             ),
         }
@@ -5466,7 +5477,7 @@ fn fold_and_persist_projection_rows(
             .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
         if event.registration.is_synced() {
             let key = (registration_index, event.record_id.clone());
-            let prior = synced_states.get(&key).cloned().flatten();
+            let prior = synced_states.remove(&key).flatten();
             match event.event.operation {
                 ChangeOperation::Insert if prior.is_some() => {
                     return Err(failure("projection_write_failed", transaction.commit_lsn));
@@ -5533,7 +5544,7 @@ fn fold_and_persist_projection_rows(
             capture_key_identity(&capture_key)
                 .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
         );
-        let prior = capture_states.get(&key).cloned().flatten();
+        let prior = capture_states.remove(&key).flatten();
         match event.event.operation {
             ChangeOperation::Insert if prior.is_some() => {
                 return Err(failure("projection_write_failed", transaction.commit_lsn));

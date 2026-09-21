@@ -1304,6 +1304,29 @@ fn membership_accepts_empty_string_primary_key() {
         changes[0]["row"].get(field_id("test_empty_string_pk", "value")),
         Some(&json!("empty key"))
     );
+    let backfill: pgrx::JsonB = Spi::get_one(
+        "SELECT synchro_backfill_bucket_edges('test_empty_string_pk', 1)",
+    )
+    .expect("backfill the empty primary key")
+    .expect("empty primary-key backfill response");
+    assert_eq!(backfill.0["records"], 1);
+    assert_eq!(backfill.0["edges"], 1);
+
+    configure_reset_test_slot("synchro_empty_key_old");
+    let prepared = prepare_reset_for_test("synchro_empty_key_candidate");
+    let id = reset_id(&prepared);
+    lock_and_stage_reset(&id, "synchro_empty_key_candidate");
+    let staged: i64 = Spi::get_one_with_args(
+        "SELECT count(*) FROM synchro.sync_stream_reset_membership_edges
+         WHERE reset_id = $1::uuid AND table_name = 'test_empty_string_pk'
+           AND record_id = '' AND scope_id = 'global'",
+        &[id.as_str().into()],
+    )
+    .expect("read the staged empty primary key")
+    .expect("staged empty primary-key count");
+    assert_eq!(staged, 1);
+    Spi::connect_mut(|client| crate::stream_reset::abort_stream_reset_for_test(client, &id))
+        .expect("abort empty primary-key reset");
 }
 
 #[pg_test]

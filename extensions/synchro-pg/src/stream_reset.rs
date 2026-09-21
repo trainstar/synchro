@@ -13,6 +13,7 @@ use crate::registry::{
     acquire_registry_write_lock, load_registry_generation_from_client, qualified_relation_name,
     TableRegistration,
 };
+use crate::spi_helpers::{jsonb_batches, jsonb_payload_parameters, required_record_id};
 
 const MAX_SLOT_NAME_BYTES: usize = 63;
 const MAX_SNAPSHOT_NAME_BYTES: usize = 128;
@@ -2103,7 +2104,7 @@ fn stage_registration(
         let mut versions = HashMap::with_capacity(rows.len());
         for row in rows {
             versions.insert(
-                required_text(&row, "record_id")?,
+                required_record_id(&row)?,
                 (
                     required_text(&row, "row_version")?,
                     required_bool(&row, "deleted")?,
@@ -2136,32 +2137,36 @@ fn stage_registration(
                 "deleted": deleted,
             }));
         }
-        let inserted = client
-            .update(
-                "INSERT INTO synchro.sync_stream_reset_captured_rows (
+        for batch in jsonb_batches(&captured, STAGING_BATCH_SIZE as usize, |row| row)? {
+            let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")?;
+            let inserted = client
+                .update(
+                    "INSERT INTO synchro.sync_stream_reset_captured_rows (
                      reset_id, relation_id, record_id, row_data, row_version,
                      checksum, deleted, registry_generation
                  )
-                 SELECT $1::uuid, $2::uuid, input.record_id, input.row_data,
+                 SELECT $1::uuid, $2::uuid, input.record_id, ($5::jsonb[])[input.payload_index],
                         input.row_version::uuid, decode(input.checksum, 'hex'),
                         input.deleted, $3
                  FROM jsonb_to_recordset($4::jsonb) AS input(
-                     record_id text, row_data jsonb, row_version text,
+                     record_id text, payload_index integer, row_version text,
                      checksum text, deleted boolean
                  )
                  RETURNING record_id",
-                None,
-                &[
-                    reset.reset_id.as_str().into(),
-                    registration.relation_id.as_str().into(),
-                    reset.staging_registry_generation()?.into(),
-                    pgrx::JsonB(captured.into()).into(),
-                ],
-            )
-            .map_err(|_| "staging captured rows failed".to_string())?
-            .len();
-        if inserted != sources.len() {
-            return Err("captured row stage is incomplete".to_string());
+                    None,
+                    &[
+                        reset.reset_id.as_str().into(),
+                        registration.relation_id.as_str().into(),
+                        reset.staging_registry_generation()?.into(),
+                        metadata.into(),
+                        payloads.into(),
+                    ],
+                )
+                .map_err(|_| "staging captured rows failed".to_string())?
+                .len();
+            if inserted != batch.len() {
+                return Err("captured row stage is incomplete".to_string());
+            }
         }
         after = sources.last().map(|source| source.record_id.clone());
     }
@@ -2188,27 +2193,31 @@ fn stage_capture_dependency_registration(
                 })
             })
             .collect::<Vec<_>>();
-        let inserted = client
-            .update(
-                "INSERT INTO synchro.sync_stream_reset_capture_dependency_rows (
+        for batch in jsonb_batches(&input, STAGING_BATCH_SIZE as usize, |row| row)? {
+            let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")?;
+            let inserted = client
+                .update(
+                    "INSERT INTO synchro.sync_stream_reset_capture_dependency_rows (
                      reset_id, relation_id, capture_key, row_data, deleted,
                      registry_generation
                  )
-                 SELECT $1::uuid, $2::uuid, input.capture_key, input.row_data, false, $3
-                 FROM jsonb_to_recordset($4::jsonb) AS input(capture_key jsonb, row_data jsonb)
+                 SELECT $1::uuid, $2::uuid, input.capture_key, ($5::jsonb[])[input.payload_index], false, $3
+                 FROM jsonb_to_recordset($4::jsonb) AS input(capture_key jsonb, payload_index integer)
                  RETURNING capture_key",
-                None,
-                &[
-                    reset.reset_id.as_str().into(),
-                    registration.relation_id.as_str().into(),
-                    reset.staging_registry_generation()?.into(),
-                    pgrx::JsonB(input.into()).into(),
-                ],
-            )
-            .map_err(|_| "staging capture dependency rows failed".to_string())?
-            .len();
-        if inserted != sources.len() {
-            return Err("capture dependency stage is incomplete".to_string());
+                    None,
+                    &[
+                        reset.reset_id.as_str().into(),
+                        registration.relation_id.as_str().into(),
+                        reset.staging_registry_generation()?.into(),
+                        metadata.into(),
+                        payloads.into(),
+                    ],
+                )
+                .map_err(|_| "staging capture dependency rows failed".to_string())?
+                .len();
+            if inserted != batch.len() {
+                return Err("capture dependency stage is incomplete".to_string());
+            }
         }
         after = sources.last().map(|source| source.record_id.clone());
     }
@@ -2262,7 +2271,7 @@ fn stage_registration_membership(
             .map_err(|_| "loading staged membership rows failed".to_string())?;
         let record_ids = rows
             .into_iter()
-            .map(|row| required_text(&row, "record_id"))
+            .map(|row| required_record_id(&row))
             .collect::<Result<Vec<_>, _>>()?;
         if record_ids.is_empty() {
             break;
@@ -2342,7 +2351,7 @@ fn load_source_rows(
         .map_err(|_| "loading registered source rows failed".to_string())?;
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
-        let record_id = required_text(&row, "record_id")?;
+        let record_id = required_record_id(&row)?;
         let encoded = required_text(&row, "row_data")?;
         let mut row_data: serde_json::Value = serde_json::from_str(&encoded)
             .map_err(|_| "registered source row is invalid".to_string())?;
@@ -2416,7 +2425,7 @@ fn load_capture_dependency_source_rows(
             return Err("capture dependency source key is incomplete".to_string());
         }
         result.push(CaptureDependencySourceRow {
-            record_id: required_text(&row, "record_id")?,
+            record_id: required_record_id(&row)?,
             capture_key: capture_key.into(),
             row_data: row_data.into(),
         });
@@ -2776,7 +2785,7 @@ fn verify_source_projection(
                 .map_err(|_| "loading staged projections failed".to_string())?;
             let mut staged = HashMap::with_capacity(rows.len());
             for row in rows {
-                staged.insert(required_text(&row, "record_id")?, row);
+                staged.insert(required_record_id(&row)?, row);
             }
             if staged.len() != sources.len() {
                 return Err("staged source projection batch is incomplete".to_string());

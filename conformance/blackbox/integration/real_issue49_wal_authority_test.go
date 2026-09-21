@@ -1261,6 +1261,91 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 			t.Fatal("typed fold retained a row after its hard delete")
 		}
 	})
+
+	t.Run("expanded-history-exceeds-one-jsonb-container", func(t *testing.T) {
+		const updates = 130
+		largeID := "00000000-0000-4000-8d11-000000000041"
+		witnessID := "00000000-0000-4000-8d11-000000000042"
+		var payload strings.Builder
+		for index := 0; index < 16384; index++ {
+			fmt.Fprintf(&payload, "%x", sha256.Sum256([]byte(fmt.Sprintf("issue54-large-%d", index))))
+		}
+		value := payload.String()
+		if len(value) != 1<<20 || 2*updates*len(value) <= 268435455 {
+			t.Fatal("expanded history fixture does not cross PostgreSQL's JSONB container boundary")
+		}
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', $2)", largeID, value,
+		); err != nil {
+			t.Fatal(err)
+		}
+		waitForRealWALRecords(t, ctx, harness, "cf_items", largeID)
+		var external bool
+		if err := admin.QueryRowContext(ctx,
+			"SELECT pg_column_size(value) > current_setting('block_size')::integer FROM cf_items WHERE id = $1",
+			largeID,
+		).Scan(&external); err != nil || !external {
+			t.Fatalf("large fold fixture is not externally toasted: external=%t error=%v", external, err)
+		}
+		tx, err := harness.Source().BeginTx(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		for index := 0; index < updates; index++ {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE cf_items SET updated_at = '2041-01-01T00:00:00Z'::timestamptz + $2 * interval '1 second' WHERE id = $1",
+				largeID, index,
+			); err != nil {
+				t.Fatalf("write unchanged-TOAST update %d: %v", index, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-expanded-history')", witnessID,
+		); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(2 * time.Minute)
+		var observation blackbox.WALPipelineObservation
+		for time.Now().Before(deadline) {
+			observation, err = harness.Operator().ObserveWALRecords(ctx, []string{largeID, witnessID})
+			if err == nil && len(observation.Records) == 2 &&
+				observation.ContiguousAcknowledged && observation.AcknowledgementMatchesObservedEnd &&
+				observation.SlotMatchesObservedEnd {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if err != nil || len(observation.Records) != 2 || !observation.ContiguousAcknowledged ||
+			!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd {
+			t.Fatalf("expanded history did not materialize and acknowledge: observation=%#v error=%v; %s",
+				observation, err, harness.FailureDiagnostics())
+		}
+		var images, transactions, events int
+		var historyMatches, currentMatches bool
+		if err := admin.QueryRowContext(ctx, `
+			WITH history AS (
+				SELECT * FROM synchro.sync_captured_projections
+				WHERE record_id = $1 AND commit_lsn = (
+					SELECT max(commit_lsn) FROM synchro.sync_captured_projections WHERE record_id = $1
+				)
+			)
+			SELECT count(*), count(DISTINCT commit_lsn), count(DISTINCT event_ordinal),
+			       bool_and(row_data->>$2 = $3 AND NOT deleted),
+			       (SELECT row_data->>$2 = $3 AND NOT deleted
+			        FROM synchro.sync_captured_rows WHERE record_id = $1)
+			FROM history`, largeID, valueField, value,
+		).Scan(&images, &transactions, &events, &historyMatches, &currentMatches); err != nil {
+			t.Fatalf("read expanded history: %v", err)
+		}
+		if images != 2*updates || transactions != 1 || events != updates || !historyMatches || !currentMatches {
+			t.Fatalf("expanded history changed rows or transaction boundaries: images=%d transactions=%d events=%d history=%t current=%t",
+				images, transactions, events, historyMatches, currentMatches)
+		}
+	})
 }
 
 // TestRealIssue49AdapterDelegationAndServerScopes proves SYNC-BOUNDARY-001 and
