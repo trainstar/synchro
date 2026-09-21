@@ -475,9 +475,15 @@ fn migrate_current_schema_digest_pages(
         if records.is_empty() {
             return Ok(());
         }
+        let last = records
+            .last()
+            .ok_or_else(|| "schema digest row page is empty".to_string())?;
+        after_relation_id.clone_from(&last.relation_id);
+        after_record_id.clone_from(&last.record_id);
+        first_page = false;
 
         let mut updates = Vec::with_capacity(records.len());
-        for record in &records {
+        for record in records {
             let target = target_registrations
                 .get(record.relation_id.as_str())
                 .copied()
@@ -493,7 +499,7 @@ fn migrate_current_schema_digest_pages(
             let (child_row, child_digest) = migrate_schema_row(
                 source,
                 target,
-                record.row_data.0.clone(),
+                record.row_data.0,
                 &record.record_id,
                 &record.row_version,
                 &record.checksum,
@@ -514,13 +520,6 @@ fn migrate_current_schema_digest_pages(
             }));
         }
         update_schema_digest_rows_and_edges(client, target_generation, &updates)?;
-
-        let last = records
-            .last()
-            .ok_or_else(|| "schema digest row page is empty".to_string())?;
-        after_relation_id.clone_from(&last.relation_id);
-        after_record_id.clone_from(&last.record_id);
-        first_page = false;
     }
 }
 
@@ -555,9 +554,19 @@ fn migrate_captured_projection_pages(
         if projections.is_empty() {
             return Ok(());
         }
+        let last = projections
+            .last()
+            .ok_or_else(|| "schema digest projection page is empty".to_string())?;
+        after_stream_generation.clone_from(&last.stream_generation);
+        after_commit_lsn.clone_from(&last.commit_lsn);
+        after_event_ordinal = last.event_ordinal;
+        after_relation_id.clone_from(&last.relation_id);
+        after_image_kind.clone_from(&last.image_kind);
+        after_record_id.clone_from(&last.record_id);
+        first_page = false;
 
         let mut updates = Vec::with_capacity(projections.len());
-        for projection in &projections {
+        for projection in projections {
             let target = target_registrations
                 .get(projection.relation_id.as_str())
                 .copied()
@@ -573,7 +582,7 @@ fn migrate_captured_projection_pages(
             let (child_row, child_digest) = migrate_schema_row(
                 source,
                 target,
-                projection.row_data.0.clone(),
+                projection.row_data.0,
                 &projection.record_id,
                 &projection.row_version,
                 &projection.checksum,
@@ -597,17 +606,6 @@ fn migrate_captured_projection_pages(
             }));
         }
         update_captured_projections(client, target_generation, &updates)?;
-
-        let last = projections
-            .last()
-            .ok_or_else(|| "schema digest projection page is empty".to_string())?;
-        after_stream_generation.clone_from(&last.stream_generation);
-        after_commit_lsn.clone_from(&last.commit_lsn);
-        after_event_ordinal = last.event_ordinal;
-        after_relation_id.clone_from(&last.relation_id);
-        after_image_kind.clone_from(&last.image_kind);
-        after_record_id.clone_from(&last.record_id);
-        first_page = false;
     }
 }
 
