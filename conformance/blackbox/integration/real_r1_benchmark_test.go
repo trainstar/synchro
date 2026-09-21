@@ -17,7 +17,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1122,22 +1121,14 @@ func measureR1WorkerObservedRSS(
 }
 
 func readR1ProcessRSSBytes(ctx context.Context, pid int) (int64, error) {
-	if ctx == nil || pid <= 0 {
-		return 0, fmt.Errorf("RSS process observation is invalid")
-	}
-	output, err := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
+	rss, err := readRealProcessRSSBytes(ctx, pid)
 	if err != nil {
-		return 0, fmt.Errorf("read process RSS: %w", err)
+		return 0, err
 	}
-	fields := strings.Fields(string(output))
-	if len(fields) != 1 {
-		return 0, fmt.Errorf("process RSS output is invalid")
-	}
-	kibibytes, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil || kibibytes <= 0 || kibibytes > r1BenchmarkMaximumRSSBytes/1024 {
+	if rss > r1BenchmarkMaximumRSSBytes {
 		return 0, fmt.Errorf("process RSS value is invalid")
 	}
-	return kibibytes * 1024, nil
+	return rss, nil
 }
 
 func r1ResponseObjects(t *testing.T, value any, name string) []map[string]any {
