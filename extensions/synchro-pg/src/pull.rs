@@ -728,7 +728,7 @@ pub(crate) fn synced_row_digest(
     synced_row_digest_with_schema_hash(table_reg, data, record_id, server_version, schema_hash)
 }
 
-fn synced_row_digest_with_schema_hash(
+pub(crate) fn synced_row_digest_with_schema_hash(
     table_reg: &TableRegistration,
     data: &serde_json::Value,
     record_id: &str,

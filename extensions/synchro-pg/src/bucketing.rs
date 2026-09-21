@@ -5,93 +5,12 @@ use pgrx::spi::SpiClient;
 
 use crate::registry::{MembershipDependency, RegisteredFunction, TableRegistration};
 
-/// Evaluate a registered membership function against the worker projection.
-///
-/// The function identity, argument type, and positive result bound come from
-/// the validated registry generation. This path never evaluates caller SQL.
-pub(crate) fn resolve_membership(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
-    record_id: &str,
-) -> Result<Vec<String>, spi::Error> {
-    resolve_registered_membership(
-        client,
-        &registration.membership_function,
-        &registration.pk_type,
-        record_id,
-        registration.max_scope_fanout,
-    )
-}
-
-pub(crate) fn resolve_registered_membership(
-    client: &SpiClient<'_>,
-    function: &RegisteredFunction,
-    primary_key_type: &str,
-    record_id: &str,
-    max_scope_fanout: i32,
-) -> Result<Vec<String>, spi::Error> {
-    if max_scope_fanout <= 0 {
-        pgrx::error!("registered membership evaluation metadata is invalid");
-    }
-    let result_limit = max_scope_fanout
-        .checked_add(1)
-        .unwrap_or_else(|| pgrx::error!("registered scope fanout limit overflowed"));
-    let maximum = usize::try_from(max_scope_fanout)
-        .unwrap_or_else(|_| pgrx::error!("registered scope fanout limit is invalid"));
-    let sql = membership_query(function, primary_key_type, result_limit);
-    let rows = client.select(&sql, None, &[record_id.into()])?;
-    let mut scopes = Vec::new();
-    let mut seen = HashSet::new();
-    let mut row_count = 0usize;
-    for row in rows {
-        row_count = row_count
-            .checked_add(1)
-            .unwrap_or_else(|| pgrx::error!("membership result count overflowed"));
-        if row_count > maximum {
-            pgrx::error!("membership function exceeded its registered scope fanout bound");
-        }
-        let scope_id = row
-            .get_by_name::<String, &str>("scope_id")?
-            .unwrap_or_else(|| pgrx::error!("membership function returned a null scope ID"));
-        validate_scope_id(&scope_id);
-        if seen.insert(scope_id.clone()) {
-            scopes.push(scope_id);
-        }
-    }
-    scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    Ok(scopes)
-}
-
-pub(crate) fn membership_query(
-    function: &RegisteredFunction,
-    primary_key_type: &str,
-    result_limit: i32,
-) -> String {
-    format!(
-        "SELECT membership.scope_id
-         FROM {}($1::{}) AS membership(scope_id)
-         LIMIT {}",
-        qualified_function_name(function),
-        primary_key_type,
-        result_limit,
-    )
-}
-
 pub(crate) fn qualified_function_name(function: &RegisteredFunction) -> String {
     format!(
         "{}.{}",
         crate::pull::pg_quote_ident(&function.schema),
         crate::pull::pg_quote_ident(&function.name),
     )
-}
-
-fn validate_scope_id(scope_id: &str) {
-    if scope_id.is_empty()
-        || scope_id.as_bytes().contains(&0)
-        || scope_id.chars().any(char::is_control)
-    {
-        pgrx::error!("membership function returned an invalid scope ID");
-    }
 }
 
 /// Evaluate one registered dependency impact function.

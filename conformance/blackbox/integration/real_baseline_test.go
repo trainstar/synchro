@@ -30,7 +30,7 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load real harness environment: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	harness, err := blackbox.Provision(ctx, blackbox.HarnessConfig{Environment: environment})
 	if err != nil {
@@ -57,7 +57,8 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 		INSERT INTO cf_late_registration (id, owner_id, value)
 		SELECT ('10000000-0000-4000-8000-' || lpad(value::text, 12, '0'))::uuid,
 		       'diagnostic-user',
-		       'historical-filler-' || value::text
+		       CASE WHEN value <= 256 THEN repeat(md5(value::text), 32768)
+		            ELSE 'historical-filler-' || value::text END
 		FROM generate_series(1, 2048) value`); err != nil {
 		t.Fatalf("insert projection bootstrap staging rows: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	if !candidateObserved {
 		t.Fatal("projection bootstrap candidate slot was not observed")
 	}
-	barrierContext, barrierCancel := context.WithTimeout(ctx, 15*time.Second)
+	barrierContext, barrierCancel := context.WithTimeout(ctx, 90*time.Second)
 	defer barrierCancel()
 	if err := barrierControl.AcquireBarrier(barrierContext); err != nil {
 		select {
@@ -114,15 +115,46 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 			t.Fatalf("queue projection bootstrap barrier: %v", err)
 		}
 	}
-	if err := harness.Source().ExecContext(
-		ctx,
+	admin := openIssue49Admin(t, ctx, harness)
+	edgeLock, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin untouched candidate edge control: %v", err)
+	}
+	defer edgeLock.Rollback()
+	var bootstrapID, lockedRecord string
+	if err := edgeLock.QueryRowContext(ctx, `
+		SELECT edge.reset_id::text, edge.record_id
+		FROM synchro.sync_stream_reset_membership_edges edge
+		JOIN synchro.sync_stream_resets reset ON reset.reset_id = edge.reset_id
+		WHERE reset.lifecycle = 'baseline_staged'
+		  AND reset.target_registry_generation = $1
+		  AND edge.table_name = 'cf_late_registration'
+		  AND edge.record_id = $2 AND edge.scope_id = 'user:diagnostic-user'
+		FOR UPDATE OF edge`, generation, historicalID).Scan(&bootstrapID, &lockedRecord); err != nil || lockedRecord != historicalID {
+		t.Fatalf("lock untouched candidate membership: record=%q error=%v", lockedRecord, err)
+	}
+	catchup, err := harness.Source().BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("begin candidate catch-up batch: %v", err)
+	}
+	defer catchup.Rollback()
+	if _, err := catchup.ExecContext(ctx,
 		"INSERT INTO cf_late_registration (id, owner_id, value) VALUES ($1, $2, $3)",
 		catchupID, "diagnostic-user", "candidate-catchup",
 	); err != nil {
 		t.Fatalf("insert candidate catch-up row: %v", err)
 	}
+	if _, err := catchup.ExecContext(ctx, `
+		INSERT INTO cf_late_registration (id, owner_id, value)
+		SELECT ('20000000-0000-4000-8000-' || lpad(value::text, 12, '0'))::uuid,
+		       'diagnostic-user', 'candidate-batch-' || value::text
+		FROM generate_series(1, 500) value`); err != nil {
+		t.Fatalf("insert candidate catch-up batch: %v", err)
+	}
+	if err := catchup.Commit(); err != nil {
+		t.Fatalf("commit candidate catch-up batch: %v", err)
+	}
 	// Each transaction fits the decoder limit, but together they cross the poll target.
-	admin := openIssue49Admin(t, ctx, harness)
 	for index := 0; index < 4; index++ {
 		if _, err := admin.ExecContext(ctx, `
 			SELECT pg_catalog.pg_logical_emit_message(
@@ -135,6 +167,38 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	}
 	if err := barrierControl.ReleaseBarrier(); err != nil {
 		t.Fatalf("release projection bootstrap barrier: %v", err)
+	}
+
+	// Full reconciliation must wait for the untouched edge, but ordinary catch-up must not.
+	var candidateRows, candidateEdges int
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
+		if err := admin.QueryRowContext(ctx, `
+			SELECT
+				(SELECT count(*) FROM synchro.sync_stream_reset_captured_rows
+				 WHERE reset_id = $1::uuid
+				   AND (record_id = $2 OR record_id LIKE '20000000-0000-4000-8000-%')),
+				(SELECT count(*) FROM synchro.sync_stream_reset_membership_edges
+				 WHERE reset_id = $1::uuid AND scope_id = 'user:diagnostic-user'
+				   AND (record_id = $2 OR record_id LIKE '20000000-0000-4000-8000-%'))`,
+			bootstrapID, catchupID,
+		).Scan(&candidateRows, &candidateEdges); err != nil {
+			t.Fatalf("observe bounded candidate catch-up: %v", err)
+		}
+		if candidateRows == 501 && candidateEdges == 501 {
+			break
+		}
+		select {
+		case early := <-completed:
+			t.Fatalf("bootstrap ended before untouched-edge release: %v", early.err)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if candidateRows != 501 || candidateEdges != 501 {
+		t.Fatalf("candidate catch-up rewrote unrelated membership or lost a batch: rows=%d edges=%d", candidateRows, candidateEdges)
+	}
+	if err := edgeLock.Rollback(); err != nil {
+		t.Fatalf("release untouched candidate edge: %v", err)
 	}
 
 	var outcome bootstrapOutcome
@@ -184,6 +248,32 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 		!observation.NoPendingFences ||
 		!observation.StageCleared {
 		t.Fatalf("projection bootstrap observation is incomplete: %#v", observation)
+	}
+	var activatedRows int
+	if err := admin.QueryRowContext(ctx, `
+		SELECT count(*) FROM synchro.sync_captured_rows
+		WHERE registry_generation = $1
+		  AND (record_id = $2 OR record_id LIKE '20000000-0000-4000-8000-%')`,
+		generation, catchupID,
+	).Scan(&activatedRows); err != nil || activatedRows != 501 {
+		t.Fatalf("activation lost candidate catch-up rows: rows=%d error=%v", activatedRows, err)
+	}
+	var largeBaselineRows int
+	if err := admin.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM synchro.sync_captured_rows captured
+		JOIN synchro.sync_registry_fields field
+		  ON field.registry_generation = captured.registry_generation
+		 AND field.relation_id = captured.relation_id
+		 AND field.physical_column = 'value'
+		WHERE captured.registry_generation = $1
+		  AND captured.record_id LIKE '10000000-0000-4000-8000-%'
+		  AND right(captured.record_id, 12)::integer BETWEEN 1 AND 256
+		  AND captured.row_data->>field.field_id::text =
+		      repeat(md5(right(captured.record_id, 12)::integer::text), 32768)`,
+		generation,
+	).Scan(&largeBaselineRows); err != nil || largeBaselineRows != 256 {
+		t.Fatalf("activation changed the large baseline payload batch: rows=%d error=%v", largeBaselineRows, err)
 	}
 }
 

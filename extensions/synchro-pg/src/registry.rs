@@ -165,6 +165,96 @@ struct PrimaryKey {
 }
 
 #[derive(Debug, Clone)]
+struct CatalogRelation {
+    physical: PhysicalRelation,
+    owner_oid: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogColumn {
+    physical_column: String,
+    sql_type: String,
+    nullable: bool,
+    generated: String,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogPrimaryKey {
+    column: String,
+    not_null: bool,
+    type_oid: u32,
+    sql_type: String,
+    key_count: i32,
+    is_not_partial: bool,
+    has_no_expressions: bool,
+    key_attnum: i32,
+    replica_identity: String,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogTrigger {
+    name: String,
+    enabled: String,
+    trigger_type: i32,
+    argument_count: i32,
+    function_name: String,
+    definition: String,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogPublication {
+    owner_oid: u32,
+    all_tables: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogFunction {
+    function: RegisteredFunction,
+    owner_oid: u32,
+    returns_set: bool,
+    volatility: String,
+    security_definer: bool,
+    language: String,
+    function_kind: String,
+    parsed_body: bool,
+    fixed_path: bool,
+    argument_count: i32,
+    argument_defaults: i32,
+    variadic: u32,
+    first_argument_type_oid: Option<u32>,
+    returns_text: bool,
+    impact_arguments: bool,
+    returns_row_ref: bool,
+    acl_valid: bool,
+    dependencies_valid: bool,
+    fingerprint: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct StagedReconfiguration {
+    sync_columns: Vec<String>,
+    exclude_columns: Vec<String>,
+}
+
+struct GenerationCatalog {
+    relations: std::collections::HashMap<u32, CatalogRelation>,
+    columns: std::collections::HashMap<u32, Vec<CatalogColumn>>,
+    primary_keys: std::collections::HashMap<u32, Vec<CatalogPrimaryKey>>,
+    logical_id_kinds: std::collections::HashMap<String, String>,
+    triggers: std::collections::HashMap<u32, Vec<CatalogTrigger>>,
+    publication: Option<CatalogPublication>,
+    publication_relations: std::collections::HashSet<u32>,
+    functions: std::collections::HashMap<u32, CatalogFunction>,
+    relation_privileges: std::collections::HashMap<u32, bool>,
+    relation_rls: std::collections::HashMap<u32, bool>,
+    synchro_owner_oid: Option<u32>,
+    staged_reconfigurations: std::collections::HashMap<String, StagedReconfiguration>,
+    membership_limits: (i32, i32),
+}
+
+type ProjectionDependencies = std::collections::HashMap<u32, Vec<(u32, Vec<String>)>>;
+
+#[derive(Debug, Clone)]
 struct BaseGeneration {
     generation: i64,
     stream_generation: String,
@@ -1297,8 +1387,30 @@ fn validate_scope_fanout_limit(client: &SpiClient<'_>, value: i32) -> Result<i32
     Ok(value)
 }
 
+fn validate_scope_fanout_limit_from_catalog(
+    value: i32,
+    catalog: &GenerationCatalog,
+) -> Result<i32, spi::Error> {
+    let (maximum, _) = catalog.membership_limits;
+    if value <= 0 || value > maximum {
+        pgrx::error!("membership scope fanout limit is invalid");
+    }
+    Ok(value)
+}
+
 fn validate_impact_row_limit(client: &SpiClient<'_>, value: i32) -> Result<i32, spi::Error> {
     let (_, maximum) = configured_membership_limits(client)?;
+    if value <= 0 || value > maximum {
+        pgrx::error!("membership impact row limit is invalid");
+    }
+    Ok(value)
+}
+
+fn validate_impact_row_limit_from_catalog(
+    value: i32,
+    catalog: &GenerationCatalog,
+) -> Result<i32, spi::Error> {
+    let (_, maximum) = catalog.membership_limits;
     if value <= 0 || value > maximum {
         pgrx::error!("membership impact row limit is invalid");
     }
@@ -1375,6 +1487,212 @@ fn registered_function_fingerprint(
         &[prior_search_path.as_str().into()],
     )?;
     Ok(Sha256::digest(definition.as_bytes()).to_vec())
+}
+
+fn load_catalog_functions(
+    client: &SpiClient<'_>,
+    function_oids: &std::collections::HashSet<u32>,
+) -> Result<std::collections::HashMap<u32, CatalogFunction>, spi::Error> {
+    if function_oids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let prior_search_path = client
+        .select(
+            "SELECT pg_catalog.current_setting('search_path') AS search_path",
+            None,
+            &[],
+        )?
+        .first()
+        .get_by_name::<String, &str>("search_path")?
+        .unwrap_or_else(|| pgrx::error!("search path is unavailable"));
+    client.select(
+        "SELECT pg_catalog.set_config('search_path', 'pg_catalog, synchro', true)",
+        None,
+        &[],
+    )?;
+    let rows = client.select(
+        "WITH requested AS (
+             SELECT DISTINCT function_oid
+             FROM unnest($1::oid[]) AS requested(function_oid)
+         ), roles AS (
+             SELECT (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner') AS owner_oid,
+                    (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_worker') AS worker_oid
+         )
+         SELECT procedure.oid::bigint AS function_oid,
+                namespace.nspname::text AS function_schema,
+                procedure.proname::text AS function_name,
+                procedure.proowner::bigint AS owner_oid,
+                procedure.proretset AS returns_set,
+                procedure.provolatile::text AS volatility,
+                procedure.prosecdef AS security_definer,
+                language.lanname::text AS language,
+                procedure.prokind::text AS function_kind,
+                procedure.prosqlbody IS NOT NULL AS parsed_body,
+                COALESCE(procedure.proconfig, '{}'::text[]) =
+                    ARRAY['search_path=pg_catalog, synchro']::text[] AS fixed_path,
+                procedure.pronargs::integer AS argument_count,
+                procedure.pronargdefaults::integer AS argument_defaults,
+                procedure.provariadic::bigint AS variadic,
+                procedure.proargtypes[0]::bigint AS first_argument_type_oid,
+                procedure.prorettype = 'text'::pg_catalog.regtype AS returns_text,
+                procedure.proargtypes = ARRAY[
+                    'jsonb'::pg_catalog.regtype::oid,
+                    'jsonb'::pg_catalog.regtype::oid
+                ]::pg_catalog.oidvector AS impact_arguments,
+                procedure.prorettype = 'synchro.synchro_row_ref'::pg_catalog.regtype
+                    AS returns_row_ref,
+                EXISTS (
+                    SELECT 1
+                    FROM roles
+                    WHERE roles.owner_oid IS NOT NULL
+                      AND roles.worker_oid IS NOT NULL
+                      AND pg_catalog.has_schema_privilege(roles.owner_oid, namespace.oid, 'USAGE')
+                      AND pg_catalog.has_schema_privilege(roles.worker_oid, namespace.oid, 'USAGE')
+                      AND EXISTS (
+                          SELECT 1
+                          FROM pg_catalog.aclexplode(
+                               COALESCE(procedure.proacl,
+                                        pg_catalog.acldefault('f', procedure.proowner))
+                          ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                          WHERE acl.grantee = roles.owner_oid
+                            AND acl.privilege_type = 'EXECUTE'
+                      )
+                      AND EXISTS (
+                          SELECT 1
+                          FROM pg_catalog.aclexplode(
+                               COALESCE(procedure.proacl,
+                                        pg_catalog.acldefault('f', procedure.proowner))
+                          ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                          WHERE acl.grantee = roles.worker_oid
+                            AND acl.privilege_type = 'EXECUTE'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pg_catalog.aclexplode(
+                               COALESCE(procedure.proacl,
+                                        pg_catalog.acldefault('f', procedure.proowner))
+                          ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                          WHERE acl.grantee = 0
+                            AND acl.privilege_type = 'EXECUTE'
+                      )
+                ) AS acl_valid,
+                NOT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_depend dependency
+                    JOIN pg_catalog.pg_class relation
+                      ON dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                     AND relation.oid = dependency.refobjid
+                    JOIN pg_catalog.pg_namespace relation_namespace
+                      ON relation_namespace.oid = relation.relnamespace
+                    LEFT JOIN synchro.sync_projection_views projection
+                      ON projection.view_oid = relation.oid
+                    WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
+                      AND dependency.objid = procedure.oid
+                      AND dependency.deptype = 'n'
+                      AND relation_namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                      AND projection.view_oid IS NULL
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_depend dependency
+                    JOIN pg_catalog.pg_proc called
+                      ON dependency.refclassid = 'pg_catalog.pg_proc'::regclass
+                     AND called.oid = dependency.refobjid
+                    JOIN pg_catalog.pg_namespace called_namespace
+                      ON called_namespace.oid = called.pronamespace
+                    WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
+                      AND dependency.objid = procedure.oid
+                      AND dependency.deptype = 'n'
+                      AND called_namespace.nspname <> 'pg_catalog'
+                ) AS dependencies_valid,
+                pg_catalog.pg_get_functiondef(procedure.oid) AS definition
+         FROM requested
+         JOIN pg_catalog.pg_proc procedure ON procedure.oid = requested.function_oid
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         JOIN pg_catalog.pg_language language ON language.oid = procedure.prolang",
+        None,
+        &[function_oids
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>()
+            .into()],
+    )?;
+    client.select(
+        "SELECT pg_catalog.set_config('search_path', $1, true)",
+        None,
+        &[prior_search_path.as_str().into()],
+    )?;
+
+    let mut functions = std::collections::HashMap::new();
+    for row in rows {
+        let function = registered_function_from_row(&row)?;
+        let oid = function.oid;
+        let definition = row
+            .get_by_name::<String, &str>("definition")?
+            .unwrap_or_else(|| pgrx::error!("registered function definition is missing"));
+        let owner_oid = row
+            .get_by_name::<i64, &str>("owner_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog function has no owner"));
+        let variadic = row
+            .get_by_name::<i64, &str>("variadic")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog function has no variadic state"));
+        functions.insert(
+            oid,
+            CatalogFunction {
+                function,
+                owner_oid,
+                returns_set: row
+                    .get_by_name::<bool, &str>("returns_set")?
+                    .unwrap_or(false),
+                volatility: row
+                    .get_by_name::<String, &str>("volatility")?
+                    .unwrap_or_default(),
+                security_definer: row
+                    .get_by_name::<bool, &str>("security_definer")?
+                    .unwrap_or(true),
+                language: row
+                    .get_by_name::<String, &str>("language")?
+                    .unwrap_or_default(),
+                function_kind: row
+                    .get_by_name::<String, &str>("function_kind")?
+                    .unwrap_or_default(),
+                parsed_body: row
+                    .get_by_name::<bool, &str>("parsed_body")?
+                    .unwrap_or(false),
+                fixed_path: row
+                    .get_by_name::<bool, &str>("fixed_path")?
+                    .unwrap_or(false),
+                argument_count: row
+                    .get_by_name::<i32, &str>("argument_count")?
+                    .unwrap_or_default(),
+                argument_defaults: row
+                    .get_by_name::<i32, &str>("argument_defaults")?
+                    .unwrap_or_default(),
+                variadic,
+                first_argument_type_oid: row
+                    .get_by_name::<i64, &str>("first_argument_type_oid")?
+                    .map(checked_oid),
+                returns_text: row
+                    .get_by_name::<bool, &str>("returns_text")?
+                    .unwrap_or(false),
+                impact_arguments: row
+                    .get_by_name::<bool, &str>("impact_arguments")?
+                    .unwrap_or(false),
+                returns_row_ref: row
+                    .get_by_name::<bool, &str>("returns_row_ref")?
+                    .unwrap_or(false),
+                acl_valid: row.get_by_name::<bool, &str>("acl_valid")?.unwrap_or(false),
+                dependencies_valid: row
+                    .get_by_name::<bool, &str>("dependencies_valid")?
+                    .unwrap_or(false),
+                fingerprint: Sha256::digest(definition.as_bytes()).to_vec(),
+            },
+        );
+    }
+    Ok(functions)
 }
 
 fn resolve_membership_function(
@@ -1655,65 +1973,102 @@ fn registered_function_from_row(
     Ok(RegisteredFunction { oid, schema, name })
 }
 
-fn validate_registered_membership_function(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
-    primary_key_type_oid: u32,
+fn catalog_function_meets_deterministic_contract(function: &CatalogFunction) -> bool {
+    function.returns_set
+        && function.volatility == "s"
+        && !function.security_definer
+        && function.language == "sql"
+        && function.function_kind == "f"
+        && function.parsed_body
+        && function.fixed_path
+}
+
+fn validate_catalog_function_controls(
+    function: &CatalogFunction,
+    expected: &RegisteredFunction,
+    expected_fingerprint: &[u8],
+    drift_error: &str,
+    definition_drift_error: &str,
 ) -> Result<(), spi::Error> {
-    let resolved = resolve_membership_function(
-        client,
-        &format!(
-            "{}.{}",
-            crate::pull::pg_quote_ident(&registration.membership_function.schema),
-            crate::pull::pg_quote_ident(&registration.membership_function.name),
-        ),
-        primary_key_type_oid,
-    )?;
-    if resolved != registration.membership_function {
-        pgrx::error!("registered membership function has drifted");
+    if expected.schema.starts_with("pg_")
+        || expected.schema == "information_schema"
+        || expected.name.is_empty()
+        || function.function.schema.starts_with("pg_")
+        || function.function.schema == "information_schema"
+        || function.function.name.is_empty()
+    {
+        pgrx::error!("function identity is invalid");
     }
-    let expected = client
-        .select(
-            "SELECT membership_function_fingerprint
-             FROM synchro.sync_registry
-             WHERE registry_generation = $1 AND relation_id = $2::uuid",
-            None,
-            &[
-                registration.registry_generation.into(),
-                registration.relation_id.as_str().into(),
-            ],
-        )?
-        .first()
-        .get_one::<Vec<u8>>()?
-        .unwrap_or_default();
-    if expected.len() != 32 || registered_function_fingerprint(client, resolved.oid)? != expected {
-        pgrx::error!("registered membership function definition has drifted");
+    if function.function != *expected {
+        pgrx::error!("{}", drift_error);
+    }
+    if !function.acl_valid {
+        pgrx::error!("registered function access control is invalid");
+    }
+    if !function.dependencies_valid {
+        pgrx::error!("registered function reads an undeclared projection dependency");
+    }
+    if expected_fingerprint.len() != 32 || function.fingerprint != expected_fingerprint {
+        pgrx::error!("{}", definition_drift_error);
     }
     Ok(())
 }
 
-fn validate_registered_impact_function(
-    client: &SpiClient<'_>,
+fn validate_registered_membership_function_from_catalog(
+    registration: &TableRegistration,
+    primary_key_type_oid: u32,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    let function = catalog
+        .functions
+        .get(&registration.membership_function.oid)
+        .unwrap_or_else(|| pgrx::error!("membership function signature is invalid"));
+    if function.argument_count != 1
+        || function.argument_defaults != 0
+        || function.variadic != 0
+        || function.first_argument_type_oid != Some(primary_key_type_oid)
+        || !function.returns_text
+    {
+        pgrx::error!("membership function signature is invalid");
+    }
+    if !catalog_function_meets_deterministic_contract(function) {
+        pgrx::error!("membership function does not meet the deterministic contract");
+    }
+    validate_catalog_function_controls(
+        function,
+        &registration.membership_function,
+        &registration.membership_function_fingerprint,
+        "registered membership function has drifted",
+        "registered membership function definition has drifted",
+    )
+}
+
+fn validate_registered_impact_function_from_catalog(
     function: &RegisteredFunction,
     expected_fingerprint: &[u8],
+    functions: &std::collections::HashMap<u32, CatalogFunction>,
 ) -> Result<(), spi::Error> {
-    let resolved = resolve_impact_function(
-        client,
-        &format!(
-            "{}.{}",
-            crate::pull::pg_quote_ident(&function.schema),
-            crate::pull::pg_quote_ident(&function.name),
-        ),
-    )?;
-    if resolved != *function {
-        pgrx::error!("registered impact function has drifted");
-    }
-    if expected_fingerprint.len() != 32
-        || registered_function_fingerprint(client, resolved.oid)? != expected_fingerprint
+    let catalog_function = functions
+        .get(&function.oid)
+        .unwrap_or_else(|| pgrx::error!("impact function signature is invalid"));
+    if catalog_function.argument_count != 2
+        || catalog_function.argument_defaults != 0
+        || catalog_function.variadic != 0
+        || !catalog_function.impact_arguments
+        || !catalog_function.returns_row_ref
     {
-        pgrx::error!("registered impact function definition has drifted");
+        pgrx::error!("impact function signature is invalid");
     }
-    Ok(())
+    if !catalog_function_meets_deterministic_contract(catalog_function) {
+        pgrx::error!("impact function does not meet the deterministic contract");
+    }
+    validate_catalog_function_controls(
+        catalog_function,
+        function,
+        expected_fingerprint,
+        "registered impact function has drifted",
+        "registered impact function definition has drifted",
+    )
 }
 
 fn resolve_physical_relation(
@@ -1805,30 +2160,6 @@ fn physical_relation_from_row(row: &SpiHeapTupleData<'_>) -> Result<PhysicalRela
         oid: checked_oid(relation_oid),
         replica_identity,
     })
-}
-
-fn relation_by_oid(
-    client: &SpiClient<'_>,
-    relation_oid: u32,
-) -> Result<Option<PhysicalRelation>, spi::Error> {
-    let rows = client.select(
-        "SELECT n.nspname::text AS physical_schema,
-                c.relname::text AS physical_relation,
-                c.oid::bigint AS physical_relation_oid,
-                c.relreplident::text AS replica_identity
-         FROM pg_catalog.pg_class c
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-         WHERE c.oid = $1::oid
-           AND c.relkind IN ('r', 'p')
-           AND n.nspname !~ '^pg_'
-           AND n.nspname <> 'information_schema'",
-        None,
-        &[i64::from(relation_oid).into()],
-    )?;
-    let Some(row) = rows.into_iter().next() else {
-        return Ok(None);
-    };
-    Ok(Some(physical_relation_from_row(&row)?))
 }
 
 fn validate_actor_owns_relation(
@@ -1990,7 +2321,7 @@ fn validate_dependency_application_ownership(
 }
 
 fn validate_publication_owner(client: &SpiClient<'_>, relation_oid: u32) -> Result<(), spi::Error> {
-    let publication = configured_publication_name();
+    let publication_name = configured_publication_name();
     let valid: bool = client
         .select(
             "SELECT NOT EXISTS (
@@ -2005,7 +2336,10 @@ fn validate_publication_owner(client: &SpiClient<'_>, relation_oid: u32) -> Resu
                    AND publication.pubowner = relation.relowner
              ) AS valid",
             None,
-            &[publication.as_str().into(), i64::from(relation_oid).into()],
+            &[
+                publication_name.as_str().into(),
+                i64::from(relation_oid).into(),
+            ],
         )?
         .first()
         .get_by_name("valid")?
@@ -2021,14 +2355,14 @@ fn validate_actor_can_manage_publication(
     actor: pg_sys::Oid,
     relation_oid: u32,
 ) -> Result<(), spi::Error> {
-    let publication = configured_publication_name();
+    let publication_name = configured_publication_name();
     let rows = client.select(
         "SELECT publication.pubowner = $2::oid AS owns_publication
          FROM pg_catalog.pg_publication publication
          WHERE publication.pubname = $1",
         None,
         &[
-            publication.as_str().into(),
+            publication_name.as_str().into(),
             i64::from(actor.to_u32()).into(),
         ],
     )?;
@@ -2268,76 +2602,100 @@ fn load_and_validate_primary_key(
         None,
         &[i64::from(relation_oid).into()],
     )?;
-    let rows: Vec<_> = rows.into_iter().collect();
+    let rows = rows
+        .into_iter()
+        .map(|row| catalog_primary_key_from_row(&row))
+        .collect::<Result<Vec<_>, spi::Error>>()?;
+    primary_key_from_rows(&rows, requested_column)
+}
+
+fn catalog_primary_key_from_row(
+    row: &SpiHeapTupleData<'_>,
+) -> Result<CatalogPrimaryKey, spi::Error> {
+    Ok(CatalogPrimaryKey {
+        column: row
+            .get_by_name::<String, &str>("attname")?
+            .unwrap_or_else(|| pgrx::error!("registered relation primary key must be a column")),
+        not_null: row
+            .get_by_name::<bool, &str>("attnotnull")?
+            .unwrap_or(false),
+        type_oid: row
+            .get_by_name::<i64, &str>("type_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("registered relation primary key has no type OID")),
+        sql_type: row
+            .get_by_name::<String, &str>("sql_type")?
+            .unwrap_or_else(|| pgrx::error!("registered relation primary key has no SQL type")),
+        key_count: row
+            .get_by_name::<i32, &str>("key_count")?
+            .unwrap_or_else(|| pgrx::error!("primary key metadata is incomplete")),
+        is_not_partial: row
+            .get_by_name::<bool, &str>("is_not_partial")?
+            .unwrap_or(false),
+        has_no_expressions: row
+            .get_by_name::<bool, &str>("has_no_expressions")?
+            .unwrap_or(false),
+        key_attnum: row.get_by_name::<i32, &str>("key_attnum")?.unwrap_or(0),
+        replica_identity: row
+            .get_by_name::<String, &str>("replica_identity")?
+            .unwrap_or_default(),
+    })
+}
+
+fn primary_key_from_rows(
+    rows: &[CatalogPrimaryKey],
+    requested_column: &str,
+) -> Result<PrimaryKey, spi::Error> {
     let Some(first) = rows.first() else {
         pgrx::error!("registered relation must have one declared primary key");
     };
-
-    let key_count = first
-        .get_by_name::<i32, &str>("key_count")?
-        .unwrap_or_else(|| pgrx::error!("primary key metadata is incomplete"));
-    let is_not_partial = first
-        .get_by_name::<bool, &str>("is_not_partial")?
-        .unwrap_or(false);
-    let has_no_expressions = first
-        .get_by_name::<bool, &str>("has_no_expressions")?
-        .unwrap_or(false);
-    let replica_identity = first
-        .get_by_name::<String, &str>("replica_identity")?
-        .unwrap_or_default();
-
-    if key_count != 1 || rows.len() != 1 {
+    if first.key_count != 1 || rows.len() != 1 {
         pgrx::error!("registered relation primary key must have exactly one column");
     }
-    if !is_not_partial || !has_no_expressions {
+    if !first.is_not_partial || !first.has_no_expressions {
         pgrx::error!("registered relation primary key must be a plain non-partial key");
     }
-    if replica_identity != "d" {
+    if first.replica_identity != "d" {
         pgrx::error!("registered relation requires REPLICA IDENTITY DEFAULT");
     }
-
-    let key_attnum = first.get_by_name::<i32, &str>("key_attnum")?.unwrap_or(0);
-    let column = first
-        .get_by_name::<String, &str>("attname")?
-        .unwrap_or_else(|| pgrx::error!("registered relation primary key must be a column"));
-    let not_null = first
-        .get_by_name::<bool, &str>("attnotnull")?
-        .unwrap_or(false);
-    let sql_type = first
-        .get_by_name::<String, &str>("sql_type")?
-        .unwrap_or_else(|| pgrx::error!("registered relation primary key has no SQL type"));
-    let type_oid = first
-        .get_by_name::<i64, &str>("type_oid")?
-        .map(checked_oid)
-        .unwrap_or_else(|| pgrx::error!("registered relation primary key has no type OID"));
-
-    if key_attnum <= 0 {
+    if first.key_attnum <= 0 {
         pgrx::error!("registered relation primary key must be a column");
     }
-    if !not_null {
+    if !first.not_null {
         pgrx::error!("registered relation primary key must be non-null");
     }
-    if column != requested_column {
+    if first.column != requested_column {
         pgrx::error!(
             "requested primary key column {:?} does not match declared primary key {:?}",
             requested_column,
-            column
+            first.column
         );
     }
-
-    let portable_type = primary_key_portable_type(&sql_type).unwrap_or_else(|| {
+    let portable_type = primary_key_portable_type(&first.sql_type).unwrap_or_else(|| {
         pgrx::error!(
             "registered relation primary key type {:?} is not portable",
-            sql_type
+            first.sql_type
         )
     });
-
     Ok(PrimaryKey {
-        column,
-        sql_type,
+        column: first.column.clone(),
+        sql_type: first.sql_type.clone(),
         portable_type,
-        type_oid,
+        type_oid: first.type_oid,
     })
+}
+
+fn primary_key_from_catalog(
+    catalog: &GenerationCatalog,
+    relation_oid: u32,
+    requested_column: &str,
+) -> Result<PrimaryKey, spi::Error> {
+    let rows = catalog
+        .primary_keys
+        .get(&relation_oid)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    primary_key_from_rows(rows, requested_column)
 }
 
 fn primary_key_portable_type(sql_type: &str) -> Option<String> {
@@ -2820,65 +3178,28 @@ fn build_field_registrations(
         None,
         &[i64::from(relation_oid).into(), sync_column_refs.into()],
     )?;
-    let retained_by_column: std::collections::HashMap<&str, &FieldRegistration> = retained
+    let columns = rows
+        .into_iter()
+        .map(|row| catalog_column_from_row(&row))
+        .collect::<Result<Vec<_>, spi::Error>>()?;
+    let retained_by_column = retained
         .unwrap_or_default()
         .iter()
         .map(|field| (field.physical_column.as_str(), field))
-        .collect();
-    let mut fields = Vec::with_capacity(sync_columns.len());
-    for row in rows {
-        let physical_column = row
-            .get_by_name::<String, &str>("physical_column")?
-            .unwrap_or_else(|| pgrx::error!("registered field has no physical column"));
-        let sql_type = row
-            .get_by_name::<String, &str>("sql_type")?
-            .unwrap_or_else(|| pgrx::error!("registered field has no SQL type"));
-        let portable_type = normalize_portable_type_name(&sql_type)
-            .unwrap_or_else(|| {
-                pgrx::error!(
-                    "registered field {:?} has unsupported type {:?}",
-                    physical_column,
-                    sql_type
-                )
-            })
-            .to_string();
-        let (decimal_precision, decimal_scale) = if portable_type == "decimal" {
-            parse_decimal_metadata(&sql_type)
-                .unwrap_or_else(|| pgrx::error!("decimal field has no precision and scale"))
-        } else {
-            (None, None)
-        };
-        let nullable = row
-            .get_by_name::<bool, &str>("nullable")?
-            .unwrap_or_else(|| pgrx::error!("registered field has no nullability"));
-        let generated = row
-            .get_by_name::<String, &str>("generated")?
-            .unwrap_or_default();
-        let primary_key = physical_column == pk_column;
-        let writable = !primary_key
-            && physical_column != updated_at_column
-            && physical_column != deleted_at_column
-            && physical_column != "created_at"
-            && generated.is_empty();
-        let retained_field = retained_by_column.get(physical_column.as_str());
-        fields.push(FieldRegistration {
-            field_id: retained_field
-                .map(|field| field.field_id.clone())
-                .unwrap_or_else(|| new_logical_id(client, "field")),
-            physical_column,
-            portable_type,
-            native_json: matches!(sql_type.as_str(), "json" | "jsonb"),
-            decimal_precision,
-            decimal_scale,
-            nullable,
-            writable,
-            primary_key,
-        });
-    }
-    if fields.len() != sync_columns.len() {
-        pgrx::error!("registered field identity does not cover the synced projection");
-    }
-    Ok(fields)
+        .collect::<std::collections::HashMap<_, _>>();
+    field_registrations_from_catalog(
+        &columns,
+        sync_columns,
+        pk_column,
+        updated_at_column,
+        deleted_at_column,
+        |column| {
+            retained_by_column
+                .get(column)
+                .map(|retained| retained.field_id.clone())
+                .unwrap_or_else(|| new_logical_id(client, "field"))
+        },
+    )
 }
 
 fn build_capture_field_registrations(
@@ -2897,8 +3218,9 @@ fn build_capture_field_registrations(
     let requested_refs = requested.iter().map(String::as_str).collect::<Vec<_>>();
     let rows = client.select(
         "SELECT attribute.attname::text AS physical_column,
-                pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) AS sql_type,
-                NOT attribute.attnotnull AS nullable
+                 pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) AS sql_type,
+                 NOT attribute.attnotnull AS nullable,
+                 attribute.attgenerated::text AS generated
          FROM pg_catalog.pg_attribute attribute
          WHERE attribute.attrelid = $1::oid
            AND attribute.attnum > 0
@@ -2908,45 +3230,11 @@ fn build_capture_field_registrations(
         None,
         &[i64::from(relation_oid).into(), requested_refs.into()],
     )?;
-    let capture_keys = capture_key_columns
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let mut fields = Vec::with_capacity(requested.len());
-    for row in rows {
-        let physical_column = row
-            .get_by_name::<String, &str>("physical_column")?
-            .unwrap_or_else(|| pgrx::error!("capture dependency field has no column"));
-        let sql_type = row
-            .get_by_name::<String, &str>("sql_type")?
-            .unwrap_or_else(|| pgrx::error!("capture dependency field has no SQL type"));
-        let portable_type = normalize_portable_type_name(&sql_type)
-            .unwrap_or_else(|| {
-                pgrx::error!(
-                    "capture dependency field {:?} has unsupported type {:?}",
-                    physical_column,
-                    sql_type
-                )
-            })
-            .to_string();
-        fields.push(CaptureFieldRegistration {
-            capture_key: capture_keys.contains(physical_column.as_str()),
-            physical_column,
-            portable_type,
-            nullable: row
-                .get_by_name::<bool, &str>("nullable")?
-                .unwrap_or_else(|| pgrx::error!("capture dependency field has no nullability")),
-        });
-    }
-    if fields.len() != requested.len()
-        || fields.iter().filter(|field| field.capture_key).count() != capture_key_columns.len()
-        || fields
-            .iter()
-            .any(|field| field.capture_key && field.nullable)
-    {
-        pgrx::error!("capture dependency projection is incomplete");
-    }
-    Ok(fields)
+    let columns = rows
+        .into_iter()
+        .map(|row| catalog_column_from_row(&row))
+        .collect::<Result<Vec<_>, spi::Error>>()?;
+    capture_field_registrations_from_catalog(&columns, capture_key_columns, captured_columns)
 }
 
 fn insert_field_registrations(
@@ -3005,6 +3293,158 @@ fn insert_capture_field_registrations(
         )?;
     }
     Ok(())
+}
+
+fn catalog_column_from_row(row: &SpiHeapTupleData<'_>) -> Result<CatalogColumn, spi::Error> {
+    Ok(CatalogColumn {
+        physical_column: row
+            .get_by_name::<String, &str>("physical_column")?
+            .unwrap_or_else(|| pgrx::error!("registered field has no physical column")),
+        sql_type: row
+            .get_by_name::<String, &str>("sql_type")?
+            .unwrap_or_else(|| pgrx::error!("registered field has no SQL type")),
+        nullable: row
+            .get_by_name::<bool, &str>("nullable")?
+            .unwrap_or_else(|| pgrx::error!("registered field has no nullability")),
+        generated: row
+            .get_by_name::<String, &str>("generated")?
+            .unwrap_or_default(),
+    })
+}
+
+fn field_registrations_from_catalog(
+    columns: &[CatalogColumn],
+    sync_columns: &[String],
+    pk_column: &str,
+    updated_at_column: &str,
+    deleted_at_column: &str,
+    field_id: impl Fn(&str) -> String,
+) -> Result<Vec<FieldRegistration>, spi::Error> {
+    let requested = sync_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let mut fields = Vec::with_capacity(sync_columns.len());
+    for column in columns
+        .iter()
+        .filter(|column| requested.contains(column.physical_column.as_str()))
+    {
+        let portable_type = normalize_portable_type_name(&column.sql_type)
+            .unwrap_or_else(|| {
+                pgrx::error!(
+                    "registered field {:?} has unsupported type {:?}",
+                    column.physical_column,
+                    column.sql_type
+                )
+            })
+            .to_string();
+        let (decimal_precision, decimal_scale) = if portable_type == "decimal" {
+            parse_decimal_metadata(&column.sql_type)
+                .unwrap_or_else(|| pgrx::error!("decimal field has no precision and scale"))
+        } else {
+            (None, None)
+        };
+        let primary_key = column.physical_column == pk_column;
+        let writable = !primary_key
+            && column.physical_column != updated_at_column
+            && column.physical_column != deleted_at_column
+            && column.physical_column != "created_at"
+            && column.generated.is_empty();
+        fields.push(FieldRegistration {
+            field_id: field_id(&column.physical_column),
+            physical_column: column.physical_column.clone(),
+            portable_type,
+            native_json: matches!(column.sql_type.as_str(), "json" | "jsonb"),
+            decimal_precision,
+            decimal_scale,
+            nullable: column.nullable,
+            writable,
+            primary_key,
+        });
+    }
+    if fields.len() != sync_columns.len() {
+        pgrx::error!("registered field identity does not cover the synced projection");
+    }
+    Ok(fields)
+}
+
+fn retained_field_registrations_from_catalog(
+    columns: &[CatalogColumn],
+    sync_columns: &[String],
+    pk_column: &str,
+    updated_at_column: &str,
+    deleted_at_column: &str,
+    retained: &[FieldRegistration],
+) -> Result<Vec<FieldRegistration>, spi::Error> {
+    let retained_by_column = retained
+        .iter()
+        .map(|field| (field.physical_column.as_str(), field))
+        .collect::<std::collections::HashMap<_, _>>();
+    field_registrations_from_catalog(
+        columns,
+        sync_columns,
+        pk_column,
+        updated_at_column,
+        deleted_at_column,
+        |column| {
+            retained_by_column
+                .get(column)
+                .map(|retained| retained.field_id.clone())
+                .unwrap_or_else(|| pgrx::error!("registered field metadata has drifted"))
+        },
+    )
+}
+
+fn capture_field_registrations_from_catalog(
+    columns: &[CatalogColumn],
+    capture_key_columns: &[String],
+    captured_columns: &[String],
+) -> Result<Vec<CaptureFieldRegistration>, spi::Error> {
+    let mut requested = capture_key_columns.to_vec();
+    requested.extend(captured_columns.iter().cloned());
+    requested.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    requested.dedup();
+    if requested.len() != capture_key_columns.len() + captured_columns.len() {
+        pgrx::error!("capture dependency fields are duplicated");
+    }
+    let requested = requested
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let capture_keys = capture_key_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let mut fields = Vec::with_capacity(requested.len());
+    for column in columns
+        .iter()
+        .filter(|column| requested.contains(column.physical_column.as_str()))
+    {
+        let portable_type = normalize_portable_type_name(&column.sql_type)
+            .unwrap_or_else(|| {
+                pgrx::error!(
+                    "capture dependency field {:?} has unsupported type {:?}",
+                    column.physical_column,
+                    column.sql_type
+                )
+            })
+            .to_string();
+        fields.push(CaptureFieldRegistration {
+            capture_key: capture_keys.contains(column.physical_column.as_str()),
+            physical_column: column.physical_column.clone(),
+            portable_type,
+            nullable: column.nullable,
+        });
+    }
+    if fields.len() != requested.len()
+        || fields.iter().filter(|field| field.capture_key).count() != capture_key_columns.len()
+        || fields
+            .iter()
+            .any(|field| field.capture_key && field.nullable)
+    {
+        pgrx::error!("capture dependency projection is incomplete");
+    }
+    Ok(fields)
 }
 
 fn load_field_registrations(
@@ -3620,6 +4060,501 @@ fn capture_trigger_names_exist(
         .unwrap_or(false))
 }
 
+fn load_logical_id_kinds_for_registrations(
+    client: &SpiClient<'_>,
+    registrations: &[TableRegistration],
+) -> Result<std::collections::HashMap<String, String>, spi::Error> {
+    let logical_ids = registrations
+        .iter()
+        .flat_map(|registration| {
+            std::iter::once(registration.relation_id.clone())
+                .chain((!registration.table_id.is_empty()).then(|| registration.table_id.clone()))
+                .chain(
+                    (!registration.primary_key_field_id.is_empty())
+                        .then(|| registration.primary_key_field_id.clone()),
+                )
+                .chain(
+                    registration
+                        .fields
+                        .iter()
+                        .map(|field| field.field_id.clone()),
+                )
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if logical_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows = client.select(
+        "SELECT logical_id::text AS logical_id, kind
+         FROM synchro.sync_logical_ids
+         WHERE logical_id = ANY($1::uuid[])",
+        None,
+        &[logical_ids.into()],
+    )?;
+    let mut kinds = std::collections::HashMap::new();
+    for row in rows {
+        let logical_id = row
+            .get_by_name::<String, &str>("logical_id")?
+            .unwrap_or_else(|| pgrx::error!("catalog logical ID is missing"));
+        let kind = row
+            .get_by_name::<String, &str>("kind")?
+            .unwrap_or_else(|| pgrx::error!("catalog logical ID kind is missing"));
+        kinds.insert(logical_id, kind);
+    }
+    Ok(kinds)
+}
+
+fn load_catalog_for_registrations(
+    client: &SpiClient<'_>,
+    generation: i64,
+    registrations: &[TableRegistration],
+) -> Result<GenerationCatalog, spi::Error> {
+    let relation_oids = registrations
+        .iter()
+        .map(|registration| i64::from(registration.physical_relation_oid))
+        .collect::<Vec<_>>();
+    let relation_ids = registrations
+        .iter()
+        .map(|registration| registration.relation_id.clone())
+        .collect::<Vec<_>>();
+    let membership_function_oids = registrations
+        .iter()
+        .filter(|registration| registration.is_synced())
+        .map(|registration| registration.membership_function.oid)
+        .collect::<std::collections::HashSet<_>>();
+    let relation_rows = client.select(
+        "SELECT relation.oid::bigint AS physical_relation_oid,
+                namespace.nspname::text AS physical_schema,
+                relation.relname::text AS physical_relation,
+                relation.relreplident::text AS replica_identity,
+                relation.relowner::bigint AS owner_oid
+         FROM synchro.sync_registry registry
+         JOIN pg_catalog.pg_class relation
+           ON relation.oid = registry.physical_relation_oid
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+          WHERE registry.registry_generation = $1
+            AND registry.physical_relation_oid = ANY($2::oid[])
+            AND relation.relkind IN ('r', 'p')
+           AND namespace.nspname !~ '^pg_'
+           AND namespace.nspname <> 'information_schema'",
+        None,
+        &[generation.into(), relation_oids.clone().into()],
+    )?;
+    let mut relations = std::collections::HashMap::new();
+    for row in relation_rows {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog relation has no OID"));
+        let physical = PhysicalRelation {
+            schema: row
+                .get_by_name::<String, &str>("physical_schema")?
+                .unwrap_or_else(|| pgrx::error!("catalog relation has no schema")),
+            relation: row
+                .get_by_name::<String, &str>("physical_relation")?
+                .unwrap_or_else(|| pgrx::error!("catalog relation has no name")),
+            oid: relation_oid,
+            replica_identity: row
+                .get_by_name::<String, &str>("replica_identity")?
+                .unwrap_or_else(|| pgrx::error!("catalog relation has no replica identity")),
+        };
+        let owner_oid = row
+            .get_by_name::<i64, &str>("owner_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog relation has no owner"));
+        relations.insert(
+            relation_oid,
+            CatalogRelation {
+                physical,
+                owner_oid,
+            },
+        );
+    }
+
+    let column_rows = client.select(
+        "SELECT attribute.attrelid::bigint AS physical_relation_oid,
+                attribute.attname::text AS physical_column,
+                pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) AS sql_type,
+                NOT attribute.attnotnull AS nullable,
+                attribute.attgenerated::text AS generated
+         FROM synchro.sync_registry registry
+         JOIN pg_catalog.pg_attribute attribute
+           ON attribute.attrelid = registry.physical_relation_oid
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+          WHERE registry.registry_generation = $1
+            AND registry.physical_relation_oid = ANY($2::oid[])
+          ORDER BY attribute.attrelid, attribute.attnum",
+        None,
+        &[generation.into(), relation_oids.clone().into()],
+    )?;
+    let mut columns = std::collections::HashMap::<u32, Vec<CatalogColumn>>::new();
+    for row in column_rows {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog column has no relation OID"));
+        columns
+            .entry(relation_oid)
+            .or_default()
+            .push(catalog_column_from_row(&row)?);
+    }
+
+    let primary_key_rows = client.select(
+        "SELECT relation.oid::bigint AS physical_relation_oid,
+                attribute.attname::text AS attname,
+                attribute.attnotnull AS attnotnull,
+                attribute.atttypid::bigint AS type_oid,
+                pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) AS sql_type,
+                index.indnkeyatts::integer AS key_count,
+                (index.indpred IS NULL) AS is_not_partial,
+                (index.indexprs IS NULL) AS has_no_expressions,
+                key.attnum::integer AS key_attnum,
+                relation.relreplident::text AS replica_identity
+         FROM synchro.sync_registry registry
+         JOIN pg_catalog.pg_class relation
+           ON relation.oid = registry.physical_relation_oid
+         JOIN pg_catalog.pg_index index
+           ON index.indrelid = relation.oid AND index.indisprimary
+         JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality) ON true
+         LEFT JOIN pg_catalog.pg_attribute attribute
+           ON attribute.attrelid = relation.oid
+          AND attribute.attnum = key.attnum
+          AND NOT attribute.attisdropped
+          WHERE registry.registry_generation = $1
+            AND registry.physical_relation_oid = ANY($2::oid[])
+          ORDER BY relation.oid, key.ordinality",
+        None,
+        &[generation.into(), relation_oids.clone().into()],
+    )?;
+    let mut primary_keys = std::collections::HashMap::<u32, Vec<CatalogPrimaryKey>>::new();
+    for row in primary_key_rows {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog primary key has no relation OID"));
+        primary_keys
+            .entry(relation_oid)
+            .or_default()
+            .push(catalog_primary_key_from_row(&row)?);
+    }
+
+    let logical_id_kinds = load_logical_id_kinds_for_registrations(client, registrations)?;
+    let privilege_rows = client.select(
+        "WITH owner_role AS (
+             SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner'
+         ), relation_acl AS (
+             SELECT registry.physical_relation_oid::bigint AS physical_relation_oid,
+                    registry.push_policy = 'enabled' AS requires_write,
+                    registry.push_policy = 'enabled' AND NOT registry.has_deleted_at
+                        AS requires_delete,
+                    relation.relacl, relation.relowner
+             FROM synchro.sync_registry registry
+              JOIN pg_catalog.pg_class relation
+                ON relation.oid = registry.physical_relation_oid
+              WHERE registry.registry_generation = $1
+                AND registry.physical_relation_oid = ANY($2::oid[])
+         )
+         SELECT relation_acl.physical_relation_oid,
+                EXISTS (
+                    SELECT 1
+                    FROM owner_role
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.aclexplode(
+                             COALESCE(relation_acl.relacl,
+                                      pg_catalog.acldefault('r', relation_acl.relowner))
+                        ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                        WHERE acl.grantee = owner_role.oid
+                          AND acl.privilege_type = 'SELECT'
+                    )
+                      AND (
+                          NOT relation_acl.requires_write
+                          OR (
+                              EXISTS (
+                                  SELECT 1
+                                  FROM pg_catalog.aclexplode(
+                                       COALESCE(relation_acl.relacl,
+                                                pg_catalog.acldefault('r', relation_acl.relowner))
+                                  ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                                  WHERE acl.grantee = owner_role.oid
+                                    AND acl.privilege_type = 'INSERT'
+                              )
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM pg_catalog.aclexplode(
+                                       COALESCE(relation_acl.relacl,
+                                                pg_catalog.acldefault('r', relation_acl.relowner))
+                                  ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                                  WHERE acl.grantee = owner_role.oid
+                                    AND acl.privilege_type = 'UPDATE'
+                              )
+                          )
+                      )
+                      AND (
+                          NOT relation_acl.requires_delete
+                          OR EXISTS (
+                              SELECT 1
+                              FROM pg_catalog.aclexplode(
+                                   COALESCE(relation_acl.relacl,
+                                            pg_catalog.acldefault('r', relation_acl.relowner))
+                              ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                              WHERE acl.grantee = owner_role.oid
+                                AND acl.privilege_type = 'DELETE'
+                          )
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pg_catalog.aclexplode(
+                               COALESCE(relation_acl.relacl,
+                                        pg_catalog.acldefault('r', relation_acl.relowner))
+                          ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                          WHERE acl.grantee = owner_role.oid
+                            AND acl.privilege_type IN ('INSERT', 'UPDATE', 'DELETE')
+                            AND (
+                                (acl.privilege_type IN ('INSERT', 'UPDATE')
+                                    AND NOT relation_acl.requires_write)
+                                OR (acl.privilege_type = 'DELETE'
+                                    AND NOT relation_acl.requires_delete)
+                            )
+                      )
+                ) AS valid
+         FROM relation_acl",
+        None,
+        &[generation.into(), relation_oids.clone().into()],
+    )?;
+    let mut relation_privileges = std::collections::HashMap::new();
+    for row in privilege_rows {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog privilege relation has no identity"));
+        let valid = row.get_by_name::<bool, &str>("valid")?.unwrap_or(false);
+        relation_privileges.insert(relation_oid, valid);
+    }
+
+    let rls_rows = client.select(
+        "WITH owner_role AS (
+             SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner'
+         ), relation_policy AS (
+             SELECT registry.physical_relation_oid AS physical_relation_oid,
+                    relation.relrowsecurity, relation.relowner
+             FROM synchro.sync_registry registry
+              JOIN pg_catalog.pg_class relation
+                ON relation.oid = registry.physical_relation_oid
+              WHERE registry.registry_generation = $1
+                AND registry.physical_relation_oid = ANY($2::oid[])
+         )
+         SELECT relation_policy.physical_relation_oid::bigint AS physical_relation_oid,
+                EXISTS (
+                    SELECT 1
+                    FROM owner_role
+                    WHERE relation_policy.relrowsecurity
+                      AND relation_policy.relowner <> owner_role.oid
+                      AND (
+                          SELECT count(*)
+                          FROM pg_catalog.pg_policy policy
+                          WHERE policy.polrelid = relation_policy.physical_relation_oid
+                            AND policy.polpermissive
+                            AND policy.polcmd = '*'
+                            AND cardinality(policy.polroles) = 1
+                            AND policy.polroles[1] = owner_role.oid
+                            AND policy.polqual IS NOT NULL
+                            AND policy.polwithcheck IS NOT NULL
+                      ) = 1
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pg_catalog.pg_policy policy
+                          WHERE policy.polrelid = relation_policy.physical_relation_oid
+                            AND policy.polpermissive
+                            AND 0 = ANY(policy.polroles)
+                      )
+                ) AS valid
+         FROM relation_policy",
+        None,
+        &[generation.into(), relation_oids.clone().into()],
+    )?;
+    let mut relation_rls = std::collections::HashMap::new();
+    for row in rls_rows {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog RLS relation has no identity"));
+        let valid = row.get_by_name::<bool, &str>("valid")?.unwrap_or(false);
+        relation_rls.insert(relation_oid, valid);
+    }
+    let trigger_rows = client.select(
+        "SELECT trigger.tgrelid::bigint AS physical_relation_oid,
+                trigger.tgname::text AS trigger_name,
+                trigger.tgenabled::text AS trigger_enabled,
+                trigger.tgtype::integer AS trigger_type,
+                trigger.tgnargs::integer AS argument_count,
+                procedure.proname::text AS function_name,
+                pg_catalog.pg_get_triggerdef(trigger.oid, true) AS trigger_definition
+         FROM synchro.sync_registry registry
+         JOIN pg_catalog.pg_trigger trigger
+           ON trigger.tgrelid = registry.physical_relation_oid
+         JOIN pg_catalog.pg_proc procedure ON procedure.oid = trigger.tgfoid
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+          WHERE registry.registry_generation = $1
+            AND registry.physical_relation_oid = ANY($3::oid[])
+            AND NOT trigger.tgisinternal
+           AND namespace.nspname = 'synchro'
+           AND trigger.tgname = ANY($2)
+         ORDER BY trigger.tgrelid, trigger.tgname",
+        None,
+        &[
+            generation.into(),
+            vec![
+                PRIMARY_KEY_GUARD_TRIGGER.to_string(),
+                CAPTURE_FENCE_TRIGGER.to_string(),
+                CAPTURE_TRUNCATE_TRIGGER.to_string(),
+            ]
+            .into(),
+            relation_oids.clone().into(),
+        ],
+    )?;
+    let mut triggers = std::collections::HashMap::<u32, Vec<CatalogTrigger>>::new();
+    for row in trigger_rows {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog trigger has no relation OID"));
+        triggers
+            .entry(relation_oid)
+            .or_default()
+            .push(CatalogTrigger {
+                name: row
+                    .get_by_name::<String, &str>("trigger_name")?
+                    .unwrap_or_default(),
+                enabled: row
+                    .get_by_name::<String, &str>("trigger_enabled")?
+                    .unwrap_or_default(),
+                trigger_type: row
+                    .get_by_name::<i32, &str>("trigger_type")?
+                    .unwrap_or_default(),
+                argument_count: row
+                    .get_by_name::<i32, &str>("argument_count")?
+                    .unwrap_or_default(),
+                function_name: row
+                    .get_by_name::<String, &str>("function_name")?
+                    .unwrap_or_default(),
+                definition: row
+                    .get_by_name::<String, &str>("trigger_definition")?
+                    .unwrap_or_default(),
+            });
+    }
+
+    let publication_name = configured_publication_name();
+    let publication_rows = client.select(
+        "SELECT pubowner::bigint AS owner_oid, puballtables
+         FROM pg_catalog.pg_publication
+         WHERE pubname = $1",
+        None,
+        &[publication_name.as_str().into()],
+    )?;
+    let publication = match publication_rows.into_iter().next() {
+        Some(row) => Some(CatalogPublication {
+            owner_oid: row
+                .get_by_name::<i64, &str>("owner_oid")?
+                .map(checked_oid)
+                .unwrap_or_else(|| pgrx::error!("catalog publication has no owner")),
+            all_tables: row
+                .get_by_name::<bool, &str>("puballtables")?
+                .unwrap_or(false),
+        }),
+        None => None,
+    };
+    let publication_relation_rows = client.select(
+        "SELECT publication_relation.prrelid::bigint AS physical_relation_oid
+         FROM synchro.sync_registry registry
+         JOIN pg_catalog.pg_publication publication ON publication.pubname = $2
+          JOIN pg_catalog.pg_publication_rel publication_relation
+            ON publication_relation.prpubid = publication.oid
+           AND publication_relation.prrelid = registry.physical_relation_oid
+           WHERE registry.registry_generation = $1
+             AND registry.physical_relation_oid = ANY($3::oid[])",
+        None,
+        &[
+            generation.into(),
+            publication_name.as_str().into(),
+            relation_oids.clone().into(),
+        ],
+    )?;
+    let mut publication_relations = std::collections::HashSet::new();
+    for row in publication_relation_rows {
+        let relation_oid = row
+            .get_by_name::<i64, &str>("physical_relation_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("catalog publication relation has no identity"));
+        publication_relations.insert(relation_oid);
+    }
+
+    let functions = load_catalog_functions(client, &membership_function_oids)?;
+    let synchro_owner_rows = client.select(
+        "SELECT oid::bigint AS owner_oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner'",
+        None,
+        &[],
+    )?;
+    let synchro_owner_oid = match synchro_owner_rows.into_iter().next() {
+        Some(row) => Some(
+            row.get_by_name::<i64, &str>("owner_oid")?
+                .map(checked_oid)
+                .unwrap_or_else(|| pgrx::error!("catalog synchro owner has no identity")),
+        ),
+        None => None,
+    };
+
+    let staged_rows = client.select(
+        "SELECT registry.relation_id::text AS relation_id,
+                registry.sync_columns, registry.exclude_columns
+         FROM synchro.sync_registry registry
+         JOIN synchro.sync_registry_generations generation
+           ON generation.generation = registry.registry_generation
+         WHERE generation.state = 'pending'
+           AND generation.validated
+           AND registry.registry_generation > $1
+           AND registry.relation_id = ANY($2::uuid[])
+          ORDER BY registry.relation_id, registry.registry_generation DESC",
+        None,
+        &[generation.into(), relation_ids.into()],
+    )?;
+    let mut staged_reconfigurations = std::collections::HashMap::new();
+    for row in staged_rows {
+        let relation_id = row
+            .get_by_name::<String, &str>("relation_id")?
+            .unwrap_or_else(|| pgrx::error!("staged registry relation has no identity"));
+        staged_reconfigurations
+            .entry(relation_id)
+            .or_insert(StagedReconfiguration {
+                sync_columns: row
+                    .get_by_name::<Vec<String>, &str>("sync_columns")?
+                    .unwrap_or_default(),
+                exclude_columns: row
+                    .get_by_name::<Vec<String>, &str>("exclude_columns")?
+                    .unwrap_or_default(),
+            });
+    }
+
+    Ok(GenerationCatalog {
+        relations,
+        columns,
+        primary_keys,
+        logical_id_kinds,
+        triggers,
+        publication,
+        publication_relations,
+        functions,
+        relation_privileges,
+        relation_rls,
+        synchro_owner_oid,
+        staged_reconfigurations,
+        membership_limits: configured_membership_limits(client)?,
+    })
+}
+
 fn validate_generation_entries(
     client: &mut SpiClient<'_>,
     generation: i64,
@@ -3672,10 +4607,13 @@ fn validate_generation_entries(
         if registration.registry_generation != generation {
             pgrx::error!("registry generation contains an invalid entry");
         }
-        validate_registration_metadata(client, &registration)?;
         registrations.push(registration);
     }
-    load_membership_dependencies_from_client(client, generation, &registrations)?;
+    let catalog = load_catalog_for_registrations(client, generation, &registrations)?;
+    for registration in &registrations {
+        validate_registration_metadata_from_catalog(registration, &catalog)?;
+    }
+    load_membership_dependencies_from_catalog(client, generation, &registrations, &catalog)?;
     Ok(())
 }
 
@@ -3872,24 +4810,37 @@ fn load_registry_generation_entries(
         if registration.registry_generation != generation {
             pgrx::error!("registry entry belongs to another generation");
         }
-        if validate_capture_controls {
-            validate_loaded_registration(client, &registration)?;
-        } else {
-            validate_persisted_registration_metadata(client, &registration)?;
-        }
         registrations.push(registration);
     }
-    if validate_capture_controls {
-        let dependencies =
-            load_membership_dependencies_from_client(client, generation, &registrations)?;
-        validate_generation_function_projections(client, &registrations, &dependencies)?;
+    if !validate_capture_controls {
+        let logical_id_kinds = load_logical_id_kinds_for_registrations(client, &registrations)?;
+        for registration in &registrations {
+            validate_persisted_registration_metadata_from_catalog(registration, &logical_id_kinds)?;
+        }
+        return Ok(registrations);
     }
+    let catalog = load_catalog_for_registrations(client, generation, &registrations)?;
+    for registration in &registrations {
+        validate_loaded_registration_from_catalog(registration, &catalog)?;
+    }
+    let dependencies =
+        load_membership_dependencies_from_catalog(client, generation, &registrations, &catalog)?;
+    validate_generation_function_projections(client, &registrations, &dependencies)?;
     Ok(registrations)
 }
 
 fn validate_persisted_registration_metadata(
     client: &SpiClient<'_>,
     registration: &TableRegistration,
+) -> Result<(), spi::Error> {
+    let logical_id_kinds =
+        load_logical_id_kinds_for_registrations(client, std::slice::from_ref(registration))?;
+    validate_persisted_registration_metadata_from_catalog(registration, &logical_id_kinds)
+}
+
+fn validate_persisted_registration_metadata_from_catalog(
+    registration: &TableRegistration,
+    logical_id_kinds: &std::collections::HashMap<String, String>,
 ) -> Result<(), spi::Error> {
     if registration.is_capture_dependency() {
         if registration.relation_id.is_empty()
@@ -3908,19 +4859,11 @@ fn validate_persisted_registration_metadata(
         {
             pgrx::error!("capture dependency registry metadata is incomplete");
         }
-        let relation_identity_valid = client
-            .select(
-                "SELECT EXISTS (
-                     SELECT 1 FROM synchro.sync_logical_ids
-                     WHERE logical_id = $1::uuid AND kind = 'relation'
-                 ) AS valid",
-                None,
-                &[registration.relation_id.as_str().into()],
-            )?
-            .first()
-            .get_by_name::<bool, &str>("valid")?
-            .unwrap_or(false);
-        if !relation_identity_valid {
+        if logical_id_kinds
+            .get(&registration.relation_id)
+            .map(String::as_str)
+            != Some("relation")
+        {
             pgrx::error!("capture dependency relation identity is invalid");
         }
         return Ok(());
@@ -3976,7 +4919,7 @@ fn validate_persisted_registration_metadata(
         pgrx::error!("registered field identity does not cover the synced projection");
     }
     validate_lifecycle_fields(registration)?;
-    validate_logical_id_kinds(client, registration)
+    validate_logical_id_kinds_from_catalog(registration, logical_id_kinds)
 }
 
 fn validate_lifecycle_fields(registration: &TableRegistration) -> Result<(), spi::Error> {
@@ -4010,16 +4953,29 @@ fn validate_generation_function_projections(
     registrations: &[TableRegistration],
     dependencies: &[MembershipDependency],
 ) -> Result<(), spi::Error> {
+    let function_oids = registrations
+        .iter()
+        .filter(|registration| registration.is_synced())
+        .map(|registration| registration.membership_function.oid)
+        .chain(
+            dependencies
+                .iter()
+                .map(|dependency| dependency.impact_function.oid),
+        )
+        .collect::<std::collections::HashSet<_>>();
+    let projections = function_projection_dependencies_for_functions(client, &function_oids)?;
     for target in registrations
         .iter()
         .filter(|registration| registration.is_synced())
     {
-        for (physical_oid, columns) in
-            function_projection_dependencies(client, target.membership_function.oid)?
+        for (physical_oid, columns) in projections
+            .get(&target.membership_function.oid)
+            .into_iter()
+            .flatten()
         {
             let source = registrations
                 .iter()
-                .find(|registration| registration.physical_relation_oid == physical_oid)
+                .find(|registration| registration.physical_relation_oid == *physical_oid)
                 .unwrap_or_else(|| {
                     pgrx::error!("membership function projection is not registered")
                 });
@@ -4064,12 +5020,14 @@ fn validate_generation_function_projections(
             .iter()
             .find(|registration| registration.relation_id == dependency.target_relation_id)
             .expect("validated dependency target");
-        for (physical_oid, columns) in
-            function_projection_dependencies(client, dependency.impact_function.oid)?
+        for (physical_oid, columns) in projections
+            .get(&dependency.impact_function.oid)
+            .into_iter()
+            .flatten()
         {
-            let registration = if physical_oid == source.physical_relation_oid {
+            let registration = if *physical_oid == source.physical_relation_oid {
                 source
-            } else if physical_oid == target.physical_relation_oid {
+            } else if *physical_oid == target.physical_relation_oid {
                 target
             } else {
                 pgrx::error!("impact function reads outside its declared relations");
@@ -4081,7 +5039,7 @@ fn validate_generation_function_projections(
             {
                 pgrx::error!("impact function reads an undeclared projection field");
             }
-            if physical_oid == source.physical_relation_oid {
+            if *physical_oid == source.physical_relation_oid {
                 let declared: std::collections::HashSet<&str> = dependency
                     .dependency_columns
                     .iter()
@@ -4117,12 +5075,16 @@ fn projected_registration_columns(
     }
 }
 
-fn function_projection_dependencies(
+fn function_projection_dependencies_for_functions(
     client: &SpiClient<'_>,
-    function_oid: u32,
-) -> Result<Vec<(u32, Vec<String>)>, spi::Error> {
+    function_oids: &std::collections::HashSet<u32>,
+) -> Result<ProjectionDependencies, spi::Error> {
+    if function_oids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
     let rows = client.select(
-        "SELECT projection.physical_relation_oid::bigint AS physical_relation_oid,
+        "SELECT dependency.objid::bigint AS function_oid,
+                projection.physical_relation_oid::bigint AS physical_relation_oid,
                 COALESCE(
                     array_agg(DISTINCT attribute.attname::text)
                         FILTER (
@@ -4139,15 +5101,24 @@ fn function_projection_dependencies(
            ON attribute.attrelid = projection.view_oid
           AND attribute.attnum = dependency.refobjsubid
          WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
-           AND dependency.objid = $1::oid
-           AND dependency.deptype = 'n'
-         GROUP BY projection.physical_relation_oid
-         ORDER BY projection.physical_relation_oid",
+            AND dependency.objid = ANY($1::oid[])
+            AND dependency.deptype = 'n'
+          GROUP BY dependency.objid, projection.physical_relation_oid
+          ORDER BY dependency.objid, projection.physical_relation_oid",
         None,
-        &[i64::from(function_oid).into()],
+        &[function_oids
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>()
+            .into()],
     )?;
-    let mut result = Vec::with_capacity(rows.len());
+    let mut result = std::collections::HashMap::<u32, Vec<(u32, Vec<String>)>>::new();
     for row in rows {
+        let function_oid = row
+            .get_by_name::<i64, &str>("function_oid")?
+            .map(checked_oid)
+            .unwrap_or_else(|| pgrx::error!("projection dependency has no function identity"));
         let oid = row
             .get_by_name::<i64, &str>("physical_relation_oid")?
             .map(checked_oid)
@@ -4155,7 +5126,7 @@ fn function_projection_dependencies(
         let columns = row
             .get_by_name::<Vec<String>, &str>("columns")?
             .unwrap_or_default();
-        result.push((oid, columns));
+        result.entry(function_oid).or_default().push((oid, columns));
     }
     Ok(result)
 }
@@ -4168,6 +5139,16 @@ pub(crate) fn load_membership_dependencies_from_client(
     client: &SpiClient<'_>,
     generation: i64,
     registrations: &[TableRegistration],
+) -> Result<Vec<MembershipDependency>, spi::Error> {
+    let catalog = load_catalog_for_registrations(client, generation, registrations)?;
+    load_membership_dependencies_from_catalog(client, generation, registrations, &catalog)
+}
+
+fn load_membership_dependencies_from_catalog(
+    client: &SpiClient<'_>,
+    generation: i64,
+    registrations: &[TableRegistration],
+    catalog: &GenerationCatalog,
 ) -> Result<Vec<MembershipDependency>, spi::Error> {
     let rows = client.select(
         "SELECT dependency_id::text AS dependency_id,
@@ -4191,6 +5172,19 @@ pub(crate) fn load_membership_dependencies_from_client(
         None,
         &[generation.into()],
     )?;
+    let rows = rows.into_iter().collect::<Vec<_>>();
+    let impact_function_oids = rows
+        .iter()
+        .map(|row| {
+            Ok(row
+                .get_by_name::<i64, &str>("impact_function_oid")?
+                .map(checked_oid)
+                .unwrap_or_else(|| {
+                    pgrx::error!("membership dependency has no impact function OID")
+                }))
+        })
+        .collect::<Result<std::collections::HashSet<_>, spi::Error>>()?;
+    let impact_functions = load_catalog_functions(client, &impact_function_oids)?;
     let mut dependencies = Vec::new();
     let mut identities = std::collections::HashSet::new();
     let mut edges = std::collections::HashSet::new();
@@ -4265,27 +5259,28 @@ pub(crate) fn load_membership_dependencies_from_client(
             pgrx::error!("membership dependency metadata is invalid");
         }
         if dependency_registration.is_synced() {
-            validate_application_ownership(
-                client,
+            validate_application_ownership_from_catalog(
                 dependency_registration.physical_relation_oid,
                 dependency_registration.membership_function.oid,
+                catalog,
             )?;
         } else {
-            validate_capture_application_ownership(
-                client,
+            validate_capture_application_ownership_from_catalog(
                 dependency_registration.physical_relation_oid,
+                catalog,
             )?;
         }
-        validate_application_ownership(
-            client,
+        validate_application_ownership_from_catalog(
             target_registration.physical_relation_oid,
             target_registration.membership_function.oid,
+            catalog,
         )?;
-        validate_dependency_application_ownership(
-            client,
+        validate_dependency_application_ownership_from_catalog(
             dependency_registration.physical_relation_oid,
             target_registration.physical_relation_oid,
             &impact_function,
+            catalog,
+            &impact_functions,
         )?;
         let (validated_field_ids, validated_columns) = validate_declared_dependency_fields(
             dependency_registration,
@@ -4298,11 +5293,11 @@ pub(crate) fn load_membership_dependencies_from_client(
         if validated_field_ids != dependency_field_ids || validated_columns != dependency_columns {
             pgrx::error!("membership dependency captured fields changed");
         }
-        validate_impact_row_limit(client, max_impact_rows)?;
-        validate_registered_impact_function(
-            client,
+        validate_impact_row_limit_from_catalog(max_impact_rows, catalog)?;
+        validate_registered_impact_function_from_catalog(
             &impact_function,
             &impact_function_fingerprint,
+            &impact_functions,
         )?;
         dependencies.push(MembershipDependency {
             dependency_relation_id,
@@ -4581,28 +5576,256 @@ fn registration_from_row(row: &SpiHeapTupleData<'_>) -> Result<TableRegistration
     })
 }
 
-fn validate_registration_metadata(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
+fn validate_capture_application_ownership_from_catalog(
+    relation_oid: u32,
+    catalog: &GenerationCatalog,
 ) -> Result<(), spi::Error> {
-    if registration.is_capture_dependency() {
-        if registration.relation_id.is_empty()
-            || registration.table_name.trim().is_empty()
-            || registration.pk_column.trim().is_empty()
-            || registration.pk_type.trim().is_empty()
-            || registration.registry_generation <= 0
-            || !registration.table_id.is_empty()
-            || !registration.primary_key_field_id.is_empty()
-            || registration.membership_function.oid != 0
-            || registration.max_scope_fanout != 0
-            || !registration.fields.is_empty()
-            || registration.capture_fields.is_empty()
-            || registration.capture_key_columns.len() != 1
-            || registration.capture_key_columns[0] != registration.pk_column
-        {
-            pgrx::error!("capture dependency registry metadata is incomplete");
+    let valid = catalog
+        .relations
+        .get(&relation_oid)
+        .is_some_and(|relation| Some(relation.owner_oid) != catalog.synchro_owner_oid);
+    if !valid {
+        pgrx::error!("capture dependency relation owner is invalid");
+    }
+    Ok(())
+}
+
+fn validate_application_ownership_from_catalog(
+    relation_oid: u32,
+    membership_function_oid: u32,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    let valid = catalog.synchro_owner_oid.is_some_and(|synchro_owner_oid| {
+        catalog
+            .relations
+            .get(&relation_oid)
+            .is_some_and(|relation| {
+                catalog
+                    .functions
+                    .get(&membership_function_oid)
+                    .is_some_and(|function| {
+                        function.owner_oid == relation.owner_oid
+                            && relation.owner_oid != synchro_owner_oid
+                    })
+            })
+    });
+    if !valid {
+        pgrx::error!("registered relation and membership function owners are invalid");
+    }
+    Ok(())
+}
+
+fn validate_dependency_application_ownership_from_catalog(
+    dependency_relation_oid: u32,
+    target_relation_oid: u32,
+    impact_function: &RegisteredFunction,
+    catalog: &GenerationCatalog,
+    impact_functions: &std::collections::HashMap<u32, CatalogFunction>,
+) -> Result<(), spi::Error> {
+    let valid = catalog
+        .relations
+        .get(&dependency_relation_oid)
+        .zip(catalog.relations.get(&target_relation_oid))
+        .is_some_and(|(dependency, target)| {
+            dependency.owner_oid == target.owner_oid
+                && impact_functions
+                    .get(&impact_function.oid)
+                    .is_some_and(|function| function.owner_oid == dependency.owner_oid)
+        });
+    if !valid {
+        pgrx::error!("membership dependency application owners are invalid");
+    }
+    Ok(())
+}
+
+fn validate_publication_owner_from_catalog(
+    relation_oid: u32,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    let valid = match (
+        catalog.publication.as_ref(),
+        catalog.relations.get(&relation_oid),
+    ) {
+        (None, _) => true,
+        (Some(publication), Some(relation)) => publication.owner_oid == relation.owner_oid,
+        (Some(_), None) => false,
+    };
+    if !valid {
+        pgrx::error!("configured publication owner does not match the application relation owner");
+    }
+    Ok(())
+}
+
+fn validate_relation_privileges_from_catalog(
+    relation_oid: u32,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    if catalog.relation_privileges.get(&relation_oid) != Some(&true) {
+        pgrx::error!("synchro_owner direct relation privileges do not match the push policy");
+    }
+    Ok(())
+}
+
+fn validate_relation_rls_from_catalog(
+    relation_oid: u32,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    if catalog.relation_rls.get(&relation_oid) != Some(&true) {
+        pgrx::error!("registered relation row-level security policy is invalid");
+    }
+    Ok(())
+}
+
+fn validate_publication_membership_from_catalog(
+    relation_oid: u32,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    let publication_is_invalid = catalog
+        .publication
+        .as_ref()
+        .map(|publication| publication.all_tables)
+        .unwrap_or(true);
+    if publication_is_invalid || !catalog.publication_relations.contains(&relation_oid) {
+        pgrx::error!("registered relation is not an exact publication member");
+    }
+    Ok(())
+}
+
+fn validate_capture_triggers_from_catalog(
+    registration: &TableRegistration,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    let triggers = catalog
+        .triggers
+        .get(&registration.physical_relation_oid)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if !capture_triggers_match_catalog(registration, triggers) {
+        pgrx::error!("registered relation is missing required capture triggers");
+    }
+    Ok(())
+}
+
+fn capture_triggers_match_catalog(
+    registration: &TableRegistration,
+    triggers: &[CatalogTrigger],
+) -> bool {
+    let mut found_guard = false;
+    let mut found_fence = false;
+    let mut found_truncate = false;
+    for trigger in triggers {
+        if trigger.enabled != "O" {
+            return false;
         }
-        let physical = relation_by_oid(client, registration.physical_relation_oid)?
+        match trigger.name.as_str() {
+            PRIMARY_KEY_GUARD_TRIGGER
+                if trigger.function_name == PRIMARY_KEY_GUARD_TRIGGER
+                    && trigger.trigger_type == 19
+                    && trigger.argument_count == 1
+                    && trigger
+                        .definition
+                        .contains(&format!("'{}'", registration.pk_column)) =>
+            {
+                if found_guard {
+                    return false;
+                }
+                found_guard = true;
+            }
+            CAPTURE_FENCE_TRIGGER
+                if trigger.function_name == CAPTURE_FENCE_TRIGGER
+                    && trigger.trigger_type == 29
+                    && trigger.argument_count == 5
+                    && trigger
+                        .definition
+                        .contains(&format!("'{}'", registration.relation_id))
+                    && trigger
+                        .definition
+                        .contains(&format!("'{}'", registration.registration_kind.as_str()))
+                    && trigger.definition.contains(&format!(
+                        "'{}'",
+                        if registration.is_synced() {
+                            registration.table_id.as_str()
+                        } else {
+                            ""
+                        }
+                    ))
+                    && registration
+                        .capture_key_columns
+                        .iter()
+                        .all(|column| trigger.definition.contains(column))
+                    && trigger.definition.contains(&format!(
+                        "'{}'",
+                        if registration.is_synced() && registration.has_deleted_at {
+                            registration.deleted_at_col.as_str()
+                        } else {
+                            ""
+                        }
+                    )) =>
+            {
+                if found_fence {
+                    return false;
+                }
+                found_fence = true;
+            }
+            CAPTURE_TRUNCATE_TRIGGER
+                if trigger.function_name == CAPTURE_TRUNCATE_TRIGGER
+                    && trigger.trigger_type == 34
+                    && trigger.argument_count == 1
+                    && trigger
+                        .definition
+                        .contains(&format!("'{}'", registration.relation_id)) =>
+            {
+                if found_truncate {
+                    return false;
+                }
+                found_truncate = true;
+            }
+            _ => return false,
+        }
+    }
+    found_guard && found_fence && found_truncate
+}
+
+fn staged_reconfiguration_owns_live_catalog_from_catalog(
+    registration: &TableRegistration,
+    catalog: &GenerationCatalog,
+) -> Result<bool, spi::Error> {
+    let Some(staged) = catalog
+        .staged_reconfigurations
+        .get(&registration.relation_id)
+    else {
+        return Ok(false);
+    };
+    if staged.sync_columns.is_empty() {
+        return Ok(false);
+    }
+    let actual = catalog
+        .columns
+        .get(&registration.physical_relation_oid)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|column| column.physical_column.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let staged = staged
+        .sync_columns
+        .iter()
+        .chain(staged.exclude_columns.iter())
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    Ok(staged == actual)
+}
+
+fn validate_registration_metadata_from_catalog(
+    registration: &TableRegistration,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    validate_persisted_registration_metadata_from_catalog(registration, &catalog.logical_id_kinds)?;
+    if registration.is_capture_dependency() {
+        let physical = catalog
+            .relations
+            .get(&registration.physical_relation_oid)
+            .map(|relation| &relation.physical)
             .unwrap_or_else(|| pgrx::error!("capture dependency relation no longer exists"));
         if physical.schema != registration.physical_schema
             || physical.relation != registration.physical_relation
@@ -4610,17 +5833,15 @@ fn validate_registration_metadata(
         {
             pgrx::error!("capture dependency relation has drifted");
         }
-        validate_capture_application_ownership(client, registration.physical_relation_oid)?;
-        validate_publication_owner(client, registration.physical_relation_oid)?;
-        validate_relation_privileges(
-            client,
+        validate_capture_application_ownership_from_catalog(
             registration.physical_relation_oid,
-            &PushPolicy::ReadOnly,
-            false,
+            catalog,
         )?;
-        validate_relation_rls(client, registration.physical_relation_oid)?;
-        let primary_key = load_and_validate_primary_key(
-            client,
+        validate_publication_owner_from_catalog(registration.physical_relation_oid, catalog)?;
+        validate_relation_privileges_from_catalog(registration.physical_relation_oid, catalog)?;
+        validate_relation_rls_from_catalog(registration.physical_relation_oid, catalog)?;
+        let primary_key = primary_key_from_catalog(
+            catalog,
             registration.physical_relation_oid,
             &registration.pk_column,
         )?;
@@ -4635,9 +5856,12 @@ fn validate_registration_metadata(
             .filter(|field| !field.capture_key)
             .map(|field| field.physical_column.clone())
             .collect::<Vec<_>>();
-        let mut actual = build_capture_field_registrations(
-            client,
-            registration.physical_relation_oid,
+        let mut actual = capture_field_registrations_from_catalog(
+            catalog
+                .columns
+                .get(&registration.physical_relation_oid)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
             &registration.capture_key_columns,
             &captured_columns,
         )?;
@@ -4647,60 +5871,12 @@ fn validate_registration_metadata(
         if actual != stored {
             pgrx::error!("capture dependency field metadata has drifted");
         }
-        let relation_identity_valid = client
-            .select(
-                "SELECT EXISTS (
-                     SELECT 1 FROM synchro.sync_logical_ids
-                     WHERE logical_id = $1::uuid AND kind = 'relation'
-                 ) AS valid",
-                None,
-                &[registration.relation_id.as_str().into()],
-            )?
-            .first()
-            .get_by_name::<bool, &str>("valid")?
-            .unwrap_or(false);
-        if !relation_identity_valid {
-            pgrx::error!("capture dependency relation identity is invalid");
-        }
         return Ok(());
     }
-    if registration.relation_id.is_empty()
-        || registration.table_id.is_empty()
-        || registration.primary_key_field_id.is_empty()
-        || registration.table_name.trim().is_empty()
-        || registration.membership_function.schema.is_empty()
-        || registration.membership_function.name.is_empty()
-        || registration.membership_function.oid == 0
-        || registration.max_scope_fanout <= 0
-        || registration.pk_column.trim().is_empty()
-        || registration.pk_type.trim().is_empty()
-        || registration.registry_generation <= 0
-    {
-        pgrx::error!("registry metadata is incomplete");
-    }
-    let primary_key_fields: Vec<&FieldRegistration> = registration
-        .fields
-        .iter()
-        .filter(|field| field.primary_key)
-        .collect();
-    if primary_key_fields.len() != 1
-        || primary_key_fields[0].field_id != registration.primary_key_field_id
-        || primary_key_fields[0].physical_column != registration.pk_column
-        || primary_key_fields[0].portable_type != registration.pk_portable_type
-        || primary_key_fields[0].writable
-    {
-        pgrx::error!("registry primary key field identity is invalid");
-    }
-    if registration.replica_identity != "d" {
-        pgrx::error!("registry replica identity is invalid");
-    }
-    if !matches!(
-        registration.pk_portable_type.as_str(),
-        "string" | "int" | "int64"
-    ) {
-        pgrx::error!("registry portable primary key type is invalid");
-    }
-    let physical = relation_by_oid(client, registration.physical_relation_oid)?
+    let physical = catalog
+        .relations
+        .get(&registration.physical_relation_oid)
+        .map(|relation| &relation.physical)
         .unwrap_or_else(|| pgrx::error!("registered physical relation no longer exists"));
     if physical.schema != registration.physical_schema
         || physical.relation != registration.physical_relation
@@ -4708,22 +5884,17 @@ fn validate_registration_metadata(
     {
         pgrx::error!("registered physical relation has drifted");
     }
-    validate_application_ownership(
-        client,
+    validate_application_ownership_from_catalog(
         registration.physical_relation_oid,
         registration.membership_function.oid,
+        catalog,
     )?;
-    validate_publication_owner(client, registration.physical_relation_oid)?;
-    validate_relation_privileges(
-        client,
-        registration.physical_relation_oid,
-        &registration.push_policy,
-        registration.has_deleted_at,
-    )?;
-    validate_relation_rls(client, registration.physical_relation_oid)?;
+    validate_publication_owner_from_catalog(registration.physical_relation_oid, catalog)?;
+    validate_relation_privileges_from_catalog(registration.physical_relation_oid, catalog)?;
+    validate_relation_rls_from_catalog(registration.physical_relation_oid, catalog)?;
 
-    let primary_key = load_and_validate_primary_key(
-        client,
+    let primary_key = primary_key_from_catalog(
+        catalog,
         registration.physical_relation_oid,
         &registration.pk_column,
     )?;
@@ -4732,35 +5903,33 @@ fn validate_registration_metadata(
     {
         pgrx::error!("registered primary key metadata has drifted");
     }
-    validate_scope_fanout_limit(client, registration.max_scope_fanout)?;
-    validate_registered_membership_function(client, registration, primary_key.type_oid)?;
+    validate_scope_fanout_limit_from_catalog(registration.max_scope_fanout, catalog)?;
+    validate_registered_membership_function_from_catalog(
+        registration,
+        primary_key.type_oid,
+        catalog,
+    )?;
 
-    let actual_columns =
-        ordered_table_columns_for_oid_in_client(client, registration.physical_relation_oid)?;
+    let actual_columns = catalog
+        .columns
+        .get(&registration.physical_relation_oid)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|column| column.physical_column.clone())
+        .collect::<Vec<_>>();
     validate_stored_column_partition(&actual_columns, registration)?;
-    let stored_field_columns: std::collections::HashSet<&str> = registration
-        .fields
-        .iter()
-        .map(|field| field.physical_column.as_str())
-        .collect();
-    let synced_columns: std::collections::HashSet<&str> = registration
-        .sync_columns
-        .iter()
-        .map(String::as_str)
-        .collect();
-    if stored_field_columns != synced_columns {
-        pgrx::error!("registered field identity does not cover the synced projection");
-    }
-    validate_lifecycle_fields(registration)?;
-    validate_logical_id_kinds(client, registration)?;
-    let mut actual_fields = build_field_registrations(
-        client,
-        registration.physical_relation_oid,
+    let mut actual_fields = retained_field_registrations_from_catalog(
+        catalog
+            .columns
+            .get(&registration.physical_relation_oid)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
         &registration.sync_columns,
         &registration.pk_column,
         &registration.updated_at_col,
         &registration.deleted_at_col,
-        Some(&registration.fields),
+        &registration.fields,
     )?;
     let mut stored_fields = registration.fields.clone();
     actual_fields.sort_by(|left, right| left.physical_column.cmp(&right.physical_column));
@@ -4771,115 +5940,54 @@ fn validate_registration_metadata(
     Ok(())
 }
 
-fn validate_logical_id_kinds(
-    client: &SpiClient<'_>,
+fn validate_logical_id_kinds_from_catalog(
     registration: &TableRegistration,
+    logical_id_kinds: &std::collections::HashMap<String, String>,
 ) -> Result<(), spi::Error> {
-    let valid: bool = client
-        .select(
-            "SELECT EXISTS (
-                 SELECT 1 FROM synchro.sync_logical_ids
-                 WHERE logical_id = $1::uuid AND kind = 'relation'
-             ) AND EXISTS (
-                 SELECT 1 FROM synchro.sync_logical_ids
-                 WHERE logical_id = $2::uuid AND kind = 'table'
-             ) AND NOT EXISTS (
-                 SELECT 1
-                 FROM unnest($3::text[]) AS expected(field_id)
-                 LEFT JOIN synchro.sync_logical_ids ids
-                   ON ids.logical_id = expected.field_id::uuid
-                  AND ids.kind = 'field'
-                 WHERE ids.logical_id IS NULL
-             ) AS valid",
-            None,
-            &[
-                registration.relation_id.as_str().into(),
-                registration.table_id.as_str().into(),
-                registration
-                    .fields
-                    .iter()
-                    .map(|field| field.field_id.as_str())
-                    .collect::<Vec<_>>()
-                    .into(),
-            ],
-        )?
-        .first()
-        .get_by_name("valid")?
-        .unwrap_or(false);
+    let valid = logical_id_kinds
+        .get(&registration.relation_id)
+        .map(String::as_str)
+        == Some("relation")
+        && logical_id_kinds
+            .get(&registration.table_id)
+            .map(String::as_str)
+            == Some("table")
+        && registration.fields.iter().all(|field| {
+            logical_id_kinds.get(&field.field_id).map(String::as_str) == Some("field")
+        });
     if !valid {
         pgrx::error!("registry logical identity ledger is invalid");
     }
     Ok(())
 }
 
+#[cfg(any(test, feature = "pg_test"))]
 pub(crate) fn validate_loaded_registration(
     client: &SpiClient<'_>,
     registration: &TableRegistration,
 ) -> Result<(), spi::Error> {
-    if staged_reconfiguration_owns_live_catalog(client, registration)? {
+    let catalog = load_catalog_for_registrations(
+        client,
+        registration.registry_generation,
+        std::slice::from_ref(registration),
+    )?;
+    validate_loaded_registration_from_catalog(registration, &catalog)
+}
+
+fn validate_loaded_registration_from_catalog(
+    registration: &TableRegistration,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
+    if staged_reconfiguration_owns_live_catalog_from_catalog(registration, catalog)? {
         // A pending validated generation staged this relation's live shape,
         // so the loaded registration mismatches the catalog by design until
         // activation. True drift stays detectable because tolerance requires
         // the staged shape to match the catalog exactly. Issue #43.
         return Ok(());
     }
-    validate_registration_metadata(client, registration)?;
-    validate_capture_triggers(client, registration)?;
-    validate_publication_membership(client, registration.physical_relation_oid)?;
-    Ok(())
-}
-
-fn staged_reconfiguration_owns_live_catalog(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
-) -> Result<bool, spi::Error> {
-    let rows = client.select(
-        "SELECT reg.sync_columns, reg.exclude_columns
-         FROM synchro.sync_registry reg
-         JOIN synchro.sync_registry_generations gen
-           ON gen.generation = reg.registry_generation
-         WHERE gen.state = 'pending'
-           AND gen.validated
-           AND reg.registry_generation > $1
-           AND reg.relation_id = $2::uuid
-         ORDER BY reg.registry_generation DESC
-         LIMIT 1",
-        None,
-        &[
-            registration.registry_generation.into(),
-            registration.relation_id.as_str().into(),
-        ],
-    )?;
-    let Some(staged) = rows.into_iter().next() else {
-        return Ok(false);
-    };
-    let staged_sync = staged
-        .get_by_name::<Vec<String>, &str>("sync_columns")?
-        .unwrap_or_default();
-    let staged_exclude = staged
-        .get_by_name::<Vec<String>, &str>("exclude_columns")?
-        .unwrap_or_default();
-    if staged_sync.is_empty() {
-        return Ok(false);
-    }
-    let actual =
-        ordered_table_columns_for_oid_in_client(client, registration.physical_relation_oid)?;
-    let actual: std::collections::HashSet<&str> = actual.iter().map(String::as_str).collect();
-    let staged: std::collections::HashSet<&str> = staged_sync
-        .iter()
-        .chain(staged_exclude.iter())
-        .map(String::as_str)
-        .collect();
-    Ok(staged == actual)
-}
-
-pub(crate) fn validate_capture_triggers(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
-) -> Result<(), spi::Error> {
-    if !capture_triggers_match(client, registration)? {
-        pgrx::error!("registered relation is missing required capture triggers");
-    }
+    validate_registration_metadata_from_catalog(registration, catalog)?;
+    validate_capture_triggers_from_catalog(registration, catalog)?;
+    validate_publication_membership_from_catalog(registration.physical_relation_oid, catalog)?;
     Ok(())
 }
 
@@ -4912,105 +6020,32 @@ fn capture_triggers_match(
             .into(),
         ],
     )?;
-    let mut found_guard = false;
-    let mut found_fence = false;
-    let mut found_truncate = false;
-    for row in rows {
-        let name = row
-            .get_by_name::<String, &str>("trigger_name")?
-            .unwrap_or_default();
-        let enabled = row
-            .get_by_name::<String, &str>("trigger_enabled")?
-            .unwrap_or_default();
-        let function = row
-            .get_by_name::<String, &str>("function_name")?
-            .unwrap_or_default();
-        let trigger_type = row
-            .get_by_name::<i32, &str>("trigger_type")?
-            .unwrap_or_default();
-        let argument_count = row
-            .get_by_name::<i32, &str>("argument_count")?
-            .unwrap_or_default();
-        let definition = row
-            .get_by_name::<String, &str>("trigger_definition")?
-            .unwrap_or_default();
-        if enabled != "O" {
-            return Ok(false);
-        }
-        match name.as_str() {
-            PRIMARY_KEY_GUARD_TRIGGER
-                if function == PRIMARY_KEY_GUARD_TRIGGER
-                    && trigger_type == 19
-                    && argument_count == 1
-                    && definition.contains(&format!("'{}'", registration.pk_column)) =>
-            {
-                if found_guard {
-                    return Ok(false);
-                }
-                found_guard = true;
-            }
-            CAPTURE_FENCE_TRIGGER
-                if function == CAPTURE_FENCE_TRIGGER
-                    && trigger_type == 29
-                    && argument_count == 5
-                    && definition.contains(&format!("'{}'", registration.relation_id))
-                    && definition
-                        .contains(&format!("'{}'", registration.registration_kind.as_str()))
-                    && definition.contains(&format!(
-                        "'{}'",
-                        if registration.is_synced() {
-                            registration.table_id.as_str()
-                        } else {
-                            ""
-                        }
-                    ))
-                    && registration
-                        .capture_key_columns
-                        .iter()
-                        .all(|column| definition.contains(column))
-                    && definition.contains(&format!(
-                        "'{}'",
-                        if registration.is_synced() && registration.has_deleted_at {
-                            registration.deleted_at_col.as_str()
-                        } else {
-                            ""
-                        }
-                    )) =>
-            {
-                if found_fence {
-                    return Ok(false);
-                }
-                found_fence = true;
-            }
-            CAPTURE_TRUNCATE_TRIGGER
-                if function == CAPTURE_TRUNCATE_TRIGGER
-                    && trigger_type == 34
-                    && argument_count == 1
-                    && definition.contains(&format!("'{}'", registration.relation_id)) =>
-            {
-                if found_truncate {
-                    return Ok(false);
-                }
-                found_truncate = true;
-            }
-            _ => return Ok(false),
-        }
-    }
-    Ok(found_guard && found_fence && found_truncate)
-}
-
-pub(crate) fn validate_publication_membership(
-    client: &SpiClient<'_>,
-    relation_oid: u32,
-) -> Result<(), spi::Error> {
-    let publication = configured_publication_name();
-    if !publication_exists(client, &publication)?
-        || publication_is_for_all_tables(client, &publication)?
-        || !publication_contains_relation(client, &publication, relation_oid)?
-    {
-        pgrx::error!("registered relation is not an exact publication member");
-    }
-    Ok(())
+    let triggers = rows
+        .into_iter()
+        .map(|row| {
+            Ok(CatalogTrigger {
+                name: row
+                    .get_by_name::<String, &str>("trigger_name")?
+                    .unwrap_or_default(),
+                enabled: row
+                    .get_by_name::<String, &str>("trigger_enabled")?
+                    .unwrap_or_default(),
+                trigger_type: row
+                    .get_by_name::<i32, &str>("trigger_type")?
+                    .unwrap_or_default(),
+                argument_count: row
+                    .get_by_name::<i32, &str>("argument_count")?
+                    .unwrap_or_default(),
+                function_name: row
+                    .get_by_name::<String, &str>("function_name")?
+                    .unwrap_or_default(),
+                definition: row
+                    .get_by_name::<String, &str>("trigger_definition")?
+                    .unwrap_or_default(),
+            })
+        })
+        .collect::<Result<Vec<_>, spi::Error>>()?;
+    Ok(capture_triggers_match_catalog(registration, &triggers))
 }
 
 fn validate_stored_column_partition(

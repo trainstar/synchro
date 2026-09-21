@@ -8,16 +8,17 @@ use pgrx::spi::{SpiClient, SpiHeapTupleData, SpiTupleTable};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use synchro_core::change::ChangeOperation;
-use synchro_core::checksum::Sha256Digest;
+use synchro_core::checksum::{SchemaHash, Sha256Digest};
 use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
 
 use crate::bucketing::resolve_dependency_impacts;
-use crate::pull::synced_row_digest;
+use crate::pull::{schema_hash_for_generation, synced_row_digest_with_schema_hash};
 use crate::registry::{
     load_membership_dependencies_from_client, load_registry_generation_for_activation,
     load_registry_generation_for_worker, load_registry_generation_from_client,
     MembershipDependency, RegistrationKind, TableRegistration,
 };
+use crate::spi_helpers::{jsonb_batches, jsonb_payload_parameters, required_record_id};
 use crate::wal_decoder::{
     ColumnInfo, RelationKey, TupleImage, TupleValue, WalDecoder, WalEvent, WalTransaction,
     BEGIN_MSG, MAX_TRANSACTION_BYTES,
@@ -107,6 +108,61 @@ struct CapturedRow {
     digest: synchro_core::checksum::Sha256Digest,
     deleted: bool,
     registry_generation: i64,
+}
+
+#[derive(Clone)]
+struct CaptureDependencyRow {
+    capture_key: serde_json::Value,
+    row_data: serde_json::Value,
+}
+
+#[derive(Clone)]
+enum SyncedRowRef {
+    Existing(CapturedRow),
+    Pending(usize),
+}
+
+#[derive(Clone)]
+struct SyncedFoldState {
+    row: SyncedRowRef,
+    raw: serde_json::Map<String, serde_json::Value>,
+}
+
+struct PendingSyncedAfter {
+    registration_index: usize,
+    event_index: usize,
+    raw: serde_json::Value,
+    native_json_values: serde_json::Map<String, serde_json::Value>,
+}
+
+struct FoldedSyncedEvent {
+    event_index: usize,
+    prior: Option<SyncedRowRef>,
+    after: Option<usize>,
+}
+
+#[derive(Clone)]
+enum CaptureRowRef {
+    Existing(CaptureDependencyRow),
+    Pending(usize),
+}
+
+#[derive(Clone)]
+struct CaptureFoldState {
+    row: CaptureRowRef,
+    raw: serde_json::Map<String, serde_json::Value>,
+}
+
+struct PendingCaptureAfter {
+    registration_index: usize,
+    capture_key: serde_json::Value,
+    raw: serde_json::Value,
+}
+
+struct FoldedCaptureEvent {
+    event_index: usize,
+    prior: Option<CaptureRowRef>,
+    after: Option<usize>,
 }
 
 struct DependencyEvent {
@@ -2444,38 +2500,42 @@ pub(crate) fn reconcile_candidate_membership_records(
             "record_id": record_id,
         }));
     }
-    client
-        .update(
-            "WITH impact AS (
-                 SELECT relation_id, record_id
-                 FROM jsonb_to_recordset($2::jsonb) AS input(
-                     relation_id text, record_id text
+    for impact_batch in edge_input.chunks(JSONB_BATCH_SIZE) {
+        client
+            .update(
+                "WITH impact AS (
+                     SELECT relation_id, record_id
+                     FROM jsonb_to_recordset($2::jsonb) AS input(
+                         relation_id text, record_id text
+                     )
                  )
-             )
-             DELETE FROM synchro.sync_stream_reset_membership_edges edge
-             USING impact
-             WHERE edge.reset_id = $1::uuid
-               AND edge.relation_id = impact.relation_id::uuid
-               AND edge.record_id = impact.record_id",
-            None,
-            &[
-                bootstrap_id.into(),
-                pgrx::JsonB(serde_json::Value::Array(edge_input)).into(),
-            ],
-        )
-        .map_err(|_| "clearing affected candidate membership failed".to_string())?;
+                 DELETE FROM synchro.sync_stream_reset_membership_edges edge
+                 USING impact
+                 WHERE edge.reset_id = $1::uuid
+                   AND edge.relation_id = impact.relation_id::uuid
+                   AND edge.record_id = impact.record_id",
+                None,
+                &[
+                    bootstrap_id.into(),
+                    pgrx::JsonB(serde_json::Value::Array(impact_batch.to_vec())).into(),
+                ],
+            )
+            .map_err(|_| "clearing affected candidate membership failed".to_string())?;
+    }
     for (relation_id, record_ids) in records_by_relation {
         let registration = registrations
             .get(relation_id)
             .ok_or_else(|| "candidate impact registration is unavailable".to_string())?;
-        let records = load_candidate_membership_records(
-            client,
-            bootstrap_id,
-            registry_generation,
-            registration,
-            &record_ids,
-        )?;
-        write_candidate_membership_records(client, bootstrap_id, registration, &records)?;
+        for record_id_batch in record_ids.chunks(JSONB_BATCH_SIZE) {
+            let records = load_candidate_membership_records(
+                client,
+                bootstrap_id,
+                registry_generation,
+                registration,
+                record_id_batch,
+            )?;
+            write_candidate_membership_records(client, bootstrap_id, registration, &records)?;
+        }
     }
     Ok(())
 }
@@ -2570,9 +2630,7 @@ fn candidate_membership_records(
 ) -> Result<Vec<CandidateMembershipRecord>, String> {
     let mut records = Vec::with_capacity(rows.len());
     for row in rows {
-        let record_id = optional_text(&row, "record_id")?
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "candidate membership row identity is missing".to_string())?;
+        let record_id = required_record_id(&row)?;
         let row_version = optional_text(&row, "row_version")?
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "candidate membership row version is missing".to_string())?;
@@ -2623,31 +2681,33 @@ fn write_candidate_membership_records(
     if edges.is_empty() {
         return Ok(());
     }
-    let expected = edges.len();
-    let inserted = client
-        .update(
-            "INSERT INTO synchro.sync_stream_reset_membership_edges (
-                 reset_id, relation_id, table_name, record_id, scope_id,
-                 checksum, row_version, staged_at
-             )
-             SELECT $2::uuid, $3::uuid, $4, input.record_id, input.scope_id,
-                    decode(input.checksum_hex, 'hex'), input.row_version::uuid, now()
-             FROM jsonb_to_recordset($1::jsonb) AS input(
-                 record_id text, scope_id text, checksum_hex text, row_version text
-             )
-             RETURNING record_id",
-            None,
-            &[
-                pgrx::JsonB(serde_json::Value::Array(edges)).into(),
-                bootstrap_id.into(),
-                registration.relation_id.as_str().into(),
-                registration.table_name.as_str().into(),
-            ],
-        )
-        .map_err(|_| "recording candidate membership failed".to_string())?
-        .len();
-    if inserted != expected {
-        return Err("candidate membership insert count differs".to_string());
+    for edge_batch in edges.chunks(JSONB_BATCH_SIZE) {
+        let expected = edge_batch.len();
+        let inserted = client
+            .update(
+                "INSERT INTO synchro.sync_stream_reset_membership_edges (
+                     reset_id, relation_id, table_name, record_id, scope_id,
+                     checksum, row_version, staged_at
+                 )
+                 SELECT $2::uuid, $3::uuid, $4, input.record_id, input.scope_id,
+                        decode(input.checksum_hex, 'hex'), input.row_version::uuid, now()
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     record_id text, scope_id text, checksum_hex text, row_version text
+                 )
+                 RETURNING record_id",
+                None,
+                &[
+                    pgrx::JsonB(serde_json::Value::Array(edge_batch.to_vec())).into(),
+                    bootstrap_id.into(),
+                    registration.relation_id.as_str().into(),
+                    registration.table_name.as_str().into(),
+                ],
+            )
+            .map_err(|_| "recording candidate membership failed".to_string())?
+            .len();
+        if inserted != expected {
+            return Err("candidate membership insert count differs".to_string());
+        }
     }
     Ok(())
 }
@@ -3409,6 +3469,16 @@ fn materialize_transaction(
     })
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+pub(super) fn materialize_transaction_for_test(
+    client: &mut SpiClient<'_>,
+    transaction: &WalTransaction,
+) -> Result<(), String> {
+    materialize_transaction(client, transaction)
+        .map(|_| ())
+        .map_err(|failure| failure.class.to_string())
+}
+
 fn existing_transaction(
     client: &SpiClient<'_>,
     stream_generation: &str,
@@ -3748,6 +3818,7 @@ fn correlate_events<'a>(
 ) -> Result<Vec<ApplicableEvent<'a>>, PoisonFailure> {
     let mut applicable = Vec::new();
     let mut applicable_events = Vec::new();
+    let mut fence_validation_rows = Vec::new();
     for event in &transaction.events {
         if let Some(registration) = find_registration(registry, &event.relation) {
             applicable_events.push((event, registration));
@@ -3769,6 +3840,39 @@ fn correlate_events<'a>(
         );
         return Err(failure("fence_correlation_failed", transaction.commit_lsn));
     }
+
+    let relation_indexes = registration_indexes(registry);
+    let mut pending_capture_keys = Vec::new();
+    for (event, registration) in &applicable_events {
+        if !registration.is_capture_dependency() {
+            continue;
+        }
+        let registration_index = relation_indexes
+            .get(registration.relation_id.as_str())
+            .copied()
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        if let Some(image) = event.before.as_ref() {
+            pending_capture_keys.push(PendingCaptureKey {
+                event_ordinal: event.event_ordinal,
+                before: true,
+                registration_index,
+                raw: capture_dependency_key_raw(registration, image)
+                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
+            });
+        }
+        if let Some(image) = event.after.as_ref() {
+            pending_capture_keys.push(PendingCaptureKey {
+                event_ordinal: event.event_ordinal,
+                before: false,
+                registration_index,
+                raw: capture_dependency_key_raw(registration, image)
+                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
+            });
+        }
+    }
+    let capture_keys =
+        convert_capture_dependency_key_batches(client, registry, &pending_capture_keys)
+            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
 
     for ((event, registration), fence) in applicable_events.into_iter().zip(applicable_fences) {
         let (old_record_id, new_record_id, old_capture_key, new_capture_key) =
@@ -3796,13 +3900,23 @@ fn correlate_events<'a>(
                 let old_capture_key = event
                     .before
                     .as_ref()
-                    .map(|image| capture_dependency_key(client, registration, image))
+                    .map(|_| {
+                        capture_keys
+                            .get(&(event.event_ordinal, true))
+                            .cloned()
+                            .ok_or_else(|| "capture dependency key is missing".to_string())
+                    })
                     .transpose()
                     .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
                 let new_capture_key = event
                     .after
                     .as_ref()
-                    .map(|image| capture_dependency_key(client, registration, image))
+                    .map(|_| {
+                        capture_keys
+                            .get(&(event.event_ordinal, false))
+                            .cloned()
+                            .ok_or_else(|| "capture dependency key is missing".to_string())
+                    })
                     .transpose()
                     .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
                 let old_capture_key =
@@ -3840,21 +3954,24 @@ fn correlate_events<'a>(
             );
             return Err(failure("fence_correlation_failed", transaction.commit_lsn));
         }
-        validate_fence_row(
-            client,
-            fence,
-            transaction.xid,
-            transaction.commit_lsn,
-            event.event_ordinal,
-            fence_target,
-        )
-        .map_err(|_| {
-            log!(
-                "synchro WAL durable fence correlation failed at source ordinal {}",
-                event.event_ordinal
-            );
-            failure("fence_correlation_failed", transaction.commit_lsn)
-        })?;
+        fence_validation_rows.push(serde_json::json!({
+            "fence_id": fence.fence_id,
+            "dml_ordinal": fence.dml_ordinal,
+            "relation_id": fence.relation_id,
+            "registration_kind": fence.registration_kind,
+            "table_id": fence.table_id,
+            "physical_schema": fence.physical_schema,
+            "physical_relation": fence.physical_relation,
+            "physical_relation_oid": i64::from(fence.physical_relation_oid),
+            "operation": fence.operation,
+            "old_record_id": fence.old_record_id,
+            "new_record_id": fence.new_record_id,
+            "old_capture_key": fence.old_capture_key,
+            "new_capture_key": fence.new_capture_key,
+            "row_version": fence.row_version,
+            "event_ordinal": i64::try_from(event.event_ordinal)
+                .map_err(|_| failure("fence_correlation_failed", transaction.commit_lsn))?,
+        }));
 
         let mut operation = event.operation;
         let mut record_id = if registration.is_synced() {
@@ -3901,103 +4018,1215 @@ fn correlate_events<'a>(
         });
     }
 
+    validate_fence_rows(client, transaction, fence_target, &fence_validation_rows).map_err(
+        |_| {
+            log!("synchro WAL durable fence correlation failed");
+            failure("fence_correlation_failed", transaction.commit_lsn)
+        },
+    )?;
+
     Ok(applicable)
 }
 
-fn validate_fence_row(
+fn validate_fence_rows(
     client: &SpiClient<'_>,
-    fence: &FenceMessage,
-    source_xid: u32,
-    commit_lsn: u64,
-    event_ordinal: u64,
+    transaction: &WalTransaction,
     target: FenceTarget<'_>,
+    rows: &[serde_json::Value],
 ) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
     let coverage_predicate = match target {
         FenceTarget::Active => "fence.coverage = 'pending'",
         FenceTarget::Candidate { .. } => {
             "(
                     (fence.coverage = 'materialized'
-                     AND fence.stream_generation = $16
-                     AND fence.commit_lsn = $17::pg_lsn
-                     AND fence.event_ordinal = $18)
+                     AND fence.stream_generation = $3
+                     AND fence.commit_lsn = $4::pg_lsn
+                     AND fence.event_ordinal = input.event_ordinal)
                     OR
                     (fence.coverage = 'pending'
                      AND EXISTS (
                          SELECT 1 FROM synchro.sync_registry target_registry
-                         WHERE target_registry.registry_generation = $20
-                           AND target_registry.relation_id = fence.relation_id
+                         WHERE target_registry.registry_generation = $6
+                            AND target_registry.relation_id = fence.relation_id
                      )
                      AND NOT EXISTS (
                          SELECT 1 FROM synchro.sync_registry source_registry
-                         WHERE source_registry.registry_generation = $19
-                           AND source_registry.relation_id = fence.relation_id
+                         WHERE source_registry.registry_generation = $5
+                            AND source_registry.relation_id = fence.relation_id
                      ))
-                 )"
+                  )"
         }
     };
     let query = format!(
-        "SELECT count(*)::bigint AS count
-         FROM synchro.sync_write_fences fence
-         WHERE fence.fence_id = $1::uuid
-            AND fence.dml_ordinal = $2
-            AND fence.relation_id = $3::uuid
-            AND fence.registration_kind = $4
-            AND fence.table_id::text IS NOT DISTINCT FROM $5
-            AND fence.physical_schema = $6
-            AND fence.physical_relation = $7
-            AND fence.physical_relation_oid = $8::oid
-            AND fence.operation = $9
-            AND fence.old_record_id IS NOT DISTINCT FROM $10
-            AND fence.new_record_id IS NOT DISTINCT FROM $11
-            AND fence.old_capture_key IS NOT DISTINCT FROM $12
-            AND fence.new_capture_key IS NOT DISTINCT FROM $13
-            AND fence.row_version = $14::uuid
-            AND (fence.transaction_xid::text::numeric % 4294967296) = $15
-            AND {coverage_predicate}"
+        "WITH input AS (
+             SELECT fence_id, dml_ordinal, relation_id, registration_kind, table_id,
+                    physical_schema, physical_relation, physical_relation_oid, operation,
+                    old_record_id, new_record_id, old_capture_key, new_capture_key,
+                    row_version, event_ordinal
+             FROM jsonb_to_recordset($1::jsonb) AS input(
+                 fence_id text, dml_ordinal bigint, relation_id text,
+                 registration_kind text, table_id text, physical_schema text,
+                 physical_relation text, physical_relation_oid bigint, operation text,
+                 old_record_id text, new_record_id text, old_capture_key jsonb,
+                 new_capture_key jsonb, row_version text, event_ordinal bigint
+             )
+         )
+         SELECT count(*)::bigint AS count
+         FROM input
+         JOIN synchro.sync_write_fences fence
+           ON fence.fence_id = input.fence_id::uuid
+          AND fence.dml_ordinal = input.dml_ordinal
+          AND fence.relation_id = input.relation_id::uuid
+          AND fence.registration_kind = input.registration_kind
+          AND fence.table_id::text IS NOT DISTINCT FROM input.table_id
+          AND fence.physical_schema = input.physical_schema
+          AND fence.physical_relation = input.physical_relation
+          AND fence.physical_relation_oid = input.physical_relation_oid::oid
+          AND fence.operation = input.operation
+          AND fence.old_record_id IS NOT DISTINCT FROM input.old_record_id
+          AND fence.new_record_id IS NOT DISTINCT FROM input.new_record_id
+          AND fence.old_capture_key IS NOT DISTINCT FROM input.old_capture_key
+          AND fence.new_capture_key IS NOT DISTINCT FROM input.new_capture_key
+          AND fence.row_version = input.row_version::uuid
+          AND (fence.transaction_xid::text::numeric % 4294967296) = $2
+          AND {coverage_predicate}"
     );
-    let mut values = vec![
-        fence.fence_id.as_str().into(),
-        i64::try_from(fence.dml_ordinal).unwrap_or(i64::MAX).into(),
-        fence.relation_id.as_str().into(),
-        fence.registration_kind.as_str().into(),
-        fence.table_id.as_deref().into(),
-        fence.physical_schema.as_str().into(),
-        fence.physical_relation.as_str().into(),
-        i64::from(fence.physical_relation_oid).into(),
-        fence.operation.as_str().into(),
-        fence.old_record_id.as_deref().into(),
-        fence.new_record_id.as_deref().into(),
-        fence.old_capture_key.clone().map(pgrx::JsonB).into(),
-        fence.new_capture_key.clone().map(pgrx::JsonB).into(),
-        fence.row_version.as_str().into(),
-        i64::from(source_xid).into(),
-    ];
-    let commit_lsn = format_lsn(commit_lsn);
-    if let FenceTarget::Candidate {
-        source_stream_generation,
-        source_registry_generation,
-        target_registry_generation,
-    } = target
-    {
-        values.extend([
-            source_stream_generation.into(),
-            commit_lsn.as_str().into(),
-            i64::try_from(event_ordinal)
-                .map_err(|_| "fence event ordinal is invalid".to_string())?
-                .into(),
-            source_registry_generation.into(),
-            target_registry_generation.into(),
-        ]);
+    let commit_lsn = format_lsn(transaction.commit_lsn);
+    for batch in rows.chunks(JSONB_BATCH_SIZE) {
+        let mut values = vec![
+            pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+            i64::from(transaction.xid).into(),
+        ];
+        if let FenceTarget::Candidate {
+            source_stream_generation,
+            source_registry_generation,
+            target_registry_generation,
+        } = target
+        {
+            values.extend([
+                source_stream_generation.into(),
+                commit_lsn.as_str().into(),
+                source_registry_generation.into(),
+                target_registry_generation.into(),
+            ]);
+        }
+        let count = client
+            .select(&query, None, &values)
+            .map_err(|_| "loading fence failed".to_string())?
+            .first()
+            .get_by_name::<i64, &str>("count")
+            .map_err(|_| "loading fence failed".to_string())?
+            .unwrap_or(0);
+        if count != i64::try_from(batch.len()).map_err(|_| "fence batch is invalid".to_string())? {
+            return Err("fence correlation failed".to_string());
+        }
     }
-    let count = client
-        .select(&query, None, &values)
-        .map_err(|_| "loading fence failed".to_string())?
-        .first()
-        .get_by_name::<i64, &str>("count")
-        .map_err(|_| "loading fence failed".to_string())?
-        .unwrap_or(0);
-    if count != 1 {
-        return Err("fence correlation failed".to_string());
+    Ok(())
+}
+
+fn registration_indexes(registry: &[TableRegistration]) -> HashMap<&str, usize> {
+    registry
+        .iter()
+        .enumerate()
+        .map(|(index, registration)| (registration.relation_id.as_str(), index))
+        .collect()
+}
+
+fn captured_row_from_spi(row: &SpiHeapTupleData<'_>) -> Result<CapturedRow, String> {
+    let row_data = row
+        .get_by_name::<pgrx::JsonB, &str>("row_data")
+        .map_err(|_| "reading captured row failed".to_string())?
+        .ok_or_else(|| "captured row data is missing".to_string())?
+        .0;
+    let row_version = row
+        .get_by_name::<String, &str>("row_version")
+        .map_err(|_| "reading captured row failed".to_string())?
+        .ok_or_else(|| "captured row version is missing".to_string())?;
+    let digest = row
+        .get_by_name::<Vec<u8>, &str>("checksum")
+        .map_err(|_| "reading captured row failed".to_string())?
+        .ok_or_else(|| "captured row digest is missing".to_string())?
+        .try_into()
+        .map(synchro_core::checksum::Sha256Digest::from_bytes)
+        .map_err(|_| "captured row digest must contain exactly 32 octets".to_string())?;
+    let deleted = row
+        .get_by_name::<bool, &str>("deleted")
+        .map_err(|_| "reading captured row failed".to_string())?
+        .ok_or_else(|| "captured row deletion state is missing".to_string())?;
+    let registry_generation = row
+        .get_by_name::<i64, &str>("registry_generation")
+        .map_err(|_| "reading captured row registry generation failed".to_string())?
+        .ok_or_else(|| "captured row registry generation is missing".to_string())?;
+    if registry_generation <= 0 {
+        return Err("captured row registry generation is invalid".to_string());
+    }
+    Ok(CapturedRow {
+        row_data,
+        row_version,
+        digest,
+        deleted,
+        registry_generation,
+    })
+}
+
+fn load_captured_rows_batch(
+    client: &SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    inputs: &[(usize, String)],
+    registry: &[TableRegistration],
+) -> Result<HashMap<(usize, String), CapturedRow>, String> {
+    let mut loaded = HashMap::new();
+    if inputs.is_empty() {
+        return Ok(loaded);
+    }
+    let relation_indexes = registration_indexes(registry);
+    for batch in inputs.chunks(JSONB_BATCH_SIZE) {
+        let input = batch
+            .iter()
+            .map(|(index, record_id)| {
+                serde_json::json!({
+                    "relation_id": registry[*index].relation_id.as_str(),
+                    "record_id": record_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let rows = match target {
+            ProjectionTarget::Active { .. } => client.select(
+                "WITH input AS (
+                     SELECT relation_id, record_id
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, record_id text
+                     )
+                 )
+                 SELECT input.relation_id, input.record_id, captured.row_data,
+                        captured.row_version::text AS row_version, captured.checksum,
+                        captured.deleted, captured.registry_generation
+                 FROM input
+                 JOIN synchro.sync_captured_rows captured
+                   ON captured.relation_id = input.relation_id::uuid
+                  AND captured.record_id = input.record_id",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+            ),
+            ProjectionTarget::Candidate { bootstrap_id, .. } => client.select(
+                "WITH input AS (
+                     SELECT relation_id, record_id
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, record_id text
+                     )
+                 )
+                 SELECT input.relation_id, input.record_id, captured.row_data,
+                        captured.row_version::text AS row_version, captured.checksum,
+                        captured.deleted, captured.registry_generation
+                 FROM input
+                 JOIN synchro.sync_stream_reset_captured_rows captured
+                   ON captured.reset_id = $2::uuid
+                  AND captured.relation_id = input.relation_id::uuid
+                  AND captured.record_id = input.record_id",
+                None,
+                &[
+                    pgrx::JsonB(serde_json::Value::Array(input)).into(),
+                    bootstrap_id.into(),
+                ],
+            ),
+        }
+        .map_err(|_| "loading captured row batch failed".to_string())?;
+        for row in rows {
+            let relation_id = optional_text(&row, "relation_id")?
+                .ok_or_else(|| "captured row relation identity is missing".to_string())?;
+            let record_id = optional_text(&row, "record_id")?
+                .ok_or_else(|| "captured row identity is missing".to_string())?;
+            let registration_index = relation_indexes
+                .get(relation_id.as_str())
+                .copied()
+                .ok_or_else(|| "captured row relation is unavailable".to_string())?;
+            loaded.insert(
+                (registration_index, record_id),
+                captured_row_from_spi(&row)?,
+            );
+        }
+    }
+    Ok(loaded)
+}
+
+fn capture_key_identity(value: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|_| "encoding capture dependency key failed".to_string())
+}
+
+fn load_capture_dependency_rows_batch(
+    client: &SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    inputs: &[(usize, serde_json::Value)],
+    registry: &[TableRegistration],
+) -> Result<HashMap<(usize, String), CaptureDependencyRow>, String> {
+    let mut loaded = HashMap::new();
+    if inputs.is_empty() {
+        return Ok(loaded);
+    }
+    let relation_indexes = registration_indexes(registry);
+    for batch in inputs.chunks(JSONB_BATCH_SIZE) {
+        let input = batch
+            .iter()
+            .map(|(index, capture_key)| {
+                serde_json::json!({
+                    "relation_id": registry[*index].relation_id.as_str(),
+                    "capture_key": capture_key,
+                })
+            })
+            .collect::<Vec<_>>();
+        let rows = match target {
+            ProjectionTarget::Active { .. } => client.select(
+                "WITH input AS (
+                     SELECT relation_id, capture_key
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, capture_key jsonb
+                     )
+                 )
+                 SELECT input.relation_id, captured.capture_key, captured.row_data
+                 FROM input
+                 JOIN synchro.sync_capture_dependency_rows captured
+                   ON captured.relation_id = input.relation_id::uuid
+                  AND captured.capture_key = input.capture_key
+                  AND NOT captured.deleted",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+            ),
+            ProjectionTarget::Candidate { bootstrap_id, .. } => client.select(
+                "WITH input AS (
+                     SELECT relation_id, capture_key
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, capture_key jsonb
+                     )
+                 )
+                 SELECT input.relation_id, captured.capture_key, captured.row_data
+                 FROM input
+                 JOIN synchro.sync_stream_reset_capture_dependency_rows captured
+                   ON captured.reset_id = $2::uuid
+                  AND captured.relation_id = input.relation_id::uuid
+                  AND captured.capture_key = input.capture_key
+                  AND NOT captured.deleted",
+                None,
+                &[
+                    pgrx::JsonB(serde_json::Value::Array(input)).into(),
+                    bootstrap_id.into(),
+                ],
+            ),
+        }
+        .map_err(|_| "loading capture dependency row batch failed".to_string())?;
+        for row in rows {
+            let relation_id = optional_text(&row, "relation_id")?
+                .ok_or_else(|| "capture dependency relation identity is missing".to_string())?;
+            let registration_index = relation_indexes
+                .get(relation_id.as_str())
+                .copied()
+                .ok_or_else(|| "capture dependency relation is unavailable".to_string())?;
+            let capture_key = row
+                .get_by_name::<pgrx::JsonB, &str>("capture_key")
+                .map_err(|_| "reading capture dependency key failed".to_string())?
+                .ok_or_else(|| "capture dependency key is missing".to_string())?
+                .0;
+            let row_data = row
+                .get_by_name::<pgrx::JsonB, &str>("row_data")
+                .map_err(|_| "reading capture dependency row failed".to_string())?
+                .ok_or_else(|| "capture dependency row is missing".to_string())?
+                .0;
+            loaded.insert(
+                (registration_index, capture_key_identity(&capture_key)?),
+                CaptureDependencyRow {
+                    capture_key,
+                    row_data,
+                },
+            );
+        }
+    }
+    Ok(loaded)
+}
+
+fn synced_raw_state(
+    registration: &TableRegistration,
+    captured: &CapturedRow,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let row_data = captured
+        .row_data
+        .as_object()
+        .ok_or_else(|| "captured row data is not an object".to_string())?;
+    let mut raw = serde_json::Map::new();
+    for field in &registration.fields {
+        let value = row_data
+            .get(&field.field_id)
+            .cloned()
+            .ok_or_else(|| format!("captured row omits synced field {}", field.field_id))?;
+        raw.insert(field.physical_column.clone(), value);
+    }
+    Ok(raw)
+}
+
+fn capture_dependency_raw_state(
+    registration: &TableRegistration,
+    captured: &CaptureDependencyRow,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let row_data = captured
+        .row_data
+        .as_object()
+        .ok_or_else(|| "capture dependency row is not an object".to_string())?;
+    let mut raw = serde_json::Map::new();
+    for field in &registration.capture_fields {
+        let value = row_data
+            .get(&field.physical_column)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "captured capture dependency row omits column {}",
+                    field.physical_column
+                )
+            })?;
+        raw.insert(field.physical_column.clone(), value);
+    }
+    Ok(raw)
+}
+
+fn synced_after_raw(
+    registration: &TableRegistration,
+    image: &TupleImage,
+    prior: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<
+    (
+        serde_json::Value,
+        serde_json::Map<String, serde_json::Value>,
+    ),
+    String,
+> {
+    let mut raw = serde_json::Map::new();
+    let mut native_json_values = serde_json::Map::new();
+    for field in &registration.fields {
+        let column = &field.physical_column;
+        let value = image
+            .get(column)
+            .ok_or_else(|| format!("source after image omits synced column {column}"))?;
+        let value = match value {
+            TupleValue::Null => serde_json::Value::Null,
+            TupleValue::Text(bytes) => serde_json::Value::String(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| format!("synced column {column} has invalid text"))?
+                    .to_string(),
+            ),
+            TupleValue::Binary(_) => {
+                return Err(format!(
+                    "synced column {column} uses unsupported binary output"
+                ));
+            }
+            TupleValue::Unchanged => prior
+                .and_then(|prior| prior.get(column))
+                .cloned()
+                .ok_or_else(|| format!("unchanged synced column {column} has no prior value"))?,
+        };
+        if field.native_json {
+            native_json_values.insert(field.field_id.clone(), value.clone());
+        }
+        raw.insert(column.clone(), value);
+    }
+    Ok((serde_json::Value::Object(raw), native_json_values))
+}
+
+fn capture_dependency_after_raw(
+    registration: &TableRegistration,
+    image: &TupleImage,
+    prior: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let mut raw = serde_json::Map::new();
+    for field in &registration.capture_fields {
+        let column = &field.physical_column;
+        let value = image
+            .get(column)
+            .ok_or_else(|| format!("capture dependency image omits column {column}"))?;
+        let value = match value {
+            TupleValue::Null => serde_json::Value::Null,
+            TupleValue::Text(bytes) => serde_json::Value::String(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| format!("capture dependency column {column} has invalid text"))?
+                    .to_string(),
+            ),
+            TupleValue::Binary(_) => {
+                return Err(format!(
+                    "capture dependency column {column} uses unsupported binary output"
+                ));
+            }
+            TupleValue::Unchanged => prior
+                .and_then(|prior| prior.get(column))
+                .cloned()
+                .ok_or_else(|| {
+                    format!("unchanged capture dependency column {column} has no prior value")
+                })?,
+        };
+        raw.insert(column.clone(), value);
+    }
+    Ok(serde_json::Value::Object(raw))
+}
+
+fn capture_dependency_key_raw(
+    registration: &TableRegistration,
+    image: &TupleImage,
+) -> Result<serde_json::Value, String> {
+    let mut raw = serde_json::Map::new();
+    for column in &registration.capture_key_columns {
+        let value = image
+            .get(column)
+            .ok_or_else(|| format!("capture dependency image omits column {column}"))?;
+        let value = match value {
+            TupleValue::Null => serde_json::Value::Null,
+            TupleValue::Text(bytes) => serde_json::Value::String(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| format!("capture dependency column {column} has invalid text"))?
+                    .to_string(),
+            ),
+            TupleValue::Binary(_) => {
+                return Err(format!(
+                    "capture dependency column {column} uses unsupported binary output"
+                ));
+            }
+            TupleValue::Unchanged => {
+                return Err(format!(
+                    "unchanged capture dependency column {column} has no prior value"
+                ));
+            }
+        };
+        raw.insert(column.clone(), value);
+    }
+    Ok(serde_json::Value::Object(raw))
+}
+
+struct PendingCaptureKey {
+    event_ordinal: u64,
+    before: bool,
+    registration_index: usize,
+    raw: serde_json::Value,
+}
+
+fn convert_capture_dependency_key_batches(
+    client: &SpiClient<'_>,
+    registry: &[TableRegistration],
+    pending: &[PendingCaptureKey],
+) -> Result<HashMap<(u64, bool), serde_json::Value>, String> {
+    let mut by_registration = HashMap::<usize, Vec<usize>>::new();
+    for (index, item) in pending.iter().enumerate() {
+        by_registration
+            .entry(item.registration_index)
+            .or_default()
+            .push(index);
+    }
+    let mut keys = HashMap::new();
+    for (registration_index, indexes) in by_registration {
+        let registration = &registry[registration_index];
+        let relation = crate::registry::qualified_relation_name(
+            &registration.physical_schema,
+            &registration.physical_relation,
+        );
+        let query = format!(
+            "SELECT input.item_index, to_jsonb(projected) AS row_data
+             FROM unnest($1::bigint[], $2::jsonb[]) AS input(item_index, raw)
+             CROSS JOIN LATERAL jsonb_populate_record(NULL::{relation}, input.raw) AS projected
+             ORDER BY input.item_index"
+        );
+        for batch in jsonb_batches(&indexes, JSONB_BATCH_SIZE, |index| &pending[*index].raw)? {
+            let item_indexes = batch
+                .iter()
+                .map(|index| {
+                    i64::try_from(*index).map_err(|_| "capture key index is invalid".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let payloads = batch
+                .iter()
+                .map(|index| pgrx::JsonB(pending[*index].raw.clone()))
+                .collect::<Vec<_>>();
+            let rows = client
+                .select(&query, None, &[item_indexes.into(), payloads.into()])
+                .map_err(|_| "canonicalizing capture dependency key batch failed".to_string())?;
+            if rows.len() != batch.len() {
+                return Err("canonical capture dependency key batch count differs".to_string());
+            }
+            for row in rows {
+                let index = row
+                    .get_by_name::<i64, &str>("item_index")
+                    .map_err(|_| "reading canonical capture dependency key failed".to_string())?
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| {
+                        "canonical capture dependency key index is invalid".to_string()
+                    })?;
+                let item = pending.get(index).ok_or_else(|| {
+                    "canonical capture dependency key index is unavailable".to_string()
+                })?;
+                let mut key = row
+                    .get_by_name::<pgrx::JsonB, &str>("row_data")
+                    .map_err(|_| "reading canonical capture dependency key failed".to_string())?
+                    .ok_or_else(|| "canonical capture dependency key is missing".to_string())?
+                    .0;
+                let object = key
+                    .as_object_mut()
+                    .ok_or_else(|| "canonical capture dependency key is invalid".to_string())?;
+                object.retain(|column, _| {
+                    registration
+                        .capture_key_columns
+                        .iter()
+                        .any(|candidate| candidate == column)
+                });
+                if object.len() != registration.capture_key_columns.len() || object.is_empty() {
+                    return Err("capture dependency key is invalid".to_string());
+                }
+                if keys
+                    .insert((item.event_ordinal, item.before), key)
+                    .is_some()
+                {
+                    return Err("canonical capture dependency key is duplicated".to_string());
+                }
+            }
+        }
+    }
+    if keys.len() != pending.len() {
+        return Err("canonical capture dependency key batch is incomplete".to_string());
+    }
+    Ok(keys)
+}
+
+fn load_schema_hashes(
+    client: &SpiClient<'_>,
+    events: &[ApplicableEvent<'_>],
+) -> Result<HashMap<i64, SchemaHash>, String> {
+    let mut hashes = HashMap::new();
+    for event in events.iter().filter(|event| event.registration.is_synced()) {
+        let generation = event.registration.registry_generation;
+        if let std::collections::hash_map::Entry::Vacant(entry) = hashes.entry(generation) {
+            entry.insert(schema_hash_for_generation(client, generation)?);
+        }
+    }
+    Ok(hashes)
+}
+
+fn convert_synced_after_batches(
+    client: &SpiClient<'_>,
+    registry: &[TableRegistration],
+    events: &[ApplicableEvent<'_>],
+    pending: &[PendingSyncedAfter],
+    schema_hashes: &HashMap<i64, SchemaHash>,
+) -> Result<Vec<CapturedRow>, String> {
+    let mut by_registration = HashMap::<usize, Vec<usize>>::new();
+    for (index, item) in pending.iter().enumerate() {
+        by_registration
+            .entry(item.registration_index)
+            .or_default()
+            .push(index);
+    }
+    let mut result = (0..pending.len())
+        .map(|_| None)
+        .collect::<Vec<Option<CapturedRow>>>();
+    for (registration_index, indexes) in by_registration {
+        let registration = &registry[registration_index];
+        let relation = crate::registry::qualified_relation_name(
+            &registration.physical_schema,
+            &registration.physical_relation,
+        );
+        let query = format!(
+            "SELECT input.item_index, {} AS row_data
+             FROM unnest($1::bigint[], $2::jsonb[]) AS input(item_index, raw)
+             CROSS JOIN LATERAL jsonb_populate_record(NULL::{relation}, input.raw) AS projected
+             ORDER BY input.item_index",
+            crate::pull::synced_row_projection_sql(registration, "projected"),
+        );
+        for batch in jsonb_batches(&indexes, JSONB_BATCH_SIZE, |index| &pending[*index].raw)? {
+            let item_indexes = batch
+                .iter()
+                .map(|index| {
+                    i64::try_from(*index).map_err(|_| "captured row index is invalid".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let payloads = batch
+                .iter()
+                .map(|index| pgrx::JsonB(pending[*index].raw.clone()))
+                .collect::<Vec<_>>();
+            let rows = client
+                .select(&query, None, &[item_indexes.into(), payloads.into()])
+                .map_err(|_| "canonicalizing captured row batch failed".to_string())?;
+            if rows.len() != batch.len() {
+                return Err("canonical captured row batch count differs".to_string());
+            }
+            for row in rows {
+                let index = row
+                    .get_by_name::<i64, &str>("item_index")
+                    .map_err(|_| "reading canonical captured row batch failed".to_string())?
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| "canonical captured row batch index is invalid".to_string())?;
+                let pending_item = pending.get(index).ok_or_else(|| {
+                    "canonical captured row batch index is unavailable".to_string()
+                })?;
+                let mut row_data = row
+                    .get_by_name::<pgrx::JsonB, &str>("row_data")
+                    .map_err(|_| "reading canonical captured row failed".to_string())?
+                    .ok_or_else(|| "canonical captured row is missing".to_string())?
+                    .0;
+                let row_object = row_data
+                    .as_object_mut()
+                    .ok_or_else(|| "canonical captured row is not an object".to_string())?;
+                row_object.extend(pending_item.native_json_values.clone());
+                crate::pull::canonicalize_synced_row_data(registration, &mut row_data)?;
+                let event = events
+                    .get(pending_item.event_index)
+                    .ok_or_else(|| "canonical captured row event is unavailable".to_string())?;
+                let deleted = if registration.has_deleted_at {
+                    captured_row_deleted(
+                        &registration.fields,
+                        &registration.deleted_at_col,
+                        &row_data,
+                    )?
+                } else {
+                    false
+                };
+                let schema_hash = schema_hashes
+                    .get(&registration.registry_generation)
+                    .cloned()
+                    .ok_or_else(|| "immutable schema hash is missing".to_string())?;
+                let digest = synced_row_digest_with_schema_hash(
+                    registration,
+                    &row_data,
+                    &event.record_id,
+                    &event.row_version,
+                    schema_hash,
+                )?;
+                if result[index].is_some() {
+                    return Err(
+                        "canonical captured row batch contains a duplicate index".to_string()
+                    );
+                }
+                result[index] = Some(CapturedRow {
+                    row_data,
+                    row_version: event.row_version.clone(),
+                    digest,
+                    deleted,
+                    registry_generation: registration.registry_generation,
+                });
+            }
+        }
+    }
+    result
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "canonical captured row batch is incomplete".to_string())
+}
+
+fn convert_capture_after_batches(
+    client: &SpiClient<'_>,
+    registry: &[TableRegistration],
+    pending: &[PendingCaptureAfter],
+) -> Result<Vec<CaptureDependencyRow>, String> {
+    let mut by_registration = HashMap::<usize, Vec<usize>>::new();
+    for (index, item) in pending.iter().enumerate() {
+        by_registration
+            .entry(item.registration_index)
+            .or_default()
+            .push(index);
+    }
+    let mut result = (0..pending.len())
+        .map(|_| None)
+        .collect::<Vec<Option<CaptureDependencyRow>>>();
+    for (registration_index, indexes) in by_registration {
+        let registration = &registry[registration_index];
+        let relation = crate::registry::qualified_relation_name(
+            &registration.physical_schema,
+            &registration.physical_relation,
+        );
+        let query = format!(
+            "SELECT input.item_index, to_jsonb(projected) AS row_data
+             FROM unnest($1::bigint[], $2::jsonb[]) AS input(item_index, raw)
+             CROSS JOIN LATERAL jsonb_populate_record(NULL::{relation}, input.raw) AS projected
+             ORDER BY input.item_index"
+        );
+        for batch in jsonb_batches(&indexes, JSONB_BATCH_SIZE, |index| &pending[*index].raw)? {
+            let item_indexes = batch
+                .iter()
+                .map(|index| {
+                    i64::try_from(*index).map_err(|_| "capture row index is invalid".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let payloads = batch
+                .iter()
+                .map(|index| pgrx::JsonB(pending[*index].raw.clone()))
+                .collect::<Vec<_>>();
+            let rows = client
+                .select(&query, None, &[item_indexes.into(), payloads.into()])
+                .map_err(|_| "canonicalizing capture dependency row batch failed".to_string())?;
+            if rows.len() != batch.len() {
+                return Err("canonical capture dependency row batch count differs".to_string());
+            }
+            for row in rows {
+                let index = row
+                    .get_by_name::<i64, &str>("item_index")
+                    .map_err(|_| "reading canonical capture dependency batch failed".to_string())?
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| {
+                        "canonical capture dependency batch index is invalid".to_string()
+                    })?;
+                let mut row_data = row
+                    .get_by_name::<pgrx::JsonB, &str>("row_data")
+                    .map_err(|_| "reading canonical capture dependency row failed".to_string())?
+                    .ok_or_else(|| "canonical capture dependency row is missing".to_string())?
+                    .0;
+                let object = row_data
+                    .as_object_mut()
+                    .ok_or_else(|| "canonical capture dependency row is invalid".to_string())?;
+                object.retain(|column, _| {
+                    registration
+                        .capture_fields
+                        .iter()
+                        .any(|field| field.physical_column.as_str() == column)
+                });
+                if object.len() != registration.capture_fields.len() {
+                    return Err("canonical capture dependency projection is incomplete".to_string());
+                }
+                if result[index].is_some() {
+                    return Err(
+                        "canonical capture dependency batch contains a duplicate index".to_string(),
+                    );
+                }
+                result[index] = Some(CaptureDependencyRow {
+                    capture_key: pending
+                        .get(index)
+                        .ok_or_else(|| {
+                            "canonical capture dependency batch index is unavailable".to_string()
+                        })?
+                        .capture_key
+                        .clone(),
+                    row_data,
+                });
+            }
+        }
+    }
+    result
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "canonical capture dependency batch is incomplete".to_string())
+}
+
+fn resolved_synced_row(row: &SyncedRowRef, pending: &[CapturedRow]) -> Result<CapturedRow, String> {
+    match row {
+        SyncedRowRef::Existing(row) => Ok(row.clone()),
+        SyncedRowRef::Pending(index) => pending
+            .get(*index)
+            .cloned()
+            .ok_or_else(|| "pending captured row is unavailable".to_string()),
+    }
+}
+
+fn resolved_capture_row(
+    row: &CaptureRowRef,
+    pending: &[CaptureDependencyRow],
+) -> Result<CaptureDependencyRow, String> {
+    match row {
+        CaptureRowRef::Existing(row) => Ok(row.clone()),
+        CaptureRowRef::Pending(index) => pending
+            .get(*index)
+            .cloned()
+            .ok_or_else(|| "pending capture dependency row is unavailable".to_string()),
+    }
+}
+
+fn write_synced_projection_batches(
+    client: &mut SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    rows: &[serde_json::Value],
+) -> Result<(), PoisonFailure> {
+    let ProjectionTarget::Active { stream_generation } = target else {
+        return Ok(());
+    };
+    for batch in jsonb_batches(rows, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        let inserted = client
+            .update(
+                "INSERT INTO synchro.sync_captured_projections (
+                     stream_generation, commit_lsn, event_ordinal, relation_id,
+                     image_kind, registry_generation, record_id, row_data,
+                     row_version, checksum, deleted
+                 )
+                 SELECT $2, $3::pg_lsn, input.event_ordinal, input.relation_id::uuid,
+                        input.image_kind, input.registry_generation, input.record_id,
+                        ($4::jsonb[])[input.payload_index], input.row_version::uuid,
+                        decode(input.checksum_hex, 'hex'), input.deleted
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     event_ordinal bigint, relation_id text, image_kind text,
+                     registry_generation bigint, record_id text, payload_index integer,
+                     row_version text, checksum_hex text, deleted boolean
+                 )
+                 ORDER BY input.event_ordinal,
+                          CASE input.image_kind WHEN 'before' THEN 0 ELSE 1 END
+                 RETURNING record_id",
+                None,
+                &[
+                    metadata.into(),
+                    stream_generation.into(),
+                    format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
+                ],
+            )
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+            .len();
+        if inserted != batch.len() {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+    }
+    Ok(())
+}
+
+fn write_capture_projection_batches(
+    client: &mut SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    rows: &[serde_json::Value],
+) -> Result<(), PoisonFailure> {
+    let ProjectionTarget::Active { stream_generation } = target else {
+        return Ok(());
+    };
+    for batch in jsonb_batches(rows, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        let inserted = client
+            .update(
+                "INSERT INTO synchro.sync_capture_dependency_projections (
+                     stream_generation, commit_lsn, event_ordinal, relation_id,
+                     image_kind, registry_generation, capture_key, row_data, deleted
+                 )
+                 SELECT $2, $3::pg_lsn, input.event_ordinal, input.relation_id::uuid,
+                        input.image_kind, input.registry_generation, input.capture_key,
+                        ($4::jsonb[])[input.payload_index], input.deleted
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     event_ordinal bigint, relation_id text, image_kind text,
+                     registry_generation bigint, capture_key jsonb, payload_index integer,
+                     deleted boolean
+                 )
+                 ORDER BY input.event_ordinal,
+                          CASE input.image_kind WHEN 'before' THEN 0 ELSE 1 END
+                 RETURNING relation_id",
+                None,
+                &[
+                    metadata.into(),
+                    stream_generation.into(),
+                    format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
+                ],
+            )
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+            .len();
+        if inserted != batch.len() {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+    }
+    Ok(())
+}
+
+fn write_synced_current_batches(
+    client: &mut SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    upserts: &[serde_json::Value],
+    deletes: &[serde_json::Value],
+) -> Result<(), PoisonFailure> {
+    for batch in jsonb_batches(upserts, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        let inserted = match target {
+            ProjectionTarget::Active { stream_generation } => client.update(
+                "INSERT INTO synchro.sync_captured_rows (
+                     relation_id, record_id, row_data, row_version, checksum, deleted,
+                     source_stream_generation, source_commit_lsn, source_event_ordinal,
+                     registry_generation, updated_at
+                 )
+                 SELECT input.relation_id::uuid, input.record_id, ($4::jsonb[])[input.payload_index],
+                        input.row_version::uuid, decode(input.checksum_hex, 'hex'), input.deleted,
+                        $2, $3::pg_lsn, input.event_ordinal, input.registry_generation, now()
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     relation_id text, record_id text, payload_index integer, row_version text,
+                     checksum_hex text, deleted boolean, event_ordinal bigint,
+                     registry_generation bigint
+                 )
+                 ON CONFLICT (relation_id, record_id) DO UPDATE SET
+                     row_data = EXCLUDED.row_data,
+                     row_version = EXCLUDED.row_version,
+                     checksum = EXCLUDED.checksum,
+                     deleted = EXCLUDED.deleted,
+                     source_stream_generation = EXCLUDED.source_stream_generation,
+                     source_commit_lsn = EXCLUDED.source_commit_lsn,
+                     source_event_ordinal = EXCLUDED.source_event_ordinal,
+                     source_reset_id = NULL,
+                     registry_generation = EXCLUDED.registry_generation,
+                     updated_at = now()
+                 RETURNING record_id",
+                None,
+                &[
+                    metadata.into(),
+                    stream_generation.into(),
+                    format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
+                ],
+            ),
+            ProjectionTarget::Candidate {
+                bootstrap_id,
+                registry_generation,
+            } => client.update(
+                "INSERT INTO synchro.sync_stream_reset_captured_rows (
+                     reset_id, relation_id, record_id, row_data, row_version,
+                     checksum, deleted, registry_generation, staged_at
+                 )
+                 SELECT $2::uuid, input.relation_id::uuid, input.record_id, ($4::jsonb[])[input.payload_index],
+                        input.row_version::uuid, decode(input.checksum_hex, 'hex'),
+                        input.deleted, $3, now()
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     relation_id text, record_id text, payload_index integer, row_version text,
+                     checksum_hex text, deleted boolean, event_ordinal bigint,
+                     registry_generation bigint
+                 )
+                 ON CONFLICT (reset_id, relation_id, record_id) DO UPDATE SET
+                     row_data = EXCLUDED.row_data,
+                     row_version = EXCLUDED.row_version,
+                     checksum = EXCLUDED.checksum,
+                     deleted = EXCLUDED.deleted,
+                     registry_generation = EXCLUDED.registry_generation,
+                     staged_at = now()
+                 RETURNING record_id",
+                None,
+                &[
+                    metadata.into(),
+                    bootstrap_id.into(),
+                    registry_generation.into(),
+                    payloads.into(),
+                ],
+            ),
+        }
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+        .len();
+        if inserted != batch.len() {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+    }
+    for batch in deletes.chunks(JSONB_BATCH_SIZE) {
+        let deleted = match target {
+            ProjectionTarget::Active { .. } => client.update(
+                "WITH input AS (
+                     SELECT relation_id, record_id
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, record_id text
+                     )
+                 )
+                 DELETE FROM synchro.sync_captured_rows captured
+                 USING input
+                 WHERE captured.relation_id = input.relation_id::uuid
+                   AND captured.record_id = input.record_id
+                 RETURNING captured.record_id",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into()],
+            ),
+            ProjectionTarget::Candidate { bootstrap_id, .. } => client.update(
+                "WITH input AS (
+                     SELECT relation_id, record_id
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, record_id text
+                     )
+                 )
+                 DELETE FROM synchro.sync_stream_reset_captured_rows captured
+                 USING input
+                 WHERE captured.reset_id = $2::uuid
+                   AND captured.relation_id = input.relation_id::uuid
+                   AND captured.record_id = input.record_id
+                 RETURNING captured.record_id",
+                None,
+                &[
+                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    bootstrap_id.into(),
+                ],
+            ),
+        }
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+        .len();
+        if deleted != batch.len() {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+    }
+    Ok(())
+}
+
+fn write_capture_current_batches(
+    client: &mut SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    upserts: &[serde_json::Value],
+    deletes: &[serde_json::Value],
+) -> Result<(), PoisonFailure> {
+    for batch in jsonb_batches(upserts, JSONB_BATCH_SIZE, |row| row)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+    {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        let inserted = match target {
+            ProjectionTarget::Active { stream_generation } => client.update(
+                "INSERT INTO synchro.sync_capture_dependency_rows (
+                     relation_id, capture_key, row_data, deleted,
+                     source_stream_generation, source_commit_lsn, source_event_ordinal,
+                     source_reset_id, registry_generation, updated_at
+                 )
+                 SELECT input.relation_id::uuid, input.capture_key, ($4::jsonb[])[input.payload_index], false,
+                        $2, $3::pg_lsn, input.event_ordinal, NULL,
+                        input.registry_generation, now()
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     relation_id text, capture_key jsonb, payload_index integer,
+                     event_ordinal bigint, registry_generation bigint
+                 )
+                 ON CONFLICT (relation_id, capture_key) DO UPDATE SET
+                     row_data = EXCLUDED.row_data,
+                     deleted = false,
+                     source_stream_generation = EXCLUDED.source_stream_generation,
+                     source_commit_lsn = EXCLUDED.source_commit_lsn,
+                     source_event_ordinal = EXCLUDED.source_event_ordinal,
+                     source_reset_id = NULL,
+                     registry_generation = EXCLUDED.registry_generation,
+                     updated_at = now()
+                 RETURNING relation_id",
+                None,
+                &[
+                    metadata.into(),
+                    stream_generation.into(),
+                    format_lsn(transaction.commit_lsn).as_str().into(),
+                    payloads.into(),
+                ],
+            ),
+            ProjectionTarget::Candidate {
+                bootstrap_id,
+                registry_generation,
+            } => client.update(
+                "INSERT INTO synchro.sync_stream_reset_capture_dependency_rows (
+                     reset_id, relation_id, capture_key, row_data, deleted,
+                     registry_generation, staged_at
+                 )
+                 SELECT $2::uuid, input.relation_id::uuid, input.capture_key,
+                        ($4::jsonb[])[input.payload_index], false, $3, now()
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     relation_id text, capture_key jsonb, payload_index integer,
+                     event_ordinal bigint, registry_generation bigint
+                 )
+                 ON CONFLICT (reset_id, relation_id, capture_key) DO UPDATE SET
+                     row_data = EXCLUDED.row_data,
+                     deleted = false,
+                     registry_generation = EXCLUDED.registry_generation,
+                     staged_at = now()
+                 RETURNING relation_id",
+                None,
+                &[
+                    metadata.into(),
+                    bootstrap_id.into(),
+                    registry_generation.into(),
+                    payloads.into(),
+                ],
+            ),
+        }
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+        .len();
+        if inserted != batch.len() {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+    }
+    for batch in deletes.chunks(JSONB_BATCH_SIZE) {
+        let deleted = match target {
+            ProjectionTarget::Active { .. } => client.update(
+                "WITH input AS (
+                     SELECT relation_id, capture_key
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, capture_key jsonb
+                     )
+                 )
+                 DELETE FROM synchro.sync_capture_dependency_rows captured
+                 USING input
+                 WHERE captured.relation_id = input.relation_id::uuid
+                   AND captured.capture_key = input.capture_key
+                 RETURNING captured.relation_id",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into()],
+            ),
+            ProjectionTarget::Candidate { bootstrap_id, .. } => client.update(
+                "WITH input AS (
+                     SELECT relation_id, capture_key
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, capture_key jsonb
+                     )
+                 )
+                 DELETE FROM synchro.sync_stream_reset_capture_dependency_rows captured
+                 USING input
+                 WHERE captured.reset_id = $2::uuid
+                   AND captured.relation_id = input.relation_id::uuid
+                   AND captured.capture_key = input.capture_key
+                 RETURNING captured.relation_id",
+                None,
+                &[
+                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    bootstrap_id.into(),
+                ],
+            ),
+        }
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+        .len();
+        if deleted != batch.len() {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+    }
+    Ok(())
+}
+
+fn write_candidate_row_version_batches(
+    client: &mut SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    rows: &[serde_json::Value],
+) -> Result<(), PoisonFailure> {
+    let ProjectionTarget::Candidate { bootstrap_id, .. } = target else {
+        return Ok(());
+    };
+    for batch in rows.chunks(JSONB_BATCH_SIZE) {
+        let inserted = client
+            .update(
+                "INSERT INTO synchro.sync_stream_reset_row_versions (
+                     reset_id, relation_id, record_id, row_version, fence_id,
+                     source_reset_id, deleted, baseline_generated, staged_at
+                 )
+                 SELECT $2::uuid, input.relation_id::uuid, input.record_id,
+                        input.row_version::uuid, input.fence_id::uuid, NULL,
+                        input.deleted, false, now()
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     relation_id text, record_id text, row_version text,
+                     fence_id text, deleted boolean
+                 )
+                 ON CONFLICT (reset_id, relation_id, record_id) DO UPDATE SET
+                     row_version = EXCLUDED.row_version,
+                     fence_id = EXCLUDED.fence_id,
+                     source_reset_id = NULL,
+                     deleted = EXCLUDED.deleted,
+                     baseline_generated = false,
+                     staged_at = now()
+                 RETURNING record_id",
+                None,
+                &[
+                    pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into(),
+                    bootstrap_id.into(),
+                ],
+            )
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
+            .len();
+        if inserted != batch.len() {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
     }
     Ok(())
 }
@@ -4009,8 +5238,6 @@ fn persist_events_and_projections(
     registry: &[TableRegistration],
     events: &[ApplicableEvent<'_>],
 ) -> Result<PersistedEvents, PoisonFailure> {
-    let mut impacts = Vec::with_capacity(events.len());
-    let mut dependency_events = Vec::with_capacity(events.len());
     for event_chunk_input in events.chunks(JSONB_BATCH_SIZE) {
         let mut event_rows = Vec::with_capacity(event_chunk_input.len());
         let mut fence_rows = Vec::with_capacity(event_chunk_input.len());
@@ -4143,59 +5370,360 @@ fn persist_events_and_projections(
         }
     }
 
+    let schema_hashes = load_schema_hashes(client, events)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+    let mut persisted = PersistedEvents {
+        direct_impacts: Vec::with_capacity(events.len()),
+        dependency_events: Vec::with_capacity(events.len()),
+    };
+    // Pages share the source transaction. Membership reads only the final projection.
+    for batch in events.chunks(JSONB_BATCH_SIZE) {
+        let batch = fold_and_persist_projection_rows(
+            client,
+            target,
+            transaction,
+            registry,
+            batch,
+            &schema_hashes,
+        )?;
+        persisted.direct_impacts.extend(batch.direct_impacts);
+        persisted.dependency_events.extend(batch.dependency_events);
+    }
+    Ok(persisted)
+}
+
+fn fold_and_persist_projection_rows(
+    client: &mut SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    registry: &[TableRegistration],
+    events: &[ApplicableEvent<'_>],
+    schema_hashes: &HashMap<i64, SchemaHash>,
+) -> Result<PersistedEvents, PoisonFailure> {
+    let relation_indexes = registration_indexes(registry);
+    let mut synced_inputs = Vec::new();
+    let mut capture_inputs = Vec::new();
+    let mut seen_synced = HashSet::new();
+    let mut seen_capture = HashSet::new();
     for event in events {
-        if let ProjectionTarget::Candidate { .. } = target {
-            if event.registration.is_synced() {
-                persist_candidate_row_version(client, target, event, transaction.commit_lsn)?;
+        let registration_index = relation_indexes
+            .get(event.registration.relation_id.as_str())
+            .copied()
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        if event.registration.is_synced() {
+            let key = (registration_index, event.record_id.clone());
+            if seen_synced.insert(key.clone()) {
+                synced_inputs.push(key);
+            }
+        } else {
+            let capture_key = event
+                .new_capture_key
+                .as_ref()
+                .or(event.old_capture_key.as_ref())
+                .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?
+                .clone();
+            let key = (
+                registration_index,
+                capture_key_identity(&capture_key)
+                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
+            );
+            if seen_capture.insert(key) {
+                capture_inputs.push((registration_index, capture_key));
             }
         }
-        if event.registration.is_capture_dependency() {
-            let dependency_event =
-                persist_capture_dependency_event(client, target, transaction, event)?;
-            dependency_events.push(dependency_event);
+    }
+
+    let loaded_synced = load_captured_rows_batch(client, target, &synced_inputs, registry)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+    let loaded_capture =
+        load_capture_dependency_rows_batch(client, target, &capture_inputs, registry)
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+    let initially_present_synced = loaded_synced.keys().cloned().collect::<HashSet<_>>();
+    let initially_present_capture = loaded_capture.keys().cloned().collect::<HashSet<_>>();
+
+    let mut synced_states = HashMap::<(usize, String), Option<SyncedFoldState>>::new();
+    for (key, row) in loaded_synced {
+        let raw = synced_raw_state(&registry[key.0], &row)
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        synced_states.insert(
+            key,
+            Some(SyncedFoldState {
+                row: SyncedRowRef::Existing(row),
+                raw,
+            }),
+        );
+    }
+    let mut capture_states = HashMap::<(usize, String), Option<CaptureFoldState>>::new();
+    for (key, row) in loaded_capture {
+        let raw = capture_dependency_raw_state(&registry[key.0], &row)
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        capture_states.insert(
+            key,
+            Some(CaptureFoldState {
+                row: CaptureRowRef::Existing(row),
+                raw,
+            }),
+        );
+    }
+
+    let mut pending_synced = Vec::new();
+    let mut folded_synced = Vec::new();
+    let mut pending_capture = Vec::new();
+    let mut folded_capture = Vec::new();
+    for (event_index, event) in events.iter().enumerate() {
+        let registration_index = relation_indexes
+            .get(event.registration.relation_id.as_str())
+            .copied()
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        if event.registration.is_synced() {
+            let key = (registration_index, event.record_id.clone());
+            let prior = synced_states.remove(&key).flatten();
+            match event.event.operation {
+                ChangeOperation::Insert if prior.is_some() => {
+                    return Err(failure("projection_write_failed", transaction.commit_lsn));
+                }
+                ChangeOperation::Update | ChangeOperation::Delete if prior.is_none() => {
+                    return Err(failure("projection_write_failed", transaction.commit_lsn));
+                }
+                _ => {}
+            }
+            let prior_ref = prior.as_ref().map(|state| state.row.clone());
+            let after = match event.event.operation {
+                ChangeOperation::Insert | ChangeOperation::Update => {
+                    let image = event
+                        .event
+                        .after
+                        .as_ref()
+                        .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+                    let (raw, native_json_values) = synced_after_raw(
+                        event.registration,
+                        image,
+                        prior.as_ref().map(|state| &state.raw),
+                    )
+                    .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+                    let index = pending_synced.len();
+                    let state_raw = raw.as_object().cloned().ok_or_else(|| {
+                        failure("projection_write_failed", transaction.commit_lsn)
+                    })?;
+                    pending_synced.push(PendingSyncedAfter {
+                        registration_index,
+                        event_index,
+                        raw,
+                        native_json_values,
+                    });
+                    synced_states.insert(
+                        key,
+                        Some(SyncedFoldState {
+                            row: SyncedRowRef::Pending(index),
+                            raw: state_raw,
+                        }),
+                    );
+                    Some(index)
+                }
+                ChangeOperation::Delete => {
+                    synced_states.insert(key, None);
+                    None
+                }
+            };
+            folded_synced.push(FoldedSyncedEvent {
+                event_index,
+                prior: prior_ref,
+                after,
+            });
             continue;
         }
 
-        let prior = load_captured_row(client, target, event.registration, &event.record_id)
+        let capture_key = event
+            .new_capture_key
+            .as_ref()
+            .or(event.old_capture_key.as_ref())
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?
+            .clone();
+        let key = (
+            registration_index,
+            capture_key_identity(&capture_key)
+                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
+        );
+        let prior = capture_states.remove(&key).flatten();
+        match event.event.operation {
+            ChangeOperation::Insert if prior.is_some() => {
+                return Err(failure("projection_write_failed", transaction.commit_lsn));
+            }
+            ChangeOperation::Update | ChangeOperation::Delete if prior.is_none() => {
+                return Err(failure("projection_write_failed", transaction.commit_lsn));
+            }
+            _ => {}
+        }
+        let prior_ref = prior.as_ref().map(|state| state.row.clone());
+        let after = match event.event.operation {
+            ChangeOperation::Insert | ChangeOperation::Update => {
+                let image = event
+                    .event
+                    .after
+                    .as_ref()
+                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+                let raw = capture_dependency_after_raw(
+                    event.registration,
+                    image,
+                    prior.as_ref().map(|state| &state.raw),
+                )
+                .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+                let index = pending_capture.len();
+                let state_raw = raw
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+                pending_capture.push(PendingCaptureAfter {
+                    registration_index,
+                    capture_key: capture_key.clone(),
+                    raw,
+                });
+                capture_states.insert(
+                    key,
+                    Some(CaptureFoldState {
+                        row: CaptureRowRef::Pending(index),
+                        raw: state_raw,
+                    }),
+                );
+                Some(index)
+            }
+            ChangeOperation::Delete => {
+                capture_states.insert(key, None);
+                None
+            }
+        };
+        folded_capture.push(FoldedCaptureEvent {
+            event_index,
+            prior: prior_ref,
+            after,
+        });
+    }
+
+    let converted_synced =
+        convert_synced_after_batches(client, registry, events, &pending_synced, schema_hashes)
             .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-        let dependency_old_row = prior.as_ref().map(|captured| captured.row_data.clone());
-        let (digest, delete_projection_image, dependency_new_row) = match event.event.operation {
+    let converted_capture = convert_capture_after_batches(client, registry, &pending_capture)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+
+    let mut synced_projections = Vec::new();
+    let mut capture_projections = Vec::new();
+    let mut synced_current = HashMap::<(usize, String), serde_json::Value>::new();
+    let mut capture_current = HashMap::<(usize, String), serde_json::Value>::new();
+    let mut candidate_versions = HashMap::<(usize, String), serde_json::Value>::new();
+    let mut impacts = Vec::with_capacity(folded_synced.len());
+    let mut dependency_events = (0..events.len())
+        .map(|_| None)
+        .collect::<Vec<Option<DependencyEvent>>>();
+
+    for folded in folded_synced {
+        let event = &events[folded.event_index];
+        let registration_index = relation_indexes
+            .get(event.registration.relation_id.as_str())
+            .copied()
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        let prior = folded
+            .prior
+            .as_ref()
+            .map(|row| resolved_synced_row(row, &converted_synced))
+            .transpose()
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        let after = folded
+            .after
+            .and_then(|index| converted_synced.get(index).cloned());
+        let event_ordinal = i64::try_from(event.event.event_ordinal)
+            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+        let projection = |image_kind: &str, row: &CapturedRow| {
+            serde_json::json!({
+                "event_ordinal": event_ordinal,
+                "relation_id": event.registration.relation_id,
+                "image_kind": image_kind,
+                "registry_generation": event.registration.registry_generation,
+                "record_id": event.record_id,
+                "row_data": row.row_data,
+                "row_version": row.row_version,
+                "checksum_hex": row.digest.to_lower_hex(),
+                "deleted": row.deleted,
+            })
+        };
+        let (digest, delete_projection_image, old_row, new_row) = match event.event.operation {
             ChangeOperation::Insert => {
-                if prior.is_some() {
-                    return Err(failure("projection_write_failed", transaction.commit_lsn));
-                }
-                let after = capture_after_projection(client, event, None)
-                    .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-                persist_projection(client, target, transaction, event, "after", &after)?;
-                persist_current_row(client, target, transaction, event, &after)?;
-                let new_row = (!after.deleted).then(|| after.row_data.clone());
-                (Some(after.digest), None, new_row)
+                let after = after
+                    .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+                synced_projections.push(projection("after", &after));
+                synced_current.insert(
+                    (registration_index, event.record_id.clone()),
+                    serde_json::json!({
+                        "relation_id": event.registration.relation_id,
+                        "record_id": event.record_id,
+                        "row_data": after.row_data,
+                        "row_version": after.row_version,
+                        "checksum_hex": after.digest.to_lower_hex(),
+                        "deleted": after.deleted,
+                        "event_ordinal": event_ordinal,
+                        "registry_generation": after.registry_generation,
+                    }),
+                );
+                (
+                    Some(after.digest),
+                    None,
+                    None,
+                    (!after.deleted).then_some(after.row_data),
+                )
             }
             ChangeOperation::Update => {
                 let prior = prior
                     .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
-                persist_projection(client, target, transaction, event, "before", &prior)?;
-                let after = capture_after_projection(client, event, Some(&prior))
-                    .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-                persist_projection(client, target, transaction, event, "after", &after)?;
-                persist_current_row(client, target, transaction, event, &after)?;
-                let delete_image = (event.operation == ChangeOperation::Delete).then_some("after");
-                let new_row = (!after.deleted).then(|| after.row_data.clone());
-                (Some(after.digest), delete_image, new_row)
+                let after = after
+                    .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+                synced_projections.push(projection("before", &prior));
+                synced_projections.push(projection("after", &after));
+                synced_current.insert(
+                    (registration_index, event.record_id.clone()),
+                    serde_json::json!({
+                        "relation_id": event.registration.relation_id,
+                        "record_id": event.record_id,
+                        "row_data": after.row_data,
+                        "row_version": after.row_version,
+                        "checksum_hex": after.digest.to_lower_hex(),
+                        "deleted": after.deleted,
+                        "event_ordinal": event_ordinal,
+                        "registry_generation": after.registry_generation,
+                    }),
+                );
+                (
+                    Some(after.digest),
+                    (event.operation == ChangeOperation::Delete).then_some("after"),
+                    Some(prior.row_data),
+                    (!after.deleted).then_some(after.row_data),
+                )
             }
             ChangeOperation::Delete => {
                 let prior = prior
                     .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
-                persist_projection(client, target, transaction, event, "before", &prior)?;
-                delete_current_row(client, target, event)?;
-                (None, None, None)
+                synced_projections.push(projection("before", &prior));
+                synced_current.insert(
+                    (registration_index, event.record_id.clone()),
+                    serde_json::json!({
+                        "relation_id": event.registration.relation_id,
+                        "record_id": event.record_id,
+                        "delete": true,
+                    }),
+                );
+                (None, None, Some(prior.row_data), None)
             }
         };
-
-        let registration_index = registry
-            .iter()
-            .position(|candidate| candidate.relation_id == event.registration.relation_id)
-            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        if matches!(target, ProjectionTarget::Candidate { .. }) {
+            candidate_versions.insert(
+                (registration_index, event.record_id.clone()),
+                serde_json::json!({
+                    "relation_id": event.registration.relation_id,
+                    "record_id": event.record_id,
+                    "row_version": event.row_version,
+                    "fence_id": event.fence_id,
+                    "deleted": event.operation == ChangeOperation::Delete,
+                }),
+            );
+        }
         impacts.push(ImpactedRow {
             registration_index,
             record_id: event.record_id.clone(),
@@ -4206,632 +5734,172 @@ fn persist_events_and_projections(
             delete_projection_image,
             digest,
         });
-        dependency_events.push(DependencyEvent {
+        dependency_events[folded.event_index] = Some(DependencyEvent {
             dependency_relation_id: event.registration.relation_id.clone(),
             dependency_registration_kind: event.registration.registration_kind,
             event_ordinal: event.event.event_ordinal,
-            old_row: dependency_old_row,
-            new_row: dependency_new_row,
+            old_row,
+            new_row,
         });
     }
+
+    for folded in folded_capture {
+        let event = &events[folded.event_index];
+        let registration_index = relation_indexes
+            .get(event.registration.relation_id.as_str())
+            .copied()
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        let capture_key = event
+            .new_capture_key
+            .as_ref()
+            .or(event.old_capture_key.as_ref())
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        let prior = folded
+            .prior
+            .as_ref()
+            .map(|row| resolved_capture_row(row, &converted_capture))
+            .transpose()
+            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+        let after = folded
+            .after
+            .and_then(|index| converted_capture.get(index).cloned());
+        let event_ordinal = i64::try_from(event.event.event_ordinal)
+            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+        let projection = |image_kind: &str,
+                          key: &serde_json::Value,
+                          row: &CaptureDependencyRow,
+                          deleted: bool| {
+            serde_json::json!({
+                "event_ordinal": event_ordinal,
+                "relation_id": event.registration.relation_id,
+                "image_kind": image_kind,
+                "registry_generation": event.registration.registry_generation,
+                "capture_key": key,
+                "row_data": row.row_data,
+                "deleted": deleted,
+            })
+        };
+        let (old_row, new_row) = match event.event.operation {
+            ChangeOperation::Insert => {
+                let after = after
+                    .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+                capture_projections.push(projection("after", capture_key, &after, false));
+                capture_current.insert(
+                    (
+                        registration_index,
+                        capture_key_identity(capture_key)
+                            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
+                    ),
+                    serde_json::json!({
+                        "relation_id": event.registration.relation_id,
+                        "capture_key": capture_key,
+                        "row_data": after.row_data,
+                        "event_ordinal": event_ordinal,
+                        "registry_generation": event.registration.registry_generation,
+                    }),
+                );
+                (None, Some(after.row_data))
+            }
+            ChangeOperation::Update => {
+                let prior = prior
+                    .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+                let after = after
+                    .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+                capture_projections.push(projection("before", &prior.capture_key, &prior, false));
+                capture_projections.push(projection("after", capture_key, &after, false));
+                capture_current.insert(
+                    (
+                        registration_index,
+                        capture_key_identity(capture_key)
+                            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
+                    ),
+                    serde_json::json!({
+                        "relation_id": event.registration.relation_id,
+                        "capture_key": capture_key,
+                        "row_data": after.row_data,
+                        "event_ordinal": event_ordinal,
+                        "registry_generation": event.registration.registry_generation,
+                    }),
+                );
+                (Some(prior.row_data), Some(after.row_data))
+            }
+            ChangeOperation::Delete => {
+                let prior = prior
+                    .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+                capture_projections.push(projection("before", &prior.capture_key, &prior, true));
+                capture_current.insert(
+                    (
+                        registration_index,
+                        capture_key_identity(&prior.capture_key)
+                            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?,
+                    ),
+                    serde_json::json!({
+                        "relation_id": event.registration.relation_id,
+                        "capture_key": prior.capture_key,
+                        "delete": true,
+                    }),
+                );
+                (Some(prior.row_data), None)
+            }
+        };
+        dependency_events[folded.event_index] = Some(DependencyEvent {
+            dependency_relation_id: event.registration.relation_id.clone(),
+            dependency_registration_kind: event.registration.registration_kind,
+            event_ordinal: event.event.event_ordinal,
+            old_row,
+            new_row,
+        });
+    }
+
+    let mut synced_upserts = Vec::new();
+    let mut synced_deletes = Vec::new();
+    for (key, row) in synced_current {
+        if row.get("delete") == Some(&serde_json::Value::Bool(true)) {
+            if initially_present_synced.contains(&key) {
+                synced_deletes.push(row);
+            }
+        } else {
+            synced_upserts.push(row);
+        }
+    }
+    let mut capture_upserts = Vec::new();
+    let mut capture_deletes = Vec::new();
+    for (key, row) in capture_current {
+        if row.get("delete") == Some(&serde_json::Value::Bool(true)) {
+            if initially_present_capture.contains(&key) {
+                capture_deletes.push(row);
+            }
+        } else {
+            capture_upserts.push(row);
+        }
+    }
+
+    write_synced_projection_batches(client, target, transaction, &synced_projections)?;
+    write_capture_projection_batches(client, target, transaction, &capture_projections)?;
+    let versions = candidate_versions.into_values().collect::<Vec<_>>();
+    write_candidate_row_version_batches(client, target, transaction, &versions)?;
+    write_synced_current_batches(
+        client,
+        target,
+        transaction,
+        &synced_upserts,
+        &synced_deletes,
+    )?;
+    write_capture_current_batches(
+        client,
+        target,
+        transaction,
+        &capture_upserts,
+        &capture_deletes,
+    )?;
+    let dependency_events = dependency_events
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+
     Ok(PersistedEvents {
         direct_impacts: impacts,
         dependency_events,
-    })
-}
-
-fn persist_candidate_row_version(
-    client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    event: &ApplicableEvent<'_>,
-    commit_lsn: u64,
-) -> Result<(), PoisonFailure> {
-    let ProjectionTarget::Candidate { bootstrap_id, .. } = target else {
-        return Ok(());
-    };
-    if !event.registration.is_synced() {
-        return Ok(());
-    }
-    client
-        .update(
-            "INSERT INTO synchro.sync_stream_reset_row_versions (
-                 reset_id, relation_id, record_id, row_version, fence_id,
-                 source_reset_id, deleted, baseline_generated, staged_at
-             ) VALUES (
-                 $1::uuid, $2::uuid, $3, $4::uuid, $5::uuid,
-                 NULL, $6, false, now()
-             )
-             ON CONFLICT (reset_id, relation_id, record_id) DO UPDATE SET
-                 row_version = EXCLUDED.row_version,
-                 fence_id = EXCLUDED.fence_id,
-                 source_reset_id = NULL,
-                 deleted = EXCLUDED.deleted,
-                 baseline_generated = false,
-                 staged_at = now()",
-            None,
-            &[
-                bootstrap_id.into(),
-                event.registration.relation_id.as_str().into(),
-                event.record_id.as_str().into(),
-                event.row_version.as_str().into(),
-                event.fence_id.as_str().into(),
-                (event.operation == ChangeOperation::Delete).into(),
-            ],
-        )
-        .map_err(|_| failure("projection_write_failed", commit_lsn))?;
-    Ok(())
-}
-
-fn persist_capture_dependency_event(
-    client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    transaction: &WalTransaction,
-    event: &ApplicableEvent<'_>,
-) -> Result<DependencyEvent, PoisonFailure> {
-    let current_key = event
-        .new_capture_key
-        .as_ref()
-        .or(event.old_capture_key.as_ref())
-        .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
-    let prior = load_capture_dependency_row(client, target, event.registration, current_key)
-        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-    let old_row = prior.as_ref().map(|(_, row)| row.clone());
-    let new_row = match event.event.operation {
-        ChangeOperation::Insert => {
-            if prior.is_some() {
-                return Err(failure("projection_write_failed", transaction.commit_lsn));
-            }
-            let row = capture_dependency_projection(
-                client,
-                event.registration,
-                event
-                    .event
-                    .after
-                    .as_ref()
-                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?,
-                None,
-            )
-            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-            persist_capture_dependency_projection(
-                client,
-                target,
-                transaction,
-                event,
-                "after",
-                current_key,
-                &row,
-                false,
-            )?;
-            persist_current_capture_dependency(
-                client,
-                target,
-                transaction,
-                event,
-                current_key,
-                &row,
-            )?;
-            Some(row)
-        }
-        ChangeOperation::Update => {
-            let (prior_key, prior_row) = prior
-                .as_ref()
-                .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
-            persist_capture_dependency_projection(
-                client,
-                target,
-                transaction,
-                event,
-                "before",
-                prior_key,
-                prior_row,
-                false,
-            )?;
-            let row = capture_dependency_projection(
-                client,
-                event.registration,
-                event
-                    .event
-                    .after
-                    .as_ref()
-                    .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?,
-                Some(prior_row),
-            )
-            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-            persist_capture_dependency_projection(
-                client,
-                target,
-                transaction,
-                event,
-                "after",
-                current_key,
-                &row,
-                false,
-            )?;
-            persist_current_capture_dependency(
-                client,
-                target,
-                transaction,
-                event,
-                current_key,
-                &row,
-            )?;
-            Some(row)
-        }
-        ChangeOperation::Delete => {
-            let (prior_key, prior_row) = prior
-                .as_ref()
-                .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
-            persist_capture_dependency_projection(
-                client,
-                target,
-                transaction,
-                event,
-                "before",
-                prior_key,
-                prior_row,
-                true,
-            )?;
-            let (table, id_column, id_value) = match target {
-                ProjectionTarget::Active { .. } => {
-                    ("synchro.sync_capture_dependency_rows", "", None)
-                }
-                ProjectionTarget::Candidate { bootstrap_id, .. } => (
-                    "synchro.sync_stream_reset_capture_dependency_rows",
-                    "reset_id = $3::uuid AND ",
-                    Some(bootstrap_id),
-                ),
-            };
-            let query = format!(
-                "DELETE FROM {table}
-                 WHERE {id_column}relation_id = $1::uuid AND capture_key = $2"
-            );
-            let mut values = vec![
-                event.registration.relation_id.as_str().into(),
-                pgrx::JsonB(prior_key.clone()).into(),
-            ];
-            if let Some(bootstrap_id) = id_value {
-                values.push(bootstrap_id.into());
-            }
-            let deleted = client
-                .update(&query, None, &values)
-                .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?
-                .len();
-            if deleted != 1 {
-                return Err(failure("projection_write_failed", transaction.commit_lsn));
-            }
-            None
-        }
-    };
-    Ok(DependencyEvent {
-        dependency_relation_id: event.registration.relation_id.clone(),
-        dependency_registration_kind: event.registration.registration_kind,
-        event_ordinal: event.event.event_ordinal,
-        old_row,
-        new_row,
-    })
-}
-
-fn capture_dependency_key(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
-    image: &TupleImage,
-) -> Result<serde_json::Value, String> {
-    let row = canonical_capture_dependency_values(
-        client,
-        registration,
-        image,
-        &registration.capture_key_columns,
-        None,
-    )?;
-    if !row.is_object() || row.as_object().is_none_or(serde_json::Map::is_empty) {
-        return Err("capture dependency key is invalid".to_string());
-    }
-    Ok(row)
-}
-
-fn capture_dependency_projection(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
-    image: &TupleImage,
-    prior: Option<&serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    let columns = registration
-        .capture_fields
-        .iter()
-        .map(|field| field.physical_column.clone())
-        .collect::<Vec<_>>();
-    canonical_capture_dependency_values(client, registration, image, &columns, prior)
-}
-
-fn canonical_capture_dependency_values(
-    client: &SpiClient<'_>,
-    registration: &TableRegistration,
-    image: &TupleImage,
-    columns: &[String],
-    prior: Option<&serde_json::Value>,
-) -> Result<serde_json::Value, String> {
-    let prior = prior.and_then(serde_json::Value::as_object);
-    let mut raw = serde_json::Map::new();
-    for column in columns {
-        let value = image
-            .get(column)
-            .ok_or_else(|| format!("capture dependency image omits column {column}"))?;
-        let value = match value {
-            TupleValue::Null => serde_json::Value::Null,
-            TupleValue::Text(bytes) => serde_json::Value::String(
-                std::str::from_utf8(bytes)
-                    .map_err(|_| format!("capture dependency column {column} has invalid text"))?
-                    .to_string(),
-            ),
-            TupleValue::Binary(_) => {
-                return Err(format!(
-                    "capture dependency column {column} uses unsupported binary output"
-                ));
-            }
-            TupleValue::Unchanged => {
-                prior
-                    .and_then(|row| row.get(column))
-                    .cloned()
-                    .ok_or_else(|| {
-                        format!("unchanged capture dependency column {column} has no prior value")
-                    })?
-            }
-        };
-        raw.insert(column.clone(), value);
-    }
-    let relation = crate::registry::qualified_relation_name(
-        &registration.physical_schema,
-        &registration.physical_relation,
-    );
-    let mut row_data = client
-        .select(
-            &format!(
-                "SELECT to_jsonb(projected) AS row_data
-                 FROM jsonb_populate_record(NULL::{relation}, $1) AS projected"
-            ),
-            None,
-            &[pgrx::JsonB(raw.into()).into()],
-        )
-        .map_err(|_| "canonicalizing capture dependency row failed".to_string())?
-        .first()
-        .get_by_name::<pgrx::JsonB, &str>("row_data")
-        .map_err(|_| "reading canonical capture dependency row failed".to_string())?
-        .ok_or_else(|| "canonical capture dependency row is missing".to_string())?
-        .0;
-    let object = row_data
-        .as_object_mut()
-        .ok_or_else(|| "canonical capture dependency row is invalid".to_string())?;
-    object.retain(|column, _| columns.iter().any(|candidate| candidate == column));
-    if object.len() != columns.len() {
-        return Err("canonical capture dependency projection is incomplete".to_string());
-    }
-    Ok(row_data)
-}
-
-fn load_capture_dependency_row(
-    client: &SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    registration: &TableRegistration,
-    capture_key: &serde_json::Value,
-) -> Result<Option<(serde_json::Value, serde_json::Value)>, String> {
-    let (table, reset_predicate, bootstrap_id) = match target {
-        ProjectionTarget::Active { .. } => ("synchro.sync_capture_dependency_rows", "", None),
-        ProjectionTarget::Candidate { bootstrap_id, .. } => (
-            "synchro.sync_stream_reset_capture_dependency_rows",
-            "reset_id = $3::uuid AND ",
-            Some(bootstrap_id),
-        ),
-    };
-    let query = format!(
-        "SELECT capture_key, row_data
-         FROM {table}
-         WHERE {reset_predicate}relation_id = $1::uuid AND capture_key = $2 AND NOT deleted"
-    );
-    let mut values = vec![
-        registration.relation_id.as_str().into(),
-        pgrx::JsonB(capture_key.clone()).into(),
-    ];
-    if let Some(bootstrap_id) = bootstrap_id {
-        values.push(bootstrap_id.into());
-    }
-    let rows = client
-        .select(&query, None, &values)
-        .map_err(|_| "loading capture dependency row failed".to_string())?;
-    let Some(row) = rows.into_iter().next() else {
-        return Ok(None);
-    };
-    let key = row
-        .get_by_name::<pgrx::JsonB, &str>("capture_key")
-        .map_err(|_| "reading capture dependency key failed".to_string())?
-        .ok_or_else(|| "capture dependency key is missing".to_string())?
-        .0;
-    let data = row
-        .get_by_name::<pgrx::JsonB, &str>("row_data")
-        .map_err(|_| "reading capture dependency row failed".to_string())?
-        .ok_or_else(|| "capture dependency row is missing".to_string())?
-        .0;
-    Ok(Some((key, data)))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn persist_capture_dependency_projection(
-    client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    transaction: &WalTransaction,
-    event: &ApplicableEvent<'_>,
-    image_kind: &str,
-    capture_key: &serde_json::Value,
-    row_data: &serde_json::Value,
-    deleted: bool,
-) -> Result<(), PoisonFailure> {
-    let ProjectionTarget::Active { stream_generation } = target else {
-        return Ok(());
-    };
-    client
-        .update(
-            "INSERT INTO synchro.sync_capture_dependency_projections (
-                 stream_generation, commit_lsn, event_ordinal, relation_id,
-                 image_kind, registry_generation, capture_key, row_data, deleted
-             ) VALUES ($1, $2::pg_lsn, $3, $4::uuid, $5, $6, $7, $8, $9)",
-            None,
-            &[
-                stream_generation.into(),
-                format_lsn(transaction.commit_lsn).as_str().into(),
-                i64::try_from(event.event.event_ordinal)
-                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                    .into(),
-                event.registration.relation_id.as_str().into(),
-                image_kind.into(),
-                event.registration.registry_generation.into(),
-                pgrx::JsonB(capture_key.clone()).into(),
-                pgrx::JsonB(row_data.clone()).into(),
-                deleted.into(),
-            ],
-        )
-        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-    Ok(())
-}
-
-fn persist_current_capture_dependency(
-    client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    transaction: &WalTransaction,
-    event: &ApplicableEvent<'_>,
-    capture_key: &serde_json::Value,
-    row_data: &serde_json::Value,
-) -> Result<(), PoisonFailure> {
-    if let ProjectionTarget::Candidate {
-        bootstrap_id,
-        registry_generation,
-    } = target
-    {
-        client
-            .update(
-                "INSERT INTO synchro.sync_stream_reset_capture_dependency_rows (
-                     reset_id, relation_id, capture_key, row_data, deleted,
-                     registry_generation, staged_at
-                 ) VALUES ($1::uuid, $2::uuid, $3, $4, false, $5, now())
-                 ON CONFLICT (reset_id, relation_id, capture_key) DO UPDATE SET
-                     row_data = EXCLUDED.row_data,
-                     deleted = false,
-                     registry_generation = EXCLUDED.registry_generation,
-                     staged_at = now()",
-                None,
-                &[
-                    bootstrap_id.into(),
-                    event.registration.relation_id.as_str().into(),
-                    pgrx::JsonB(capture_key.clone()).into(),
-                    pgrx::JsonB(row_data.clone()).into(),
-                    registry_generation.into(),
-                ],
-            )
-            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-        return Ok(());
-    }
-    let ProjectionTarget::Active { stream_generation } = target else {
-        unreachable!();
-    };
-    client
-        .update(
-            "INSERT INTO synchro.sync_capture_dependency_rows (
-                 relation_id, capture_key, row_data, deleted,
-                 source_stream_generation, source_commit_lsn, source_event_ordinal,
-                 source_reset_id, registry_generation, updated_at
-             ) VALUES ($1::uuid, $2, $3, false, $4, $5::pg_lsn, $6, NULL, $7, now())
-             ON CONFLICT (relation_id, capture_key) DO UPDATE SET
-                 row_data = EXCLUDED.row_data,
-                 deleted = false,
-                 source_stream_generation = EXCLUDED.source_stream_generation,
-                 source_commit_lsn = EXCLUDED.source_commit_lsn,
-                 source_event_ordinal = EXCLUDED.source_event_ordinal,
-                 source_reset_id = NULL,
-                 registry_generation = EXCLUDED.registry_generation,
-                 updated_at = now()",
-            None,
-            &[
-                event.registration.relation_id.as_str().into(),
-                pgrx::JsonB(capture_key.clone()).into(),
-                pgrx::JsonB(row_data.clone()).into(),
-                stream_generation.into(),
-                format_lsn(transaction.commit_lsn).as_str().into(),
-                i64::try_from(event.event.event_ordinal)
-                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                    .into(),
-                event.registration.registry_generation.into(),
-            ],
-        )
-        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-    Ok(())
-}
-
-fn load_captured_row(
-    client: &SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    registration: &TableRegistration,
-    record_id: &str,
-) -> Result<Option<CapturedRow>, String> {
-    let (table, reset_predicate, bootstrap_id) = match target {
-        ProjectionTarget::Active { .. } => ("synchro.sync_captured_rows", "", None),
-        ProjectionTarget::Candidate { bootstrap_id, .. } => (
-            "synchro.sync_stream_reset_captured_rows",
-            "reset_id = $3::uuid AND ",
-            Some(bootstrap_id),
-        ),
-    };
-    let query = format!(
-        "SELECT row_data, row_version::text AS row_version, checksum, deleted,
-                registry_generation
-         FROM {table}
-         WHERE {reset_predicate}relation_id = $1::uuid AND record_id = $2"
-    );
-    let mut values = vec![registration.relation_id.as_str().into(), record_id.into()];
-    if let Some(bootstrap_id) = bootstrap_id {
-        values.push(bootstrap_id.into());
-    }
-    let rows = client
-        .select(&query, None, &values)
-        .map_err(|_| "loading captured row failed".to_string())?;
-    let Some(row) = rows.into_iter().next() else {
-        return Ok(None);
-    };
-    let row_data = row
-        .get_by_name::<pgrx::JsonB, &str>("row_data")
-        .map_err(|_| "reading captured row failed".to_string())?
-        .ok_or_else(|| "captured row data is missing".to_string())?
-        .0;
-    let row_version = row
-        .get_by_name::<String, &str>("row_version")
-        .map_err(|_| "reading captured row failed".to_string())?
-        .ok_or_else(|| "captured row version is missing".to_string())?;
-    let digest = row
-        .get_by_name::<Vec<u8>, &str>("checksum")
-        .map_err(|_| "reading captured row failed".to_string())?
-        .ok_or_else(|| "captured row digest is missing".to_string())?
-        .try_into()
-        .map(synchro_core::checksum::Sha256Digest::from_bytes)
-        .map_err(|_| "captured row digest must contain exactly 32 octets".to_string())?;
-    let deleted = row
-        .get_by_name::<bool, &str>("deleted")
-        .map_err(|_| "reading captured row failed".to_string())?
-        .ok_or_else(|| "captured row deletion state is missing".to_string())?;
-    let registry_generation = row
-        .get_by_name::<i64, &str>("registry_generation")
-        .map_err(|_| "reading captured row registry generation failed".to_string())?
-        .ok_or_else(|| "captured row registry generation is missing".to_string())?;
-    if registry_generation <= 0 {
-        return Err("captured row registry generation is invalid".to_string());
-    }
-    Ok(Some(CapturedRow {
-        row_data,
-        row_version,
-        digest,
-        deleted,
-        registry_generation,
-    }))
-}
-
-fn capture_after_projection(
-    client: &SpiClient<'_>,
-    event: &ApplicableEvent<'_>,
-    prior: Option<&CapturedRow>,
-) -> Result<CapturedRow, String> {
-    let image = event
-        .event
-        .after
-        .as_ref()
-        .ok_or_else(|| "source event has no after image".to_string())?;
-    let prior_data = prior.and_then(|row| row.row_data.as_object());
-    let mut raw = serde_json::Map::new();
-    let mut native_json_values = serde_json::Map::new();
-    for field in &event.registration.fields {
-        let column = &field.physical_column;
-        let value = image
-            .get(column)
-            .ok_or_else(|| format!("source after image omits synced column {column}"))?;
-        let value = match value {
-            TupleValue::Null => {
-                if field.native_json {
-                    native_json_values.insert(field.field_id.clone(), serde_json::Value::Null);
-                }
-                serde_json::Value::Null
-            }
-            TupleValue::Text(bytes) => {
-                let text = std::str::from_utf8(bytes)
-                    .map_err(|_| format!("synced column {column} has invalid text"))?
-                    .to_string();
-                if field.native_json {
-                    native_json_values.insert(
-                        field.field_id.clone(),
-                        serde_json::Value::String(text.clone()),
-                    );
-                }
-                serde_json::Value::String(text)
-            }
-            TupleValue::Binary(_) => {
-                return Err(format!(
-                    "synced column {column} uses unsupported binary output"
-                ))
-            }
-            TupleValue::Unchanged => {
-                let prior_value = prior_data
-                    .and_then(|data| data.get(&field.field_id))
-                    .cloned()
-                    .ok_or_else(|| {
-                        format!("unchanged synced column {column} has no prior value")
-                    })?;
-                if field.native_json {
-                    native_json_values.insert(field.field_id.clone(), prior_value.clone());
-                }
-                prior_value
-            }
-        };
-        raw.insert(column.clone(), value);
-    }
-
-    let query = format!(
-        "SELECT {} AS row_data
-         FROM jsonb_populate_record(NULL::{}, $1) AS projected",
-        crate::pull::synced_row_projection_sql(event.registration, "projected"),
-        crate::registry::qualified_relation_name(
-            &event.registration.physical_schema,
-            &event.registration.physical_relation,
-        ),
-    );
-    let mut row_data = client
-        .select(&query, None, &[pgrx::JsonB(raw.into()).into()])
-        .map_err(|_| "canonicalizing captured row failed".to_string())?
-        .first()
-        .get_by_name::<pgrx::JsonB, &str>("row_data")
-        .map_err(|_| "reading canonical captured row failed".to_string())?
-        .ok_or_else(|| "canonical captured row is missing".to_string())?
-        .0;
-    let row_object = row_data
-        .as_object_mut()
-        .ok_or_else(|| "canonical captured row is not an object".to_string())?;
-    row_object.extend(native_json_values);
-    crate::pull::canonicalize_synced_row_data(event.registration, &mut row_data)?;
-    let deleted = if event.registration.has_deleted_at {
-        captured_row_deleted(
-            &event.registration.fields,
-            &event.registration.deleted_at_col,
-            &row_data,
-        )?
-    } else {
-        false
-    };
-    let digest = synced_row_digest(
-        client,
-        event.registration,
-        &row_data,
-        &event.record_id,
-        &event.row_version,
-    )?;
-    Ok(CapturedRow {
-        row_data,
-        row_version: event.row_version.clone(),
-        digest,
-        deleted,
-        registry_generation: event.registration.registry_generation,
     })
 }
 
@@ -4848,168 +5916,6 @@ fn captured_row_deleted(
         .get(&field.field_id)
         .ok_or_else(|| "captured deletion field is missing".to_string())?;
     Ok(!value.is_null())
-}
-
-fn persist_projection(
-    client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    transaction: &WalTransaction,
-    event: &ApplicableEvent<'_>,
-    image_kind: &str,
-    captured: &CapturedRow,
-) -> Result<(), PoisonFailure> {
-    let ProjectionTarget::Active { stream_generation } = target else {
-        return Ok(());
-    };
-    client
-        .update(
-            "INSERT INTO synchro.sync_captured_projections (
-                 stream_generation, commit_lsn, event_ordinal, relation_id,
-                 image_kind, registry_generation, record_id, row_data,
-                  row_version, checksum, deleted
-             ) VALUES (
-                 $1, $2::pg_lsn, $3, $4::uuid, $5, $6, $7, $8,
-                 $9::uuid, $10, $11
-             )",
-            None,
-            &[
-                stream_generation.into(),
-                format_lsn(transaction.commit_lsn).as_str().into(),
-                i64::try_from(event.event.event_ordinal)
-                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                    .into(),
-                event.registration.relation_id.as_str().into(),
-                image_kind.into(),
-                event.registration.registry_generation.into(),
-                event.record_id.as_str().into(),
-                pgrx::JsonB(captured.row_data.clone()).into(),
-                captured.row_version.as_str().into(),
-                captured.digest.as_bytes().to_vec().into(),
-                captured.deleted.into(),
-            ],
-        )
-        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-    Ok(())
-}
-
-fn persist_current_row(
-    client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    transaction: &WalTransaction,
-    event: &ApplicableEvent<'_>,
-    captured: &CapturedRow,
-) -> Result<(), PoisonFailure> {
-    if let ProjectionTarget::Candidate {
-        bootstrap_id,
-        registry_generation,
-    } = target
-    {
-        client
-            .update(
-                "INSERT INTO synchro.sync_stream_reset_captured_rows (
-                     reset_id, relation_id, record_id, row_data, row_version,
-                     checksum, deleted, registry_generation, staged_at
-                 ) VALUES (
-                     $1::uuid, $2::uuid, $3, $4, $5::uuid, $6, $7, $8, now()
-                 )
-                 ON CONFLICT (reset_id, relation_id, record_id) DO UPDATE SET
-                     row_data = EXCLUDED.row_data,
-                     row_version = EXCLUDED.row_version,
-                     checksum = EXCLUDED.checksum,
-                     deleted = EXCLUDED.deleted,
-                     registry_generation = EXCLUDED.registry_generation,
-                     staged_at = now()",
-                None,
-                &[
-                    bootstrap_id.into(),
-                    event.registration.relation_id.as_str().into(),
-                    event.record_id.as_str().into(),
-                    pgrx::JsonB(captured.row_data.clone()).into(),
-                    captured.row_version.as_str().into(),
-                    captured.digest.as_bytes().to_vec().into(),
-                    captured.deleted.into(),
-                    registry_generation.into(),
-                ],
-            )
-            .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-        return Ok(());
-    }
-    let ProjectionTarget::Active { stream_generation } = target else {
-        unreachable!();
-    };
-    client
-        .update(
-            "INSERT INTO synchro.sync_captured_rows (
-                 relation_id, record_id, row_data, row_version, checksum, deleted,
-                 source_stream_generation, source_commit_lsn, source_event_ordinal,
-                 registry_generation, updated_at
-             ) VALUES (
-                 $1::uuid, $2, $3, $4::uuid, $5, $6,
-                 $7, $8::pg_lsn, $9, $10, now()
-             )
-             ON CONFLICT (relation_id, record_id) DO UPDATE SET
-                 row_data = EXCLUDED.row_data,
-                 row_version = EXCLUDED.row_version,
-                 checksum = EXCLUDED.checksum,
-                 deleted = EXCLUDED.deleted,
-                 source_stream_generation = EXCLUDED.source_stream_generation,
-                 source_commit_lsn = EXCLUDED.source_commit_lsn,
-                 source_event_ordinal = EXCLUDED.source_event_ordinal,
-                 source_reset_id = NULL,
-                 registry_generation = EXCLUDED.registry_generation,
-                 updated_at = now()",
-            None,
-            &[
-                event.registration.relation_id.as_str().into(),
-                event.record_id.as_str().into(),
-                pgrx::JsonB(captured.row_data.clone()).into(),
-                captured.row_version.as_str().into(),
-                captured.digest.as_bytes().to_vec().into(),
-                captured.deleted.into(),
-                stream_generation.into(),
-                format_lsn(transaction.commit_lsn).as_str().into(),
-                i64::try_from(event.event.event_ordinal)
-                    .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-                    .into(),
-                event.registration.registry_generation.into(),
-            ],
-        )
-        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
-    Ok(())
-}
-
-fn delete_current_row(
-    client: &mut SpiClient<'_>,
-    target: ProjectionTarget<'_>,
-    event: &ApplicableEvent<'_>,
-) -> Result<(), PoisonFailure> {
-    let (table, reset_predicate, bootstrap_id) = match target {
-        ProjectionTarget::Active { .. } => ("synchro.sync_captured_rows", "", None),
-        ProjectionTarget::Candidate { bootstrap_id, .. } => (
-            "synchro.sync_stream_reset_captured_rows",
-            "reset_id = $3::uuid AND ",
-            Some(bootstrap_id),
-        ),
-    };
-    let query = format!(
-        "DELETE FROM {table}
-         WHERE {reset_predicate}relation_id = $1::uuid AND record_id = $2"
-    );
-    let mut values = vec![
-        event.registration.relation_id.as_str().into(),
-        event.record_id.as_str().into(),
-    ];
-    if let Some(bootstrap_id) = bootstrap_id {
-        values.push(bootstrap_id.into());
-    }
-    let deleted = client
-        .update(&query, None, &values)
-        .map_err(|_| failure("projection_write_failed", 0))?
-        .len();
-    if deleted != 1 {
-        return Err(failure("projection_write_failed", 0));
-    }
-    Ok(())
 }
 
 fn collect_membership_impacts(
@@ -5056,77 +5962,84 @@ fn collect_membership_impacts(
                 event.new_row.as_ref(),
             )
             .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
-            for record_id in record_ids {
-                let key = (target_index, record_id.clone());
-                let Some(captured) =
-                    load_captured_row(client, target, target_registration, &record_id)
-                        .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?
-                else {
-                    continue;
-                };
-                if impacts
-                    .get(&key)
-                    .is_some_and(|impact| event.event_ordinal <= impact.event_ordinal)
-                {
-                    continue;
-                }
-                if let ProjectionTarget::Active { stream_generation } = target {
-                    let event_ordinal = i64::try_from(event.event_ordinal)
-                        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
-                    reevaluation_projections.push(serde_json::json!({
-                        "event_ordinal": event_ordinal,
-                        "relation_id": target_registration.relation_id,
-                        "registry_generation": captured.registry_generation,
-                        "record_id": record_id,
-                        "row_version": captured.row_version,
-                        "checksum_hex": captured.digest.to_lower_hex(),
-                        "deleted": captured.deleted,
-                    }));
-                    if reevaluation_projections.len() == JSONB_BATCH_SIZE {
-                        let projections = std::mem::replace(
-                            &mut reevaluation_projections,
-                            Vec::with_capacity(JSONB_BATCH_SIZE),
-                        );
-                        persist_reevaluation_projection_batch(
-                            client,
-                            stream_generation,
-                            transaction.commit_lsn,
-                            projections,
-                        )
-                        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+            for record_id_batch in record_ids.chunks(JSONB_BATCH_SIZE) {
+                let inputs = record_id_batch
+                    .iter()
+                    .map(|record_id| (target_index, record_id.clone()))
+                    .collect::<Vec<_>>();
+                let captured_rows = load_captured_rows_batch(client, target, &inputs, registry)
+                    .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
+                for record_id in record_id_batch {
+                    let key = (target_index, record_id.clone());
+                    let Some(captured) = captured_rows.get(&key).cloned() else {
+                        continue;
+                    };
+                    if impacts
+                        .get(&key)
+                        .is_some_and(|impact| event.event_ordinal <= impact.event_ordinal)
+                    {
+                        continue;
                     }
-                }
-                if let Some(impact) = impacts.get_mut(&key) {
-                    impact.event_ordinal = event.event_ordinal;
-                    if !impact.direct_change {
-                        impact.operation = if captured.deleted {
-                            ChangeOperation::Delete
-                        } else {
-                            ChangeOperation::Update
-                        };
-                        impact.row_version = captured.row_version;
-                        impact.delete_projection_image = captured.deleted.then_some("after");
-                        impact.digest = Some(captured.digest);
+                    if let ProjectionTarget::Active { stream_generation } = target {
+                        let event_ordinal = i64::try_from(event.event_ordinal)
+                            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+                        reevaluation_projections.push(serde_json::json!({
+                            "event_ordinal": event_ordinal,
+                            "relation_id": target_registration.relation_id,
+                            "registry_generation": captured.registry_generation,
+                            "record_id": record_id,
+                            "row_version": captured.row_version,
+                            "checksum_hex": captured.digest.to_lower_hex(),
+                            "deleted": captured.deleted,
+                        }));
+                        if reevaluation_projections.len() == JSONB_BATCH_SIZE {
+                            let projections = std::mem::replace(
+                                &mut reevaluation_projections,
+                                Vec::with_capacity(JSONB_BATCH_SIZE),
+                            );
+                            persist_reevaluation_projection_batch(
+                                client,
+                                stream_generation,
+                                transaction.commit_lsn,
+                                projections,
+                            )
+                            .map_err(|_| {
+                                failure("projection_write_failed", transaction.commit_lsn)
+                            })?;
+                        }
                     }
-                    continue;
-                }
-                impacts.insert(
-                    key,
-                    ImpactedRow {
-                        registration_index: target_index,
-                        record_id,
-                        operation: if captured.deleted {
-                            ChangeOperation::Delete
-                        } else {
-                            ChangeOperation::Update
+                    if let Some(impact) = impacts.get_mut(&key) {
+                        impact.event_ordinal = event.event_ordinal;
+                        if !impact.direct_change {
+                            impact.operation = if captured.deleted {
+                                ChangeOperation::Delete
+                            } else {
+                                ChangeOperation::Update
+                            };
+                            impact.row_version = captured.row_version;
+                            impact.delete_projection_image = captured.deleted.then_some("after");
+                            impact.digest = Some(captured.digest);
+                        }
+                        continue;
+                    }
+                    impacts.insert(
+                        key,
+                        ImpactedRow {
+                            registration_index: target_index,
+                            record_id: record_id.clone(),
+                            operation: if captured.deleted {
+                                ChangeOperation::Delete
+                            } else {
+                                ChangeOperation::Update
+                            },
+                            direct_change: false,
+                            event_ordinal: event.event_ordinal,
+                            row_version: captured.row_version,
+                            delete_projection_image: captured.deleted.then_some("after"),
+                            digest: Some(captured.digest),
                         },
-                        direct_change: false,
-                        event_ordinal: event.event_ordinal,
-                        row_version: captured.row_version,
-                        delete_projection_image: captured.deleted.then_some("after"),
-                        digest: Some(captured.digest),
-                    },
-                );
+                    );
+                }
             }
         }
     }

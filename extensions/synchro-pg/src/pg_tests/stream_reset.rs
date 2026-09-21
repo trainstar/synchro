@@ -398,6 +398,72 @@
     }
 
     #[pg_test]
+    fn stream_reset_staging_query_volume() {
+        setup_test_tables();
+        let dependency = create_capture_dependency_table(false);
+        register_capture_dependency_table(&dependency);
+        configure_reset_test_slot("synchro_reset_old");
+        let mut measurements = Vec::new();
+        for row_count in [10i32, 100, 501] {
+            Spi::run_with_args(
+                "INSERT INTO public.test_orders (id, user_id, title)
+                 SELECT ('27000000-0000-4000-8000-' || lpad(value::text, 12, '0'))::uuid,
+                        'u1', 'bounded reset'
+                 FROM generate_series(1, $1) value
+                 ON CONFLICT DO NOTHING",
+                &[row_count.into()],
+            )
+            .expect("insert reset measurement rows");
+            Spi::run_with_args(
+                &format!(
+                    "INSERT INTO public.{dependency} (id, target_id, internal_note)
+                     SELECT value, 42, 'not captured' FROM generate_series(1, $1) value
+                     ON CONFLICT DO NOTHING"
+                ),
+                &[row_count.into()],
+            )
+            .expect("insert reset dependency measurement rows");
+            let slot = format!("synchro_reset_count_{row_count}");
+            let prepared = prepare_reset_for_test(&slot);
+            let id = reset_id(&prepared);
+            let (_, count) = query_counts::measure(0, || lock_and_stage_reset(&id, &slot));
+            let staged: i64 = Spi::get_one_with_args(
+                "SELECT count(*)
+                 FROM synchro.sync_stream_reset_captured_rows
+                 WHERE reset_id = $1::uuid",
+                &[id.as_str().into()],
+            )
+            .expect("count measured reset rows")
+            .expect("measured reset row count");
+            assert_eq!(staged, i64::from(row_count));
+            let dependencies: i64 = Spi::get_one_with_args(
+                "SELECT count(*)
+                 FROM synchro.sync_stream_reset_capture_dependency_rows
+                 WHERE reset_id = $1::uuid AND NOT deleted
+                   AND row_data = jsonb_build_object('id', capture_key->'id', 'target_id', 42)",
+                &[id.as_str().into()],
+            )
+            .expect("count verified reset dependencies")
+            .expect("verified reset dependency count");
+            assert_eq!(dependencies, i64::from(row_count));
+            assert!(count > 0);
+            measurements.push(count);
+            Spi::connect_mut(|client| {
+                crate::stream_reset::abort_stream_reset_for_test(client, &id)
+            })
+            .expect("abort measured reset");
+        }
+        assert_eq!(
+            measurements[0], measurements[1],
+            "reset staging SPI queries must depend on batches, not rows"
+        );
+        assert!(
+            measurements[2] > measurements[1],
+            "reset staging must page beyond one source batch"
+        );
+    }
+
+    #[pg_test]
     fn projection_bootstrap_abort_clears_catchup_boundary_and_stage() {
         setup_test_tables();
         configure_reset_test_slot("synchro_reset_old");

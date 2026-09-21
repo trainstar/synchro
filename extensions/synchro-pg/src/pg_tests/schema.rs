@@ -1483,6 +1483,312 @@
         assert!(rebuild["records"][0]["row"][optional_field_id].is_null());
     }
 
+    fn schema_digest_record_ids(start: usize, count: usize) -> Vec<String> {
+        (start..start + count)
+            .map(|index| format!("d5000000-0000-4000-8000-{index:012x}"))
+            .collect()
+    }
+
+    fn insert_schema_digest_source_rows(record_ids: &[String]) {
+        let rows = record_ids
+            .iter()
+            .map(|record_id| {
+                json!({
+                    "record_id": record_id,
+                    "user_id": "schema-digest-batch-user",
+                    "title": format!("schema digest {record_id}"),
+                })
+            })
+            .collect::<Vec<_>>();
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             SELECT input.record_id::uuid, input.user_id, input.title
+             FROM jsonb_to_recordset($1::jsonb) AS input(
+                 record_id text, user_id text, title text
+             )",
+            &[pgrx::JsonB(Value::Array(rows)).into()],
+        )
+        .expect("insert schema digest source rows");
+    }
+
+    fn stage_schema_digest_source_rows(record_ids: &[String]) {
+        Spi::connect_mut(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            let table = registry
+                .iter()
+                .find(|table| table.table_name == "test_orders")
+                .expect("schema digest source table");
+            let relation_id = table.relation_id.clone();
+            let registry_generation = table.registry_generation;
+            let references = record_ids.iter().map(String::as_str).collect::<Vec<_>>();
+            let hydrated = crate::pull::hydrate_records(client, "test_orders", &references, &registry)
+                .unwrap_or_else(|error| pgrx::error!("hydrate schema digest source rows: {error}"));
+            assert_eq!(hydrated.len(), record_ids.len());
+            let stream_generation = client
+                .select(
+                    "SELECT stream_generation FROM sync_runtime_state WHERE singleton",
+                    None,
+                    &[],
+                )?
+                .first()
+                .get_by_name::<String, &str>("stream_generation")?
+                .expect("schema digest stream generation");
+            let input = hydrated
+                .into_iter()
+                .enumerate()
+                .map(|(index, record)| {
+                    json!({
+                        "record_id": record["id"],
+                        "row_data": record["data"],
+                        "row_version": record["server_version"],
+                        "checksum_hex": record["row_checksum"]["digest"],
+                        "commit_lsn": format!("0/{:08X}", index + 1),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let expected = input.len();
+            let captured = client
+                .update(
+                    "INSERT INTO sync_captured_rows (
+                         relation_id, record_id, row_data, row_version, checksum, deleted,
+                         source_stream_generation, source_commit_lsn, source_event_ordinal,
+                         registry_generation
+                     )
+                     SELECT $2::uuid, input.record_id, input.row_data,
+                            input.row_version::uuid, decode(input.checksum_hex, 'hex'), false,
+                            $3, input.commit_lsn::pg_lsn, 0, $4
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         record_id text, row_data jsonb, row_version text,
+                         checksum_hex text, commit_lsn text
+                     )
+                     RETURNING record_id",
+                    None,
+                    &[
+                        pgrx::JsonB(Value::Array(input.clone())).into(),
+                        relation_id.as_str().into(),
+                        stream_generation.as_str().into(),
+                        registry_generation.into(),
+                    ],
+                )?
+                .len();
+            let projections = client
+                .update(
+                    "INSERT INTO sync_captured_projections (
+                         stream_generation, commit_lsn, event_ordinal, relation_id,
+                         image_kind, registry_generation, record_id, row_data,
+                         row_version, checksum, deleted
+                     )
+                     SELECT $2, input.commit_lsn::pg_lsn, 0, $3::uuid,
+                            'after', $4, input.record_id, input.row_data,
+                            input.row_version::uuid, decode(input.checksum_hex, 'hex'), false
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         record_id text, row_data jsonb, row_version text,
+                         checksum_hex text, commit_lsn text
+                     )
+                     RETURNING record_id",
+                    None,
+                    &[
+                        pgrx::JsonB(Value::Array(input.clone())).into(),
+                        stream_generation.as_str().into(),
+                        relation_id.as_str().into(),
+                        registry_generation.into(),
+                    ],
+                )?
+                .len();
+            let edges = client
+                .update(
+                    "INSERT INTO sync_bucket_edges (
+                         relation_id, table_name, record_id, bucket_id, checksum, row_version
+                     )
+                     SELECT $2::uuid, 'test_orders', input.record_id,
+                            'user:schema-digest-batch-user',
+                            decode(input.checksum_hex, 'hex'), input.row_version::uuid
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         record_id text, row_data jsonb, row_version text,
+                         checksum_hex text, commit_lsn text
+                     )
+                     RETURNING record_id",
+                    None,
+                    &[
+                        pgrx::JsonB(Value::Array(input)).into(),
+                        relation_id.as_str().into(),
+                    ],
+                )?
+                .len();
+            assert_eq!(captured, expected);
+            assert_eq!(projections, expected);
+            assert_eq!(edges, expected);
+            Ok::<_, spi::Error>(())
+        })
+        .expect("stage schema digest source rows");
+    }
+
+    fn clear_schema_digest_source_rows(record_ids: &[String]) {
+        Spi::run_with_args(
+            "DELETE FROM sync_bucket_edges WHERE record_id = ANY($1)",
+            &[record_ids.to_vec().into()],
+        )
+        .expect("clear schema digest edges");
+        Spi::run_with_args(
+            "DELETE FROM sync_captured_projections WHERE record_id = ANY($1)",
+            &[record_ids.to_vec().into()],
+        )
+        .expect("clear schema digest projections");
+        Spi::run_with_args(
+            "DELETE FROM sync_captured_rows WHERE record_id = ANY($1)",
+            &[record_ids.to_vec().into()],
+        )
+        .expect("clear schema digest rows");
+    }
+
+    fn prepare_schema_digest_target() -> (i64, String) {
+        Spi::run("ALTER TABLE test_orders ADD COLUMN schema_digest_batch_note TEXT")
+            .expect("add schema digest target field");
+        Spi::run(
+            "SELECT tests.register_test_table(
+                 'test_orders',
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
+                 ARRAY['internal_notes']
+             )",
+        )
+        .expect("register schema digest target");
+        let target_generation: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC LIMIT 1",
+        )
+        .expect("load schema digest target generation")
+        .expect("schema digest target generation");
+        let (parent_version, parent_hash) = latest_schema_ref();
+        let pending = Spi::connect(|client| {
+            let pending = crate::schema::prepare_pending_manifest(client, target_generation)
+                .expect("prepare schema digest target manifest")
+                .expect("schema digest target manifest");
+            Ok::<_, spi::Error>(pending)
+        })
+        .expect("load schema digest target manifest");
+        let body: Value = serde_json::from_str(&pending.canonical_body)
+            .expect("decode schema digest target manifest");
+        let transition = body["transition_class"]
+            .as_str()
+            .expect("schema digest target transition");
+        let compatibility_floor = body["compatibility_floor"]
+            .as_i64()
+            .expect("schema digest target compatibility floor");
+        assert_eq!(transition, "class_2");
+        Spi::run_with_args(
+            "INSERT INTO sync_schema_manifest (
+                 schema_version, schema_hash, canonical_manifest_body,
+                 parent_schema_version, parent_schema_hash, transition_class,
+                 compatibility_floor, registry_generation
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                pending.version.into(),
+                pending.hash.as_str().into(),
+                pending.canonical_body.as_str().into(),
+                parent_version.into(),
+                parent_hash.as_str().into(),
+                transition.into(),
+                compatibility_floor.into(),
+                target_generation.into(),
+            ],
+        )
+        .expect("install schema digest target manifest");
+        let optional_field_id: String = Spi::get_one_with_args(
+            "SELECT field.field_id::text
+             FROM sync_registry_fields field
+             JOIN sync_registry registry
+               ON registry.registry_generation = field.registry_generation
+              AND registry.relation_id = field.relation_id
+             WHERE field.registry_generation = $1
+               AND registry.table_name = 'test_orders'
+               AND field.physical_column = 'schema_digest_batch_note'",
+            &[target_generation.into()],
+        )
+        .expect("load schema digest target field")
+        .expect("schema digest target field");
+        (target_generation, optional_field_id)
+    }
+
+    fn assert_schema_digest_migration_output(
+        target_generation: i64,
+        optional_field_id: &str,
+        record_ids: &[String],
+    ) {
+        let migrated: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'rows', (
+                     SELECT count(*) FROM sync_captured_rows
+                     WHERE registry_generation = $1 AND record_id = ANY($3)
+                       AND row_data ? $2 AND row_data -> $2 = 'null'::jsonb
+                 ),
+                 'projections', (
+                     SELECT count(*) FROM sync_captured_projections
+                     WHERE registry_generation = $1 AND record_id = ANY($3)
+                       AND row_data ? $2 AND row_data -> $2 = 'null'::jsonb
+                 ),
+                 'edges', (
+                     SELECT count(*)
+                     FROM sync_bucket_edges edge
+                     JOIN sync_captured_rows captured
+                       ON captured.relation_id = edge.relation_id
+                      AND captured.record_id = edge.record_id
+                     WHERE captured.registry_generation = $1
+                       AND captured.record_id = ANY($3)
+                       AND edge.checksum = captured.checksum
+                       AND edge.row_version = captured.row_version
+                 )
+             )",
+            &[
+                target_generation.into(),
+                optional_field_id.into(),
+                record_ids.to_vec().into(),
+            ],
+        )
+        .expect("load migrated schema digest output")
+        .expect("migrated schema digest output");
+        assert_eq!(migrated.0["rows"], json!(record_ids.len()));
+        assert_eq!(migrated.0["projections"], json!(record_ids.len()));
+        assert_eq!(migrated.0["edges"], json!(record_ids.len()));
+    }
+
+    #[pg_test]
+    fn test_schema_digest_migration_pages_retained_data() {
+        setup_test_tables();
+        register_client("schema-digest-batch-user", "schema-digest-batch-client");
+        let batch_size = usize::try_from(crate::materialize::DEFAULT_BACKFILL_BATCH_SIZE)
+            .expect("schema digest batch size");
+        let below_batch = schema_digest_record_ids(0, batch_size - 1);
+        insert_schema_digest_source_rows(&below_batch);
+        let (target_generation, optional_field_id) = prepare_schema_digest_target();
+        stage_schema_digest_source_rows(&below_batch);
+
+        let (_, below_batch_queries) = query_counts::measure(0, || {
+            Spi::connect_mut(|client| {
+                crate::materialize::migrate_schema_digests(client, target_generation)
+            })
+            .expect("migrate schema digest batch below boundary")
+        });
+        assert_schema_digest_migration_output(target_generation, &optional_field_id, &below_batch);
+
+        clear_schema_digest_source_rows(&below_batch);
+        let extra_records = schema_digest_record_ids(batch_size - 1, 2);
+        insert_schema_digest_source_rows(&extra_records);
+        let mut cross_batch = below_batch;
+        cross_batch.extend(extra_records);
+        stage_schema_digest_source_rows(&cross_batch);
+
+        let (_, cross_batch_queries) = query_counts::measure(0, || {
+            Spi::connect_mut(|client| {
+                crate::materialize::migrate_schema_digests(client, target_generation)
+            })
+            .expect("migrate schema digest batch across boundary")
+        });
+        assert_schema_digest_migration_output(target_generation, &optional_field_id, &cross_batch);
+        assert_eq!(cross_batch_queries, below_batch_queries + 4);
+    }
+
     #[pg_test]
     fn test_class_4_field_removal_keeps_rebuild_valid() {
         setup_test_tables();
@@ -3275,7 +3581,7 @@
     }
 
     #[pg_test]
-    fn test_registry_loads_child_metadata_in_one_scan_per_table() {
+    fn test_registry_loads_child_metadata_in_one_scan_per_generation() {
         setup_test_tables();
         Spi::run("SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off")
             .expect("force registry metadata sequential scans");
@@ -3321,6 +3627,142 @@
         assert_eq!(registrations.len(), 3);
         assert_eq!(field_scans - field_scans_before, 1);
         assert_eq!(capture_field_scans - capture_field_scans_before, 1);
+    }
+
+    #[pg_test]
+    fn test_catalog_reads_stay_constant_for_capture_dependencies() {
+        setup_test_tables();
+        Spi::run(
+            "CREATE TABLE test_generation_catalog_capture_one (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+              );
+              CREATE TABLE test_generation_catalog_capture_two (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+              );
+              GRANT SELECT ON TABLE test_generation_catalog_capture_one,
+                  test_generation_catalog_capture_two TO synchro_owner;
+              ALTER TABLE test_generation_catalog_capture_one ENABLE ROW LEVEL SECURITY;
+              ALTER TABLE test_generation_catalog_capture_two ENABLE ROW LEVEL SECURITY;
+              CREATE POLICY test_generation_catalog_capture_one_policy
+                  ON test_generation_catalog_capture_one
+                  AS PERMISSIVE FOR ALL TO synchro_owner
+                  USING (true) WITH CHECK (true);
+              CREATE POLICY test_generation_catalog_capture_two_policy
+                  ON test_generation_catalog_capture_two
+                  AS PERMISSIVE FOR ALL TO synchro_owner
+                  USING (true) WITH CHECK (true);
+              SELECT synchro_register_capture_dependency(
+                  'public.test_generation_catalog_capture_one', ARRAY['id'], ARRAY['value']
+              )",
+        )
+        .expect("register first capture dependency");
+        activate_pending_registry_for_test();
+        let active: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations WHERE state = 'active'",
+        )
+        .expect("read active registry generation")
+        .expect("active registry generation");
+        let (_, active_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, active)
+            })
+            .expect("load active registry generation")
+        });
+
+        Spi::run(
+            "SELECT synchro_register_capture_dependency(
+                 'public.test_generation_catalog_capture_two', ARRAY['id'], ARRAY['value']
+             )",
+        )
+        .expect("register second capture dependency");
+        let pending: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC LIMIT 1",
+        )
+        .expect("read pending registry generation")
+        .expect("pending registry generation");
+        let (_, pending_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, pending)
+            })
+            .expect("load pending registry generation")
+        });
+
+        assert!(active_operations > 0);
+        assert_eq!(pending_operations, active_operations);
+    }
+
+    #[pg_test]
+    fn test_catalog_reads_stay_constant_for_membership_functions() {
+        setup_test_tables();
+        Spi::run(
+            "CREATE TABLE test_generation_catalog_function_one (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE test_generation_catalog_function_two (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             SELECT synchro_prepare_projection_view(
+                 'public.test_generation_catalog_function_one',
+                 'test_generation_catalog_function_one',
+                 ARRAY['id']
+             );
+             SELECT synchro_prepare_projection_view(
+                 'public.test_generation_catalog_function_two',
+                 'test_generation_catalog_function_two',
+                 ARRAY['id']
+             );
+             SELECT tests.register_test_table(
+                 'test_generation_catalog_function_one',
+                 $$SELECT 'global' FROM synchro_projection.test_generation_catalog_function_one
+                   WHERE record_id = p_key::text$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .expect("register first membership function");
+        activate_pending_registry_for_test();
+        let active: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations WHERE state = 'active'",
+        )
+        .expect("read active registry generation")
+        .expect("active registry generation");
+        let (_, active_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, active)
+            })
+            .expect("load active registry generation")
+        });
+
+        Spi::run(
+            "SELECT tests.register_test_table(
+                 'test_generation_catalog_function_two',
+                 $$SELECT 'global' FROM synchro_projection.test_generation_catalog_function_two
+                   WHERE record_id = p_key::text$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .expect("register second membership function");
+        let pending: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC LIMIT 1",
+        )
+        .expect("read pending registry generation")
+        .expect("pending registry generation");
+        let (_, pending_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, pending)
+            })
+            .expect("load pending registry generation")
+        });
+
+        assert!(active_operations > 0);
+        assert_eq!(pending_operations, active_operations);
     }
 
     #[pg_test]

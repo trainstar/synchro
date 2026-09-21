@@ -1,15 +1,18 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
-use synchro_core::checksum::SchemaHash;
 
-use crate::pull::{canonicalize_synced_row_data, synced_row_digest, typed_primary_key_bytes};
+use crate::pull::{
+    canonicalize_synced_row_data, synced_row_digest_with_schema_hash, typed_primary_key_bytes,
+};
 use crate::registry::{
     load_registry_from_client, load_registry_generation_for_activation,
     load_registry_generation_from_client, TableRegistration,
 };
-use crate::spi_helpers::required_text;
+use crate::spi_helpers::{
+    jsonb_batches, jsonb_payload_parameters, required_record_id, required_text,
+};
 
-const DEFAULT_BACKFILL_BATCH_SIZE: i64 = 1_000;
+pub(crate) const DEFAULT_BACKFILL_BATCH_SIZE: i64 = 1_000;
 const MAX_BACKFILL_BATCH_SIZE: i64 = 1_000;
 
 #[derive(Debug)]
@@ -42,6 +45,12 @@ struct CapturedProjectionRecord {
     row_version: String,
     checksum: Vec<u8>,
     registry_generation: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SchemaMigrationHashes {
+    source: synchro_core::checksum::SchemaHash,
+    target: synchro_core::checksum::SchemaHash,
 }
 
 #[pg_extern]
@@ -382,259 +391,33 @@ pub(crate) fn migrate_schema_digests(
 
     let target_registry = load_registry_generation_from_client(client, target_generation)
         .map_err(|error| format!("loading target registry for schema migration: {error}"))?;
+    let target_schema_hash = crate::pull::schema_hash_for_generation(client, target_generation)?;
+    let target_registrations = target_registry
+        .iter()
+        .filter(|registration| registration.is_synced())
+        .map(|registration| (registration.relation_id.as_str(), registration))
+        .collect::<std::collections::HashMap<_, _>>();
     retire_removed_schema_rows(client, target_generation)?;
-    let rows = client
-        .select(
-            "SELECT captured.relation_id::text AS relation_id,
-                    captured.record_id, captured.row_data,
-                    captured.row_version::text AS row_version,
-                    captured.checksum, captured.registry_generation
-             FROM synchro.sync_captured_rows captured
-             JOIN synchro.sync_registry target
-               ON target.registry_generation = $1
-               AND target.relation_id = captured.relation_id
-               AND target.registration_kind = 'synced'
-             ORDER BY captured.relation_id, captured.record_id",
-            None,
-            &[target_generation.into()],
-        )
-        .map_err(|error| format!("loading retained schema rows: {error}"))?;
-    let mut records = Vec::with_capacity(rows.len());
-    for row in rows {
-        records.push(SchemaDigestRecord {
-            relation_id: required_text(&row, "relation_id", "")?,
-            record_id: required_text(&row, "record_id", "")?,
-            row_data: row
-                .get_by_name::<pgrx::JsonB, &str>("row_data")
-                .map_err(|error| format!("reading retained row data: {error}"))?
-                .ok_or_else(|| "retained row data is missing".to_string())?,
-            row_version: required_text(&row, "row_version", "")?,
-            checksum: required_bytes(&row, "checksum")?,
-            registry_generation: row
-                .get_by_name::<i64, &str>("registry_generation")
-                .map_err(|error| format!("reading retained row generation: {error}"))?
-                .filter(|generation| *generation > 0)
-                .ok_or_else(|| "retained row generation is invalid".to_string())?,
-        });
-    }
-
     let mut source_registries = std::collections::HashMap::new();
-    for record in records {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            source_registries.entry(record.registry_generation)
-        {
-            let registry = load_registry_generation_for_activation(
-                client,
-                record.registry_generation,
-                target_generation,
-            )
-            .map_err(|error| format!("loading source registry for schema migration: {error}"))?;
-            entry.insert(registry);
-        }
-        let source = source_registries
-            .get(&record.registry_generation)
-            .and_then(|registry| {
-                registry
-                    .iter()
-                    .find(|table| table.relation_id == record.relation_id && table.is_synced())
-            })
-            .ok_or_else(|| "retained row source registration is missing".to_string())?;
-        let target = target_registry
-            .iter()
-            .find(|table| table.relation_id == record.relation_id && table.is_synced())
-            .ok_or_else(|| "retained row target registration is missing".to_string())?;
-        if source.table_id != target.table_id
-            || source.primary_key_field_id != target.primary_key_field_id
-            || typed_primary_key_bytes(source, &record.record_id)?
-                != typed_primary_key_bytes(target, &record.record_id)?
-        {
-            return Err("schema migration changed row identity".to_string());
-        }
-
-        let source_digest = synced_row_digest(
-            client,
-            source,
-            &record.row_data.0,
-            &record.record_id,
-            &record.row_version,
-        )?;
-        if source_digest.as_bytes() != record.checksum.as_slice() {
-            return Err("retained row source checksum does not match".to_string());
-        }
-
-        let (child_row, child_digest) = migrate_schema_row(
-            client,
-            source,
-            target,
-            record.row_data.0,
-            &record.record_id,
-            &record.row_version,
-            &record.checksum,
-        )?;
-        let updated = client
-            .update(
-                "UPDATE synchro.sync_captured_rows
-                 SET row_data = $3, checksum = $4,
-                     registry_generation = $5, updated_at = now()
-                 WHERE relation_id = $1::uuid AND record_id = $2
-                   AND checksum = $6 AND row_version = $7::uuid
-                   AND registry_generation = $8
-                 RETURNING record_id",
-                None,
-                &[
-                    record.relation_id.as_str().into(),
-                    record.record_id.as_str().into(),
-                    pgrx::JsonB(child_row).into(),
-                    child_digest.clone().into(),
-                    target_generation.into(),
-                    record.checksum.clone().into(),
-                    record.row_version.as_str().into(),
-                    record.registry_generation.into(),
-                ],
-            )
-            .map_err(|error| format!("migrating retained schema row: {error}"))?
-            .len();
-        if updated != 1 {
-            return Err("retained row changed during schema migration".to_string());
-        }
-        client
-            .update(
-                "UPDATE synchro.sync_bucket_edges
-                 SET checksum = $4, updated_at = now()
-                 WHERE relation_id = $1::uuid AND table_name = $2 AND record_id = $3
-                   AND checksum = $5 AND row_version = $6::uuid",
-                None,
-                &[
-                    record.relation_id.as_str().into(),
-                    target.table_name.as_str().into(),
-                    record.record_id.as_str().into(),
-                    child_digest.clone().into(),
-                    record.checksum.into(),
-                    record.row_version.as_str().into(),
-                ],
-            )
-            .map_err(|error| format!("migrating retained schema edges: {error}"))?;
-    }
-
-    let projection_rows = client
-        .select(
-            "SELECT projection.stream_generation,
-                    projection.commit_lsn::text AS commit_lsn,
-                    projection.event_ordinal,
-                    projection.relation_id::text AS relation_id,
-                    projection.image_kind,
-                    projection.record_id,
-                    projection.row_data,
-                    projection.row_version::text AS row_version,
-                    projection.checksum,
-                    projection.registry_generation
-             FROM synchro.sync_captured_projections projection
-             JOIN synchro.sync_registry target
-               ON target.registry_generation = $1
-               AND target.relation_id = projection.relation_id
-               AND target.registration_kind = 'synced'
-             ORDER BY projection.relation_id, projection.record_id,
-                       projection.commit_lsn, projection.event_ordinal,
-                       projection.image_kind",
-            None,
-            &[target_generation.into()],
-        )
-        .map_err(|error| format!("loading retained schema projections: {error}"))?;
-    let mut projections = Vec::with_capacity(projection_rows.len());
-    for row in projection_rows {
-        projections.push(CapturedProjectionRecord {
-            stream_generation: required_text(&row, "stream_generation", "")?,
-            commit_lsn: required_text(&row, "commit_lsn", "")?,
-            event_ordinal: row
-                .get_by_name::<i64, &str>("event_ordinal")
-                .map_err(|error| format!("reading retained projection ordinal: {error}"))?
-                .filter(|ordinal| *ordinal >= 0)
-                .ok_or_else(|| "retained projection ordinal is invalid".to_string())?,
-            relation_id: required_text(&row, "relation_id", "")?,
-            image_kind: required_text(&row, "image_kind", "")?,
-            record_id: required_text(&row, "record_id", "")?,
-            row_data: row
-                .get_by_name::<pgrx::JsonB, &str>("row_data")
-                .map_err(|error| format!("reading retained projection row data: {error}"))?
-                .ok_or_else(|| "retained projection row data is missing".to_string())?,
-            row_version: required_text(&row, "row_version", "")?,
-            checksum: required_bytes(&row, "checksum")?,
-            registry_generation: row
-                .get_by_name::<i64, &str>("registry_generation")
-                .map_err(|error| format!("reading retained projection generation: {error}"))?
-                .filter(|generation| *generation > 0)
-                .ok_or_else(|| "retained projection generation is invalid".to_string())?,
-        });
-    }
-    for projection in projections {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            source_registries.entry(projection.registry_generation)
-        {
-            let registry = load_registry_generation_for_activation(
-                client,
-                projection.registry_generation,
-                target_generation,
-            )
-            .map_err(|error| format!("loading projection source registry: {error}"))?;
-            entry.insert(registry);
-        }
-        let source = source_registries
-            .get(&projection.registry_generation)
-            .and_then(|registry| {
-                registry
-                    .iter()
-                    .find(|table| table.relation_id == projection.relation_id && table.is_synced())
-            })
-            .ok_or_else(|| "retained projection source registration is missing".to_string())?;
-        let target = target_registry
-            .iter()
-            .find(|table| table.relation_id == projection.relation_id && table.is_synced())
-            .ok_or_else(|| "retained projection target registration is missing".to_string())?;
-        let (child_row, child_digest) = migrate_schema_row(
-            client,
-            source,
-            target,
-            projection.row_data.0,
-            &projection.record_id,
-            &projection.row_version,
-            &projection.checksum,
-        )?;
-        let updated = client
-            .update(
-                "UPDATE synchro.sync_captured_projections
-                 SET row_data = $8, checksum = $9, registry_generation = $10
-                 WHERE stream_generation = $1
-                   AND commit_lsn = $2::pg_lsn
-                   AND event_ordinal = $3
-                   AND relation_id = $4::uuid
-                   AND image_kind = $5
-                   AND record_id = $6
-                   AND row_version = $7::uuid
-                   AND checksum = $11
-                   AND registry_generation = $12
-                 RETURNING record_id",
-                None,
-                &[
-                    projection.stream_generation.as_str().into(),
-                    projection.commit_lsn.as_str().into(),
-                    projection.event_ordinal.into(),
-                    projection.relation_id.as_str().into(),
-                    projection.image_kind.as_str().into(),
-                    projection.record_id.as_str().into(),
-                    projection.row_version.as_str().into(),
-                    pgrx::JsonB(child_row).into(),
-                    child_digest.clone().into(),
-                    target_generation.into(),
-                    projection.checksum.into(),
-                    projection.registry_generation.into(),
-                ],
-            )
-            .map_err(|error| format!("migrating retained schema projection: {error}"))?
-            .len();
-        if updated != 1 {
-            return Err("retained projection changed during schema migration".to_string());
-        }
-    }
+    source_registries.insert(target_generation, target_registry.clone());
+    let mut source_schema_hashes = std::collections::HashMap::new();
+    source_schema_hashes.insert(target_generation, target_schema_hash);
+    migrate_current_schema_digest_pages(
+        client,
+        target_generation,
+        target_schema_hash,
+        &target_registrations,
+        &mut source_registries,
+        &mut source_schema_hashes,
+    )?;
+    migrate_captured_projection_pages(
+        client,
+        target_generation,
+        target_schema_hash,
+        &target_registrations,
+        &mut source_registries,
+        &mut source_schema_hashes,
+    )?;
 
     let invalid = client
         .select(
@@ -665,6 +448,445 @@ pub(crate) fn migrate_schema_digests(
         .unwrap_or(true);
     if invalid {
         return Err("schema digest migration left invalid retained edges".to_string());
+    }
+    Ok(())
+}
+
+fn migrate_current_schema_digest_pages(
+    client: &mut SpiClient<'_>,
+    target_generation: i64,
+    target_schema_hash: synchro_core::checksum::SchemaHash,
+    target_registrations: &std::collections::HashMap<&str, &TableRegistration>,
+    source_registries: &mut std::collections::HashMap<i64, Vec<TableRegistration>>,
+    source_schema_hashes: &mut std::collections::HashMap<i64, synchro_core::checksum::SchemaHash>,
+) -> Result<(), String> {
+    let mut first_page = true;
+    let mut after_relation_id = String::new();
+    let mut after_record_id = String::new();
+
+    loop {
+        let records = load_schema_digest_record_page(
+            client,
+            target_generation,
+            first_page,
+            &after_relation_id,
+            &after_record_id,
+        )?;
+        if records.is_empty() {
+            return Ok(());
+        }
+        let last = records
+            .last()
+            .ok_or_else(|| "schema digest row page is empty".to_string())?;
+        after_relation_id.clone_from(&last.relation_id);
+        after_record_id.clone_from(&last.record_id);
+        first_page = false;
+
+        let mut updates = Vec::with_capacity(records.len());
+        for record in records {
+            let target = target_registrations
+                .get(record.relation_id.as_str())
+                .copied()
+                .ok_or_else(|| "retained row target registration is missing".to_string())?;
+            let (source, source_schema_hash) = source_registration_for_schema_migration(
+                client,
+                source_registries,
+                source_schema_hashes,
+                record.registry_generation,
+                target_generation,
+                &record.relation_id,
+            )?;
+            let (child_row, child_digest) = migrate_schema_row(
+                source,
+                target,
+                record.row_data.0,
+                &record.record_id,
+                &record.row_version,
+                &record.checksum,
+                SchemaMigrationHashes {
+                    source: source_schema_hash,
+                    target: target_schema_hash,
+                },
+            )?;
+            updates.push(serde_json::json!({
+                "relation_id": record.relation_id,
+                "record_id": record.record_id,
+                "row_data": child_row,
+                "checksum_hex": lower_hex(&child_digest),
+                "row_version": record.row_version,
+                "source_checksum_hex": lower_hex(&record.checksum),
+                "source_registry_generation": record.registry_generation,
+                "table_name": target.table_name,
+            }));
+        }
+        update_schema_digest_rows_and_edges(client, target_generation, &updates)?;
+    }
+}
+
+fn migrate_captured_projection_pages(
+    client: &mut SpiClient<'_>,
+    target_generation: i64,
+    target_schema_hash: synchro_core::checksum::SchemaHash,
+    target_registrations: &std::collections::HashMap<&str, &TableRegistration>,
+    source_registries: &mut std::collections::HashMap<i64, Vec<TableRegistration>>,
+    source_schema_hashes: &mut std::collections::HashMap<i64, synchro_core::checksum::SchemaHash>,
+) -> Result<(), String> {
+    let mut first_page = true;
+    let mut after_stream_generation = String::new();
+    let mut after_commit_lsn = String::new();
+    let mut after_event_ordinal = 0i64;
+    let mut after_relation_id = String::new();
+    let mut after_image_kind = String::new();
+    let mut after_record_id = String::new();
+
+    loop {
+        let projections = load_captured_projection_page(
+            client,
+            target_generation,
+            first_page,
+            &after_stream_generation,
+            &after_commit_lsn,
+            after_event_ordinal,
+            &after_relation_id,
+            &after_image_kind,
+            &after_record_id,
+        )?;
+        if projections.is_empty() {
+            return Ok(());
+        }
+        let last = projections
+            .last()
+            .ok_or_else(|| "schema digest projection page is empty".to_string())?;
+        after_stream_generation.clone_from(&last.stream_generation);
+        after_commit_lsn.clone_from(&last.commit_lsn);
+        after_event_ordinal = last.event_ordinal;
+        after_relation_id.clone_from(&last.relation_id);
+        after_image_kind.clone_from(&last.image_kind);
+        after_record_id.clone_from(&last.record_id);
+        first_page = false;
+
+        let mut updates = Vec::with_capacity(projections.len());
+        for projection in projections {
+            let target = target_registrations
+                .get(projection.relation_id.as_str())
+                .copied()
+                .ok_or_else(|| "retained projection target registration is missing".to_string())?;
+            let (source, source_schema_hash) = source_registration_for_schema_migration(
+                client,
+                source_registries,
+                source_schema_hashes,
+                projection.registry_generation,
+                target_generation,
+                &projection.relation_id,
+            )?;
+            let (child_row, child_digest) = migrate_schema_row(
+                source,
+                target,
+                projection.row_data.0,
+                &projection.record_id,
+                &projection.row_version,
+                &projection.checksum,
+                SchemaMigrationHashes {
+                    source: source_schema_hash,
+                    target: target_schema_hash,
+                },
+            )?;
+            updates.push(serde_json::json!({
+                "stream_generation": projection.stream_generation,
+                "commit_lsn": projection.commit_lsn,
+                "event_ordinal": projection.event_ordinal,
+                "relation_id": projection.relation_id,
+                "image_kind": projection.image_kind,
+                "record_id": projection.record_id,
+                "row_data": child_row,
+                "checksum_hex": lower_hex(&child_digest),
+                "row_version": projection.row_version,
+                "source_checksum_hex": lower_hex(&projection.checksum),
+                "source_registry_generation": projection.registry_generation,
+            }));
+        }
+        update_captured_projections(client, target_generation, &updates)?;
+    }
+}
+
+fn load_schema_digest_record_page(
+    client: &SpiClient<'_>,
+    target_generation: i64,
+    first_page: bool,
+    after_relation_id: &str,
+    after_record_id: &str,
+) -> Result<Vec<SchemaDigestRecord>, String> {
+    let rows = client
+        .select(
+            "SELECT captured.relation_id::text AS relation_id,
+                    captured.record_id, captured.row_data,
+                    captured.row_version::text AS row_version,
+                    captured.checksum, captured.registry_generation
+             FROM synchro.sync_captured_rows captured
+             JOIN synchro.sync_registry target
+               ON target.registry_generation = $1
+               AND target.relation_id = captured.relation_id
+               AND target.registration_kind = 'synced'
+             WHERE $2 OR (captured.relation_id, captured.record_id) > (NULLIF($3, '')::uuid, $4)
+             ORDER BY captured.relation_id, captured.record_id
+             LIMIT $5",
+            None,
+            &[
+                target_generation.into(),
+                first_page.into(),
+                after_relation_id.into(),
+                after_record_id.into(),
+                DEFAULT_BACKFILL_BATCH_SIZE.into(),
+            ],
+        )
+        .map_err(|error| format!("loading retained schema rows: {error}"))?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(SchemaDigestRecord {
+                relation_id: required_text(&row, "relation_id", "")?,
+                record_id: required_record_id(&row)?,
+                row_data: row
+                    .get_by_name::<pgrx::JsonB, &str>("row_data")
+                    .map_err(|error| format!("reading retained row data: {error}"))?
+                    .ok_or_else(|| "retained row data is missing".to_string())?,
+                row_version: required_text(&row, "row_version", "")?,
+                checksum: required_bytes(&row, "checksum")?,
+                registry_generation: row
+                    .get_by_name::<i64, &str>("registry_generation")
+                    .map_err(|error| format!("reading retained row generation: {error}"))?
+                    .filter(|generation| *generation > 0)
+                    .ok_or_else(|| "retained row generation is invalid".to_string())?,
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_captured_projection_page(
+    client: &SpiClient<'_>,
+    target_generation: i64,
+    first_page: bool,
+    after_stream_generation: &str,
+    after_commit_lsn: &str,
+    after_event_ordinal: i64,
+    after_relation_id: &str,
+    after_image_kind: &str,
+    after_record_id: &str,
+) -> Result<Vec<CapturedProjectionRecord>, String> {
+    let rows = client
+        .select(
+            "SELECT projection.stream_generation,
+                    projection.commit_lsn::text AS commit_lsn,
+                    projection.event_ordinal,
+                    projection.relation_id::text AS relation_id,
+                    projection.image_kind,
+                    projection.record_id,
+                    projection.row_data,
+                    projection.row_version::text AS row_version,
+                    projection.checksum,
+                    projection.registry_generation
+             FROM synchro.sync_captured_projections projection
+             JOIN synchro.sync_registry target
+               ON target.registry_generation = $1
+               AND target.relation_id = projection.relation_id
+               AND target.registration_kind = 'synced'
+             WHERE $2 OR (
+                 projection.stream_generation,
+                 projection.commit_lsn,
+                 projection.event_ordinal,
+                 projection.relation_id,
+                 projection.image_kind,
+                 projection.record_id
+             ) > ($3, NULLIF($4, '')::pg_lsn, $5, NULLIF($6, '')::uuid, $7, $8)
+             ORDER BY projection.stream_generation,
+                      projection.commit_lsn,
+                      projection.event_ordinal,
+                      projection.relation_id,
+                      projection.image_kind,
+                      projection.record_id
+             LIMIT $9",
+            None,
+            &[
+                target_generation.into(),
+                first_page.into(),
+                after_stream_generation.into(),
+                after_commit_lsn.into(),
+                after_event_ordinal.into(),
+                after_relation_id.into(),
+                after_image_kind.into(),
+                after_record_id.into(),
+                DEFAULT_BACKFILL_BATCH_SIZE.into(),
+            ],
+        )
+        .map_err(|error| format!("loading retained schema projections: {error}"))?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(CapturedProjectionRecord {
+                stream_generation: required_text(&row, "stream_generation", "")?,
+                commit_lsn: required_text(&row, "commit_lsn", "")?,
+                event_ordinal: row
+                    .get_by_name::<i64, &str>("event_ordinal")
+                    .map_err(|error| format!("reading retained projection ordinal: {error}"))?
+                    .filter(|ordinal| *ordinal >= 0)
+                    .ok_or_else(|| "retained projection ordinal is invalid".to_string())?,
+                relation_id: required_text(&row, "relation_id", "")?,
+                image_kind: required_text(&row, "image_kind", "")?,
+                record_id: required_record_id(&row)?,
+                row_data: row
+                    .get_by_name::<pgrx::JsonB, &str>("row_data")
+                    .map_err(|error| format!("reading retained projection row data: {error}"))?
+                    .ok_or_else(|| "retained projection row data is missing".to_string())?,
+                row_version: required_text(&row, "row_version", "")?,
+                checksum: required_bytes(&row, "checksum")?,
+                registry_generation: row
+                    .get_by_name::<i64, &str>("registry_generation")
+                    .map_err(|error| format!("reading retained projection generation: {error}"))?
+                    .filter(|generation| *generation > 0)
+                    .ok_or_else(|| "retained projection generation is invalid".to_string())?,
+            })
+        })
+        .collect()
+}
+
+fn source_registration_for_schema_migration<'a>(
+    client: &SpiClient<'_>,
+    source_registries: &'a mut std::collections::HashMap<i64, Vec<TableRegistration>>,
+    source_schema_hashes: &mut std::collections::HashMap<i64, synchro_core::checksum::SchemaHash>,
+    source_generation: i64,
+    target_generation: i64,
+    relation_id: &str,
+) -> Result<(&'a TableRegistration, synchro_core::checksum::SchemaHash), String> {
+    if let std::collections::hash_map::Entry::Vacant(entry) =
+        source_registries.entry(source_generation)
+    {
+        let registry =
+            load_registry_generation_for_activation(client, source_generation, target_generation)
+                .map_err(|error| format!("loading source registry for schema migration: {error}"))?;
+        entry.insert(registry);
+    }
+    if let std::collections::hash_map::Entry::Vacant(entry) =
+        source_schema_hashes.entry(source_generation)
+    {
+        let schema_hash = crate::pull::schema_hash_for_generation(client, source_generation)?;
+        entry.insert(schema_hash);
+    }
+    let source = source_registries
+        .get(&source_generation)
+        .and_then(|registry| {
+            registry
+                .iter()
+                .find(|table| table.relation_id == relation_id && table.is_synced())
+        })
+        .ok_or_else(|| "retained schema source registration is missing".to_string())?;
+    let schema_hash = source_schema_hashes
+        .get(&source_generation)
+        .copied()
+        .ok_or_else(|| "retained schema source hash is missing".to_string())?;
+    Ok((source, schema_hash))
+}
+
+fn update_schema_digest_rows_and_edges(
+    client: &mut SpiClient<'_>,
+    target_generation: i64,
+    updates: &[serde_json::Value],
+) -> Result<(), String> {
+    for batch in jsonb_batches(updates, DEFAULT_BACKFILL_BATCH_SIZE as usize, |row| row)? {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")?;
+        let expected = i64::try_from(batch.len())
+            .map_err(|_| "schema digest row batch is out of range".to_string())?;
+        let migrated = client
+            .update(
+                "WITH input AS (
+                 SELECT relation_id, record_id, payload_index, checksum_hex, row_version,
+                        source_checksum_hex, source_registry_generation, table_name
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     relation_id text, record_id text, payload_index integer, checksum_hex text,
+                     row_version text, source_checksum_hex text,
+                     source_registry_generation bigint, table_name text
+                 )
+             ), migrated AS (
+                 UPDATE synchro.sync_captured_rows captured
+                 SET row_data = ($3::jsonb[])[input.payload_index],
+                     checksum = decode(input.checksum_hex, 'hex'),
+                     registry_generation = $2,
+                     updated_at = now()
+                 FROM input
+                 WHERE captured.relation_id = input.relation_id::uuid
+                   AND captured.record_id = input.record_id
+                   AND captured.checksum = decode(input.source_checksum_hex, 'hex')
+                   AND captured.row_version = input.row_version::uuid
+                   AND captured.registry_generation = input.source_registry_generation
+                 RETURNING captured.record_id
+             ), edges AS (
+                 UPDATE synchro.sync_bucket_edges edge
+                 SET checksum = decode(input.checksum_hex, 'hex'), updated_at = now()
+                 FROM input
+                 WHERE edge.relation_id = input.relation_id::uuid
+                   AND edge.table_name = input.table_name
+                   AND edge.record_id = input.record_id
+                   AND edge.checksum = decode(input.source_checksum_hex, 'hex')
+                   AND edge.row_version = input.row_version::uuid
+                 RETURNING edge.record_id
+             )
+             SELECT count(*)::bigint AS migrated FROM migrated",
+                None,
+                &[metadata.into(), target_generation.into(), payloads.into()],
+            )
+            .map_err(|error| format!("migrating retained schema row batch: {error}"))?
+            .first()
+            .get_by_name::<i64, &str>("migrated")
+            .map_err(|error| format!("reading retained schema row batch count: {error}"))?
+            .ok_or_else(|| "retained schema row batch count is missing".to_string())?;
+        if migrated != expected {
+            return Err("retained row changed during schema migration".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn update_captured_projections(
+    client: &mut SpiClient<'_>,
+    target_generation: i64,
+    updates: &[serde_json::Value],
+) -> Result<(), String> {
+    for batch in jsonb_batches(updates, DEFAULT_BACKFILL_BATCH_SIZE as usize, |row| row)? {
+        let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")?;
+        let updated = client
+            .update(
+                "WITH input AS (
+                 SELECT stream_generation, commit_lsn, event_ordinal, relation_id,
+                        image_kind, record_id, payload_index, checksum_hex, row_version,
+                        source_checksum_hex, source_registry_generation
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     stream_generation text, commit_lsn text, event_ordinal bigint,
+                     relation_id text, image_kind text, record_id text, payload_index integer,
+                     checksum_hex text, row_version text, source_checksum_hex text,
+                     source_registry_generation bigint
+                 )
+             )
+             UPDATE synchro.sync_captured_projections projection
+             SET row_data = ($3::jsonb[])[input.payload_index],
+                 checksum = decode(input.checksum_hex, 'hex'),
+                 registry_generation = $2
+             FROM input
+             WHERE projection.stream_generation = input.stream_generation
+               AND projection.commit_lsn = input.commit_lsn::pg_lsn
+               AND projection.event_ordinal = input.event_ordinal
+               AND projection.relation_id = input.relation_id::uuid
+               AND projection.image_kind = input.image_kind
+               AND projection.record_id = input.record_id
+               AND projection.row_version = input.row_version::uuid
+               AND projection.checksum = decode(input.source_checksum_hex, 'hex')
+               AND projection.registry_generation = input.source_registry_generation
+             RETURNING projection.record_id",
+                None,
+                &[metadata.into(), target_generation.into(), payloads.into()],
+            )
+            .map_err(|error| format!("migrating retained schema projection batch: {error}"))?
+            .len();
+        if updated != batch.len() {
+            return Err("retained projection changed during schema migration".to_string());
+        }
     }
     Ok(())
 }
@@ -705,13 +927,13 @@ fn retire_removed_schema_rows(
 }
 
 fn migrate_schema_row(
-    client: &SpiClient<'_>,
     source: &TableRegistration,
     target: &TableRegistration,
     mut row_data: serde_json::Value,
     record_id: &str,
     row_version: &str,
     checksum: &[u8],
+    schema_hashes: SchemaMigrationHashes,
 ) -> Result<(serde_json::Value, Vec<u8>), String> {
     if source.table_id != target.table_id
         || source.primary_key_field_id != target.primary_key_field_id
@@ -721,7 +943,13 @@ fn migrate_schema_row(
         return Err("schema migration changed row identity".to_string());
     }
 
-    let source_digest = synced_row_digest(client, source, &row_data, record_id, row_version)?;
+    let source_digest = synced_row_digest_with_schema_hash(
+        source,
+        &row_data,
+        record_id,
+        row_version,
+        schema_hashes.source,
+    )?;
     if source_digest.as_bytes() != checksum {
         return Err("retained row source checksum does not match".to_string());
     }
@@ -750,7 +978,13 @@ fn migrate_schema_row(
         }
         child_fields.insert(field.field_id.clone(), serde_json::Value::Null);
     }
-    let child_digest = synced_row_digest(client, target, &row_data, record_id, row_version)?;
+    let child_digest = synced_row_digest_with_schema_hash(
+        target,
+        &row_data,
+        record_id,
+        row_version,
+        schema_hashes.target,
+    )?;
     Ok((row_data, child_digest.as_bytes().to_vec()))
 }
 
@@ -884,7 +1118,7 @@ fn stage_table_edges(
         return Err("backfill batch size must be positive".to_string());
     }
 
-    let mut last_record_id = String::new();
+    let mut last_record_id: Option<String> = None;
     let mut record_count = 0i64;
     let mut edge_count = 0i64;
     let mut batch_count = 0i64;
@@ -898,13 +1132,13 @@ fn stage_table_edges(
                  FROM synchro.sync_captured_rows
                  WHERE relation_id = $1::uuid
                    AND NOT deleted
-                   AND record_id > $2
+                   AND ($2::text IS NULL OR record_id > $2)
                  ORDER BY record_id
                  LIMIT $3",
                 None,
                 &[
                     table.relation_id.as_str().into(),
-                    last_record_id.as_str().into(),
+                    last_record_id.as_deref().into(),
                     batch_size.into(),
                 ],
             )
@@ -919,7 +1153,7 @@ fn stage_table_edges(
         let mut records = Vec::with_capacity(rows.len());
         for row in rows {
             records.push(CapturedRecord {
-                record_id: required_text(&row, "record_id", "")?,
+                record_id: required_record_id(&row)?,
                 row_data: row
                     .get_by_name::<pgrx::JsonB, &str>("row_data")
                     .map_err(|error| format!("reading captured row data: {error}"))?
@@ -1033,35 +1267,16 @@ fn stage_table_edges(
                     })?)
                     .ok_or_else(|| "membership backfill edge count overflowed".to_string())?;
         }
-        last_record_id = records
-            .last()
-            .map(|record| record.record_id.clone())
-            .ok_or_else(|| "membership backfill batch is empty".to_string())?;
+        last_record_id = Some(
+            records
+                .last()
+                .ok_or_else(|| "membership backfill batch is empty".to_string())?
+                .record_id
+                .clone(),
+        );
     }
 
     Ok((record_count, edge_count, batch_count))
-}
-
-fn synced_row_digest_with_schema_hash(
-    table: &TableRegistration,
-    data: &serde_json::Value,
-    record_id: &str,
-    server_version: &str,
-    schema_hash: SchemaHash,
-) -> Result<synchro_core::checksum::Sha256Digest, String> {
-    let mut canonical = data.clone();
-    canonicalize_synced_row_data(table, &mut canonical)?;
-    let canonical_table = crate::pull::canonical_table(table)?;
-    let primary_key = crate::pull::row_primary_key_json(table, record_id)?;
-    let row = synchro_core::checksum::CanonicalRow::from_json(
-        serde_json::to_string(&primary_key)
-            .map_err(|error| format!("encoding primary key: {error}"))?,
-        &serde_json::to_string(&canonical)
-            .map_err(|error| format!("encoding wire row: {error}"))?,
-    )
-    .map_err(|error| format!("canonical row is invalid: {error}"))?;
-    synchro_core::checksum::row_digest(schema_hash, &canonical_table, &row, server_version)
-        .map_err(|error| format!("computing row digest: {error}"))
 }
 
 fn lower_hex(bytes: &[u8]) -> String {

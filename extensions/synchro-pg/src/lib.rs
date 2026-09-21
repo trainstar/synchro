@@ -2307,6 +2307,7 @@ mod tests {
     use serde_json::Value;
     use sha2::{Digest, Sha256};
 
+    include!("pg_tests/query_counts.rs");
     include!("pg_tests/order_cursor.rs");
     include!("pg_tests/integrity.rs");
     include!("pg_tests/wal_pipeline.rs");

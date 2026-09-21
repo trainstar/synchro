@@ -35,6 +35,23 @@ Each readiness limit must be a positive integer. A zero value makes its readines
 
 Use stricter positive limits when your service-level objectives require faster failure detection.
 
+## Maintenance batches
+
+Reset staging reads source rows in 500-row pages.
+It batches version, projection, membership, and integrity work within the same snapshot-bound operation.
+Activation still requires the complete verified stage.
+
+Payload batches also use a soft 16 MiB serialized-byte target.
+Individual row payloads remain separate PostgreSQL values instead of one combined JSONB container.
+Large individual rows retain the existing PostgreSQL limits.
+This target changes batching, not the source-transaction limits above.
+
+Each `synchro_compact` call expires at most `p_batch_size` stale clients and deletes at most `p_batch_size` eligible effects.
+Clients outside the expiry batch continue to protect their checkpoints.
+Compaction locks only scopes represented in its selected effect batch.
+It rechecks retention after those locks and commits deletion with all affected floor updates.
+Repeat compaction while either `deactivated_clients` or `deleted_entries` is nonzero.
+
 ## Development database reinstalls
 
 A running worker does not by itself prove that registry activation succeeded.

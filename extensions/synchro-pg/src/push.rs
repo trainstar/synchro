@@ -54,13 +54,16 @@ struct StoredMutation {
 
 struct EvaluationContext<'a> {
     submitted_schema: &'a SchemaRef,
-    current_manifest: &'a SchemaManifest,
-    manifests: &'a HashMap<SchemaRef, SchemaManifest>,
+    authored_tables: &'a AuthoredTableIndexes<'a>,
+    current_tables: &'a TableIndex<'a>,
     registry: &'a HashMap<String, TableRegistration>,
     ever_synced_tables: &'a HashSet<String>,
     required_insert_columns: &'a HashMap<u32, HashSet<String>>,
     has_write_protect: bool,
 }
+
+type TableIndex<'a> = HashMap<String, &'a TableSchema>;
+type AuthoredTableIndexes<'a> = HashMap<SchemaRef, TableIndex<'a>>;
 
 struct EvaluationTarget {
     table_id: String,
@@ -359,7 +362,21 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         }
 
         let mut manifests = load_authored_manifests(client, &request.mutations);
-        manifests.insert(current_schema.clone(), current_manifest.clone());
+        manifests.insert(current_schema.clone(), current_manifest);
+        let authored_tables = manifests
+            .iter()
+            .map(|(reference, manifest)| {
+                let tables = manifest
+                    .tables
+                    .iter()
+                    .map(|table| (table.table_id.clone(), table))
+                    .collect();
+                (reference.clone(), tables)
+            })
+            .collect::<AuthoredTableIndexes<'_>>();
+        let current_tables = authored_tables
+            .get(&current_schema)
+            .expect("current manifest was indexed");
         let registry = load_registry_inner(client)
             .into_iter()
             .map(|registration| (registration.table_id.clone(), registration))
@@ -368,9 +385,9 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             .mutations
             .iter()
             .filter(|mutation| {
-                manifests
+                authored_tables
                     .get(&mutation.authored_schema)
-                    .is_some_and(|manifest| table_for_id(manifest, &mutation.table).is_none())
+                    .is_some_and(|tables| !tables.contains_key(&mutation.table))
             })
             .map(|mutation| mutation.table.clone())
             .collect::<HashSet<_>>();
@@ -380,8 +397,8 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         let has_write_protect = check_write_protect_exists(client);
         let evaluation_context = EvaluationContext {
             submitted_schema: &request.schema,
-            current_manifest: &current_manifest,
-            manifests: &manifests,
+            authored_tables: &authored_tables,
+            current_tables,
             registry: &registry,
             ever_synced_tables: &ever_synced_tables,
             required_insert_columns: &required_insert_columns,
@@ -1116,13 +1133,6 @@ fn load_required_insert_columns(
     required
 }
 
-fn table_for_id<'a>(manifest: &'a SchemaManifest, table_id: &str) -> Option<&'a TableSchema> {
-    manifest
-        .tables
-        .iter()
-        .find(|table| table.table_id == table_id)
-}
-
 fn all_mutation_field_ids(mutation: &Mutation) -> Vec<String> {
     let mut fields = mutation
         .pk
@@ -1221,8 +1231,8 @@ fn evaluate_mutation(
     context: &EvaluationContext<'_>,
 ) -> EvaluatedMutation {
     let submitted_schema = context.submitted_schema;
-    let current_manifest = context.current_manifest;
-    let manifests = context.manifests;
+    let authored_tables = context.authored_tables;
+    let current_tables = context.current_tables;
     let registry = context.registry;
     let ever_synced_tables = context.ever_synced_tables;
     let required_insert_columns = context.required_insert_columns;
@@ -1240,13 +1250,12 @@ fn evaluate_mutation(
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     let outcome_schema = submitted_schema.clone();
-    let authored_manifest = manifests.get(&mutation.authored_schema);
-    let authored_table =
-        authored_manifest.and_then(|manifest| table_for_id(manifest, &mutation.table));
-    let current_table = table_for_id(current_manifest, &mutation.table);
+    let authored_tables = authored_tables.get(&mutation.authored_schema);
+    let authored_table = authored_tables.and_then(|tables| tables.get(&mutation.table).copied());
+    let current_table = current_tables.get(&mutation.table).copied();
     let table_reg = registry.get(&mutation.table);
 
-    if authored_manifest.is_none() {
+    if authored_tables.is_none() {
         return terminal_evaluation(
             mutation,
             outcome_schema,

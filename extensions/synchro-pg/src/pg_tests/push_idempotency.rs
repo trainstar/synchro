@@ -221,10 +221,11 @@
         ))
         .expect("authored schema mutation");
         mutation.authored_schema = authored_schema.clone();
-        let manifests = Spi::connect(|client| {
-            crate::push::load_authored_manifests(client, &[mutation])
+        let (manifests, operations) = query_counts::measure(0, || {
+            Spi::connect(|client| crate::push::load_authored_manifests(client, &[mutation]))
         });
 
+        assert_eq!(operations, 1);
         assert_eq!(manifests.len(), 1);
         assert!(manifests.contains_key(&authored_schema));
     }

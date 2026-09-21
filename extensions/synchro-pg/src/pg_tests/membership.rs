@@ -1087,7 +1087,8 @@ fn membership_function_limits_rows_before_rust_rejection() {
     .expect("load registered membership limit fixture");
     let resolution = Spi::connect(|client| {
         let result = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-            crate::bucketing::resolve_membership(client, &registration, "1").map_err(|_| ())
+            crate::materialize::resolve_membership_batch(client, &registration, &["1".to_string()])
+                .map_err(|_| ())
         }))
         .catch_others(|_| Err(()))
         .execute();
@@ -1095,18 +1096,11 @@ fn membership_function_limits_rows_before_rust_rejection() {
     })
     .expect("resolve registered membership limit fixture");
     let materialized_rows = Spi::connect(|client| {
-        let result_limit = registration
-            .max_scope_fanout
-            .checked_add(1)
-            .expect("positive test scope fanout limit");
         let rows = client.select(
-            &crate::bucketing::membership_query(
-                &registration.membership_function,
-                &registration.pk_type,
-                result_limit,
-            ),
+            &crate::materialize::membership_batch_query(&registration)
+                .expect("bounded membership query"),
             None,
-            &["1".into()],
+            &[pgrx::JsonB(json!([{"record_id": "1"}])).into()],
         )?;
         Ok::<_, pgrx::spi::Error>(rows.into_iter().count())
     })
@@ -1237,15 +1231,16 @@ fn membership_uses_captured_values_instead_of_live_rows() {
     )
     .expect("change live membership source");
     let scopes = Spi::connect(|client| {
-        let registry = crate::registry::load_registry_from_client(client)?;
+        let registry = crate::registry::load_registry_from_client(client)
+            .map_err(|error| error.to_string())?;
         let registration = registry
             .iter()
             .find(|registration| registration.table_name == "test_orders")
             .expect("projection membership registration");
-        crate::bucketing::resolve_membership(client, registration, record_id)
+        crate::materialize::resolve_membership_batch(client, registration, &[record_id.to_string()])
     })
     .expect("resolve captured membership");
-    assert_eq!(scopes, vec!["user:captured-owner"]);
+    assert_eq!(scopes[record_id], vec!["user:captured-owner"]);
 }
 
 #[pg_test]
@@ -1275,17 +1270,22 @@ fn membership_accepts_empty_string_primary_key() {
     insert_edge("test_empty_string_pk", "", "global");
     insert_changelog("global", "test_empty_string_pk", "", 1);
     let scopes = Spi::connect(|client| {
-        let registry = crate::registry::load_registry_from_client(client)?;
+        let registry = crate::registry::load_registry_from_client(client)
+            .map_err(|error| error.to_string())?;
         let registration = registry
             .iter()
             .find(|registration| registration.physical_relation == "test_empty_string_pk")
             .expect("empty string primary-key registration");
-        assert!(crate::bucketing::resolve_membership(client, registration, "absent")?.is_empty());
-        crate::bucketing::resolve_membership(client, registration, "")
+        crate::materialize::resolve_membership_batch(
+            client,
+            registration,
+            &["absent".to_string(), "".to_string()],
+        )
     })
     .expect("resolve empty string primary-key membership");
 
-    assert_eq!(scopes, vec!["global"]);
+    assert!(scopes["absent"].is_empty());
+    assert_eq!(scopes[""], vec!["global"]);
     let response = pull_client(
         user_id,
         client_id,
@@ -1304,33 +1304,43 @@ fn membership_accepts_empty_string_primary_key() {
         changes[0]["row"].get(field_id("test_empty_string_pk", "value")),
         Some(&json!("empty key"))
     );
+    let backfill: pgrx::JsonB = Spi::get_one(
+        "SELECT synchro_backfill_bucket_edges('test_empty_string_pk', 1)",
+    )
+    .expect("backfill the empty primary key")
+    .expect("empty primary-key backfill response");
+    assert_eq!(backfill.0["records"], 1);
+    assert_eq!(backfill.0["edges"], 1);
+
+    configure_reset_test_slot("synchro_empty_key_old");
+    let prepared = prepare_reset_for_test("synchro_empty_key_candidate");
+    let id = reset_id(&prepared);
+    lock_and_stage_reset(&id, "synchro_empty_key_candidate");
+    let staged: i64 = Spi::get_one_with_args(
+        "SELECT count(*) FROM synchro.sync_stream_reset_membership_edges
+         WHERE reset_id = $1::uuid AND table_name = 'test_empty_string_pk'
+           AND record_id = '' AND scope_id = 'global'",
+        &[id.as_str().into()],
+    )
+    .expect("read the staged empty primary key")
+    .expect("staged empty primary-key count");
+    assert_eq!(staged, 1);
+    Spi::connect_mut(|client| crate::stream_reset::abort_stream_reset_for_test(client, &id))
+        .expect("abort empty primary-key reset");
 }
 
 #[pg_test]
 fn membership_function_fails_closed_when_query_limit_overflows() {
-    let function = crate::registry::RegisteredFunction {
-        oid: 0,
-        schema: "tests".to_string(),
-        name: "unreachable_membership_function".to_string(),
-    };
+    setup_test_tables();
+    let mut registration = crate::registry::load_registry()
+        .expect("load membership overflow registry")
+        .pop()
+        .expect("membership overflow registration");
+    registration.max_scope_fanout = i32::MAX;
     let resolution = Spi::connect(|client| {
-        let result = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-            crate::bucketing::resolve_registered_membership(
-                client,
-                &function,
-                "integer",
-                "1",
-                i32::MAX,
-            )
-            .map_err(|_| ())
-        }))
-        .catch_others(|_| Err(()))
-        .execute();
-        Ok::<_, pgrx::spi::Error>(result)
-    })
-    .expect("resolve overflowed membership limit");
-
-    assert_eq!(resolution, Err(()));
+        crate::materialize::resolve_membership_batch(client, &registration, &["1".to_string()])
+    });
+    assert!(resolution.is_err());
 }
 
 /// Pull at `pull.rs:1124` and rebuild at `rebuild.rs:673` both recompute a

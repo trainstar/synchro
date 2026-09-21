@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -23,9 +24,9 @@ func TestRealIssue49CompletePullVisibleWALRepresentation(t *testing.T) {
 	table := requireRealTable(t, client, "cf_items")
 	admin := openIssue49Admin(t, ctx, harness)
 
-	recordIDs := []string{
-		"00000000-0000-4000-8e01-000000000011",
-		"00000000-0000-4000-8e01-000000000012",
+	recordIDs := make([]string, 501)
+	for index := range recordIDs {
+		recordIDs[index] = fmt.Sprintf("00000000-0000-4000-8e01-%012x", index+1)
 	}
 	sourceTransaction, err := harness.Source().BeginTx(ctx)
 	if err != nil {
@@ -36,7 +37,7 @@ func TestRealIssue49CompletePullVisibleWALRepresentation(t *testing.T) {
 			ctx,
 			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', $2)",
 			recordID,
-			"issue49-complete-representation-"+string(rune('a'+index)),
+			fmt.Sprintf("issue49-complete-representation-%03d", index+1),
 		); err != nil {
 			_ = sourceTransaction.Rollback()
 			t.Fatalf("insert complete WAL representation row %d: %v", index+1, err)
@@ -53,20 +54,20 @@ func TestRealIssue49CompletePullVisibleWALRepresentation(t *testing.T) {
 		harness.AdapterURL(),
 		token,
 		"/sync/pull",
-		realPullPayload(client, issue49CloneScopes(client.Scopes), 100),
+		realPullPayload(client, issue49CloneScopes(client.Scopes), 600),
 	)
 
 	t.Run("assertion", func(t *testing.T) {
 		want := issue49CompleteWALRepresentation{
-			Fences:             2,
+			Fences:             501,
 			Transactions:       1,
-			Events:             2,
-			Projections:        2,
-			CapturedRows:       2,
-			Edges:              2,
-			Changes:            2,
-			DeclaredEvents:     2,
-			DeclaredEffects:    2,
+			Events:             501,
+			Projections:        501,
+			CapturedRows:       501,
+			Edges:              501,
+			Changes:            501,
+			DeclaredEvents:     501,
+			DeclaredEffects:    501,
 			Acknowledged:       true,
 			OneSourceIdentity:  true,
 			ConsistentVersions: true,
@@ -78,11 +79,19 @@ func TestRealIssue49CompletePullVisibleWALRepresentation(t *testing.T) {
 			t.Fatalf("complete WAL representation pull status = %d: %#v", pullStatus, pullResponse)
 		}
 		changes := requireRealChanges(t, pullResponse)
-		if len(changes) != 2 {
+		if len(changes) != 501 {
 			t.Fatalf("complete WAL representation pull returned %d changes: %#v", len(changes), changes)
 		}
-		requireRealPullChange(t, changes, "user:diagnostic-user", table, recordIDs[0], "issue49-complete-representation-a")
-		requireRealPullChange(t, changes, "user:diagnostic-user", table, recordIDs[1], "issue49-complete-representation-b")
+		for index, recordID := range recordIDs {
+			requireRealPullChange(
+				t,
+				changes,
+				"user:diagnostic-user",
+				table,
+				recordID,
+				fmt.Sprintf("issue49-complete-representation-%03d", index+1),
+			)
+		}
 	})
 }
 

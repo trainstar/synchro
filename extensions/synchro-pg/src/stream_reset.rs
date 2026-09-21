@@ -1,20 +1,23 @@
-use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use pgrx::prelude::*;
 use pgrx::spi::{SpiClient, SpiHeapTupleData, SpiTupleTable};
 use synchro_core::checksum::Sha256Digest;
 
-use crate::bucketing::resolve_membership;
+use crate::materialize::resolve_membership_batch;
 use crate::pull::{
-    canonicalize_synced_row_data, hydrate_records, synced_row_digest, synced_row_projection_sql,
+    canonicalize_synced_row_data, hydrate_records, schema_hash_for_generation,
+    synced_row_digest_with_schema_hash, synced_row_projection_sql,
 };
 use crate::registry::{
     acquire_registry_write_lock, load_registry_generation_from_client, qualified_relation_name,
     TableRegistration,
 };
+use crate::spi_helpers::{jsonb_batches, jsonb_payload_parameters, required_record_id};
 
 const MAX_SLOT_NAME_BYTES: usize = 63;
 const MAX_SNAPSHOT_NAME_BYTES: usize = 128;
+const STAGING_BATCH_SIZE: i64 = 500;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SlotValidation {
@@ -89,13 +92,9 @@ struct SourceRow {
 }
 
 struct CaptureDependencySourceRow {
+    record_id: String,
     capture_key: serde_json::Value,
     row_data: serde_json::Value,
-}
-
-struct StagedVersion {
-    row_version: String,
-    deleted: bool,
 }
 
 trait ResetRow {
@@ -2050,37 +2049,126 @@ fn stage_registration(
     if registration.is_capture_dependency() {
         return stage_capture_dependency_registration(client, reset, registration);
     }
-    for source in load_source_rows(client, registration)? {
-        let staged_version = load_or_create_staged_version(client, reset, registration, &source)?;
-        if staged_version.deleted != source.deleted {
-            return Err("source row and durable version differ".to_string());
+    let schema_hash = schema_hash_for_generation(client, registration.registry_generation)?;
+    let mut after = None;
+    loop {
+        let sources = load_source_rows(client, registration, after.as_deref())?;
+        if sources.is_empty() {
+            break;
         }
-        let digest = synced_row_digest(
-            client,
-            registration,
-            &source.row_data,
-            &source.record_id,
-            &staged_version.row_version,
-        )?;
-        client
+        let input = sources
+            .iter()
+            .map(|source| {
+                serde_json::json!({
+                    "record_id": source.record_id,
+                    "deleted": source.deleted,
+                })
+            })
+            .collect::<Vec<_>>();
+        let rows = client
             .update(
-                "INSERT INTO synchro.sync_stream_reset_captured_rows (
-                     reset_id, relation_id, record_id, row_data, row_version,
-                     checksum, deleted, registry_generation
-                 ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6, $7, $8)",
+                "WITH source AS (
+                     SELECT record_id, deleted
+                     FROM jsonb_to_recordset($3::jsonb) AS input(record_id text, deleted boolean)
+                 ),
+                 existing AS MATERIALIZED (
+                     SELECT version.record_id, version.row_version, version.deleted
+                     FROM synchro.sync_stream_reset_row_versions version
+                     JOIN source USING (record_id)
+                     WHERE version.reset_id = $1::uuid AND version.relation_id = $2::uuid
+                 ),
+                 inserted AS (
+                     INSERT INTO synchro.sync_stream_reset_row_versions (
+                         reset_id, relation_id, record_id, row_version, fence_id,
+                         source_reset_id, deleted, baseline_generated
+                     )
+                     SELECT $1::uuid, $2::uuid, source.record_id, gen_random_uuid(), NULL,
+                            $1::uuid, source.deleted, true
+                     FROM source
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM existing WHERE existing.record_id = source.record_id
+                     )
+                     RETURNING record_id, row_version, deleted
+                 )
+                 SELECT record_id, row_version::text AS row_version, deleted FROM existing
+                 UNION ALL
+                 SELECT record_id, row_version::text AS row_version, deleted FROM inserted",
                 None,
                 &[
                     reset.reset_id.as_str().into(),
                     registration.relation_id.as_str().into(),
-                    source.record_id.as_str().into(),
-                    pgrx::JsonB(source.row_data).into(),
-                    staged_version.row_version.as_str().into(),
-                    digest.as_bytes().to_vec().into(),
-                    source.deleted.into(),
-                    reset.staging_registry_generation()?.into(),
+                    pgrx::JsonB(input.into()).into(),
                 ],
             )
-            .map_err(|_| "staging captured row failed".to_string())?;
+            .map_err(|_| "staging baseline row versions failed".to_string())?;
+        let mut versions = HashMap::with_capacity(rows.len());
+        for row in rows {
+            versions.insert(
+                required_record_id(&row)?,
+                (
+                    required_text(&row, "row_version")?,
+                    required_bool(&row, "deleted")?,
+                ),
+            );
+        }
+        if versions.len() != sources.len() {
+            return Err("staged row version set is incomplete".to_string());
+        }
+        let mut captured = Vec::with_capacity(sources.len());
+        for source in &sources {
+            let (row_version, deleted) = versions
+                .get(&source.record_id)
+                .ok_or_else(|| "staged row version is missing".to_string())?;
+            if *deleted != source.deleted {
+                return Err("source row and durable version differ".to_string());
+            }
+            let digest = synced_row_digest_with_schema_hash(
+                registration,
+                &source.row_data,
+                &source.record_id,
+                row_version,
+                schema_hash,
+            )?;
+            captured.push(serde_json::json!({
+                "record_id": source.record_id,
+                "row_data": source.row_data,
+                "row_version": row_version,
+                "checksum": digest.to_lower_hex(),
+                "deleted": deleted,
+            }));
+        }
+        for batch in jsonb_batches(&captured, STAGING_BATCH_SIZE as usize, |row| row)? {
+            let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")?;
+            let inserted = client
+                .update(
+                    "INSERT INTO synchro.sync_stream_reset_captured_rows (
+                     reset_id, relation_id, record_id, row_data, row_version,
+                     checksum, deleted, registry_generation
+                 )
+                 SELECT $1::uuid, $2::uuid, input.record_id, ($5::jsonb[])[input.payload_index],
+                        input.row_version::uuid, decode(input.checksum, 'hex'),
+                        input.deleted, $3
+                 FROM jsonb_to_recordset($4::jsonb) AS input(
+                     record_id text, payload_index integer, row_version text,
+                     checksum text, deleted boolean
+                 )
+                 RETURNING record_id",
+                    None,
+                    &[
+                        reset.reset_id.as_str().into(),
+                        registration.relation_id.as_str().into(),
+                        reset.staging_registry_generation()?.into(),
+                        metadata.into(),
+                        payloads.into(),
+                    ],
+                )
+                .map_err(|_| "staging captured rows failed".to_string())?
+                .len();
+            if inserted != batch.len() {
+                return Err("captured row stage is incomplete".to_string());
+            }
+        }
+        after = sources.last().map(|source| source.record_id.clone());
     }
     Ok(())
 }
@@ -2090,23 +2178,48 @@ fn stage_capture_dependency_registration(
     reset: &ResetRecord,
     registration: &TableRegistration,
 ) -> Result<(), String> {
-    for source in load_capture_dependency_source_rows(client, registration)? {
-        client
-            .update(
-                "INSERT INTO synchro.sync_stream_reset_capture_dependency_rows (
+    let mut after = None;
+    loop {
+        let sources = load_capture_dependency_source_rows(client, registration, after.as_deref())?;
+        if sources.is_empty() {
+            break;
+        }
+        let input = sources
+            .iter()
+            .map(|source| {
+                serde_json::json!({
+                    "capture_key": source.capture_key,
+                    "row_data": source.row_data,
+                })
+            })
+            .collect::<Vec<_>>();
+        for batch in jsonb_batches(&input, STAGING_BATCH_SIZE as usize, |row| row)? {
+            let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data")?;
+            let inserted = client
+                .update(
+                    "INSERT INTO synchro.sync_stream_reset_capture_dependency_rows (
                      reset_id, relation_id, capture_key, row_data, deleted,
                      registry_generation
-                 ) VALUES ($1::uuid, $2::uuid, $3, $4, false, $5)",
-                None,
-                &[
-                    reset.reset_id.as_str().into(),
-                    registration.relation_id.as_str().into(),
-                    pgrx::JsonB(source.capture_key).into(),
-                    pgrx::JsonB(source.row_data).into(),
-                    reset.staging_registry_generation()?.into(),
-                ],
-            )
-            .map_err(|_| "staging capture dependency row failed".to_string())?;
+                 )
+                 SELECT $1::uuid, $2::uuid, input.capture_key, ($5::jsonb[])[input.payload_index], false, $3
+                 FROM jsonb_to_recordset($4::jsonb) AS input(capture_key jsonb, payload_index integer)
+                 RETURNING capture_key",
+                    None,
+                    &[
+                        reset.reset_id.as_str().into(),
+                        registration.relation_id.as_str().into(),
+                        reset.staging_registry_generation()?.into(),
+                        metadata.into(),
+                        payloads.into(),
+                    ],
+                )
+                .map_err(|_| "staging capture dependency rows failed".to_string())?
+                .len();
+            if inserted != batch.len() {
+                return Err("capture dependency stage is incomplete".to_string());
+            }
+        }
+        after = sources.last().map(|source| source.record_id.clone());
     }
     Ok(())
 }
@@ -2138,45 +2251,69 @@ fn stage_registration_membership(
     if !registration.is_synced() {
         return Ok(());
     }
-    let rows = client
-        .select(
-            "SELECT record_id, checksum, row_version::text AS row_version
-             FROM synchro.sync_stream_reset_captured_rows
-             WHERE reset_id = $1::uuid AND relation_id = $2::uuid AND NOT deleted
-             ORDER BY record_id",
-            None,
-            &[
-                reset.reset_id.as_str().into(),
-                registration.relation_id.as_str().into(),
-            ],
-        )
-        .map_err(|_| "loading staged membership rows failed".to_string())?;
-    for row in rows {
-        let record_id = required_text(&row, "record_id")?;
-        let checksum = required_digest(&row, "checksum")?;
-        let row_version = required_text(&row, "row_version")?;
-        let scopes = resolve_membership(client, registration, &record_id)
+    let mut after: Option<String> = None;
+    loop {
+        let rows = client
+            .select(
+                "SELECT record_id
+                 FROM synchro.sync_stream_reset_captured_rows
+                 WHERE reset_id = $1::uuid AND relation_id = $2::uuid AND NOT deleted
+                   AND ($3::text IS NULL OR record_id > $3)
+                 ORDER BY record_id LIMIT $4",
+                None,
+                &[
+                    reset.reset_id.as_str().into(),
+                    registration.relation_id.as_str().into(),
+                    after.as_deref().into(),
+                    STAGING_BATCH_SIZE.into(),
+                ],
+            )
+            .map_err(|_| "loading staged membership rows failed".to_string())?;
+        let record_ids = rows
+            .into_iter()
+            .map(|row| required_record_id(&row))
+            .collect::<Result<Vec<_>, _>>()?;
+        if record_ids.is_empty() {
+            break;
+        }
+        let memberships = resolve_membership_batch(client, registration, &record_ids)
             .map_err(|_| "resolving staged membership failed".to_string())?;
-        for scope_id in scopes {
-            client
+        let mut edges = Vec::new();
+        for (record_id, scopes) in memberships {
+            for scope_id in scopes {
+                edges.push(serde_json::json!({ "record_id": record_id, "scope_id": scope_id }));
+            }
+        }
+        let expected = edges.len();
+        if expected > 0 {
+            let inserted = client
                 .update(
                     "INSERT INTO synchro.sync_stream_reset_membership_edges (
                          reset_id, relation_id, table_name, record_id, scope_id,
                          checksum, row_version
-                     ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::uuid)",
+                     )
+                     SELECT captured.reset_id, captured.relation_id, $3, captured.record_id,
+                            input.scope_id, captured.checksum, captured.row_version
+                     FROM jsonb_to_recordset($4::jsonb) AS input(record_id text, scope_id text)
+                     JOIN synchro.sync_stream_reset_captured_rows captured
+                       ON captured.reset_id = $1::uuid AND captured.relation_id = $2::uuid
+                      AND captured.record_id = input.record_id AND NOT captured.deleted
+                     RETURNING record_id",
                     None,
                     &[
                         reset.reset_id.as_str().into(),
                         registration.relation_id.as_str().into(),
                         registration.table_name.as_str().into(),
-                        record_id.as_str().into(),
-                        scope_id.as_str().into(),
-                        checksum.as_bytes().to_vec().into(),
-                        row_version.as_str().into(),
+                        pgrx::JsonB(edges.into()).into(),
                     ],
                 )
-                .map_err(|_| "staging membership edge failed".to_string())?;
+                .map_err(|_| "staging membership edges failed".to_string())?
+                .len();
+            if inserted != expected {
+                return Err("staged membership edge set is incomplete".to_string());
+            }
         }
+        after = record_ids.last().cloned();
     }
     Ok(())
 }
@@ -2184,6 +2321,7 @@ fn stage_registration_membership(
 fn load_source_rows(
     client: &SpiClient<'_>,
     registration: &TableRegistration,
+    after: Option<&str>,
 ) -> Result<Vec<SourceRow>, String> {
     let relation = qualified_relation_name(
         &registration.physical_schema,
@@ -2203,15 +2341,17 @@ fn load_source_rows(
                 ({})::text AS row_data,
                 {deleted} AS deleted
          FROM {relation} source
-         ORDER BY source.{primary_key}",
+         WHERE ($1::text IS NULL OR source.{primary_key} > $1::{})
+         ORDER BY source.{primary_key} LIMIT $2",
         synced_row_projection_sql(registration, "source"),
+        registration.pk_type,
     );
     let rows = client
-        .select(&query, None, &[])
+        .select(&query, None, &[after.into(), STAGING_BATCH_SIZE.into()])
         .map_err(|_| "loading registered source rows failed".to_string())?;
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
-        let record_id = required_text(&row, "record_id")?;
+        let record_id = required_record_id(&row)?;
         let encoded = required_text(&row, "row_data")?;
         let mut row_data: serde_json::Value = serde_json::from_str(&encoded)
             .map_err(|_| "registered source row is invalid".to_string())?;
@@ -2231,6 +2371,7 @@ fn load_source_rows(
 fn load_capture_dependency_source_rows(
     client: &SpiClient<'_>,
     registration: &TableRegistration,
+    after: Option<&str>,
 ) -> Result<Vec<CaptureDependencySourceRow>, String> {
     let relation = qualified_relation_name(
         &registration.physical_schema,
@@ -2250,13 +2391,17 @@ fn load_capture_dependency_source_rows(
     if selections.is_empty() {
         return Err("capture dependency projection has no fields".to_string());
     }
+    let primary_key = crate::pull::pg_quote_ident(&registration.pk_column);
     let query = format!(
-        "SELECT {} FROM {relation} source ORDER BY source.{}",
+        "SELECT source.{primary_key}::text AS record_id, {}
+         FROM {relation} source
+         WHERE ($1::text IS NULL OR source.{primary_key} > $1::{})
+         ORDER BY source.{primary_key} LIMIT $2",
         selections.join(", "),
-        crate::pull::pg_quote_ident(&registration.pk_column),
+        registration.pk_type,
     );
     let rows = client
-        .select(&query, None, &[])
+        .select(&query, None, &[after.into(), STAGING_BATCH_SIZE.into()])
         .map_err(|_| "loading capture dependency source rows failed".to_string())?;
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
@@ -2280,62 +2425,12 @@ fn load_capture_dependency_source_rows(
             return Err("capture dependency source key is incomplete".to_string());
         }
         result.push(CaptureDependencySourceRow {
+            record_id: required_record_id(&row)?,
             capture_key: capture_key.into(),
             row_data: row_data.into(),
         });
     }
     Ok(result)
-}
-
-fn load_or_create_staged_version(
-    client: &mut SpiClient<'_>,
-    reset: &ResetRecord,
-    registration: &TableRegistration,
-    source: &SourceRow,
-) -> Result<StagedVersion, String> {
-    let rows = client
-        .select(
-            "SELECT row_version::text AS row_version, deleted
-             FROM synchro.sync_stream_reset_row_versions
-             WHERE reset_id = $1::uuid AND relation_id = $2::uuid AND record_id = $3",
-            None,
-            &[
-                reset.reset_id.as_str().into(),
-                registration.relation_id.as_str().into(),
-                source.record_id.as_str().into(),
-            ],
-        )
-        .map_err(|_| "loading staged row version failed".to_string())?;
-    if let Some(row) = rows.into_iter().next() {
-        return Ok(StagedVersion {
-            row_version: required_text(&row, "row_version")?,
-            deleted: required_bool(&row, "deleted")?,
-        });
-    }
-    let row = client
-        .select(
-            "INSERT INTO synchro.sync_stream_reset_row_versions (
-                 reset_id, relation_id, record_id, row_version, fence_id,
-                 source_reset_id, deleted, baseline_generated
-             ) VALUES (
-                 $1::uuid, $2::uuid, $3, gen_random_uuid(), NULL,
-                 $1::uuid, $4, true
-             )
-             RETURNING row_version::text AS row_version, deleted",
-            None,
-            &[
-                reset.reset_id.as_str().into(),
-                registration.relation_id.as_str().into(),
-                source.record_id.as_str().into(),
-                source.deleted.into(),
-            ],
-        )
-        .map_err(|_| "creating baseline row version failed".to_string())?
-        .first();
-    Ok(StagedVersion {
-        row_version: required_text(&row, "row_version")?,
-        deleted: required_bool(&row, "deleted")?,
-    })
 }
 
 fn stage_fence_coverage(
@@ -2572,64 +2667,105 @@ fn verify_source_projection(
     reset: &ResetRecord,
     registry: &[TableRegistration],
 ) -> Result<(), String> {
-    let mut source_keys = BTreeSet::new();
-    let mut capture_source_keys = BTreeSet::new();
+    let mut source_count = 0i64;
+    let mut capture_source_count = 0i64;
     for registration in registry {
+        let mut after = None;
         if registration.is_capture_dependency() {
-            for source in load_capture_dependency_source_rows(client, registration)? {
-                let row = client
+            loop {
+                let sources =
+                    load_capture_dependency_source_rows(client, registration, after.as_deref())?;
+                if sources.is_empty() {
+                    break;
+                }
+                let keys = sources
+                    .iter()
+                    .map(|source| source.capture_key.clone())
+                    .collect::<Vec<_>>();
+                let rows = client
                     .select(
-                        "SELECT capture_key, row_data, deleted, registry_generation
-                         FROM synchro.sync_stream_reset_capture_dependency_rows
-                         WHERE reset_id = $1::uuid
-                           AND relation_id = $2::uuid
-                           AND capture_key = $3",
+                        "SELECT captured.capture_key, captured.row_data, captured.deleted,
+                                captured.registry_generation
+                         FROM synchro.sync_stream_reset_capture_dependency_rows captured
+                         JOIN jsonb_array_elements($3::jsonb) input(capture_key)
+                           ON captured.capture_key = input.capture_key
+                         WHERE captured.reset_id = $1::uuid
+                           AND captured.relation_id = $2::uuid",
                         None,
                         &[
                             reset.reset_id.as_str().into(),
                             registration.relation_id.as_str().into(),
-                            pgrx::JsonB(source.capture_key.clone()).into(),
+                            pgrx::JsonB(keys.into()).into(),
                         ],
                     )
-                    .map_err(|_| "loading staged capture dependency failed".to_string())?
-                    .first();
-                let staged_key = row
-                    .get_by_name::<pgrx::JsonB, &str>("capture_key")
-                    .map_err(|_| "reading staged capture dependency failed".to_string())?
-                    .map(|value| value.0)
-                    .ok_or_else(|| "staged capture dependency is missing".to_string())?;
-                let row_data = row
-                    .get_by_name::<pgrx::JsonB, &str>("row_data")
-                    .map_err(|_| "reading staged capture dependency failed".to_string())?
-                    .map(|value| value.0)
-                    .ok_or_else(|| "staged capture dependency is missing".to_string())?;
-                let deleted = required_bool(&row, "deleted")?;
-                let generation = required_positive_i64(&row, "registry_generation")?;
-                if staged_key != source.capture_key
-                    || row_data != source.row_data
-                    || deleted
-                    || generation != reset.staging_registry_generation()?
-                {
-                    return Err(
-                        "staged capture dependency projection differs from source".to_string()
+                    .map_err(|_| "loading staged capture dependencies failed".to_string())?;
+                let mut staged = HashMap::with_capacity(rows.len());
+                for row in rows {
+                    let key = row
+                        .get_by_name::<pgrx::JsonB, &str>("capture_key")
+                        .map_err(|_| "reading staged capture dependency failed".to_string())?
+                        .ok_or_else(|| "staged capture dependency key is missing".to_string())?
+                        .0;
+                    staged.insert(
+                        serde_json::to_string(&key)
+                            .map_err(|_| "encoding capture dependency key failed".to_string())?,
+                        row,
                     );
                 }
-                capture_source_keys.insert((
-                    registration.relation_id.clone(),
-                    serde_json::to_string(&source.capture_key)
-                        .map_err(|_| "encoding capture dependency key failed".to_string())?,
-                ));
+                if staged.len() != sources.len() {
+                    return Err("staged capture dependency batch is incomplete".to_string());
+                }
+                for source in &sources {
+                    let key = serde_json::to_string(&source.capture_key)
+                        .map_err(|_| "encoding capture dependency key failed".to_string())?;
+                    let row = staged
+                        .get(&key)
+                        .ok_or_else(|| "staged capture dependency is missing".to_string())?;
+                    let row_data = row
+                        .get_by_name::<pgrx::JsonB, &str>("row_data")
+                        .map_err(|_| "reading staged capture dependency failed".to_string())?
+                        .ok_or_else(|| "staged capture dependency data is missing".to_string())?
+                        .0;
+                    if row_data != source.row_data
+                        || required_bool(row, "deleted")?
+                        || required_positive_i64(row, "registry_generation")?
+                            != reset.staging_registry_generation()?
+                    {
+                        return Err(
+                            "staged capture dependency projection differs from source".to_string()
+                        );
+                    }
+                }
+                capture_source_count += sources.len() as i64;
+                after = sources.last().map(|source| source.record_id.clone());
             }
             continue;
         }
-        for source in load_source_rows(client, registration)? {
-            source_keys.insert((registration.relation_id.clone(), source.record_id.clone()));
-            let row = client
+        let schema_hash = schema_hash_for_generation(client, registration.registry_generation)?;
+        loop {
+            let sources = load_source_rows(client, registration, after.as_deref())?;
+            if sources.is_empty() {
+                break;
+            }
+            let record_ids = sources
+                .iter()
+                .map(|source| source.record_id.clone())
+                .collect::<Vec<_>>();
+            let rows = client
                 .select(
-                    "SELECT captured.row_data, captured.row_version::text AS row_version,
+                    "SELECT captured.record_id, captured.row_data,
+                            captured.row_version::text AS row_version,
                             captured.checksum, captured.deleted,
                             captured.registry_generation, version.deleted AS version_deleted,
-                            version.baseline_generated
+                            version.baseline_generated,
+                            ARRAY(
+                                SELECT edge.scope_id
+                                FROM synchro.sync_stream_reset_membership_edges edge
+                                WHERE edge.reset_id = captured.reset_id
+                                  AND edge.relation_id = captured.relation_id
+                                  AND edge.record_id = captured.record_id
+                                ORDER BY edge.scope_id
+                            ) AS scopes
                      FROM synchro.sync_stream_reset_captured_rows captured
                      JOIN synchro.sync_stream_reset_row_versions version
                        ON version.reset_id = captured.reset_id
@@ -2638,137 +2774,122 @@ fn verify_source_projection(
                       AND version.row_version = captured.row_version
                      WHERE captured.reset_id = $1::uuid
                        AND captured.relation_id = $2::uuid
-                       AND captured.record_id = $3",
+                       AND captured.record_id = ANY($3)",
                     None,
                     &[
                         reset.reset_id.as_str().into(),
                         registration.relation_id.as_str().into(),
-                        source.record_id.as_str().into(),
+                        record_ids.into(),
                     ],
                 )
-                .map_err(|_| "loading staged projection failed".to_string())?
-                .first();
-            let row_data = row
-                .get_by_name::<pgrx::JsonB, &str>("row_data")
-                .map_err(|_| "reading staged projection failed".to_string())?
-                .map(|value| value.0)
-                .ok_or_else(|| "staged projection is missing".to_string())?;
-            let row_version = required_text(&row, "row_version")?;
-            let deleted = required_bool(&row, "deleted")?;
-            let version_deleted = required_bool(&row, "version_deleted")?;
-            let baseline_generated = required_bool(&row, "baseline_generated")?;
-            let generation = required_positive_i64(&row, "registry_generation")?;
-            let checksum = required_digest(&row, "checksum")?;
-            let computed = synced_row_digest(
-                client,
-                registration,
-                &source.row_data,
-                &source.record_id,
-                &row_version,
-            )?;
-            if row_data != source.row_data
-                || deleted != source.deleted
-                || version_deleted != source.deleted
-                || generation != reset.staging_registry_generation()?
-                || checksum != computed
-            {
-                return Err("staged source projection differs from source".to_string());
+                .map_err(|_| "loading staged projections failed".to_string())?;
+            let mut staged = HashMap::with_capacity(rows.len());
+            for row in rows {
+                staged.insert(required_record_id(&row)?, row);
             }
-            if !baseline_generated {
-                let hydrated = hydrate_records(
-                    client,
-                    &registration.table_name,
-                    &[source.record_id.as_str()],
-                    registry,
-                )?
-                .into_iter()
-                .next()
-                .ok_or_else(|| "canonical source hydration is missing".to_string())?;
-                if hydrated.get("data") != Some(&source.row_data)
-                    || hydrated
-                        .get("server_version")
-                        .and_then(serde_json::Value::as_str)
-                        != Some(row_version.as_str())
-                {
-                    return Err("canonical source hydration differs from staging".to_string());
+            if staged.len() != sources.len() {
+                return Err("staged source projection batch is incomplete".to_string());
+            }
+            let mut retained_ids = Vec::new();
+            for source in &sources {
+                let row = staged
+                    .get(&source.record_id)
+                    .ok_or_else(|| "staged source projection is missing".to_string())?;
+                if !required_bool(row, "baseline_generated")? {
+                    retained_ids.push(source.record_id.as_str());
                 }
             }
-            let expected_scopes = if source.deleted {
-                Vec::new()
-            } else {
-                resolve_membership(client, registration, &source.record_id)
-                    .map_err(|_| "resolving verified membership failed".to_string())?
-            };
-            let rows = client
-                .select(
-                    "SELECT scope_id
-                     FROM synchro.sync_stream_reset_membership_edges
-                     WHERE reset_id = $1::uuid AND relation_id = $2::uuid AND record_id = $3
-                     ORDER BY scope_id",
-                    None,
-                    &[
-                        reset.reset_id.as_str().into(),
-                        registration.relation_id.as_str().into(),
-                        source.record_id.as_str().into(),
-                    ],
-                )
-                .map_err(|_| "loading staged membership failed".to_string())?;
-            let actual_scopes = rows
-                .into_iter()
-                .map(|row| required_text(&row, "scope_id"))
-                .collect::<Result<Vec<_>, _>>()?;
-            if actual_scopes != expected_scopes {
-                return Err("staged membership differs from source".to_string());
+            let mut hydrated = HashMap::new();
+            for row in hydrate_records(client, &registration.table_name, &retained_ids, registry)? {
+                let id = row
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "canonical source hydration identity is missing".to_string())?
+                    .to_string();
+                hydrated.insert(id, row);
             }
+            let live_ids = sources
+                .iter()
+                .filter(|source| !source.deleted)
+                .map(|source| source.record_id.clone())
+                .collect::<Vec<_>>();
+            let memberships = resolve_membership_batch(client, registration, &live_ids)
+                .map_err(|_| "resolving verified membership failed".to_string())?;
+            for source in &sources {
+                let row = staged
+                    .get(&source.record_id)
+                    .ok_or_else(|| "staged source projection is missing".to_string())?;
+                let row_data = row
+                    .get_by_name::<pgrx::JsonB, &str>("row_data")
+                    .map_err(|_| "reading staged projection failed".to_string())?
+                    .ok_or_else(|| "staged projection data is missing".to_string())?
+                    .0;
+                let row_version = required_text(row, "row_version")?;
+                let computed = synced_row_digest_with_schema_hash(
+                    registration,
+                    &source.row_data,
+                    &source.record_id,
+                    &row_version,
+                    schema_hash,
+                )?;
+                if row_data != source.row_data
+                    || required_bool(row, "deleted")? != source.deleted
+                    || required_bool(row, "version_deleted")? != source.deleted
+                    || required_positive_i64(row, "registry_generation")?
+                        != reset.staging_registry_generation()?
+                    || required_digest(row, "checksum")? != computed
+                {
+                    return Err("staged source projection differs from source".to_string());
+                }
+                if !required_bool(row, "baseline_generated")? {
+                    let hydrated = hydrated
+                        .get(&source.record_id)
+                        .ok_or_else(|| "canonical source hydration is missing".to_string())?;
+                    if hydrated.get("data") != Some(&source.row_data)
+                        || hydrated
+                            .get("server_version")
+                            .and_then(serde_json::Value::as_str)
+                            != Some(row_version.as_str())
+                    {
+                        return Err("canonical source hydration differs from staging".to_string());
+                    }
+                }
+                let expected_scopes = if source.deleted {
+                    &[][..]
+                } else {
+                    memberships
+                        .get(&source.record_id)
+                        .ok_or_else(|| "verified membership is missing".to_string())?
+                        .as_slice()
+                };
+                let actual_scopes = row
+                    .get_by_name::<Vec<String>, &str>("scopes")
+                    .map_err(|_| "reading staged membership failed".to_string())?
+                    .ok_or_else(|| "staged membership is missing".to_string())?;
+                if actual_scopes != expected_scopes {
+                    return Err("staged membership differs from source".to_string());
+                }
+            }
+            source_count += sources.len() as i64;
+            after = sources.last().map(|source| source.record_id.clone());
         }
     }
-    let staged_rows = client
+    let counts = client
         .select(
-            "SELECT relation_id::text AS relation_id, record_id
-             FROM synchro.sync_stream_reset_captured_rows
-             WHERE reset_id = $1::uuid",
+            "SELECT
+                 (SELECT count(*) FROM synchro.sync_stream_reset_captured_rows
+                  WHERE reset_id = $1::uuid) AS synced,
+                 (SELECT count(*) FROM synchro.sync_stream_reset_capture_dependency_rows
+                  WHERE reset_id = $1::uuid) AS dependencies",
             None,
             &[reset.reset_id.as_str().into()],
         )
-        .map_err(|_| "loading staged source identities failed".to_string())?;
-    let staged_keys = staged_rows
-        .into_iter()
-        .map(|row| {
-            Ok((
-                required_text(&row, "relation_id")?,
-                required_text(&row, "record_id")?,
-            ))
-        })
-        .collect::<Result<BTreeSet<_>, String>>()?;
-    if staged_keys != source_keys {
-        return Err("staged source row set is incomplete".to_string());
-    }
-    let staged_capture_rows = client
-        .select(
-            "SELECT relation_id::text AS relation_id, capture_key
-             FROM synchro.sync_stream_reset_capture_dependency_rows
-             WHERE reset_id = $1::uuid",
-            None,
-            &[reset.reset_id.as_str().into()],
-        )
-        .map_err(|_| "loading staged capture dependency identities failed".to_string())?;
-    let staged_capture_keys = staged_capture_rows
-        .into_iter()
-        .map(|row| {
-            let capture_key = row
-                .get_by_name::<pgrx::JsonB, &str>("capture_key")
-                .map_err(|_| "reading staged capture dependency key failed".to_string())?
-                .map(|value| value.0)
-                .ok_or_else(|| "staged capture dependency key is missing".to_string())?;
-            Ok((
-                required_text(&row, "relation_id")?,
-                serde_json::to_string(&capture_key)
-                    .map_err(|_| "encoding staged capture dependency key failed".to_string())?,
-            ))
-        })
-        .collect::<Result<BTreeSet<_>, String>>()?;
-    if staged_capture_keys != capture_source_keys {
-        return Err("staged capture dependency row set is incomplete".to_string());
+        .map_err(|_| "counting staged source identities failed".to_string())?
+        .first();
+    if required_nonnegative_i64(&counts, "synced")? != source_count
+        || required_nonnegative_i64(&counts, "dependencies")? != capture_source_count
+    {
+        return Err("staged source row set differs from source".to_string());
     }
     Ok(())
 }
@@ -2778,24 +2899,41 @@ fn stage_scope_digests(
     reset: &ResetRecord,
     registry: &[TableRegistration],
 ) -> Result<(), String> {
-    for (scope_id, digest, row_count, schema_hash) in
-        compute_staged_scope_digests(client, reset, registry)?
-    {
-        client
+    let digests = compute_staged_scope_digests(client, reset, registry)?;
+    for batch in digests.chunks(STAGING_BATCH_SIZE as usize) {
+        let input = batch
+            .iter()
+            .map(|(scope_id, digest, row_count, schema_hash)| {
+                serde_json::json!({
+                    "scope_id": scope_id,
+                    "digest": digest.to_lower_hex(),
+                    "row_count": row_count,
+                    "schema_hash": schema_hash,
+                })
+            })
+            .collect::<Vec<_>>();
+        let inserted = client
             .update(
                 "INSERT INTO synchro.sync_stream_reset_scope_digests (
                      reset_id, scope_id, schema_hash, digest, row_count
-                 ) VALUES ($1::uuid, $2, $3, $4, $5)",
+                 )
+                 SELECT $1::uuid, input.scope_id, input.schema_hash,
+                        decode(input.digest, 'hex'), input.row_count
+                 FROM jsonb_to_recordset($2::jsonb) AS input(
+                     scope_id text, schema_hash text, digest text, row_count bigint
+                 )
+                 RETURNING scope_id",
                 None,
                 &[
                     reset.reset_id.as_str().into(),
-                    scope_id.as_str().into(),
-                    schema_hash.as_str().into(),
-                    digest.as_bytes().to_vec().into(),
-                    row_count.into(),
+                    pgrx::JsonB(input.into()).into(),
                 ],
             )
-            .map_err(|_| "staging scope digest failed".to_string())?;
+            .map_err(|_| "staging scope digests failed".to_string())?
+            .len();
+        if inserted != batch.len() {
+            return Err("staged scope digest set is incomplete".to_string());
+        }
     }
     Ok(())
 }

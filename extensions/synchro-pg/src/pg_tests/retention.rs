@@ -1,23 +1,26 @@
     #[pg_test]
     fn test_compact_deactivates_stale() {
         setup_test_tables();
-        register_client("u1", "c1");
+        for client_id in ["c1", "c2", "c3"] {
+            register_client("u1", client_id);
+        }
 
         // Set client's last_sync_at to 30 days ago.
         Spi::run_with_args(
             "UPDATE sync_clients
              SET created_at = now() - interval '30 days',
                  last_sync_at = now() - interval '30 days' \
-             WHERE user_id = $1 AND client_id = $2",
-            &["u1".into(), "c1".into()],
+             WHERE user_id = $1",
+            &["u1".into()],
         )
         .unwrap();
 
-        let resp: Option<pgrx::JsonB> =
-            Spi::get_one("SELECT synchro_compact('7 days', 10000)").unwrap();
-        let resp = resp.unwrap().0;
-
-        assert!(resp["deactivated_clients"].as_i64().unwrap() >= 1);
+        for expected in [2, 1, 0] {
+            let response: pgrx::JsonB = Spi::get_one("SELECT synchro_compact('7 days', 2)")
+                .expect("compact one stale-client batch")
+                .expect("stale-client batch response");
+            assert_eq!(response.0["deactivated_clients"], expected);
+        }
     }
 
     #[pg_test]
@@ -313,6 +316,155 @@
 
         assert_eq!(response.0["deleted_entries"].as_i64(), Some(2));
         assert_eq!(remaining, 1);
+    }
+
+    #[pg_test]
+    fn test_compact_updates_scope_floors_in_one_set() {
+        setup_test_tables();
+        let mut measurements = Vec::new();
+        for scope_count in [1, 10] {
+            let mut scopes = Vec::new();
+            for index in 0..scope_count {
+                let record_id = format!("e1200000-0000-4000-8000-{:012}", scope_count * 100 + index);
+                let owner = format!("compact-{scope_count}-{index}");
+                let scope = format!("user:{owner}");
+                Spi::run_with_args(
+                    "INSERT INTO test_orders (id, user_id, title)
+                     VALUES ($1::uuid, $2, 'scope floor batch')",
+                    &[record_id.as_str().into(), owner.as_str().into()],
+                )
+                .expect("insert compaction source");
+                insert_changelog(&scope, "test_orders", &record_id, 1);
+                scopes.push(scope);
+            }
+            let expected: pgrx::JsonB = Spi::get_one_with_args(
+                "SELECT jsonb_object_agg(
+                     bucket_id, jsonb_build_array(commit_lsn::text, event_ordinal, effect_ordinal)
+                 )
+                 FROM sync_changelog WHERE bucket_id = ANY($1)",
+                &[scopes.clone().into()],
+            )
+            .expect("read expected compaction floors")
+            .expect("expected compaction floors");
+            let (response, queries) = query_counts::measure(1, || {
+                Spi::get_one::<pgrx::JsonB>("SELECT synchro_compact('30 days', 100)")
+                    .expect("compact scope set")
+                    .expect("compacted scope set response")
+            });
+            assert_eq!(response.0["deleted_entries"], scope_count);
+            let actual: pgrx::JsonB = Spi::get_one_with_args(
+                "SELECT jsonb_object_agg(
+                     scope_id, jsonb_build_array(
+                         floor_commit_lsn::text, floor_event_ordinal, floor_effect_ordinal
+                     )
+                 )
+                 FROM sync_scope_state
+                 WHERE scope_id = ANY($1) AND floor_position_kind = 'effect'",
+                &[scopes.into()],
+            )
+            .expect("read advanced compaction floors")
+            .expect("advanced compaction floors");
+            assert_eq!(actual.0, expected.0);
+            assert!(queries > 0);
+            measurements.push(queries);
+        }
+        assert_eq!(
+            measurements[0], measurements[1],
+            "compaction query count must not grow with scopes in one batch"
+        );
+    }
+
+    #[pg_test]
+    fn test_compact_rejects_invalid_effect_position_atomically() {
+        setup_test_tables();
+        let record_id = "e1300000-0000-4000-8000-000000000001";
+        Spi::run_with_args(
+            "INSERT INTO test_products (id, name) VALUES ($1::uuid, 'invalid position')",
+            &[record_id.into()],
+        )
+        .expect("insert invalid compaction position source");
+        insert_changelog("global", "test_products", record_id, 1);
+        Spi::run_with_args(
+            "UPDATE sync_changelog SET effect_ordinal = -1 WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .expect("corrupt compaction position");
+        Spi::run(
+            "DO $test$
+             DECLARE rejected boolean := false;
+             BEGIN
+                 BEGIN
+                     PERFORM synchro_compact('30 days', 100);
+                 EXCEPTION WHEN OTHERS THEN
+                     rejected := true;
+                 END;
+                 IF NOT rejected THEN
+                     RAISE EXCEPTION 'invalid compaction position was accepted';
+                 END IF;
+             END
+             $test$",
+        )
+        .expect("reject invalid position");
+        let retained: i64 = Spi::get_one_with_args(
+            "SELECT count(*) FROM sync_changelog WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .expect("count retained invalid effect")
+        .expect("retained invalid effect count");
+        let floor: String = Spi::get_one(
+            "SELECT floor_position_kind FROM sync_scope_state WHERE scope_id = 'global'",
+        )
+        .expect("read floor after rejection")
+        .expect("floor after rejection");
+        assert_eq!(retained, 1);
+        assert_eq!(floor, "generation_start");
+    }
+
+    #[pg_test]
+    fn test_compact_floor_failure_rolls_back_effect_deletion() {
+        setup_test_tables();
+        let record_id = "e1400000-0000-4000-8000-000000000001";
+        Spi::run_with_args(
+            "INSERT INTO test_products (id, name) VALUES ($1::uuid, 'floor failure')",
+            &[record_id.into()],
+        )
+        .expect("insert floor failure source");
+        insert_changelog("global", "test_products", record_id, 1);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reject_compaction_floor() RETURNS trigger
+             LANGUAGE plpgsql AS $function$
+             BEGIN
+                 RAISE EXCEPTION 'injected floor failure' USING ERRCODE = 'check_violation';
+             END
+             $function$;
+             CREATE TRIGGER reject_compaction_floor
+             BEFORE UPDATE OF floor_position_kind ON synchro.sync_scope_state
+             FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_compaction_floor();
+             DO $test$
+             DECLARE rejected boolean := false;
+             BEGIN
+                 BEGIN
+                     PERFORM synchro_compact('30 days', 100);
+                 EXCEPTION WHEN check_violation THEN
+                     rejected := true;
+                 END;
+                 IF NOT rejected THEN
+                     RAISE EXCEPTION 'compaction ignored the floor write failure';
+                 END IF;
+             END
+             $test$",
+        )
+        .expect("surface the injected floor failure");
+        let state: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'effects', (SELECT count(*) FROM sync_changelog WHERE record_id = $1),
+                 'floor', (SELECT floor_position_kind FROM sync_scope_state WHERE scope_id = 'global')
+             )",
+            &[record_id.into()],
+        )
+        .expect("read compaction rollback state")
+        .expect("compaction rollback state");
+        assert_eq!(state.0, json!({"effects": 1, "floor": "generation_start"}));
     }
 
     #[pg_test]

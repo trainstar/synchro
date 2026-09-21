@@ -24,6 +24,138 @@ const (
 	s11TransportTimeout   = 30 * time.Second
 )
 
+func TestRealCompactionLocksOnlySelectedScopesAndRechecksRetention(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	harness, token := provisionRealProofHarness(t, ctx)
+	admin := openIssue49Admin(t, ctx, harness)
+	first := "00000000-0000-4000-8c54-000000000001"
+	second := "00000000-0000-4000-8c54-000000000002"
+	if err := harness.Source().ExecContext(ctx, `
+		INSERT INTO cf_items (id, owner_id, value) VALUES
+			($1, 'issue54-other-owner', 'first'),
+			($2, 'diagnostic-user', 'second')`, first, second); err != nil {
+		t.Fatalf("insert compaction lock witnesses: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", first, second)
+	var firstScope string
+	if err := admin.QueryRowContext(ctx, `
+		SELECT bucket_id FROM synchro.sync_changelog ORDER BY seq LIMIT 1`,
+	).Scan(&firstScope); err != nil || firstScope != "user:issue54-other-owner" {
+		t.Fatalf("establish first compaction scope: scope=%q error=%v", firstScope, err)
+	}
+
+	compaction, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compaction.Rollback()
+	var deleted int64
+	if err := compaction.QueryRowContext(ctx, `
+		SELECT (synchro.synchro_compact('30 days', 1)->>'deleted_entries')::bigint`,
+	).Scan(&deleted); err != nil || deleted != 1 {
+		t.Fatalf("compact one effect while retaining locks: deleted=%d error=%v", deleted, err)
+	}
+	probe, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Rollback()
+	var unlockedScope string
+	if err := probe.QueryRowContext(ctx, `
+		SELECT scope_id FROM synchro.sync_scope_state
+		WHERE scope_id = 'user:diagnostic-user' FOR UPDATE NOWAIT`,
+	).Scan(&unlockedScope); err != nil || unlockedScope != "user:diagnostic-user" {
+		t.Fatalf("compaction locked an unrelated scope: scope=%q error=%v", unlockedScope, err)
+	}
+	if err := probe.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	holder, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback()
+	if _, err := holder.ExecContext(ctx, `
+		SELECT scope_id FROM synchro.sync_scope_state
+		WHERE scope_id = 'user:diagnostic-user' FOR SHARE`); err != nil {
+		t.Fatalf("hold the remaining scope for retention recheck: %v", err)
+	}
+	compaction, err = admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compaction.Rollback()
+	var compactionPID int
+	if err := compaction.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&compactionPID); err != nil {
+		t.Fatal(err)
+	}
+	type compactionResult struct {
+		deleted int64
+		err     error
+	}
+	done := make(chan compactionResult, 1)
+	queryContext, cancelQuery := context.WithCancel(ctx)
+	received := false
+	defer func() {
+		cancelQuery()
+		if !received {
+			<-done
+		}
+	}()
+	go func() {
+		var result compactionResult
+		result.err = compaction.QueryRowContext(queryContext, `
+			SELECT (synchro.synchro_compact('30 days', 1)->>'deleted_entries')::bigint`,
+		).Scan(&result.deleted)
+		done <- result
+	}()
+	waiting := false
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		if err := admin.QueryRowContext(ctx, `
+			SELECT COALESCE((
+				SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = $1
+			), false)`, compactionPID).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case result := <-done:
+			received = true
+			t.Fatalf("compaction did not wait for its selected scope: %#v", result)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if !waiting {
+		t.Fatal("compaction did not reach the selected scope lock")
+	}
+	connectRealProtocolClient(t, ctx, harness, token, "issue54-new-retention-client")
+	if err := holder.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result := <-done
+	received = true
+	if result.err != nil || result.deleted != 0 {
+		t.Fatalf("compaction ignored a client committed during its lock wait: %#v", result)
+	}
+	if err := compaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := admin.QueryRowContext(ctx, `
+		SELECT count(*) FROM synchro.sync_changelog WHERE record_id = $1`, second,
+	).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("new client lost its retained effect: remaining=%d error=%v", remaining, err)
+	}
+}
+
 func TestRealS11PushResponseLossReplaysExactCanonicalResponse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
