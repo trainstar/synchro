@@ -302,7 +302,7 @@ func TestRealIssue50ValidTransactionsCrossSoftBatchTarget(t *testing.T) {
 				SELECT pg_catalog.pg_logical_emit_message(
 					true,
 					'synchro_conformance_issue50_valid_batch',
-					repeat(md5($1::text), 262144)::bytea
+					repeat(md5($1::integer::text), 262144)::bytea
 				)::text`, index).Scan(&messageLSN); err != nil || messageLSN == "" {
 				t.Fatalf("emit Issue 50 valid source message %d: %v", index+1, err)
 			}
