@@ -1339,6 +1339,8 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 			t.Fatalf("expanded-history source is outside the existing decoder contract: bytes=%d updates=%d error=%v",
 				rawBytes, updateRecords, err)
 		}
+		t.Logf("expanded history: raw WAL=%d bytes, update records=%d, image payload=%d bytes",
+			rawBytes, updateRecords, 2*updates*len(value))
 		if err := harness.Source().ExecContext(ctx,
 			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-expanded-history')", witnessID,
 		); err != nil {
@@ -1356,14 +1358,14 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 				poison := waitForIssue49Poison(t, ctx, harness, witnessID)
 				t.Fatalf("expanded history blocked: class=%s raw_bytes=%d", poison.FailureClass, rawBytes)
 			}
-			if err == nil && len(observation.Records) == 2 &&
+			if err == nil && len(observation.Records) == 3 &&
 				observation.ContiguousAcknowledged && observation.AcknowledgementMatchesObservedEnd &&
 				observation.SlotMatchesObservedEnd {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		if err != nil || len(observation.Records) != 2 || !observation.ContiguousAcknowledged ||
+		if err != nil || len(observation.Records) != 3 || !observation.ContiguousAcknowledged ||
 			!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd {
 			t.Fatalf("expanded history did not materialize and acknowledge: observation=%#v error=%v; %s",
 				observation, err, harness.FailureDiagnostics())
