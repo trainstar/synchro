@@ -1312,6 +1312,19 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 		var observation blackbox.WALPipelineObservation
 		for time.Now().Before(deadline) {
 			observation, err = harness.Operator().ObserveWALRecords(ctx, []string{largeID, witnessID})
+			if err == nil && observation.BlockingPoison {
+				poison := waitForIssue49Poison(t, ctx, harness, witnessID)
+				var rawBytes int64
+				sizeErr := admin.QueryRowContext(ctx, `
+					SELECT COALESCE(sum(octet_length(data)), 0)::bigint
+					FROM pg_logical_slot_peek_binary_changes(
+						(SELECT active_slot_name FROM synchro.sync_runtime_state WHERE singleton),
+						NULL, 1, 'proto_version', '1',
+						'publication_names', current_setting('synchro.publication_name')
+					)`).Scan(&rawBytes)
+				t.Fatalf("expanded history blocked: class=%s raw_bytes=%d observation_error=%v",
+					poison.FailureClass, rawBytes, sizeErr)
+			}
 			if err == nil && len(observation.Records) == 2 &&
 				observation.ContiguousAcknowledged && observation.AcknowledgementMatchesObservedEnd &&
 				observation.SlotMatchesObservedEnd {
