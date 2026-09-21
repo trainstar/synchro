@@ -144,72 +144,71 @@ pub(crate) fn is_lower_uuid(value: &str) -> bool {
             } else {
                 byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
             }
-
-            #[cfg(test)]
-            mod tests {
-                use super::{jsonb_batches, jsonb_payload_parameters, JSONB_BATCH_BYTES};
-                use serde_json::json;
-
-                #[test]
-                fn payload_batches_respect_encoded_bytes_and_keep_large_rows() {
-                    let escaped = json!("\n".repeat(JSONB_BATCH_BYTES / 4));
-                    let rows = vec![escaped.clone(), escaped];
-                    let batches = jsonb_batches(&rows, 500, |row| row).unwrap();
-                    assert_eq!(
-                        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-                        [1, 1]
-                    );
-
-                    let rows = vec![json!("x".repeat(JSONB_BATCH_BYTES - 2)), json!(null)];
-                    let batches = jsonb_batches(&rows, 500, |row| row).unwrap();
-                    assert_eq!(
-                        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-                        [1, 1]
-                    );
-
-                    let rows = vec![json!("x".repeat(JSONB_BATCH_BYTES)), json!(null)];
-                    let batches = jsonb_batches(&rows, 500, |row| row).unwrap();
-                    assert_eq!(
-                        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-                        [1, 1]
-                    );
-                    assert_eq!(batches[0][0], rows[0]);
-                }
-
-                #[test]
-                fn payload_batches_preserve_rows_and_native_parameter_binding() {
-                    let rows = (0..5)
-                        .map(|index| json!({"record_id": index, "row_data": {"value": index}}))
-                        .collect::<Vec<_>>();
-                    let batches = jsonb_batches(&rows, 2, |row| row).unwrap();
-                    assert_eq!(
-                        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
-                        [2, 2, 1]
-                    );
-                    for batch in batches {
-                        let (metadata, payloads) =
-                            jsonb_payload_parameters(batch, "row_data").unwrap();
-                        let metadata = metadata.0.as_array().unwrap();
-                        assert_eq!(metadata.len(), batch.len());
-                        assert_eq!(payloads.len(), batch.len());
-                        for (index, original) in batch.iter().enumerate() {
-                            assert_eq!(metadata[index]["record_id"], original["record_id"]);
-                            assert_eq!(metadata[index]["payload_index"], index + 1);
-                            assert!(metadata[index].get("row_data").is_none());
-                            assert_eq!(payloads[index].0, original["row_data"]);
-                        }
-                    }
-                    assert!(jsonb_batches(&rows, 0, |row| row).is_err());
-                    assert!(jsonb_batches::<serde_json::Value>(&[], 1, |row| row)
-                        .unwrap()
-                        .is_empty());
-                    assert!(jsonb_payload_parameters(&[json!({})], "row_data").is_err());
-                    assert!(jsonb_payload_parameters(
-                        &[json!({"payload_index": 0, "row_data": {}})],
-                        "row_data",
-                    )
-                    .is_err());
-                }
-            }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{jsonb_batches, jsonb_payload_parameters, JSONB_BATCH_BYTES};
+    use serde_json::json;
+
+    #[test]
+    fn payload_batches_respect_encoded_bytes_and_keep_large_rows() {
+        let escaped = json!("\n".repeat(JSONB_BATCH_BYTES / 4));
+        let rows = vec![escaped.clone(), escaped];
+        let batches = jsonb_batches(&rows, 500, |row| row).unwrap();
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            [1, 1]
+        );
+
+        let rows = vec![json!("x".repeat(JSONB_BATCH_BYTES - 2)), json!(null)];
+        let batches = jsonb_batches(&rows, 500, |row| row).unwrap();
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            [1, 1]
+        );
+
+        let rows = vec![json!("x".repeat(JSONB_BATCH_BYTES)), json!(null)];
+        let batches = jsonb_batches(&rows, 500, |row| row).unwrap();
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            [1, 1]
+        );
+        assert_eq!(batches[0][0], rows[0]);
+    }
+
+    #[test]
+    fn payload_batches_preserve_rows_and_native_parameter_binding() {
+        let rows = (0..5)
+            .map(|index| json!({"record_id": index, "row_data": {"value": index}}))
+            .collect::<Vec<_>>();
+        let batches = jsonb_batches(&rows, 2, |row| row).unwrap();
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            [2, 2, 1]
+        );
+        for batch in batches {
+            let (metadata, payloads) = jsonb_payload_parameters(batch, "row_data").unwrap();
+            let metadata = metadata.0.as_array().unwrap();
+            assert_eq!(metadata.len(), batch.len());
+            assert_eq!(payloads.len(), batch.len());
+            for (index, original) in batch.iter().enumerate() {
+                assert_eq!(metadata[index]["record_id"], original["record_id"]);
+                assert_eq!(metadata[index]["payload_index"], index + 1);
+                assert!(metadata[index].get("row_data").is_none());
+                assert_eq!(payloads[index].0, original["row_data"]);
+            }
+        }
+        assert!(jsonb_batches(&rows, 0, |row| row).is_err());
+        assert!(jsonb_batches::<serde_json::Value>(&[], 1, |row| row)
+            .unwrap()
+            .is_empty());
+        assert!(jsonb_payload_parameters(&[json!({})], "row_data").is_err());
+        assert!(jsonb_payload_parameters(
+            &[json!({"payload_index": 0, "row_data": {}})],
+            "row_data",
+        )
+        .is_err());
+    }
 }
