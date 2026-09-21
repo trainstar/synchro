@@ -4,6 +4,7 @@
         use pgrx::pg_sys;
 
         thread_local! {
+            static ACTIVE: Cell<bool> = const { Cell::new(false) };
             static DEPTH: Cell<usize> = const { Cell::new(0) };
             static COUNT: Cell<usize> = const { Cell::new(0) };
             static TARGET_DEPTH: Cell<usize> = const { Cell::new(0) };
@@ -23,6 +24,7 @@
                     pg_sys::ExecutorEnd_hook = self.end;
                 }
                 DEPTH.set(0);
+                ACTIVE.set(false);
             }
         }
 
@@ -49,7 +51,7 @@
 
         // Depth one counts SPI work inside one SQL entry point, not SQL-function internals.
         pub(super) fn measure<T>(depth: usize, operation: impl FnOnce() -> T) -> (T, usize) {
-            assert_eq!(DEPTH.get(), 0, "query measurement must not nest");
+            assert!(!ACTIVE.replace(true), "query measurement must not nest");
             let hooks = unsafe {
                 Hooks {
                     start: pg_sys::ExecutorStart_hook,
@@ -90,4 +92,12 @@
         assert_eq!(inner, 1);
         let (_, empty) = query_counts::measure(0, || ());
         assert_eq!(empty, 0);
+        let nested = std::panic::catch_unwind(|| {
+            query_counts::measure(0, || query_counts::measure(0, || ()))
+        });
+        assert!(nested.is_err());
+        let (_, restored) = query_counts::measure(0, || {
+            Spi::get_one::<i32>("SELECT 42").expect("execute after measurement rejection")
+        });
+        assert_eq!(restored, 1);
     }

@@ -101,7 +101,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-EPOCH-FAULT-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", []string{"TestRealSchemaIncompatibleMutationPersistsCanonicalIntent", "TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-MANIFEST-FAULT-001", []string{"TestRealIssue49PublishedSchemaIdentityIsImmutable"}},
-	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect", "TestRealIssue49RemainingSemantics"}},
+	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-PG-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect", "TestRealIssue49RemainingSemantics", "TestRealCompactionLocksOnlySelectedScopesAndRechecksRetention"}},
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-RETENTION-001-FAULT-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect", "TestRealIssue49RemainingSemantics"}},
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-PG-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
