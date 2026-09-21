@@ -1,9 +1,9 @@
 diff --git a/extensions/synchro-pg/src/compaction.rs b/extensions/synchro-pg/src/compaction.rs
 --- a/extensions/synchro-pg/src/compaction.rs
 +++ b/extensions/synchro-pg/src/compaction.rs
-@@ -24,6 +24,16 @@ fn synchro_compact(
-         let deactivated = deactivate_stale_clients(client, p_stale_threshold);
-         lock_retention_state(client);
+@@ -68,6 +68,16 @@ fn synchro_compact(
+         validate_stale_inputs(client, p_stale_threshold);
+         let deactivated = deactivate_stale_clients(client, p_stale_threshold, p_batch_size);
          let (deleted_entries, last_deleted_seq) = delete_acknowledged_effects(client, p_batch_size);
 +        let _ = client
 +            .update("DELETE FROM sync_push_mutations", None, &[])
@@ -78,8 +78,8 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchr
      IF TG_OP = 'DELETE'
 @@ -2060,4 +2052,4 @@
  /* <begin connected objects> */
---- synchro-pg/src/compaction.rs:37
-+-- synchro-pg/src/compaction.rs:47
+--- synchro-pg/src/compaction.rs:81
++-- synchro-pg/src/compaction.rs:91
  -- synchro_pg::compaction::synchro_inject_client_retention_expiry
  CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
 @@ -2453,3 +2445,3 @@
