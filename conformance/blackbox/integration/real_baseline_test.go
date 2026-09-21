@@ -57,7 +57,8 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 		INSERT INTO cf_late_registration (id, owner_id, value)
 		SELECT ('10000000-0000-4000-8000-' || lpad(value::text, 12, '0'))::uuid,
 		       'diagnostic-user',
-		       'historical-filler-' || value::text
+		       CASE WHEN value <= 18 THEN repeat(md5(value::text), 32768)
+		            ELSE 'historical-filler-' || value::text END
 		FROM generate_series(1, 2048) value`); err != nil {
 		t.Fatalf("insert projection bootstrap staging rows: %v", err)
 	}
@@ -256,6 +257,23 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 		generation, catchupID,
 	).Scan(&activatedRows); err != nil || activatedRows != 501 {
 		t.Fatalf("activation lost candidate catch-up rows: rows=%d error=%v", activatedRows, err)
+	}
+	var largeBaselineRows int
+	if err := admin.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM synchro.sync_captured_rows captured
+		JOIN synchro.sync_registry_fields field
+		  ON field.registry_generation = captured.registry_generation
+		 AND field.relation_id = captured.relation_id
+		 AND field.physical_column = 'value'
+		WHERE captured.registry_generation = $1
+		  AND captured.record_id LIKE '10000000-0000-4000-8000-%'
+		  AND right(captured.record_id, 12)::integer BETWEEN 1 AND 18
+		  AND captured.row_data->>field.field_id::text =
+		      repeat(md5(right(captured.record_id, 12)::integer::text), 32768)`,
+		generation,
+	).Scan(&largeBaselineRows); err != nil || largeBaselineRows != 18 {
+		t.Fatalf("activation changed the large baseline payload batch: rows=%d error=%v", largeBaselineRows, err)
 	}
 }
 
