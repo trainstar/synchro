@@ -239,3 +239,123 @@ func TestRealIssue50ActiveWALIntakeBounds(t *testing.T) {
 		})
 	}
 }
+
+// TestRealIssue50ValidTransactionsCrossSoftBatchTarget proves that the soft
+// intake target preserves valid source transactions that exceed it in aggregate.
+func TestRealIssue50ValidTransactionsCrossSoftBatchTarget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	admin := openIssue49Admin(t, ctx, harness)
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+	if err != nil {
+		t.Fatalf("create Issue 50 valid-batch WAL controller: %v", err)
+	}
+	workerPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
+	if err != nil {
+		t.Fatalf("observe Issue 50 valid-batch WAL worker: %v", err)
+	}
+	resumeWAL, err := controller.PauseWALMaterialization(ctx)
+	if err != nil {
+		t.Fatalf("pause Issue 50 valid-batch WAL materialization: %v", err)
+	}
+	walPaused := true
+	defer func() {
+		if !walPaused {
+			return
+		}
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if err := resumeWAL(cleanupContext); err != nil {
+			t.Errorf("resume Issue 50 valid-batch WAL materialization during cleanup: %v", err)
+		}
+	}()
+
+	witnessIDs := []string{
+		"00000000-0000-4000-8c51-000000000001",
+		"00000000-0000-4000-8c51-000000000002",
+		"00000000-0000-4000-8c51-000000000003",
+		"00000000-0000-4000-8c51-000000000004",
+	}
+	for index, witnessID := range witnessIDs {
+		func() {
+			sourceTransaction, err := admin.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin Issue 50 valid source transaction %d: %v", index+1, err)
+			}
+			committed := false
+			defer func() {
+				if !committed {
+					_ = sourceTransaction.Rollback()
+				}
+			}()
+			if _, err := sourceTransaction.ExecContext(
+				ctx,
+				"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', $2)",
+				witnessID,
+				"issue50-valid-batch-witness",
+			); err != nil {
+				t.Fatalf("insert Issue 50 valid source witness %d: %v", index+1, err)
+			}
+			var messageLSN string
+			if err := sourceTransaction.QueryRowContext(ctx, `
+				SELECT pg_catalog.pg_logical_emit_message(
+					true,
+					'synchro_conformance_issue50_valid_batch',
+					repeat(md5($1::text), 262144)::bytea
+				)::text`, index).Scan(&messageLSN); err != nil || messageLSN == "" {
+				t.Fatalf("emit Issue 50 valid source message %d: %v", index+1, err)
+			}
+			if err := sourceTransaction.Commit(); err != nil {
+				t.Fatalf("commit Issue 50 valid source transaction %d: %v", index+1, err)
+			}
+			committed = true
+		}()
+	}
+
+	if err := resumeWAL(ctx); err != nil {
+		t.Fatalf("resume Issue 50 valid-batch WAL materialization: %v", err)
+	}
+	walPaused = false
+	waitForRealWALRecords(t, ctx, harness, "cf_items", witnessIDs...)
+
+	var observation blackbox.WALPipelineObservation
+	var observationErr error
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		observation, observationErr = harness.Operator().ObserveWALRecords(ctx, witnessIDs)
+		if observationErr == nil && len(observation.Records) == len(witnessIDs) && observation.WorkerRunning &&
+			!observation.BlockingPoison && observation.ContiguousAcknowledged &&
+			observation.AcknowledgementMatchesObservedEnd && observation.SlotMatchesObservedEnd {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	currentPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
+	if err != nil {
+		t.Fatalf("observe Issue 50 completed valid-batch WAL worker: %v", err)
+	}
+
+	if observationErr != nil || len(observation.Records) != len(witnessIDs) || !observation.WorkerRunning ||
+		observation.BlockingPoison || !observation.ContiguousAcknowledged ||
+		!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd {
+		t.Fatalf("Issue 50 valid source batch did not complete and acknowledge: observation=%#v err=%v", observation, observationErr)
+	}
+	seenCommitLSNs := make(map[string]struct{}, len(witnessIDs))
+	for index, record := range observation.Records {
+		if record.RecordID != witnessIDs[index] || record.CommitLSN == "" || record.EndLSN == "" {
+			t.Fatalf("Issue 50 valid source transaction identity is incomplete: records=%#v", observation.Records)
+		}
+		if _, duplicate := seenCommitLSNs[record.CommitLSN]; duplicate {
+			t.Fatalf("Issue 50 valid source transactions share a commit identity: records=%#v", observation.Records)
+		}
+		seenCommitLSNs[record.CommitLSN] = struct{}{}
+	}
+	last := observation.Records[len(observation.Records)-1]
+	if observation.AcknowledgedEndLSN != last.EndLSN || observation.SlotConfirmedFlushLSN != last.EndLSN {
+		t.Fatalf("Issue 50 acknowledgement did not reach the last valid source transaction: observation=%#v", observation)
+	}
+	if currentPID != workerPID {
+		t.Fatalf("Issue 50 WAL worker changed during valid-batch intake: before=%d after=%d", workerPID, currentPID)
+	}
+}
