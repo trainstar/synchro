@@ -15,7 +15,7 @@ pub const ORIGIN_MSG: u8 = b'O';
 pub const LOGICAL_MSG: u8 = b'M';
 pub const TRUNCATE_MSG: u8 = b'T';
 
-const MAX_TRANSACTION_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_TRANSACTION_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSACTION_RECORDS: usize = 10_000;
 
 /// Tuple value tags used by pgoutput.
@@ -111,6 +111,7 @@ pub struct WalTransaction {
     pub messages: Vec<WalLogicalMessage>,
 }
 
+#[derive(Clone)]
 struct PendingTransaction {
     xid: u32,
     final_lsn: u64,
@@ -124,6 +125,7 @@ struct PendingTransaction {
 }
 
 /// Stateful strict decoder for pgoutput protocol version 1.
+#[derive(Clone)]
 pub struct WalDecoder {
     relations: HashMap<u32, RelationInfo>,
     transaction: Option<PendingTransaction>,
@@ -165,6 +167,12 @@ impl WalDecoder {
         self.transaction
             .as_ref()
             .map(|transaction| transaction.commit_timestamp)
+    }
+
+    pub(crate) fn pending_failure_context(&self) -> Option<(u64, i64)> {
+        self.transaction
+            .as_ref()
+            .map(|transaction| (transaction.final_lsn, transaction.commit_timestamp))
     }
 
     /// Consume one complete pgoutput message.

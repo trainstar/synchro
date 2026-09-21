@@ -21,6 +21,8 @@ An empty publication, slot, database, or worker login makes the related readines
 
 The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction. An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement. Candidate decoding also rejects the transaction. Split the source write into smaller transactions to stay below these fixed safety limits.
 
+The worker reads peeked pgoutput data one message at a time. It preserves each complete valid source transaction when a poll batch reaches its soft 16 MiB target.
+
 ## Readiness limits
 
 | GUC | Context | Default | Purpose |
