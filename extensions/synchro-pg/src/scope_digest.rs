@@ -5,7 +5,7 @@ use synchro_core::checksum::{row_identity, scope_digest, ScopeDigestEntry, Sha25
 
 use crate::pull::{canonical_table, row_primary_key_json, schema_hash_for_generation};
 use crate::registry::TableRegistration;
-use crate::spi_helpers::required_text;
+use crate::spi_helpers::{required_record_id, required_text};
 
 pub(crate) fn compute_reset_scope_digests(
     client: &SpiClient<'_>,
@@ -45,7 +45,7 @@ pub(crate) fn compute_reset_scope_digests(
         .map_err(|_| "loading scope digest edges failed".to_string())?;
     for row in edge_rows {
         let relation_id = required_text(&row, "relation_id", "scope digest edge ")?;
-        let record_id = required_text(&row, "record_id", "scope digest edge ")?;
+        let record_id = required_record_id(&row)?;
         let scope_id = required_text(&row, "scope_id", "scope digest edge ")?;
         let registration = registry
             .iter()
