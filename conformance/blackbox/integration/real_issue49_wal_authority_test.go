@@ -3,15 +3,18 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -982,6 +985,280 @@ func TestRealIssue49FenceCorrelationAndCapturePending(t *testing.T) {
 			!mismatchState.FencePending || !mismatchState.KeyChanged || !mismatchState.VersionChanged ||
 			mismatchState.EventMaterialized || mismatchState.OriginalRecordMaterialized || mismatchState.MismatchedRecordMaterialized {
 			t.Fatalf("key and version mismatch did not block capture: mismatch=%#v poison=%#v state=%#v", mismatch, mismatchPoison, mismatchState)
+		}
+	})
+}
+
+func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	harness, token := provisionRealProofHarness(t, ctx)
+	admin := openIssue49Admin(t, ctx, harness)
+	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-fold-client")
+	rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8d11-000000000001")
+	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8d11-000000000002")
+	table := requireRealTable(t, client, "cf_items")
+	valueField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "value")
+	recordID := "00000000-0000-4000-8d11-000000000011"
+
+	transaction, err := harness.Source().BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("begin folded source transaction: %v", err)
+	}
+	for step, statement := range []string{
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'fold-initial')",
+		"UPDATE cf_items SET value = 'fold-intermediate' WHERE id = $1",
+		"UPDATE cf_items SET value = 'fold-final' WHERE id = $1",
+	} {
+		if _, err := transaction.ExecContext(ctx, statement, recordID); err != nil {
+			_ = transaction.Rollback()
+			t.Fatalf("execute folded source operation %d: %v", step+1, err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatalf("commit folded source transaction: %v", err)
+	}
+
+	waitForRealWALRecords(t, ctx, harness, "cf_items", recordID)
+	pullUntilRealRecords(t, ctx, harness, token, client, []realRecordExpectation{{
+		scopeID: "user:diagnostic-user", table: table, recordID: recordID, value: "fold-final",
+	}})
+
+	var events, currentRows, changes int
+	var deleted bool
+	var imagesJSON, currentValue string
+	if err := admin.QueryRowContext(ctx, `
+		WITH relation AS (
+			SELECT registry.relation_id
+			FROM synchro.sync_registry registry
+			JOIN synchro.sync_registry_generations generation
+			  ON generation.generation = registry.registry_generation
+			WHERE generation.state = 'active' AND registry.table_name = 'cf_items'
+		)
+		SELECT (SELECT count(*) FROM synchro.sync_wal_events event
+		        JOIN synchro.sync_write_fences fence USING (fence_id)
+		        JOIN relation ON relation.relation_id = event.relation_id
+		        WHERE fence.old_record_id = $1 OR fence.new_record_id = $1),
+		       (SELECT count(*) FROM synchro.sync_captured_rows captured JOIN relation USING (relation_id)
+		        WHERE captured.record_id = $1),
+		       (SELECT deleted FROM synchro.sync_captured_rows captured JOIN relation USING (relation_id)
+		        WHERE captured.record_id = $1),
+		       (SELECT count(*) FROM synchro.sync_changelog change JOIN relation USING (relation_id)
+		        WHERE change.record_id = $1),
+		       (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+		           'image', projection.image_kind,
+		           'value', projection.row_data ->> $2
+		       ) ORDER BY projection.event_ordinal,
+		           CASE projection.image_kind WHEN 'before' THEN 0 ELSE 1 END)::text, '[]')
+		        FROM synchro.sync_captured_projections projection
+		        JOIN relation USING (relation_id)
+		        WHERE projection.record_id = $1),
+		       (SELECT captured.row_data ->> $2 FROM synchro.sync_captured_rows captured
+		        JOIN relation USING (relation_id) WHERE captured.record_id = $1)`, recordID, valueField).Scan(&events, &currentRows, &deleted, &changes, &imagesJSON, &currentValue); err != nil {
+		t.Fatalf("observe folded source materialization: %v", err)
+	}
+	type projectionImage struct {
+		Image string `json:"image"`
+		Value string `json:"value"`
+	}
+	var images []projectionImage
+	if err := json.Unmarshal([]byte(imagesJSON), &images); err != nil {
+		t.Fatalf("decode folded projection images: %v", err)
+	}
+	expected := []projectionImage{
+		{Image: "after", Value: "fold-initial"},
+		{Image: "before", Value: "fold-initial"},
+		{Image: "after", Value: "fold-intermediate"},
+		{Image: "before", Value: "fold-intermediate"},
+		{Image: "after", Value: "fold-final"},
+	}
+	if events != 3 || currentRows != 1 || deleted || changes != 1 ||
+		!slices.Equal(images, expected) || currentValue != "fold-final" {
+		t.Fatalf("folded source operations lost exact history or final state: events=%d rows=%d deleted=%t changes=%d images=%s current=%q", events, currentRows, deleted, changes, imagesJSON, currentValue)
+	}
+
+	t.Run("transient-and-existing-final-deletes", func(t *testing.T) {
+		newRow := "00000000-0000-4000-8d11-000000000021"
+		oldRow := "00000000-0000-4000-8d11-000000000022"
+		newKey, oldKey := "issue54-new-capture", "issue54-old-capture"
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'before')", oldRow,
+		); err != nil {
+			t.Fatal(err)
+		}
+		waitForRealWALRecords(t, ctx, harness, "cf_items", oldRow)
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_item_impacts (id, scope_key) VALUES ($1, 'no-assigned-scope')", oldKey,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if !waitForIssue49CaptureDependencyFence(t, ctx, admin, oldKey) {
+			t.Fatal("existing capture row did not materialize")
+		}
+		tx, err := harness.Source().BeginTx(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		for _, operation := range []struct {
+			sql string
+			key string
+		}{
+			{"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'transient')", newRow},
+			{"DELETE FROM cf_items WHERE id = $1", newRow},
+			{"UPDATE cf_items SET value = 'changed-before-delete' WHERE id = $1", oldRow},
+			{"DELETE FROM cf_items WHERE id = $1", oldRow},
+			{"INSERT INTO cf_item_impacts (id, scope_key) VALUES ($1, 'no-assigned-scope')", newKey},
+			{"DELETE FROM cf_item_impacts WHERE id = $1", newKey},
+			{"DELETE FROM cf_item_impacts WHERE id = $1", oldKey},
+			{"INSERT INTO cf_item_impacts (id, scope_key) VALUES ($1, 'no-assigned-scope')", oldKey},
+			{"DELETE FROM cf_item_impacts WHERE id = $1", oldKey},
+		} {
+			if _, err := tx.ExecContext(ctx, operation.sql, operation.key); err != nil {
+				t.Fatalf("execute final-delete source operation: %v", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		witness := "00000000-0000-4000-8d11-000000000023"
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-deletes')", witness,
+		); err != nil {
+			t.Fatal(err)
+		}
+		waitForRealWALRecords(t, ctx, harness, "cf_items", witness)
+		var retained int
+		var countsJSON string
+		if err := admin.QueryRowContext(ctx, `
+			SELECT
+				(SELECT count(*) FROM synchro.sync_captured_rows WHERE record_id = ANY($1)) +
+				(SELECT count(*) FROM synchro.sync_capture_dependency_rows WHERE capture_key->>'id' = ANY($2)),
+				(SELECT jsonb_object_agg(identity, count)::text
+				 FROM (
+					 SELECT COALESCE(fence.new_record_id, fence.old_record_id,
+					                 fence.new_capture_key->>'id', fence.old_capture_key->>'id') AS identity,
+					        count(*) AS count
+					 FROM synchro.sync_wal_events event
+					 JOIN synchro.sync_write_fences fence USING (fence_id)
+					 WHERE fence.new_record_id = ANY($1) OR fence.old_record_id = ANY($1)
+					    OR fence.new_capture_key->>'id' = ANY($2) OR fence.old_capture_key->>'id' = ANY($2)
+					 GROUP BY identity
+				 ) history)`,
+			[]string{newRow, oldRow}, []string{newKey, oldKey},
+		).Scan(&retained, &countsJSON); err != nil {
+			t.Fatalf("observe final-delete materialization: %v", err)
+		}
+		var counts map[string]int
+		if err := json.Unmarshal([]byte(countsJSON), &counts); err != nil {
+			t.Fatalf("decode final-delete event counts: %v", err)
+		}
+		if retained != 0 || len(counts) != 4 || counts[newRow] != 2 || counts[oldRow] != 3 ||
+			counts[newKey] != 2 || counts[oldKey] != 4 {
+			t.Fatalf("final deletes lost events or retained rows: rows=%d counts=%v", retained, counts)
+		}
+	})
+
+	t.Run("unchanged-toast-native-json-and-soft-delete", func(t *testing.T) {
+		typedID := "00000000-0000-4000-8d11-000000000031"
+		var payload strings.Builder
+		for index := 0; index < 1024; index++ {
+			fmt.Fprintf(&payload, "%x", sha256.Sum256([]byte(fmt.Sprintf("issue54-%d", index))))
+		}
+		text := payload.String()
+		authored := make([]string, 2)
+		for index := range authored {
+			encoded, err := json.Marshal(map[string]any{"payload": text, "revision": index})
+			if err != nil {
+				t.Fatal(err)
+			}
+			authored[index] = string(encoded)
+		}
+		jsonField := loadRealProtocolFieldID(t, ctx, harness, "cf_schema_queue", "authored_mutation")
+		textField := loadRealProtocolFieldID(t, ctx, harness, "cf_schema_queue", "legacy_value")
+		if err := harness.Source().ExecContext(ctx, `
+			INSERT INTO cf_schema_queue (id, owner_id, authored_mutation, legacy_value)
+			VALUES ($1, 'diagnostic-user', $2::jsonb, $3)`, typedID, authored[0], text); err != nil {
+			t.Fatal(err)
+		}
+		var externalValues bool
+		if err := admin.QueryRowContext(ctx, `
+			SELECT pg_column_size(authored_mutation) > current_setting('block_size')::integer
+			       AND pg_column_size(legacy_value) > current_setting('block_size')::integer
+			FROM cf_schema_queue WHERE id = $1`, typedID,
+		).Scan(&externalValues); err != nil || !externalValues {
+			t.Fatalf("typed fixture did not require external TOAST storage: external=%t error=%v", externalValues, err)
+		}
+		waitForRealWALRecords(t, ctx, harness, "cf_schema_queue", typedID)
+		tx, err := harness.Source().BeginTx(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		for _, operation := range []struct {
+			sql  string
+			args []any
+		}{
+			{"UPDATE cf_schema_queue SET updated_at = '2040-01-01T00:00:00Z' WHERE id = $1", []any{typedID}},
+			{"UPDATE cf_schema_queue SET authored_mutation = $2::jsonb WHERE id = $1", []any{typedID, authored[1]}},
+			{"UPDATE cf_schema_queue SET updated_at = '2040-01-03T00:00:00Z' WHERE id = $1", []any{typedID}},
+			{"UPDATE cf_schema_queue SET deleted_at = '2040-01-02T00:00:00Z' WHERE id = $1", []any{typedID}},
+			{"DELETE FROM cf_schema_queue WHERE id = $1", []any{typedID}},
+		} {
+			if _, err := tx.ExecContext(ctx, operation.sql, operation.args...); err != nil {
+				t.Fatalf("execute ordered typed source operation: %v", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		witness := "00000000-0000-4000-8d11-000000000032"
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-typed-fold')", witness,
+		); err != nil {
+			t.Fatal(err)
+		}
+		waitForRealWALRecords(t, ctx, harness, "cf_items", witness)
+		var encoded string
+		var currentRows int
+		if err := admin.QueryRowContext(ctx, `
+			SELECT
+				(SELECT jsonb_agg(jsonb_build_object(
+					'image', image_kind, 'json', row_data->>$2, 'json_type', jsonb_typeof(row_data->$2),
+					'text', row_data->>$3, 'deleted', deleted
+				) ORDER BY event_ordinal, CASE image_kind WHEN 'before' THEN 0 ELSE 1 END)::text
+				 FROM synchro.sync_captured_projections
+				 WHERE record_id = $1 AND commit_lsn = (
+					SELECT max(commit_lsn) FROM synchro.sync_captured_projections WHERE record_id = $1
+				 )),
+				(SELECT count(*) FROM synchro.sync_captured_rows WHERE record_id = $1)`,
+			typedID, jsonField, textField,
+		).Scan(&encoded, &currentRows); err != nil {
+			t.Fatalf("observe typed projection history: %v", err)
+		}
+		var history []struct {
+			Image    string `json:"image"`
+			JSON     string `json:"json"`
+			JSONType string `json:"json_type"`
+			Text     string `json:"text"`
+			Deleted  bool   `json:"deleted"`
+		}
+		if err := json.Unmarshal([]byte(encoded), &history); err != nil {
+			t.Fatalf("decode typed projection history: %v", err)
+		}
+		revisions := []int{0, 0, 0, 1, 1, 1, 1, 1, 1}
+		kinds := []string{"before", "after", "before", "after", "before", "after", "before", "after", "before"}
+		if len(history) != len(revisions) {
+			t.Fatalf("typed fold retained %d images, want %d", len(history), len(revisions))
+		}
+		for index, image := range history {
+			if image.Image != kinds[index] || image.JSON != authored[revisions[index]] || image.JSONType != "string" ||
+				image.Text != text || image.Deleted != (index == 7 || index == 8) {
+				t.Fatalf("typed fold changed projection image %d", index)
+			}
+		}
+		if currentRows != 0 {
+			t.Fatal("typed fold retained a row after its hard delete")
 		}
 	})
 }

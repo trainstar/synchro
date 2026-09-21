@@ -3275,7 +3275,7 @@
     }
 
     #[pg_test]
-    fn test_registry_loads_child_metadata_in_one_scan_per_table() {
+    fn test_registry_loads_child_metadata_in_one_scan_per_generation() {
         setup_test_tables();
         Spi::run("SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off")
             .expect("force registry metadata sequential scans");
@@ -3321,6 +3321,142 @@
         assert_eq!(registrations.len(), 3);
         assert_eq!(field_scans - field_scans_before, 1);
         assert_eq!(capture_field_scans - capture_field_scans_before, 1);
+    }
+
+    #[pg_test]
+    fn test_catalog_reads_stay_constant_for_capture_dependencies() {
+        setup_test_tables();
+        Spi::run(
+            "CREATE TABLE test_generation_catalog_capture_one (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+              );
+              CREATE TABLE test_generation_catalog_capture_two (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+              );
+              GRANT SELECT ON TABLE test_generation_catalog_capture_one,
+                  test_generation_catalog_capture_two TO synchro_owner;
+              ALTER TABLE test_generation_catalog_capture_one ENABLE ROW LEVEL SECURITY;
+              ALTER TABLE test_generation_catalog_capture_two ENABLE ROW LEVEL SECURITY;
+              CREATE POLICY test_generation_catalog_capture_one_policy
+                  ON test_generation_catalog_capture_one
+                  AS PERMISSIVE FOR ALL TO synchro_owner
+                  USING (true) WITH CHECK (true);
+              CREATE POLICY test_generation_catalog_capture_two_policy
+                  ON test_generation_catalog_capture_two
+                  AS PERMISSIVE FOR ALL TO synchro_owner
+                  USING (true) WITH CHECK (true);
+              SELECT synchro_register_capture_dependency(
+                  'public.test_generation_catalog_capture_one', ARRAY['id'], ARRAY['value']
+              )",
+        )
+        .expect("register first capture dependency");
+        activate_pending_registry_for_test();
+        let active: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations WHERE state = 'active'",
+        )
+        .expect("read active registry generation")
+        .expect("active registry generation");
+        let (_, active_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, active)
+            })
+            .expect("load active registry generation")
+        });
+
+        Spi::run(
+            "SELECT synchro_register_capture_dependency(
+                 'public.test_generation_catalog_capture_two', ARRAY['id'], ARRAY['value']
+             )",
+        )
+        .expect("register second capture dependency");
+        let pending: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC LIMIT 1",
+        )
+        .expect("read pending registry generation")
+        .expect("pending registry generation");
+        let (_, pending_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, pending)
+            })
+            .expect("load pending registry generation")
+        });
+
+        assert!(active_operations > 0);
+        assert_eq!(pending_operations, active_operations);
+    }
+
+    #[pg_test]
+    fn test_catalog_reads_stay_constant_for_membership_functions() {
+        setup_test_tables();
+        Spi::run(
+            "CREATE TABLE test_generation_catalog_function_one (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE test_generation_catalog_function_two (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             SELECT synchro_prepare_projection_view(
+                 'public.test_generation_catalog_function_one',
+                 'test_generation_catalog_function_one',
+                 ARRAY['id']
+             );
+             SELECT synchro_prepare_projection_view(
+                 'public.test_generation_catalog_function_two',
+                 'test_generation_catalog_function_two',
+                 ARRAY['id']
+             );
+             SELECT tests.register_test_table(
+                 'test_generation_catalog_function_one',
+                 $$SELECT 'global' FROM synchro_projection.test_generation_catalog_function_one
+                   WHERE record_id = p_key::text$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .expect("register first membership function");
+        activate_pending_registry_for_test();
+        let active: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations WHERE state = 'active'",
+        )
+        .expect("read active registry generation")
+        .expect("active registry generation");
+        let (_, active_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, active)
+            })
+            .expect("load active registry generation")
+        });
+
+        Spi::run(
+            "SELECT tests.register_test_table(
+                 'test_generation_catalog_function_two',
+                 $$SELECT 'global' FROM synchro_projection.test_generation_catalog_function_two
+                   WHERE record_id = p_key::text$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only'
+             )",
+        )
+        .expect("register second membership function");
+        let pending: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC LIMIT 1",
+        )
+        .expect("read pending registry generation")
+        .expect("pending registry generation");
+        let (_, pending_operations) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::registry::load_registry_generation_from_client(client, pending)
+            })
+            .expect("load pending registry generation")
+        });
+
+        assert!(active_operations > 0);
+        assert_eq!(pending_operations, active_operations);
     }
 
     #[pg_test]

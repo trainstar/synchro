@@ -1,3 +1,12 @@
+    use std::collections::HashMap;
+
+    use synchro_core::change::ChangeOperation;
+
+    use crate::registry::TableRegistration;
+    use crate::wal_decoder::{
+        RelationKey, TupleImage, TupleValue, WalEvent, WalLogicalMessage, WalTransaction,
+    };
+
     #[pg_test]
     fn test_push_preserves_transaction_wide_fence_ordinals() {
         setup_test_tables();
@@ -840,10 +849,12 @@
         .expect("load product membership registration");
         let query = crate::materialize::membership_batch_query(&registration)
             .expect("build bounded membership query");
-        let memberships = Spi::connect(|client| {
-            crate::materialize::resolve_membership_batch(client, &registration, &record_ids)
-        })
-        .expect("resolve bounded membership batch");
+        let (memberships, query_count) = query_counts::measure(0, || {
+            Spi::connect(|client| {
+                crate::materialize::resolve_membership_batch(client, &registration, &record_ids)
+            })
+            .expect("resolve bounded membership batch")
+        });
         let response: pgrx::JsonB = Spi::get_one(
             "SELECT synchro_backfill_bucket_edges('test_products', 1000)",
         )
@@ -852,8 +863,172 @@
 
         assert_eq!(query.matches("jsonb_to_recordset").count(), 1);
         assert_eq!(query.matches("CROSS JOIN LATERAL").count(), 1);
+        assert_eq!(query_count, 1);
         assert_eq!(memberships.len(), 2);
         assert!(memberships.values().all(|scopes| scopes == &["global"]));
         assert_eq!(response.0["records"], json!(2));
         assert_eq!(response.0["edges"], json!(2));
+    }
+
+    fn wal_counting_image(registration: &TableRegistration, record_id: &str) -> TupleImage {
+        registration
+            .fields
+            .iter()
+            .map(|field| {
+                let value = match field.physical_column.as_str() {
+                    "id" => TupleValue::Text(record_id.as_bytes().to_vec()),
+                    "user_id" => TupleValue::Text(b"u1".to_vec()),
+                    "title" => TupleValue::Text(b"WAL query count".to_vec()),
+                    "amount" => TupleValue::Text(b"0".to_vec()),
+                    "created_at" | "updated_at" => {
+                        TupleValue::Text(b"2000-01-01 00:00:00+00".to_vec())
+                    }
+                    "deleted_at" => TupleValue::Null,
+                    column => panic!("unexpected test_orders synced column {column}"),
+                };
+                (field.physical_column.clone(), value)
+            })
+            .collect()
+    }
+
+    fn wal_counting_transaction(
+        registration: &TableRegistration,
+        commit_lsn: u64,
+        start: u32,
+        count: u32,
+    ) -> WalTransaction {
+        let xid: String = Spi::get_one("SELECT pg_current_xact_id()::text")
+            .expect("read WAL counting transaction xid")
+            .expect("WAL counting transaction xid");
+        let xid = xid.parse().expect("parse WAL counting transaction xid");
+        let relation = RelationKey::new(
+            registration.physical_schema.clone(),
+            registration.physical_relation.clone(),
+            registration.physical_relation_oid,
+        );
+        let mut events = Vec::new();
+        let mut messages = Vec::new();
+        for offset in 0..count {
+            let sequence = start + offset;
+            let record_id = format!("31000000-0000-4000-8000-{sequence:012x}");
+            let fence_id = format!("32000000-0000-4000-8000-{sequence:012x}");
+            let row_version = format!("33000000-0000-4000-8000-{sequence:012x}");
+            Spi::run_with_args(
+                "INSERT INTO test_orders (id, user_id, title)
+                 VALUES ($1::uuid, 'u1', 'WAL query count')",
+                &[record_id.as_str().into()],
+            )
+            .expect("insert WAL counting source row");
+            Spi::run_with_args(
+                "INSERT INTO synchro.sync_write_fences (
+                     fence_id, transaction_xid, dml_ordinal, relation_id,
+                     registration_kind, table_id,
+                     physical_schema, physical_relation, physical_relation_oid,
+                     operation, old_record_id, new_record_id, row_version
+                 ) VALUES (
+                     $1::uuid, pg_current_xact_id(), $2, $3::uuid,
+                     'synced', $4::uuid, $5, $6, $7::oid,
+                     'insert', NULL, $8, $9::uuid
+                 )",
+                &[
+                    fence_id.as_str().into(),
+                    i64::from(offset + 1).into(),
+                    registration.relation_id.as_str().into(),
+                    registration.table_id.as_str().into(),
+                    registration.physical_schema.as_str().into(),
+                    registration.physical_relation.as_str().into(),
+                    i64::from(registration.physical_relation_oid).into(),
+                    record_id.as_str().into(),
+                    row_version.as_str().into(),
+                ],
+            )
+            .expect("insert WAL counting fence");
+            events.push(WalEvent {
+                operation: ChangeOperation::Insert,
+                relation: relation.clone(),
+                event_ordinal: u64::from(offset),
+                before: None,
+                after: Some(wal_counting_image(registration, &record_id)),
+            });
+            messages.push(WalLogicalMessage {
+                prefix: "synchro_fence".to_string(),
+                content: serde_json::to_vec(&json!({
+                    "fence_id": fence_id,
+                    "dml_ordinal": offset + 1,
+                    "registration_kind": "synced",
+                    "relation_id": registration.relation_id,
+                    "table_id": registration.table_id,
+                    "physical_schema": registration.physical_schema,
+                    "physical_relation": registration.physical_relation,
+                    "physical_relation_oid": registration.physical_relation_oid,
+                    "operation": "insert",
+                    "old_record_id": serde_json::Value::Null,
+                    "new_record_id": record_id,
+                    "old_capture_key": serde_json::Value::Null,
+                    "new_capture_key": serde_json::Value::Null,
+                    "row_version": row_version,
+                }))
+                .expect("encode WAL counting fence"),
+                message_lsn: commit_lsn,
+            });
+        }
+        WalTransaction {
+            xid,
+            final_lsn: commit_lsn,
+            commit_lsn,
+            end_lsn: commit_lsn + 1,
+            commit_timestamp: 0,
+            events,
+            truncates: Vec::new(),
+            messages,
+        }
+    }
+
+    #[pg_test]
+    fn wal_materialization_query_count_is_bounded() {
+        setup_test_tables();
+        let registration = Spi::connect(|client| {
+            crate::registry::load_registry_from_client(client).map(|registry| {
+                registry
+                    .into_iter()
+                    .find(|registration| registration.table_name == "test_orders")
+                    .expect("orders WAL counting registration")
+            })
+        })
+        .expect("load orders WAL counting registration");
+        let mut measurements = HashMap::new();
+        for (start, count, commit_lsn) in [(1, 10, 0x100u64), (100, 100, 0x200), (1_000, 501, 0x300)] {
+            let transaction = wal_counting_transaction(&registration, commit_lsn, start, count);
+            let (result, queries) = query_counts::measure(0, || {
+                Spi::connect_mut(|client| {
+                    crate::bgworker::materialize_transaction_for_test(client, &transaction)
+                })
+            });
+            result.expect("materialize WAL counting transaction");
+            assert!(queries > 0, "WAL query measurement observed no work");
+            let durable: pgrx::JsonB = Spi::get_one_with_args(
+                "SELECT jsonb_build_object(
+                     'events', (SELECT count(*) FROM synchro.sync_wal_events WHERE commit_lsn = $1::pg_lsn),
+                     'projections', (SELECT count(*) FROM synchro.sync_captured_projections WHERE commit_lsn = $1::pg_lsn),
+                     'rows', (SELECT count(*) FROM synchro.sync_captured_rows WHERE source_commit_lsn = $1::pg_lsn),
+                     'effects', (SELECT count(*) FROM synchro.sync_changelog WHERE commit_lsn = $1::pg_lsn)
+                 )",
+                &[crate::stream_position::format_lsn(commit_lsn).as_str().into()],
+            )
+            .expect("read measured WAL results")
+            .expect("measured WAL results");
+            assert_eq!(
+                durable.0,
+                json!({"events": count, "projections": count, "rows": count, "effects": count}),
+            );
+            measurements.insert(count, queries);
+        }
+        let below_boundary = measurements[&10];
+        assert_eq!(measurements[&100], below_boundary);
+        // Two input pages must use at most twice the work of one complete page.
+        assert!(
+            measurements[&501] > below_boundary
+                && measurements[&501] <= 2 * below_boundary,
+            "WAL materialization query count grew beyond its JSONB batch boundary: {measurements:?}"
+        );
     }

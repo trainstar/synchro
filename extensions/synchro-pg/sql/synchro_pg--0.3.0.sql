@@ -1960,7 +1960,7 @@ AS 'MODULE_PATHNAME', 'synchro_build_fingerprint_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/compaction.rs:9
+-- synchro-pg/src/compaction.rs:54
 -- synchro_pg::compaction::synchro_compact
 CREATE  FUNCTION "synchro_compact"(
 	"p_stale_threshold" TEXT DEFAULT '30 days', /* core::option::Option<&str> */
@@ -2058,7 +2058,7 @@ AS 'MODULE_PATHNAME', 'synchro_health_detail_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/compaction.rs:37
+-- synchro-pg/src/compaction.rs:81
 -- synchro_pg::compaction::synchro_inject_client_retention_expiry
 CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
 	"p_user_id" TEXT, /* core::option::Option<&str> */
@@ -2130,7 +2130,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:183
+-- synchro-pg/src/registry.rs:273
 -- synchro_pg::registry::synchro_prepare_projection_view
 CREATE  FUNCTION "synchro_prepare_projection_view"(
 	"p_relation_name" TEXT, /* &str */
@@ -2249,7 +2249,7 @@ AS 'MODULE_PATHNAME', 'synchro_pull_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/push.rs:129
+-- synchro-pg/src/push.rs:132
 -- synchro_pg::push::synchro_push
 CREATE  FUNCTION "synchro_push"(
 	"p_user_id" TEXT, /* &str */
@@ -2282,7 +2282,7 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:653
+-- synchro-pg/src/registry.rs:743
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2295,7 +2295,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:929
+-- synchro-pg/src/registry.rs:1019
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2322,7 +2322,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:337
+-- synchro-pg/src/registry.rs:427
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2354,7 +2354,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:702
+-- synchro-pg/src/bgworker.rs:757
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2440,7 +2440,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:886
+-- synchro-pg/src/registry.rs:976
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */

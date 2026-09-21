@@ -105,7 +105,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-RETENTION-001-FAULT-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect", "TestRealIssue49RemainingSemantics"}},
 	{"SCN-RETENTION-RECONNECT-001", "OBL-RETENTION-RECONNECT-RETENTION-003-FAULT-LINUX-X64-001", []string{"TestRealS12StaleClientCompactionAndReconnect"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-PG-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
-	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", []string{"TestRealReleaseWALOrdinalGapsPreserveCommitOrder"}},
+	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-PG-LINUX-X64-001", []string{"TestRealReleaseWALOrdinalGapsPreserveCommitOrder", "TestRealWALFoldPreservesOrderedImages"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ORDER-FAULT-LINUX-X64-001", []string{"TestRealReleaseWALOrdinalGapsPreserveCommitOrder"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-NO-LOSS-FAULT-LINUX-X64-001", []string{"TestRealIssue49CompletePullVisibleWALRepresentation", "TestRealIssue49WALPoisonBlocksContiguousProgress"}},
 	{"SCN-WAL-ORDER-001", "OBL-WAL-ONLY-PUBLICATION-PG-LINUX-X64-001", []string{"TestRealIssue49WALIsTheOnlyAtomicPublicationPath"}},
