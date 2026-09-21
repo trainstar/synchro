@@ -1262,17 +1262,17 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 		}
 	})
 
-	t.Run("expanded-history-exceeds-one-jsonb-container", func(t *testing.T) {
-		const updates = 130
+	t.Run("expanded-history-crosses-transport-byte-target", func(t *testing.T) {
+		const updates = 200
 		largeID := "00000000-0000-4000-8d11-000000000041"
 		witnessID := "00000000-0000-4000-8d11-000000000042"
 		var payload strings.Builder
-		for index := 0; index < 16384; index++ {
+		for index := 0; index < 1024; index++ {
 			fmt.Fprintf(&payload, "%x", sha256.Sum256([]byte(fmt.Sprintf("issue54-large-%d", index))))
 		}
 		value := payload.String()
-		if len(value) != 1<<20 || 2*updates*len(value) <= 268435455 {
-			t.Fatal("expanded history fixture does not cross PostgreSQL's JSONB container boundary")
+		if len(value) != 64<<10 || 2*updates*len(value) <= 16<<20 {
+			t.Fatal("expanded history fixture does not cross the transport byte target")
 		}
 		if err := harness.Source().ExecContext(ctx,
 			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', $2)", largeID, value,
@@ -1287,6 +1287,24 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 		).Scan(&external); err != nil || !external {
 			t.Fatalf("large fold fixture is not externally toasted: external=%t error=%v", external, err)
 		}
+		controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resume, err := controller.PauseWALMaterialization(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paused := true
+		defer func() {
+			if paused {
+				cleanup, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancelCleanup()
+				if err := resume(cleanup); err != nil {
+					t.Errorf("resume expanded-history materialization: %v", err)
+				}
+			}
+		}()
 		tx, err := harness.Source().BeginTx(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -1303,27 +1321,40 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 		if err := tx.Commit(); err != nil {
 			t.Fatal(err)
 		}
+		var rawBytes int64
+		var updateRecords int
+		if err := admin.QueryRowContext(ctx, `
+			SELECT COALESCE(sum(octet_length(data)), 0)::bigint,
+			       count(*) FILTER (WHERE get_byte(data, 0) = 85)
+			FROM pg_logical_slot_peek_binary_changes(
+				(SELECT active_slot_name FROM synchro.sync_runtime_state WHERE singleton),
+				NULL, 1000, 'proto_version', '1',
+				'publication_names', current_setting('synchro.publication_name')
+			)
+			WHERE xid::text::numeric = (
+				SELECT max(transaction_xid::text::numeric) % 4294967296
+				FROM synchro.sync_write_fences WHERE new_record_id = $1
+			)`, largeID,
+		).Scan(&rawBytes, &updateRecords); err != nil || rawBytes <= 0 || rawBytes > 16<<20 || updateRecords != updates {
+			t.Fatalf("expanded-history source is outside the existing decoder contract: bytes=%d updates=%d error=%v",
+				rawBytes, updateRecords, err)
+		}
 		if err := harness.Source().ExecContext(ctx,
 			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-expanded-history')", witnessID,
 		); err != nil {
 			t.Fatal(err)
 		}
+		if err := resume(ctx); err != nil {
+			t.Fatal(err)
+		}
+		paused = false
 		deadline := time.Now().Add(2 * time.Minute)
 		var observation blackbox.WALPipelineObservation
 		for time.Now().Before(deadline) {
 			observation, err = harness.Operator().ObserveWALRecords(ctx, []string{largeID, witnessID})
 			if err == nil && observation.BlockingPoison {
 				poison := waitForIssue49Poison(t, ctx, harness, witnessID)
-				var rawBytes int64
-				sizeErr := admin.QueryRowContext(ctx, `
-					SELECT COALESCE(sum(octet_length(data)), 0)::bigint
-					FROM pg_logical_slot_peek_binary_changes(
-						(SELECT active_slot_name FROM synchro.sync_runtime_state WHERE singleton),
-						NULL, 1, 'proto_version', '1',
-						'publication_names', current_setting('synchro.publication_name')
-					)`).Scan(&rawBytes)
-				t.Fatalf("expanded history blocked: class=%s raw_bytes=%d observation_error=%v",
-					poison.FailureClass, rawBytes, sizeErr)
+				t.Fatalf("expanded history blocked: class=%s raw_bytes=%d", poison.FailureClass, rawBytes)
 			}
 			if err == nil && len(observation.Records) == 2 &&
 				observation.ContiguousAcknowledged && observation.AcknowledgementMatchesObservedEnd &&

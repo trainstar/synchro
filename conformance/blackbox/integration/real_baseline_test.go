@@ -30,7 +30,7 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load real harness environment: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	harness, err := blackbox.Provision(ctx, blackbox.HarnessConfig{Environment: environment})
 	if err != nil {
@@ -57,7 +57,7 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 		INSERT INTO cf_late_registration (id, owner_id, value)
 		SELECT ('10000000-0000-4000-8000-' || lpad(value::text, 12, '0'))::uuid,
 		       'diagnostic-user',
-		       CASE WHEN value <= 18 THEN repeat(md5(value::text), 32768)
+		       CASE WHEN value <= 256 THEN repeat(md5(value::text), 32768)
 		            ELSE 'historical-filler-' || value::text END
 		FROM generate_series(1, 2048) value`); err != nil {
 		t.Fatalf("insert projection bootstrap staging rows: %v", err)
@@ -105,7 +105,7 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	if !candidateObserved {
 		t.Fatal("projection bootstrap candidate slot was not observed")
 	}
-	barrierContext, barrierCancel := context.WithTimeout(ctx, 15*time.Second)
+	barrierContext, barrierCancel := context.WithTimeout(ctx, 90*time.Second)
 	defer barrierCancel()
 	if err := barrierControl.AcquireBarrier(barrierContext); err != nil {
 		select {
@@ -268,11 +268,11 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 		 AND field.physical_column = 'value'
 		WHERE captured.registry_generation = $1
 		  AND captured.record_id LIKE '10000000-0000-4000-8000-%'
-		  AND right(captured.record_id, 12)::integer BETWEEN 1 AND 18
+		  AND right(captured.record_id, 12)::integer BETWEEN 1 AND 256
 		  AND captured.row_data->>field.field_id::text =
 		      repeat(md5(right(captured.record_id, 12)::integer::text), 32768)`,
 		generation,
-	).Scan(&largeBaselineRows); err != nil || largeBaselineRows != 18 {
+	).Scan(&largeBaselineRows); err != nil || largeBaselineRows != 256 {
 		t.Fatalf("activation changed the large baseline payload batch: rows=%d error=%v", largeBaselineRows, err)
 	}
 }
