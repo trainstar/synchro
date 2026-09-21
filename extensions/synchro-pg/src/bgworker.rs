@@ -3151,8 +3151,8 @@ fn peek_and_decode(
     let staged_decoder = decoder.clone();
     let (staged_decoder, batch) = run_replication_transaction(worker_role_oid, move || {
         let mut staged_decoder = staged_decoder;
-        let cursor_name = Spi::connect(|client| {
-            client
+        Spi::connect(|client| {
+            let mut cursor = client
                 .try_open_cursor(
                     "SELECT lsn::text AS lsn, xid::text AS xid, data
                      FROM pg_catalog.pg_logical_slot_peek_binary_changes(
@@ -3163,24 +3163,26 @@ fn peek_and_decode(
                      )",
                     &[slot.into(), BATCH_SIZE.into(), publication.into()],
                 )
-                .map(|cursor| cursor.detach_into_name())
-                .map_err(|_| PeekDecodeError::Read)
-        })?;
-        let mut batch = PeekedTransactions {
-            message_count: 0,
-            transactions: Vec::new(),
-        };
-        let mut batch_bytes = 0usize;
+                .map_err(|_| PeekDecodeError::Read)?;
+            let mut batch = PeekedTransactions {
+                message_count: 0,
+                transactions: Vec::new(),
+            };
+            let mut batch_bytes = 0usize;
 
-        loop {
-            let continue_reading = Spi::connect(|client| {
-                let mut cursor = client
-                    .find_cursor(&cursor_name)
-                    .map_err(|_| PeekDecodeError::Read)?;
-                let (sql_xid, data_len, completed) = {
+            loop {
+                let (tuple_table, sql_xid, data_len, completed) = {
                     let rows = cursor.fetch(1).map_err(|_| PeekDecodeError::Read)?.first();
                     if rows.is_empty() {
-                        return Ok(false);
+                        return Ok((staged_decoder, batch));
+                    }
+                    let tuple_table = unsafe {
+                        // SAFETY: cursor.fetch created the active tuple table. No SPI call occurs
+                        // before this fetch-owned table is released on the continuing path.
+                        pg_sys::SPI_tuptable
+                    };
+                    if tuple_table.is_null() {
+                        return Err(PeekDecodeError::Read);
                     }
                     let lsn = rows
                         .get_by_name::<String, &str>("lsn")
@@ -3217,7 +3219,7 @@ fn peek_and_decode(
                                 pending_final_lsn: failure_context.map(|context| context.0),
                                 pending_commit_timestamp: failure_context.map(|context| context.1),
                             })?;
-                    (sql_xid, data_len, completed)
+                    (tuple_table, sql_xid, data_len, completed)
                 };
                 batch.message_count += 1;
                 batch_bytes = batch_bytes.saturating_add(data_len);
@@ -3231,17 +3233,16 @@ fn peek_and_decode(
                     batch.transactions.push(transaction);
                 }
                 if complete_batch {
-                    return Ok(false);
+                    return Ok((staged_decoder, batch));
                 }
-                cursor.detach_into_name();
-                Ok(true)
-            })?;
-            if !continue_reading {
-                break;
+                unsafe {
+                    // SAFETY: The lexical scope dropped the fetch-owned SpiTupleTable and all
+                    // views into its bytea. No SPI call changed this table pointer. PostgreSQL
+                    // SPI_freetuptable releases only this fetch table before the next fetch.
+                    pg_sys::SPI_freetuptable(tuple_table);
+                }
             }
-        }
-
-        Ok((staged_decoder, batch))
+        })
     })?;
     *decoder = staged_decoder;
     Ok(batch)
