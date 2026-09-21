@@ -2354,7 +2354,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:700
+-- synchro-pg/src/bgworker.rs:702
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT

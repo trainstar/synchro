@@ -130,18 +130,20 @@ var serverProofBindings = []serverProofBinding{
 }
 
 var nonScenarioRealTests = map[string]string{
-	"TestRealExtensionReinstallRebindsWorkerSlot":   "regression",
-	"TestRealHTTPHarness":                           "framework",
-	"TestRealMutationControlMutationConservation":   "adversarial",
-	"TestRealNativeCaptureServerObservationSignals": "regression",
-	"TestRealMutationControlProgressOrder":          "adversarial",
-	"TestRealMutationControlScopeIsolation":         "adversarial",
-	"TestRealMutationControlWALAcknowledgement":     "adversarial",
-	"TestRealR1PerformanceBenchmark":                "benchmark",
-	"TestRealS17InvalidPushShapesDoNoDurableWork":   "adversarial",
-	"TestRealS20PushMutationCountBoundsAreAtomic":   "adversarial",
-	"TestRealWALPipeline":                           "regression",
-	"TestRealWALObservationUsesOneSnapshot":         "framework",
+	"TestRealExtensionReinstallRebindsWorkerSlot":          "regression",
+	"TestRealHTTPHarness":                                  "framework",
+	"TestRealMutationControlMutationConservation":          "adversarial",
+	"TestRealNativeCaptureServerObservationSignals":        "regression",
+	"TestRealMutationControlProgressOrder":                 "adversarial",
+	"TestRealMutationControlScopeIsolation":                "adversarial",
+	"TestRealMutationControlWALAcknowledgement":            "adversarial",
+	"TestRealR1PerformanceBenchmark":                       "benchmark",
+	"TestRealS17InvalidPushShapesDoNoDurableWork":          "adversarial",
+	"TestRealS20PushMutationCountBoundsAreAtomic":          "adversarial",
+	"TestRealWALPipeline":                                  "regression",
+	"TestRealIssue50ActiveWALIntakeBounds":                 "regression",
+	"TestRealIssue50ValidTransactionsCrossSoftBatchTarget": "regression",
+	"TestRealWALObservationUsesOneSnapshot":                "framework",
 }
 
 func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {

@@ -17,7 +17,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1051,93 +1050,34 @@ func measureR1WorkerObservedRSS(
 		t.Fatalf("stage R1 worker RSS source transaction: %v", err)
 	}
 
-	type samplingResult struct {
-		peak int64
-		err  error
-	}
-	samplingContext, stopSampling := context.WithCancel(ctx)
-	ready := make(chan error, 1)
-	result := make(chan samplingResult, 1)
-	go func() {
-		first := true
-		var peak int64
-		for {
-			rss, rssErr := readR1ProcessRSSBytes(samplingContext, expectedPID)
-			if samplingContext.Err() != nil {
-				result <- samplingResult{peak: peak}
-				return
-			}
-			if rssErr != nil {
-				sampleErr := rssErr
-				if first {
-					ready <- sampleErr
-				}
-				result <- samplingResult{peak: peak, err: sampleErr}
-				return
-			}
-			if rss > peak {
-				peak = rss
-			}
-			if first {
-				ready <- nil
-				first = false
-			}
-			timer := time.NewTimer(time.Millisecond)
-			select {
-			case <-samplingContext.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				result <- samplingResult{peak: peak}
-				return
-			case <-timer.C:
-			}
-		}
-	}()
-	if err := <-ready; err != nil {
-		stopSampling()
-		<-result
+	_, stopSampling, err := startRealProcessRSSSampler(ctx, expectedPID, r1BenchmarkMaximumRSSBytes)
+	if err != nil {
 		t.Fatalf("start R1 WAL worker RSS sampling: %v", err)
 	}
+	samplingStopped := false
+	defer func() {
+		if !samplingStopped {
+			_, _ = stopSampling()
+		}
+	}()
 	if err := transaction.Commit(); err != nil {
-		stopSampling()
-		<-result
 		t.Fatalf("commit R1 worker RSS source transaction: %v", err)
 	}
 	committed = true
 	waitForR1WALRecordAdvance(t, ctx, harness, markerID, priorCount)
-	stopSampling()
-	observation := <-result
-	if observation.err != nil {
-		t.Fatalf("sample R1 WAL worker RSS: %v", observation.err)
+	peak, sampleErr := stopSampling()
+	samplingStopped = true
+	if sampleErr != nil {
+		t.Fatalf("sample R1 WAL worker RSS: %v", sampleErr)
 	}
 	currentPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
 	if err != nil || currentPID != expectedPID {
 		t.Fatal("R1 WAL worker process changed during RSS measurement")
 	}
-	if observation.peak <= 0 || observation.peak > r1BenchmarkMaximumRSSBytes {
+	if peak <= 0 || peak > r1BenchmarkMaximumRSSBytes {
 		t.Fatal("R1 WAL worker maximum observed RSS is invalid")
 	}
-	return observation.peak
-}
-
-func readR1ProcessRSSBytes(ctx context.Context, pid int) (int64, error) {
-	if ctx == nil || pid <= 0 {
-		return 0, fmt.Errorf("RSS process observation is invalid")
-	}
-	output, err := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return 0, fmt.Errorf("read process RSS: %w", err)
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) != 1 {
-		return 0, fmt.Errorf("process RSS output is invalid")
-	}
-	kibibytes, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil || kibibytes <= 0 || kibibytes > r1BenchmarkMaximumRSSBytes/1024 {
-		return 0, fmt.Errorf("process RSS value is invalid")
-	}
-	return kibibytes * 1024, nil
+	return peak
 }
 
 func r1ResponseObjects(t *testing.T, value any, name string) []map[string]any {

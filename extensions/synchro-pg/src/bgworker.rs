@@ -20,6 +20,7 @@ use crate::registry::{
 };
 use crate::wal_decoder::{
     ColumnInfo, RelationKey, TupleImage, TupleValue, WalDecoder, WalEvent, WalTransaction,
+    BEGIN_MSG, MAX_TRANSACTION_BYTES,
 };
 
 const BATCH_SIZE: i32 = 500;
@@ -30,6 +31,7 @@ const REGISTRY_PREFIX: &str = "synchro_registry";
 const FENCE_PREFIX: &str = "synchro_fence";
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const MAX_POISON_DETAIL_BYTES: usize = 512;
+const MAX_PEEK_BATCH_BYTES: usize = MAX_TRANSACTION_BYTES;
 const STARTUP_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const STARTUP_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -1896,30 +1898,25 @@ fn poll_candidate_and_process(
         return finalize_candidate(bootstrap);
     }
     let publication = publication_name();
-    let messages = run_replication_transaction(worker_role_oid, || {
-        peek_messages(&bootstrap.identity.slot_name, &publication)
-    })?;
-    if messages.is_empty() {
-        return Ok(());
-    }
-    let mut transactions = Vec::new();
-    for message in messages {
-        let completed = decoder
-            .feed(&message.data)
-            .map_err(|_| "decoding candidate WAL failed".to_string())?;
-        for transaction in &completed {
-            if message
-                .sql_xid
-                .is_some_and(|sql_xid| sql_xid != transaction.xid)
-            {
-                return Err("candidate WAL transaction identity is invalid".to_string());
-            }
+    let batch = peek_and_decode(
+        decoder,
+        &bootstrap.identity.slot_name,
+        &publication,
+        worker_role_oid,
+    )
+    .map_err(|error| match error {
+        PeekDecodeError::Read => "peeking candidate WAL failed".to_string(),
+        PeekDecodeError::Decode { .. } => "decoding candidate WAL failed".to_string(),
+        PeekDecodeError::Identity { .. } => {
+            "candidate WAL transaction identity is invalid".to_string()
         }
-        transactions.extend(completed);
+    })?;
+    if batch.message_count == 0 {
+        return Ok(());
     }
     let mut previous = None;
     let mut current = clone_candidate_bootstrap(bootstrap);
-    for transaction in transactions {
+    for transaction in batch.transactions {
         if previous.is_some_and(|commit_lsn| commit_lsn >= transaction.commit_lsn) {
             return Err("candidate WAL transaction order is invalid".to_string());
         }
@@ -3000,62 +2997,39 @@ fn poll_and_process(
 ) -> Result<usize, PollFailure> {
     validate_slot_boundary(slot, worker_role_oid)?;
     let publication = publication_name();
-    let messages =
-        run_replication_transaction(worker_role_oid, || peek_messages(slot, &publication))
-            .map_err(|_| PollFailure::Transient("peek"))?;
-    if messages.is_empty() {
+    let batch =
+        peek_and_decode(decoder, slot, &publication, worker_role_oid).map_err(
+            |error| match error {
+                PeekDecodeError::Read => PollFailure::Transient("peek"),
+                PeekDecodeError::Decode {
+                    lsn,
+                    pending_final_lsn,
+                    pending_commit_timestamp,
+                } => PollFailure::Poison(PoisonFailure {
+                    class: "decode_failed",
+                    detail: "WAL decoder rejected a replication message".to_string(),
+                    commit_lsn: pending_final_lsn.unwrap_or(lsn),
+                    relation_id: None,
+                    commit_timestamp: pending_commit_timestamp,
+                }),
+                PeekDecodeError::Identity { transaction } => PollFailure::Poison(PoisonFailure {
+                    class: "validation_failed",
+                    detail: "WAL transaction identifier did not match the decoded transaction"
+                        .to_string(),
+                    commit_lsn: transaction.commit_lsn,
+                    relation_id: infer_transaction_relation_id(&transaction),
+                    commit_timestamp: Some(transaction.commit_timestamp),
+                }),
+            },
+        )?;
+    if batch.message_count == 0 {
         record_oldest_unmaterialized_commit(decoder.pending_commit_timestamp(), worker_role_oid)
             .map_err(|_| PollFailure::Transient("lag_record"))?;
         return Ok(0);
     }
 
-    let message_count = messages.len();
-    let mut transactions = Vec::new();
-    let mut pending_final_lsn = None;
-    let mut pending_commit_timestamp = decoder.pending_commit_timestamp();
-    for message in messages {
-        if message.data.first() == Some(&crate::wal_decoder::BEGIN_MSG) && message.data.len() >= 17
-        {
-            pending_final_lsn = Some(u64::from_be_bytes(
-                message.data[1..9].try_into().unwrap_or([0; 8]),
-            ));
-            pending_commit_timestamp = Some(i64::from_be_bytes(
-                message.data[9..17].try_into().unwrap_or([0; 8]),
-            ));
-        }
-        match decoder.feed(&message.data) {
-            Ok(completed) => {
-                for transaction in &completed {
-                    if let Some(sql_xid) = message.sql_xid {
-                        if sql_xid != transaction.xid {
-                            return Err(PollFailure::Poison(PoisonFailure {
-                                class: "validation_failed",
-                                detail: "WAL transaction identifier did not match the decoded transaction"
-                                    .to_string(),
-                                commit_lsn: transaction.commit_lsn,
-                                relation_id: infer_transaction_relation_id(transaction),
-                                commit_timestamp: Some(transaction.commit_timestamp),
-                            }));
-                        }
-                    }
-                }
-                if !completed.is_empty() {
-                    pending_final_lsn = None;
-                    pending_commit_timestamp = decoder.pending_commit_timestamp();
-                }
-                transactions.extend(completed);
-            }
-            Err(_) => {
-                return Err(PollFailure::Poison(PoisonFailure {
-                    class: "decode_failed",
-                    detail: "WAL decoder rejected a replication message".to_string(),
-                    commit_lsn: pending_final_lsn.unwrap_or(message.lsn),
-                    relation_id: None,
-                    commit_timestamp: pending_commit_timestamp,
-                }));
-            }
-        }
-    }
+    let message_count = batch.message_count;
+    let transactions = batch.transactions;
 
     record_oldest_unmaterialized_commit(
         transactions
@@ -3151,46 +3125,127 @@ fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<()
     })
 }
 
-struct PeekedMessage {
-    lsn: u64,
-    sql_xid: Option<u32>,
-    data: Vec<u8>,
+struct PeekedTransactions {
+    message_count: usize,
+    transactions: Vec<WalTransaction>,
 }
 
-fn peek_messages(slot: &str, publication: &str) -> Result<Vec<PeekedMessage>, String> {
-    Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT lsn::text AS lsn, xid::text AS xid, data
-                 FROM pg_catalog.pg_logical_slot_peek_binary_changes(
-                     $1, NULL, $2,
-                     'proto_version', '1',
-                     'publication_names', $3,
-                     'messages', 'true'
-                 )",
-                None,
-                &[slot.into(), BATCH_SIZE.into(), publication.into()],
-            )
-            .map_err(|_| "peeking WAL failed".to_string())?;
-        let mut messages = Vec::new();
-        for row in rows {
-            let lsn = row
-                .get_by_name::<String, &str>("lsn")
-                .map_err(|_| "reading WAL position failed".to_string())?
-                .and_then(|value| parse_lsn(&value))
-                .ok_or_else(|| "WAL position is invalid".to_string())?;
-            let sql_xid = row
-                .get_by_name::<String, &str>("xid")
-                .map_err(|_| "reading WAL transaction failed".to_string())?
-                .and_then(|value| value.parse::<u32>().ok());
-            let data = row
-                .get_by_name::<Vec<u8>, &str>("data")
-                .map_err(|_| "reading WAL data failed".to_string())?
-                .ok_or_else(|| "WAL data is missing".to_string())?;
-            messages.push(PeekedMessage { lsn, sql_xid, data });
-        }
-        Ok(messages)
-    })
+enum PeekDecodeError {
+    Read,
+    Decode {
+        lsn: u64,
+        pending_final_lsn: Option<u64>,
+        pending_commit_timestamp: Option<i64>,
+    },
+    Identity {
+        transaction: Box<WalTransaction>,
+    },
+}
+
+fn peek_and_decode(
+    decoder: &mut WalDecoder,
+    slot: &str,
+    publication: &str,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<PeekedTransactions, PeekDecodeError> {
+    let staged_decoder = decoder.clone();
+    let (staged_decoder, batch) = run_replication_transaction(worker_role_oid, move || {
+        let mut staged_decoder = staged_decoder;
+        Spi::connect(|client| {
+            let mut cursor = client
+                .try_open_cursor(
+                    "SELECT lsn::text AS lsn, xid::text AS xid, data
+                     FROM pg_catalog.pg_logical_slot_peek_binary_changes(
+                         $1, NULL, $2,
+                         'proto_version', '1',
+                         'publication_names', $3,
+                         'messages', 'true'
+                     )",
+                    &[slot.into(), BATCH_SIZE.into(), publication.into()],
+                )
+                .map_err(|_| PeekDecodeError::Read)?;
+            let mut batch = PeekedTransactions {
+                message_count: 0,
+                transactions: Vec::new(),
+            };
+            let mut batch_bytes = 0usize;
+
+            loop {
+                let (tuple_table, sql_xid, data_len, completed) = {
+                    let rows = cursor.fetch(1).map_err(|_| PeekDecodeError::Read)?.first();
+                    if rows.is_empty() {
+                        return Ok((staged_decoder, batch));
+                    }
+                    let tuple_table = unsafe {
+                        // SAFETY: cursor.fetch created the active tuple table. No SPI call occurs
+                        // before this fetch-owned table is released on the continuing path.
+                        pg_sys::SPI_tuptable
+                    };
+                    if tuple_table.is_null() {
+                        return Err(PeekDecodeError::Read);
+                    }
+                    let lsn = rows
+                        .get_by_name::<String, &str>("lsn")
+                        .map_err(|_| PeekDecodeError::Read)?
+                        .and_then(|value| parse_lsn(&value))
+                        .ok_or(PeekDecodeError::Read)?;
+                    let sql_xid = rows
+                        .get_by_name::<String, &str>("xid")
+                        .map_err(|_| PeekDecodeError::Read)?
+                        .and_then(|value| value.parse::<u32>().ok());
+                    let datum = rows
+                        .get_datum_by_name("data")
+                        .map_err(|_| PeekDecodeError::Read)?
+                        .ok_or(PeekDecodeError::Read)?;
+                    // The fixed query returns bytea. This borrow cannot escape its SPI session.
+                    let data = unsafe {
+                        <&[u8] as FromDatum>::from_polymorphic_datum(datum, false, pg_sys::BYTEAOID)
+                    }
+                    .ok_or(PeekDecodeError::Read)?;
+                    let failure_context = if data.first() == Some(&BEGIN_MSG) && data.len() >= 17 {
+                        Some((
+                            u64::from_be_bytes(data[1..9].try_into().unwrap_or([0; 8])),
+                            i64::from_be_bytes(data[9..17].try_into().unwrap_or([0; 8])),
+                        ))
+                    } else {
+                        staged_decoder.pending_failure_context()
+                    };
+                    let data_len = data.len();
+                    let completed =
+                        staged_decoder
+                            .feed(data)
+                            .map_err(|_| PeekDecodeError::Decode {
+                                lsn,
+                                pending_final_lsn: failure_context.map(|context| context.0),
+                                pending_commit_timestamp: failure_context.map(|context| context.1),
+                            })?;
+                    (tuple_table, sql_xid, data_len, completed)
+                };
+                batch.message_count += 1;
+                batch_bytes = batch_bytes.saturating_add(data_len);
+                let complete_batch = !completed.is_empty() && batch_bytes >= MAX_PEEK_BATCH_BYTES;
+                for transaction in completed {
+                    if sql_xid.is_some_and(|xid| xid != transaction.xid) {
+                        return Err(PeekDecodeError::Identity {
+                            transaction: Box::new(transaction),
+                        });
+                    }
+                    batch.transactions.push(transaction);
+                }
+                if complete_batch {
+                    return Ok((staged_decoder, batch));
+                }
+                unsafe {
+                    // SAFETY: The lexical scope dropped the fetch-owned SpiTupleTable and all
+                    // views into its bytea. No SPI call changed this table pointer. PostgreSQL
+                    // SPI_freetuptable releases only this fetch table before the next fetch.
+                    pg_sys::SPI_freetuptable(tuple_table);
+                }
+            }
+        })
+    })?;
+    *decoder = staged_decoder;
+    Ok(batch)
 }
 
 fn materialize_one(transaction: &WalTransaction) -> Result<MaterializedTransaction, PoisonFailure> {
