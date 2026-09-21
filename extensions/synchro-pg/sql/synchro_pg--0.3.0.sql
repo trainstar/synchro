@@ -1896,7 +1896,7 @@ $$;
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:597
+-- synchro-pg/src/stream_reset.rs:595
 -- synchro_pg::stream_reset::synchro_abort_projection_bootstrap
 CREATE  FUNCTION "synchro_abort_projection_bootstrap"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1907,7 +1907,7 @@ AS 'MODULE_PATHNAME', 'synchro_abort_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:229
+-- synchro-pg/src/stream_reset.rs:227
 -- synchro_pg::stream_reset::synchro_abort_stream_reset
 CREATE  FUNCTION "synchro_abort_stream_reset"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1918,7 +1918,7 @@ AS 'MODULE_PATHNAME', 'synchro_abort_stream_reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:328
+-- synchro-pg/src/stream_reset.rs:326
 -- synchro_pg::stream_reset::synchro_activate_projection_bootstrap
 CREATE  FUNCTION "synchro_activate_projection_bootstrap"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1929,7 +1929,7 @@ AS 'MODULE_PATHNAME', 'synchro_activate_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:214
+-- synchro-pg/src/stream_reset.rs:212
 -- synchro_pg::stream_reset::synchro_activate_stream_reset
 CREATE  FUNCTION "synchro_activate_stream_reset"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1971,7 +1971,7 @@ AS 'MODULE_PATHNAME', 'synchro_compact_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:606
+-- synchro-pg/src/stream_reset.rs:604
 -- synchro_pg::stream_reset::synchro_complete_projection_bootstrap_cleanup
 CREATE  FUNCTION "synchro_complete_projection_bootstrap_cleanup"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -1982,7 +1982,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_projection_bootstrap_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:239
+-- synchro-pg/src/stream_reset.rs:237
 -- synchro_pg::stream_reset::synchro_complete_stream_reset_cleanup
 CREATE  FUNCTION "synchro_complete_stream_reset_cleanup"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2026,7 +2026,7 @@ AS 'MODULE_PATHNAME', 'synchro_debug_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:304
+-- synchro-pg/src/stream_reset.rs:302
 -- synchro_pg::stream_reset::synchro_emit_projection_bootstrap_barrier
 CREATE  FUNCTION "synchro_emit_projection_bootstrap_barrier"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2069,7 +2069,7 @@ AS 'MODULE_PATHNAME', 'synchro_inject_client_retention_expiry_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:153
+-- synchro-pg/src/stream_reset.rs:151
 -- synchro_pg::stream_reset::synchro_lock_stream_reset_sources
 CREATE  FUNCTION "synchro_lock_stream_reset_sources"(
 	"reset_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2080,7 +2080,7 @@ AS 'MODULE_PATHNAME', 'synchro_lock_stream_reset_sources_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:165
+-- synchro-pg/src/stream_reset.rs:163
 -- synchro_pg::stream_reset::synchro_mark_stream_reset_snapshot
 CREATE  FUNCTION "synchro_mark_stream_reset_snapshot"(
 	"reset_id" uuid, /* pgrx::datum::uuid::Uuid */
@@ -2118,7 +2118,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:249
+-- synchro-pg/src/stream_reset.rs:247
 -- synchro_pg::stream_reset::synchro_prepare_projection_bootstrap
 CREATE  FUNCTION "synchro_prepare_projection_bootstrap"(
 	"registry_generation" bigint, /* i64 */
@@ -2143,7 +2143,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_view_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:144
+-- synchro-pg/src/stream_reset.rs:142
 -- synchro_pg::stream_reset::synchro_prepare_stream_reset
 CREATE  FUNCTION "synchro_prepare_stream_reset"(
 	"candidate_slot_name" TEXT /* &str */
@@ -2154,7 +2154,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_stream_reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:342
+-- synchro-pg/src/stream_reset.rs:340
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_active_stream
 CREATE  FUNCTION "synchro_projection_bootstrap_active_stream"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT STABLE
@@ -2163,7 +2163,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_active_stream_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:514
+-- synchro-pg/src/stream_reset.rs:512
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_interrupted
 CREATE  FUNCTION "synchro_projection_bootstrap_interrupted"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT STABLE
@@ -2172,7 +2172,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_interrupted_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:492
+-- synchro-pg/src/stream_reset.rs:490
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_is_activated
 CREATE  FUNCTION "synchro_projection_bootstrap_is_activated"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2183,7 +2183,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_is_activated_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:367
+-- synchro-pg/src/stream_reset.rs:365
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_main_boundary
 CREATE  FUNCTION "synchro_projection_bootstrap_main_boundary"(
 	"stream_generation" TEXT, /* &str */
@@ -2195,7 +2195,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_main_boundary_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:459
+-- synchro-pg/src/stream_reset.rs:457
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_next_aborted_slot
 CREATE  FUNCTION "synchro_projection_bootstrap_next_aborted_slot"() RETURNS TEXT /* core::option::Option<alloc::string::String> */
 STRICT STABLE
@@ -2204,7 +2204,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_next_aborted_slot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:394
+-- synchro-pg/src/stream_reset.rs:392
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_slot_absent
 CREATE  FUNCTION "synchro_projection_bootstrap_slot_absent"(
 	"candidate_slot_name" TEXT /* &str */
@@ -2215,7 +2215,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_slot_absent_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:419
+-- synchro-pg/src/stream_reset.rs:417
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_slot_drop_state
 CREATE  FUNCTION "synchro_projection_bootstrap_slot_drop_state"(
 	"candidate_slot_name" TEXT /* &str */
@@ -2226,7 +2226,7 @@ AS 'MODULE_PATHNAME', 'synchro_projection_bootstrap_slot_drop_state_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:569
+-- synchro-pg/src/stream_reset.rs:567
 -- synchro_pg::stream_reset::synchro_projection_bootstrap_status
 CREATE  FUNCTION "synchro_projection_bootstrap_status"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2343,7 +2343,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:316
+-- synchro-pg/src/stream_reset.rs:314
 -- synchro_pg::stream_reset::synchro_request_projection_bootstrap_barrier
 CREATE  FUNCTION "synchro_request_projection_bootstrap_barrier"(
 	"bootstrap_id" uuid /* pgrx::datum::uuid::Uuid */
@@ -2384,7 +2384,7 @@ AS 'MODULE_PATHNAME', 'synchro_schema_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:265
+-- synchro-pg/src/stream_reset.rs:263
 -- synchro_pg::stream_reset::synchro_stage_projection_bootstrap
 CREATE  FUNCTION "synchro_stage_projection_bootstrap"(
 	"bootstrap_id" uuid, /* pgrx::datum::uuid::Uuid */
@@ -2402,7 +2402,7 @@ AS 'MODULE_PATHNAME', 'synchro_stage_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/stream_reset.rs:174
+-- synchro-pg/src/stream_reset.rs:172
 -- synchro_pg::stream_reset::synchro_stage_stream_reset
 CREATE  FUNCTION "synchro_stage_stream_reset"(
 	"reset_id" uuid, /* pgrx::datum::uuid::Uuid */
