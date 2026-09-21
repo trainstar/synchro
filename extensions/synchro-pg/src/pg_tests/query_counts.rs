@@ -75,7 +75,7 @@
     fn query_measurement_observes_database_execution() {
         Spi::run(
             "CREATE FUNCTION pg_temp.query_count_probe() RETURNS integer
-             LANGUAGE SQL VOLATILE AS 'SELECT 42'",
+             LANGUAGE SQL VOLATILE SET search_path = pg_catalog AS 'SELECT 42'",
         )
         .expect("create query measurement control");
         let (value, outer) = query_counts::measure(0, || {

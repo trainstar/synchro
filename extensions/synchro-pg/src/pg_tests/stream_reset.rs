@@ -432,10 +432,9 @@
             })
             .expect("abort measured reset");
         }
-        pgrx::warning!(
-            "reset staging SPI queries: 10 rows={}, 100 rows={}",
-            measurements[0],
-            measurements[1]
+        assert_eq!(
+            measurements[0], measurements[1],
+            "reset staging SPI queries must depend on batches, not rows"
         );
     }
 
