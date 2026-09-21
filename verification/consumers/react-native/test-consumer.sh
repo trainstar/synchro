@@ -78,7 +78,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-npx --yes @react-native-community/cli@20.0.0 init SynchroConsumer \
+cli_version=20.2.0
+npx --yes "@react-native-community/cli@$cli_version" init SynchroConsumer \
   --version 0.83.10 \
   --directory "$work_dir/app" \
   --pm npm \
@@ -120,6 +121,11 @@ if [ "$mode" = "smoke" ]; then
 fi
 (
   cd "$work_dir/app"
+  # Keep consumer tooling aligned instead of retaining the template's older CLI pins.
+  npm pkg set \
+    "devDependencies.@react-native-community/cli=$cli_version" \
+    "devDependencies.@react-native-community/cli-platform-android=$cli_version" \
+    "devDependencies.@react-native-community/cli-platform-ios=$cli_version"
   if [ "$resolution" = "public" ]; then
     npm install --ignore-scripts --save-exact "@trainstar/synchro-react-native@$version"
   else
