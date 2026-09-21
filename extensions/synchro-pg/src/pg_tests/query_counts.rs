@@ -11,27 +11,6 @@
             static PRIOR_END: Cell<pg_sys::ExecutorEnd_hook_type> = const { Cell::new(None) };
         }
 
-        #[pg_test]
-        fn query_measurement_observes_database_execution() {
-            Spi::run(
-                "CREATE FUNCTION pg_temp.query_count_probe() RETURNS integer
-                 LANGUAGE SQL VOLATILE AS 'SELECT 42'",
-            )
-            .expect("create query measurement control");
-            let (value, outer) = query_counts::measure(0, || {
-                Spi::get_one::<i32>("SELECT pg_temp.query_count_probe()")
-            });
-            assert_eq!(value.expect("execute query control"), Some(42));
-            assert_eq!(outer, 1);
-            let (_, inner) = query_counts::measure(1, || {
-                Spi::get_one::<i32>("SELECT pg_temp.query_count_probe()")
-                    .expect("execute nested query control")
-            });
-            assert_eq!(inner, 1);
-            let (_, empty) = query_counts::measure(0, || ());
-            assert_eq!(empty, 0);
-        }
-
         struct Hooks {
             start: pg_sys::ExecutorStart_hook_type,
             end: pg_sys::ExecutorEnd_hook_type,
@@ -90,4 +69,25 @@
             drop(hooks);
             (result, count)
         }
+    }
+
+    #[pg_test]
+    fn query_measurement_observes_database_execution() {
+        Spi::run(
+            "CREATE FUNCTION pg_temp.query_count_probe() RETURNS integer
+             LANGUAGE SQL VOLATILE AS 'SELECT 42'",
+        )
+        .expect("create query measurement control");
+        let (value, outer) = query_counts::measure(0, || {
+            Spi::get_one::<i32>("SELECT pg_temp.query_count_probe()")
+        });
+        assert_eq!(value.expect("execute query control"), Some(42));
+        assert_eq!(outer, 1);
+        let (_, inner) = query_counts::measure(1, || {
+            Spi::get_one::<i32>("SELECT pg_temp.query_count_probe()")
+                .expect("execute nested query control")
+        });
+        assert_eq!(inner, 1);
+        let (_, empty) = query_counts::measure(0, || ());
+        assert_eq!(empty, 0);
     }
