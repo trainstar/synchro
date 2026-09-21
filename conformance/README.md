@@ -44,6 +44,13 @@ Those checks follow the native bindings. A warm synchronization call can pull wi
 
 Run the complete corpora with `make test-rn-scenarios-ios` and `make test-rn-scenarios-android`.
 
+The example and isolated consumers pin the same Community CLI version.
+The consumer script replaces older template CLI pins before dependency installation.
+
+Detox 20.47.0 uses `stream-json/jsonl/Parser`, and bunyamin 1.6.3 uses `StreamArray.withParser`.
+Neither path uses the filters affected by [GHSA-528h-pc64-c93x](https://github.com/advisories/GHSA-528h-pc64-c93x).
+Recheck these call paths when updating either tool. [Issue #86](https://github.com/trainstar/synchro/issues/86) records the dependency evidence.
+
 The example harness displays raw JSON responses without wrapping in a horizontal scroll view.
 Wrapping a large paragraph can retain many full-text copies in Android's native line-layout cache.
 Only completed commands expose the response view.
