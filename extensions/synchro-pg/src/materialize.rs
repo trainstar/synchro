@@ -1,8 +1,10 @@
 use pgrx::prelude::*;
 use pgrx::spi::SpiClient;
-use synchro_core::checksum::SchemaHash;
 
-use crate::pull::{canonicalize_synced_row_data, synced_row_digest, typed_primary_key_bytes};
+use crate::pull::{
+    canonicalize_synced_row_data, synced_row_digest, synced_row_digest_with_schema_hash,
+    typed_primary_key_bytes,
+};
 use crate::registry::{
     load_registry_from_client, load_registry_generation_for_activation,
     load_registry_generation_from_client, TableRegistration,
@@ -1040,28 +1042,6 @@ fn stage_table_edges(
     }
 
     Ok((record_count, edge_count, batch_count))
-}
-
-fn synced_row_digest_with_schema_hash(
-    table: &TableRegistration,
-    data: &serde_json::Value,
-    record_id: &str,
-    server_version: &str,
-    schema_hash: SchemaHash,
-) -> Result<synchro_core::checksum::Sha256Digest, String> {
-    let mut canonical = data.clone();
-    canonicalize_synced_row_data(table, &mut canonical)?;
-    let canonical_table = crate::pull::canonical_table(table)?;
-    let primary_key = crate::pull::row_primary_key_json(table, record_id)?;
-    let row = synchro_core::checksum::CanonicalRow::from_json(
-        serde_json::to_string(&primary_key)
-            .map_err(|error| format!("encoding primary key: {error}"))?,
-        &serde_json::to_string(&canonical)
-            .map_err(|error| format!("encoding wire row: {error}"))?,
-    )
-    .map_err(|error| format!("canonical row is invalid: {error}"))?;
-    synchro_core::checksum::row_digest(schema_hash, &canonical_table, &row, server_version)
-        .map_err(|error| format!("computing row digest: {error}"))
 }
 
 fn lower_hex(bytes: &[u8]) -> String {

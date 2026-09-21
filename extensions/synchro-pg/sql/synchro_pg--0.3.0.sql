@@ -1940,7 +1940,7 @@ AS 'MODULE_PATHNAME', 'synchro_activate_stream_reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/materialize.rs:47
+-- synchro-pg/src/materialize.rs:49
 -- synchro_pg::materialize::synchro_backfill_bucket_edges
 CREATE  FUNCTION "synchro_backfill_bucket_edges"(
 	"p_table_name" TEXT DEFAULT NULL, /* core::option::Option<&str> */
