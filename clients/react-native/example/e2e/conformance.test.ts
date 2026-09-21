@@ -99,6 +99,7 @@ describe('React Native conformance host', () => {
 
   it('emits the strict error envelope for an invalid command', async () => {
     await expect(element(by.id('conformance-harness'))).toBeVisible();
+    await expect(element(by.id('conformance-result'))).not.toExist();
     await element(by.id('conformance-command-input')).replaceText('{');
     await element(by.id('btn-conformance-execute')).tap();
     await waitFor(element(by.id('conformance-command-state')))
@@ -120,6 +121,11 @@ describe('React Native conformance host', () => {
     ) {
       throw new Error(`strict error envelope is invalid: ${raw}`);
     }
+    await element(by.id('conformance-command-input')).replaceText('');
+    await waitFor(element(by.id('conformance-command-state')))
+      .toHaveText('idle')
+      .withTimeout(5000);
+    await expect(element(by.id('conformance-result'))).not.toExist();
   });
 
   it('rejects create mode when the database survives a process relaunch', async () => {

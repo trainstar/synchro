@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -159,15 +160,19 @@ export function ConformanceHarness({
       >
         {state}
       </Text>
-      <Text
-        accessibilityLabel="Conformance command response"
-        accessibilityLiveRegion="polite"
-        selectable
-        style={styles.result}
-        testID="conformance-result"
-      >
-        {resultText}
-      </Text>
+      {/* New responses must not reuse a narrow placeholder text layout. */}
+      {(state === 'ok' || state === 'error') && (
+        <ScrollView horizontal style={styles.result}>
+          <Text
+            accessibilityLabel="Conformance command response"
+            accessibilityLiveRegion="polite"
+            selectable
+            testID="conformance-result"
+          >
+            {resultText}
+          </Text>
+        </ScrollView>
+      )}
     </View>
   );
 }
