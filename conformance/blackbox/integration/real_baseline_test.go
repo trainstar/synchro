@@ -121,6 +121,17 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert candidate catch-up row: %v", err)
 	}
+	// Each transaction fits the decoder limit, but together they cross the poll target.
+	for index := 0; index < 4; index++ {
+		if err := harness.Source().ExecContext(ctx, `
+			SELECT pg_catalog.pg_logical_emit_message(
+				true,
+				'synchro_conformance_candidate_batch',
+				repeat(md5($1::integer::text), 262144)::bytea
+			)`, index); err != nil {
+			t.Fatalf("emit candidate catch-up transaction %d: %v", index+1, err)
+		}
+	}
 	if err := barrierControl.ReleaseBarrier(); err != nil {
 		t.Fatalf("release projection bootstrap barrier: %v", err)
 	}
