@@ -122,8 +122,9 @@ func TestRealClass3ProjectionBootstrap(t *testing.T) {
 		t.Fatalf("insert candidate catch-up row: %v", err)
 	}
 	// Each transaction fits the decoder limit, but together they cross the poll target.
+	admin := openIssue49Admin(t, ctx, harness)
 	for index := 0; index < 4; index++ {
-		if err := harness.Source().ExecContext(ctx, `
+		if _, err := admin.ExecContext(ctx, `
 			SELECT pg_catalog.pg_logical_emit_message(
 				true,
 				'synchro_conformance_candidate_batch',
