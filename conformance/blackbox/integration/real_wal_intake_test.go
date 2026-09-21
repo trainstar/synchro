@@ -122,77 +122,27 @@ func TestRealIssue50ActiveWALIntakeBounds(t *testing.T) {
 			if err != nil {
 				t.Fatalf("observe Issue 50 WAL worker: %v", err)
 			}
-			baselineRSS, err := readRealProcessRSSBytes(ctx, workerPID)
+			baselineRSS, stopSampling, err := startRealProcessRSSSampler(ctx, workerPID, 0)
 			if err != nil {
-				t.Fatalf("read Issue 50 baseline worker RSS: %v", err)
+				t.Fatalf("start Issue 50 WAL worker RSS sampling: %v", err)
 			}
-			samplingContext, stopSampling := context.WithCancel(ctx)
-			type samplingResult struct {
-				peak int64
-				err  error
-			}
-			samplingReady := make(chan error, 1)
-			samplingResults := make(chan samplingResult, 1)
-			go func() {
-				peak := baselineRSS
-				first := true
-				for {
-					rss, sampleErr := readRealProcessRSSBytes(samplingContext, workerPID)
-					if samplingContext.Err() != nil {
-						samplingResults <- samplingResult{peak: peak}
-						return
-					}
-					if sampleErr != nil {
-						if first {
-							samplingReady <- sampleErr
-						}
-						samplingResults <- samplingResult{peak: peak, err: sampleErr}
-						return
-					}
-					if rss > peak {
-						peak = rss
-					}
-					if first {
-						samplingReady <- nil
-						first = false
-					}
-					timer := time.NewTimer(time.Millisecond)
-					select {
-					case <-samplingContext.Done():
-						if !timer.Stop() {
-							<-timer.C
-						}
-						samplingResults <- samplingResult{peak: peak}
-						return
-					case <-timer.C:
-					}
-				}
-			}()
 			samplingStopped := false
 			defer func() {
 				if samplingStopped {
 					return
 				}
-				stopSampling()
-				<-samplingResults
+				_, _ = stopSampling()
 			}()
-			if err := <-samplingReady; err != nil {
-				stopSampling()
-				<-samplingResults
-				samplingStopped = true
-				t.Fatalf("start Issue 50 WAL worker RSS sampling: %v", err)
-			}
 
 			if err := resumeWAL(ctx); err != nil {
 				t.Fatalf("resume Issue 50 WAL materialization: %v", err)
 			}
 			walPaused = false
 			poison := waitForIssue49Poison(t, ctx, harness, witnessID)
-			stopSampling()
-			sample := <-samplingResults
+			peakRSS, sampleErr := stopSampling()
 			samplingStopped = true
-			if sample.err != nil || sample.peak <= 0 {
-				t.Fatalf("sample Issue 50 WAL worker RSS: peak=%d err=%v", sample.peak, sample.err)
+			if sampleErr != nil || peakRSS <= 0 {
+				t.Fatalf("sample Issue 50 WAL worker RSS: peak=%d err=%v", peakRSS, sampleErr)
 			}
 
 			blockedAcknowledgement := observeIssue49BlockedAcknowledgement(t, ctx, admin, poison.CommitLSN)
@@ -215,7 +165,11 @@ func TestRealIssue50ActiveWALIntakeBounds(t *testing.T) {
 				t.Fatalf("observe Issue 50 blocked WAL worker: %v", err)
 			}
 			payloadBytes := int64(workload.rows * issue50TextValueBytes)
-			t.Logf("Issue 50 source_payload_bytes=%d worker_rss_baseline_bytes=%d worker_rss_peak_bytes=%d", payloadBytes, baselineRSS, sample.peak)
+			t.Logf("Issue 50 source_payload_bytes=%d worker_rss_baseline_bytes=%d worker_rss_peak_bytes=%d", payloadBytes, baselineRSS, peakRSS)
+			// Detect retaining even one full raw transaction before the existing decoder limit.
+			if workload.rows == 4096 && peakRSS-baselineRSS >= payloadBytes {
+				t.Fatalf("Issue 50 intake retained source-sized memory: growth=%d payload=%d", peakRSS-baselineRSS, payloadBytes)
+			}
 
 			if poison.FailureClass != "decode_failed" || poison.CommitLSN == "" ||
 				!poison.AcknowledgementBlocked || poison.LaterRecordMaterialized || !poison.LaterFencePending ||

@@ -3012,17 +3012,13 @@ fn poll_and_process(
                     relation_id: None,
                     commit_timestamp: pending_commit_timestamp,
                 }),
-                PeekDecodeError::Identity {
-                    commit_lsn,
-                    relation_id,
-                    commit_timestamp,
-                } => PollFailure::Poison(PoisonFailure {
+                PeekDecodeError::Identity { transaction } => PollFailure::Poison(PoisonFailure {
                     class: "validation_failed",
                     detail: "WAL transaction identifier did not match the decoded transaction"
                         .to_string(),
-                    commit_lsn,
-                    relation_id,
-                    commit_timestamp: Some(commit_timestamp),
+                    commit_lsn: transaction.commit_lsn,
+                    relation_id: infer_transaction_relation_id(&transaction),
+                    commit_timestamp: Some(transaction.commit_timestamp),
                 }),
             },
         )?;
@@ -3142,9 +3138,7 @@ enum PeekDecodeError {
         pending_commit_timestamp: Option<i64>,
     },
     Identity {
-        commit_lsn: u64,
-        relation_id: Option<String>,
-        commit_timestamp: i64,
+        transaction: Box<WalTransaction>,
     },
 }
 
@@ -3227,17 +3221,15 @@ fn peek_and_decode(
                 };
                 batch.message_count += 1;
                 batch_bytes = batch_bytes.saturating_add(data_len);
-                for transaction in &completed {
+                let complete_batch = !completed.is_empty() && batch_bytes >= MAX_PEEK_BATCH_BYTES;
+                for transaction in completed {
                     if sql_xid.is_some_and(|xid| xid != transaction.xid) {
                         return Err(PeekDecodeError::Identity {
-                            commit_lsn: transaction.commit_lsn,
-                            relation_id: infer_transaction_relation_id(transaction),
-                            commit_timestamp: transaction.commit_timestamp,
+                            transaction: Box::new(transaction),
                         });
                     }
+                    batch.transactions.push(transaction);
                 }
-                let complete_batch = !completed.is_empty() && batch_bytes >= MAX_PEEK_BATCH_BYTES;
-                batch.transactions.extend(completed);
                 if complete_batch {
                     return Ok(false);
                 }
