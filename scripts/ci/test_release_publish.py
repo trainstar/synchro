@@ -16,6 +16,8 @@ import unittest
 import urllib.parse
 import zipfile
 from datetime import datetime, timezone
+from email import policy
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -413,6 +415,7 @@ class PublicationStateTests(unittest.TestCase):
                                 uploads.append((
                                     query,
                                     self.rfile.read(int(self.headers["Content-Length"])),
+                                    self.headers["Content-Type"],
                                 ))
                                 self.respond(b"new")
                             elif parsed.path == "/status" and query.get("id") in (["old"], ["new"]):
@@ -477,7 +480,13 @@ class PublicationStateTests(unittest.TestCase):
                     self.assertEqual(len(uploads), int(uploaded))
                     if uploaded:
                         self.assertEqual(uploads[0][0], {"name": [name], "publishingType": ["USER_MANAGED"]})
-                        self.assertIn(bundle, uploads[0][1])
+                        message = BytesParser(policy=policy.default).parsebytes(
+                            f"Content-Type: {uploads[0][2]}\r\n\r\n".encode() + uploads[0][1]
+                        )
+                        parts = list(message.iter_parts())
+                        self.assertEqual(len(parts), 1)
+                        self.assertEqual(parts[0].get_param("name", header="Content-Disposition"), "bundle")
+                        self.assertEqual(parts[0].get_payload(decode=True), bundle)
                     operation = json.loads((runner / "maven-operation.json").read_text(encoding="utf-8"))
                     self.assertEqual(operation["bundle_sha256"], hashlib.sha256(bundle).hexdigest())
                     self.assertEqual(operation["deployment_name"], name)
