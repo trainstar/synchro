@@ -1,5 +1,6 @@
 import XCTest
 import GRDB
+import os
 @testable import Synchro
 
 final class PushProcessorTests: XCTestCase {
@@ -227,7 +228,17 @@ final class PushProcessorTests: XCTestCase {
     }
 
     func testPushRetryRejectsHistoricalSchemaConflictAfterResponseLoss() async throws {
-        let (db, _, processor) = try makeTestEnv()
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("synchro_history_\(UUID().uuidString).sqlite")
+        let db = try SynchroDatabase(path: path)
+        let tables = [testTable, customTable]
+        try SchemaManager(database: db).createSyncedTables(schema: SchemaResponse(
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            serverTime: Date(),
+            tables: tables
+        ))
+        let processor = PushProcessor(database: db, changeTracker: ChangeTracker(database: db))
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
             params: [
@@ -235,6 +246,25 @@ final class PushProcessorTests: XCTestCase {
                 "w2", "Second", "u1", "2026-01-01T10:00:00.000Z",
             ]
         )
+        _ = try db.execute(
+            "INSERT INTO custom_items (item_id, title, modified_at) VALUES (?, ?, ?)",
+            params: ["other-row", "Other table", "2026-01-01T10:00:00.000Z"]
+        )
+        let historyReads = OSAllocatedUnfairLock(initialState: [String]())
+        try db.dbPool.writeWithoutTransaction { connection in
+            connection.trace { event in
+                guard case let .statement(statement) = event else { return }
+                let sql = statement.sql
+                if sql.hasPrefix("SELECT request_json, schema_json FROM _synchro_push_batches")
+                    || sql.hasPrefix("SELECT schema_json FROM _synchro_schema_archive") {
+                    historyReads.withLock { $0.append(sql) }
+                }
+            }
+        }
+        defer {
+            try? db.dbPool.writeWithoutTransaction { $0.trace(nil) }
+            try? db.close()
+        }
 
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [MockURLProtocol.self]
@@ -252,24 +282,39 @@ final class PushProcessorTests: XCTestCase {
         )
         let httpClient = HttpClient(config: config, session: session)
         var requestCount = 0
-        MockURLProtocol.requestHandler = { _ in
+        var requestBodies: [Data] = []
+        MockURLProtocol.requestHandler = { request in
             requestCount += 1
+            requestBodies.append(try XCTUnwrap(request.bodyData()))
             throw URLError(.networkConnectionLost)
         }
 
-        do {
-            _ = try await processor.processPush(
-                httpClient: httpClient,
-                clientID: "test-device",
-                clientGeneration: 1,
-                schemaVersion: 1,
-                schemaHash: protocolTestSchemaHash,
-                syncedTables: [testTable]
-            )
-            XCTFail("expected response loss")
-        } catch is RetryableError {
+        var operationReads: [[String]] = []
+        for _ in 0..<2 {
+            historyReads.withLock { $0.removeAll() }
+            do {
+                _ = try await processor.processPush(
+                    httpClient: httpClient,
+                    clientID: "test-device",
+                    clientGeneration: 1,
+                    schemaVersion: 1,
+                    schemaHash: protocolTestSchemaHash,
+                    syncedTables: tables
+                )
+                XCTFail("expected response loss")
+            } catch is RetryableError {
+            }
+            operationReads.append(historyReads.withLock { $0 })
         }
-        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(requestCount, 2)
+        XCTAssertEqual(requestBodies[0], requestBodies[1])
+        let request = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: requestBodies[0])
+        XCTAssertEqual(request.mutations.count, 3)
+        XCTAssertEqual(Set(request.mutations.map(\.table)), Set(tables.map(\.tableID)))
+        for reads in operationReads {
+            XCTAssertEqual(reads.filter { $0.contains("FROM _synchro_push_batches") }.count, 1)
+            XCTAssertEqual(reads.filter { $0.contains("FROM _synchro_schema_archive") }.count, 1)
+        }
 
         let conflictingSchema = try JSONEncoder.synchroEncoder().encode([customTable])
         try db.writeTransaction { connection in
@@ -290,12 +335,12 @@ final class PushProcessorTests: XCTestCase {
                 clientGeneration: 1,
                 schemaVersion: 1,
                 schemaHash: protocolTestSchemaHash,
-                syncedTables: [testTable]
+                syncedTables: tables
             )
             XCTFail("expected historical schema conflict")
         } catch SynchroError.invalidResponse {
         }
-        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(requestCount, 2)
     }
 
     func testPushCompletionClearsMatchingDurableBackoffWithCommittedState() async throws {
