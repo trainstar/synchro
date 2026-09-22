@@ -251,7 +251,7 @@ final class PushProcessorTests: XCTestCase {
             params: ["other-row", "Other table", "2026-01-01T10:00:00.000Z"]
         )
         let historyReads = OSAllocatedUnfairLock(initialState: [String]())
-        try db.dbPool.writeWithoutTransaction { connection in
+        try db.writeTransaction { connection in
             connection.trace { event in
                 guard case let .statement(statement) = event else { return }
                 let sql = statement.sql
@@ -262,7 +262,7 @@ final class PushProcessorTests: XCTestCase {
             }
         }
         defer {
-            try? db.dbPool.writeWithoutTransaction { $0.trace(nil) }
+            try? db.writeTransaction { $0.trace(nil) }
             try? db.close()
         }
 
