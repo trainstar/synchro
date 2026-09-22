@@ -231,13 +231,14 @@ final class PushProcessorTests: XCTestCase {
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("synchro_history_\(UUID().uuidString).sqlite")
         let db = try SynchroDatabase(path: path)
-        let tables = [testTable, customTable]
-        try SchemaManager(database: db).createSyncedTables(schema: SchemaResponse(
+        let schema = SchemaResponse(
             schemaVersion: 1,
             schemaHash: protocolTestSchemaHash,
             serverTime: Date(),
-            tables: tables
-        ))
+            tables: [testTable, customTable]
+        )
+        let tables = try schema.localTables()
+        try SchemaManager(database: db).createSyncedTables(schema: schema)
         let processor = PushProcessor(database: db, changeTracker: ChangeTracker(database: db))
         _ = try db.execute(
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
