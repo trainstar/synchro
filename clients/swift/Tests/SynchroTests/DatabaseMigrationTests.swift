@@ -263,19 +263,48 @@ final class DatabaseMigrationTests: XCTestCase {
                     local_order INTEGER PRIMARY KEY AUTOINCREMENT,
                     mutation_id TEXT NOT NULL UNIQUE,
                     table_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
                     record_id TEXT NOT NULL,
                     pk_field_id TEXT NOT NULL,
-                    pk_logical_type TEXT NOT NULL
+                    pk_logical_type TEXT NOT NULL,
+                    lifecycle_state TEXT NOT NULL
                 )
                 """)
-            try db.execute(
-                sql: """
-                    INSERT INTO _synchro_pending_changes
-                        (mutation_id, table_id, record_id, pk_field_id, pk_logical_type)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                arguments: ["mutation-1", "items", "record-1", "id", "string"]
-            )
+            try db.execute(sql: """
+                CREATE INDEX idx_synchro_pending_changes_row_order
+                ON _synchro_pending_changes (table_id, table_name, record_id, local_order)
+                """)
+            for values in [
+                ["mutation-1", "items", "items", "1", "id", "string", "unsealed"],
+                ["mutation-2", "items", "renamed_items", "1", "id", "string", "unsealed"],
+                ["accepted", "items", "renamed_items", "1", "id", "string", "accepted"],
+                ["rejected", "items", "renamed_items", "1", "id", "string", "rejected"],
+                ["superseded", "items", "renamed_items", "1", "id", "string", "superseded_before_send"],
+                ["cancelled", "items", "renamed_items", "1", "id", "string", "cancelled_before_send"],
+                ["other-field", "items", "renamed_items", "1", "other-id", "string", "unsealed"],
+                ["other-type", "items", "renamed_items", "1", "id", "int", "unsealed"],
+                ["other-row", "items", "renamed_items", "2", "id", "string", "unsealed"],
+                ["other-table", "other-items", "items", "1", "id", "string", "unsealed"],
+            ] {
+                try db.execute(
+                    sql: """
+                        INSERT INTO _synchro_pending_changes
+                            (mutation_id, table_id, table_name, record_id, pk_field_id, pk_logical_type, lifecycle_state)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: StatementArguments(values)
+                )
+            }
+            try db.execute(sql: """
+                WITH RECURSIVE records(value) AS (
+                    SELECT 1 UNION ALL SELECT value + 1 FROM records WHERE value < 1000
+                )
+                INSERT INTO _synchro_pending_changes
+                    (mutation_id, table_id, table_name, record_id, pk_field_id, pk_logical_type, lifecycle_state)
+                SELECT 'unrelated-' || value, 'items', 'renamed_items', CAST(value + 10 AS TEXT),
+                       'id', 'string', 'unsealed'
+                FROM records
+                """)
         }
         try legacy.close()
 
@@ -283,24 +312,43 @@ final class DatabaseMigrationTests: XCTestCase {
         defer { try? db.close() }
         XCTAssertEqual(
             try db.query(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_synchro_pending_protocol_row_order'",
+                "PRAGMA index_info('idx_synchro_pending_protocol_row_order')",
                 params: nil
-            ).count,
-            1
+            ).map { $0["name"] as String },
+            ["table_id", "pk_field_id", "pk_logical_type", "record_id", "local_order"]
         )
+        let lookup = """
+            SELECT mutation_id FROM _synchro_pending_changes
+            WHERE table_id = ? AND pk_field_id = ? AND pk_logical_type = ? AND record_id = ?
+              AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+            ORDER BY local_order DESC LIMIT 1
+            """
+        let params = ["items", "id", "string", "1"]
+        let plan = try db.query("EXPLAIN QUERY PLAN " + lookup, params: params)
+            .map { $0["detail"] as String }
+            .joined(separator: "\n")
+        XCTAssertTrue(plan.contains("idx_synchro_pending_protocol_row_order"), plan)
+        XCTAssertFalse(plan.contains("USE TEMP B-TREE"), plan)
         XCTAssertEqual(
-            try db.queryOne(
-                """
-                SELECT mutation_id
-                FROM _synchro_pending_changes INDEXED BY idx_synchro_pending_protocol_row_order
-                WHERE table_id = ? AND pk_field_id = ? AND pk_logical_type = ? AND record_id = ?
-                ORDER BY local_order DESC
-                LIMIT 1
-                """,
-                params: ["items", "id", "string", "record-1"]
-            )?["mutation_id"] as String?,
-            "mutation-1"
+            try db.queryOne(lookup, params: params)?["mutation_id"] as String?,
+            "mutation-2"
         )
+        let withoutIndex = try db.writeTransaction { connection in
+            try connection.execute(sql: "DROP INDEX idx_synchro_pending_protocol_row_order")
+            let plan = try Row.fetchAll(
+                connection,
+                sql: "EXPLAIN QUERY PLAN " + lookup,
+                arguments: StatementArguments(params)
+            ).map { $0["detail"] as String }.joined(separator: "\n")
+            let newest = try String.fetchOne(
+                connection,
+                sql: lookup,
+                arguments: StatementArguments(params)
+            )
+            return (plan, newest)
+        }
+        XCTAssertFalse(withoutIndex.0.contains("idx_synchro_pending_protocol_row_order"), withoutIndex.0)
+        XCTAssertEqual(withoutIndex.1, "mutation-2")
     }
 
     private func recordMigrationsThroughVersionTwelve(_ db: GRDB.Database) throws {
