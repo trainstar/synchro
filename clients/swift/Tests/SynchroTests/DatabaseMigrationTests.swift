@@ -333,17 +333,22 @@ final class DatabaseMigrationTests: XCTestCase {
             try db.queryOne(lookup, params: params)?["mutation_id"] as String?,
             "mutation-2"
         )
-        try db.writeTransaction { connection in
+        let withoutIndex = try db.writeTransaction { connection in
             try connection.execute(sql: "DROP INDEX idx_synchro_pending_protocol_row_order")
+            let plan = try Row.fetchAll(
+                connection,
+                sql: "EXPLAIN QUERY PLAN " + lookup,
+                arguments: StatementArguments(params)
+            ).map { $0["detail"] as String }.joined(separator: "\n")
+            let newest = try String.fetchOne(
+                connection,
+                sql: lookup,
+                arguments: StatementArguments(params)
+            )
+            return (plan, newest)
         }
-        let withoutIndex = try db.query("EXPLAIN QUERY PLAN " + lookup, params: params)
-            .map { $0["detail"] as String }
-            .joined(separator: "\n")
-        XCTAssertFalse(withoutIndex.contains("idx_synchro_pending_protocol_row_order"), withoutIndex)
-        XCTAssertEqual(
-            try db.queryOne(lookup, params: params)?["mutation_id"] as String?,
-            "mutation-2"
-        )
+        XCTAssertFalse(withoutIndex.0.contains("idx_synchro_pending_protocol_row_order"), withoutIndex.0)
+        XCTAssertEqual(withoutIndex.1, "mutation-2")
     }
 
     private func recordMigrationsThroughVersionTwelve(_ db: GRDB.Database) throws {
