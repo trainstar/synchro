@@ -123,6 +123,8 @@ Native and React Native consumers report resume success only after stop and clos
 
 The Public gate does not repeat that lifecycle.
 It verifies public GitHub assets, Maven files, and the npm tarball against sealed identities.
+Public Maven observation contains only public file identities.
+Private Central deployment identifiers and states remain in the protected publisher's operation record.
 It then resolves and builds clean Go, Swift, Kotlin, and React Native consumers from public coordinates.
 The gate fails when it cannot prove a public identity.
 A successful build never replaces missing byte or integrity proof.

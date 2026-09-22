@@ -4,9 +4,21 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
 import unittest
 import urllib.parse
+import zipfile
 from datetime import datetime, timezone
+from email import policy
+from email.parser import BytesParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -37,13 +49,7 @@ class PublicationStateTests(unittest.TestCase):
         return {
             "tags": {"v1.2.3": None, "api/go/v1.2.3": None},
             "github": None,
-            "maven": {
-                "deployment_id": None,
-                "deployment_name": None,
-                "deployment_state": None,
-                "bundle_sha256": None,
-                "public_files": {},
-            },
+            "maven": {"public_files": {}},
             "npm": {"sha256": None, "dist_tags": {}, "provenance": False},
         }
 
@@ -87,62 +93,55 @@ class PublicationStateTests(unittest.TestCase):
         self.assertEqual(result["github"], "draft-partial")
         self.assertEqual(result["next_operation"], "publish-github")
 
-    def test_validated_maven_resumes_publication(self) -> None:
+    def test_absent_public_maven_requires_publication(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
         state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
-        state["maven"] = {
-            "deployment_id": "deployment-1",
-            "deployment_name": self.identity["maven_bundle"]["deployment_name"],
-            "deployment_state": "VALIDATED",
-            "bundle_sha256": self.identity["maven_bundle"]["sha256"],
-            "public_files": {},
-        }
         result = release_publish.classify_publication(self.identity, state)
-        self.assertEqual(result["maven"], "validated")
+        self.assertEqual(result["maven"], "absent")
         self.assertEqual(result["next_operation"], "publish-maven")
 
-    def test_publishing_maven_resumes_public_verification(self) -> None:
+    def test_public_maven_state_rejects_private_deployment_claims(self) -> None:
         state = self.state()
-        state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
-        state["maven"] = {
-            "deployment_id": "deployment-1",
-            "deployment_name": self.identity["maven_bundle"]["deployment_name"],
-            "deployment_state": "PUBLISHING",
-            "bundle_sha256": self.identity["maven_bundle"]["sha256"],
-            "public_files": {},
-        }
-        result = release_publish.classify_publication(self.identity, state)
-        self.assertEqual(result["maven"], "publishing")
-        self.assertEqual(result["next_operation"], "publish-maven")
-
-    def test_published_maven_waits_for_public_repository(self) -> None:
-        state = self.state()
-        state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
-        state["maven"] = {
-            "deployment_id": "deployment-1",
-            "deployment_name": self.identity["maven_bundle"]["deployment_name"],
-            "deployment_state": "PUBLISHED",
-            "bundle_sha256": self.identity["maven_bundle"]["sha256"],
-            "public_files": {},
-        }
-        result = release_publish.classify_publication(self.identity, state)
-        self.assertEqual(result["maven"], "published-pending-public")
-        self.assertEqual(result["next_operation"], "publish-maven")
-
-    def test_failed_maven_deployment_stops_recovery(self) -> None:
-        state = self.state()
-        state["maven"] = {
-            "deployment_id": "deployment-1",
-            "deployment_name": self.identity["maven_bundle"]["deployment_name"],
-            "deployment_state": "FAILED",
-            "bundle_sha256": self.identity["maven_bundle"]["sha256"],
-            "public_files": {},
-        }
-        with self.assertRaisesRegex(release_publish.PublicationError, "deployment failed"):
+        state["maven"]["deployment_state"] = "PUBLISHED"
+        with self.assertRaises(release_publish.PublicationError):
             release_publish.classify_publication(self.identity, state)
+
+    def test_public_maven_identity_requires_complete_matching_bytes(self) -> None:
+        state = self.state()
+        expected = {
+            "fit/trainstar/synchro/1.2.3/synchro-1.2.3.aar": "4" * 64,
+            "fit/trainstar/synchro/1.2.3/synchro-1.2.3.pom": "6" * 64,
+        }
+        self.identity["maven_entries"] = expected
+        invalid = (
+            {next(iter(expected)): "4" * 64},
+            {**expected, next(iter(expected)): "0" * 64},
+            {**expected, "unexpected.jar": "7" * 64},
+        )
+        for files in invalid:
+            with self.subTest(files=files):
+                state["maven"]["public_files"] = files
+                with self.assertRaises(release_publish.PublicationError):
+                    release_publish.classify_publication(self.identity, state)
+        state["maven"]["public_files"] = expected
+        self.assertEqual(release_publish.classify_publication(self.identity, state)["maven"], "published")
+
+    @mock.patch.object(release_publish, "central_json", side_effect=AssertionError("public observation used private state"))
+    @mock.patch.object(release_publish, "request_json", return_value=None)
+    @mock.patch.object(release_publish, "request_bytes")
+    def test_public_observer_returns_only_verified_public_maven_files(
+        self, request_bytes: mock.Mock, request_json: mock.Mock, central_json: mock.Mock
+    ) -> None:
+        payload = b"authored public Maven bytes"
+        relative = next(iter(self.identity["maven_entries"]))
+        self.identity["maven_entries"] = {relative: hashlib.sha256(payload).hexdigest()}
+        request_bytes.return_value = payload
+        state = release_publish.observe_public(self.identity, "trainstar/synchro", None)
+        self.assertEqual(state["maven"], {"public_files": self.identity["maven_entries"]})
+        self.assertEqual(release_publish.classify_publication(self.identity, state)["maven"], "published")
+        request_bytes.assert_called_once_with(f"{release_publish.MAVEN_BASE}/{relative}")
+        central_json.assert_not_called()
 
     def test_matching_publication_promotes_latest(self) -> None:
         state = self.state()
@@ -270,21 +269,6 @@ class PublicationStateTests(unittest.TestCase):
         with self.assertRaisesRegex(release_publish.PublicationError, "duplicate"):
             release_publish.select_central(value, "wanted")
 
-    def test_central_recovery_waits_for_unsettled_deployments(self) -> None:
-        for state in ("PENDING", "VALIDATING"):
-            with self.subTest(state=state):
-                self.assertEqual(release_publish.central_recovery_action(state), "wait")
-
-    def test_central_recovery_replaces_only_unpublished_settled_deployments(self) -> None:
-        for state in ("VALIDATED", "FAILED"):
-            with self.subTest(state=state):
-                self.assertEqual(release_publish.central_recovery_action(state), "replace")
-
-    def test_central_recovery_never_replaces_irreversible_deployments(self) -> None:
-        for state in ("PUBLISHING", "PUBLISHED"):
-            with self.subTest(state=state):
-                self.assertEqual(release_publish.central_recovery_action(state), "continue")
-
     @mock.patch.object(release_publish, "central_json")
     def test_lists_every_central_page_with_documented_size_parameter(self, central_json: mock.Mock) -> None:
         central_json.side_effect = [
@@ -326,6 +310,194 @@ class PublicationStateTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(release_publish.PublicationError, "incomplete"):
             release_publish.list_central_deployments("wanted")
+
+    def test_release_workflow_executes_private_recovery_effects(self) -> None:
+        lines = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8").splitlines()
+        start = lines.index("      - name: Resolve or upload and validate Maven deployment")
+        run = next(index for index in range(start, len(lines)) if lines[index] == "        run: |")
+        end = next(index for index in range(run + 1, len(lines)) if lines[index] and not lines[index].startswith("          "))
+        command = textwrap.dedent("\n".join(lines[run + 1:end]))
+        command = command.replace("${{ needs.candidate.outputs.release_dir_name }}", "fixture")
+        self.assertNotIn("${{", command)
+
+        with tempfile.TemporaryDirectory(prefix="synchro-publication-effects-") as directory:
+            root = Path(directory)
+            release_dir = root / "dist/releases/fixture"
+            release_dir.mkdir(parents=True)
+            distributions = []
+            for role, name in (
+                ("pg-extension", "postgres.tar.gz"),
+                ("adapter", "adapter.tar.gz"),
+                ("seed-tool", "seed.tar.gz"),
+                ("kotlin-maven", "maven.zip"),
+                ("react-native-npm", "react-native.tgz"),
+            ):
+                path = release_dir / name
+                if role == "kotlin-maven":
+                    with zipfile.ZipFile(path, "w") as archive:
+                        archive.writestr("fit/trainstar/synchro/1.2.3/synchro-1.2.3.aar", b"sealed Maven payload")
+                else:
+                    path.write_bytes(f"sealed {role} bytes".encode())
+                distributions.append({
+                    "role": role, "kind": "file", "path": name,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                })
+            (release_dir / "release-manifest.json").write_text(json.dumps({
+                "schema_version": 1,
+                "release_version": self.version,
+                "source": {"commit": self.commit, "source_tags": [f"api/go/v{self.version}", f"v{self.version}"]},
+                "distributions": distributions,
+            }), encoding="utf-8")
+            (release_dir / "SHA256SUMS").write_text(
+                "".join(f"{item['sha256']}  {item['path']}\n" for item in distributions), encoding="utf-8"
+            )
+            (release_dir / "sbom.spdx.json").write_text('{"spdxVersion":"SPDX-2.3"}', encoding="utf-8")
+            identity = release_publish.identity_for_directory(release_dir)
+            bundle = (release_dir / "maven.zip").read_bytes()
+            name = identity["maven_bundle"]["deployment_name"]
+            tools = root / "tools"
+            tools.mkdir()
+            python_proxy = tools / "python3"
+            python_proxy.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import importlib.util
+                import os
+                import sys
+                assert sys.argv[1] == "scripts/release-publish.py"
+                spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
+                publisher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(publisher)
+                publisher.CENTRAL_API = os.environ["TEST_CENTRAL_URL"]
+                sys.argv = sys.argv[1:]
+                raise SystemExit(publisher.main())
+                """), encoding="utf-8")
+            python_proxy.chmod(0o755)
+            sleeper = tools / "sleep"
+            sleeper.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "$TEST_SLEEP_LOG"\n', encoding="utf-8")
+            sleeper.chmod(0o755)
+
+            for initial in (None, "PENDING", "VALIDATING", "VALIDATED", "FAILED", "PUBLISHING", "PUBLISHED", "PUBLIC"):
+                with self.subTest(initial=initial):
+                    requests = []
+                    uploads = []
+                    errors = []
+
+                    class Handler(BaseHTTPRequestHandler):
+                        def log_message(self, *_args: object) -> None:
+                            return
+
+                        def respond(self, payload: bytes, status: int = 200) -> None:
+                            self.send_response(status)
+                            self.send_header("Content-Length", str(len(payload)))
+                            self.end_headers()
+                            self.wfile.write(payload)
+
+                        def do_GET(self) -> None:
+                            parsed = urllib.parse.urlsplit(self.path)
+                            requests.append(("GET", parsed.path))
+                            query = urllib.parse.parse_qs(parsed.query)
+                            if parsed.path != "/deployments" or query.get("deploymentName") != [name]:
+                                errors.append(("GET", self.path))
+                                self.respond(b"unexpected request", 400)
+                                return
+                            deployments = [] if initial is None else [{
+                                "deploymentId": "old", "deploymentName": name, "deploymentState": initial,
+                            }]
+                            self.respond(json.dumps({
+                                "deployments": deployments, "page": 0, "pageSize": 100,
+                                "pageCount": 1, "totalResultCount": len(deployments),
+                            }).encode())
+
+                        def do_POST(self) -> None:
+                            parsed = urllib.parse.urlsplit(self.path)
+                            query = urllib.parse.parse_qs(parsed.query)
+                            if parsed.path == "/upload":
+                                requests.append(("POST", "/upload"))
+                                uploads.append((
+                                    query,
+                                    self.rfile.read(int(self.headers["Content-Length"])),
+                                    self.headers["Content-Type"],
+                                ))
+                                self.respond(b"new")
+                            elif parsed.path == "/status" and query.get("id") in (["old"], ["new"]):
+                                requests.append(("POST", "/status/" + query["id"][0]))
+                                self.respond(b'{"deploymentState":"VALIDATED"}')
+                            else:
+                                errors.append(("POST", self.path))
+                                self.respond(b"unexpected request", 400)
+
+                        def do_DELETE(self) -> None:
+                            requests.append(("DELETE", self.path))
+                            if self.path != "/deployment/old":
+                                errors.append(("DELETE", self.path))
+                                self.respond(b"unexpected request", 400)
+                                return
+                            self.respond(b"")
+
+                    runner = root / str(initial)
+                    runner.mkdir()
+                    state = self.state()
+                    state["maven"]["public_files"] = identity["maven_entries"] if initial == "PUBLIC" else {}
+                    (runner / "public-github-classification.json").write_text(
+                        json.dumps(release_publish.classify_publication(identity, state)), encoding="utf-8"
+                    )
+                    sleep_log = runner / "sleep.log"
+                    sleep_log.touch()
+                    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+                        thread = threading.Thread(target=server.serve_forever)
+                        thread.start()
+                        try:
+                            result = subprocess.run(
+                                ["bash", "-c", command], cwd=root,
+                                env={
+                                    **os.environ,
+                                    "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                                    "GITHUB_WORKSPACE": str(root),
+                                    "RUNNER_TEMP": str(runner),
+                                    "GITHUB_OUTPUT": str(runner / "outputs"),
+                                    "MAVEN_CENTRAL_USERNAME": "fixture-user",
+                                    "MAVEN_CENTRAL_PASSWORD": "fixture-password",
+                                    "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
+                                    "TEST_CENTRAL_URL": f"http://127.0.0.1:{server.server_port}",
+                                    "TEST_SLEEP_LOG": str(sleep_log),
+                                },
+                                text=True, capture_output=True, timeout=20, check=False,
+                            )
+                        finally:
+                            server.shutdown()
+                            thread.join()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(errors, [])
+                    expected = [] if initial == "PUBLIC" else [("GET", "/deployments")]
+                    if initial in {"PENDING", "VALIDATING"}:
+                        expected.append(("POST", "/status/old"))
+                    replaced = initial in {"PENDING", "VALIDATING", "VALIDATED", "FAILED"}
+                    if replaced:
+                        expected.append(("DELETE", "/deployment/old"))
+                    uploaded = initial is None or replaced
+                    if uploaded:
+                        expected.extend([("POST", "/upload"), ("POST", "/status/new")])
+                    self.assertEqual(requests, expected)
+                    self.assertEqual(len(uploads), int(uploaded))
+                    if uploaded:
+                        self.assertEqual(uploads[0][0], {"name": [name], "publishingType": ["USER_MANAGED"]})
+                        message = BytesParser(policy=policy.default).parsebytes(
+                            f"Content-Type: {uploads[0][2]}\r\n\r\n".encode() + uploads[0][1]
+                        )
+                        parts = list(message.iter_parts())
+                        self.assertEqual(len(parts), 1)
+                        self.assertEqual(parts[0].get_param("name", header="Content-Disposition"), "bundle")
+                        self.assertEqual(parts[0].get_payload(decode=True), bundle)
+                    operation = json.loads((runner / "maven-operation.json").read_text(encoding="utf-8"))
+                    self.assertEqual(operation["bundle_sha256"], hashlib.sha256(bundle).hexdigest())
+                    self.assertEqual(operation["deployment_name"], name)
+                    self.assertEqual(operation["deployment_id"], "new" if uploaded else "" if initial == "PUBLIC" else "old")
+                    self.assertEqual(operation["deployment_state"], "VALIDATED" if uploaded else initial)
+                    self.assertEqual(
+                        operation["verification"],
+                        "sealed-upload" if uploaded else "public-repository" if initial == "PUBLIC" else "awaiting-public-byte-verification",
+                    )
+                    expected_waits = int(uploaded) + int(initial in {"PENDING", "VALIDATING"})
+                    self.assertEqual(sleep_log.read_text(encoding="utf-8").splitlines(), ["15"] * expected_waits)
 
     def receipt(self, digest: str = "6" * 64, attempt: str = "2") -> dict[str, str]:
         return {

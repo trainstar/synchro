@@ -309,33 +309,10 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
 
     expected_maven = identity["maven_entries"]
     maven = state["maven"]
-    if not isinstance(maven, dict) or set(maven) != {"deployment_id", "deployment_name", "deployment_state", "bundle_sha256", "public_files"}:
+    if not isinstance(maven, dict) or set(maven) != {"public_files"}:
         raise PublicationError("Maven state is invalid")
-    deployment_id = maven["deployment_id"]
-    deployment_state = maven["deployment_state"]
-    if deployment_id is None:
-        if any(maven[key] is not None for key in ("deployment_name", "deployment_state", "bundle_sha256")):
-            raise PublicationError("Maven deployment state lacks an identifier")
-    else:
-        if not isinstance(deployment_id, str) or not deployment_id:
-            raise PublicationError("Maven deployment identifier is invalid")
-        if maven["deployment_name"] != identity["maven_bundle"]["deployment_name"]:
-            raise PublicationError("Maven deployment name differs")
-        if deployment_state not in MAVEN_STATES:
-            raise PublicationError("Maven deployment state is unsupported")
-        if maven["bundle_sha256"] != identity["maven_bundle"]["sha256"]:
-            raise PublicationError("Maven deployment bundle bytes differ")
-        if deployment_state == "FAILED":
-            raise PublicationError("Maven deployment failed")
     maven_public = require_hash_map(maven["public_files"], expected_maven, "public Maven repository", partial=False)
-    if maven_public:
-        maven_status = "published"
-    elif deployment_id is None:
-        maven_status = "absent"
-    elif deployment_state == "PUBLISHED":
-        maven_status = "published-pending-public"
-    else:
-        maven_status = str(deployment_state).lower()
+    maven_status = "published" if maven_public else "absent"
 
     npm = state["npm"]
     if not isinstance(npm, dict) or set(npm) != {"sha256", "dist_tags", "provenance"} or not isinstance(npm["dist_tags"], dict):
@@ -597,7 +574,7 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
     return {
         "tags": tags,
         "github": github,
-        "maven": {"deployment_id": None, "deployment_name": None, "deployment_state": None, "bundle_sha256": None, "public_files": public_maven},
+        "maven": {"public_files": public_maven},
         "npm": {"sha256": npm_hash, "dist_tags": dist_tags, "provenance": npm_provenance},
     }
 
@@ -639,10 +616,6 @@ def main() -> int:
     identity_parser = subparsers.add_parser("identity")
     identity_parser.add_argument("--release-dir", type=Path, required=True)
     identity_parser.add_argument("--output", type=Path, required=True)
-    classify_parser = subparsers.add_parser("classify")
-    classify_parser.add_argument("--release-dir", type=Path, required=True)
-    classify_parser.add_argument("--state", type=Path, required=True)
-    classify_parser.add_argument("--output", type=Path, required=True)
     observe_parser = subparsers.add_parser("observe-public")
     observe_parser.add_argument("--release-dir", type=Path, required=True)
     observe_parser.add_argument("--repository", default="trainstar/synchro")
@@ -681,9 +654,6 @@ def main() -> int:
     try:
         if args.command == "identity":
             write_json(args.output, identity_for_directory(args.release_dir.resolve()))
-        elif args.command == "classify":
-            identity = identity_for_directory(args.release_dir.resolve())
-            write_json(args.output, classify_publication(identity, load_json(args.state, "publication state")))
         elif args.command == "observe-public":
             identity = identity_for_directory(args.release_dir.resolve())
             token = os.environ.get(args.github_token_environment, "").strip() or None
