@@ -80,6 +80,7 @@ Use `make test-swift-integration` to run XCTest without repeating the scenario c
 The Swift retained-schema retry control measures actual SQLite reads across mixed-table mutations.
 Sealing and replay each resolve a retained schema once per transaction.
 The control also requires unchanged retry bytes and rejection of archive corruption between transactions.
+The Swift queue-index upgrade control verifies column order and an unforced newest-mutation lookup, with index removal as a negative control.
 
 ## Real PostgreSQL Scenarios
 
