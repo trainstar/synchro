@@ -77,6 +77,10 @@ Use `make test-swift-integration` to run XCTest without repeating the scenario c
 `SWIFT_TEST_ARGS` selects diagnostic XCTest cases in `test-swift-unit` and `test-swift-integration`. Required CI leaves it empty.
 `test-swift-unit`, `test-swift-integration`, and `test-kotlin-unit` parse structured results even when their runners fail.
 
+The Swift retained-schema retry control measures actual SQLite reads across mixed-table mutations.
+Sealing and replay each resolve a retained schema once per transaction.
+The control also requires unchanged retry bytes and rejection of archive corruption between transactions.
+
 ## Real PostgreSQL Scenarios
 
 Run the real PostgreSQL black-box tests with:

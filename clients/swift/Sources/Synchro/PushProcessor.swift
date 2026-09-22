@@ -62,6 +62,7 @@ final class PushProcessor: @unchecked Sendable {
         })
 
         let reconciliation = try database.writeSyncLockedTransaction { db in
+            var historicalSchemas: [HistoricalSchemaKey: [LocalSchemaTable]] = [:]
             let conflicts = try applyAcceptedInTransaction(
                 db,
                 accepted: response.accepted,
@@ -75,7 +76,8 @@ final class PushProcessor: @unchecked Sendable {
                     id: \.mutationID
                 ),
                 historicalSchema: batch.request.schema,
-                historicalTables: batch.syncedTables
+                historicalTables: batch.syncedTables,
+                historicalSchemas: &historicalSchemas
             )
             let rejectedOutcome = try applyRejectedOutcomeInTransaction(
                 db,
@@ -96,7 +98,8 @@ final class PushProcessor: @unchecked Sendable {
                     id: \.mutationID
                 ),
                 historicalSchema: batch.request.schema,
-                historicalTables: batch.syncedTables
+                historicalTables: batch.syncedTables,
+                historicalSchemas: &historicalSchemas
             )
             try completeBatch(db, batchID: batch.request.batchID)
             try SynchroMeta.clearMatchingBackoffRecord(
@@ -115,13 +118,10 @@ final class PushProcessor: @unchecked Sendable {
         from pending: [PendingChange],
         schemaVersion: Int64,
         schemaHash: String,
-        syncedTables: [LocalSchemaTable]
+        syncedTables: [LocalSchemaTable],
+        historicalSchemas: inout [HistoricalSchemaKey: [LocalSchemaTable]]
     ) throws -> [Mutation] {
         let requestSchema = SchemaRef(version: schemaVersion, hash: schemaHash)
-        // Resolving a historical table decodes every sealed batch, and one
-        // seal resolves the same few (table, schema) pairs for every pending
-        // mutation, so the resolution is cached for the batch.
-        var historicalTables: [HistoricalTableKey: LocalSchemaTable] = [:]
         return try pending.map { change in
             guard let tableID = change.tableID,
                   let pkFieldID = change.pkFieldID,
@@ -140,12 +140,11 @@ final class PushProcessor: @unchecked Sendable {
                 schema: authoredSchema,
                 sealedSchema: authoredSchema == requestSchema ? requestSchema : nil,
                 sealedTables: authoredSchema == requestSchema ? syncedTables : nil,
-                cache: &historicalTables
+                cache: &historicalSchemas
             )
             let columns: [String: AnyCodable]? = change.operation == "delete"
                 ? nil
                 : Dictionary(uniqueKeysWithValues: change.fieldValuesByID.values.map { ($0.fieldID, $0.wireValue) })
-            try validateCapturedMutation(change, schema: schema)
             return Mutation(
                 mutationID: change.mutationID,
                 table: tableID,
@@ -283,6 +282,7 @@ final class PushProcessor: @unchecked Sendable {
         expectedBatchID: String?
     ) throws -> SealedPushBatch? {
         try database.writeTransaction { db in
+            var historicalSchemas: [HistoricalSchemaKey: [LocalSchemaTable]] = [:]
             let rows = try Row.fetchAll(
                 db,
                 sql: """
@@ -304,7 +304,9 @@ final class PushProcessor: @unchecked Sendable {
                     }
                 }
                 let batch = try decodeBatch(db, row: row)
-                try validateSealedBatch(db, batch: batch, clientID: clientID)
+                try validateSealedBatch(
+                    db, batch: batch, clientID: clientID, historicalSchemas: &historicalSchemas
+                )
                 return batch
             }
 
@@ -319,7 +321,8 @@ final class PushProcessor: @unchecked Sendable {
                 from: pending,
                 schemaVersion: schemaVersion,
                 schemaHash: schemaHash,
-                syncedTables: syncedTables
+                syncedTables: syncedTables,
+                historicalSchemas: &historicalSchemas
             )
             guard !mutations.isEmpty else { return nil }
             let request = PushRequest(
@@ -329,10 +332,11 @@ final class PushProcessor: @unchecked Sendable {
                 schema: SchemaRef(version: schemaVersion, hash: schemaHash),
                 mutations: mutations
             )
-            try request.validate(syncedTables: syncedTables)
             let requestJSON = try encodeString(request)
             let batch = SealedPushBatch(request: request, requestJSON: requestJSON, pending: pending, syncedTables: syncedTables)
-            try validateSealedBatch(db, batch: batch, clientID: clientID)
+            try validateSealedBatch(
+                db, batch: batch, clientID: clientID, historicalSchemas: &historicalSchemas
+            )
             try db.execute(
                 sql: """
                     INSERT INTO _synchro_push_batches
@@ -375,14 +379,14 @@ final class PushProcessor: @unchecked Sendable {
     private func validateSealedBatch(
         _ db: GRDB.Database,
         batch: SealedPushBatch,
-        clientID: String
+        clientID: String,
+        historicalSchemas: inout [HistoricalSchemaKey: [LocalSchemaTable]]
     ) throws {
         guard batch.request.clientID == clientID,
               batch.request.mutations.count == batch.pending.count else {
             throw SynchroError.invalidResponse(message: "stored sealed push batch identity is invalid")
         }
         try batch.request.validate(syncedTables: batch.syncedTables)
-        var historicalTables: [HistoricalTableKey: LocalSchemaTable] = [:]
         for (mutation, pending) in zip(batch.request.mutations, batch.pending) {
             guard mutation.mutationID == pending.mutationID else {
                 throw SynchroError.invalidResponse(message: "stored push mutation identity is invalid")
@@ -393,7 +397,7 @@ final class PushProcessor: @unchecked Sendable {
                 schema: mutation.authoredSchema,
                 sealedSchema: batch.request.schema,
                 sealedTables: batch.syncedTables,
-                cache: &historicalTables
+                cache: &historicalSchemas
             )
             try validateCapturedMutation(pending, schema: authoredTable)
             guard try self.mutation(from: pending, schema: authoredTable) == mutation else {
@@ -408,7 +412,7 @@ final class PushProcessor: @unchecked Sendable {
         syncedTables: [LocalSchemaTable]
     ) throws {
         try request.validate(syncedTables: syncedTables)
-        var historicalTables: [HistoricalTableKey: LocalSchemaTable] = [:]
+        var historicalSchemas: [HistoricalSchemaKey: [LocalSchemaTable]] = [:]
         for mutation in request.mutations {
             guard let source = try ledgerEntry(db, mutationID: mutation.mutationID),
                   source.tableID == mutation.table,
@@ -422,7 +426,7 @@ final class PushProcessor: @unchecked Sendable {
                 schema: mutation.authoredSchema,
                 sealedSchema: request.schema == mutation.authoredSchema ? request.schema : nil,
                 sealedTables: request.schema == mutation.authoredSchema ? syncedTables : nil,
-                cache: &historicalTables
+                cache: &historicalSchemas
             )
             try validateCapturedMutation(source, schema: authoredTable)
             let expected = try self.mutation(from: source, schema: authoredTable)
@@ -642,12 +646,14 @@ final class PushProcessor: @unchecked Sendable {
         sentPending: [String: PendingChange] = [:]
     ) throws -> [ConflictEvent] {
         try database.writeSyncLockedTransaction { db in
-            try applyAcceptedInTransaction(
+            var historicalSchemas: [HistoricalSchemaKey: [LocalSchemaTable]] = [:]
+            return try applyAcceptedInTransaction(
                 db,
                 accepted: accepted,
                 syncedTables: syncedTables,
                 currentTables: syncedTables,
-                sentPending: sentPending
+                sentPending: sentPending,
+                historicalSchemas: &historicalSchemas
             )
         }
     }
@@ -660,11 +666,11 @@ final class PushProcessor: @unchecked Sendable {
         sentPending: [String: PendingChange],
         outcomeJSONByID: [String: String] = [:],
         historicalSchema: SchemaRef? = nil,
-        historicalTables: [LocalSchemaTable]? = nil
+        historicalTables: [LocalSchemaTable]? = nil,
+        historicalSchemas: inout [HistoricalSchemaKey: [LocalSchemaTable]]
     ) throws -> [ConflictEvent] {
         let outcomeTableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
         let currentTableMap = Dictionary(uniqueKeysWithValues: currentTables.map { ($0.tableID, $0) })
-        var historicalTablesByKey: [HistoricalTableKey: LocalSchemaTable] = [:]
         for outcome in accepted {
             let source = try exactLedgerSource(
                 db,
@@ -696,7 +702,7 @@ final class PushProcessor: @unchecked Sendable {
                     schema: outcome.outcomeSchema,
                     sealedSchema: historicalSchema,
                     sealedTables: historicalTables,
-                    cache: &historicalTablesByKey
+                    cache: &historicalSchemas
                 )
                 try verifyAuthoritativeRow(
                     row,
@@ -810,12 +816,14 @@ final class PushProcessor: @unchecked Sendable {
         sentPending: [String: PendingChange]
     ) throws -> RejectedOutcome {
         try database.writeSyncLockedTransaction { db in
-            try applyRejectedOutcomeInTransaction(
+            var historicalSchemas: [HistoricalSchemaKey: [LocalSchemaTable]] = [:]
+            return try applyRejectedOutcomeInTransaction(
                 db,
                 rejected: rejected,
                 syncedTables: syncedTables,
                 currentTables: syncedTables,
-                sentPending: sentPending
+                sentPending: sentPending,
+                historicalSchemas: &historicalSchemas
             )
         }
     }
@@ -829,12 +837,12 @@ final class PushProcessor: @unchecked Sendable {
         outcomeJSONByID: [String: String] = [:],
         originalMutationJSONByID: [String: String] = [:],
         historicalSchema: SchemaRef? = nil,
-        historicalTables: [LocalSchemaTable]? = nil
+        historicalTables: [LocalSchemaTable]? = nil,
+        historicalSchemas: inout [HistoricalSchemaKey: [LocalSchemaTable]]
     ) throws -> RejectedOutcome {
         let outcomeTableMap = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
         let currentTableMap = Dictionary(uniqueKeysWithValues: currentTables.map { ($0.tableID, $0) })
         var conflicts: [ConflictEvent] = []
-        var historicalTablesByKey: [HistoricalTableKey: LocalSchemaTable] = [:]
         for outcome in rejected {
             let source = try exactLedgerSource(
                 db,
@@ -873,7 +881,7 @@ final class PushProcessor: @unchecked Sendable {
                     ),
                     sealedSchema: historicalSchema,
                     sealedTables: historicalTables,
-                    cache: &historicalTablesByKey
+                    cache: &historicalSchemas
                 )
                 originalJSON = try encodeOriginalMutation(source, schema: authoredTable)
             } else {
@@ -891,7 +899,7 @@ final class PushProcessor: @unchecked Sendable {
                     schema: outcome.outcomeSchema,
                     sealedSchema: historicalSchema,
                     sealedTables: historicalTables,
-                    cache: &historicalTablesByKey
+                    cache: &historicalSchemas
                 )
                 try verifyAuthoritativeRow(
                     row,
@@ -1016,8 +1024,7 @@ final class PushProcessor: @unchecked Sendable {
     }
 
     // Retained schema sources can change between transactions, so each operation owns its cache.
-    private struct HistoricalTableKey: Hashable {
-        let tableID: String
+    private struct HistoricalSchemaKey: Hashable {
         let schemaVersion: Int64
         let schemaHash: String
     }
@@ -1028,15 +1035,20 @@ final class PushProcessor: @unchecked Sendable {
         schema: SchemaRef,
         sealedSchema: SchemaRef? = nil,
         sealedTables: [LocalSchemaTable]? = nil,
-        cache: inout [HistoricalTableKey: LocalSchemaTable]
+        cache: inout [HistoricalSchemaKey: [LocalSchemaTable]]
     ) throws -> LocalSchemaTable {
-        let key = HistoricalTableKey(
-            tableID: tableID,
+        let key = HistoricalSchemaKey(
             schemaVersion: schema.version,
             schemaHash: schema.hash
         )
         if let cached = cache[key] {
-            return cached
+            if sealedSchema == schema, let sealedTables, sealedTables != cached {
+                throw SynchroError.invalidResponse(message: "historical schema binding is inconsistent")
+            }
+            guard let table = cached.first(where: { $0.tableID == tableID }) else {
+                throw SynchroError.invalidResponse(message: "outcome schema lacks its logical table")
+            }
+            return table
         }
         var candidates: [[LocalSchemaTable]] = []
         if sealedSchema == schema, let sealedTables {
@@ -1086,7 +1098,7 @@ final class PushProcessor: @unchecked Sendable {
         guard let table = tables.first(where: { $0.tableID == tableID }) else {
             throw SynchroError.invalidResponse(message: "outcome schema lacks its logical table")
         }
-        cache[key] = table
+        cache[key] = tables
         return table
     }
 
