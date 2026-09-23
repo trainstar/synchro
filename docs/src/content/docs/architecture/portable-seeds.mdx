@@ -39,14 +39,24 @@ Clients still log in normally, connect normally, and reconcile with the server o
 ## Generate a seed
 
 Run this example in Bash on the tutorial server, from its repository checkout.
-It requires Go 1.25 and the owner role created by [Server setup](/synchro/getting-started/server-setup/).
-That role has the `synchro_seed` privilege. The adapter role does not.
+It requires Go 1.25 and the database created by [Server setup](/synchro/getting-started/server-setup/).
+Create a separate export login. Neither the adapter nor the application owner needs seed-export authority.
+
+```sh
+sudo -u postgres createuser --host /var/run/postgresql --port 55432 \
+  --login --inherit --pwprompt \
+  --no-superuser --no-createdb --no-createrole --no-replication \
+  synchro_quickstart_seed
+sudo -u postgres psql --host /var/run/postgresql --port 55432 \
+  --dbname synchro_quickstart -X -v ON_ERROR_STOP=1 \
+  --command 'GRANT synchro_seed TO synchro_quickstart_seed;'
+```
 
 ```bash
 make build-seed
 (
-  export DATABASE_URL='postgres://synchro_quickstart_owner@127.0.0.1:55432/synchro_quickstart'
-  read -rsp 'Tutorial owner database password: ' PGPASSWORD
+  export DATABASE_URL='postgres://synchro_quickstart_seed@127.0.0.1:55432/synchro_quickstart'
+  read -rsp 'Tutorial seed database password: ' PGPASSWORD
   echo
   export PGPASSWORD
   bin/synchro-seed --output ./build/seed.db

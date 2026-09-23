@@ -314,18 +314,28 @@ synchro_worker` for its SQL object access. Its own replication attribute
 authorizes logical replication because PostgreSQL does not inherit role
 attributes through membership. No other login principal has `REPLICATION`.
 
-The worker credential is provisioned outside the extension, stored outside the
-database and repository, rotated by deployment tooling, and restricted by
-`pg_hba.conf` to the configured database, expected host or local transport, and
-SCRAM-SHA-256 or certificate authentication. Readiness verifies the configured
-worker login OID and that it remains the sole runtime replication principal.
+The WAL background worker opens an internal PostgreSQL connection as the
+configured worker login. This connection does not use a password or pass
+through `pg_hba.conf`. PostgreSQL role attributes, membership validation, and
+explicit role activation constrain its SQL access. Readiness verifies the
+configured worker login OID and that it remains the sole runtime replication
+principal.
+
+The projection-bootstrap coordinator separately opens external SQL and logical
+replication connections with that worker identity. Those connections require
+deployment-managed authentication and matching `pg_hba.conf` rules.
+Provision and rotate their password or certificate outside the extension and
+repository. Restrict external worker access to the configured database and
+expected transport. These external authentication controls do not authenticate
+the internal background-worker connection.
 
 Release verification receives the worker login through
 `SYNCHRO_CONFORMANCE_WORKER_USER`. It receives the secret through
-`SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE`. The harness does not create or copy
-the credential. It installs a database-specific SCRAM-SHA-256 rule before a
-worker-specific rejection rule. Negative controls reject a wrong secret,
-another database, and passwordless local access.
+`SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE` for external connections.
+The fixture setup provisions that credential outside the extension.
+The harness installs a database-specific SCRAM-SHA-256 rule before a
+worker-specific rejection rule. External-connection negative controls reject
+a wrong secret, another database, and passwordless local access.
 
 The installation applies all of these default-deny rules:
 

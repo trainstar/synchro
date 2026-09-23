@@ -473,7 +473,7 @@ The fixed `synchro` schema and every extension-owned object MUST revoke `PUBLIC`
 
 ### Database Role Separation
 
-Owner, adapter, seed, monitor, operator, and worker SQL authority MUST remain split among the six least-privilege `NOLOGIN`, `NOREPLICATION` group roles in [ADR 005]. Exactly one dedicated `LOGIN REPLICATION NOINHERIT` worker credential MAY belong only to the worker group and MUST use explicit `SET ROLE` for SQL access under restricted HBA and external credential management. A runtime role inheriting owner or another runtime role, broad function grants, or any other replication-capable login is a violation of Database role separation.
+Owner, adapter, seed, monitor, operator, and worker SQL authority MUST remain split among the six least-privilege `NOLOGIN`, `NOREPLICATION` group roles in [ADR 005]. Exactly one dedicated `LOGIN REPLICATION NOINHERIT` worker principal MAY belong only to the worker group and MUST use explicit `SET ROLE` for SQL access. Its internal background-worker connection does not use HBA authentication. External worker connections MUST use restricted HBA and deployment-managed credentials. A runtime role inheriting owner or another runtime role, broad function grants, or any other replication-capable login is a violation of Database role separation.
 
 ### Capture Health Readiness
 

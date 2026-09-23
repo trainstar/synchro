@@ -161,8 +161,7 @@ sudo -u postgres createuser --host /var/run/postgresql --port 55432 \
 sudo -u postgres psql -X -v ON_ERROR_STOP=1 \
   --host /var/run/postgresql --port 55432 --dbname synchro_quickstart <<'SQL'
 CREATE EXTENSION synchro_pg;
-GRANT synchro_owner, synchro_operator TO synchro_quickstart_owner;
-GRANT synchro_seed TO synchro_quickstart_owner;
+GRANT synchro_operator TO synchro_quickstart_owner;
 GRANT synchro_adapter TO synchro_quickstart_adapter;
 GRANT synchro_worker TO synchro_quickstart_worker;
 GRANT CREATE ON SCHEMA public TO synchro_quickstart_owner;
@@ -186,6 +185,7 @@ use a password or a `pg_hba.conf` rule.
 
 The application owner must own both the registered relations and the configured publication.
 The empty publication above establishes that ownership before registration.
+It does not need membership in the internal `synchro_owner` role.
 
 Enable the worker after the database and worker login exist:
 
