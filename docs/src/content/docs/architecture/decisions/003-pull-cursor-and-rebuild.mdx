@@ -86,6 +86,9 @@ object:
 }
 ```
 
+The scope IDs in this example are already server-declared and assigned to the
+authenticated client. A scope name does not grant access or create assignment.
+
 The request rules are:
 
 1. `client_id` is a nonempty identifier for the authenticated user's client.
@@ -99,9 +102,8 @@ The request rules are:
 6. A scope that was never assigned to this client generation is invalid. A
    previously assigned scope that has since been removed is accepted so the
    server can report the removal normally.
-7. `limit` is an integer in the inclusive range `1` through the server's
-   configured maximum. The server does not silently clamp zero, negative, or
-   over-limit values.
+7. `limit` is an integer in the inclusive range `1..1000`. The server does
+   not silently clamp zero, negative, or over-limit values.
 8. A malformed JSON body, missing required member, wrong JSON type, unknown
    scope, future scope-set version, or invalid limit returns an error and does
    not process any scope.
@@ -453,8 +455,7 @@ The request rules are:
 6. `cursor` is `null` for the first request or an opaque rebuild continuation
    token for every later request. A client-supplied lexical row key is never a
    valid cursor.
-7. `limit` is an integer in the inclusive range `1` through the server's
-   configured rebuild maximum.
+7. `limit` is an integer in the inclusive range `1..1000`.
 8. A continuation request uses the page size bound to its token. A different
    limit is invalid and cannot change page identity during replay.
 

@@ -1,38 +1,43 @@
-# Synchro React Native Example
+# Synchro React Native Verification Harness
 
-This app is the RN bridge verification harness for `@trainstar/synchro-react-native`. It is not product sample UI. Each button exercises a specific SDK behavior and updates a visible `PASS` / `FAIL` badge for Detox.
+This app is the React Native bridge verification harness for `@trainstar/synchro-react-native`.
+It is not a product tutorial or sample UI.
+Use the [primary Quickstart](../../../docs/src/content/docs/getting-started/quickstart.mdx) for application setup.
 
 ## Requirements
 
-- Node `20+`
-- Xcode with an iOS simulator
-- Android SDK and emulator for Android verification
-- JDK `17` for Android builds
-- Running Synchro test server via the repo `make` targets
+- Node `22.20.0` for repository contributor tooling
 
-## Common Commands
+The published package runtime supports Node `>=20.19.4`.
+That runtime floor does not replace the contributor toolchain pin.
+Use the [development guide](../../../docs/src/content/docs/getting-started/development.mdx) for fixture prerequisites and the Make sequence.
 
-From `clients/react-native/example`:
+## Development Commands
+
+From `clients/react-native`, use Metro commands only for development:
 
 ```sh
-npm run ios
-npm run build:ios
-npm run build:android
-npm run detox:build:ios
-npm run detox:test:ios
-npm run detox:build:android
-npm run detox:test:android
+yarn example start
+yarn example ios
+yarn example android
 ```
 
-From the repo root:
+## Validation Commands
+
+From the repository root:
 
 ```sh
+make lint-rn
 make test-rn-unit
 make test-rn-e2e-ios
 make test-rn-e2e-android
 ```
 
-The Make targets start and configure the `synchrod` test server automatically.
+Use `make test-rn` when both end-to-end platforms are available.
+Do not replace these targets with direct Jest or Detox commands.
+
+The end-to-end targets restart the repository-owned extension-backed test adapter and create a fresh test seed.
+The development guide defines their platform and fixture prerequisites.
 
 ## What The Harness Covers
 
@@ -48,7 +53,7 @@ The Make targets start and configure the `synchrod` test server automatically.
 
 ## Notes
 
-- The harness assumes the repo test JWT secret and test server settings used by the existing Swift and Kotlin integration flows.
+- The harness uses the repository test JWT secret and test server settings.
 - iOS Detox runs build a bundled JS app instead of relying on Metro. The local Synchro adapter listens on `8091`, which stays off Metro's default `8081` port.
 - Android verification is required for shipability. iOS-only green runs are not sufficient.
 - `seed.db` is the pinned offline seed for the harness. `seed.db.sha256` records its digest.

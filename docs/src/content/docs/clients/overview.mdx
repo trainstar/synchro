@@ -43,6 +43,9 @@ It does not own:
 - Swift is released through Swift Package Manager from the repo root `Package.swift`
 - Kotlin is released from `clients/kotlin/synchro`
 - React Native is released from `clients/react-native`
+- [Client consumption](/synchro/clients/consumption/) has copyable local and
+  published installation declarations, writable database requirements, and a
+  first-sync flow.
 
 ## Client guides
 
@@ -75,12 +78,9 @@ Current seed rules:
 
 ## React Native on iOS
 
-The current iOS integration requires the consuming app to add the native Synchro dependency and GRDB in its Podfile. This is part of the current public installation contract until the CocoaPods dependency story is simplified further.
-
-```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v<version>'
-pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
-```
+The current iOS integration requires both Synchro and GRDB in the application
+Podfile. See [Client consumption](/synchro/clients/consumption/#react-native-ios-podfile-requirements)
+for the exact published and local declarations.
 
 ## Specification
 

@@ -1,19 +1,19 @@
 # Contributing
 
-Contributions are always welcome, no matter how large or small!
+Read the [code of conduct](CODE_OF_CONDUCT.md) before contributing.
 
-We want this community to be friendly and respectful to each other. Please follow it in all your interactions with the project. Before contributing, please read the [code of conduct](./CODE_OF_CONDUCT.md).
-
-## Development workflow
+## Development Workflow
 
 This project is a monorepo managed using [Yarn workspaces](https://yarnpkg.com/features/workspaces). It contains the following packages:
 
-- The library package in the root directory.
+- The library package in `clients/react-native/`, which is the workspace root and not the repository root.
 - An example app in the `example/` directory.
 
-To get started with the project, make sure you have the correct version of [Node.js](https://nodejs.org/) installed. See the [`.nvmrc`](./.nvmrc) file for the version used in this project.
+Use Node `22.20.0` for contributor tooling, as pinned in [`.nvmrc`](.nvmrc).
+The published package supports Node `>=20.19.4` at runtime.
+The runtime floor does not replace the contributor toolchain pin.
 
-Run `yarn` in the root directory to install the required dependencies for each package:
+From `clients/react-native`, run `yarn` to install the required workspace dependencies:
 
 ```sh
 yarn
@@ -21,17 +21,23 @@ yarn
 
 > Since the project relies on Yarn workspaces, you cannot use [`npm`](https://github.com/npm/cli) for development without manually migrating.
 
-The [example app](/example/) demonstrates usage of the library. You need to run it to test any changes you make.
+The [example app](example/README.md) demonstrates the library integration.
+It is the required Detox harness.
+Interactive Metro runs support development and do not provide validation evidence.
 
-It is configured to use the local version of the library, so any changes you make to the library's source code will be reflected in the example app. Changes to the library's JavaScript code will be reflected in the example app without a rebuild, but native code changes will require a rebuild of the example app.
+The example uses the local library.
+Metro can load JavaScript changes without a native rebuild.
+Rebuild the example after changing native code.
 
-If you want to use Android Studio or Xcode to edit the native code, you can open the `example/android` or `example/ios` directories respectively in those editors. To edit the Objective-C or Swift files, open `example/ios/SynchroReactNativeExample.xcworkspace` in Xcode and find the source files at `Pods > Development Pods > @trainstar/synchro-react-native`.
+After pod installation, open `example/ios/SynchroReactNativeExample.xcworkspace` in Xcode.
+The bridge pod is named `SynchroReactNative`; its source files are in `ios/`.
 
-To edit the Java or Kotlin files, open `example/android` in Android studio and find the source files at `trainstar-synchro-react-native` under `Android`.
+Open `example/android` in Android Studio for the Android application.
+The bridge source files are in `android/src/main/`.
 
-You can use various commands from the root directory to work with the project.
+For development only, run these commands from `clients/react-native`:
 
-To start the packager:
+To start Metro:
 
 ```sh
 yarn example start
@@ -49,7 +55,7 @@ To run the example app on iOS:
 yarn example ios
 ```
 
-To confirm that the app is running with the new architecture, you can check the Metro logs for a message like this:
+To confirm the new architecture during development, inspect the Metro logs for a message like this:
 
 ```sh
 Running "SynchroReactNativeExample" with {"fabric":true,"initialProps":{"concurrentRoot":true},"rootTag":1}
@@ -57,32 +63,22 @@ Running "SynchroReactNativeExample" with {"fabric":true,"initialProps":{"concurr
 
 Note the `"fabric":true` and `"concurrentRoot":true` properties.
 
-Make sure your code passes TypeScript:
+Run validation through Make from the repository root:
 
 ```sh
-yarn typecheck
+make lint-rn
+make test-rn-unit
+make test-rn-e2e-ios
+make test-rn-e2e-android
 ```
 
-Remember to add tests for your change if possible. Run the unit tests by:
+Use `make test-rn` when both end-to-end platforms are available.
+Do not use direct Jest or Detox commands as a substitute for these structured gates.
 
-```sh
-yarn test
-```
+The end-to-end targets prepare repository-owned test fixtures and seeds.
+Use the [development guide](../../docs/src/content/docs/getting-started/development.mdx) for the fixture prerequisites and Make sequence.
 
-
-
-### Scripts
-
-The `package.json` file contains various scripts for common tasks:
-
-- `yarn`: setup project by installing dependencies.
-- `yarn typecheck`: type-check files with TypeScript.
-- `yarn test`: run unit tests with [Jest](https://jestjs.io/).
-- `yarn example start`: start the Metro server for the example app.
-- `yarn example android`: run the example app on Android.
-- `yarn example ios`: run the example app on iOS.
-
-### Sending a pull request
+## Sending A Pull Request
 
 > **Working on your first pull request?** You can learn how from this _free_ series: [How to Contribute to an Open Source Project on GitHub](https://app.egghead.io/playlists/how-to-contribute-to-an-open-source-project-on-github).
 
@@ -91,5 +87,5 @@ When you're sending a pull request:
 - Prefer small pull requests focused on one change.
 - Verify that linters and tests are passing.
 - Review the documentation to make sure it looks good.
-- Follow the pull request template when opening a pull request.
+- Describe the change and applicable Make results in the pull request.
 - For pull requests that change the API or implementation, discuss with maintainers first by opening an issue.

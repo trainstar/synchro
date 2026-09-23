@@ -176,6 +176,11 @@ Example:
 - `templates_public` for public templates
 - `templates_user:{user_id}` for user-created templates
 
+These are example names, not automatic assignments.
+The default identity scope is `user:{user_id}`.
+Custom private scopes require an explicit server-side grant, and shared scopes require registration.
+See [Scope modeling](/synchro/architecture/scope-modeling/#membership-and-assignment).
+
 The system should prefer one shared scope with many subscribers over copying the same shared rows into every private scope.
 
 Shared scopes should be grouped by operational behavior, not only by visibility. One shared `global` scope is acceptable for small stable datasets that change together. Larger or more independently changing public datasets should use separate shared scopes.

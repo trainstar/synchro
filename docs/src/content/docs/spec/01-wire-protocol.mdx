@@ -21,7 +21,7 @@ If an implementation behavior differs from this document or an Accepted ADR, the
 
 ## Transport, authentication, and adapter boundary
 
-The four runtime endpoints are:
+The four authenticated protocol endpoints are:
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -30,7 +30,24 @@ The four runtime endpoints are:
 | `POST /sync/pull` | Read one incremental page across assigned scopes. |
 | `POST /sync/rebuild` | Read one page from an immutable single-scope rebuild snapshot. |
 
-Requests and responses use HTTPS, UTF-8 JSON, and `Content-Type: application/json`. Every request uses `Authorization: Bearer <credential>`. The credential is opaque to the sync protocol.
+The adapter also serves these unauthenticated operator routes:
+
+| Endpoint | Purpose | Exposure rule |
+| --- | --- | --- |
+| `GET /ready` | Return only `{"ready":true}` or `{"ready":false}`. | A load balancer may reach this route. |
+| `GET /sync/schema` | Return the current schema manifest. | Restrict this route to the operator network. |
+| `GET /sync/tables` | Return registered table metadata. | Restrict this route to the operator network. |
+
+Do not expose internal health, registry, worker, slot, table, or row diagnostics
+through these routes. The adapter has no TLS listener. Run the standalone
+server on a private loopback or private network listener behind a reverse proxy
+that terminates public HTTPS. Do not expose the standalone HTTP listener to the
+public Internet.
+
+Production requests and responses use HTTPS, UTF-8 JSON, and
+`Content-Type: application/json`. Every authenticated protocol request uses
+`Authorization: Bearer <credential>`. The credential is opaque to the sync
+protocol.
 
 The adapter either validates the bearer credential or trusts an upstream component that has already validated it. In both cases, the adapter resolves exactly one canonical authenticated user identity. That identity is transport context and MUST NOT be accepted from a JSON request member. A `client_id` MUST be bound to that authenticated user.
 
@@ -168,6 +185,9 @@ Connect registers or resumes a client, negotiates protocol version 3, returns th
   }
 }
 ```
+
+The scope IDs in this example are already server-declared and assigned to the
+authenticated client. A scope name does not grant access or create assignment.
 
 The request members are:
 
@@ -722,7 +742,8 @@ The exact request rules are:
 4. `scopes` contains each locally active or previously assigned scope being reconciled. Every value has exactly one `cursor` member containing an opaque string or `null`.
 5. `null` means no usable incremental state and requests rebuild for that scope.
 6. A never-assigned or invented scope is invalid. A previously assigned scope that was removed is accepted for authoritative removal dispatch.
-7. `limit` is an integer from `1` through the configured pull maximum. It is never defaulted or clamped.
+7. `limit` is an integer in the fixed inclusive range `1..1000`. It is never
+   defaulted or clamped.
 
 ### Terminal response example
 
@@ -929,7 +950,10 @@ Rebuild materializes exactly one currently assigned scope from one durable immut
 }
 ```
 
-`scope` MUST be currently assigned. `rebuild_id` is generated and persisted by the client for one rebuild attempt. A new attempt uses a new UUID. `cursor` is `null` only on the first request. `limit` is an integer from `1` through the configured rebuild maximum and is fixed for the session.
+`scope` MUST be currently assigned. `rebuild_id` is generated and persisted by
+the client for one rebuild attempt. A new attempt uses a new UUID. `cursor` is
+`null` only on the first request. `limit` is an integer in the fixed inclusive
+range `1..1000` and is fixed for the session.
 
 The first request creates or reuses a session for this exact rebuild identity,
 current accepted-write epoch,
@@ -1072,7 +1096,16 @@ Every non-200 response uses this envelope:
 | 503 | `capture_pending` | true | Pull or rebuild cannot include an accepted push until its fence is durably WAL-materialized or represented by activated verified reset-baseline coverage. |
 | 503 | `temporary_unavailable` | true | An operational failure prevents a complete operation. Capture blocking uses bounded `reason: "capture_blocked"`. |
 
-HTTP 429 and 503 responses include a valid `Retry-After` header. A valid value is an IMF-fixdate or delta seconds that match `(?:0|[1-9][0-9]*)(?:\.[0-9]+)?` after optional whitespace is removed. Exponents, signs, leading zeros, and missing integer or fractional digits are invalid. A client retries only when `retryable` is `true`, and it preserves the exact sealed push request, presented pull cursors, or rebuild page state for that retry. `rebuild_restart_required` is non-retryable for the same continuation and requires a new rebuild attempt.
+HTTP 429 and 503 responses include a valid `Retry-After` header. A sender MUST
+emit an IMF-fixdate or nonnegative integer `delay-seconds` value. The current
+adapter emits the integer `5`. Native receivers MUST continue to tolerate a
+fractional nonnegative decimal value as a compatibility input after optional
+whitespace removal. Receivers reject exponents, signs, leading zeros, missing
+integer digits, and missing fractional digits. A client retries only when
+`retryable` is `true`, and it preserves the exact sealed push request, presented
+pull cursors, or rebuild page state for that retry.
+`rebuild_restart_required` is non-retryable for the same continuation and
+requires a new rebuild attempt.
 
 Row and version conflicts are HTTP 200 per-mutation `conflict` outcomes. They are never HTTP 409. `schema_incompatible` is an HTTP 200 terminal mutation outcome when the request-level schema is exact current. `unsupported` is a connect schema action, not an error code. No schema action is inferred from `schema_mismatch`.
 

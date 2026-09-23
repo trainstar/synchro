@@ -36,14 +36,83 @@ The portable seed generator does not:
 
 Clients still log in normally, connect normally, and reconcile with the server on first use.
 
-## Generation example
+## Generate a seed
+
+Run this example in Bash on the tutorial server, from its repository checkout.
+It requires Go 1.25 and the owner role created by [Server setup](/synchro/getting-started/server-setup/).
+That role has the `synchro_seed` privilege. The adapter role does not.
 
 ```bash
-cd api/go
-GOWORK=off go run ./cmd/synchro-seed \
-  --database-url "postgres://user:pass@localhost:5432/app?sslmode=disable" \
-  --output ./build/seed.db
+make build-seed
+(
+  export DATABASE_URL='postgres://synchro_quickstart_owner@127.0.0.1:55432/synchro_quickstart'
+  read -rsp 'Tutorial owner database password: ' PGPASSWORD
+  echo
+  export PGPASSWORD
+  bin/synchro-seed --output ./build/seed.db
+)
 ```
+
+The generator reads `DATABASE_URL` when `--database-url` is absent.
+The subshell discards its password after generation.
+For deployment, use a dedicated login with `synchro_seed` membership.
+Obtain its credential from your secret manager. Do not put database
+credentials in a seed artifact, application bundle, source file, or command
+history. The export accepts no user JWT.
+
+## Configure a client seed
+
+Set `seedDatabasePath` before the first open. The SDK validates and atomically
+copies the seed only when the destination database does not exist. Later opens
+keep the existing local database and do not overwrite pending intent.
+
+The following snippets show only the `seedDatabasePath` addition. Apply it to
+the complete client initialization in [Client consumption](/synchro/clients/consumption/).
+The variables in each snippet come from that prior initialization.
+
+For Swift, pass an absolute bundled-file path:
+
+```swift
+let config = SynchroConfig(
+    dbPath: databaseURL.path,
+    serverURL: serverURL,
+    authProvider: { accessToken },
+    clientID: clientID,
+    appVersion: "0.3.0",
+    seedDatabasePath: seedURL.path
+)
+```
+
+For Kotlin, copy the bundled asset to an application-private file before
+creating `SynchroClient`, then pass that file's absolute path:
+
+```kotlin
+val config = SynchroConfig(
+    dbPath = context.getDatabasePath("notes.sqlite").absolutePath,
+    serverURL = serverURL,
+    authProvider = { accessToken },
+    clientID = clientID,
+    appVersion = "0.3.0",
+    seedDatabasePath = seedFile.absolutePath,
+)
+```
+
+For React Native, pass an asset name or an absolute seed path:
+
+```ts
+const client = new SynchroClient({
+  dbPath: "notes.sqlite",
+  serverURL,
+  authProvider: async () => accessToken,
+  clientID,
+  appVersion: "0.3.0",
+  seedDatabasePath: "seed.db",
+});
+```
+
+On Android, a relative React Native seed name resolves from the app assets. On
+iOS, it resolves from the application bundle before a Documents-directory
+fallback. Do not call `initialize()` until the seed asset is present.
 
 ## Client behavior after login
 

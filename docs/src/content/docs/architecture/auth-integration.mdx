@@ -1,67 +1,98 @@
 ---
 title: Auth Integration
-description: How to mount Synchro behind your existing API or let the adapter validate JWTs directly.
+description: Connect Synchro routes to a canonical authenticated user identity.
 ---
 
-The Go adapter supports two integration modes for protected sync routes.
+Synchro receives one canonical user ID for each authenticated protocol request.
+It does not accept a user ID from a JSON request member. The identity binds the
+client, scopes, cursors, and write policy.
 
-## 1. Trusted upstream auth
+The adapter accepts exactly one authentication mode. Do not configure more than
+one mode.
 
-Recommended when Synchro is mounted behind an existing product API.
+## Trusted upstream authentication
 
-Flow:
+Use `UserIDResolver` when an upstream API already validates the request. The
+resolver returns the product's canonical internal user ID. Return
+`ErrAuthRequired` when the request has no authenticated user.
 
-1. your main API validates the bearer token
-2. your main API resolves the canonical internal user ID
-3. Synchro receives that resolved user ID through a trusted resolver
-4. the PostgreSQL extension runs DB-side policy and sync logic with that canonical identity
+```go
+handler := synchroapi.Routes(synchroapi.Config{
+    DB: db,
+    UserIDResolver: synchroapi.RequestContextUserIDResolver,
+})
+```
 
-Why this is the better default:
+Set the canonical identity with `WithUserID` only after the trusted upstream
+authentication middleware completes. Never copy a user ID from a request body,
+query parameter, or client header into that context.
 
-- product-specific identity logic stays in the product API
-- Synchro stays generic
-- internal user mapping lives in one place
-- adapter code stays transport-focused
+`synchrod-pg` configures only direct JWT validation from environment variables.
+Embed `Routes` in the trusted upstream server when you need `UserIDResolver`.
 
-## 2. Direct JWT validation in the adapter
+## Adapter JWT authentication
 
-Supported when Synchro must validate bearer tokens itself.
+Use one of these modes when the adapter validates bearer tokens:
 
-Current adapter support:
+| Mode | `Config` fields | Accepted algorithms |
+| --- | --- | --- |
+| Shared secret | `JWTSecret` | HS256 |
+| Key set | `JWKSURL`, `JWKSContext` | RS256 or ES256 |
 
-- `JWTSecret`
-- `JWKSURL`
+`JWTSecret`, `JWKSURL`, and `UserIDResolver` are mutually exclusive.
+`JWKSContext` is required when `JWKSURL` is set. Keep that context active for
+the handler lifetime. Cancel it during server shutdown. `JWTUserClaim` selects
+the canonical user claim and defaults to `sub`.
 
-Use this when you do not already have a trusted upstream API layer resolving product identities before the request reaches Synchro.
+```go
+jwksContext, cancelJWKS := context.WithCancel(context.Background())
+defer cancelJWKS()
 
-## Portable seed relationship
+handler := synchroapi.Routes(synchroapi.Config{
+    DB:          db,
+    JWKSURL:     "https://identity.example/.well-known/jwks.json",
+    JWKSContext: jwksContext,
+    JWTUserClaim: "sub",
+})
+```
 
-Portable seed generation is separate from runtime auth.
+Store a shared secret outside source control. Generate it with a protected
+secret manager or with `openssl rand -hex 32`, then export it only to the
+adapter process environment.
 
-The seed generator:
+## Transport boundary
 
-- is trusted tooling
-- connects directly to PostgreSQL
-- does not accept JWT input
+The standalone adapter serves HTTP. Bind it to a private loopback or private
+network address. Terminate public HTTPS at a reverse proxy before requests reach
+the adapter. Forward the original request only from that trusted proxy.
 
-Client runtime auth stays unchanged after that. Apps still authenticate normally when they begin real sync.
+The four protocol routes require authentication:
 
-## Choosing the right mode
+```text
+POST /sync/connect
+POST /sync/push
+POST /sync/pull
+POST /sync/rebuild
+```
 
-Use trusted upstream auth when:
+`GET /ready`, `GET /sync/schema`, and `GET /sync/tables` are unauthenticated.
+Keep the metadata routes on an operator network. `GET /ready` returns only a
+boolean readiness result. Do not add worker, registry, slot, row, or table
+diagnostics to a public route.
 
-- Synchro is mounted inside a larger product API
-- you already validate tokens elsewhere
-- you need product-specific user resolution before sync
+## Scope assignment
 
-Use direct JWT validation when:
+The server assigns scopes. The default private scope is
+`user:{canonical_user_id}`. Registered shared scopes apply to every active
+client. An operator can grant or revoke an existing scope for one user with
+`synchro_grant_user_scope` and `synchro_revoke_user_scope`.
 
-- Synchro is exposed more directly
-- you want the adapter to own bearer-token validation
-- you do not have a separate API layer resolving internal user IDs first
+The next connect reconciles a grant or revoke. An added scope has a null cursor
+and rebuilds. A removed scope causes local provenance cleanup. A client cannot
+invent, grant, or retain an unassigned scope.
 
 ## Read next
 
-- [Architecture overview](/synchro/architecture/overview/)
-- [Quickstart](/synchro/getting-started/quickstart/)
-- [Client contract](/synchro/spec/02-client-contract/)
+- [Server setup](/synchro/getting-started/server-setup/)
+- [Wire protocol](/synchro/spec/01-wire-protocol/)
+- [Scope modeling](/synchro/architecture/scope-modeling/)

@@ -13,11 +13,11 @@ This catalog defines the observable conditions that every conforming Synchro pro
 
 `MUST` and `MUST NOT` are normative. Failing a `MUST`, observing behavior forbidden by a `MUST NOT`, or accepting an invalid state identified below is a conformance violation. The Accepted ADRs define the exact shapes, bindings, ordering rules, matrices, and dispatch behavior referenced here and MUST NOT be weakened by an implementation-specific interpretation.
 
-[ADR 001]: ../architecture/decisions/001-wal-change-stream/
-[ADR 002]: ../architecture/decisions/002-mutation-idempotency-and-conflicts/
-[ADR 003]: ../architecture/decisions/003-pull-cursor-and-rebuild/
-[ADR 004]: ../architecture/decisions/004-membership-schema-and-retention/
-[ADR 005]: ../architecture/decisions/005-integrity-authorization-and-seeds/
+[ADR 001]: /synchro/architecture/decisions/001-wal-change-stream/
+[ADR 002]: /synchro/architecture/decisions/002-mutation-idempotency-and-conflicts/
+[ADR 003]: /synchro/architecture/decisions/003-pull-cursor-and-rebuild/
+[ADR 004]: /synchro/architecture/decisions/004-membership-schema-and-retention/
+[ADR 005]: /synchro/architecture/decisions/005-integrity-authorization-and-seeds/
 
 For v0.3.0, every level-three invariant heading in this document maps to
 exactly one requirement record, and every requirement maps through exactly one
@@ -207,7 +207,7 @@ Repeated evaluation of the same authoritative row and dependency state MUST prod
 
 ### Deterministic Scope Function Contract
 
-Membership, impact, and assignment functions MUST satisfy the exact registered signatures and restrictions in [ADR 004], including schema qualification, `LANGUAGE SQL`, `STABLE`, `SECURITY INVOKER`, declared dependencies, capture-only dependency registrations, commit-ordered projection access, and positive bounds. A function that reads a live application relation, or activation after any contract violation, is a conformance violation.
+Membership and impact functions MUST satisfy the exact registered signatures and restrictions in [ADR 004], including schema qualification, `LANGUAGE SQL`, `STABLE`, `SECURITY INVOKER`, declared dependencies, capture-only dependency registrations, commit-ordered projection access, and positive bounds. A function that reads a live application relation, or activation after any contract violation, is a conformance violation.
 
 ### Dependency Driven Membership Propagation
 

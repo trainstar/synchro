@@ -51,9 +51,14 @@ The most important selective-sync rule is still:
 
 Recommended baseline:
 
-- private data lives in private scopes such as `documents_user:{user_id}`
+- private data can use the default identity scope `user:{user_id}`
 - shared data lives in shared scopes such as `templates_public`
 - one local SQLite table may be fed by both shared and private scopes
+
+Row membership and client assignment are different operations.
+A membership function selects the scopes that contain a row.
+Connect assigns the authenticated user's identity scope, registered shared scopes, and explicit user grants.
+A custom scope name does not assign itself to a client.
 
 This page is only the mental model. Detailed operational guidance, grouping rules, and anti-patterns live in [Scope modeling](/synchro/architecture/scope-modeling/).
 
@@ -76,7 +81,7 @@ The reference Go host layer supports:
 - trusted upstream auth
 - direct JWT validation
 
-For most product APIs, trusted upstream auth is the better default because product-specific identity logic stays in the host API instead of the host layer.
+Use trusted upstream auth when the product API already authenticates requests and resolves canonical user identities.
 
 Detailed wiring guidance lives in [Auth integration](/synchro/architecture/auth-integration/).
 

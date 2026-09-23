@@ -1,62 +1,41 @@
 ---
 title: Synchro
-description: Production-grade offline sync for serious native apps, built around an extension-based server architecture.
+description: PostgreSQL-to-SQLite synchronization for Swift, Kotlin, and React Native applications.
 ---
 
-Synchro gives teams building serious native apps production-grade offline sync without a separate sync tier.
+Synchro synchronizes PostgreSQL data with local SQLite databases.
+Native applications can keep working offline and synchronize through an authenticated HTTP adapter.
 
-Its core differentiator is an extension-based server architecture: server-side sync logic runs inside PostgreSQL instead of being rebuilt in a standalone sync service or spread across application handlers.
+The PostgreSQL extension owns server-side synchronization.
+Swift and Kotlin own the local database and durable synchronization work.
+React Native exposes those clients through a native bridge.
 
-Swift and Kotlin are first-class client engines. React Native is a bridge over them.
+## Start with a working example
 
-## Why teams choose it
+Follow [First synchronization](/synchro/getting-started/quickstart/) to edit a note offline and verify it on PostgreSQL and another client.
 
-- No separate sync tier. The server-side sync contract lives in the PostgreSQL extension, not in a standalone sync service.
-- Native-first client engines. Swift and Kotlin own local SQLite, change capture, queueing, retry, and safe apply. React Native stays a bridge.
-- Lower adoption friction. Synchro is designed for minimal required schema changes and SQL-based configuration in the database repo.
-- Deterministic selective sync. Server-defined scopes, materialized membership, and explicit rebuilds make behavior predictable.
-- Portable seeds. Generate client-compatible SQLite seeds from PostgreSQL for faster first start and bundled shared data.
+The guides describe `0.3.0`.
+Use the [local-consumer installation](/synchro/clients/consumption/) before that release is available.
+The [support policy](/synchro/reference/support-policy/) distinguishes supported environments from development hosts.
 
-## Supported release scope
+## Find the right guide
 
-- PostgreSQL 18 on Ubuntu 24.04 Linux x64
-- Swift on iOS 16 and current stable iOS
-- Kotlin on Android API 24 and current stable Android API
-- React Native 0.83.x on current stable iOS and current stable Android
+| Goal | Documentation |
+| --- | --- |
+| Install the server | [Server setup](/synchro/getting-started/server-setup/) |
+| Install and initialize a client | [Client consumption](/synchro/clients/consumption/) |
+| Configure authentication | [Auth integration](/synchro/architecture/auth-integration/) |
+| Choose private and shared scopes | [Scope modeling](/synchro/architecture/scope-modeling/) |
+| Bundle initial local data | [Portable seeds](/synchro/architecture/portable-seeds/) |
+| Configure limits or recover a development database | [Operations](/synchro/operations/configuration/) |
+| Contribute and run checks | [Local development](/synchro/getting-started/development/) |
+| Prepare a release | [Release procedure](https://github.com/trainstar/synchro/blob/dev/RELEASE.md) |
 
-macOS hosts Apple toolchain and Swift validation. It is not a PostgreSQL support cell.
+## Understand the contract
 
-The support matrix states required policy. Testing evidence records executed checks. See [Testing Evidence Overview](/synchro/verification/overview/) and [Support policy](/synchro/reference/support-policy/).
+Start with [Architecture](/synchro/architecture/overview/).
+Use the [wire protocol](/synchro/spec/01-wire-protocol/), [client contract](/synchro/spec/02-client-contract/), and [state machines](/synchro/spec/03-state-machines/) for precise behavior.
+The [invariants](/synchro/spec/04-invariants/) and [schema evolution](/synchro/spec/05-schema-evolution/) describe integrity and compatibility rules.
 
-## Start here by goal
-
-- Validate the release locally: [Quickstart](/synchro/getting-started/quickstart/)
-- Understand the runtime model: [Architecture overview](/synchro/architecture/overview/)
-- Model scopes correctly: [Scope modeling](/synchro/architecture/scope-modeling/)
-- Plan bundled warm-start databases: [Portable seeds](/synchro/architecture/portable-seeds/)
-- Choose an auth integration path: [Auth integration](/synchro/architecture/auth-integration/)
-- Install from another repo: [Client consumption](/synchro/clients/consumption/)
-- Read the public SDK boundaries: [Client SDKs](/synchro/clients/overview/)
-
-## Release specification
-
-The published spec is the release contract for the current implementation:
-
-- [Principles](/synchro/spec/00-principles/)
-- [Wire Protocol](/synchro/spec/01-wire-protocol/)
-- [Client Contract](/synchro/spec/02-client-contract/)
-- [State Machines](/synchro/spec/03-state-machines/)
-- [Invariants](/synchro/spec/04-invariants/)
-- [Schema Evolution](/synchro/spec/05-schema-evolution/)
-- [Conformance Plan](/synchro/spec/06-conformance-plan/)
-- [Testing Evidence](/synchro/spec/07-release-verification/)
-
-## Public release surfaces
-
-- PostgreSQL extension for PG 18
-- `synchrod-pg` reference host binary
-- `synchro-seed` generator
-- Swift Package Manager package
-- CocoaPods package
-- Kotlin package
-- React Native package
+Testing policy is not release certification.
+See [Testing evidence](/synchro/verification/overview/) for the distinction.

@@ -266,32 +266,10 @@ Clients verify row digests before apply. After atomically applying a terminal pa
 
 ## Legal client state transitions
 
-The protocol version 3 client states are exactly:
-
-```text
-uninitialized, local_ready, connecting, schema_applying, ready,
-pushing, pulling, rebuilding, backoff, error, stopped
-```
-
-The complete legal adjacency map is:
-
-| From | Allowed `to` states |
-| --- | --- |
-| `uninitialized` | `local_ready`, `error`, `stopped` |
-| `local_ready` | `connecting`, `error`, `stopped` |
-| `connecting` | `schema_applying`, `ready`, `backoff`, `error`, `stopped` |
-| `schema_applying` | `ready`, `rebuilding`, `error`, `stopped` |
-| `ready` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
-| `pushing` | `pushing`, `ready`, `pulling`, `connecting`, `backoff`, `error`, `stopped` |
-| `pulling` | `pulling`, `ready`, `rebuilding`, `connecting`, `backoff`, `error`, `stopped` |
-| `rebuilding` | `rebuilding`, `ready`, `connecting`, `backoff`, `error`, `stopped` |
-| `backoff` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
-| `error` | `local_ready`, `stopped` |
-| `stopped` | `local_ready` |
-
-The `pushing`, `pulling`, and `rebuilding` self-transitions represent another sealed batch or another page. `backoff` returns only to the interrupted operation or to `connecting`. `error -> local_ready` requires an explicit reset or retry action. `stopped -> local_ready` requires an explicit new start and local metadata validation. In particular, `stopped -> pulling`, `error -> ready`, and all unlisted pairs are illegal.
-
-Unknown states and illegal transitions are non-retryable local contract errors. They must not mutate durable queue, cursor, rebuild, or schema state. Parsing two recognized state names is not transition validation.
+The complete normative client state map and transition rules are in
+[State Transition Summary](/synchro/spec/03-state-machines/#state-transition-summary).
+Unknown states and unlisted transitions are non-retryable local contract
+errors. They must not mutate durable queue, cursor, rebuild, or schema state.
 
 ## SemVer 2.0 precedence
 
