@@ -90,6 +90,150 @@ class PublicationStateTests(unittest.TestCase):
                 with self.assertRaisesRegex(release_publish.PublicationError, "source commit"):
                     release_publish.validate_candidate_identity(commit, self.version)
 
+    def test_recovery_requires_successful_candidate_for_dispatch_commit(self) -> None:
+        command = release_step_command("Verify recovery workflow Candidate")
+        successful = {
+            "head_sha": self.commit, "event": "push", "status": "completed", "conclusion": "success",
+        }
+        with tempfile.TemporaryDirectory(prefix="synchro-dispatch-candidate-") as directory:
+            tools = Path(directory)
+            gh = tools / "gh"
+            gh.write_text(
+                '#!/bin/sh\n'
+                'test "$1" = api || exit 1\n'
+                'test "$2" = "repos/trainstar/synchro/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&head_sha=$GITHUB_SHA&per_page=100" || exit 1\n'
+                'printf "%s\\n" "$TEST_CI_RUNS"\n',
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            for runs, accepted in (
+                ([], False),
+                ([{**successful, "head_sha": "b" * 40}], False),
+                ([{**successful, "event": "pull_request"}], False),
+                ([{**successful, "status": "in_progress"}], False),
+                ([{**successful, "conclusion": "failure"}], False),
+                ([successful], True),
+            ):
+                with self.subTest(runs=runs):
+                    result = subprocess.run(
+                        ["bash", "-c", command],
+                        env={
+                            **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                            "GITHUB_SHA": self.commit, "GITHUB_REPOSITORY": "trainstar/synchro",
+                            "TEST_CI_RUNS": json.dumps({"workflow_runs": runs}),
+                        },
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_recovery_preserves_dispatch_helper_without_changing_candidate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="synchro-recovery-helper-") as directory:
+            root = Path(directory)
+            repo = root / "source"
+            repo.mkdir()
+            runner = root / "runner"
+            runner.mkdir()
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args], cwd=repo, capture_output=True, text=True, check=True,
+                ).stdout.strip()
+            git("init", "--quiet", "--initial-branch=master")
+            git("config", "user.name", "Release fixture")
+            git("config", "user.email", "release@example.invalid")
+            helper = repo / "scripts/release-publish.py"
+            helper.parent.mkdir()
+            original = 'raise RuntimeError("original defective publisher")\n'
+            helper.write_text(original, encoding="utf-8")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "Create original candidate")
+            candidate = git("rev-parse", "HEAD")
+            corrected = (ROOT / "scripts/release-publish.py").read_bytes()
+            helper.write_bytes(corrected)
+            git("commit", "--quiet", "-am", "Correct publication helper")
+            dispatch = git("rev-parse", "HEAD")
+            for name, checkout in (
+                ("Preserve dispatch publication helper", dispatch),
+                ("Load dispatch publication helper", candidate),
+            ):
+                with self.subTest(step=name):
+                    git("checkout", "--quiet", "--detach", checkout)
+                    subprocess.run(
+                        ["bash", "-c", release_step_command(name)], cwd=repo,
+                        env={**os.environ, "GITHUB_SHA": dispatch, "RUNNER_TEMP": str(runner)},
+                        check=True, capture_output=True, text=True,
+                    )
+                    git("checkout", "--quiet", "--detach", candidate)
+                    self.assertEqual(helper.read_text(encoding="utf-8"), original)
+                    self.assertEqual(git("status", "--porcelain"), "")
+                    self.assertEqual(git("rev-parse", "HEAD"), candidate)
+                    preserved = runner / "release-publish.py"
+                    self.assertEqual(preserved.read_bytes(), corrected)
+                    subprocess.run(
+                        [sys.executable, str(preserved), "validate-candidate",
+                         "--source-commit", candidate, "--version", self.version],
+                        cwd=repo, check=True, capture_output=True, text=True,
+                    )
+
+    @mock.patch.object(release_publish, "request_json")
+    def test_authenticated_draft_lookup_paginates_without_using_published_endpoint(self, request_json: mock.Mock) -> None:
+        pages = [
+            [{"id": index, "tag_name": f"other-{index}"} for index in range(1, 101)],
+            [{"id": 101, "tag_name": self.identity["root_tag"], "draft": True, "assets": []}],
+        ]
+        request_json.side_effect = pages
+        draft = release_publish.github_release("trainstar/synchro", self.identity["root_tag"], "fixture-token")
+        self.assertEqual(draft, pages[1][0])
+        self.assertEqual(request_json.call_args_list, [
+            mock.call("https://api.github.com/repos/trainstar/synchro/releases?per_page=100&page=1", "fixture-token"),
+            mock.call("https://api.github.com/repos/trainstar/synchro/releases?per_page=100&page=2", "fixture-token"),
+        ])
+
+    @mock.patch.object(release_publish, "request_json", return_value=None)
+    def test_anonymous_lookup_does_not_discover_private_drafts(self, request_json: mock.Mock) -> None:
+        self.assertIsNone(release_publish.github_release("trainstar/synchro", self.identity["root_tag"], None))
+        request_json.assert_called_once_with("https://api.github.com/repos/trainstar/synchro/releases/tags/v1.2.3")
+
+    @mock.patch.object(release_publish, "request_json")
+    def test_authenticated_draft_lookup_rejects_ambiguous_or_invalid_responses(self, request_json: mock.Mock) -> None:
+        draft = {"id": 1, "tag_name": self.identity["root_tag"], "draft": True, "assets": []}
+        for value in (
+            None,
+            {},
+            [None],
+            [{"tag_name": self.identity["root_tag"]}],
+            [draft, draft],
+            [draft, {**draft, "id": 2}],
+        ):
+            with self.subTest(value=value):
+                request_json.return_value = value
+                with self.assertRaises(release_publish.PublicationError):
+                    release_publish.github_release("trainstar/synchro", self.identity["root_tag"], "fixture-token")
+
+    @mock.patch.object(release_publish, "request_bytes", return_value=None)
+    @mock.patch.object(release_publish, "request_json")
+    def test_authenticated_observer_recovers_draft_when_published_tag_is_absent(
+        self, request_json: mock.Mock, request_bytes: mock.Mock,
+    ) -> None:
+        def response(url: str, token: str | None = None) -> object:
+            if "/git/ref/tags/" in url:
+                return {"object": {"sha": self.commit}}
+            if "/releases?" in url:
+                self.assertEqual(token, "fixture-token")
+                return [{
+                    "id": 1, "tag_name": self.identity["root_tag"], "draft": True,
+                    "assets": [{
+                        "name": "server", "digest": "sha256:" + self.identity["github_assets"]["server"],
+                        "browser_download_url": "https://github.com/trainstar/synchro/releases/download/v1.2.3/server",
+                    }],
+                }]
+            return None
+        request_json.side_effect = response
+        state = release_publish.observe_public(self.identity, "trainstar/synchro", "fixture-token")
+        classified = release_publish.classify_publication(self.identity, state)
+        self.assertEqual(classified["github"], "draft-partial")
+        self.assertEqual(classified["next_operation"], "publish-github")
+        self.assertEqual(state["github"]["assets"], {"server": self.identity["github_assets"]["server"]})
+
     def test_candidate_identity_rejects_noncanonical_values(self) -> None:
         invalid = (
             ("A" * 40, self.version),
@@ -339,6 +483,126 @@ class PublicationStateTests(unittest.TestCase):
         with self.assertRaisesRegex(release_publish.PublicationError, "incomplete"):
             release_publish.list_central_deployments("wanted")
 
+    def test_release_workflow_creates_and_recovers_github_drafts(self) -> None:
+        command = release_step_command("Create or recover draft and publish GitHub assets")
+        for expression, value in (
+            ("release_dir_name", "fixture"), ("version", self.version), ("source_commit", self.commit),
+        ):
+            command = command.replace("${{ needs.candidate.outputs." + expression + " }}", value)
+        self.assertNotIn("${{", command)
+        with tempfile.TemporaryDirectory(prefix="synchro-github-draft-") as directory:
+            root = Path(directory)
+            release = root / "dist/releases/fixture"
+            (release / "artifacts").mkdir(parents=True)
+            payloads = {
+                "release-manifest.json": b"sealed manifest",
+                "SHA256SUMS": b"sealed checksums",
+                "sbom.spdx.json": b"sealed SBOM",
+                "server.tar.gz": b"sealed server",
+            }
+            for name, data in payloads.items():
+                (release / ("artifacts" if name == "server.tar.gz" else "") / name).write_bytes(data)
+            tools = root / "tools"
+            tools.mkdir()
+            proxy = tools / "python3"
+            proxy.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import importlib.util
+                import json
+                import os
+                import sys
+                from pathlib import Path
+                assert sys.argv[1] == os.path.join(os.environ["RUNNER_TEMP"], "release-publish.py")
+                spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
+                publisher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(publisher)
+                def request_json(url, token=None):
+                    assert token == "fixture-token"
+                    assert url == "https://api.github.com/repos/trainstar/synchro/releases?per_page=100&page=1"
+                    value = json.loads(Path(os.environ["TEST_GITHUB_STATE"]).read_text())["release"]
+                    return [] if value is None else [value]
+                publisher.request_json = request_json
+                sys.argv = sys.argv[1:]
+                raise SystemExit(publisher.main())
+                """), encoding="utf-8")
+            proxy.chmod(0o755)
+            gh = tools / "gh"
+            gh.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import json
+                import os
+                import sys
+                from pathlib import Path
+                path = Path(os.environ["TEST_GITHUB_STATE"])
+                state = json.loads(path.read_text())
+                args = sys.argv[1:]
+                assert args[0] == "release", "published-tag lookup cannot retrieve a draft (HTTP 404)"
+                assert args[2] == "v1.2.3"
+                state["operations"].append(args[1])
+                if args[1] == "create":
+                    assert state["release"] is None
+                    assert "--draft" in args and "--latest=false" in args and "--verify-tag" in args
+                    state["release"] = {"id": 17, "tag_name": args[2], "draft": True, "assets": []}
+                elif args[1] == "upload":
+                    asset = Path(args[3])
+                    assert state["release"]["draft"]
+                    assert asset.name not in state["files"]
+                    state["files"][asset.name] = asset.read_bytes().hex()
+                    state["release"]["assets"].append({"name": asset.name})
+                elif args[1] == "download":
+                    name = args[args.index("--pattern") + 1]
+                    output = Path(args[args.index("--dir") + 1]) / name
+                    output.write_bytes(bytes.fromhex(state["files"][name]))
+                elif args[1] == "edit":
+                    assert "--draft=false" in args and "--latest=false" in args
+                    state["release"]["draft"] = False
+                else:
+                    raise AssertionError(args)
+                path.write_text(json.dumps(state))
+                """), encoding="utf-8")
+            gh.chmod(0o755)
+            for initial in ("absent", "draft-partial"):
+                with self.subTest(initial=initial):
+                    runner = root / initial
+                    runner.mkdir()
+                    existing = initial == "draft-partial"
+                    state_path = runner / "github-state.json"
+                    state_path.write_text(json.dumps({
+                        "release": {
+                            "id": 17, "tag_name": "v1.2.3", "draft": True,
+                            "assets": [{"name": "release-manifest.json"}],
+                        } if existing else None,
+                        "files": {"release-manifest.json": payloads["release-manifest.json"].hex()} if existing else {},
+                        "operations": [],
+                    }), encoding="utf-8")
+                    (runner / "public-before-classification.json").write_text(
+                        json.dumps({"github": initial}), encoding="utf-8",
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", command], cwd=root,
+                        env={
+                            **os.environ,
+                            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                            "RUNNER_TEMP": str(runner), "GITHUB_OUTPUT": str(runner / "outputs"),
+                            "GITHUB_REPOSITORY": "trainstar/synchro", "GH_TOKEN": "fixture-token",
+                            "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
+                            "TEST_GITHUB_STATE": str(state_path),
+                        },
+                        capture_output=True, text=True, timeout=20, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    self.assertEqual(state["files"], {name: data.hex() for name, data in payloads.items()})
+                    self.assertFalse(state["release"]["draft"])
+                    self.assertEqual(state["release"]["id"], 17)
+                    self.assertEqual(
+                        state["operations"],
+                        ["download", "upload", "upload", "upload", "edit"] if existing
+                        else ["create", "upload", "upload", "upload", "upload", "edit"],
+                    )
+                    self.assertEqual(
+                        json.loads((runner / "github-operation.json").read_text(encoding="utf-8")),
+                        {"release_id": "17", "tag": "v1.2.3", "source_commit": self.commit, "operation": "publish-draft"},
+                    )
+
     def test_release_workflow_executes_private_recovery_effects(self) -> None:
         command = release_step_command("Resolve or upload and validate Maven deployment")
         command = command.replace("${{ needs.candidate.outputs.release_dir_name }}", "fixture")
@@ -386,7 +650,7 @@ class PublicationStateTests(unittest.TestCase):
                 import importlib.util
                 import os
                 import sys
-                assert sys.argv[1] == "scripts/release-publish.py"
+                assert sys.argv[1] == os.path.join(os.environ["RUNNER_TEMP"], "release-publish.py")
                 spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
                 publisher = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(publisher)
