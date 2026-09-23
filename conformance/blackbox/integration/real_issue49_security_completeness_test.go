@@ -665,6 +665,7 @@ func TestRealIssue49SecurityDatabaseAuthority(t *testing.T) {
 		{"synchro_monitor", "synchro.synchro_readiness()"},
 		{"synchro_monitor", "synchro.synchro_health_detail()"},
 		{"synchro_operator", "synchro.synchro_health_detail()"},
+		{"synchro_operator", "synchro.synchro_capture_truncate_guard()"},
 	}
 	capabilitiesValid := true
 	for _, capability := range capabilities {
@@ -1202,6 +1203,7 @@ const security49UnexpectedFunctionAuthoritySQL = `
 		('synchro_operator', 'synchro_debug'),
 		('synchro_operator', 'synchro_primary_key_guard'),
 		('synchro_operator', 'synchro_capture_fence'),
+		('synchro_operator', 'synchro_capture_truncate_guard'),
 		('synchro_operator', 'synchro_prepare_stream_reset'),
 		('synchro_operator', 'synchro_lock_stream_reset_sources'),
 		('synchro_operator', 'synchro_mark_stream_reset_snapshot'),
