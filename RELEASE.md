@@ -1,5 +1,9 @@
 # Release Synchro
 
+`RELEASE.md` is the sole release procedure.
+Use [GitHub Releases](https://github.com/trainstar/synchro/releases) to determine published release availability.
+`VERSION` controls the selected candidate version.
+
 ## Routine Actions
 
 1. Merge the release pull request into `dev`.
@@ -33,14 +37,43 @@ Do not continue when a required control, credential, or runtime is unavailable.
 
 ## Prepare A Release
 
-1. Run `make set-version VERSION=X.Y.Z`.
-2. Run `make version-check`.
-3. Confirm the support matrix in `conformance/support-matrix.json`.
-4. Merge the release pull request into `dev`.
-5. Confirm Candidate CI passed for that exact commit.
-6. Dispatch Release from the `dev` head.
+1. Select the release version as `X.Y.Z`.
+2. Create or select exactly one GitHub milestone named `vX.Y.Z`.
+3. Assign every release issue to that milestone.
+4. Run `make set-version VERSION=X.Y.Z`.
+5. Run `make version-check`.
+6. Confirm the support matrix in `conformance/support-matrix.json`.
+7. Merge the release pull request into `dev`.
+8. Record the exact merged `dev` SHA.
+9. Confirm that the required CI completed successfully for that exact SHA.
+10. Confirm that exactly one `vX.Y.Z` milestone exists.
+11. Dispatch Release from the `dev` head.
 
 `VERSION` is the release version authority.
+
+The workflow selects the version from the committed source.
+Do not dispatch a different branch or SHA after recording the candidate SHA.
+
+In the GitHub UI, select **Actions**, select **Release**, select **Run workflow**, and select `dev`.
+Leave `resume_run_id` empty for a new candidate.
+
+Use this command for a new candidate:
+
+```sh
+gh workflow run Release --repo trainstar/synchro --ref dev
+```
+
+Use this command only to resume a completed original Release run with a retained sealed candidate:
+
+```sh
+printf 'Original Release run ID: '
+read -r ORIGINAL_RUN_ID
+gh workflow run Release --repo trainstar/synchro --ref dev -f resume_run_id="$ORIGINAL_RUN_ID"
+```
+
+Set `ORIGINAL_RUN_ID` to the decimal ID of the original Release run that owns the sealed candidate receipt.
+`resume_run_id` must identify that run.
+It does not authorize a different candidate, version, source SHA, or artifact set.
 
 ## Support And Compatibility
 
@@ -89,7 +122,7 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 | Gate | Outcome |
 | --- | --- |
 | Candidate | Required source CI passes for the exact commit. |
-| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on each required support cell. |
+| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on all seven required support cells. |
 | Publish | One approval authorizes dependency-ordered publication. |
 | Public | Public bytes match the sealed payloads, and clean consumers resolve and build from public coordinates. |
 
@@ -163,17 +196,22 @@ Synchro has no numeric performance guarantee. Performance budgets remain deferre
 | Observed state | Required action |
 | --- | --- |
 | No sealed candidate | Start a new candidate. |
-| Sealed candidate without tags | Resume with original sealed bytes. |
+| Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Resume with original sealed bytes and the original artifact-owner run ID. |
 | One source tag exists | Verify its commit and create the missing tag there. |
 | GitHub published and a registry is missing | Keep non-latest status and publish the original payload. |
 | Registry outcome is unknown | Query the recorded operation before retry. |
 | Published bytes match | Skip upload and repeat incomplete public checks only. |
 | Bytes, tag, source, or version differ | Stop and record the conflict. |
-| Original artifacts expired | Stop. Never rebuild an existing release version. |
+| Original artifacts or the sealed candidate receipt expired | Stop. Never rebuild an existing release version. |
 | Published defect | Retain immutable artifacts and release a corrected patch. |
 
 Never move tags or replace published bytes.
 Recovery never rebuilds or republishes an existing package version.
+
+The `publication-sealed-candidate` receipt artifact retains for 90 days.
+Before a resume, verify that the receipt remains available and that its source SHA, version, sealed manifest, and artifacts match the original candidate.
+The workflow rejects an unavailable or mismatched receipt.
+Do not bypass this control or add a substitute gate.
 
 Before publication, source or dependency corrections require a new candidate.
 Retain the failed candidate unchanged and repeat every required gate.
@@ -183,4 +221,3 @@ Its package results do not certify the new candidate.
 
 - [Support policy](docs/src/content/docs/reference/support-policy.mdx)
 - [Testing evidence](docs/src/content/docs/spec/07-release-verification.mdx)
-- [Release-process plan](docs/superpowers/plans/2026-09-14-synchro-release-process.md)

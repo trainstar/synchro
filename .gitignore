@@ -50,6 +50,13 @@ plans/
 docs/.vscode/
 .playwright-mcp/
 
+# Retired planning and tracker records
+.r2-completion-tracker.md
+.r3-completion-tracker.md
+clients/react-native/BUILD_TRACKER.md
+docs/agent-tasks/
+docs/superpowers/plans/
+
 # Docs build output
 docs/node_modules/
 docs/dist/
