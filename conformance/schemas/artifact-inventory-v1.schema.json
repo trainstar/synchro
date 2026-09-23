@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "release", "artifacts"],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json" },
+    "schema_version": { "const": 1 },
+    "release": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "role", "name", "visibility", "kind"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^ARTDEF-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$" },
+          "role": {
+            "type": "string",
+            "enum": ["conformance-runner", "pg-extension", "pg-install-sql", "adapter", "seed-tool", "go-module", "swift-spm", "cocoapods", "kotlin-maven", "react-native-npm", "portable-seed"]
+          },
+          "name": { "type": "string", "minLength": 1 },
+          "visibility": { "enum": ["public", "internal"] },
+          "kind": { "enum": ["file", "source", "embedded", "verification"] },
+          "stage_root": { "enum": ["server", "packages"] },
+          "staging_path_template": { "$ref": "#/$defs/pathTemplate" },
+          "release_path_template": { "$ref": "#/$defs/pathTemplate" },
+          "destination_template": { "type": "string", "minLength": 1, "pattern": "\\{version\\}" },
+          "source_path": { "type": "string", "pattern": "^(?:repo-root|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)$" },
+          "source_tag_template": { "type": "string", "pattern": "^(?:v|api/go/v)\\{version\\}$" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "visibility": { "const": "public" }, "kind": { "const": "file" } }, "required": ["visibility", "kind"] },
+            "then": {
+              "required": ["stage_root", "staging_path_template", "release_path_template", "destination_template"],
+              "not": { "anyOf": [{ "required": ["source_path"] }, { "required": ["source_tag_template"] }] }
+            }
+          },
+          {
+            "if": { "properties": { "visibility": { "const": "public" }, "kind": { "const": "source" } }, "required": ["visibility", "kind"] },
+            "then": {
+              "required": ["source_path", "source_tag_template", "destination_template"],
+              "not": { "anyOf": [{ "required": ["stage_root"] }, { "required": ["staging_path_template"] }, { "required": ["release_path_template"] }] }
+            }
+          },
+          {
+            "if": { "properties": { "visibility": { "const": "public" } }, "required": ["visibility"] },
+            "then": { "properties": { "kind": { "enum": ["file", "source"] } } },
+            "else": {
+              "properties": { "kind": { "enum": ["embedded", "verification"] } },
+              "not": {
+                "anyOf": [
+                  { "required": ["stage_root"] },
+                  { "required": ["staging_path_template"] },
+                  { "required": ["release_path_template"] },
+                  { "required": ["destination_template"] },
+                  { "required": ["source_path"] },
+                  { "required": ["source_tag_template"] }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "pathTemplate": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*\\.\\.)(?!.*\\\\)[A-Za-z0-9._/-]*\\{version\\}[A-Za-z0-9._/-]*$"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "synchro-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable sync core: canonical integrity and protocol types"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde_json_canonicalizer = "0.3.2"
+sha2 = "0.10"

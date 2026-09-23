@@ -60,8 +60,12 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-[INSERT CONTACT METHOD].
+reported through an approved private reporting channel.
+Synchro has no published private reporting channel.
+To request one, open a maintainer issue at
+[the Synchro issues page](https://github.com/trainstar/synchro/issues).
+Do not include incident details or personal details in that issue.
+State only that you need a private reporting channel.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the

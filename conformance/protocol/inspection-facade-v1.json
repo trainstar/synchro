@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "facade": "SynchroInspection",
+  "operations": [
+    {
+      "name": "currentSchema",
+      "parameters": [],
+      "result": { "name": "SchemaRef", "nullable": true }
+    },
+    {
+      "name": "scopeStates",
+      "parameters": [],
+      "result": {
+        "name": "array",
+        "nullable": false,
+        "element": { "name": "ScopeStateInspection", "nullable": false }
+      }
+    },
+    {
+      "name": "scopeRows",
+      "parameters": [],
+      "result": {
+        "name": "array",
+        "nullable": false,
+        "element": { "name": "ScopeRowInspection", "nullable": false }
+      }
+    },
+    {
+      "name": "captureState",
+      "parameters": [
+        { "name": "maximumRecords", "type": { "name": "int", "nullable": false } }
+      ],
+      "result": { "name": "ClientStateCaptureInspection", "nullable": false }
+    },
+    {
+      "name": "rowMetadata",
+      "parameters": [
+        { "name": "tableName", "type": { "name": "string", "nullable": false } },
+        { "name": "recordID", "type": { "name": "string", "nullable": false } }
+      ],
+      "result": { "name": "RowMetadataInspection", "nullable": true }
+    },
+    {
+      "name": "rebuildAttempts",
+      "parameters": [],
+      "result": {
+        "name": "array",
+        "nullable": false,
+        "element": { "name": "RebuildAttemptInspection", "nullable": false }
+      }
+    },
+    {
+      "name": "rebuildReceipts",
+      "parameters": [],
+      "result": {
+        "name": "array",
+        "nullable": false,
+        "element": { "name": "RebuildReceiptInspection", "nullable": false }
+      }
+    }
+  ],
+  "models": [
+    {
+      "name": "SchemaRef",
+      "fields": [
+        { "name": "version", "type": { "name": "int64", "nullable": false } },
+        { "name": "hash", "type": { "name": "string", "nullable": false } }
+      ]
+    },
+    {
+      "name": "ScopeStateInspection",
+      "fields": [
+        { "name": "scopeID", "type": { "name": "string", "nullable": false } },
+        { "name": "cursor", "type": { "name": "string", "nullable": true } },
+        { "name": "checksum", "type": { "name": "string", "nullable": true } },
+        { "name": "localChecksum", "type": { "name": "string", "nullable": false } },
+        { "name": "generation", "type": { "name": "int64", "nullable": false } }
+      ]
+    },
+    {
+      "name": "ScopeRowInspection",
+      "fields": [
+        { "name": "scopeID", "type": { "name": "string", "nullable": false } },
+        { "name": "tableName", "type": { "name": "string", "nullable": false } },
+        { "name": "recordID", "type": { "name": "string", "nullable": false } },
+        { "name": "checksum", "type": { "name": "string", "nullable": false } },
+        { "name": "generation", "type": { "name": "int64", "nullable": false } }
+      ]
+    },
+    {
+      "name": "ClientStateCaptureInspection",
+      "fields": [
+        { "name": "schema", "type": { "name": "SchemaRef", "nullable": true } },
+        {
+          "name": "scopeStates",
+          "type": {
+            "name": "array",
+            "nullable": false,
+            "element": { "name": "ScopeStateInspection", "nullable": false }
+          }
+        },
+        { "name": "scopeStatesTruncated", "type": { "name": "bool", "nullable": false } },
+        {
+          "name": "scopeRows",
+          "type": {
+            "name": "array",
+            "nullable": false,
+            "element": { "name": "ScopeRowInspection", "nullable": false }
+          }
+        },
+        { "name": "scopeRowsTruncated", "type": { "name": "bool", "nullable": false } },
+        {
+          "name": "rebuildAttempts",
+          "type": {
+            "name": "array",
+            "nullable": false,
+            "element": { "name": "RebuildAttemptInspection", "nullable": false }
+          }
+        },
+        { "name": "rebuildAttemptsTruncated", "type": { "name": "bool", "nullable": false } },
+        {
+          "name": "rebuildReceipts",
+          "type": {
+            "name": "array",
+            "nullable": false,
+            "element": { "name": "RebuildReceiptInspection", "nullable": false }
+          }
+        },
+        { "name": "rebuildReceiptsTruncated", "type": { "name": "bool", "nullable": false } },
+        {
+          "name": "rowMetadata",
+          "type": {
+            "name": "array",
+            "nullable": false,
+            "element": { "name": "RowMetadataInspection", "nullable": false }
+          }
+        },
+        { "name": "rowMetadataTruncated", "type": { "name": "bool", "nullable": false } },
+        { "name": "overflowed", "type": { "name": "bool", "nullable": false } },
+        { "name": "applicationRowCount", "type": { "name": "int", "nullable": false } },
+        { "name": "mutationLedgerCount", "type": { "name": "int", "nullable": false } },
+        { "name": "mutationOutcomeCount", "type": { "name": "int", "nullable": false } },
+        { "name": "sealedBatchCount", "type": { "name": "int", "nullable": false } },
+        { "name": "rejectedMutationCount", "type": { "name": "int", "nullable": false } },
+        { "name": "scopeStateCount", "type": { "name": "int", "nullable": false } },
+        { "name": "scopeRowCount", "type": { "name": "int", "nullable": false } },
+        { "name": "provenanceCount", "type": { "name": "int", "nullable": false } },
+        { "name": "rowMetadataCount", "type": { "name": "int", "nullable": false } },
+        { "name": "rebuildAttemptCount", "type": { "name": "int", "nullable": false } },
+        { "name": "rebuildReceiptCount", "type": { "name": "int", "nullable": false } },
+        { "name": "provenanceMaintenanceWorkCursor", "type": { "name": "int64", "nullable": false } }
+      ]
+    },
+    {
+      "name": "RowMetadataInspection",
+      "fields": [
+        { "name": "tableName", "type": { "name": "string", "nullable": false } },
+        { "name": "recordID", "type": { "name": "string", "nullable": false } },
+        { "name": "serverVersion", "type": { "name": "string", "nullable": false } },
+        { "name": "rowChecksum", "type": { "name": "string", "nullable": true } }
+      ]
+    },
+    {
+      "name": "RebuildAttemptInspection",
+      "fields": [
+        { "name": "scopeID", "type": { "name": "string", "nullable": false } },
+        { "name": "rebuildID", "type": { "name": "string", "nullable": false } },
+        { "name": "clientGeneration", "type": { "name": "int64", "nullable": false } },
+        { "name": "schemaVersion", "type": { "name": "int64", "nullable": false } },
+        { "name": "schemaHash", "type": { "name": "string", "nullable": false } },
+        { "name": "generation", "type": { "name": "int64", "nullable": false } },
+        { "name": "cursor", "type": { "name": "string", "nullable": true } },
+        { "name": "pageLimit", "type": { "name": "int", "nullable": false } }
+      ]
+    },
+    {
+      "name": "RebuildReceiptInspection",
+      "fields": [
+        { "name": "rebuildIDFingerprint", "type": { "name": "string", "nullable": false } },
+        { "name": "pageCount", "type": { "name": "int", "nullable": false } },
+        { "name": "returnedRecordCount", "type": { "name": "int", "nullable": false } },
+        {
+          "name": "requestChainExpected",
+          "type": { "name": "array", "nullable": false, "element": { "name": "string", "nullable": false } }
+        },
+        {
+          "name": "requestChainObserved",
+          "type": { "name": "array", "nullable": false, "element": { "name": "string", "nullable": false } }
+        },
+        {
+          "name": "recordIdentitiesHex",
+          "type": { "name": "array", "nullable": false, "element": { "name": "string", "nullable": false } }
+        },
+        {
+          "name": "receivedRowChecksums",
+          "type": { "name": "array", "nullable": false, "element": { "name": "string", "nullable": false } }
+        },
+        {
+          "name": "computedRowChecksums",
+          "type": { "name": "array", "nullable": false, "element": { "name": "string", "nullable": false } }
+        },
+        { "name": "computedScopeChecksum", "type": { "name": "string", "nullable": true } },
+        { "name": "finalScopeChecksum", "type": { "name": "string", "nullable": true } },
+        { "name": "storedScopeChecksum", "type": { "name": "string", "nullable": true } },
+        { "name": "localScopeChecksum", "type": { "name": "string", "nullable": true } }
+      ]
+    }
+  ]
+}

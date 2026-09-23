@@ -1,3 +1,5 @@
+import org.gradle.api.tasks.testing.Test
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
@@ -17,6 +19,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -31,6 +34,7 @@ android {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
@@ -40,14 +44,20 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.11.1")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+    testImplementation("org.jetbrains.kotlin:kotlin-reflect:1.9.22")
     testImplementation("androidx.test:core:1.5.0")
 }
 
 mavenPublishing {
     publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    val localPublish = gradle.startParameter.taskNames.any {
+        it.contains("MavenLocal") || it.contains("ConsumerRepository")
+    }
+    if (!localPublish) {
+        signAllPublications()
+    }
 
-    coordinates("fit.trainstar", "synchro", project.findProperty("version")?.toString() ?: "0.1.0")
+    coordinates("fit.trainstar", "synchro", project.version.toString())
 
     pom {
         name.set("Synchro")
@@ -70,6 +80,61 @@ mavenPublishing {
             url.set("https://github.com/trainstar/synchro")
             connection.set("scm:git:git://github.com/trainstar/synchro.git")
             developerConnection.set("scm:git:ssh://github.com/trainstar/synchro.git")
+        }
+    }
+}
+
+providers.environmentVariable("SYNCHRO_CONSUMER_MAVEN_REPOSITORY").orNull?.let { repositoryPath ->
+    publishing {
+        repositories {
+            maven {
+                name = "consumer"
+                url = uri(repositoryPath)
+            }
+        }
+    }
+}
+
+providers.environmentVariable("SYNCHRO_RELEASE_MAVEN_REPOSITORY").orNull?.let { repositoryPath ->
+    publishing {
+        repositories {
+            maven {
+                name = "release"
+                url = uri(repositoryPath)
+            }
+        }
+    }
+}
+
+tasks.register("releaseBundle") {
+    group = "publishing"
+    description = "Write the signed Maven release repository bundle."
+    doFirst {
+        require(!providers.environmentVariable("SYNCHRO_RELEASE_MAVEN_REPOSITORY").orNull.isNullOrBlank()) {
+            "SYNCHRO_RELEASE_MAVEN_REPOSITORY is required"
+        }
+    }
+    dependsOn("publishAllPublicationsToReleaseRepository")
+}
+
+val integrationTestPatterns = listOf(
+    "com.trainstar.synchro.IntegrationTests",
+    "com.trainstar.synchro.SchemaIntegrationTests"
+)
+
+tasks.withType<Test>().configureEach {
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    when (providers.gradleProperty("synchroTestSuite").orNull) {
+        "unit" -> {
+            filter {
+                integrationTestPatterns.forEach { excludeTestsMatching(it) }
+            }
+        }
+        "integration" -> {
+            filter {
+                integrationTestPatterns.forEach { includeTestsMatching(it) }
+                isFailOnNoMatchingTests = true
+            }
         }
     }
 }

@@ -1,0 +1,305 @@
+---
+title: Client Consumption
+description: Install a Synchro client, open a durable local database, and complete the first sync.
+---
+
+This guide starts after [Server setup](/synchro/getting-started/server-setup/).
+It uses that guide's `synchro_quickstart` database, `alice` identity,
+`user:alice` scope, and `notes` table.
+
+## Choose an artifact source
+
+Use local artifacts before `0.3.0` is published. Use the published commands
+only after the matching release artifact is available. Both paths use version
+`0.3.0` and the same client APIs.
+
+Build local artifacts from this repository:
+
+```sh
+make local-consumer-artifacts
+```
+
+This creates:
+
+- Apple package files in `dist/local-consumer/apple/Synchro`
+- a Kotlin Maven repository in `dist/local-consumer/maven`
+- `dist/local-consumer/npm/trainstar-synchro-react-native-0.3.0.tgz`
+
+Do not link raw source directories into another application. The staged
+artifacts are the supported pre-release path.
+
+| Surface | Local artifact | Published artifact after release |
+| --- | --- | --- |
+| Swift | local package path | Git tag `v0.3.0` |
+| CocoaPods | local pod path | Git tag `v0.3.0` |
+| Kotlin | local Maven repository | Maven Central `fit.trainstar:synchro:0.3.0` |
+| React Native | local `.tgz` | npm `@trainstar/synchro-react-native@0.3.0` |
+
+## Prerequisites
+
+- Swift clients require iOS 16 or later.
+- Kotlin clients require Android API 24 or later and JDK 17.
+- React Native requires React Native `0.83.x`.
+- React Native consumers require Node `20.19.4` or later.
+- The repository React Native development toolchain is pinned to Node `22.20.0`
+  in `clients/react-native/.nvmrc`. This pin is for repository development.
+  It does not raise the published package floor.
+- Each client needs a writable private database path, a stable client ID, and
+  an authentication callback that returns an access token for `alice`.
+
+The tutorial adapter uses `http://127.0.0.1:8091`. Use that address only for
+the local development adapter. Android emulators must use
+`http://10.0.2.2:8091` instead. A physical device must use a reachable HTTPS
+endpoint, not a host loopback address.
+
+## Swift
+
+Add the package to `Package.swift` after `v0.3.0` is published:
+
+```swift
+dependencies: [
+    .package(
+        url: "https://github.com/trainstar/synchro.git",
+        exact: "0.3.0"
+    )
+],
+targets: [
+    .target(
+        name: "NotesApp",
+        dependencies: [.product(name: "Synchro", package: "Synchro")]
+    )
+]
+```
+
+For local development, replace the remote dependency with:
+
+```swift
+.package(path: "/absolute/path/to/synchro/dist/local-consumer/apple/Synchro")
+```
+
+Open a client from a writable Application Support path. The function performs
+the first sync before it returns:
+
+```swift
+import Foundation
+import Synchro
+
+enum NotesSetupError: Error {
+    case unexpectedServerNote
+}
+
+func openNotesClient(
+    accessToken: String,
+    clientID: String,
+    databaseFileName: String,
+    serverURL: URL
+) async throws -> SynchroClient {
+    let directory = try FileManager.default.url(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask,
+        appropriateFor: nil,
+        create: true
+    )
+    let databaseURL = directory.appendingPathComponent(databaseFileName)
+    let client = try SynchroClient(
+        config: SynchroConfig(
+            dbPath: databaseURL.path,
+            serverURL: serverURL,
+            authProvider: { accessToken },
+            clientID: clientID,
+            appVersion: "0.3.0"
+        )
+    )
+
+    do {
+        let noteID = "00000000-0000-4000-8000-000000000001"
+        try await client.start()
+        try await client.syncNow()
+
+        guard let initial = try client.query(
+            "SELECT id, body FROM notes WHERE id = ?",
+            params: [noteID]
+        ).first,
+        initial["id"] as? String == noteID else {
+            throw NotesSetupError.unexpectedServerNote
+        }
+
+        await client.stop()
+        try client.execute(
+            "UPDATE notes SET body = ? WHERE id = ?",
+            params: ["Edited offline", noteID]
+        )
+        try await client.start()
+        try await client.syncNow()
+
+        guard let updated = try client.query(
+            "SELECT body FROM notes WHERE id = ?",
+            params: [noteID]
+        ).first,
+        updated["body"] as? String == "Edited offline" else {
+            throw NotesSetupError.unexpectedServerNote
+        }
+        return client
+    } catch {
+        try? await client.close()
+        throw error
+    }
+}
+```
+
+The application obtains `accessToken` from its identity provider. Do not put a
+JWT in source code. Pass `http://127.0.0.1:8091` as `serverURL` only for the
+local tutorial adapter. When the application exits, call
+`try await client.close()`.
+
+## Kotlin
+
+Add the published artifact after `0.3.0` is available:
+
+```kotlin
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("fit.trainstar:synchro:0.3.0")
+}
+```
+
+For local development, add the staged repository before `mavenCentral()`:
+
+```kotlin
+repositories {
+    maven(url = uri("/absolute/path/to/synchro/dist/local-consumer/maven"))
+    mavenCentral()
+}
+```
+
+Open a client from the application database directory. This suspend function
+verifies that the first pull contains the server-created note:
+
+```kotlin
+import android.content.Context
+import com.trainstar.synchro.SynchroClient
+import com.trainstar.synchro.SynchroConfig
+
+suspend fun openNotesClient(
+    context: Context,
+    accessToken: String,
+    serverURL: String,
+    clientID: String,
+    databaseName: String,
+): SynchroClient {
+    val noteID = "00000000-0000-4000-8000-000000000001"
+    val client = SynchroClient(
+        SynchroConfig(
+            dbPath = context.getDatabasePath(databaseName).absolutePath,
+            serverURL = serverURL,
+            authProvider = { accessToken },
+            clientID = clientID,
+            appVersion = "0.3.0",
+        ),
+        context,
+    )
+
+    try {
+        client.start()
+        client.syncNow()
+        check(
+            client.query(
+                "SELECT id FROM notes WHERE id = ?",
+                arrayOf(noteID),
+            ).firstOrNull()?.get("id") == noteID,
+        )
+
+        client.stop()
+        client.execute(
+            "UPDATE notes SET body = ? WHERE id = ?",
+            arrayOf("Edited offline", noteID),
+        )
+        client.start()
+        client.syncNow()
+        check(
+            client.query(
+                "SELECT body FROM notes WHERE id = ?",
+                arrayOf(noteID),
+            ).firstOrNull()?.get("body") == "Edited offline",
+        )
+        return client
+    } catch (failure: Throwable) {
+        client.close()
+        throw failure
+    }
+}
+```
+
+Get `accessToken` from the application identity provider. Call `client.close()`
+when the client is no longer needed. Pass `http://10.0.2.2:8091` only for the
+local Android emulator tutorial adapter. Use an HTTPS URL in production.
+
+## React Native
+
+Install the published package after `0.3.0` is available:
+
+```sh
+npm install @trainstar/synchro-react-native@0.3.0
+```
+
+For local development, install the staged package:
+
+```sh
+npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.3.0.tgz
+```
+
+### React Native iOS Podfile requirements
+
+The React Native bridge requires both Synchro and GRDB. Use these exact Git
+dependencies for a published `0.3.0` integration:
+
+```ruby
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.3.0'
+pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+```
+
+For a local pre-release integration, replace only Synchro with the staged path:
+
+```ruby
+pod 'Synchro', :path => '/absolute/path/to/synchro/dist/local-consumer/apple/Synchro'
+pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+```
+
+The bridge pod declares its Synchro dependency. The application Podfile still
+must provide the native Synchro and GRDB sources shown above.
+
+After you add the Podfile declarations, install the pods:
+
+```sh
+cd ios
+pod install
+```
+
+Use the [React Native README](https://github.com/trainstar/synchro/tree/master/clients/react-native#usage)
+for the complete JavaScript example. It uses the public `initialize()`,
+`start()`, `syncNow()`, `queryOne()`, `execute()`, and `close()` methods.
+
+On Android, configure cleartext traffic only for the local emulator adapter.
+Use `http://10.0.2.2:8091` for that development case. Production Android and
+iOS clients must use HTTPS.
+
+## Confirm the second client
+
+Open a second client with a different stable client ID, such as
+`quickstart-swift-b`, `quickstart-kotlin-b`, or `quickstart-rn-b`. Authenticate
+as `alice`, use a distinct database file, call `start()` and `syncNow()`, then
+query the same note ID. Its `body` must be `Edited offline`.
+
+The update is an ordinary local SQLite write. The client captures durable
+intent, seals and retries requests as needed, and applies the authoritative
+server result without an echo mutation. Do not edit local queue, cursor,
+checksum, version, or provenance tables.
+
+## Read next
+
+- [Server setup](/synchro/getting-started/server-setup/)
+- [Application SQL limits](/synchro/clients/application-sql/)
+- [Portable seeds](/synchro/architecture/portable-seeds/)

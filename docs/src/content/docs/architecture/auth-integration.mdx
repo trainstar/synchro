@@ -1,0 +1,98 @@
+---
+title: Auth Integration
+description: Connect Synchro routes to a canonical authenticated user identity.
+---
+
+Synchro receives one canonical user ID for each authenticated protocol request.
+It does not accept a user ID from a JSON request member. The identity binds the
+client, scopes, cursors, and write policy.
+
+The adapter accepts exactly one authentication mode. Do not configure more than
+one mode.
+
+## Trusted upstream authentication
+
+Use `UserIDResolver` when an upstream API already validates the request. The
+resolver returns the product's canonical internal user ID. Return
+`ErrAuthRequired` when the request has no authenticated user.
+
+```go
+handler := synchroapi.Routes(synchroapi.Config{
+    DB: db,
+    UserIDResolver: synchroapi.RequestContextUserIDResolver,
+})
+```
+
+Set the canonical identity with `WithUserID` only after the trusted upstream
+authentication middleware completes. Never copy a user ID from a request body,
+query parameter, or client header into that context.
+
+`synchrod-pg` configures only direct JWT validation from environment variables.
+Embed `Routes` in the trusted upstream server when you need `UserIDResolver`.
+
+## Adapter JWT authentication
+
+Use one of these modes when the adapter validates bearer tokens:
+
+| Mode | `Config` fields | Accepted algorithms |
+| --- | --- | --- |
+| Shared secret | `JWTSecret` | HS256 |
+| Key set | `JWKSURL`, `JWKSContext` | RS256 or ES256 |
+
+`JWTSecret`, `JWKSURL`, and `UserIDResolver` are mutually exclusive.
+`JWKSContext` is required when `JWKSURL` is set. Keep that context active for
+the handler lifetime. Cancel it during server shutdown. `JWTUserClaim` selects
+the canonical user claim and defaults to `sub`.
+
+```go
+jwksContext, cancelJWKS := context.WithCancel(context.Background())
+defer cancelJWKS()
+
+handler := synchroapi.Routes(synchroapi.Config{
+    DB:          db,
+    JWKSURL:     "https://identity.example/.well-known/jwks.json",
+    JWKSContext: jwksContext,
+    JWTUserClaim: "sub",
+})
+```
+
+Store a shared secret outside source control. Generate it with a protected
+secret manager or with `openssl rand -hex 32`, then export it only to the
+adapter process environment.
+
+## Transport boundary
+
+The standalone adapter serves HTTP. Bind it to a private loopback or private
+network address. Terminate public HTTPS at a reverse proxy before requests reach
+the adapter. Forward the original request only from that trusted proxy.
+
+The four protocol routes require authentication:
+
+```text
+POST /sync/connect
+POST /sync/push
+POST /sync/pull
+POST /sync/rebuild
+```
+
+`GET /ready`, `GET /sync/schema`, and `GET /sync/tables` are unauthenticated.
+Keep the metadata routes on an operator network. `GET /ready` returns only a
+boolean readiness result. Do not add worker, registry, slot, row, or table
+diagnostics to a public route.
+
+## Scope assignment
+
+The server assigns scopes. The default private scope is
+`user:{canonical_user_id}`. Registered shared scopes apply to every active
+client. An operator can grant or revoke an existing scope for one user with
+`synchro_grant_user_scope` and `synchro_revoke_user_scope`.
+
+The next connect reconciles a grant or revoke. An added scope has a null cursor
+and rebuilds. A removed scope causes local provenance cleanup. A client cannot
+invent, grant, or retain an unassigned scope.
+
+## Read next
+
+- [Server setup](/synchro/getting-started/server-setup/)
+- [Wire protocol](/synchro/spec/01-wire-protocol/)
+- [Scope modeling](/synchro/architecture/scope-modeling/)

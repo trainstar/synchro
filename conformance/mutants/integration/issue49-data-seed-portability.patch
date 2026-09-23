@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/portable_seed.rs b/extensions/synchro-pg/src/portable_seed.rs
+--- a/extensions/synchro-pg/src/portable_seed.rs
++++ b/extensions/synchro-pg/src/portable_seed.rs
+@@ -807,7 +807,7 @@ fn load_export_scopes(
+                     state.retention_generation
+              FROM sync_shared_scopes shared
+              JOIN sync_scope_state state ON state.scope_id = shared.scope_id
+-             WHERE shared.portable = true
++             WHERE true
+              ORDER BY shared.scope_id",
+             None,
+             &[],

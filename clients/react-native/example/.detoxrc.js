@@ -3,6 +3,7 @@ module.exports = {
   testRunner: {
     args: {
       $0: 'jest',
+      _: ['e2e/conformance.test.ts', 'e2e/sync.test.ts'],
       config: 'e2e/jest.config.js',
     },
     jest: {
@@ -15,14 +16,16 @@ module.exports = {
       binaryPath:
         'ios/build/Build/Products/Debug-iphonesimulator/SynchroReactNativeExample.app',
       build:
-        'xcodebuild -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNativeExample -configuration Debug -sdk iphonesimulator -derivedDataPath ios/build',
+        "FORCE_BUNDLING=1 RCT_NO_LAUNCH_PACKAGER=1 xcodebuild -quiet -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNativeExample -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build ONLY_ACTIVE_ARCH=YES SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) DETOX_E2E'",
     },
     'android.debug': {
       type: 'android.apk',
       binaryPath: 'android/app/build/outputs/apk/debug/app-debug.apk',
+      testBinaryPath:
+        'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
-        'cd android && ./gradlew assembleDebug assembleAndroidTest -DtestBuildType=debug',
-      reversePorts: [8080],
+        'cd android && ./gradlew assembleDebug assembleAndroidTest -DtestBuildType=debug -PdetoxBundleDebug=true',
+      reversePorts: [8081],
     },
     'android.release': {
       type: 'android.apk',
@@ -31,14 +34,14 @@ module.exports = {
         'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
         'cd android && ./gradlew assembleRelease assembleDebugAndroidTest',
-      reversePorts: [8080],
+      reversePorts: [8081],
     },
   },
   devices: {
     simulator: {
       type: 'ios.simulator',
       device: {
-        id: '4B92F199-A5D5-464E-9378-7333A322EC36',
+        type: 'iPhone SE (3rd generation)',
       },
     },
     emulator: {
@@ -46,6 +49,11 @@ module.exports = {
       device: {
         avdName: 'Pixel_7_API_34',
       },
+      bootArgs: '-no-snapshot-load -no-snapshot-save',
+      // The emulator's Qt GUI layer crashes under host GPU rendering in
+      // unattended runs. Headless software rendering is stable.
+      headless: true,
+      gpuMode: 'swiftshader_indirect',
     },
   },
   configurations: {

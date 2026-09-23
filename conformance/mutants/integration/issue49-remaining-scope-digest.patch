@@ -1,0 +1,9 @@
+diff --git a/extensions/synchro-core/src/checksum.rs b/extensions/synchro-core/src/checksum.rs
+--- a/extensions/synchro-core/src/checksum.rs
++++ b/extensions/synchro-core/src/checksum.rs
+@@ -14,4 +14,4 @@
+ const ROW_ID_DOMAIN: &[u8] = b"synchro:v3:row-identity:v1\0";
+ const ROW_DIGEST_DOMAIN: &[u8] = b"synchro:v3:row-digest:v1\0";
+-const SCOPE_DIGEST_DOMAIN: &[u8] = b"synchro:v3:scope-digest:v1\0";
++const SCOPE_DIGEST_DOMAIN: &[u8] = b"synchro:v3:scope-digest:v0\0";
+ const SHA256_HEX_LENGTH: usize = 64;

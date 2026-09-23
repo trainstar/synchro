@@ -8,6 +8,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'Synchro',
+			disable404Route: true,
 			logo: {
 				light: './src/assets/logo.svg',
 				dark: './src/assets/logo-dark.svg',
@@ -17,46 +18,72 @@ export default defineConfig({
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/trainstar/synchro' },
 			],
-			editLink: {
-				baseUrl: 'https://github.com/trainstar/synchro/edit/master/docs/src/content/docs/',
-			},
-			head: [
-				{
-					tag: 'script',
-					attrs: { type: 'module' },
-					content: `import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; mermaid.initialize({ startOnLoad: true, theme: 'dark' });`,
-				},
-			],
 			sidebar: [
 				{
-					label: 'Getting Started',
+					label: 'Overview',
 					items: [
-						{ label: 'Quick Start', slug: 'getting-started/quickstart' },
-						{ label: 'Core Concepts', slug: 'getting-started/concepts' },
+						{ label: 'Welcome', slug: '' },
+						{ label: 'First synchronization', slug: 'getting-started/quickstart' },
+						{ label: 'Server setup', slug: 'getting-started/server-setup' },
+						{ label: 'Local development', slug: 'getting-started/development' },
 					],
 				},
 				{
-					label: 'Server',
+					label: 'Architecture',
 					items: [
-						{ label: 'Configuration', slug: 'server/configuration' },
-						{ label: 'Architecture', slug: 'server/architecture' },
-						{ label: 'Deployment', slug: 'server/deployment' },
-						{ label: 'Type Reference', slug: 'server/types' },
+						{ label: 'Overview', slug: 'architecture/overview' },
+						{ label: 'Scope Modeling', slug: 'architecture/scope-modeling' },
+						{ label: 'Portable Seeds', slug: 'architecture/portable-seeds' },
+						{ label: 'Auth Integration', slug: 'architecture/auth-integration' },
+					],
+				},
+				{
+					label: 'Architecture Decisions',
+					items: [
+						{ label: 'ADR 001: WAL Change Stream', slug: 'architecture/decisions/001-wal-change-stream' },
+						{ label: 'ADR 002: Mutation Idempotency', slug: 'architecture/decisions/002-mutation-idempotency-and-conflicts' },
+						{ label: 'ADR 003: Pull And Rebuild', slug: 'architecture/decisions/003-pull-cursor-and-rebuild' },
+						{ label: 'ADR 004: Membership And Schema', slug: 'architecture/decisions/004-membership-schema-and-retention' },
+						{ label: 'ADR 005: Integrity And Seeds', slug: 'architecture/decisions/005-integrity-authorization-and-seeds' },
 					],
 				},
 				{
 					label: 'Client SDKs',
 					items: [
 						{ label: 'Overview', slug: 'clients/overview' },
-						{ label: 'Swift / iOS', slug: 'clients/swift' },
-						{ label: 'Kotlin / Android', slug: 'clients/kotlin' },
-						{ label: 'React Native', slug: 'clients/react-native' },
+						{ label: 'Consumption', slug: 'clients/consumption' },
+						{ label: 'Application SQL limits', slug: 'clients/application-sql' },
 					],
 				},
 				{
-					label: 'Protocol',
+					label: 'Specification',
 					items: [
-						{ label: 'API Reference', slug: 'protocol/api-reference' },
+						{ label: 'Principles', slug: 'spec/00-principles' },
+						{ label: 'Wire Protocol', slug: 'spec/01-wire-protocol' },
+						{ label: 'Client Contract', slug: 'spec/02-client-contract' },
+						{ label: 'State Machines', slug: 'spec/03-state-machines' },
+						{ label: 'Invariants', slug: 'spec/04-invariants' },
+						{ label: 'Schema Evolution', slug: 'spec/05-schema-evolution' },
+						{ label: 'Conformance Plan', slug: 'spec/06-conformance-plan' },
+						{ label: 'Testing Evidence', slug: 'spec/07-release-verification' },
+					],
+				},
+				{
+					label: 'Testing Evidence',
+					items: [
+						{ label: 'Overview', slug: 'verification/overview' },
+					],
+				},
+				{
+					label: 'Reference',
+					items: [
+						{ label: 'Support Policy', slug: 'reference/support-policy' },
+					],
+				},
+				{
+					label: 'Operations',
+					items: [
+						{ label: 'Configuration', slug: 'operations/configuration' },
 					],
 				},
 			],

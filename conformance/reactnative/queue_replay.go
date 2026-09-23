@@ -1,0 +1,1848 @@
+package reactnative
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/scenarios"
+)
+
+const (
+	queueReplayScenarioPath = "conformance/scenarios/performance/queue-replay-001.json"
+	queueReplayScenarioID   = "SCN-PERF-QUEUE-REPLAY-001"
+	// The runner rejects client/execute-steps commands above 64 operations.
+	queueReplayMaximumLocalOperations = 64
+	// Rejected mutation details use the runner's bounded detail-record limit.
+	queueReplayMaximumRejectedDetails = 512
+	// Terminal diagnostics name a bounded set of protocol failure codes.
+	queueReplayMaximumTerminalRejectionCodes = 8
+)
+
+// LoadQueueReplayScenario loads the authored queue-replay scenario.
+func LoadQueueReplayScenario(ctx context.Context, repoRoot string) (scenarios.Scenario, error) {
+	scenario, err := scenarios.LoadFile(ctx, repoRoot, queueReplayScenarioPath)
+	if err != nil {
+		return scenarios.Scenario{}, fmt.Errorf("load React Native queue-replay scenario: %w", err)
+	}
+	if err := ValidateQueueReplayScenario(scenario); err != nil {
+		return scenarios.Scenario{}, err
+	}
+	return scenario, nil
+}
+
+// ValidateQueueReplayScenario rejects changes to the closed RN queue-replay contract.
+func ValidateQueueReplayScenario(scenario scenarios.Scenario) error {
+	if string(scenario.ID) != queueReplayScenarioID || len(scenario.Model.Setup) != 1 ||
+		scenarios.OperationKey(scenario.Model.Setup[0]) != "model/install-current-contract" || len(scenario.Steps) == 0 {
+		return errors.New("React Native queue-replay scenario contract is invalid")
+	}
+	for index, step := range scenario.Steps {
+		if step.ID != scenarios.StepID(fmt.Sprintf("STEP-PERF-QUEUE-REPLAY-%03d", index+1)) || step.NativeBinding == nil ||
+			step.NativeBinding.Kind != "workload" || step.NativeBinding.Workload == nil ||
+			scenarios.OperationKey(step.Operation) != "workload/prepare" || step.ExpectedOutcome.Disposition != "success" {
+			return errors.New("React Native queue-replay workload contract changed")
+		}
+	}
+	if len(scenario.NativeLifecycleBoundaries) != 0 {
+		return errors.New("React Native queue-replay lifecycle contract changed")
+	}
+	semantic, performance := false, false
+	claimSpecs := map[string]struct{ requirement, control string }{
+		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001": {"SYNC-MUTATION-001", "CTRL-MUTATION-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-003": {"SYNC-MUTATION-003", "CTRL-MUTATION-003"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001":    {"SYNC-QUEUE-001", "CTRL-QUEUE-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-002":    {"SYNC-QUEUE-002", "CTRL-QUEUE-002"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003":    {"SYNC-QUEUE-003", "CTRL-QUEUE-003"},
+		"ASSERT-PERF-QUEUE-REPLAY-FAILURE-001":  {"SYNC-FAILURE-001", "CTRL-FAILURE-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-STATE-001":    {"SYNC-STATE-001", "CTRL-STATE-001"},
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004":    {"SYNC-QUEUE-004", "CTRL-QUEUE-004"},
+	}
+	matchedClaims := make(map[string]int, len(claimSpecs))
+	for _, assertion := range scenario.Assertions {
+		switch assertion.ID {
+		case "ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001":
+			semantic = assertion.Predicate.ContractPredicate == "state-equality" && assertion.Oracle.ExpectedSource == "authored-model"
+		case "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001":
+			performance = assertion.Predicate.ContractPredicate == "performance-measurement" && assertion.Oracle.ExpectedSource == "authored-model"
+		}
+		if spec, found := claimSpecs[string(assertion.ID)]; found &&
+			orderedIdentifiersEqual(assertion.RequirementIDs, []string{spec.requirement}) &&
+			orderedIdentifiersEqual(assertion.ExpectationIDs, []string{"EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001"}) &&
+			assertion.Predicate.ContractPredicate == "state-equality" && assertion.Predicate.Name == "state-equals-authored-model" &&
+			assertion.Oracle.Kind == "model-state-equality" && assertion.Oracle.ExpectedSource == "authored-model" &&
+			assertion.Oracle.ObservedSource == "system-under-test" &&
+			orderedIdentifiersEqual(assertion.DetectsControlIDs, []string{spec.control}) {
+			matchedClaims[string(assertion.ID)]++
+		}
+	}
+	if !semantic || !performance {
+		return errors.New("React Native queue-replay assertion contract changed")
+	}
+	for id := range claimSpecs {
+		if matchedClaims[id] != 1 {
+			return fmt.Errorf("React Native queue-replay assertion %s changed", id)
+		}
+	}
+	ios, android, queueFault, queueControl := 0, 0, 0, 0
+	for _, obligation := range scenario.ProofObligations {
+		switch string(obligation.ObligationID) {
+		case "OBL-PERF-QUEUE-REPLAY-RN-IOS-CURRENT-001":
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-IOS-CURRENT-001", "test-rn-e2e-ios", "", "") && queueReplayNativeClaimsMatch(obligation) {
+				ios++
+			}
+		case "OBL-PERF-QUEUE-REPLAY-RN-ANDROID-CURRENT-001":
+			if proofTargetMatches(obligation, "native-e2e", "SUP-RN-ANDROID-CURRENT-001", "test-rn-e2e-android", "", "") && queueReplayNativeClaimsMatch(obligation) {
+				android++
+			}
+		case "OBL-PERF-QUEUE-REPLAY-QUEUE-003-FAULT-001":
+			if proofTargetMatches(obligation, "fault-injection", "SUP-MACOS-CURRENT-001", "test-swift", "FPL-PERF-QUEUE-REPLAY-QUEUE-003", "CTRL-QUEUE-003") {
+				queueFault++
+			}
+		case "OBL-PERF-QUEUE-REPLAY-QUEUE-003-CONTROL-001":
+			if proofTargetMatches(obligation, "negative-control", "", "test-conformance", "FPL-PERF-QUEUE-REPLAY-QUEUE-003", "CTRL-QUEUE-003") {
+				queueControl++
+			}
+		}
+	}
+	if ios != 1 || android != 1 || queueFault != 1 || queueControl != 1 {
+		return errors.New("React Native queue-replay proof obligations are invalid")
+	}
+	workloads, err := queueReplayWorkloads(scenario)
+	if err != nil {
+		return fmt.Errorf("React Native queue-replay workload contract is invalid: %w", err)
+	}
+	if queueReplayRejectedCount(workloads) > queueReplayMaximumRejectedDetails {
+		return errors.New("React Native queue-replay rejected detail records exceed the public capture bound")
+	}
+	return nil
+}
+
+func queueReplayNativeClaimsMatch(obligation scenarios.ProofObligation) bool {
+	return orderedIdentifiersEqual(obligation.RequirementIDs, []string{
+		"SYNC-OUTCOME-001", "SYNC-MUTATION-001", "SYNC-MUTATION-003", "SYNC-QUEUE-001",
+		"SYNC-QUEUE-002", "SYNC-QUEUE-003", "SYNC-FAILURE-001", "SYNC-STATE-001", "SYNC-QUEUE-004",
+	}) && orderedIdentifiersEqual(obligation.AssertionIDs, []string{
+		"ASSERT-PERF-QUEUE-REPLAY-SEMANTIC-001", "ASSERT-PERF-QUEUE-REPLAY-PERFORMANCE-001",
+		"ASSERT-PERF-QUEUE-REPLAY-MUTATION-001", "ASSERT-PERF-QUEUE-REPLAY-MUTATION-003",
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-001", "ASSERT-PERF-QUEUE-REPLAY-QUEUE-002",
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-003", "ASSERT-PERF-QUEUE-REPLAY-FAILURE-001", "ASSERT-PERF-QUEUE-REPLAY-STATE-001",
+		"ASSERT-PERF-QUEUE-REPLAY-QUEUE-004",
+	})
+}
+
+// QueueReplayCoordinatorConfig configures one authenticated RN queue-replay sidecar.
+type QueueReplayCoordinatorConfig struct {
+	Scenario   scenarios.Scenario
+	Harness    *blackbox.Harness
+	Controller *blackbox.NativeController
+	Platform   string
+	ServerURL  string
+	AuthToken  string
+	AppVersion string
+	Database   string
+}
+
+// QueueReplayCoordinator is the command sidecar for one RN queue-replay run.
+type QueueReplayCoordinator struct {
+	config   QueueReplayCoordinatorConfig
+	listener net.Listener
+	server   *http.Server
+	token    string
+	adapter  string
+	upstream string
+	database string
+
+	steps      []queueReplayWorkload
+	identities []scenarios.NativeIdentityAlias
+	runtimeIDs map[string]json.RawMessage
+	userID     string
+	clientID   string
+	clientKey  string
+
+	mu           sync.Mutex
+	proxyMu      sync.Mutex
+	prepared     bool
+	closed       bool
+	completed    bool
+	failed       error
+	stage        queueReplayStage
+	nextSeq      uint64
+	process      *actionProcessIdentity
+	stepIndex    int
+	localIndex   int
+	trace        []transportObservation
+	finalResult  *finalCapture
+	result       QueueReplayCoordinatorResult
+	responseLoss *queueReplayResponseLoss
+
+	successorClientKey  string
+	successorClientID   string
+	successorDatabase   string
+	successorAssignment scenarios.Operation
+	successorInsert     []scenarios.Operation
+	successorUpdate     []scenarios.Operation
+	successorTargets    []scenarios.NativeCRUDTarget
+	successorBefore     []queueReplayPendingMutation
+	successorRestarted  []queueReplayPendingMutation
+}
+
+// QueueReplayCoordinatorResult contains validated server and native identity evidence.
+type QueueReplayCoordinatorResult struct {
+	ServerFacts        scenarios.StateFacts
+	IdentityResolution []blackbox.NativeIdentityResolution
+	Successor          scenarios.NativeQueueSuccessorEvidence
+}
+
+type queueReplayStage uint8
+
+const (
+	queueReplayStageOpen queueReplayStage = iota
+	queueReplayStageOpened
+	queueReplayStageBootstrapped
+	queueReplayStageOfflineStopped
+	queueReplayStageLocalWrite
+	queueReplayStageRestartedBeforeSchema
+	queueReplayStageSchemaBoundary
+	queueReplayStageResponseLossBegun
+	queueReplayStageResponseLossPushReady
+	queueReplayStageResponseLoss
+	queueReplayStageResponseLossCapture
+	queueReplayStageRestartedAfterLoss
+	queueReplayStageReplay
+	queueReplayStageReplayCapture
+	queueReplayStageCapture
+	queueReplayStageRejectedCapture
+	queueReplayStageSuccessorOpened
+	queueReplayStageSuccessorBootstrapped
+	queueReplayStageSuccessorStopped
+	queueReplayStageSuccessorInsert
+	queueReplayStageSuccessorBeforeCapture
+	queueReplayStageSuccessorRestarted
+	queueReplayStageSuccessorRestartCapture
+	queueReplayStageSuccessorUpdate
+	queueReplayStageSuccessorChangedCapture
+	queueReplayStageComplete
+)
+
+type queueReplayWorkload struct {
+	step     scenarios.Step
+	local    []scenarios.Operation
+	publish  scenarios.Operation
+	dropPush scenarios.Operation
+}
+
+type queueReplayResponseLoss struct {
+	committed     chan struct{}
+	release       chan struct{}
+	committedOnce sync.Once
+	releaseOnce   sync.Once
+	claimed       bool
+	replayAllowed bool
+	err           error
+}
+
+// NewQueueReplayCoordinator creates an authenticated host-loopback listener.
+func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueReplayCoordinator, error) {
+	if err := ValidateQueueReplayScenario(config.Scenario); err != nil {
+		return nil, err
+	}
+	if config.Platform != "ios" && config.Platform != "android" {
+		return nil, errors.New("React Native queue-replay coordinator platform must be ios or android")
+	}
+	identity, err := queueReplayClientIdentity(config.Scenario)
+	if err != nil {
+		return nil, err
+	}
+	if config.AppVersion == "" {
+		config.AppVersion = defaultAppVersion
+	}
+	if config.AuthToken == "" && config.Harness == nil {
+		return nil, errors.New("React Native queue-replay coordinator auth token is required")
+	}
+	serverURL := config.ServerURL
+	if serverURL == "" && config.Harness != nil {
+		serverURL = config.Harness.AdapterURL()
+	}
+	if _, err := nativeAdapterURL(serverURL, config.Platform); err != nil {
+		return nil, err
+	}
+	token, err := randomToken(32)
+	if err != nil {
+		return nil, errors.New("create React Native queue-replay coordinator capability")
+	}
+	database := config.Database
+	if database == "" {
+		database, err = randomDatabaseNameWithPrefix("rn-queue-replay-")
+		if err != nil {
+			return nil, errors.New("create React Native queue-replay private database name")
+		}
+	}
+	if !validDatabaseName(database) {
+		return nil, errors.New("React Native queue-replay database name is invalid")
+	}
+	successorDatabase, err := randomDatabaseNameWithPrefix("rn-queue-successor-")
+	if err != nil {
+		return nil, errors.New("create React Native queue successor private database name")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, errors.New("listen for React Native queue-replay coordinator")
+	}
+	adapterURL, err := nativeAdapterURL("http://"+listener.Addr().String(), config.Platform)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	coordinator := &QueueReplayCoordinator{
+		config: config, listener: listener, token: token, adapter: adapterURL, upstream: serverURL, database: database,
+		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
+		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
+		successorClientKey: identity.clientID + "-successor-proof", successorClientID: identity.clientID + "-successor-proof", successorDatabase: successorDatabase,
+		nextSeq: 1,
+		server:  &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
+	}
+	coordinator.server.Handler = coordinator
+	return coordinator, nil
+}
+
+// Prepare installs the model and derives every authored workload.
+func (c *QueueReplayCoordinator) Prepare(ctx context.Context) error {
+	if c == nil || ctx == nil {
+		return errCoordinatorUnavailable
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errCoordinatorUnavailable
+	}
+	if c.prepared {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	if c.config.AuthToken == "" && c.config.Harness != nil {
+		token, err := c.config.Harness.NativeBearerToken(ctx, c.userID, time.Now())
+		if err != nil {
+			return errors.New("mint React Native queue-replay adapter bearer token")
+		}
+		c.config.AuthToken = token
+	}
+	if c.config.Controller == nil || c.config.Harness == nil {
+		return errors.New("React Native queue-replay coordinator dependencies are unavailable")
+	}
+	if err := c.config.Controller.Install(ctx, c.config.Scenario.Model.Setup[0]); err != nil {
+		return fmt.Errorf("install React Native queue-replay contract: %w", err)
+	}
+	workloads, err := queueReplayWorkloads(c.config.Scenario)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.steps = workloads
+	c.prepared = true
+	c.mu.Unlock()
+	return nil
+}
+
+// Serve serves the sidecar until the context ends or the listener closes.
+func (c *QueueReplayCoordinator) Serve(ctx context.Context) error {
+	if c == nil || ctx == nil {
+		return errCoordinatorUnavailable
+	}
+	if err := c.Prepare(ctx); err != nil {
+		return err
+	}
+	shutdown := make(chan struct{})
+	defer close(shutdown)
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = c.Close(shutdownContext)
+			cancel()
+		case <-shutdown:
+		}
+	}()
+	err := c.server.Serve(c.listener)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (c *QueueReplayCoordinator) Handler() http.Handler { return c }
+
+// URL returns the host-loopback sidecar URL for every platform.
+func (c *QueueReplayCoordinator) URL() string {
+	if c == nil || c.listener == nil {
+		return ""
+	}
+	return "http://" + c.listener.Addr().String()
+}
+
+func (c *QueueReplayCoordinator) Token() string {
+	if c == nil {
+		return ""
+	}
+	return c.token
+}
+
+// ExchangeCount returns the exact number of exchanges required by this coordinator.
+func (c *QueueReplayCoordinator) ExchangeCount() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.exchangeCountLocked()
+}
+
+func (c *QueueReplayCoordinator) exchangeCountLocked() int {
+	count := 14 // main open/bootstrap/captures, nine successor-proof commands, complete response
+	for _, workload := range c.steps {
+		count += queueReplayLocalBatchCount(workload) + 9 // stop, write batches, restart, schema check, begin loss, push barrier, await loss, trace, restart, replay
+	}
+	if len(c.steps) > 1 {
+		count += len(c.steps) - 1 // retain the prior replay trace before each later restart
+	}
+	return count
+}
+
+// StageCount retains the configuration name used by the Detox consumer.
+func (c *QueueReplayCoordinator) StageCount() int { return c.ExchangeCount() }
+
+func (c *QueueReplayCoordinator) Completed() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.completed && c.failed == nil
+}
+
+func (c *QueueReplayCoordinator) Result() (QueueReplayCoordinatorResult, error) {
+	if c == nil {
+		return QueueReplayCoordinatorResult{}, errCoordinatorUnavailable
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	served := uint64(0)
+	if c.nextSeq > 0 {
+		served = c.nextSeq - 1
+	}
+	progress := fmt.Sprintf("current stage=%s, exchanges served=%d versus ExchangeCount=%d", c.stage, served, c.exchangeCountLocked())
+	if c.failed != nil {
+		return QueueReplayCoordinatorResult{}, fmt.Errorf("%w (%s)", c.failed, progress)
+	}
+	if !c.completed {
+		return QueueReplayCoordinatorResult{}, fmt.Errorf("React Native queue-replay coordinator has not completed (%s)", progress)
+	}
+	return c.result, nil
+}
+
+func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errCoordinatorUnavailable
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.mu.Unlock()
+	_ = c.releaseResponseLossPush()
+	shutdownErr := c.server.Shutdown(ctx)
+	listenErr := c.listener.Close()
+	if shutdownErr != nil {
+		return shutdownErr
+	}
+	if listenErr != nil && !errors.Is(listenErr, net.ErrClosed) {
+		return listenErr
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path != "/exchange" {
+		c.proxyAdapter(writer, request)
+		return
+	}
+	if request.Method != http.MethodPost {
+		writeExchangeError(writer, http.StatusMethodNotAllowed)
+		return
+	}
+	if !validBearer(request.Header.Get("Authorization"), c.token) {
+		writeExchangeError(writer, http.StatusUnauthorized)
+		return
+	}
+	if request.Header.Get("Content-Type") != "application/json" || request.ContentLength > maximumExchangeBytes {
+		writeExchangeError(writer, http.StatusUnsupportedMediaType)
+		return
+	}
+	body, err := ioReadAll(request)
+	if err != nil || len(body) > maximumExchangeBytes {
+		writeExchangeError(writer, http.StatusRequestEntityTooLarge)
+		return
+	}
+	exchange, err := decodeExchangeRequest(body)
+	if err != nil {
+		writeExchangeError(writer, http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || !c.prepared || c.failed != nil || c.completed {
+		writeExchangeError(writer, http.StatusConflict)
+		return
+	}
+	if exchange.Sequence != c.nextSeq {
+		c.failed = errors.New("React Native queue-replay exchange sequence is not monotonic")
+		writeExchangeError(writer, http.StatusConflict)
+		return
+	}
+	if err := c.acceptResultLocked(exchange.Result); err != nil {
+		c.failed = fmt.Errorf("React Native queue-replay exchange sequence %d failed: %w", exchange.Sequence, err)
+		writeExchangeError(writer, http.StatusUnprocessableEntity)
+		return
+	}
+	response, err := c.advanceLocked(request.Context(), exchange.Sequence)
+	if err != nil {
+		c.failed = err
+		writeExchangeError(writer, http.StatusUnprocessableEntity)
+		return
+	}
+	c.nextSeq++
+	encoded, err := json.Marshal(response)
+	if err != nil || len(encoded) > maximumExchangeBytes {
+		c.failed = errors.New("React Native queue-replay exchange response is invalid")
+		writeExchangeError(writer, http.StatusInternalServerError)
+		return
+	}
+	releaseResponseLoss := response.Command != nil && response.Command.Action.Action.Actor == "client" &&
+		response.Command.Action.Action.Command == "await-call" && c.stage == queueReplayStageResponseLoss
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(encoded)
+	if releaseResponseLoss {
+		// Flush the await-call command before the malformed response starts its retry deadline.
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_ = c.releaseResponseLossPush()
+	}
+}
+
+func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, request *http.Request) {
+	if c == nil || c.upstream == "" {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, maximumExchangeBytes+1))
+	if err != nil || len(body) > maximumExchangeBytes {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	var responseLoss *queueReplayResponseLoss
+	firstResponseLossPush := false
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" {
+		responseLoss, firstResponseLossPush = c.claimResponseLossPush()
+		if responseLoss != nil && !firstResponseLossPush {
+			// Keep automatic retries from completing before the coordinator stops the client.
+			if err := c.dropProxyResponse(writer); err != nil {
+				c.recordResponseLossProxyFailure(responseLoss, err)
+			}
+			return
+		}
+	}
+	target := strings.TrimRight(c.upstream, "/") + request.URL.RequestURI()
+	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target, bytes.NewReader(body))
+	if err != nil {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	for name, values := range request.Header {
+		if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
+			continue
+		}
+		for _, value := range values {
+			upstreamRequest.Header.Add(name, value)
+		}
+	}
+	response, err := http.DefaultClient.Do(upstreamRequest)
+	if err != nil {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maximumExchangeBytes+1))
+	if err != nil || len(responseBody) > maximumExchangeBytes {
+		writeExchangeError(writer, http.StatusBadGateway)
+		return
+	}
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/push" {
+		if responseLoss != nil && firstResponseLossPush {
+			if response.StatusCode != http.StatusOK {
+				c.recordResponseLossProxyFailure(responseLoss, fmt.Errorf("React Native queue-replay response-loss push status = %d", response.StatusCode))
+				writeExchangeError(writer, http.StatusBadGateway)
+				return
+			}
+			responseLoss.committedOnce.Do(func() { close(responseLoss.committed) })
+			// The iOS HTTP client half-closes after it sends the request
+			// body, and the server reports that as request-context
+			// cancellation while the client still reads. The hold waits for
+			// the coordinated release only, and the drop below reaches a
+			// connected client or fails silently on a gone one.
+			<-responseLoss.release
+			if err := c.dropProxyResponse(writer); err != nil {
+				c.recordResponseLossProxyFailure(responseLoss, err)
+			}
+			return
+		}
+	}
+	for name, values := range response.Header {
+		if strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Transfer-Encoding") {
+			continue
+		}
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+	writer.WriteHeader(response.StatusCode)
+	_, _ = writer.Write(responseBody)
+}
+
+func (c *QueueReplayCoordinator) armResponseLossPush() {
+	fault := &queueReplayResponseLoss{committed: make(chan struct{}), release: make(chan struct{})}
+	c.proxyMu.Lock()
+	c.responseLoss = fault
+	c.proxyMu.Unlock()
+}
+
+func (c *QueueReplayCoordinator) claimResponseLossPush() (*queueReplayResponseLoss, bool) {
+	c.proxyMu.Lock()
+	defer c.proxyMu.Unlock()
+	fault := c.responseLoss
+	if fault == nil || fault.replayAllowed {
+		return nil, false
+	}
+	if fault.claimed {
+		return fault, false
+	}
+	fault.claimed = true
+	return fault, true
+}
+
+func (c *QueueReplayCoordinator) allowResponseLossReplay() {
+	c.proxyMu.Lock()
+	if c.responseLoss != nil {
+		c.responseLoss.replayAllowed = true
+	}
+	c.proxyMu.Unlock()
+}
+
+func (c *QueueReplayCoordinator) recordResponseLossProxyFailure(fault *queueReplayResponseLoss, err error) {
+	if fault == nil || err == nil {
+		return
+	}
+	c.proxyMu.Lock()
+	if fault.err == nil {
+		fault.err = err
+	}
+	c.proxyMu.Unlock()
+	fault.committedOnce.Do(func() { close(fault.committed) })
+	fault.releaseOnce.Do(func() { close(fault.release) })
+}
+
+func (c *QueueReplayCoordinator) waitForResponseLossPush(ctx context.Context) error {
+	c.proxyMu.Lock()
+	fault := c.responseLoss
+	c.proxyMu.Unlock()
+	if fault == nil {
+		return errors.New("React Native queue-replay response-loss fault is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		c.recordResponseLossProxyFailure(fault, ctx.Err())
+		return fmt.Errorf("wait for React Native queue-replay response-loss push: %w", ctx.Err())
+	case <-fault.committed:
+	}
+	c.proxyMu.Lock()
+	err := fault.err
+	c.proxyMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("React Native queue-replay response-loss proxy failed: %w", err)
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) releaseResponseLossPush() error {
+	c.proxyMu.Lock()
+	fault := c.responseLoss
+	c.proxyMu.Unlock()
+	if fault == nil {
+		return errors.New("React Native queue-replay response-loss fault is unavailable")
+	}
+	fault.releaseOnce.Do(func() { close(fault.release) })
+	return nil
+}
+
+func (c *QueueReplayCoordinator) dropProxyResponse(writer http.ResponseWriter) error {
+	hijacker, ok := writer.(http.Hijacker)
+	if !ok {
+		return errors.New("React Native queue-replay response writer cannot drop a response")
+	}
+	connection, _, err := hijacker.Hijack()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	// The two HTTP clients need opposite drops. A bare close makes the
+	// Android client repeat the request silently, so Android receives an
+	// invalid response and records the failure. The iOS client parses any
+	// invalid status line as an HTTP/0.9 success, so iOS receives the bare
+	// close and records the connection loss as retryable.
+	if c.config.Platform == "ios" {
+		return nil
+	}
+	_, err = connection.Write([]byte("SYNCHRO RESPONSE LOSS\r\n\r\n"))
+	return err
+}
+
+func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
+	if c.stage == queueReplayStageOpen {
+		if !isJSONNull(raw) {
+			return errInvalidExchange
+		}
+		return nil
+	}
+	envelope, err := decodeResultEnvelope(raw)
+	if err != nil {
+		return fmt.Errorf("React Native queue-replay result envelope: %w", err)
+	}
+	if envelope.Outcome != "passed" {
+		code, detail := "<none>", "<none>"
+		if envelope.ErrorCode != nil {
+			code = *envelope.ErrorCode
+		}
+		if envelope.ErrorDetail != nil {
+			detail = *envelope.ErrorDetail
+		}
+		return fmt.Errorf("React Native queue-replay command failed: code=%s detail=%s", code, detail)
+	}
+	switch c.stage {
+	case queueReplayStageOpened:
+		process, err := validateOpenedResult(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.process = &process
+	case queueReplayStageBootstrapped:
+		if err := c.validateSynchronized(envelope.Result, "idle"); err != nil {
+			return err
+		}
+	case queueReplayStageOfflineStopped:
+		if c.process == nil {
+			return errors.New("React Native queue-replay stopped process identity is unavailable")
+		}
+		return validateStoppedLifecycleResult(envelope.Result, *c.process)
+	case queueReplayStageReplay:
+		if err := c.validateSynchronized(envelope.Result, "idle"); err != nil {
+			return err
+		}
+		c.stepIndex++
+		c.localIndex = 0
+	case queueReplayStageLocalWrite:
+		batch, err := c.localBatch()
+		if err != nil {
+			return err
+		}
+		if err := c.validateLocal(envelope.Result, len(batch)); err != nil {
+			return err
+		}
+		c.localIndex += len(batch)
+	case queueReplayStageRestartedBeforeSchema, queueReplayStageRestartedAfterLoss:
+		process, err := c.validateRestarted(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.process = &process
+		if c.stage == queueReplayStageRestartedAfterLoss {
+			c.allowResponseLossReplay()
+		}
+	case queueReplayStageSchemaBoundary:
+		if err := c.validateSynchronized(envelope.Result, "error"); err != nil {
+			return err
+		}
+	case queueReplayStageResponseLossBegun:
+		if err := c.validateResponseLossCallBegun(envelope.Result); err != nil {
+			return err
+		}
+	case queueReplayStageResponseLossPushReady:
+		if err := validateActionResult(envelope.Result, "awaited"); err != nil {
+			return err
+		}
+		var members map[string]json.RawMessage
+		if err := decodeStrictMembers(envelope.Result, &members, 3, "queue-replay push observation"); err != nil {
+			return err
+		}
+		if err := validateSyncStatusShape(members["status"]); err != nil {
+			return err
+		}
+		var status syncStatus
+		if json.Unmarshal(members["status"], &status) != nil || status.State != "pushing" {
+			return errors.New("React Native queue-replay call did not reach push preparation")
+		}
+		if err := c.validateProcess(members["process"]); err != nil {
+			return err
+		}
+	case queueReplayStageResponseLoss:
+		if err := c.validateResponseLossCallCompleted(envelope.Result); err != nil {
+			return err
+		}
+	case queueReplayStageResponseLossCapture, queueReplayStageReplayCapture:
+		trace, err := c.validateTraceSnapshot(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.trace = append(c.trace, trace.Observations...)
+	case queueReplayStageCapture:
+		capture, err := decodeCapture(envelope.Result, []string{"client_state", "sync_status", "sync_events", "request_trace"})
+		if err != nil {
+			return fmt.Errorf("decode React Native queue-replay terminal aggregate capture: %w", err)
+		}
+		trace, err := c.combinedTrace(capture.Trace)
+		if err != nil {
+			return fmt.Errorf("validate React Native queue-replay terminal aggregate trace: %w", err)
+		}
+		capture.Trace = trace
+		if _, err := c.validateCaptureAggregate(capture); err != nil {
+			return err
+		}
+		c.finalResult = &capture
+	case queueReplayStageRejectedCapture:
+		capture, err := decodeCapture(envelope.Result, []string{"rejected_mutations"})
+		if err != nil {
+			return err
+		}
+		if c.finalResult == nil {
+			return errors.New("React Native queue-replay aggregate capture is unavailable")
+		}
+		state, err := decodeClientState(c.finalResult.ClientState)
+		if err != nil {
+			return err
+		}
+		if state.RejectedMutationCount > queueReplayMaximumRejectedDetails {
+			return fmt.Errorf("React Native queue-replay rejected mutation detail count=%d exceeds bound=%d", state.RejectedMutationCount, queueReplayMaximumRejectedDetails)
+		}
+		if err := validateRejectedMutationDetails(capture.Rejected, state.RejectedMutationCount); err != nil {
+			return err
+		}
+		c.finalResult.Rejected = copyRaw(capture.Rejected)
+	case queueReplayStageSuccessorOpened:
+		process, err := validateOpenedResult(envelope.Result)
+		if err != nil {
+			return err
+		}
+		if c.process == nil || process.DatabaseIdentityFingerprint == c.process.DatabaseIdentityFingerprint {
+			return errors.New("React Native queue successor proof did not open an isolated database")
+		}
+		c.process = &process
+	case queueReplayStageSuccessorBootstrapped:
+		if err := c.validateSynchronized(envelope.Result, "idle"); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorStopped:
+		if c.process == nil {
+			return errors.New("React Native queue successor proof process is unavailable")
+		}
+		if err := validateStoppedLifecycleResult(envelope.Result, *c.process); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorInsert:
+		if err := c.validateLocal(envelope.Result, len(c.successorInsert)); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorBeforeCapture:
+		pending, err := c.decodeSuccessorCapture(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.successorBefore = pending
+	case queueReplayStageSuccessorRestarted:
+		process, err := c.validateRestarted(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.process = &process
+	case queueReplayStageSuccessorRestartCapture:
+		pending, err := c.decodeSuccessorCapture(envelope.Result)
+		if err != nil {
+			return err
+		}
+		c.successorRestarted = pending
+	case queueReplayStageSuccessorUpdate:
+		if err := c.validateLocal(envelope.Result, len(c.successorUpdate)); err != nil {
+			return err
+		}
+	case queueReplayStageSuccessorChangedCapture:
+		pending, err := c.decodeSuccessorCapture(envelope.Result)
+		if err != nil {
+			return err
+		}
+		evidence, err := reactNativeQueueSuccessorEvidence(c.successorTargets, c.successorBefore, c.successorRestarted, pending)
+		if err != nil {
+			return err
+		}
+		if err := scenarios.ValidateNativeQueueSuccessorEvidence(evidence); err != nil {
+			return fmt.Errorf("validate React Native queue successor evidence: %w", err)
+		}
+		c.result.Successor = evidence
+	default:
+		return errInvalidExchange
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uint64) (exchangeResponse, error) {
+	response := exchangeResponse{SchemaVersion: 1, Sequence: sequence, State: "command"}
+	switch c.stage {
+	case queueReplayStageOpen:
+		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "create", "initialization": "empty", "seed_step_id": nil}, nil)
+		c.stage = queueReplayStageOpened
+	case queueReplayStageOpened:
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
+		c.stage = queueReplayStageBootstrapped
+	case queueReplayStageBootstrapped, queueReplayStageReplay:
+		if c.stage == queueReplayStageReplay && c.stepIndex > 0 && c.stepIndex < len(c.steps) {
+			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"request-trace"}}, nil)
+			c.stage = queueReplayStageReplayCapture
+			break
+		}
+		if c.stepIndex == len(c.steps) {
+			response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"scope-state", "sync-status", "sync-events", "request-trace"}}, nil)
+			c.stage = queueReplayStageCapture
+			break
+		}
+		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
+		c.stage = queueReplayStageOfflineStopped
+	case queueReplayStageOfflineStopped:
+		command, err := c.localCommand()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = command
+		c.stage = queueReplayStageLocalWrite
+	case queueReplayStageLocalWrite:
+		if c.stepIndex >= len(c.steps) {
+			return exchangeResponse{}, errors.New("React Native queue-replay workload is unavailable")
+		}
+		if c.localIndex < len(c.steps[c.stepIndex].local) {
+			command, err := c.localCommand()
+			if err != nil {
+				return exchangeResponse{}, err
+			}
+			response.Command = command
+			break
+		}
+		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil}, nil)
+		c.stage = queueReplayStageRestartedBeforeSchema
+	case queueReplayStageRestartedBeforeSchema:
+		workload := c.steps[c.stepIndex]
+		if observation, err := c.config.Controller.ApplyStep(ctx, workload.publish); err != nil || observation.Disposition != "success" {
+			return exchangeResponse{}, fmt.Errorf("publish React Native queue-replay schema for step %s: %w", workload.step.ID, nativeResultError(err, observation.Disposition))
+		}
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "error"}, nil)
+		c.stage = queueReplayStageSchemaBoundary
+	case queueReplayStageSchemaBoundary:
+		c.armResponseLossPush()
+		response.Command = c.command("client", "begin-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID(), "method": "reset-schema-and-start"}, nil)
+		c.stage = queueReplayStageResponseLossBegun
+	case queueReplayStageResponseLossBegun:
+		response.Command = c.command("observer", "await-step", map[string]any{
+			"client_key": c.clientKey, "call_id": c.responseLossCallID(), "wait_for_status": "pushing",
+		}, nil)
+		c.stage = queueReplayStageResponseLossPushReady
+	case queueReplayStageResponseLossPushReady:
+		if err := c.waitForResponseLossPush(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		if err := c.bindResponseLossPush(); err != nil {
+			_ = c.releaseResponseLossPush()
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.responseLossCallID(), "completion": "blocked"}, nil)
+		c.stage = queueReplayStageResponseLoss
+	case queueReplayStageResponseLoss:
+		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"request-trace"}}, nil)
+		c.stage = queueReplayStageResponseLossCapture
+	case queueReplayStageResponseLossCapture:
+		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil}, nil)
+		c.stage = queueReplayStageRestartedAfterLoss
+	case queueReplayStageRestartedAfterLoss:
+		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
+		c.stage = queueReplayStageReplay
+	case queueReplayStageReplayCapture:
+		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
+		c.stage = queueReplayStageOfflineStopped
+	case queueReplayStageCapture:
+		if c.finalResult == nil {
+			return exchangeResponse{}, errors.New("React Native queue-replay aggregate capture is unavailable")
+		}
+		response.Command = c.command("observer", "capture", map[string]any{"client_keys": []string{c.clientKey}, "sources": []string{"rejected-mutations"}}, nil)
+		c.stage = queueReplayStageRejectedCapture
+	case queueReplayStageRejectedCapture:
+		if err := c.completeLocked(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		assignment, insert, update, targets, err := c.queueSuccessorPlan()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		c.successorAssignment = assignment
+		c.successorInsert = insert
+		c.successorUpdate = update
+		c.successorTargets = targets
+		if observation, err := c.config.Controller.ApplyStep(ctx, c.successorAssignment); err != nil || observation.Disposition != "success" {
+			return exchangeResponse{}, fmt.Errorf("assign React Native queue successor proof scope: %w", nativeResultError(err, observation.Disposition))
+		}
+		response.Command = c.successorCommand("client", "open", map[string]any{"client_key": c.successorClientKey, "database_mode": "create", "initialization": "empty", "seed_step_id": nil})
+		c.stage = queueReplayStageSuccessorOpened
+	case queueReplayStageSuccessorOpened:
+		response.Command = c.successorCommand("client", "synchronize-step", map[string]any{"client_key": c.successorClientKey, "method": "start", "completion": "idle"})
+		c.stage = queueReplayStageSuccessorBootstrapped
+	case queueReplayStageSuccessorBootstrapped:
+		response.Command = c.successorCommand("client", "lifecycle", map[string]any{"client_key": c.successorClientKey, "operation": "stop"})
+		c.stage = queueReplayStageSuccessorStopped
+	case queueReplayStageSuccessorStopped:
+		response.Command = c.successorOperationCommand(c.successorInsert)
+		c.stage = queueReplayStageSuccessorInsert
+	case queueReplayStageSuccessorInsert:
+		response.Command = c.successorCommand("observer", "capture", map[string]any{"client_keys": []string{c.successorClientKey}, "sources": []string{"pending-mutations"}})
+		c.stage = queueReplayStageSuccessorBeforeCapture
+	case queueReplayStageSuccessorBeforeCapture:
+		response.Command = c.successorCommand("client", "open", map[string]any{"client_key": c.successorClientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil})
+		c.stage = queueReplayStageSuccessorRestarted
+	case queueReplayStageSuccessorRestarted:
+		response.Command = c.successorCommand("observer", "capture", map[string]any{"client_keys": []string{c.successorClientKey}, "sources": []string{"pending-mutations"}})
+		c.stage = queueReplayStageSuccessorRestartCapture
+	case queueReplayStageSuccessorRestartCapture:
+		response.Command = c.successorOperationCommand(c.successorUpdate)
+		c.stage = queueReplayStageSuccessorUpdate
+	case queueReplayStageSuccessorUpdate:
+		response.Command = c.successorCommand("observer", "capture", map[string]any{"client_keys": []string{c.successorClientKey}, "sources": []string{"pending-mutations"}})
+		c.stage = queueReplayStageSuccessorChangedCapture
+	case queueReplayStageSuccessorChangedCapture:
+		if len(c.result.Successor.Rows) == 0 {
+			return exchangeResponse{}, errors.New("React Native queue successor proof evidence is unavailable")
+		}
+		response.State = "complete"
+		response.Command = nil
+		c.stage = queueReplayStageComplete
+		c.completed = true
+	default:
+		return exchangeResponse{}, errInvalidExchange
+	}
+	return response, nil
+}
+
+func (c *QueueReplayCoordinator) localBatch() ([]scenarios.Operation, error) {
+	if c.stepIndex >= len(c.steps) || c.localIndex >= len(c.steps[c.stepIndex].local) {
+		return nil, errors.New("React Native queue-replay local operation is unavailable")
+	}
+	workload := c.steps[c.stepIndex]
+	limit := c.localIndex + queueReplayMaximumLocalOperations
+	if limit > len(workload.local) {
+		limit = len(workload.local)
+	}
+	return workload.local[c.localIndex:limit], nil
+}
+
+func (c *QueueReplayCoordinator) localCommand() (*conformanceCommand, error) {
+	batch, err := c.localBatch()
+	if err != nil {
+		return nil, err
+	}
+	workload := c.steps[c.stepIndex]
+	operations := make([]scenarios.Operation, 0, len(batch))
+	for offset, authored := range batch {
+		operation, err := c.config.Controller.ApplicationWrite(authored)
+		if err != nil {
+			return nil, fmt.Errorf("bind React Native queue-replay local write %d for step %s: %w", c.localIndex+offset+1, workload.step.ID, err)
+		}
+		operations = append(operations, operation)
+	}
+	return c.commandOperations("client", "execute-steps", map[string]any{"client_key": c.clientKey}, operations), nil
+}
+
+func (c *QueueReplayCoordinator) validateLocal(raw json.RawMessage, expectedRows int) error {
+	if err := validateActionResult(raw, "local-action"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "queue-replay local result"); err != nil {
+		return err
+	}
+	var rows uint64
+	decodeErr := json.Unmarshal(members["rows_affected"], &rows)
+	if decodeErr != nil || rows != uint64(expectedRows) {
+		return fmt.Errorf("React Native queue-replay local batch rows_affected=%d want=%d decode_error=%v", rows, expectedRows, decodeErr)
+	}
+	return c.validateProcess(members["process"])
+}
+
+func (c *QueueReplayCoordinator) validateSynchronized(raw json.RawMessage, completion string) error {
+	var members map[string]json.RawMessage
+	actionErr := validateActionResult(raw, "synchronized")
+	membersErr := decodeStrictMembers(raw, &members, 4, "queue-replay synchronized result")
+	if membersErr != nil {
+		return fmt.Errorf("React Native queue-replay synchronized result is invalid: members=%s want_count=4 raw=%s action_error=%v members_error=%v", queueReplayMemberNames(members), boundedRaw(raw), actionErr, membersErr)
+	}
+	var kind, actual string
+	kindErr := json.Unmarshal(members["kind"], &kind)
+	completionErr := json.Unmarshal(members["completion"], &actual)
+	var status syncStatus
+	statusDecodeErr := json.Unmarshal(members["status"], &status)
+	statusErr := validateSyncStatusShape(members["status"])
+	var statusMembers map[string]json.RawMessage
+	_ = json.Unmarshal(members["status"], &statusMembers)
+	actualProcess, processErr := decodeActionProcessIdentity(members["process"])
+	expectedProcess := actionProcessIdentity{}
+	if c.process != nil {
+		expectedProcess = *c.process
+	}
+	if actionErr != nil || kindErr != nil || kind != "synchronized" || completionErr != nil || actual != completion ||
+		statusDecodeErr != nil || statusErr != nil || processErr != nil || c.process == nil || actualProcess != expectedProcess {
+		return fmt.Errorf(
+			"React Native queue-replay synchronized result is invalid: members=%s want_count=4, kind=%q want=%q decode_error=%v action_error=%v, completion=%q want=%q decode_error=%v, status_members=%s status=%s state=%q retry_at=%s operation=%s failure=%s want_state=nonempty_bounded_string status_decode_error=%v status_error=%v, process={process_id:%q database_identity_fingerprint:%q} want={process_id:%q database_identity_fingerprint:%q} process_error=%v",
+			queueReplayMemberNames(members), kind, "synchronized", kindErr, actionErr, actual, completion, completionErr,
+			queueReplayMemberNames(statusMembers), boundedRaw(members["status"]), status.State, boundedRaw(status.RetryAt), boundedRaw(status.Operation), boundedRaw(status.Failure), statusDecodeErr, statusErr,
+			actualProcess.ProcessID, actualProcess.DatabaseIdentityFingerprint, expectedProcess.ProcessID, expectedProcess.DatabaseIdentityFingerprint, processErr,
+		)
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) validateResponseLossCallBegun(raw json.RawMessage) error {
+	if err := validateActionResult(raw, "call-begun"); err != nil {
+		return err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 4, "queue-replay response-loss call-begun result"); err != nil {
+		return err
+	}
+	var callID, state string
+	if json.Unmarshal(members["call_id"], &callID) != nil || callID != c.responseLossCallID() ||
+		json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
+		return errors.New("React Native queue-replay response-loss call did not enter flight")
+	}
+	return c.validateProcess(members["process"])
+}
+
+func (c *QueueReplayCoordinator) validateResponseLossCallCompleted(raw json.RawMessage) error {
+	var members map[string]json.RawMessage
+	actionErr := validateActionResult(raw, "call-completed")
+	membersErr := decodeStrictMembers(raw, &members, 6, "queue-replay response-loss call-completed result")
+	if membersErr != nil {
+		return fmt.Errorf("React Native queue-replay response-loss call is invalid: members=%s want_count=6 raw=%s action_error=%v members_error=%v", queueReplayMemberNames(members), boundedRaw(raw), actionErr, membersErr)
+	}
+	var callID, state, completion string
+	callIDErr := json.Unmarshal(members["call_id"], &callID)
+	stateErr := json.Unmarshal(members["state"], &state)
+	completionErr := json.Unmarshal(members["completion"], &completion)
+	var status syncStatus
+	statusDecodeErr := json.Unmarshal(members["status"], &status)
+	statusErr := validateSyncStatusShape(members["status"])
+	actualProcess, processErr := decodeActionProcessIdentity(members["process"])
+	expectedProcess := actionProcessIdentity{}
+	if c.process != nil {
+		expectedProcess = *c.process
+	}
+	if actionErr != nil || callIDErr != nil || callID != c.responseLossCallID() || stateErr != nil || state != "completed" ||
+		completionErr != nil || completion != "blocked" || statusDecodeErr != nil || statusErr != nil || status.State != "backoff" ||
+		isJSONNull(status.RetryAt) || isJSONNull(status.Operation) || processErr != nil || c.process == nil || actualProcess != expectedProcess {
+		return fmt.Errorf(
+			"React Native queue-replay response-loss call is invalid: members=%s want_count=6, call_id=%q want=%q decode_error=%v, state=%q want=%q decode_error=%v, completion=%q want=%q decode_error=%v action_error=%v, status=%s state=%q want=%q retry_at=%s operation=%s status_decode_error=%v status_error=%v, process={process_id:%q database_identity_fingerprint:%q} want={process_id:%q database_identity_fingerprint:%q} process_error=%v",
+			queueReplayMemberNames(members), callID, c.responseLossCallID(), callIDErr, state, "completed", stateErr, completion, "blocked", completionErr, actionErr,
+			boundedRaw(members["status"]), status.State, "backoff", boundedRaw(status.RetryAt), boundedRaw(status.Operation), statusDecodeErr, statusErr,
+			actualProcess.ProcessID, actualProcess.DatabaseIdentityFingerprint, expectedProcess.ProcessID, expectedProcess.DatabaseIdentityFingerprint, processErr,
+		)
+	}
+	return nil
+}
+
+func queueReplayMemberNames(members map[string]json.RawMessage) string {
+	names := make([]string, 0, len(members))
+	for name := range members {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return "[" + strings.Join(names, " ") + "]"
+}
+
+func (c *QueueReplayCoordinator) validateRestarted(raw json.RawMessage) (actionProcessIdentity, error) {
+	process, err := validateOpenedResult(raw)
+	if err != nil {
+		return actionProcessIdentity{}, err
+	}
+	if c.process == nil {
+		return actionProcessIdentity{}, errors.New("React Native queue-replay prior process identity is unavailable")
+	}
+	if process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return actionProcessIdentity{}, fmt.Errorf("React Native queue-replay restarted database identity fingerprint=%q want=%q", process.DatabaseIdentityFingerprint, c.process.DatabaseIdentityFingerprint)
+	}
+	if process.ProcessID == c.process.ProcessID {
+		return actionProcessIdentity{}, fmt.Errorf("React Native queue-replay restarted process_id=%q want a new process identity", process.ProcessID)
+	}
+	return process, nil
+}
+
+func (c *QueueReplayCoordinator) validateTraceSnapshot(raw json.RawMessage) (traceSnapshot, error) {
+	capture, err := decodeCapture(raw, []string{"request_trace"})
+	if err != nil {
+		return traceSnapshot{}, err
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "queue-replay trace capture"); err != nil {
+		return traceSnapshot{}, err
+	}
+	if c.process == nil {
+		return traceSnapshot{}, errors.New("React Native queue-replay trace process identity is unavailable")
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || process != *c.process {
+		return traceSnapshot{}, fmt.Errorf("React Native queue-replay trace process=%+v want=%+v decode_error=%v", process, *c.process, err)
+	}
+	trace, err := captureTraceFromRaw(capture.Trace)
+	if err != nil || trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || validateTraceSequence(trace.Observations) != nil {
+		return traceSnapshot{}, errors.New("React Native queue-replay trace snapshot is invalid")
+	}
+	return trace, nil
+}
+
+func (c *QueueReplayCoordinator) combinedTrace(raw json.RawMessage) (json.RawMessage, error) {
+	// The terminal capture already extracted the request_trace member, so this
+	// decodes the snapshot itself. validateTraceSnapshot expects the whole
+	// per-restart capture envelope with its process identity.
+	trace, err := captureTraceFromRaw(raw)
+	if err != nil {
+		return nil, err
+	}
+	if trace.Overflowed || validateTraceSequence(trace.Observations) != nil {
+		return nil, errors.New("React Native queue-replay terminal trace is invalid")
+	}
+	observations := make([]transportObservation, 0, len(c.trace)+len(trace.Observations))
+	observations = append(observations, c.trace...)
+	observations = append(observations, trace.Observations...)
+	for index := range observations {
+		observations[index].Sequence = uint64(index + 1)
+	}
+	combined := traceSnapshot{Observations: observations, SequenceCheckpoint: uint64(len(observations))}
+	encoded, err := json.Marshal(combined)
+	if err != nil {
+		return nil, fmt.Errorf("encode React Native queue-replay request trace: %w", err)
+	}
+	return encoded, nil
+}
+
+func (c *QueueReplayCoordinator) bindResponseLossPush() error {
+	if c.stepIndex >= len(c.steps) || c.config.Controller == nil {
+		return errors.New("React Native queue-replay response-loss binding is unavailable")
+	}
+	committedPush, err := pushResponseLossAppliedOperation(c.steps[c.stepIndex].dropPush)
+	if err != nil {
+		return fmt.Errorf("prepare React Native queue-replay committed response-loss push: %w", err)
+	}
+	if err := c.config.Controller.BindApplicationPush(committedPush); err != nil {
+		return fmt.Errorf("bind React Native queue-replay response-loss push: %w", err)
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) responseLossCallID() string {
+	return fmt.Sprintf("queue-replay-response-loss-%d", c.stepIndex+1)
+}
+
+func (c *QueueReplayCoordinator) validateProcess(raw json.RawMessage) error {
+	process, err := decodeActionProcessIdentity(raw)
+	if err != nil || c.process == nil {
+		return errors.New("React Native queue-replay process identity is invalid")
+	}
+	if process.ProcessID != c.process.ProcessID || process.DatabaseIdentityFingerprint != c.process.DatabaseIdentityFingerprint {
+		return errors.New("React Native queue-replay process identity changed")
+	}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) validateCapture(capture finalCapture) error {
+	state, err := c.validateCaptureAggregate(capture)
+	if err != nil {
+		return err
+	}
+	return validateRejectedMutationDetails(capture.Rejected, state.RejectedMutationCount)
+}
+
+func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) (inspectedClientState, error) {
+	expected, err := queueReplayExpectedState(c.config.Scenario)
+	if err != nil || len(expected.Clients) != 1 || expected.Clients[0].UserID != c.userID || expected.Clients[0].ClientID != c.clientID ||
+		expected.Clients[0].QueueCount == nil || expected.Clients[0].OutcomeCount == nil || expected.Clients[0].SealedBatchCount == nil {
+		return inspectedClientState{}, errors.New("React Native queue-replay authored client state is invalid")
+	}
+	state, err := decodeClientState(capture.ClientState)
+	if err != nil {
+		return inspectedClientState{}, err
+	}
+	counts := []struct {
+		name     string
+		observed uint64
+		expected uint64
+	}{
+		{"mutation ledger", state.MutationLedgerCount, *expected.Clients[0].QueueCount},
+		{"mutation outcomes", state.MutationOutcomeCount, *expected.Clients[0].OutcomeCount},
+		{"sealed batches", state.SealedBatchCount, *expected.Clients[0].SealedBatchCount},
+		{"rejected mutations", state.RejectedMutationCount, uint64(c.rejectedCount())},
+	}
+	mismatches := make([]string, 0, len(counts))
+	rejectedMismatch := false
+	for _, count := range counts {
+		if count.observed != count.expected {
+			mismatches = append(mismatches, fmt.Sprintf("%s count=%d want=%d", count.name, count.observed, count.expected))
+			rejectedMismatch = rejectedMismatch || count.name == "rejected mutations"
+		}
+	}
+	if len(mismatches) != 0 {
+		diagnostic := ""
+		if rejectedMismatch {
+			diagnostic = fmt.Sprintf(" terminal_rejection_codes=%s", queueReplayTerminalRejectionCodes(capture.Events))
+		}
+		return inspectedClientState{}, fmt.Errorf("React Native queue-replay final aggregate mismatch: %s%s", strings.Join(mismatches, ", "), diagnostic)
+	}
+	if validateReadyStatus(capture.Status) != nil {
+		return inspectedClientState{}, errors.New("React Native queue-replay final queue status is invalid")
+	}
+	trace, err := captureTraceFromRaw(capture.Trace)
+	if err != nil || trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || validateTraceSequence(trace.Observations) != nil {
+		return inspectedClientState{}, errors.New("React Native queue-replay request trace is invalid")
+	}
+	pushes := 0
+	for _, observation := range trace.Observations {
+		if observation.OperationClass == "push" && observation.StatusCode == http.StatusOK {
+			pushes++
+		}
+	}
+	// Each wave seals one batch, its response-loss attempt never yields a
+	// success observation on the device, and the replay resolves the batch
+	// exactly once. The contract bounds identity and durable retry metadata,
+	// not attempt counts, so only the terminal success count is authored.
+	if pushes != len(c.steps) {
+		return inspectedClientState{}, fmt.Errorf("React Native queue-replay replay push trace is invalid: successful pushes=%d want=%d", pushes, len(c.steps))
+	}
+	return state, nil
+}
+
+func validateRejectedMutationDetails(raw json.RawMessage, expected uint64) error {
+	var rejected []json.RawMessage
+	if json.Unmarshal(raw, &rejected) != nil || uint64(len(rejected)) != expected {
+		return fmt.Errorf("React Native queue-replay rejected mutation detail count=%d want=%d", len(rejected), expected)
+	}
+	return nil
+}
+
+func queueReplayTerminalRejectionCodes(raw json.RawMessage) string {
+	var events []struct {
+		Type          string  `json:"type"`
+		RejectionCode *string `json:"rejection_code"`
+		Failure       *struct {
+			Code string `json:"code"`
+		} `json:"failure"`
+	}
+	if json.Unmarshal(raw, &events) != nil {
+		return "<unavailable>"
+	}
+	codes := make(map[string]int)
+	for _, event := range events {
+		switch event.Type {
+		case "mutation_rejected":
+			code := "<none>"
+			if event.RejectionCode != nil && *event.RejectionCode != "" {
+				code = *event.RejectionCode
+			}
+			codes["mutation_rejected:"+code]++
+		case "failure":
+			if event.Failure != nil && event.Failure.Code != "" {
+				codes["failure:"+event.Failure.Code]++
+			}
+		}
+	}
+	if len(codes) == 0 {
+		return "<none>"
+	}
+	values := make([]string, 0, len(codes))
+	for code := range codes {
+		values = append(values, code)
+	}
+	sort.Strings(values)
+	more := 0
+	if len(values) > queueReplayMaximumTerminalRejectionCodes {
+		more = len(values) - queueReplayMaximumTerminalRejectionCodes
+		values = values[:queueReplayMaximumTerminalRejectionCodes]
+	}
+	for index, code := range values {
+		values[index] = fmt.Sprintf("%s=%d", code, codes[code])
+	}
+	if more != 0 {
+		values = append(values, fmt.Sprintf("...+%d", more))
+	}
+	return strings.Join(values, ",")
+}
+
+func (c *QueueReplayCoordinator) rejectedCount() int {
+	return queueReplayRejectedCount(c.steps)
+}
+
+func queueReplayRejectedCount(workloads []queueReplayWorkload) int {
+	count := 0
+	for _, workload := range workloads {
+		var payload scenarios.QueueReplayWorkload
+		if json.Unmarshal(workload.step.Operation.Payload, &payload) == nil {
+			count += int(payload.RejectedCount)
+		}
+	}
+	return count
+}
+
+func (c *QueueReplayCoordinator) completeLocked(ctx context.Context) error {
+	if c.finalResult == nil || c.config.Controller == nil {
+		return errors.New("React Native queue-replay final evidence is unavailable")
+	}
+	captures, err := c.config.Controller.Capture(ctx, []string{c.clientKey}, []string{"server-state"})
+	if err != nil || len(captures) != 1 {
+		return fmt.Errorf("capture React Native queue-replay server state: %w", nativeResultError(err, ""))
+	}
+	expected, err := queueReplayExpectedState(c.config.Scenario)
+	if err != nil {
+		return err
+	}
+	if err := validateServerState(expected, captures[0].StateFacts); err != nil {
+		return err
+	}
+	resolutions, err := c.resolveIdentities()
+	if err != nil {
+		return err
+	}
+	c.result = QueueReplayCoordinatorResult{ServerFacts: captures[0].StateFacts, IdentityResolution: resolutions}
+	return nil
+}
+
+func (c *QueueReplayCoordinator) resolveIdentities() ([]blackbox.NativeIdentityResolution, error) {
+	serverAliases := make([]scenarios.NativeIdentityAlias, 0, len(c.identities))
+	for _, alias := range c.identities {
+		if alias.Kind == "schema" || alias.Kind == "scope" || alias.Kind == "table" {
+			serverAliases = append(serverAliases, alias)
+		}
+	}
+	values, err := c.config.Controller.IdentityValues(serverAliases)
+	if err != nil {
+		return nil, fmt.Errorf("resolve React Native queue-replay runtime identities: %w", err)
+	}
+	for _, value := range values {
+		c.runtimeIDs[value.Alias] = copyRaw(value.RuntimeValue)
+	}
+	trace, err := captureTraceFromRaw(c.finalResult.Trace)
+	if err != nil {
+		return nil, err
+	}
+	for _, observation := range trace.Observations {
+		if observation.OperationClass != "push" {
+			continue
+		}
+		generation, err := requestInteger(observation, "client_generation")
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := json.Marshal(generation)
+		if err != nil {
+			return nil, err
+		}
+		c.runtimeIDs["client-generation-one"] = encoded
+		break
+	}
+	observations := make([]blackbox.NativeIdentityObservation, 0)
+	for _, alias := range c.identities {
+		value, found := c.runtimeIDs[alias.Alias]
+		if !found {
+			return nil, fmt.Errorf("React Native queue-replay identity evidence is incomplete: %s", alias.Alias)
+		}
+		for _, stepID := range alias.StepIDs {
+			owner := stepID
+			observations = append(observations, blackbox.NativeIdentityObservation{Kind: alias.Kind, Alias: alias.Alias, StepID: &owner, RuntimeValue: value})
+		}
+		for _, expectationID := range alias.ExpectationIDs {
+			owner := expectationID
+			observations = append(observations, blackbox.NativeIdentityObservation{Kind: alias.Kind, Alias: alias.Alias, ExpectationID: &owner, RuntimeValue: value})
+		}
+	}
+	return blackbox.ResolveNativeIdentityAliases(c.identities, observations)
+}
+
+func (c *QueueReplayCoordinator) command(actor, name string, parameters map[string]any, stepIDs []scenarios.StepID) *conformanceCommand {
+	steps := make([]conformanceStep, 0, len(stepIDs))
+	for _, id := range stepIDs {
+		for _, workload := range c.steps {
+			if workload.step.ID == id {
+				steps = append(steps, conformanceStep{Operation: conformanceOperation{ContractOperation: workload.step.Operation.ContractOperation, Name: workload.step.Operation.Name, Payload: copyRaw(workload.step.Operation.Payload)}})
+			}
+		}
+	}
+	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken, PushBatchSize: 1000}}
+}
+
+func (c *QueueReplayCoordinator) commandOperations(actor, name string, parameters map[string]any, operations []scenarios.Operation) *conformanceCommand {
+	steps := make([]conformanceStep, 0, len(operations))
+	for _, operation := range operations {
+		steps = append(steps, conformanceStep{Operation: conformanceOperation{ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload)}})
+	}
+	return &conformanceCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: conformanceRuntime{ClientKey: c.clientKey, Database: c.database, ClientID: c.clientID, ServerURL: c.adapter, AuthToken: c.config.AuthToken, PushBatchSize: 1000}}
+}
+
+func (c *QueueReplayCoordinator) successorCommand(actor, name string, parameters map[string]any) *conformanceCommand {
+	return &conformanceCommand{
+		SchemaVersion: 1,
+		Action:        conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}},
+		Runtime: conformanceRuntime{
+			ClientKey: c.successorClientKey, Database: c.successorDatabase, ClientID: c.successorClientID,
+			ServerURL: c.adapter, AuthToken: c.config.AuthToken, PushBatchSize: 1000,
+		},
+	}
+}
+
+func (c *QueueReplayCoordinator) successorOperationCommand(operations []scenarios.Operation) *conformanceCommand {
+	command := c.successorCommand("client", "execute-steps", map[string]any{"client_key": c.successorClientKey})
+	command.Action.Steps = make([]conformanceStep, 0, len(operations))
+	for _, operation := range operations {
+		command.Action.Steps = append(command.Action.Steps, conformanceStep{Operation: conformanceOperation{
+			ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload),
+		}})
+	}
+	return command
+}
+
+func (c *QueueReplayCoordinator) queueSuccessorPlan() (scenarios.Operation, []scenarios.Operation, []scenarios.Operation, []scenarios.NativeCRUDTarget, error) {
+	inspection, err := scenarios.NativeCRUDInspectionForSetup(c.config.Scenario.Model.Setup[0], c.userID)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	assignment, err := scenarios.NativeCRUDInspectionAssignment(c.userID, c.successorClientID, inspection.ScopeID)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	current, err := queueReplayFinalSchema(c.config.Scenario)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	plan, err := scenarios.NewNativeCRUDPlan(current.CRUDSchema(), inspection.StreamGeneration, c.userID, c.successorClientID)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	insert, err := plan.Step("insert", nil, 30)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	versions := make(map[string]string, len(plan.Targets()))
+	for _, target := range plan.Targets() {
+		versions[target.TableID] = "queued-successor-preview-version"
+	}
+	update, err := plan.Step("update", versions, 32)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	bind := func(values []scenarios.Operation) ([]scenarios.Operation, error) {
+		bound := make([]scenarios.Operation, 0, len(values))
+		for index, value := range values {
+			operation, bindErr := c.config.Controller.ApplicationWrite(value)
+			if bindErr != nil {
+				return nil, fmt.Errorf("bind React Native queue successor local write %d: %w", index+1, bindErr)
+			}
+			bound = append(bound, operation)
+		}
+		return bound, nil
+	}
+	boundInsert, err := bind(insert.LocalWrites)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	boundUpdate, err := bind(update.LocalWrites)
+	if err != nil {
+		return scenarios.Operation{}, nil, nil, nil, err
+	}
+	targets := make([]scenarios.NativeCRUDTarget, 0, len(plan.Targets()))
+	for index, target := range plan.Targets() {
+		bound, bindErr := scenarios.BindNativeCRUDTarget(target, boundInsert[index], boundUpdate[index])
+		if bindErr != nil {
+			return scenarios.Operation{}, nil, nil, nil, bindErr
+		}
+		targets = append(targets, bound)
+	}
+	return assignment, boundInsert, boundUpdate, targets, nil
+}
+
+func queueReplayFinalSchema(scenario scenarios.Scenario) (scenarios.QueueReplaySchema, error) {
+	current, err := scenarios.InitialQueueReplaySchema(scenario.Model.Setup[0])
+	if err != nil {
+		return scenarios.QueueReplaySchema{}, err
+	}
+	for index, step := range scenario.Steps {
+		inputs, err := scenarios.BuildQueueReplayInputs(step, current, uint64(index*2+1))
+		if err != nil {
+			return scenarios.QueueReplaySchema{}, err
+		}
+		current = inputs.NextSchema
+	}
+	return current, nil
+}
+
+func queueReplayLocalBatchCount(workload queueReplayWorkload) int {
+	if len(workload.local) == 0 {
+		return 0
+	}
+	return (len(workload.local) + queueReplayMaximumLocalOperations - 1) / queueReplayMaximumLocalOperations
+}
+
+func (stage queueReplayStage) String() string {
+	switch stage {
+	case queueReplayStageOpen:
+		return "open"
+	case queueReplayStageOpened:
+		return "opened"
+	case queueReplayStageBootstrapped:
+		return "bootstrapped"
+	case queueReplayStageOfflineStopped:
+		return "offline-stopped"
+	case queueReplayStageLocalWrite:
+		return "local-write"
+	case queueReplayStageRestartedBeforeSchema:
+		return "restarted-before-schema"
+	case queueReplayStageSchemaBoundary:
+		return "schema-boundary"
+	case queueReplayStageResponseLossBegun:
+		return "response-loss-begun"
+	case queueReplayStageResponseLossPushReady:
+		return "response-loss-push-ready"
+	case queueReplayStageResponseLoss:
+		return "response-loss"
+	case queueReplayStageResponseLossCapture:
+		return "response-loss-capture"
+	case queueReplayStageRestartedAfterLoss:
+		return "restarted-after-loss"
+	case queueReplayStageReplay:
+		return "replay"
+	case queueReplayStageReplayCapture:
+		return "replay-capture"
+	case queueReplayStageCapture:
+		return "capture"
+	case queueReplayStageRejectedCapture:
+		return "rejected-capture"
+	case queueReplayStageSuccessorOpened:
+		return "successor-opened"
+	case queueReplayStageSuccessorBootstrapped:
+		return "successor-bootstrapped"
+	case queueReplayStageSuccessorStopped:
+		return "successor-stopped"
+	case queueReplayStageSuccessorInsert:
+		return "successor-insert"
+	case queueReplayStageSuccessorBeforeCapture:
+		return "successor-before-capture"
+	case queueReplayStageSuccessorRestarted:
+		return "successor-restarted"
+	case queueReplayStageSuccessorRestartCapture:
+		return "successor-restart-capture"
+	case queueReplayStageSuccessorUpdate:
+		return "successor-update"
+	case queueReplayStageSuccessorChangedCapture:
+		return "successor-changed-capture"
+	case queueReplayStageComplete:
+		return "complete"
+	default:
+		return "invalid"
+	}
+}
+
+type queueReplayClient struct{ userID, clientID string }
+
+func queueReplayClientIdentity(scenario scenarios.Scenario) (queueReplayClient, error) {
+	if len(scenario.Steps) == 0 || scenario.Steps[0].NativeBinding == nil {
+		return queueReplayClient{}, errors.New("React Native queue-replay client identity is invalid")
+	}
+	binding := scenario.Steps[0].NativeBinding
+	if binding.UserID == "" || binding.ClientID == "" {
+		return queueReplayClient{}, errors.New("React Native queue-replay client identity is invalid")
+	}
+	for _, step := range scenario.Steps {
+		if step.NativeBinding == nil || step.NativeBinding.UserID != binding.UserID || step.NativeBinding.ClientID != binding.ClientID {
+			return queueReplayClient{}, errors.New("React Native queue-replay native identity differs across steps")
+		}
+	}
+	return queueReplayClient{userID: binding.UserID, clientID: binding.ClientID}, nil
+}
+
+func queueReplayExpectedState(scenario scenarios.Scenario) (scenarios.StateFacts, error) {
+	for _, expected := range scenario.Model.ExpectedState {
+		if expected.ID == "EXPECT-PERF-QUEUE-REPLAY-SEMANTIC-001" && expected.StateFacts != nil {
+			return *expected.StateFacts, nil
+		}
+	}
+	return scenarios.StateFacts{}, errors.New("React Native queue-replay expected state is absent")
+}
+
+type queueReplayPendingMutation struct {
+	MutationID            string       `json:"mutationID"`
+	LocalOrder            int64        `json:"localOrder"`
+	TableID               string       `json:"tableID"`
+	TableName             string       `json:"tableName"`
+	RecordID              string       `json:"recordID"`
+	PrimaryKeyFieldID     string       `json:"primaryKeyFieldID"`
+	PrimaryKeyLogicalType string       `json:"primaryKeyLogicalType"`
+	Operation             string       `json:"operation"`
+	AuthoredSchema        clientSchema `json:"authoredSchema"`
+	BaseVersion           *string      `json:"baseVersion"`
+	ClientVersion         string       `json:"clientVersion"`
+	Status                string       `json:"status"`
+	SourceKind            string       `json:"sourceKind"`
+	DependsOnMutationID   *string      `json:"dependsOnMutationID"`
+	NormalizedMutationID  *string      `json:"normalizedMutationID"`
+	SealedBatchID         *string      `json:"sealedBatchID"`
+	SealedOrdinal         *int64       `json:"sealedOrdinal"`
+	AuthoredFields        []struct {
+		FieldID     string          `json:"fieldID"`
+		LogicalType string          `json:"logicalType"`
+		Value       json.RawMessage `json:"value"`
+	} `json:"authoredFields"`
+}
+
+func (c *QueueReplayCoordinator) decodeSuccessorCapture(raw json.RawMessage) ([]queueReplayPendingMutation, error) {
+	capture, err := decodeCapture(raw, []string{"pending_mutations"})
+	if err != nil {
+		return nil, fmt.Errorf("decode React Native queue successor capture: %w", err)
+	}
+	var members map[string]json.RawMessage
+	if err := decodeStrictMembers(raw, &members, 3, "queue successor capture"); err != nil {
+		return nil, err
+	}
+	process, err := decodeActionProcessIdentity(members["process"])
+	if err != nil || c.process == nil || process != *c.process {
+		return nil, errors.New("React Native queue successor capture process identity changed")
+	}
+	var pending []queueReplayPendingMutation
+	if err := decodeStrictValue(capture.Pending, &pending); err != nil || len(pending) > queueReplayMaximumRejectedDetails {
+		return nil, errors.New("React Native queue successor mutation inspection is invalid")
+	}
+	return pending, nil
+}
+
+func reactNativeQueueSuccessorEvidence(targets []scenarios.NativeCRUDTarget, before, restarted, changed []queueReplayPendingMutation) (scenarios.NativeQueueSuccessorEvidence, error) {
+	evidence := scenarios.NativeQueueSuccessorEvidence{Rows: make([]scenarios.NativeQueueSuccessorRow, 0, len(targets))}
+	for _, target := range targets {
+		originals := reactNativeRetainedForRow(before, target)
+		if len(originals) != 1 {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor original count for table %q is %d", target.TableID, len(originals))
+		}
+		original := originals[0]
+		restartedMutation, found := reactNativeRetainedByID(restarted, original.MutationID)
+		if !found {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor original for table %q is absent after restart", target.TableID)
+		}
+		changedOriginal, found := reactNativeRetainedByID(changed, original.MutationID)
+		if !found {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor original for table %q is absent after changed intent", target.TableID)
+		}
+		successors := make([]queueReplayPendingMutation, 0, 1)
+		for _, mutation := range reactNativeRetainedForRow(changed, target) {
+			if mutation.DependsOnMutationID != nil && *mutation.DependsOnMutationID == original.MutationID && mutation.Operation == "update" {
+				successors = append(successors, mutation)
+			}
+		}
+		if len(successors) != 1 {
+			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor changed-intent count for table %q is %d", target.TableID, len(successors))
+		}
+		evidence.Rows = append(evidence.Rows, scenarios.NativeQueueSuccessorRow{
+			BeforeRestart: reactNativeQueuedMutation(original), AfterRestart: reactNativeQueuedMutation(restartedMutation),
+			OriginalAfterChange: reactNativeQueuedMutation(changedOriginal), Successor: reactNativeQueuedMutation(successors[0]),
+		})
+	}
+	return evidence, nil
+}
+
+func reactNativeRetainedForRow(values []queueReplayPendingMutation, target scenarios.NativeCRUDTarget) []queueReplayPendingMutation {
+	matched := make([]queueReplayPendingMutation, 0, 2)
+	for _, mutation := range values {
+		if mutation.TableName == target.TableName && mutation.RecordID == target.RecordID {
+			matched = append(matched, mutation)
+		}
+	}
+	return matched
+}
+
+func reactNativeRetainedByID(values []queueReplayPendingMutation, mutationID string) (queueReplayPendingMutation, bool) {
+	for _, mutation := range values {
+		if mutation.MutationID == mutationID {
+			return mutation, true
+		}
+	}
+	return queueReplayPendingMutation{}, false
+}
+
+func reactNativeQueuedMutation(value queueReplayPendingMutation) scenarios.NativeQueuedMutation {
+	fields := make([]scenarios.NativeQueuedField, 0, len(value.AuthoredFields))
+	for _, field := range value.AuthoredFields {
+		fields = append(fields, scenarios.NativeQueuedField{FieldID: field.FieldID, LogicalType: field.LogicalType, Value: copyRaw(field.Value)})
+	}
+	return scenarios.NativeQueuedMutation{
+		MutationID: value.MutationID, LocalOrder: value.LocalOrder, TableID: value.TableID, TableName: value.TableName,
+		RecordID: value.RecordID, PrimaryKeyFieldID: value.PrimaryKeyFieldID, PrimaryKeyLogicalType: value.PrimaryKeyLogicalType,
+		Operation: value.Operation, AuthoredSchemaVersion: int64(value.AuthoredSchema.Version), AuthoredSchemaHash: value.AuthoredSchema.Hash,
+		BaseVersion: value.BaseVersion, ClientVersion: value.ClientVersion, Status: value.Status, SourceKind: value.SourceKind,
+		DependsOnMutationID: value.DependsOnMutationID, NormalizedMutationID: value.NormalizedMutationID,
+		SealedBatchID: value.SealedBatchID, SealedOrdinal: value.SealedOrdinal, AuthoredFields: fields,
+	}
+}
+
+func queueReplayWorkloads(scenario scenarios.Scenario) ([]queueReplayWorkload, error) {
+	current, err := scenarios.InitialQueueReplaySchema(scenario.Model.Setup[0])
+	if err != nil {
+		return nil, err
+	}
+	workloads := make([]queueReplayWorkload, 0, len(scenario.Steps))
+	for index, step := range scenario.Steps {
+		inputs, err := scenarios.BuildQueueReplayInputs(step, current, uint64(index*2+1))
+		if err != nil {
+			return nil, err
+		}
+		workloads = append(workloads, queueReplayWorkload{step: step, local: inputs.Local, publish: inputs.Publish, dropPush: inputs.DropPush})
+		current = inputs.NextSchema
+	}
+	return workloads, nil
+}
+
+func queueReplayJSON(value any) json.RawMessage {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}

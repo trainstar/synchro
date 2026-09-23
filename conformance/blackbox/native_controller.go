@@ -1,0 +1,4568 @@
+package blackbox
+
+import (
+	"bytes"
+	"cmp"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/observer"
+	"github.com/trainstar/synchro/conformance/scenarios"
+	"github.com/trainstar/synchro/conformance/vectors"
+)
+
+const (
+	nativeControllerRequestTimeout       = 30 * time.Second
+	nativeControllerWaitTimeout          = 30 * time.Second
+	nativeControllerPollInterval         = 25 * time.Millisecond
+	nativeStagedSharedAuthoredScope      = "scope-b"
+	nativeStagedSharedRuntimeScope       = "cf:dedup"
+	nativeCaptureDependencyFixture       = "cf_item_impacts"
+	nativeCaptureDependencyKeyColumn     = "id"
+	nativeCaptureMaximumMutationOutcomes = 4096
+)
+
+// NativeControllerConfig configures one generic native server controller.
+type NativeControllerConfig struct {
+	Harness     *Harness
+	HTTPClient  *http.Client
+	Now         func() time.Time
+	WaitTimeout time.Duration
+}
+
+// NativeController applies authored server operations to one real black-box harness.
+type NativeController struct {
+	// crossScopeConfigured records that a membership stage reconfigured the
+	// shared fixture table, so the close path restores it.
+	crossScopeConfigured bool
+	// defaultSharedScopeRemoved records that setup or a step removed the default
+	// shared assignment. A later step restores only what this controller removed.
+	// Registration assigns the scope to every active client, so a scenario that
+	// never removed it must not re-register it.
+	defaultSharedScopeRemoved bool
+	harness                   *Harness
+	httpClient                *http.Client
+	now                       func() time.Time
+	waitTimeout               time.Duration
+
+	mu             sync.Mutex
+	closed         bool
+	installation   *nativeInstallationBinding
+	transactions   map[string]*nativeTransactionBinding
+	records        map[string]*nativeRecordBinding
+	rebuildCursors map[string]string
+	scopeCursors   map[string]string
+}
+
+// NativeWireFacts records the transport facts from one native HTTP response.
+type NativeWireFacts struct {
+	HTTPStatus int     `json:"http_status"`
+	ErrorCode  *string `json:"error_code,omitempty"`
+	Retryable  bool    `json:"retryable"`
+	// Message carries the bounded server message. The code alone cannot name
+	// which part of a rejected request the server refused.
+	Message string `json:"message,omitempty"`
+}
+
+// NativeStepObservation records the raw terminal result from one native operation.
+type NativeStepObservation struct {
+	Disposition string           `json:"disposition"`
+	ErrorCode   *string          `json:"error_code,omitempty"`
+	Wire        *NativeWireFacts `json:"wire,omitempty"`
+}
+
+// NativeCaptureFacts binds one requested source to its durable state facts.
+type NativeCaptureFacts struct {
+	Source     string               `json:"source"`
+	StateFacts scenarios.StateFacts `json:"state_facts"`
+}
+
+type nativeInstallationBinding struct {
+	authoredStream             string
+	authoredRegistryGeneration uint64
+	runtimeRegistryGeneration  int64
+	authoredSchemas            map[string]nativeSchemaReference
+	runtimeSchemas             map[string]nativeSchemaReference
+	// pendingCompositionChange records that a stage reconfigured a registration
+	// in a way the server publishes as a new manifest on activation.
+	pendingCompositionChange bool
+	pendingMembershipChange  *nativeMembershipActivationBinding
+	tables                   map[string]nativeTableBinding
+	relations                map[string]string
+	captureDependencies      map[string]nativeCaptureDependencyBinding
+	scopes                   map[string]string
+	runtimeScopes            map[string]string
+	rowScopes                map[string][]string
+	clients                  []nativeInstalledClient
+	currentAuthoredSchema    nativeSchemaReference
+	currentRuntimeSchema     nativeSchemaReference
+	// retiredFields keeps the runtime identity of each authored field a schema
+	// transition removed. A mutation queued under the earlier schema still
+	// records that identity, and the rebound table no longer carries it.
+	retiredFields map[string]string
+	// userScopes records the authored scopes each user currently holds. Scope
+	// assignment is a property of the user, so an authored assignment for one
+	// client sets the scope set of that client's user.
+	userScopes map[string][]string
+	// appliedRevocations records each scope revocation the controller issued.
+	appliedRevocations []string
+	// runtimeRowVersions maps a captured row to the row version the server
+	// stores. A row fact carries the authored version, so an authored
+	// row-version alias has no other source for its runtime value.
+	runtimeRowVersions map[string]string
+}
+
+type nativeInstalledClient struct {
+	UserID   string
+	ClientID string
+}
+
+type nativeMembershipActivationBinding struct {
+	authoredRegistryGeneration uint64
+	runtimeRegistryGeneration  int64
+	runtimeScope               string
+	priorMembershipGeneration  int64
+}
+
+type nativeSchemaReference struct {
+	Version int64  `json:"version"`
+	Hash    string `json:"hash"`
+}
+
+type nativeTableBinding struct {
+	AuthoredID        string
+	AuthoredName      string
+	AuthoredRelation  string
+	RuntimeID         string
+	RuntimeName       string
+	RuntimeRelationID string
+	AuthoredPrimary   string
+	RuntimePrimary    string
+	RuntimeDeletedAt  string
+	Fields            map[string]string
+	FieldNames        map[string]string
+	// RuntimeFieldNames names every column the runtime table declares, including
+	// the columns no authored field maps to. An insert must satisfy those
+	// columns, so they cannot be inferred from a fixture name.
+	RuntimeFieldNames map[string]struct{}
+}
+
+type nativeCaptureDependencyBinding struct {
+	AuthoredRelation string
+	RuntimeName      string
+	CapturedFields   map[string]struct{}
+}
+
+type nativeTransactionBinding struct {
+	AuthoredStream       string
+	AuthoredCommitLSN    string
+	AuthoredEndLSN       string
+	AuthoredUserID       string
+	AuthoredClientID     string
+	AuthoredBatchID      string
+	AuthoredMutationIDs  []string
+	Events               []nativeEventBinding
+	RuntimeStream        string
+	RuntimeCommitLSN     string
+	RuntimeEndLSN        string
+	RuntimeRegistry      int64
+	RuntimeBatchID       string
+	RuntimeMutationIDs   []string
+	RuntimeEventOrdinals []uint64
+	SourceXID            uint64
+	Materialized         bool
+	ApplicationPush      bool
+	// AuthoredMutationsDigest identifies the authored content of the accepted
+	// push. A replay carrying the same content must reproduce the sealed
+	// request byte for byte, so it replays the stored canonical request.
+	AuthoredMutationsDigest string
+}
+
+type nativeEventBinding struct {
+	AuthoredOrdinal   uint64
+	Operation         string
+	PhysicalOperation string
+	Relation          string
+	Table             nativeTableBinding
+	Dependency        *nativeCaptureDependencyBinding
+	RecordID          string
+	RuntimeRecordID   string
+	Before            *nativeAuthoredImage
+	After             *nativeAuthoredImage
+	AuthoredScopes    []string
+}
+
+type nativeRecordBinding struct {
+	Table           nativeTableBinding
+	RecordID        string
+	RuntimeRecordID string
+	Image           nativeAuthoredImage
+	AuthoredScopes  []string
+}
+
+type nativeAuthoredImage struct {
+	TableID           string
+	PrimaryFieldID    string
+	CanonicalWireJSON string
+	Fields            map[string]json.RawMessage
+	CaptureKey        string
+	Version           string
+	Checksum          string
+	Deleted           bool
+}
+
+type nativeRuntimeManifest struct {
+	SchemaVersion int64                     `json:"schema_version"`
+	SchemaHash    string                    `json:"schema_hash"`
+	Manifest      nativeRuntimeManifestBody `json:"manifest"`
+}
+
+type nativeRuntimeManifestBody struct {
+	SchemaVersion int64                        `json:"schema_version"`
+	SchemaHash    string                       `json:"schema_hash"`
+	Tables        []nativeRuntimeManifestTable `json:"tables"`
+}
+
+type nativeRuntimeManifestTable struct {
+	Name              string                       `json:"name"`
+	ID                string                       `json:"table_id"`
+	RelationID        string                       `json:"relation_id"`
+	PrimaryKeyFieldID string                       `json:"primary_key_field_id"`
+	Fields            []nativeRuntimeManifestField `json:"fields"`
+}
+
+type nativeRuntimeManifestField struct {
+	ID       string `json:"field_id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Writable bool   `json:"writable"`
+}
+
+type nativeInstallPayload struct {
+	Installation struct {
+		Installed            bool     `json:"installed"`
+		ProtocolVersion      int      `json:"protocol_version"`
+		MinimumClientRuntime int      `json:"minimum_client_runtime"`
+		Endpoints            []string `json:"endpoints"`
+	} `json:"installation"`
+	InitialSchema   nativePublishedSchema `json:"initial_schema"`
+	InitialRegistry struct {
+		RegistryGeneration uint64                   `json:"registry_generation"`
+		Relations          []nativeAuthoredRelation `json:"relations"`
+		ScopeRules         []nativeScopeRule        `json:"scope_rules"`
+	} `json:"initial_registry"`
+	Stream struct {
+		StreamGeneration string `json:"stream_generation"`
+	} `json:"stream"`
+	EmptyScopes []struct {
+		ScopeID string `json:"scope_id"`
+	} `json:"empty_scopes"`
+	Clients []struct {
+		UserID           string   `json:"user_id"`
+		ClientID         string   `json:"client_id"`
+		AssignedScopeIDs []string `json:"assigned_scope_ids"`
+	} `json:"clients"`
+	WritePolicies    []nativeWritePolicy            `json:"write_policies"`
+	ConfiguredLimits scenarios.ConfiguredLimitsFact `json:"configured_limits"`
+}
+
+type nativeWritePolicy struct {
+	UserID  string `json:"user_id"`
+	TableID string `json:"table_id"`
+	Allowed bool   `json:"allowed"`
+}
+
+type nativePublishedSchema struct {
+	Schema             nativeSchemaReference `json:"schema"`
+	Body               string                `json:"body"`
+	TransitionClass    string                `json:"transition_class"`
+	CompatibilityFloor int64                 `json:"compatibility_floor"`
+	Tables             []nativeAuthoredTable `json:"tables"`
+	AffectedScopes     []string              `json:"affected_scopes"`
+}
+
+type nativeAuthoredTable struct {
+	TableID           string                `json:"table_id"`
+	RelationID        string                `json:"relation_id"`
+	Name              string                `json:"name"`
+	PrimaryKeyFieldID string                `json:"primary_key_field_id"`
+	DeletedAtFieldID  *string               `json:"deleted_at_field_id"`
+	Fields            []nativeAuthoredField `json:"fields"`
+}
+
+type nativeAuthoredField struct {
+	FieldID    string `json:"field_id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	PrimaryKey bool   `json:"primary_key"`
+	Writable   bool   `json:"writable"`
+}
+
+type nativeAuthoredRelation struct {
+	Relation               string   `json:"relation"`
+	RegistrationKind       string   `json:"registration_kind"`
+	TableID                string   `json:"table_id"`
+	PrimaryKeyFieldID      string   `json:"primary_key_field_id"`
+	PrimaryKeyPortableType string   `json:"primary_key_portable_type"`
+	CaptureKeyFieldIDs     []string `json:"capture_key_field_ids"`
+	CapturedFieldIDs       []string `json:"captured_field_ids"`
+}
+
+type nativeScopeRule struct {
+	Relation    string `json:"relation"`
+	Evaluations []struct {
+		Row struct {
+			TableID           string `json:"table_id"`
+			CanonicalWireJSON string `json:"canonical_wire_json"`
+		} `json:"row"`
+		Scopes []string `json:"scopes"`
+	} `json:"evaluations"`
+}
+
+type nativeCommitPayload struct {
+	StreamGeneration string                `json:"stream_generation"`
+	CommitLSN        string                `json:"commit_lsn"`
+	EndLSN           string                `json:"end_lsn"`
+	Events           []nativeAuthoredEvent `json:"events"`
+}
+
+type nativeAuthoredEvent struct {
+	EventOrdinal uint64                   `json:"event_ordinal"`
+	Relation     string                   `json:"relation"`
+	Operation    string                   `json:"operation"`
+	Before       *nativeAuthoredImageWire `json:"before"`
+	After        *nativeAuthoredImageWire `json:"after"`
+}
+
+type nativeAuthoredImageWire struct {
+	Identity struct {
+		Kind      string `json:"kind"`
+		SyncedRow *struct {
+			TableID           string `json:"table_id"`
+			PrimaryKeyFieldID string `json:"primary_key_field_id"`
+			PortableType      string `json:"portable_type"`
+			CanonicalWireJSON string `json:"canonical_wire_json"`
+		} `json:"synced_row"`
+		CaptureKey *struct {
+			CanonicalKeyBytes string `json:"canonical_key_bytes"`
+		} `json:"capture_key"`
+	} `json:"identity"`
+	Fields []struct {
+		Field    string          `json:"field"`
+		Type     string          `json:"type"`
+		WireJSON json.RawMessage `json:"wire_json"`
+	} `json:"fields"`
+	Version  string  `json:"version"`
+	Checksum *string `json:"checksum"`
+	Deleted  bool    `json:"deleted"`
+}
+
+// NewNativeController creates one controller for a provisioned harness.
+func NewNativeController(config NativeControllerConfig) (*NativeController, error) {
+	if config.Harness == nil || config.Harness.AdapterURL() == "" || config.Harness.Source() == nil || config.Harness.Operator() == nil {
+		return nil, errors.New("native controller requires a ready black-box harness")
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	if config.WaitTimeout == 0 {
+		config.WaitTimeout = nativeControllerWaitTimeout
+	}
+	if config.WaitTimeout <= 0 {
+		return nil, errors.New("native controller wait timeout is invalid")
+	}
+	client := config.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: nativeControllerRequestTimeout}
+	}
+	return &NativeController{
+		harness:        config.Harness,
+		httpClient:     client,
+		now:            config.Now,
+		waitTimeout:    config.WaitTimeout,
+		transactions:   make(map[string]*nativeTransactionBinding),
+		records:        make(map[string]*nativeRecordBinding),
+		rebuildCursors: make(map[string]string),
+		scopeCursors:   make(map[string]string),
+	}, nil
+}
+
+// NativeBearerToken signs a bounded token for an arbitrary authored user.
+func (h *Harness) NativeBearerToken(ctx context.Context, userID string, now time.Time) (string, error) {
+	if ctx == nil {
+		return "", errors.New("native bearer token context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if h == nil || !h.sourceReady || len(h.env.jwtSecret) == 0 {
+		return "", errors.New("native bearer token harness is unavailable")
+	}
+	if !validNativeIdentity(userID) {
+		return "", errors.New("native bearer token user identity is invalid")
+	}
+	issued := now.Round(0).UTC()
+	token, err := SignHS256(h.env.jwtSecret, Claims{
+		"sub": userID,
+		"iat": issued.Unix(),
+		"exp": issued.Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		return "", err
+	}
+	if h.adapter != nil {
+		h.adapter.log.addRedaction([]byte(token))
+	}
+	if h.postgres != nil {
+		h.postgres.log.addRedaction([]byte(token))
+	}
+	return token, nil
+}
+
+func validNativeIdentity(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if character <= ' ' || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// Install binds authored schema and WAL identities to the active runtime contract.
+func (c *NativeController) Install(ctx context.Context, operation scenarios.Operation) error {
+	if err := c.context(ctx); err != nil {
+		return err
+	}
+	if scenarios.OperationKey(operation) != "model/install-current-contract" {
+		return nativeUnsupported("install", operation)
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return fmt.Errorf("native controller install operation is invalid: %w", err)
+	}
+	var payload nativeInstallPayload
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return errors.New("decode native controller install payload failed")
+	}
+	if err := validateNativeInstallPayload(payload); err != nil {
+		return err
+	}
+	runtime, runtimeRegistry, err := c.loadRuntimeManifest(ctx)
+	if err != nil {
+		return err
+	}
+	binding, err := bindNativeInstallation(payload, runtime, runtimeRegistry)
+	if err != nil {
+		return err
+	}
+	// A scope two users hold is shared, so an authored assignment can bind the
+	// default shared scope. Removing a scope the installation binds leaves its
+	// rows without a scope, so the removal happens only when nothing binds it.
+	if nativeInstallRequiresPrivateScopeAssignments(payload) && !nativeInstallHoldsDefaultSharedScope(payload, binding) {
+		if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
+			return err
+		}
+		c.defaultSharedScopeRemoved = true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation != nil {
+		return errors.New("native controller contract is already installed")
+	}
+	c.installation = binding
+	return nil
+}
+
+// nativeInstallHoldsDefaultSharedScope reports whether a client holds a scope
+// that bound to the default shared scope. One scope two users hold is shared,
+// so its binding becomes the default shared scope and the scope must stay
+// registered. An unassigned authored scope that merely absorbed the default
+// name is not held by any client and does not keep it registered.
+func nativeInstallHoldsDefaultSharedScope(payload nativeInstallPayload, binding *nativeInstallationBinding) bool {
+	if binding == nil {
+		return false
+	}
+	for _, client := range payload.Clients {
+		for _, scope := range client.AssignedScopeIDs {
+			if binding.scopes[scope] == "cf:global" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func nativeInstallRequiresPrivateScopeAssignments(payload nativeInstallPayload) bool {
+	for _, client := range payload.Clients {
+		if len(client.AssignedScopeIDs) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeStageRegistersSharedScope(operation scenarios.Operation) (bool, error) {
+	var payload struct {
+		AffectedScopes []string `json:"affected_scopes"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return false, errors.New("native controller membership stage payload is invalid")
+	}
+	if len(payload.AffectedScopes) != 2 {
+		return false, nil
+	}
+	hasPrimaryScope := false
+	hasSharedScope := false
+	for _, scope := range payload.AffectedScopes {
+		switch scope {
+		case "scope-a":
+			hasPrimaryScope = true
+		case nativeStagedSharedAuthoredScope:
+			hasSharedScope = true
+		}
+	}
+	return hasPrimaryScope && hasSharedScope, nil
+}
+
+func nativeStageRequiresClass1MembershipTransition(operation scenarios.Operation) (bool, error) {
+	var payload struct {
+		AffectedScopes []string `json:"affected_scopes"`
+		ScopeRules     []struct {
+			Relation           string            `json:"relation"`
+			MembershipFunction string            `json:"membership_function"`
+			Evaluations        []json.RawMessage `json:"evaluations"`
+		} `json:"scope_rules"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return false, errors.New("native controller membership stage payload is invalid")
+	}
+	if len(payload.AffectedScopes) != 1 || payload.AffectedScopes[0] != "user:user-a" || len(payload.ScopeRules) != 1 {
+		return false, nil
+	}
+	rule := payload.ScopeRules[0]
+	return rule.Relation == "public.items" && rule.MembershipFunction == "synchro.scope_items", nil
+}
+
+func validateNativeInstallPayload(payload nativeInstallPayload) error {
+	if !payload.Installation.Installed || payload.Installation.ProtocolVersion != 3 || payload.Installation.MinimumClientRuntime != 3 {
+		return errors.New("native controller install protocol binding is invalid")
+	}
+	// A scenario declares the endpoints its installation exposes. Accept that
+	// declaration when it names supported endpoints without repetition, rather
+	// than requiring every endpoint of the full contract.
+	supported := map[string]bool{"connect": true, "pull": true, "push": true, "rebuild": true}
+	declared := make(map[string]bool, len(payload.Installation.Endpoints))
+	for _, endpoint := range payload.Installation.Endpoints {
+		if !supported[endpoint] || declared[endpoint] {
+			return fmt.Errorf("native controller install endpoint binding is invalid: %v", payload.Installation.Endpoints)
+		}
+		declared[endpoint] = true
+	}
+	if !declared["connect"] {
+		return fmt.Errorf("native controller install endpoint binding omits connect: %v", payload.Installation.Endpoints)
+	}
+	if !validNativeSchemaReference(payload.InitialSchema.Schema, false) || payload.InitialRegistry.RegistryGeneration == 0 || payload.Stream.StreamGeneration == "" {
+		return errors.New("native controller install identity is incomplete")
+	}
+	if len(payload.InitialSchema.Tables) == 0 || len(payload.InitialRegistry.Relations) == 0 {
+		return errors.New("native controller install contract has no synced relation")
+	}
+	var body struct {
+		SchemaVersion int64  `json:"schema_version"`
+		SchemaHash    string `json:"schema_hash"`
+	}
+	if err := jsonstrict.Decode([]byte(payload.InitialSchema.Body), &body); err != nil || body.SchemaVersion != payload.InitialSchema.Schema.Version || body.SchemaHash != payload.InitialSchema.Schema.Hash {
+		return errors.New("native controller authored schema body is misbound")
+	}
+	limits := payload.ConfiguredLimits
+	if limits.MaxScopeFanout == 0 || limits.MaxImpactRows == 0 || limits.PullMaximum == 0 || limits.RebuildMaximum == 0 || limits.CompactionBatchMaximum == 0 || limits.BackfillBatchMaximum == 0 {
+		return errors.New("native controller configured limits are invalid")
+	}
+	return nil
+}
+
+func bindNativeInstallation(payload nativeInstallPayload, runtime nativeRuntimeManifest, runtimeRegistry int64) (*nativeInstallationBinding, error) {
+	result := &nativeInstallationBinding{
+		authoredStream:             payload.Stream.StreamGeneration,
+		authoredRegistryGeneration: payload.InitialRegistry.RegistryGeneration,
+		runtimeRegistryGeneration:  runtimeRegistry,
+		authoredSchemas:            make(map[string]nativeSchemaReference),
+		runtimeSchemas:             make(map[string]nativeSchemaReference),
+		tables:                     make(map[string]nativeTableBinding),
+		relations:                  make(map[string]string),
+		captureDependencies:        make(map[string]nativeCaptureDependencyBinding),
+		scopes:                     make(map[string]string),
+		runtimeScopes:              make(map[string]string),
+		rowScopes:                  make(map[string][]string),
+		currentAuthoredSchema:      payload.InitialSchema.Schema,
+		currentRuntimeSchema:       nativeSchemaReference{Version: runtime.SchemaVersion, Hash: runtime.SchemaHash},
+	}
+	result.authoredSchemas[nativeSchemaKey(payload.InitialSchema.Schema)] = payload.InitialSchema.Schema
+	result.runtimeSchemas[nativeSchemaKey(payload.InitialSchema.Schema)] = result.currentRuntimeSchema
+
+	runtimeTables := append([]nativeRuntimeManifestTable(nil), runtime.Manifest.Tables...)
+	usedRuntime := make(map[string]struct{})
+	for _, authored := range payload.InitialSchema.Tables {
+		runtimeTable, err := selectNativeRuntimeTable(authored, runtimeTables, usedRuntime)
+		if err != nil {
+			return nil, err
+		}
+		binding, err := bindNativeTable(authored, runtimeTable)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := result.tables[authored.TableID]; duplicate {
+			return nil, errors.New("native controller authored table identity is duplicated")
+		}
+		result.tables[authored.TableID] = binding
+		usedRuntime[runtimeTable.ID] = struct{}{}
+	}
+	for _, relation := range payload.InitialRegistry.Relations {
+		switch relation.RegistrationKind {
+		case "synced":
+			table, found := result.tables[relation.TableID]
+			if !found || relation.Relation == "" || relation.PrimaryKeyFieldID != table.AuthoredPrimary || relation.PrimaryKeyPortableType != "string" {
+				return nil, errors.New("native controller authored registry relation is misbound")
+			}
+			if _, duplicate := result.relations[relation.Relation]; duplicate {
+				return nil, errors.New("native controller authored relation identity is duplicated")
+			}
+			result.relations[relation.Relation] = relation.TableID
+		case "capture_dependency":
+			binding, err := bindNativeCaptureDependency(relation)
+			if err != nil {
+				return nil, err
+			}
+			if _, duplicate := result.captureDependencies[relation.Relation]; duplicate {
+				return nil, errors.New("native controller capture dependency identity is duplicated")
+			}
+			result.captureDependencies[relation.Relation] = binding
+		default:
+			return nil, errors.New("native controller authored registry kind is unsupported")
+		}
+	}
+	if len(result.relations) != len(result.tables) {
+		return nil, errors.New("native controller table and registry bindings do not close")
+	}
+	for _, rule := range payload.InitialRegistry.ScopeRules {
+		tableID, found := result.relations[rule.Relation]
+		if !found {
+			return nil, errors.New("native controller scope rule relation is not bound")
+		}
+		for _, evaluation := range rule.Evaluations {
+			if evaluation.Row.TableID != tableID || evaluation.Row.CanonicalWireJSON == "" || len(evaluation.Scopes) == 0 {
+				return nil, errors.New("native controller scope rule evaluation is invalid")
+			}
+			key := nativeRecordKey(tableID, evaluation.Row.CanonicalWireJSON)
+			if _, duplicate := result.rowScopes[key]; duplicate {
+				return nil, errors.New("native controller scope rule row is duplicated")
+			}
+			seenScopes := make(map[string]struct{}, len(evaluation.Scopes))
+			for _, scope := range evaluation.Scopes {
+				if scope == "" {
+					return nil, errors.New("native controller scope rule identity is invalid")
+				}
+				if _, duplicate := seenScopes[scope]; duplicate {
+					return nil, errors.New("native controller scope rule identity is duplicated")
+				}
+				seenScopes[scope] = struct{}{}
+			}
+			result.rowScopes[key] = append([]string(nil), evaluation.Scopes...)
+		}
+	}
+	hasInitialAssignments := false
+	for _, client := range payload.Clients {
+		if !validNativeIdentity(client.UserID) || !validNativeIdentity(client.ClientID) {
+			return nil, errors.New("native controller authored client identity is invalid")
+		}
+		result.clients = append(result.clients, nativeInstalledClient{UserID: client.UserID, ClientID: client.ClientID})
+		if result.userScopes == nil {
+			result.userScopes = make(map[string][]string)
+		}
+		for _, scope := range client.AssignedScopeIDs {
+			hasInitialAssignments = true
+			if !containsString(result.userScopes[client.UserID], scope) {
+				result.userScopes[client.UserID] = append(result.userScopes[client.UserID], scope)
+			}
+			if err := bindNativeScope(result, scope, "user:"+client.UserID); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !hasInitialAssignments {
+		policyUsers := make(map[string]map[string]struct{})
+		for _, policy := range payload.WritePolicies {
+			if !policy.Allowed {
+				continue
+			}
+			if !validNativeIdentity(policy.UserID) {
+				return nil, errors.New("native controller write-policy user identity is invalid")
+			}
+			if _, found := result.tables[policy.TableID]; !found {
+				return nil, errors.New("native controller write-policy table identity is not bound")
+			}
+			if policyUsers[policy.TableID] == nil {
+				policyUsers[policy.TableID] = make(map[string]struct{})
+			}
+			policyUsers[policy.TableID][policy.UserID] = struct{}{}
+		}
+		scopeUsers := make(map[string]map[string]struct{})
+		for key, scopes := range result.rowScopes {
+			tableID, _, found := strings.Cut(key, "\x00")
+			users := policyUsers[tableID]
+			if !found || len(users) != 1 {
+				continue
+			}
+			for _, scope := range scopes {
+				if scopeUsers[scope] == nil {
+					scopeUsers[scope] = make(map[string]struct{})
+				}
+				for user := range users {
+					scopeUsers[scope][user] = struct{}{}
+				}
+			}
+		}
+		for scope, users := range scopeUsers {
+			if len(users) != 1 {
+				continue
+			}
+			for user := range users {
+				if err := bindNativeScope(result, scope, "user:"+user); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	deferredMembershipScopes := make(map[string]struct{})
+	if !hasInitialAssignments {
+		for _, scopes := range result.rowScopes {
+			for _, scope := range scopes {
+				deferredMembershipScopes[scope] = struct{}{}
+			}
+		}
+	}
+	for _, scope := range payload.EmptyScopes {
+		if scope.ScopeID == "" {
+			return nil, errors.New("native controller authored scope identity is invalid")
+		}
+		if _, found := result.scopes[scope.ScopeID]; !found {
+			if _, deferred := deferredMembershipScopes[scope.ScopeID]; deferred {
+				continue
+			}
+			runtimeScope := "cf:global"
+			if _, used := result.runtimeScopes[runtimeScope]; used {
+				runtimeScope = "user:" + scope.ScopeID
+			}
+			if err := bindNativeScope(result, scope.ScopeID, runtimeScope); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := rebindNativeSharedTables(result, payload.InitialSchema.Tables, runtimeTables, usedRuntime); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// rebindNativeSharedTables moves an authored table off a fixture that owns its
+// rows by user when every scope carrying those rows is shared. A shared row has
+// no owner, so an owning fixture cannot hold it. The scope bindings resolve
+// only after the scope rules and the authored assignments bind, which is after
+// the runtime table selection, so the correction happens here.
+func rebindNativeSharedTables(result *nativeInstallationBinding, authoredTables []nativeAuthoredTable, runtime []nativeRuntimeManifestTable, used map[string]struct{}) error {
+	for _, authored := range authoredTables {
+		binding, bound := result.tables[authored.TableID]
+		if !bound || !nativeRuntimeTableOwnsRows(runtime, binding.RuntimeName) {
+			continue
+		}
+		if shared, decided := nativeAuthoredTableRowsAreShared(result, authored.TableID); !decided || !shared {
+			continue
+		}
+		replacement, found := selectNativeSharedRuntimeTable(authored, runtime, used)
+		if !found {
+			continue
+		}
+		corrected, err := bindNativeTable(authored, replacement)
+		if err != nil {
+			return err
+		}
+		delete(used, binding.RuntimeID)
+		result.tables[authored.TableID] = corrected
+		used[replacement.ID] = struct{}{}
+	}
+	return nil
+}
+
+// nativeRuntimeTableOwnsRows reports whether a fixture assigns each row to one
+// user through an owner column.
+func nativeRuntimeTableOwnsRows(runtime []nativeRuntimeManifestTable, name string) bool {
+	for _, table := range runtime {
+		if table.Name != name {
+			continue
+		}
+		for _, field := range table.Fields {
+			if field.Name == "owner_id" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// nativeAuthoredTableRowsAreShared reports whether every declared scope for the
+// table's rows binds to a shared runtime scope. It reports no decision when the
+// table declares no scope rule or a scope has not bound yet.
+func nativeAuthoredTableRowsAreShared(result *nativeInstallationBinding, tableID string) (bool, bool) {
+	decided := false
+	for key, scopes := range result.rowScopes {
+		owner, _, found := strings.Cut(key, "\x00")
+		if !found || owner != tableID {
+			continue
+		}
+		for _, scope := range scopes {
+			runtimeScope, bound := result.scopes[scope]
+			if !bound || runtimeScope == "" {
+				return false, false
+			}
+			if strings.HasPrefix(runtimeScope, "user:") {
+				return false, true
+			}
+			decided = true
+		}
+	}
+	return decided, decided
+}
+
+func selectNativeSharedRuntimeTable(authored nativeAuthoredTable, runtime []nativeRuntimeManifestTable, used map[string]struct{}) (nativeRuntimeManifestTable, bool) {
+	candidates := make([]nativeRuntimeManifestTable, 0)
+	for _, table := range runtime {
+		if _, alreadyUsed := used[table.ID]; alreadyUsed {
+			continue
+		}
+		if nativeRuntimeTableOwnsRows(runtime, table.Name) || !nativeRuntimeTableSupports(table, authored) {
+			continue
+		}
+		candidates = append(candidates, table)
+	}
+	if len(candidates) == 0 {
+		return nativeRuntimeManifestTable{}, false
+	}
+	sort.Slice(candidates, func(left, right int) bool { return candidates[left].Name < candidates[right].Name })
+	return candidates[0], true
+}
+
+func bindNativeCaptureDependency(relation nativeAuthoredRelation) (nativeCaptureDependencyBinding, error) {
+	if relation.Relation != "public.item_impacts" || relation.TableID != "" || relation.PrimaryKeyFieldID != "" || relation.PrimaryKeyPortableType != "" || len(relation.CaptureKeyFieldIDs) != 1 || relation.CaptureKeyFieldIDs[0] != "scope_key" || len(relation.CapturedFieldIDs) != 1 || relation.CapturedFieldIDs[0] != "scope_key" {
+		return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency relation is misbound")
+	}
+	captured := make(map[string]struct{}, len(relation.CapturedFieldIDs))
+	for _, field := range relation.CapturedFieldIDs {
+		if field == "" {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency field is invalid")
+		}
+		if _, duplicate := captured[field]; duplicate {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency field is duplicated")
+		}
+		captured[field] = struct{}{}
+	}
+	for _, field := range relation.CaptureKeyFieldIDs {
+		if field == "" {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency key is invalid")
+		}
+		if _, found := captured[field]; !found {
+			return nativeCaptureDependencyBinding{}, errors.New("native controller capture dependency key is not captured")
+		}
+	}
+	return nativeCaptureDependencyBinding{
+		AuthoredRelation: relation.Relation,
+		RuntimeName:      nativeCaptureDependencyFixture,
+		CapturedFields:   captured,
+	}, nil
+}
+
+func selectNativeRuntimeTable(authored nativeAuthoredTable, runtime []nativeRuntimeManifestTable, used map[string]struct{}) (nativeRuntimeManifestTable, error) {
+	if authored.TableID == "" || authored.Name == "" || authored.RelationID == "" || authored.PrimaryKeyFieldID == "" {
+		return nativeRuntimeManifestTable{}, errors.New("native controller authored table identity is incomplete")
+	}
+	candidates := make([]nativeRuntimeManifestTable, 0)
+	for _, table := range runtime {
+		if _, alreadyUsed := used[table.ID]; alreadyUsed || !nativeRuntimeTableSupports(table, authored) {
+			continue
+		}
+		candidates = append(candidates, table)
+	}
+	if len(candidates) == 0 {
+		offered := make([]string, 0, len(runtime))
+		for _, table := range runtime {
+			entry := table.Name
+			if _, alreadyUsed := used[table.ID]; alreadyUsed {
+				entry += "(used)"
+			}
+			offered = append(offered, entry)
+		}
+		sort.Strings(offered)
+		// The offered names alone cannot explain a rejection. Name the authored
+		// field each runtime table failed to satisfy so the binding gap is
+		// visible without a second run.
+		return nativeRuntimeManifestTable{}, fmt.Errorf("native controller has no runtime table for authored table %q named %q with primary key %q; runtime offered %v; rejections %v",
+			authored.TableID, authored.Name, authored.PrimaryKeyFieldID, offered, nativeRuntimeTableRejections(runtime, authored))
+	}
+	sort.Slice(candidates, func(left, right int) bool { return candidates[left].Name < candidates[right].Name })
+	for _, candidate := range candidates {
+		if candidate.Name == authored.Name || candidate.Name == "cf_"+authored.Name {
+			return candidate, nil
+		}
+	}
+	for _, preferred := range []string{"cf_items", "cf_global_items", "cf_documents", "cf_document_notes", "cf_schema_queue", "cf_late_registration"} {
+		for _, candidate := range candidates {
+			if candidate.Name == preferred {
+				return candidate, nil
+			}
+		}
+	}
+	return nativeRuntimeManifestTable{}, fmt.Errorf("native controller runtime table binding for %q is ambiguous", authored.TableID)
+}
+
+// nativeRuntimeTableRejections names, for each runtime table, the first
+// authored field it cannot satisfy. A binding failure otherwise reports only
+// the table names it declined.
+func nativeRuntimeTableRejections(runtime []nativeRuntimeManifestTable, authored nativeAuthoredTable) []string {
+	reasons := make([]string, 0, len(runtime))
+	for _, table := range runtime {
+		fields := make(map[string]nativeRuntimeManifestField, len(table.Fields))
+		for _, field := range table.Fields {
+			fields[field.Name] = field
+		}
+		reason := "no authored field is unsatisfied"
+		for _, field := range authored.Fields {
+			name := field.Name
+			if table.Name == "cf_schema_queue" && nativeAuthoredDeclaresField(authored, "value") {
+				name = nativeSchemaQueueFieldName(field.Name)
+			}
+			runtimeField, found := fields[name]
+			switch {
+			case !found:
+				reason = fmt.Sprintf("field %q is absent", name)
+			case runtimeField.ID == "":
+				reason = fmt.Sprintf("field %q has no identity", name)
+			case runtimeField.Type != field.Type:
+				reason = fmt.Sprintf("field %q type %q wants %q", name, runtimeField.Type, field.Type)
+			case field.PrimaryKey && runtimeField.ID != table.PrimaryKeyFieldID:
+				reason = fmt.Sprintf("field %q is not the primary key", name)
+			default:
+				continue
+			}
+			break
+		}
+		names := make([]string, 0, len(table.Fields))
+		for _, field := range table.Fields {
+			names = append(names, field.Name+":"+field.Type)
+		}
+		sort.Strings(names)
+		reasons = append(reasons, fmt.Sprintf("%s: %s (offers %v)", table.Name, reason, names))
+	}
+	sort.Strings(reasons)
+	return reasons
+}
+
+func nativeRuntimeTableSupports(runtime nativeRuntimeManifestTable, authored nativeAuthoredTable) bool {
+	if runtime.ID == "" || runtime.Name == "" || runtime.RelationID == "" || runtime.PrimaryKeyFieldID == "" {
+		return false
+	}
+	// The schema queue fixture renames an authored value field onto its JSON
+	// column and an obsolete value onto its legacy column. That mapping applies
+	// only to an authored table that declares those fields. A table that names
+	// the fixture columns directly binds through the ordinary field match.
+	if runtime.Name == "cf_schema_queue" && nativeAuthoredDeclaresField(authored, "value") {
+		return nativeSchemaQueueTableSupports(runtime, authored)
+	}
+	fields := make(map[string]nativeRuntimeManifestField, len(runtime.Fields))
+	for _, field := range runtime.Fields {
+		fields[field.Name] = field
+	}
+	for _, field := range authored.Fields {
+		runtimeField, found := fields[field.Name]
+		if !found || runtimeField.ID == "" || runtimeField.Type != field.Type {
+			return false
+		}
+		if field.PrimaryKey && runtimeField.ID != runtime.PrimaryKeyFieldID {
+			return false
+		}
+	}
+	return true
+}
+
+func nativeSchemaQueueTableSupports(runtime nativeRuntimeManifestTable, authored nativeAuthoredTable) bool {
+	if len(authored.Fields) != 3 {
+		return false
+	}
+	runtimeFields := make(map[string]nativeRuntimeManifestField, len(runtime.Fields))
+	for _, field := range runtime.Fields {
+		runtimeFields[field.Name] = field
+	}
+	for _, field := range authored.Fields {
+		runtimeName := nativeSchemaQueueFieldName(field.Name)
+		runtimeField, found := runtimeFields[runtimeName]
+		if !found || runtimeField.ID == "" {
+			return false
+		}
+		if field.Name == "value" {
+			if field.Type != "string" || runtimeField.Type != "json" {
+				return false
+			}
+		} else if runtimeField.Type != field.Type {
+			return false
+		}
+		if field.PrimaryKey && runtimeField.ID != runtime.PrimaryKeyFieldID {
+			return false
+		}
+	}
+	return true
+}
+
+func nativeAuthoredDeclaresField(authored nativeAuthoredTable, name string) bool {
+	for _, field := range authored.Fields {
+		if field.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeSchemaQueueFieldName(authored string) string {
+	switch authored {
+	case "value":
+		return "authored_mutation"
+	case "obsolete_value":
+		return "legacy_value"
+	default:
+		return authored
+	}
+}
+
+func bindNativeTable(authored nativeAuthoredTable, runtime nativeRuntimeManifestTable) (nativeTableBinding, error) {
+	fieldsByName := make(map[string]nativeRuntimeManifestField, len(runtime.Fields))
+	for _, field := range runtime.Fields {
+		if field.ID == "" || field.Name == "" {
+			return nativeTableBinding{}, errors.New("native controller runtime field identity is incomplete")
+		}
+		fieldsByName[field.Name] = field
+	}
+	binding := nativeTableBinding{
+		AuthoredID:        authored.TableID,
+		AuthoredName:      authored.Name,
+		AuthoredRelation:  authored.RelationID,
+		RuntimeID:         runtime.ID,
+		RuntimeName:       runtime.Name,
+		RuntimeRelationID: runtime.RelationID,
+		AuthoredPrimary:   authored.PrimaryKeyFieldID,
+		RuntimePrimary:    runtime.PrimaryKeyFieldID,
+		Fields:            make(map[string]string, len(authored.Fields)),
+		FieldNames:        make(map[string]string, len(authored.Fields)),
+		RuntimeFieldNames: make(map[string]struct{}, len(runtime.Fields)),
+	}
+	for name := range fieldsByName {
+		binding.RuntimeFieldNames[name] = struct{}{}
+	}
+	for _, field := range authored.Fields {
+		runtimeName := field.Name
+		if runtime.Name == "cf_schema_queue" {
+			runtimeName = nativeSchemaQueueFieldName(field.Name)
+		}
+		runtimeField, found := fieldsByName[runtimeName]
+		if !found {
+			return nativeTableBinding{}, errors.New("native controller runtime field binding is absent")
+		}
+		binding.Fields[field.FieldID] = runtimeField.ID
+		binding.FieldNames[field.FieldID] = runtimeField.Name
+	}
+	if authored.DeletedAtFieldID != nil {
+		binding.RuntimeDeletedAt = binding.FieldNames[*authored.DeletedAtFieldID]
+		if binding.RuntimeDeletedAt == "" {
+			return nativeTableBinding{}, errors.New("native controller runtime deleted-at binding is absent")
+		}
+	} else if _, runtimeDeletes := fieldsByName["deleted_at"]; runtimeDeletes {
+		authoredField := false
+		for _, runtimeName := range binding.FieldNames {
+			if runtimeName == "deleted_at" {
+				authoredField = true
+				break
+			}
+		}
+		if !authoredField {
+			binding.RuntimeDeletedAt = "deleted_at"
+		}
+	}
+	if binding.Fields[authored.PrimaryKeyFieldID] != runtime.PrimaryKeyFieldID {
+		return nativeTableBinding{}, errors.New("native controller runtime primary-key binding is invalid")
+	}
+	return binding, nil
+}
+
+// ApplicationDeletedAtField resolves one authored table's runtime soft-delete column.
+func (c *NativeController) ApplicationDeletedAtField(tableID string) (string, error) {
+	if c == nil || tableID == "" {
+		return "", errors.New("native application table identity is invalid")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.installation == nil {
+		return "", errors.New("native controller contract is unavailable")
+	}
+	table, found := c.installation.tables[tableID]
+	if !found {
+		return "", errors.New("native application table has no runtime binding")
+	}
+	return table.RuntimeDeletedAt, nil
+}
+
+// RuntimeRowVersions maps each captured row to the row version the server
+// stores. A row fact reports the authored version, so an authored row-version
+// alias resolves through this map.
+func (c *NativeController) RuntimeRowVersions() map[string]string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return nil
+	}
+	versions := make(map[string]string, len(c.installation.runtimeRowVersions))
+	for canonical, version := range c.installation.runtimeRowVersions {
+		versions[canonical] = version
+	}
+	return versions
+}
+
+// AppliedScopeRevocations reports every scope revocation the controller issued.
+// An authored assignment that shrinks a user's scope set must reach the server,
+// and the client state alone cannot show whether it did.
+func (c *NativeController) AppliedScopeRevocations() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return nil
+	}
+	return append([]string(nil), c.installation.appliedRevocations...)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func bindNativeScope(binding *nativeInstallationBinding, authored, runtime string) error {
+	if authored == "" || runtime == "" {
+		return errors.New("native controller scope binding is incomplete")
+	}
+	if existing, found := binding.scopes[authored]; found && existing != runtime {
+		delete(binding.runtimeScopes, existing)
+		if existing != "cf:global" {
+			runtime = "cf:global"
+		}
+	}
+	if existing, found := binding.runtimeScopes[runtime]; found && existing != authored {
+		return fmt.Errorf("native controller runtime scope %q is bound more than once", runtime)
+	}
+	binding.scopes[authored] = runtime
+	binding.runtimeScopes[runtime] = authored
+	return nil
+}
+
+func (c *NativeController) loadRuntimeManifest(ctx context.Context) (nativeRuntimeManifest, int64, error) {
+	response, err := (&Client{BaseURL: c.harness.AdapterURL(), HTTP: c.httpClient}).Do(ctx, Request{
+		Method: http.MethodGet,
+		Path:   "/sync/schema",
+		Class:  "native/runtime-schema",
+	})
+	if err != nil {
+		return nativeRuntimeManifest{}, 0, fmt.Errorf("load native runtime schema: %w", err)
+	}
+	if response.Status != http.StatusOK {
+		return nativeRuntimeManifest{}, 0, errors.New("native runtime schema request did not succeed")
+	}
+	var manifest nativeRuntimeManifest
+	if err := jsonstrict.Decode(response.Body, &manifest); err != nil {
+		return nativeRuntimeManifest{}, 0, errors.New("decode native runtime schema failed")
+	}
+	if !validNativeSchemaReference(nativeSchemaReference{Version: manifest.SchemaVersion, Hash: manifest.SchemaHash}, false) || manifest.Manifest.SchemaVersion != manifest.SchemaVersion || manifest.Manifest.SchemaHash != manifest.SchemaHash || len(manifest.Manifest.Tables) == 0 {
+		return nativeRuntimeManifest{}, 0, errors.New("native runtime schema identity is invalid")
+	}
+	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if err != nil {
+		return nativeRuntimeManifest{}, 0, errors.New("open native runtime registry observation failed")
+	}
+	defer database.Close()
+	var generation int64
+	if err := database.QueryRowContext(ctx, "SELECT generation FROM synchro.sync_registry_generations WHERE state = 'active' AND validated").Scan(&generation); err != nil || generation <= 0 {
+		return nativeRuntimeManifest{}, 0, errors.New("native runtime registry identity is invalid")
+	}
+	return manifest, generation, nil
+}
+
+// ApplyStep applies one non-workload controller operation.
+func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
+	if err := c.context(ctx); err != nil {
+		return NativeStepObservation{}, err
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return NativeStepObservation{}, fmt.Errorf("native controller apply operation is invalid: %w", err)
+	}
+	switch scenarios.OperationKey(operation) {
+	case "model/commit-source-transaction":
+		return c.commitSourceTransaction(ctx, operation)
+	case "model/set-client-assignments":
+		observation, usesDefaultSharedScope, revocations, err := c.setClientAssignments(operation)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		if usesDefaultSharedScope {
+			if c.defaultSharedScopeRemoved {
+				if err := c.harness.Operator().RegisterDefaultSharedScope(ctx); err != nil {
+					return NativeStepObservation{}, err
+				}
+				c.defaultSharedScopeRemoved = false
+			}
+		} else {
+			if err := c.harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.defaultSharedScopeRemoved = true
+		}
+		for _, revocation := range revocations {
+			if err := c.harness.Operator().RevokeUserScope(ctx, revocation.UserID, revocation.RuntimeScope); err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.mu.Lock()
+			if c.installation != nil {
+				c.installation.appliedRevocations = append(c.installation.appliedRevocations,
+					revocation.UserID+"/"+revocation.RuntimeScope)
+			}
+			c.mu.Unlock()
+		}
+		return observation, nil
+	case "model/publish-schema":
+		return c.publishSchema(ctx, operation)
+	case "model/stage-registry-membership-generation":
+		class1Transition, err := nativeStageRequiresClass1MembershipTransition(operation)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		if class1Transition {
+			var stage struct {
+				RegistryGeneration uint64   `json:"registry_generation"`
+				AffectedScopes     []string `json:"affected_scopes"`
+			}
+			if err := jsonstrict.Decode(operation.Payload, &stage); err != nil || stage.RegistryGeneration == 0 {
+				return NativeStepObservation{}, errors.New("native controller membership stage payload is invalid")
+			}
+			runtimeScope, err := c.runtimeScope(stage.AffectedScopes[0])
+			if err != nil {
+				return NativeStepObservation{}, err
+			}
+			runtimeGeneration, priorMembershipGeneration, err := c.harness.Operator().ConfigureClass1MembershipTransition(ctx, runtimeScope)
+			if err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.mu.Lock()
+			if c.installation == nil {
+				c.mu.Unlock()
+				return NativeStepObservation{}, errors.New("native controller contract is not installed")
+			}
+			c.installation.pendingMembershipChange = &nativeMembershipActivationBinding{
+				authoredRegistryGeneration: stage.RegistryGeneration,
+				runtimeRegistryGeneration:  runtimeGeneration,
+				runtimeScope:               runtimeScope,
+				priorMembershipGeneration:  priorMembershipGeneration,
+			}
+			c.mu.Unlock()
+			return nativeSuccess(), nil
+		}
+		registerSharedScope, err := nativeStageRegistersSharedScope(operation)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		if registerSharedScope {
+			if err := c.harness.Operator().ConfigureCrossScopeTable(ctx); err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.mu.Lock()
+			if c.installation != nil {
+				c.installation.pendingCompositionChange = true
+			}
+			c.crossScopeConfigured = true
+			c.mu.Unlock()
+			if err := c.bindStagedSharedScope(); err != nil {
+				return NativeStepObservation{}, err
+			}
+		}
+		return nativeSuccess(), nil
+	case "model/activate-registry-membership-generation":
+		var activation struct {
+			RegistryGeneration uint64 `json:"registry_generation"`
+		}
+		if err := jsonstrict.Decode(operation.Payload, &activation); err != nil || activation.RegistryGeneration == 0 {
+			return NativeStepObservation{}, errors.New("native controller membership activation payload is invalid")
+		}
+		c.mu.Lock()
+		var membershipChange *nativeMembershipActivationBinding
+		if c.installation != nil && c.installation.pendingMembershipChange != nil {
+			copy := *c.installation.pendingMembershipChange
+			membershipChange = &copy
+		}
+		c.mu.Unlock()
+		if membershipChange != nil && membershipChange.authoredRegistryGeneration != activation.RegistryGeneration {
+			return NativeStepObservation{}, errors.New("native controller membership activation does not match its stage")
+		}
+		if err := c.harness.Operator().ReloadRegistry(ctx); err != nil {
+			return NativeStepObservation{}, err
+		}
+		if membershipChange != nil {
+			if err := c.harness.Operator().WaitForClass1MembershipActivation(
+				ctx,
+				membershipChange.runtimeRegistryGeneration,
+				membershipChange.runtimeScope,
+				membershipChange.priorMembershipGeneration,
+				c.waitTimeout,
+			); err != nil {
+				return NativeStepObservation{}, err
+			}
+			c.mu.Lock()
+			if c.installation != nil {
+				c.installation.pendingMembershipChange = nil
+			}
+			c.mu.Unlock()
+		}
+		// A staged composition change publishes a new manifest when the
+		// generation activates. The worker publishes it asynchronously, so wait
+		// for it and rebind the authored schema. Otherwise every later identity
+		// resolves to the retired manifest.
+		if err := c.rebindSchemaAfterCompositionChange(ctx); err != nil {
+			return NativeStepObservation{}, err
+		}
+		// The authored registry generation advances with each activation. The
+		// captured registry fact reports the generation the scenario has
+		// reached, not the one its setup installed.
+		c.mu.Lock()
+		if c.installation != nil {
+			c.installation.authoredRegistryGeneration = activation.RegistryGeneration
+		}
+		c.mu.Unlock()
+		return nativeSuccess(), nil
+	case "model/expire-client-generation":
+		return c.expireClientGeneration(ctx, operation)
+	case "model/compact-scope":
+		if _, err := c.harness.Operator().RunDiagnosticRetentionCompaction(ctx); err != nil {
+			return NativeStepObservation{}, err
+		}
+		return nativeSuccess(), nil
+	case "workload/prepare":
+		return NativeStepObservation{}, errors.New("native controller does not execute workload macros; the manifest must supply concrete expansions")
+	default:
+		return NativeStepObservation{}, nativeUnsupported("apply", operation)
+	}
+}
+
+// ApplicationWrite maps one authored local write to the installed application schema.
+func (c *NativeController) ApplicationWrite(operation scenarios.Operation) (scenarios.Operation, error) {
+	if c == nil {
+		return scenarios.Operation{}, errors.New("native controller is unavailable")
+	}
+	if scenarios.OperationKey(operation) != "local/write" {
+		return scenarios.Operation{}, fmt.Errorf("native application operation %q is unsupported", scenarios.OperationKey(operation))
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return scenarios.Operation{}, fmt.Errorf("native application operation is invalid: %w", err)
+	}
+	var payload map[string]any
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return scenarios.Operation{}, errors.New("native application write payload is invalid")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return scenarios.Operation{}, errors.New("native controller is closed")
+	}
+	if c.installation == nil {
+		return scenarios.Operation{}, errors.New("native controller contract is not installed")
+	}
+	authoredTable, _ := payload["table_id"].(string)
+	table, found := c.installation.tables[authoredTable]
+	if !found || table.RuntimeName == "" {
+		return scenarios.Operation{}, errors.New("native application write table has no runtime binding")
+	}
+	primaryKey, ok := payload["pk"].(map[string]any)
+	if !ok {
+		return scenarios.Operation{}, errors.New("native application write primary key is invalid")
+	}
+	var primaryValue any
+	var primaryFound bool
+	if len(primaryKey) == 1 {
+		primaryValue, primaryFound = primaryKey[table.AuthoredPrimary]
+	} else if len(primaryKey) == 2 {
+		fieldID, fieldFound := primaryKey["field_id"].(string)
+		primaryValue, primaryFound = primaryKey["value"]
+		primaryFound = fieldFound && primaryFound && fieldID == table.AuthoredPrimary
+	}
+	primaryName := table.FieldNames[table.AuthoredPrimary]
+	if !primaryFound || primaryName == "" {
+		return scenarios.Operation{}, errors.New("native application write primary key has no runtime binding")
+	}
+	canonicalPrimary, err := json.Marshal(primaryValue)
+	if err != nil {
+		return scenarios.Operation{}, errors.New("native application write primary key is invalid")
+	}
+	payload["table_id"] = table.RuntimeName
+	payload["pk"] = map[string]any{primaryName: nativeRuntimeUUID(table.AuthoredID, string(canonicalPrimary))}
+	if columns, found := payload["columns"]; found {
+		payload["columns"], err = nativeApplicationWriteColumns(columns, table)
+		if err != nil {
+			return scenarios.Operation{}, err
+		}
+		// A runtime column that no authored field maps to still has to be
+		// satisfied by the insert. The columns the table declares decide that,
+		// because a fixture name cannot.
+		if payload["operation"] == "insert" {
+			userID, _ := payload["authenticated_user_id"].(string)
+			clientVersion, _ := payload["client_version"].(string)
+			support := make(map[string]any, 2)
+			if _, declared := table.RuntimeFieldNames["owner_id"]; declared {
+				support["owner_id"] = userID
+			}
+			if _, declared := table.RuntimeFieldNames["updated_at"]; declared {
+				support["updated_at"] = clientVersion
+			}
+			if table.RuntimeName == "cf_schema_queue" {
+				for authoredField, applicationField := range table.FieldNames {
+					if authoredField != table.AuthoredPrimary && applicationField != "authored_mutation" {
+						support[applicationField] = ""
+					}
+				}
+			}
+			// A table that declares no support column needs no support value.
+			if len(support) != 0 {
+				payload["columns"], err = nativeApplicationInsertSupportColumns(payload["columns"], support)
+				if err != nil {
+					return scenarios.Operation{}, err
+				}
+			}
+		}
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return scenarios.Operation{}, errors.New("encode native application write failed")
+	}
+	result := operation
+	result.Payload = encoded
+	if err := scenarios.ValidateOperation(result); err != nil {
+		return scenarios.Operation{}, fmt.Errorf("native application write is invalid: %w", err)
+	}
+	return result, nil
+}
+
+// BindApplicationPush binds one accepted application push to its authored WAL identity.
+func (c *NativeController) BindApplicationPush(operation scenarios.Operation) error {
+	if c == nil {
+		return errors.New("native controller is unavailable")
+	}
+	if scenarios.OperationKey(operation) != "push/submit" {
+		return fmt.Errorf("native application push operation %q is unsupported", scenarios.OperationKey(operation))
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return fmt.Errorf("native application push operation is invalid: %w", err)
+	}
+	var payload struct {
+		AuthenticatedUserID string `json:"authenticated_user_id"`
+		Request             struct {
+			ClientID         string                `json:"client_id"`
+			ClientGeneration int64                 `json:"client_generation"`
+			BatchID          string                `json:"batch_id"`
+			Schema           nativeSchemaReference `json:"schema"`
+			Mutations        []struct {
+				MutationID     string                     `json:"mutation_id"`
+				Table          string                     `json:"table"`
+				PK             map[string]json.RawMessage `json:"pk"`
+				AuthoredSchema nativeSchemaReference      `json:"authored_schema"`
+				Op             string                     `json:"op"`
+				BaseVersion    *string                    `json:"base_version"`
+				ClientVersion  string                     `json:"client_version"`
+				Columns        map[string]json.RawMessage `json:"columns"`
+			} `json:"mutations"`
+		} `json:"request"`
+		Delivery  string `json:"delivery"`
+		CommitLSN string `json:"commit_lsn"`
+		EndLSN    string `json:"end_lsn"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return errors.New("decode native application push failed")
+	}
+	order, validLSN := compareNativeLSN(payload.CommitLSN, payload.EndLSN)
+	if !validNativeIdentity(payload.AuthenticatedUserID) || payload.Delivery != "apply" || !validLSN || order >= 0 || len(payload.Request.Mutations) == 0 {
+		return errors.New("native application push transaction identity is invalid")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.installation == nil {
+		return errors.New("native controller contract is unavailable")
+	}
+	transaction := &nativeTransactionBinding{
+		AuthoredStream:      c.installation.authoredStream,
+		AuthoredCommitLSN:   payload.CommitLSN,
+		AuthoredEndLSN:      payload.EndLSN,
+		AuthoredUserID:      payload.AuthenticatedUserID,
+		AuthoredClientID:    payload.Request.ClientID,
+		AuthoredBatchID:     payload.Request.BatchID,
+		AuthoredMutationIDs: make([]string, 0, len(payload.Request.Mutations)),
+		ApplicationPush:     true,
+	}
+	digest, digestErr := nativeAuthoredMutationsDigest(operation.Payload)
+	if digestErr != nil {
+		return digestErr
+	}
+	transaction.AuthoredMutationsDigest = digest
+	seenRecords := make(map[string]struct{}, len(payload.Request.Mutations))
+	for ordinal, mutation := range payload.Request.Mutations {
+		if !validNativeIdentity(mutation.MutationID) {
+			return errors.New("native application push mutation identity is invalid")
+		}
+		transaction.AuthoredMutationIDs = append(transaction.AuthoredMutationIDs, mutation.MutationID)
+		table, found := c.installation.tables[mutation.Table]
+		if !found || (mutation.Op != "insert" && mutation.Op != "update" && mutation.Op != "delete") || len(mutation.PK) != 1 {
+			return errors.New("native application push mutation is unsupported")
+		}
+		if (mutation.Op == "insert" && mutation.BaseVersion != nil) ||
+			(mutation.Op != "insert" && (mutation.BaseVersion == nil || *mutation.BaseVersion == "")) ||
+			(mutation.Op == "delete" && mutation.Columns != nil) {
+			return errors.New("native application push mutation shape is invalid")
+		}
+		canonical, found := mutation.PK[table.AuthoredPrimary]
+		if !found || !json.Valid(canonical) {
+			return errors.New("native application push primary key is invalid")
+		}
+		recordID, err := nativeAuthoredRecordID(string(canonical))
+		if err != nil {
+			return err
+		}
+		runtimeRecordID := nativeRuntimeUUID(table.AuthoredID, string(canonical))
+		recordKey := nativeRecordKey(table.AuthoredID, string(canonical))
+		if _, duplicate := seenRecords[recordKey]; duplicate {
+			return errors.New("native application push targets one row more than once")
+		}
+		seenRecords[recordKey] = struct{}{}
+		fields := make(map[string]json.RawMessage, len(mutation.Columns)+1)
+		fields[table.AuthoredPrimary] = append(json.RawMessage(nil), canonical...)
+		for authoredField, value := range mutation.Columns {
+			if authoredField == table.AuthoredPrimary || !json.Valid(value) {
+				return errors.New("native application push column has no runtime binding")
+			}
+			if table.Fields[authoredField] == "" {
+				// A mutation queued under an earlier schema may name a field
+				// that a later publication retired. The server decides that
+				// outcome, and the retired column no longer exists to verify,
+				// so it contributes no image field here.
+				if mutation.AuthoredSchema != payload.Request.Schema {
+					continue
+				}
+				return errors.New("native application push column has no runtime binding")
+			}
+			fields[authoredField] = append(json.RawMessage(nil), value...)
+		}
+		var before, after *nativeAuthoredImage
+		scopes := nativeScopesForRecord(c.installation, table.AuthoredRelation, table.AuthoredID, string(canonical))
+		if mutation.Op == "insert" {
+			after = &nativeAuthoredImage{
+				TableID:           table.AuthoredID,
+				PrimaryFieldID:    table.AuthoredPrimary,
+				CanonicalWireJSON: string(canonical),
+				Fields:            fields,
+			}
+		} else {
+			record, exists := c.records[recordKey]
+			if !exists {
+				if mutation.Op == "delete" {
+					return errors.New("native application push delete has no prior record binding")
+				}
+				after = &nativeAuthoredImage{
+					TableID:           table.AuthoredID,
+					PrimaryFieldID:    table.AuthoredPrimary,
+					CanonicalWireJSON: string(canonical),
+					Fields:            fields,
+				}
+			} else {
+				prior := record.Image
+				prior.Fields = make(map[string]json.RawMessage, len(record.Image.Fields))
+				for field, value := range record.Image.Fields {
+					prior.Fields[field] = append(json.RawMessage(nil), value...)
+				}
+				before = &prior
+				scopes = append([]string(nil), record.AuthoredScopes...)
+				if mutation.Op == "update" {
+					updated := prior
+					updated.Fields = make(map[string]json.RawMessage, len(prior.Fields)+len(fields))
+					for field, value := range prior.Fields {
+						updated.Fields[field] = append(json.RawMessage(nil), value...)
+					}
+					for field, value := range fields {
+						updated.Fields[field] = append(json.RawMessage(nil), value...)
+					}
+					updated.Version = ""
+					updated.Checksum = ""
+					after = &updated
+				}
+			}
+		}
+		physicalOperation := mutation.Op
+		if mutation.Op == "delete" && table.RuntimeDeletedAt != "" {
+			physicalOperation = "update"
+		}
+		transaction.Events = append(transaction.Events, nativeEventBinding{
+			AuthoredOrdinal:   uint64(ordinal),
+			Operation:         mutation.Op,
+			PhysicalOperation: physicalOperation,
+			Relation:          table.AuthoredRelation,
+			Table:             table,
+			RecordID:          recordID,
+			RuntimeRecordID:   runtimeRecordID,
+			Before:            before,
+			After:             after,
+			AuthoredScopes:    scopes,
+		})
+	}
+	key := nativeTransactionKey(transaction.AuthoredStream, transaction.AuthoredCommitLSN)
+	if _, duplicate := c.transactions[key]; duplicate {
+		return errors.New("native application push transaction identity is duplicated")
+	}
+	c.transactions[key] = transaction
+	return nil
+}
+
+func nativeApplicationWriteColumns(value any, table nativeTableBinding) (any, error) {
+	switch columns := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(columns))
+		for authoredField, fieldValue := range columns {
+			applicationField := table.FieldNames[authoredField]
+			if applicationField == "" || authoredField == table.AuthoredPrimary {
+				return nil, errors.New("native application write column has no writable runtime binding")
+			}
+			runtimeValue, err := nativeRuntimeFieldValue(table, authoredField, fieldValue)
+			if err != nil {
+				return nil, err
+			}
+			result[applicationField] = runtimeValue
+		}
+		return result, nil
+	case []any:
+		result := make([]any, 0, len(columns))
+		for _, value := range columns {
+			column, ok := value.(map[string]any)
+			if !ok || len(column) != 2 {
+				return nil, errors.New("native application write column is invalid")
+			}
+			authoredField, hasField := column["field_id"].(string)
+			fieldValue, hasValue := column["value"]
+			applicationField := table.FieldNames[authoredField]
+			if !hasField || !hasValue || applicationField == "" || authoredField == table.AuthoredPrimary {
+				return nil, errors.New("native application write column has no writable runtime binding")
+			}
+			runtimeValue, err := nativeRuntimeFieldValue(table, authoredField, fieldValue)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, map[string]any{"field_id": applicationField, "value": runtimeValue})
+		}
+		return result, nil
+	default:
+		return nil, errors.New("native application write columns are invalid")
+	}
+}
+
+func nativeRuntimeFieldValue(table nativeTableBinding, authoredField string, value any) (any, error) {
+	if table.RuntimeName != "cf_schema_queue" || authoredField != "value" {
+		return value, nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil, errors.New("native schema-queue value is invalid")
+	}
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		return nil, errors.New("encode native schema-queue value failed")
+	}
+	return string(encoded), nil
+}
+
+func nativeApplicationInsertSupportColumns(value any, support map[string]any) (any, error) {
+	// The table decides which support columns exist, so each supplied value is
+	// validated for its own kind. A table without an owner column supplies no
+	// owner identity, and requiring one would reject a shared row.
+	if len(support) == 0 {
+		return nil, errors.New("native application insert support fields are invalid")
+	}
+	if owner, supplied := support["owner_id"]; supplied {
+		userID, _ := owner.(string)
+		if !validNativeIdentity(userID) {
+			return nil, errors.New("native application insert support fields are invalid")
+		}
+	}
+	if updated, supplied := support["updated_at"]; supplied {
+		clientVersion, _ := updated.(string)
+		if clientVersion == "" {
+			return nil, errors.New("native application insert support fields are invalid")
+		}
+	}
+	names := make([]string, 0, len(support))
+	for name := range support {
+		if name == "" {
+			return nil, errors.New("native application insert support field is invalid")
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	switch columns := value.(type) {
+	case map[string]any:
+		for _, name := range names {
+			if _, exists := columns[name]; exists {
+				continue
+			}
+			columns[name] = support[name]
+		}
+		return columns, nil
+	case []any:
+		existing := make(map[string]struct{}, len(columns))
+		for _, value := range columns {
+			column, ok := value.(map[string]any)
+			if !ok {
+				return nil, errors.New("native application insert column is invalid")
+			}
+			fieldID, ok := column["field_id"].(string)
+			if !ok || fieldID == "" {
+				return nil, errors.New("native application insert column is invalid")
+			}
+			existing[fieldID] = struct{}{}
+		}
+		for _, name := range names {
+			if _, exists := existing[name]; exists {
+				continue
+			}
+			// The marker separates a runtime support value from an authored
+			// column, so a consumer can build the physical statement from the
+			// full set and the authored capture context from the authored set.
+			columns = append(columns, map[string]any{"field_id": name, "value": support[name], "support": true})
+		}
+		return columns, nil
+	default:
+		return nil, errors.New("native application insert columns are invalid")
+	}
+}
+
+// nativeScopeRevocation names one scope a user no longer holds.
+type nativeScopeRevocation struct {
+	UserID       string
+	RuntimeScope string
+}
+
+func (c *NativeController) setClientAssignments(operation scenarios.Operation) (NativeStepObservation, bool, []nativeScopeRevocation, error) {
+	var revocations []nativeScopeRevocation
+	var payload struct {
+		UserID      string `json:"user_id"`
+		ClientID    string `json:"client_id"`
+		Assignments []struct {
+			ScopeID string `json:"scope_id"`
+		} `json:"assignments"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
+		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment payload is invalid")
+	}
+	if len(payload.Assignments) == 0 {
+		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment is empty")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return NativeStepObservation{}, false, nil, errors.New("native controller contract is not installed")
+	}
+	usesDefaultSharedScope := false
+	for _, assignment := range payload.Assignments {
+		if existing, found := c.installation.scopes[assignment.ScopeID]; found {
+			switch existing {
+			case "cf:global":
+				usesDefaultSharedScope = true
+				continue
+			case nativeStagedSharedRuntimeScope:
+				continue
+			case "user:" + payload.UserID:
+				continue
+			default:
+				return NativeStepObservation{}, false, nil, errors.New("native controller client assignment conflicts with its runtime scope")
+			}
+		}
+		if err := bindNativeScope(c.installation, assignment.ScopeID, "user:"+payload.UserID); err != nil {
+			return NativeStepObservation{}, false, nil, err
+		}
+	}
+	installed := false
+	for _, client := range c.installation.clients {
+		if client.UserID == payload.UserID && client.ClientID == payload.ClientID {
+			installed = true
+			break
+		}
+	}
+	if !installed {
+		c.installation.clients = append(c.installation.clients, nativeInstalledClient{UserID: payload.UserID, ClientID: payload.ClientID})
+	}
+	// Scope assignment is a property of the user. An authored scope the user
+	// no longer holds is revoked, so the server stops reporting it and the
+	// client drops its local scope metadata on the next connect.
+	next := make([]string, 0, len(payload.Assignments))
+	for _, assignment := range payload.Assignments {
+		if !containsString(next, assignment.ScopeID) {
+			next = append(next, assignment.ScopeID)
+		}
+	}
+	if c.installation.userScopes == nil {
+		c.installation.userScopes = make(map[string][]string)
+	}
+	for _, authored := range c.installation.userScopes[payload.UserID] {
+		if containsString(next, authored) {
+			continue
+		}
+		runtime, bound := c.installation.scopes[authored]
+		if !bound || runtime == "" {
+			continue
+		}
+		revocations = append(revocations, nativeScopeRevocation{UserID: payload.UserID, RuntimeScope: runtime})
+	}
+	c.installation.userScopes[payload.UserID] = next
+	return nativeSuccess(), usesDefaultSharedScope, revocations, nil
+}
+
+func (c *NativeController) bindStagedSharedScope() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return errors.New("native controller contract is not installed")
+	}
+	return replaceNativeScopeBinding(c.installation, nativeStagedSharedAuthoredScope, nativeStagedSharedRuntimeScope)
+}
+
+func replaceNativeScopeBinding(binding *nativeInstallationBinding, authored, runtime string) error {
+	if binding == nil || authored == "" || runtime == "" {
+		return errors.New("native controller scope binding is incomplete")
+	}
+	if existing, found := binding.scopes[authored]; found {
+		delete(binding.runtimeScopes, existing)
+	}
+	if existing, found := binding.runtimeScopes[runtime]; found && existing != authored {
+		return fmt.Errorf("native controller runtime scope %q is bound more than once", runtime)
+	}
+	binding.scopes[authored] = runtime
+	binding.runtimeScopes[runtime] = authored
+	return nil
+}
+
+func (c *NativeController) publishSchema(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
+	var payload nativePublishedSchema
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeSchemaReference(payload.Schema, false) {
+		return NativeStepObservation{}, errors.New("native controller publish-schema payload is invalid")
+	}
+	c.mu.Lock()
+	installation := c.installation
+	queueTransition := false
+	if installation != nil && len(payload.Tables) == 1 {
+		if table, found := installation.tables[payload.Tables[0].TableID]; found {
+			queueTransition = table.RuntimeName == "cf_schema_queue"
+		}
+	}
+	c.mu.Unlock()
+	var transitionErr error
+	var transitionBinding nativeTableBinding
+	if queueTransition {
+		transitionErr = c.transitionNativeSchemaQueue(ctx, payload)
+	} else {
+		transitionBinding, transitionErr = c.transitionNativeSyncedTable(ctx, payload)
+	}
+	if transitionErr != nil {
+		return NativeStepObservation{}, fmt.Errorf("apply native runtime schema transition: %w", transitionErr)
+	}
+	runtime, runtimeRegistry, err := c.waitForRuntimeSchemaChange(ctx)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	var reboundBinding nativeTableBinding
+	if queueTransition {
+		if len(payload.Tables) != 1 {
+			return NativeStepObservation{}, errors.New("native schema-queue authored table is invalid")
+		}
+		var runtimeTable *nativeRuntimeManifestTable
+		for index := range runtime.Manifest.Tables {
+			if runtime.Manifest.Tables[index].Name == "cf_schema_queue" {
+				runtimeTable = &runtime.Manifest.Tables[index]
+				break
+			}
+		}
+		if runtimeTable == nil {
+			return NativeStepObservation{}, errors.New("native schema-queue runtime table is absent")
+		}
+		reboundBinding, err = bindNativeTable(payload.Tables[0], *runtimeTable)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+	} else {
+		var runtimeTable *nativeRuntimeManifestTable
+		for index := range runtime.Manifest.Tables {
+			if runtime.Manifest.Tables[index].Name == transitionBinding.RuntimeName {
+				runtimeTable = &runtime.Manifest.Tables[index]
+				break
+			}
+		}
+		if runtimeTable == nil {
+			return NativeStepObservation{}, errors.New("native synced-table runtime table is absent")
+		}
+		reboundBinding, err = bindNativeTable(payload.Tables[0], *runtimeTable)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return NativeStepObservation{}, errors.New("native controller contract is not installed")
+	}
+	authoredKey := nativeSchemaKey(payload.Schema)
+	if _, duplicate := c.installation.runtimeSchemas[authoredKey]; duplicate {
+		return NativeStepObservation{}, errors.New("native controller authored schema is already published")
+	}
+	runtimeRef := nativeSchemaReference{Version: runtime.SchemaVersion, Hash: runtime.SchemaHash}
+	c.installation.authoredSchemas[authoredKey] = payload.Schema
+	c.installation.runtimeSchemas[authoredKey] = runtimeRef
+	c.installation.currentAuthoredSchema = payload.Schema
+	c.installation.currentRuntimeSchema = runtimeRef
+	c.installation.runtimeRegistryGeneration = runtimeRegistry
+	c.installation.tables[payload.Tables[0].TableID] = reboundBinding
+	return nativeSuccess(), nil
+}
+
+func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payload nativePublishedSchema) (nativeTableBinding, error) {
+	if len(payload.Tables) != 1 {
+		return nativeTableBinding{}, errors.New("native synced-table transition table is invalid")
+	}
+	c.mu.Lock()
+	if c.installation == nil {
+		c.mu.Unlock()
+		return nativeTableBinding{}, errors.New("native controller contract is not installed")
+	}
+	current, found := c.installation.tables[payload.Tables[0].TableID]
+	c.mu.Unlock()
+	if !found || current.AuthoredID != payload.Tables[0].TableID {
+		return nativeTableBinding{}, errors.New("native synced-table transition binding is absent")
+	}
+	runtime, _, err := c.loadRuntimeManifest(ctx)
+	if err != nil {
+		return nativeTableBinding{}, errors.New("load native synced-table transition runtime schema failed")
+	}
+	var runtimeTable *nativeRuntimeManifestTable
+	for index := range runtime.Manifest.Tables {
+		if runtime.Manifest.Tables[index].ID == current.RuntimeID {
+			runtimeTable = &runtime.Manifest.Tables[index]
+			break
+		}
+	}
+	if runtimeTable == nil || runtimeTable.Name != current.RuntimeName {
+		return nativeTableBinding{}, errors.New("native synced-table transition runtime table is absent")
+	}
+	runtimeFields := make(map[string]nativeRuntimeManifestField, len(runtimeTable.Fields))
+	for _, field := range runtimeTable.Fields {
+		runtimeFields[field.ID] = field
+	}
+	nextFields := make(map[string]nativeAuthoredField, len(payload.Tables[0].Fields))
+	for _, field := range payload.Tables[0].Fields {
+		nextFields[field.FieldID] = field
+	}
+	var removedPhysical, addedPhysical, changedPhysical, changedType, removedAuthored string
+	for authoredField, physicalField := range current.FieldNames {
+		if _, retained := nextFields[authoredField]; !retained {
+			if removedPhysical != "" {
+				return nativeTableBinding{}, errors.New("native synced-table transition removes more than one field")
+			}
+			removedPhysical = physicalField
+			removedAuthored = authoredField
+		}
+	}
+	for _, field := range payload.Tables[0].Fields {
+		runtimeFieldID, retained := current.Fields[field.FieldID]
+		if !retained {
+			if addedPhysical != "" {
+				return nativeTableBinding{}, errors.New("native synced-table transition adds more than one field")
+			}
+			addedPhysical = field.Name
+			continue
+		}
+		runtimeField, found := runtimeFields[runtimeFieldID]
+		if !found || runtimeField.Name == "" || runtimeField.Type == "" {
+			return nativeTableBinding{}, errors.New("native synced-table transition runtime field is absent")
+		}
+		if field.Type != runtimeField.Type {
+			if changedPhysical != "" {
+				return nativeTableBinding{}, errors.New("native synced-table transition changes more than one field type")
+			}
+			changedPhysical = runtimeField.Name
+			changedType = field.Type
+		}
+	}
+	if (removedPhysical == "" && addedPhysical == "" && changedPhysical == "") ||
+		(removedPhysical != "" && removedPhysical == addedPhysical) ||
+		(removedPhysical != "" && !validSchemaTransitionColumn(removedPhysical)) ||
+		(addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical)) ||
+		(changedPhysical != "" && (!validSchemaTransitionColumn(changedPhysical) || changedPhysical == removedPhysical || changedPhysical == addedPhysical)) {
+		return nativeTableBinding{}, errors.New("native synced-table transition fields are invalid")
+	}
+	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, addedPhysical, changedPhysical, changedType); err != nil {
+		return nativeTableBinding{}, err
+	}
+	c.retireNativeSchemaField(current.AuthoredID, removedAuthored, current.Fields[removedAuthored])
+	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
+	return current, nil
+}
+
+func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payload nativePublishedSchema) error {
+	if len(payload.Tables) != 1 {
+		return errors.New("native schema-queue transition table is invalid")
+	}
+	c.mu.Lock()
+	var current nativeTableBinding
+	var authoredTable string
+	for authored, table := range c.installation.tables {
+		current = table
+		authoredTable = authored
+	}
+	c.mu.Unlock()
+	if current.RuntimeName != "cf_schema_queue" {
+		return errors.New("native schema-queue transition binding is absent")
+	}
+	nextFields := make(map[string]nativeAuthoredField, len(payload.Tables[0].Fields))
+	for _, field := range payload.Tables[0].Fields {
+		nextFields[field.FieldID] = field
+	}
+	var removedPhysical, addedPhysical, removedAuthored string
+	for authoredField, physicalField := range current.FieldNames {
+		if _, retained := nextFields[authoredField]; !retained {
+			if removedPhysical != "" {
+				return errors.New("native schema-queue transition removes more than one field")
+			}
+			removedPhysical = physicalField
+			removedAuthored = authoredField
+		}
+	}
+	for _, field := range payload.Tables[0].Fields {
+		if _, retained := current.Fields[field.FieldID]; retained {
+			continue
+		}
+		if addedPhysical != "" {
+			return errors.New("native schema-queue transition adds more than one field")
+		}
+		addedPhysical = nativeSchemaQueueFieldName(field.Name)
+	}
+	// An authored transition may drop a field without adding one.
+	if !validSchemaTransitionColumn(removedPhysical) || removedPhysical == addedPhysical {
+		return errors.New("native schema-queue transition fields are invalid")
+	}
+	if addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical) {
+		return errors.New("native schema-queue transition fields are invalid")
+	}
+	if err := c.harness.Operator().TransitionSchemaQueueField(ctx, removedPhysical, addedPhysical); err != nil {
+		return err
+	}
+	// The transition changes the fixture columns. A record binding still names
+	// the removed authored field, and the capture validates every named field
+	// against the runtime row, so the removed field must leave the binding.
+	c.retireNativeSchemaField(authoredTable, removedAuthored, current.Fields[removedAuthored])
+	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
+	return nil
+}
+
+// retireNativeSchemaField keeps the runtime identity of one removed authored
+// field. The rebound table drops it, and a mutation queued under the earlier
+// schema still records it.
+func (c *NativeController) retireNativeSchemaField(authoredTable, authoredField, runtimeField string) {
+	if authoredField == "" || runtimeField == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return
+	}
+	if c.installation.retiredFields == nil {
+		c.installation.retiredFields = make(map[string]string, 1)
+	}
+	c.installation.retiredFields[authoredTable+"\x00"+authoredField] = runtimeField
+}
+
+// rebindNativeTableAfterTransition drops each authored field the transition
+// removed from the table binding and from every record image that names it.
+func (c *NativeController) rebindNativeTableAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return
+	}
+	// The table field map is a naming dictionary. A mutation queued under the
+	// earlier schema still names the retired field, so the dictionary keeps it.
+	// Only the row image drops it, because the capture validates every image
+	// field against the runtime row.
+	for _, record := range c.records {
+		if record == nil || record.Table.RuntimeID != runtimeTableID {
+			continue
+		}
+		for authoredField := range record.Image.Fields {
+			if _, keep := retained[authoredField]; keep {
+				continue
+			}
+			delete(record.Image.Fields, authoredField)
+		}
+	}
+}
+
+// RuntimeFieldID returns the runtime field identifier bound to one authored
+// field. A queued mutation records the runtime identifier, and the scenario
+// declares no alias for a field, so the binding is the only evidence.
+func (c *NativeController) RuntimeFieldID(authoredTable, authoredField string) (string, error) {
+	if c == nil {
+		return "", errors.New("native controller is unavailable")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return "", errors.New("native controller contract is not installed")
+	}
+	table, found := c.installation.tables[authoredTable]
+	if !found {
+		return "", fmt.Errorf("native controller authored table %q has no runtime binding", authoredTable)
+	}
+	runtime, found := table.Fields[authoredField]
+	if !found || runtime == "" {
+		if retired, kept := c.installation.retiredFields[authoredTable+"\x00"+authoredField]; kept && retired != "" {
+			return retired, nil
+		}
+		return "", fmt.Errorf("native controller authored field %q has no runtime binding", authoredField)
+	}
+	return runtime, nil
+}
+
+func (c *NativeController) waitForRuntimeSchemaChange(ctx context.Context) (nativeRuntimeManifest, int64, error) {
+	c.mu.Lock()
+	if c.installation == nil {
+		c.mu.Unlock()
+		return nativeRuntimeManifest{}, 0, errors.New("native controller contract is not installed")
+	}
+	prior := c.installation.currentRuntimeSchema
+	c.mu.Unlock()
+	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
+	defer cancel()
+	for {
+		manifest, generation, err := c.loadRuntimeManifest(deadline)
+		if err == nil && (manifest.SchemaVersion != prior.Version || manifest.SchemaHash != prior.Hash) {
+			return manifest, generation, nil
+		}
+		if err := waitNativePoll(deadline); err != nil {
+			return nativeRuntimeManifest{}, 0, errors.New("native runtime schema transition did not publish")
+		}
+	}
+}
+
+func (c *NativeController) expireClientGeneration(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
+	var payload struct {
+		UserID   string `json:"user_id"`
+		ClientID string `json:"client_id"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
+		return NativeStepObservation{}, errors.New("native controller expire-client payload is invalid")
+	}
+	if err := c.harness.Operator().ExpireRetentionClient(ctx, payload.UserID, payload.ClientID); err != nil {
+		return NativeStepObservation{}, err
+	}
+	return nativeSuccess(), nil
+}
+
+func (c *NativeController) commitSourceTransaction(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
+	var payload nativeCommitPayload
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil {
+		return NativeStepObservation{}, errors.New("decode native source transaction failed")
+	}
+	c.mu.Lock()
+	installation := c.installation
+	c.mu.Unlock()
+	if installation == nil {
+		return NativeStepObservation{}, errors.New("native controller contract is not installed")
+	}
+	transaction, err := bindNativeTransaction(payload, installation)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	key := nativeTransactionKey(payload.StreamGeneration, payload.CommitLSN)
+	c.mu.Lock()
+	if _, duplicate := c.transactions[key]; duplicate {
+		c.mu.Unlock()
+		return NativeStepObservation{}, errors.New("native controller source transaction identity is duplicated")
+	}
+	c.mu.Unlock()
+
+	sourceTransaction, err := c.harness.Source().BeginTx(ctx)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = sourceTransaction.Rollback()
+		}
+	}()
+	if len(transaction.Events) == 0 {
+		sourceXID, err := sourceTransaction.EmitCommitMarker(ctx)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		transaction.SourceXID = sourceXID
+	}
+	for _, event := range transaction.Events {
+		statement, arguments, err := nativeSourceStatement(event, installation)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		result, err := sourceTransaction.ExecContext(ctx, statement, arguments...)
+		if err != nil {
+			return NativeStepObservation{}, fmt.Errorf("execute native source event: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return NativeStepObservation{}, errors.New("native source event did not affect exactly one authoritative row")
+		}
+	}
+	if err := sourceTransaction.Commit(); err != nil {
+		return NativeStepObservation{}, err
+	}
+	committed = true
+
+	c.mu.Lock()
+	c.transactions[key] = transaction
+	for _, event := range transaction.Events {
+		if event.Dependency != nil {
+			continue
+		}
+		// Every other registration keys a record by its canonical wire value.
+		// Keying by the bare record identity here registers the same row twice
+		// and makes its primary-key alias ambiguous.
+		recordKey := nativeRecordKey(event.Table.AuthoredID, nativeCanonicalRecordKeyValue(event))
+		if event.After == nil || event.After.Deleted {
+			delete(c.records, recordKey)
+			continue
+		}
+		c.records[recordKey] = &nativeRecordBinding{
+			Table:           event.Table,
+			RecordID:        event.RecordID,
+			RuntimeRecordID: event.RuntimeRecordID,
+			Image:           *event.After,
+			AuthoredScopes:  append([]string(nil), event.AuthoredScopes...),
+		}
+	}
+	c.mu.Unlock()
+	return nativeSuccess(), nil
+}
+
+func bindNativeTransaction(payload nativeCommitPayload, installation *nativeInstallationBinding) (*nativeTransactionBinding, error) {
+	if installation == nil || payload.StreamGeneration != installation.authoredStream || payload.CommitLSN == "" || payload.EndLSN == "" {
+		return nil, errors.New("native source transaction identity is invalid")
+	}
+	if order, valid := compareNativeLSN(payload.CommitLSN, payload.EndLSN); !valid || order >= 0 {
+		return nil, errors.New("native source transaction LSN range is invalid")
+	}
+	result := &nativeTransactionBinding{AuthoredStream: payload.StreamGeneration, AuthoredCommitLSN: payload.CommitLSN, AuthoredEndLSN: payload.EndLSN}
+	seenOrdinals := make(map[uint64]struct{}, len(payload.Events))
+	seenRecords := make(map[string]struct{}, len(payload.Events))
+	seenCaptureKeys := make(map[string]struct{}, len(payload.Events))
+	for _, event := range payload.Events {
+		if _, duplicate := seenOrdinals[event.EventOrdinal]; duplicate {
+			return nil, errors.New("native source event ordinal is duplicated")
+		}
+		seenOrdinals[event.EventOrdinal] = struct{}{}
+		tableID, synced := installation.relations[event.Relation]
+		if !synced {
+			dependency, found := installation.captureDependencies[event.Relation]
+			if !found {
+				return nil, fmt.Errorf("native source relation %q is not bound", event.Relation)
+			}
+			before, err := decodeNativeCaptureDependencyImage(event.Before, dependency)
+			if err != nil {
+				return nil, err
+			}
+			after, err := decodeNativeCaptureDependencyImage(event.After, dependency)
+			if err != nil {
+				return nil, err
+			}
+			if event.Operation == "insert" && (before != nil || after == nil) || event.Operation == "update" && (before == nil || after == nil) || event.Operation == "delete" && (before == nil || after != nil) {
+				return nil, errors.New("native source event images do not match the operation")
+			}
+			if event.Operation != "insert" && event.Operation != "update" && event.Operation != "delete" {
+				return nil, errors.New("native source event operation is unsupported")
+			}
+			image := after
+			if image == nil {
+				image = before
+			}
+			captureKey := nativeCaptureDependencyKey(*image)
+			if _, duplicate := seenCaptureKeys[event.Relation+"\x00"+captureKey]; duplicate {
+				return nil, errors.New("native source transaction targets one capture dependency more than once")
+			}
+			seenCaptureKeys[event.Relation+"\x00"+captureKey] = struct{}{}
+			result.Events = append(result.Events, nativeEventBinding{
+				AuthoredOrdinal:   event.EventOrdinal,
+				Operation:         event.Operation,
+				PhysicalOperation: event.Operation,
+				Relation:          event.Relation,
+				Dependency:        &dependency,
+				Before:            before,
+				After:             after,
+			})
+			continue
+		}
+		table := installation.tables[tableID]
+		before, err := decodeNativeAuthoredImage(event.Before, table)
+		if err != nil {
+			return nil, err
+		}
+		after, err := decodeNativeAuthoredImage(event.After, table)
+		if err != nil {
+			return nil, err
+		}
+		if event.Operation == "insert" && (before != nil || after == nil) || event.Operation == "update" && (before == nil || after == nil) || event.Operation == "delete" && (before == nil || after != nil) {
+			return nil, errors.New("native source event images do not match the operation")
+		}
+		if event.Operation != "insert" && event.Operation != "update" && event.Operation != "delete" {
+			return nil, errors.New("native source event operation is unsupported")
+		}
+		image := after
+		if image == nil {
+			image = before
+		}
+		recordID, err := nativeAuthoredRecordID(image.CanonicalWireJSON)
+		if err != nil {
+			return nil, err
+		}
+		runtimeRecordID := nativeRuntimeUUID(table.AuthoredID, image.CanonicalWireJSON)
+		if _, duplicate := seenRecords[table.AuthoredID+"\x00"+runtimeRecordID]; duplicate {
+			return nil, errors.New("native source transaction targets one row more than once")
+		}
+		seenRecords[table.AuthoredID+"\x00"+runtimeRecordID] = struct{}{}
+		scopes := nativeScopesForRecord(installation, table.AuthoredRelation, table.AuthoredID, image.CanonicalWireJSON)
+		result.Events = append(result.Events, nativeEventBinding{
+			AuthoredOrdinal:   event.EventOrdinal,
+			Operation:         event.Operation,
+			PhysicalOperation: event.Operation,
+			Relation:          event.Relation,
+			Table:             table,
+			RecordID:          recordID,
+			RuntimeRecordID:   runtimeRecordID,
+			Before:            before,
+			After:             after,
+			AuthoredScopes:    scopes,
+		})
+	}
+	sort.Slice(result.Events, func(left, right int) bool {
+		return result.Events[left].AuthoredOrdinal < result.Events[right].AuthoredOrdinal
+	})
+	return result, nil
+}
+
+func decodeNativeAuthoredImage(wire *nativeAuthoredImageWire, table nativeTableBinding) (*nativeAuthoredImage, error) {
+	if wire == nil {
+		return nil, nil
+	}
+	row := wire.Identity.SyncedRow
+	if wire.Identity.Kind != "synced" || row == nil || row.TableID != table.AuthoredID || row.PrimaryKeyFieldID != table.AuthoredPrimary || row.PortableType != "string" || row.CanonicalWireJSON == "" || wire.Version == "" || wire.Checksum == nil || len(*wire.Checksum) != 64 {
+		return nil, errors.New("native source image identity is invalid")
+	}
+	if _, err := hex.DecodeString(*wire.Checksum); err != nil {
+		return nil, errors.New("native source image checksum is invalid")
+	}
+	fields := make(map[string]json.RawMessage, len(wire.Fields))
+	for _, field := range wire.Fields {
+		decoded, err := nativeFieldWireJSON(field.WireJSON)
+		if _, known := table.Fields[field.Field]; !known || field.Type == "" || err != nil {
+			return nil, errors.New("native source image field is invalid")
+		}
+		if _, duplicate := fields[field.Field]; duplicate {
+			return nil, errors.New("native source image field is duplicated")
+		}
+		fields[field.Field] = decoded
+	}
+	if len(fields) != len(table.Fields) {
+		return nil, errors.New("native source image field set is incomplete")
+	}
+	return &nativeAuthoredImage{
+		TableID:           row.TableID,
+		PrimaryFieldID:    row.PrimaryKeyFieldID,
+		CanonicalWireJSON: row.CanonicalWireJSON,
+		Fields:            fields,
+		Version:           wire.Version,
+		Checksum:          *wire.Checksum,
+		Deleted:           wire.Deleted,
+	}, nil
+}
+
+func decodeNativeCaptureDependencyImage(wire *nativeAuthoredImageWire, dependency nativeCaptureDependencyBinding) (*nativeAuthoredImage, error) {
+	if wire == nil {
+		return nil, nil
+	}
+	if wire.Identity.Kind != "capture_dependency" || wire.Identity.SyncedRow != nil || wire.Identity.CaptureKey == nil || wire.Identity.CaptureKey.CanonicalKeyBytes == "" || wire.Version == "" || wire.Checksum != nil {
+		return nil, errors.New("native capture dependency image identity is invalid")
+	}
+	fields := make(map[string]json.RawMessage, len(wire.Fields))
+	for _, field := range wire.Fields {
+		decoded, err := nativeFieldWireJSON(field.WireJSON)
+		if _, known := dependency.CapturedFields[field.Field]; !known || field.Type == "" || err != nil {
+			return nil, errors.New("native capture dependency image field is invalid")
+		}
+		if _, duplicate := fields[field.Field]; duplicate {
+			return nil, errors.New("native capture dependency image field is duplicated")
+		}
+		fields[field.Field] = decoded
+	}
+	if len(fields) != len(dependency.CapturedFields) {
+		return nil, errors.New("native capture dependency image field set is incomplete")
+	}
+	return &nativeAuthoredImage{
+		Fields:     fields,
+		CaptureKey: wire.Identity.CaptureKey.CanonicalKeyBytes,
+		Version:    wire.Version,
+		Deleted:    wire.Deleted,
+	}, nil
+}
+
+func nativeFieldWireJSON(encoded json.RawMessage) (json.RawMessage, error) {
+	var decoded string
+	if len(encoded) == 0 || json.Unmarshal(encoded, &decoded) != nil || !json.Valid([]byte(decoded)) {
+		return nil, errors.New("native field wire JSON is invalid")
+	}
+	return json.RawMessage(decoded), nil
+}
+
+// nativeCaptureDependencyKey builds the runtime capture key for one dependency
+// image. The extension derives that key from the registered capture key columns
+// and stores it as a JSON object, so the fixture primary key column carries the
+// authored canonical key.
+func nativeCaptureDependencyKey(image nativeAuthoredImage) string {
+	encoded, err := json.Marshal(map[string]string{nativeCaptureDependencyKeyColumn: image.CaptureKey})
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func nativeScopesForRecord(installation *nativeInstallationBinding, relation, tableID, canonical string) []string {
+	_ = relation
+	if scopes, found := installation.rowScopes[nativeRecordKey(tableID, canonical)]; found {
+		return append([]string(nil), scopes...)
+	}
+	if len(installation.scopes) == 1 {
+		for scope := range installation.scopes {
+			return []string{scope}
+		}
+	}
+	values := make([]string, 0, len(installation.scopes))
+	for scope := range installation.scopes {
+		values = append(values, scope)
+	}
+	sort.Strings(values)
+	if len(values) != 0 {
+		return values[:1]
+	}
+	return nil
+}
+
+func nativeSourceStatement(event nativeEventBinding, installation *nativeInstallationBinding) (string, []any, error) {
+	if event.Dependency != nil {
+		return nativeCaptureDependencySourceStatement(event)
+	}
+	image := event.After
+	if image == nil {
+		image = event.Before
+	}
+	if image == nil {
+		return "", nil, errors.New("native source event has no image")
+	}
+	// Each fixture names its own payload column, so the lookup happens inside the
+	// branch that needs it. A delete carries no payload.
+	value := ""
+	if event.Operation != "delete" && nativeTableDeclaresField(event.Table, "value") {
+		resolved, err := nativeImageStringField(*image, event.Table, "value")
+		if err != nil {
+			return "", nil, err
+		}
+		value = resolved
+	}
+	runtimeScope := ""
+	if len(event.AuthoredScopes) != 0 {
+		runtimeScope = installation.scopes[event.AuthoredScopes[0]]
+	}
+	owner := strings.TrimPrefix(runtimeScope, "user:")
+	switch event.Table.RuntimeName {
+	case "cf_items", "cf_late_registration":
+		if owner == runtimeScope || owner == "" {
+			// The authored scope and its runtime binding name why the private
+			// table cannot own the row. The complete scope map shows whether the
+			// authored assignment bound the scope to its user.
+			bound := make([]string, 0, len(installation.scopes))
+			for authored, runtime := range installation.scopes {
+				bound = append(bound, authored+"->"+runtime)
+			}
+			sort.Strings(bound)
+			return "", nil, fmt.Errorf("native private source row has no user scope binding: authored table %q bound to %q, authored scopes %v, runtime scope %q, scope map %v",
+				event.Table.AuthoredID, event.Table.RuntimeName, event.AuthoredScopes, runtimeScope, bound)
+		}
+		switch event.Operation {
+		case "insert":
+			return "INSERT INTO " + event.Table.RuntimeName + " (id, owner_id, value) VALUES ($1, $2, $3)", []any{event.RuntimeRecordID, owner, value}, nil
+		case "update":
+			return "UPDATE " + event.Table.RuntimeName + " SET owner_id = $2, value = $3, updated_at = clock_timestamp() WHERE id = $1", []any{event.RuntimeRecordID, owner, value}, nil
+		case "delete":
+			return "DELETE FROM " + event.Table.RuntimeName + " WHERE id = $1", []any{event.RuntimeRecordID}, nil
+		}
+	case "cf_global_items":
+		switch event.Operation {
+		case "insert":
+			return "INSERT INTO cf_global_items (id, value) VALUES ($1, $2)", []any{event.RuntimeRecordID, value}, nil
+		case "update":
+			return "UPDATE cf_global_items SET value = $2, updated_at = clock_timestamp() WHERE id = $1", []any{event.RuntimeRecordID, value}, nil
+		case "delete":
+			return "DELETE FROM cf_global_items WHERE id = $1", []any{event.RuntimeRecordID}, nil
+		}
+	case "cf_schema_queue":
+		if owner == runtimeScope || owner == "" {
+			return "", nil, errors.New("native queue source row has no user scope binding")
+		}
+		legacy := ""
+		if event.Operation != "delete" {
+			resolved, err := nativeImageStringField(*image, event.Table, "legacy_value")
+			if err != nil {
+				return "", nil, err
+			}
+			legacy = resolved
+		}
+		switch event.Operation {
+		case "insert":
+			// authored_mutation carries the queued application mutation for the
+			// queue-replay scenario. A source row has no authored value for it,
+			// and the fixture requires one, so it takes an empty object.
+			return "INSERT INTO cf_schema_queue (id, owner_id, authored_mutation, legacy_value) VALUES ($1, $2, '{}'::jsonb, $3)", []any{event.RuntimeRecordID, owner, legacy}, nil
+		case "update":
+			return "UPDATE cf_schema_queue SET owner_id = $2, legacy_value = $3, updated_at = clock_timestamp() WHERE id = $1", []any{event.RuntimeRecordID, owner, legacy}, nil
+		case "delete":
+			return "DELETE FROM cf_schema_queue WHERE id = $1", []any{event.RuntimeRecordID}, nil
+		}
+	default:
+		return "", nil, fmt.Errorf("native source table %q has no generic DML binding", event.Table.RuntimeName)
+	}
+	return "", nil, errors.New("native source event operation is unsupported")
+}
+
+func nativeTableDeclaresField(table nativeTableBinding, name string) bool {
+	for _, field := range table.FieldNames {
+		if field == name {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeCaptureDependencySourceStatement(event nativeEventBinding) (string, []any, error) {
+	if event.Dependency == nil || event.Dependency.RuntimeName != nativeCaptureDependencyFixture {
+		return "", nil, errors.New("native capture dependency source binding is invalid")
+	}
+	switch event.Operation {
+	case "insert":
+		if event.After == nil {
+			return "", nil, errors.New("native capture dependency source event has no after image")
+		}
+		value, err := nativeCaptureDependencyStringField(*event.After, *event.Dependency, "scope_key")
+		if err != nil {
+			return "", nil, err
+		}
+		return "INSERT INTO " + event.Dependency.RuntimeName + " (" + nativeCaptureDependencyKeyColumn + ", scope_key) VALUES ($1, $2)", []any{event.After.CaptureKey, value}, nil
+	case "update":
+		if event.Before == nil || event.After == nil {
+			return "", nil, errors.New("native capture dependency source event images are incomplete")
+		}
+		after, err := nativeCaptureDependencyStringField(*event.After, *event.Dependency, "scope_key")
+		if err != nil {
+			return "", nil, err
+		}
+		return "UPDATE " + event.Dependency.RuntimeName + " SET scope_key = $2 WHERE " + nativeCaptureDependencyKeyColumn + " = $1", []any{event.Before.CaptureKey, after}, nil
+	case "delete":
+		if event.Before == nil {
+			return "", nil, errors.New("native capture dependency source event has no before image")
+		}
+		return "DELETE FROM " + event.Dependency.RuntimeName + " WHERE " + nativeCaptureDependencyKeyColumn + " = $1", []any{event.Before.CaptureKey}, nil
+	default:
+		return "", nil, errors.New("native source event operation is unsupported")
+	}
+}
+
+func nativeCaptureDependencyStringField(image nativeAuthoredImage, dependency nativeCaptureDependencyBinding, field string) (string, error) {
+	if _, found := dependency.CapturedFields[field]; !found {
+		return "", errors.New("native capture dependency source field is not captured")
+	}
+	raw, found := image.Fields[field]
+	if !found {
+		return "", errors.New("native capture dependency source field is absent")
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", errors.New("native capture dependency source field is invalid")
+	}
+	return value, nil
+}
+
+func nativeImageStringField(image nativeAuthoredImage, table nativeTableBinding, name string) (string, error) {
+	for authoredField := range table.Fields {
+		if table.FieldNames[authoredField] != name {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(image.Fields[authoredField], &value); err != nil {
+			return "", errors.New("native source string field is invalid")
+		}
+		return value, nil
+	}
+	return "", fmt.Errorf("native source field %q is not authored", name)
+}
+
+// RequestStep sends one arbitrary-user authenticated request to the current adapter.
+func (c *NativeController) RequestStep(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
+	if err := c.context(ctx); err != nil {
+		return NativeStepObservation{}, err
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return NativeStepObservation{}, fmt.Errorf("native controller request operation is invalid: %w", err)
+	}
+	key := scenarios.OperationKey(operation)
+	if key != "connect/send" && key != "pull/request-page" && key != "push/submit" && key != "rebuild/request-page" {
+		return NativeStepObservation{}, nativeUnsupported("request", operation)
+	}
+	userID, body, path, err := c.nativeHTTPRequest(ctx, operation)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	tokenProvider := TokenProviderFunc(func(tokenContext context.Context) (string, error) {
+		return c.harness.NativeBearerToken(tokenContext, userID, c.now())
+	})
+	response, err := (&Client{BaseURL: c.harness.AdapterURL(), HTTP: c.httpClient, Tokens: tokenProvider}).Do(ctx, Request{
+		Method:  http.MethodPost,
+		Path:    path,
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    body,
+		Class:   key,
+	})
+	if err != nil {
+		return NativeStepObservation{}, fmt.Errorf("execute native controller HTTP request: %w", err)
+	}
+	observation, err := nativeHTTPObservation(response)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	if response.Status >= 200 && response.Status < 300 {
+		if err := c.rememberNativeHTTPResponse(key, userID, body, response.Body); err != nil {
+			return NativeStepObservation{}, err
+		}
+	}
+	return observation, nil
+}
+
+func (c *NativeController) nativeHTTPRequest(ctx context.Context, operation scenarios.Operation) (string, []byte, string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return "", nil, "", errors.New("native controller contract is not installed")
+	}
+	var authored map[string]json.RawMessage
+	if err := jsonstrict.Decode(operation.Payload, &authored); err != nil {
+		return "", nil, "", errors.New("decode native controller HTTP payload failed")
+	}
+	key := scenarios.OperationKey(operation)
+	var userField string
+	var path string
+	var request map[string]any
+	switch key {
+	case "connect/send":
+		userField = "user_id"
+		path = "/sync/connect"
+		request = make(map[string]any)
+		if err := decodeNativeMap(operation.Payload, &request); err != nil {
+			return "", nil, "", err
+		}
+		delete(request, "user_id")
+		delete(request, "runtime_version")
+		request["platform"] = "native-conformance"
+		request["app_version"] = "0.3.0"
+		if err := c.rewriteNativeSchemaMember(request, "schema"); err != nil {
+			return "", nil, "", err
+		}
+		known, ok := request["known_scopes"].([]any)
+		if !ok {
+			return "", nil, "", errors.New("native connect known scopes are invalid")
+		}
+		runtimeKnown := make(map[string]any, len(known))
+		for _, raw := range known {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				return "", nil, "", errors.New("native connect known scope is invalid")
+			}
+			scope, _ := entry["scope_id"].(string)
+			runtimeScope, err := c.runtimeScope(scope)
+			if err != nil {
+				return "", nil, "", err
+			}
+			cursor := any(nil)
+			if value, found := c.scopeCursors[nativeScopeCursorKey(nativeMapString(request, "client_id"), runtimeScope)]; found {
+				cursor = value
+			}
+			runtimeKnown[runtimeScope] = map[string]any{"cursor": cursor}
+		}
+		request["known_scopes"] = runtimeKnown
+		if receipts, found := request["seed_receipts"].(map[string]any); found {
+			rewritten := make(map[string]any, len(receipts))
+			for scope, receipt := range receipts {
+				runtimeScope, err := c.runtimeScope(scope)
+				if err != nil {
+					return "", nil, "", err
+				}
+				rewritten[runtimeScope] = receipt
+			}
+			request["seed_receipts"] = rewritten
+		}
+	case "pull/request-page":
+		userField = "user_id"
+		path = "/sync/pull"
+		if err := decodeNativeMap(operation.Payload, &request); err != nil {
+			return "", nil, "", err
+		}
+		delete(request, "user_id")
+		if err := c.rewriteNativeSchemaMember(request, "schema"); err != nil {
+			return "", nil, "", err
+		}
+		scopes, ok := request["scopes"].([]any)
+		if !ok {
+			return "", nil, "", errors.New("native pull scopes are invalid")
+		}
+		runtimeScopes := make(map[string]any, len(scopes))
+		for _, raw := range scopes {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				return "", nil, "", errors.New("native pull scope is invalid")
+			}
+			scope, _ := entry["scope_id"].(string)
+			source, _ := entry["cursor_source"].(string)
+			runtimeScope, err := c.runtimeScope(scope)
+			if err != nil {
+				return "", nil, "", err
+			}
+			cursor, err := c.nativeCursor(nativeMapString(request, "client_id"), runtimeScope, source, false)
+			if err != nil {
+				return "", nil, "", err
+			}
+			runtimeScopes[runtimeScope] = map[string]any{"cursor": cursor}
+		}
+		request["scopes"] = runtimeScopes
+	case "push/submit":
+		userField = "authenticated_user_id"
+		path = "/sync/push"
+		var wrapper map[string]any
+		if err := decodeNativeMap(operation.Payload, &wrapper); err != nil {
+			return "", nil, "", err
+		}
+		delivery, _ := wrapper["delivery"].(string)
+		if delivery != "apply" {
+			return "", nil, "", fmt.Errorf("native controller cannot execute push delivery %q through the RequestStep interface", delivery)
+		}
+		request, _ = wrapper["request"].(map[string]any)
+		if request == nil {
+			return "", nil, "", errors.New("native push request is invalid")
+		}
+		// A replay that carries the accepted content must reproduce the sealed
+		// request exactly, or the server sees a changed fingerprint. Replay the
+		// stored canonical request for that batch.
+		sealed, sealedErr := c.sealedNativePushReplay(ctx, operation, request)
+		if sealedErr != nil {
+			return "", nil, "", sealedErr
+		}
+		if sealed != nil {
+			userValue, _ := wrapper[userField].(string)
+			return userValue, sealed, path, nil
+		}
+		if err := c.rewriteNativePush(ctx, request); err != nil {
+			return "", nil, "", err
+		}
+	case "rebuild/request-page":
+		userField = "user_id"
+		path = "/sync/rebuild"
+		if err := decodeNativeMap(operation.Payload, &request); err != nil {
+			return "", nil, "", err
+		}
+		delete(request, "user_id")
+		if err := c.rewriteNativeSchemaMember(request, "schema"); err != nil {
+			return "", nil, "", err
+		}
+		scope, _ := request["scope_id"].(string)
+		runtimeScope, err := c.runtimeScope(scope)
+		if err != nil {
+			return "", nil, "", err
+		}
+		delete(request, "scope_id")
+		request["scope"] = runtimeScope
+		source, _ := request["cursor_source"].(string)
+		delete(request, "cursor_source")
+		cursor, err := c.nativeCursor(nativeMapString(request, "client_id"), runtimeScope, source, true)
+		if err != nil {
+			return "", nil, "", err
+		}
+		request["cursor"] = cursor
+	default:
+		return "", nil, "", nativeUnsupported("request", operation)
+	}
+	var userID string
+	if err := json.Unmarshal(authored[userField], &userID); err != nil || !validNativeIdentity(userID) {
+		return "", nil, "", errors.New("native HTTP authenticated user is invalid")
+	}
+	body, err := json.Marshal(request)
+	if err != nil || jsonstrict.ValidateValue(body) != nil {
+		return "", nil, "", errors.New("encode native controller HTTP request failed")
+	}
+	return userID, body, path, nil
+}
+
+func decodeNativeMap(raw []byte, target *map[string]any) error {
+	if err := jsonstrict.Decode(raw, target); err != nil {
+		return errors.New("decode native operation payload failed")
+	}
+	return nil
+}
+
+func (c *NativeController) rewriteNativeSchemaMember(request map[string]any, name string) error {
+	raw, ok := request[name].(map[string]any)
+	if !ok {
+		return errors.New("native authored schema reference is invalid")
+	}
+	authored, err := nativeSchemaFromMap(raw)
+	if err != nil {
+		return err
+	}
+	if authored.Version == 0 && authored.Hash == "" {
+		return nil
+	}
+	runtime, found := c.installation.runtimeSchemas[nativeSchemaKey(authored)]
+	if !found {
+		return fmt.Errorf("native authored schema %d/%s has no runtime binding", authored.Version, authored.Hash)
+	}
+	request[name] = map[string]any{"version": runtime.Version, "hash": runtime.Hash}
+	return nil
+}
+
+func (c *NativeController) rewriteNativePush(ctx context.Context, request map[string]any) error {
+	if err := c.rewriteNativeSchemaMember(request, "schema"); err != nil {
+		return err
+	}
+	// A replay must target the batch the client actually sent. The authored
+	// batch and mutation identifiers are aliases, and the accepted application
+	// push records their runtime values.
+	if err := c.rewriteNativePushIdentities(ctx, request); err != nil {
+		return err
+	}
+	mutations, ok := request["mutations"].([]any)
+	if !ok || len(mutations) == 0 {
+		return errors.New("native push mutations are invalid")
+	}
+	for _, raw := range mutations {
+		mutation, ok := raw.(map[string]any)
+		if !ok {
+			return errors.New("native push mutation is invalid")
+		}
+		authoredTable, _ := mutation["table"].(string)
+		table, found := c.installation.tables[authoredTable]
+		if !found {
+			return fmt.Errorf("native push table %q has no runtime binding", authoredTable)
+		}
+		mutation["table"] = table.RuntimeID
+		if err := c.rewriteNativeSchemaMember(mutation, "authored_schema"); err != nil {
+			return err
+		}
+		pk, ok := mutation["pk"].(map[string]any)
+		if !ok || len(pk) != 1 {
+			return errors.New("native push primary key is invalid")
+		}
+		value, found := pk[table.AuthoredPrimary]
+		if !found {
+			return errors.New("native push primary key field is misbound")
+		}
+		canonical, err := json.Marshal(value)
+		if err != nil {
+			return errors.New("native push primary key value is invalid")
+		}
+		mutation["pk"] = map[string]any{table.RuntimePrimary: nativeRuntimeUUID(table.AuthoredID, string(canonical))}
+		if columns, found := mutation["columns"].(map[string]any); found {
+			rewritten := make(map[string]any, len(columns))
+			for authoredField, value := range columns {
+				runtimeField, known := table.Fields[authoredField]
+				if !known || authoredField == table.AuthoredPrimary {
+					return errors.New("native push column has no writable runtime binding")
+				}
+				runtimeValue, err := nativeRuntimeFieldValue(table, authoredField, value)
+				if err != nil {
+					return err
+				}
+				rewritten[runtimeField] = runtimeValue
+			}
+			mutation["columns"] = rewritten
+		}
+	}
+	return nil
+}
+
+func (c *NativeController) runtimeScope(authored string) (string, error) {
+	runtime, found := c.installation.scopes[authored]
+	if !found {
+		return "", fmt.Errorf("native authored scope %q has no runtime binding", authored)
+	}
+	return runtime, nil
+}
+
+func (c *NativeController) nativeCursor(clientID, runtimeScope, source string, rebuild bool) (any, error) {
+	switch source {
+	case "none":
+		return nil, nil
+	case "local_checkpoint":
+		cursor, found := c.scopeCursors[nativeScopeCursorKey(clientID, runtimeScope)]
+		if !found {
+			return nil, errors.New("native local checkpoint cursor is unavailable")
+		}
+		return cursor, nil
+	case "local_rebuild_continuation":
+		if !rebuild {
+			return nil, errors.New("native rebuild continuation was requested outside rebuild")
+		}
+		cursor, found := c.rebuildCursors[nativeScopeCursorKey(clientID, runtimeScope)]
+		if !found {
+			return nil, errors.New("native rebuild continuation is unavailable")
+		}
+		return cursor, nil
+	case "forged":
+		if !rebuild {
+			return nil, errors.New("native forged cursor was requested outside rebuild")
+		}
+		return "native-forged-rebuild-cursor", nil
+	default:
+		return nil, fmt.Errorf("native cursor source %q is unsupported", source)
+	}
+}
+
+func nativeHTTPObservation(response Response) (NativeStepObservation, error) {
+	wire := &NativeWireFacts{HTTPStatus: response.Status}
+	if response.Status >= 200 && response.Status < 300 {
+		if len(bytes.TrimSpace(response.Body)) == 0 || !json.Valid(response.Body) {
+			return NativeStepObservation{}, errors.New("native successful HTTP response is invalid")
+		}
+		return NativeStepObservation{Disposition: "success", Wire: wire}, nil
+	}
+	var envelope struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := jsonstrict.Decode(response.Body, &envelope); err != nil || envelope.Error.Code == "" || envelope.Error.Message == "" {
+		return NativeStepObservation{}, errors.New("native HTTP error response is invalid")
+	}
+	code := envelope.Error.Code
+	wire.ErrorCode = &code
+	wire.Retryable = envelope.Error.Retryable
+	wire.Message = envelope.Error.Message
+	return NativeStepObservation{Disposition: "error", ErrorCode: &code, Wire: wire}, nil
+}
+
+func (c *NativeController) rememberNativeHTTPResponse(key, userID string, requestBody, responseBody []byte) error {
+	var request map[string]any
+	var response map[string]any
+	if err := decodeNativeMap(requestBody, &request); err != nil || decodeNativeMap(responseBody, &response) != nil {
+		return errors.New("decode successful native HTTP exchange failed")
+	}
+	clientID := nativeMapString(request, "client_id")
+	switch key {
+	case "connect/send":
+		if generation, ok := nativeJSONInt64(response["client_generation"]); !ok || generation <= 0 {
+			return errors.New("native connect response generation is invalid")
+		}
+		delta, ok := response["scopes"].(map[string]any)
+		if !ok {
+			return errors.New("native connect scope response is invalid")
+		}
+		additions, _ := delta["add"].([]any)
+		for _, raw := range additions {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				return errors.New("native connect scope addition is invalid")
+			}
+			scope, _ := entry["id"].(string)
+			if scope == "" {
+				return errors.New("native connect scope identity is invalid")
+			}
+			if cursor, ok := entry["cursor"].(string); ok && cursor != "" {
+				c.scopeCursors[nativeScopeCursorKey(clientID, scope)] = cursor
+			}
+		}
+		_ = userID
+	case "pull/request-page":
+		cursors, ok := response["scope_cursors"].(map[string]any)
+		if !ok {
+			return errors.New("native pull cursor response is invalid")
+		}
+		for scope, raw := range cursors {
+			cursor, ok := raw.(string)
+			if !ok || cursor == "" {
+				return errors.New("native pull cursor is invalid")
+			}
+			c.scopeCursors[nativeScopeCursorKey(clientID, scope)] = cursor
+		}
+	case "rebuild/request-page":
+		scope := nativeMapString(request, "scope")
+		if more, _ := response["has_more"].(bool); more {
+			cursor, ok := response["cursor"].(string)
+			if !ok || cursor == "" {
+				return errors.New("native rebuild continuation response is invalid")
+			}
+			c.rebuildCursors[nativeScopeCursorKey(clientID, scope)] = cursor
+		} else if cursor, ok := response["final_scope_cursor"].(string); ok && cursor != "" {
+			c.scopeCursors[nativeScopeCursorKey(clientID, scope)] = cursor
+			delete(c.rebuildCursors, nativeScopeCursorKey(clientID, scope))
+		}
+	}
+	return nil
+}
+
+// ProcessStep executes one server process operation or returns a precise boundary error.
+func (c *NativeController) ProcessStep(ctx context.Context, clientKey *string, operation scenarios.Operation) (NativeStepObservation, error) {
+	if err := c.context(ctx); err != nil {
+		return NativeStepObservation{}, err
+	}
+	if clientKey != nil {
+		return NativeStepObservation{}, errors.New("native controller cannot execute a client process operation")
+	}
+	if err := scenarios.ValidateOperation(operation); err != nil {
+		return NativeStepObservation{}, fmt.Errorf("native controller process operation is invalid: %w", err)
+	}
+	switch scenarios.OperationKey(operation) {
+	case "process/materialize-source-transaction":
+		return c.materializeSourceTransaction(ctx, operation)
+	case "process/acknowledge-contiguous-prefix":
+		return c.acknowledgeContiguousPrefix(ctx, operation)
+	case "process/repair-and-retry-source-transaction":
+		retried, err := c.harness.Operator().RetryWALPoison(ctx)
+		if err != nil {
+			return NativeStepObservation{}, err
+		}
+		if !retried {
+			return NativeStepObservation{}, errors.New("native WAL poison retry was not accepted")
+		}
+		return nativeSuccess(), nil
+	case "process/restart-wal-worker":
+		if err := c.harness.RestartPostgres(ctx); err != nil {
+			return NativeStepObservation{}, err
+		}
+		return nativeSuccess(), nil
+	case "process/response-loss":
+		return NativeStepObservation{}, errors.New("native controller cannot record client response loss because ProcessStep omits the transport handle")
+	case "process/restart-client":
+		return NativeStepObservation{}, errors.New("native controller cannot restart a client process")
+	default:
+		return NativeStepObservation{}, nativeUnsupported("process", operation)
+	}
+}
+
+// PauseWALMaterialization holds committed source transactions outside pull visibility.
+func (c *NativeController) PauseWALMaterialization(ctx context.Context) (func(context.Context) error, error) {
+	if err := c.context(ctx); err != nil {
+		return nil, err
+	}
+	gate, err := c.harness.acquireWALWorkerGate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return gate.release, nil
+}
+
+func (c *NativeController) materializeSourceTransaction(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
+	stream, commit, err := nativeProcessTransactionIdentity(operation.Payload)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	key := nativeTransactionKey(stream, commit)
+	c.mu.Lock()
+	transaction := c.transactions[key]
+	if transaction == nil {
+		c.mu.Unlock()
+		return NativeStepObservation{}, errors.New("native source transaction was not committed through this controller")
+	}
+	for _, other := range c.transactions {
+		if other.AuthoredStream != stream || other.Materialized {
+			continue
+		}
+		order, valid := compareNativeLSN(other.AuthoredCommitLSN, commit)
+		if !valid {
+			c.mu.Unlock()
+			return NativeStepObservation{}, errors.New("native source transaction position is invalid")
+		}
+		if order < 0 {
+			code := "source_transaction_predecessor_pending"
+			c.mu.Unlock()
+			return NativeStepObservation{Disposition: "error", ErrorCode: &code}, nil
+		}
+	}
+	c.mu.Unlock()
+
+	walDeadline, cancelWAL := context.WithTimeout(ctx, c.waitTimeout)
+	var resolveErr error
+	for {
+		resolveErr = c.resolveRuntimeTransaction(walDeadline, transaction)
+		if resolveErr == nil {
+			break
+		}
+		if err := waitNativePoll(walDeadline); err != nil {
+			cancelWAL()
+			return NativeStepObservation{}, fmt.Errorf("native source transaction did not become WAL-materialized: %w", resolveErr)
+		}
+	}
+	cancelWAL()
+	if transaction.ApplicationPush {
+		applicationDeadline, cancelApplication := context.WithTimeout(ctx, c.waitTimeout)
+		defer cancelApplication()
+		for {
+			resolveErr = c.resolveApplicationPushRecords(applicationDeadline, transaction)
+			if resolveErr == nil {
+				break
+			}
+			if err := waitNativePoll(applicationDeadline); err != nil {
+				return NativeStepObservation{}, fmt.Errorf("native application push records did not resolve: %w", resolveErr)
+			}
+		}
+	}
+	if err := c.validateRuntimeTransactionOrder(ctx, transaction); err != nil {
+		return NativeStepObservation{}, err
+	}
+	c.mu.Lock()
+	transaction.Materialized = true
+	if transaction.ApplicationPush {
+		for _, event := range transaction.Events {
+			if event.Dependency != nil {
+				continue
+			}
+			recordKey := nativeRecordKey(event.Table.AuthoredID, nativeCanonicalRecordKeyValue(event))
+			if event.After == nil || event.After.Deleted {
+				delete(c.records, recordKey)
+				continue
+			}
+			c.records[recordKey] = &nativeRecordBinding{
+				Table:           event.Table,
+				RecordID:        event.RecordID,
+				RuntimeRecordID: event.RuntimeRecordID,
+				Image:           *event.After,
+				AuthoredScopes:  append([]string(nil), event.AuthoredScopes...),
+			}
+		}
+	}
+	c.mu.Unlock()
+	return nativeSuccess(), nil
+}
+
+func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
+	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	type pushIdentity struct {
+		mutationID string
+		batchID    string
+		ordinal    int
+		tableID    string
+		primaryKey json.RawMessage
+		operation  string
+		accepted   bool
+	}
+	// The server records a rejected mutation with its identity and its
+	// rejection code. Only an accepted mutation materializes a row, so read
+	// the identities first and validate materialization for accepted
+	// mutations alone.
+	rows, err := database.QueryContext(ctx, `
+		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value, operation,
+		       rejection_code IS NULL
+		FROM synchro.sync_push_mutations
+		WHERE user_id = $1 AND client_id = $2
+		ORDER BY first_batch_id, request_ordinal`, transaction.AuthoredUserID, transaction.AuthoredClientID)
+	if err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	defer rows.Close()
+	byBatch := make(map[string][]pushIdentity)
+	for rows.Next() {
+		var value pushIdentity
+		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey, &value.operation, &value.accepted); err != nil {
+			return errors.New("scan native application push identity failed")
+		}
+		byBatch[value.batchID] = append(byBatch[value.batchID], value)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	var runtimeBatchID string
+	var runtimeMutationIDs []string
+	var acceptedEvents []bool
+	for batchID, values := range byBatch {
+		if len(values) != len(transaction.Events) {
+			continue
+		}
+		matches := true
+		mutations := make([]string, len(values))
+		accepted := make([]bool, len(values))
+		for index, value := range values {
+			event := transaction.Events[index]
+			runtimePrimary, marshalErr := json.Marshal(event.RuntimeRecordID)
+			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || value.operation != event.Operation || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
+				matches = false
+				break
+			}
+			mutations[index] = value.mutationID
+			accepted[index] = value.accepted
+		}
+		if !matches {
+			continue
+		}
+		if runtimeBatchID != "" {
+			return errors.New("native application push identity binding is ambiguous")
+		}
+		runtimeBatchID = batchID
+		runtimeMutationIDs = mutations
+		acceptedEvents = accepted
+	}
+	if runtimeBatchID == "" {
+		return errors.New("native application push identity binding is absent")
+	}
+	transaction.RuntimeBatchID = runtimeBatchID
+	transaction.RuntimeMutationIDs = runtimeMutationIDs
+	for index := range transaction.Events {
+		if index >= len(acceptedEvents) || !acceptedEvents[index] {
+			continue
+		}
+		event := &transaction.Events[index]
+		var rowData []byte
+		var version, checksum string
+		var deleted bool
+		err := database.QueryRowContext(ctx, `
+			SELECT captured.row_data, captured.row_version::text, encode(captured.checksum, 'hex'), captured.deleted
+			FROM synchro.sync_captured_rows captured
+			JOIN synchro.sync_registry registry
+			  ON registry.registry_generation = captured.registry_generation
+			 AND registry.relation_id = captured.relation_id
+			WHERE registry.table_name = $1 AND captured.record_id = $2`, event.Table.RuntimeName, event.RuntimeRecordID).Scan(&rowData, &version, &checksum, &deleted)
+		if err != nil || deleted != (event.Operation == "delete") || !diagnosticUUIDPattern.MatchString(version) || len(checksum) != 64 {
+			return errors.New("native application push row is not materialized")
+		}
+		if event.Operation == "delete" {
+			if event.Before == nil || event.After != nil {
+				return errors.New("native application push delete binding is invalid")
+			}
+			record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.Before}
+			if err := validateNativeRuntimeRow(record, rowData); err != nil {
+				return err
+			}
+			continue
+		}
+		record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.After}
+		if err := validateNativeRuntimeRow(record, rowData); err != nil {
+			return err
+		}
+		event.After.Version = version
+		event.After.Checksum = checksum
+	}
+	// Record bindings are registered when a source transaction materializes. A
+	// scenario that accepts a push without materializing still needs them, or a
+	// primary-key alias for the pushed row has no runtime binding.
+	for index, event := range transaction.Events {
+		if index >= len(acceptedEvents) || !acceptedEvents[index] || event.Dependency != nil || event.After == nil {
+			continue
+		}
+		recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
+		if _, bound := c.records[recordKey]; bound {
+			continue
+		}
+		c.records[recordKey] = &nativeRecordBinding{
+			Table:           event.Table,
+			RecordID:        event.RecordID,
+			RuntimeRecordID: event.RuntimeRecordID,
+			Image:           *event.After,
+			AuthoredScopes:  append([]string(nil), event.AuthoredScopes...),
+		}
+	}
+	return nil
+}
+
+func nativeProcessTransactionIdentity(raw json.RawMessage) (string, string, error) {
+	var payload struct {
+		StreamGeneration string `json:"stream_generation"`
+		CommitLSN        string `json:"commit_lsn"`
+	}
+	if err := jsonstrict.Decode(raw, &payload); err != nil || payload.StreamGeneration == "" || payload.CommitLSN == "" {
+		return "", "", errors.New("native process transaction identity is invalid")
+	}
+	return payload.StreamGeneration, payload.CommitLSN, nil
+}
+
+func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, binding *nativeTransactionBinding) error {
+	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	if len(binding.Events) == 0 {
+		return resolveNativeEmptyRuntimeTransaction(ctx, database, binding)
+	}
+	type runtimeIdentity struct {
+		stream   string
+		commit   string
+		end      string
+		registry int64
+		ordinal  uint64
+	}
+	identities := make([]runtimeIdentity, 0, len(binding.Events))
+	for _, event := range binding.Events {
+		var identity runtimeIdentity
+		var ordinal int64
+		var err error
+		if event.Dependency != nil {
+			image := event.After
+			if image == nil {
+				image = event.Before
+			}
+			captureKey := nativeCaptureDependencyKey(*image)
+			err = database.QueryRowContext(ctx, `
+				SELECT event.stream_generation, event.commit_lsn::text, transaction.end_lsn::text,
+				       transaction.registry_generation, event.event_ordinal
+				FROM synchro.sync_wal_events event
+				JOIN synchro.sync_wal_transactions transaction
+				  ON transaction.stream_generation = event.stream_generation
+				 AND transaction.commit_lsn = event.commit_lsn
+				JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
+				WHERE event.physical_relation = $1
+				  AND event.operation = $2
+				  AND (fence.new_capture_key = $3::jsonb OR fence.old_capture_key = $3::jsonb)
+				ORDER BY event.commit_lsn DESC
+				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey).Scan(
+				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
+			)
+		} else {
+			err = database.QueryRowContext(ctx, `
+				SELECT event.stream_generation, event.commit_lsn::text, transaction.end_lsn::text,
+				       transaction.registry_generation, event.event_ordinal
+				FROM synchro.sync_wal_events event
+				JOIN synchro.sync_wal_transactions transaction
+				  ON transaction.stream_generation = event.stream_generation
+				 AND transaction.commit_lsn = event.commit_lsn
+				JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
+				WHERE event.physical_relation = $1
+				  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
+				  AND event.operation = $3
+				ORDER BY event.commit_lsn DESC
+				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation).Scan(
+				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
+			)
+		}
+		if err != nil || ordinal < 0 {
+			identifier := event.RuntimeRecordID
+			if event.Dependency != nil {
+				image := event.After
+				if image == nil {
+					image = event.Before
+				}
+				identifier = nativeCaptureDependencyKey(*image)
+			}
+			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s; emitted %s", event.Relation, event.PhysicalOperation, identifier, describeNativeRelationEvents(ctx, database, event.Table.RuntimeName, event.Dependency))
+		}
+		identity.ordinal = uint64(ordinal)
+		identities = append(identities, identity)
+	}
+	first := identities[0]
+	ordinals := make([]uint64, len(identities))
+	for index, identity := range identities {
+		if identity.stream != first.stream || identity.commit != first.commit || identity.end != first.end || identity.registry != first.registry {
+			return errors.New("native authored transaction spans more than one runtime WAL transaction")
+		}
+		ordinals[index] = identity.ordinal
+	}
+	for index := 1; index < len(ordinals); index++ {
+		if ordinals[index] <= ordinals[index-1] {
+			return errors.New("native authored event order does not match runtime WAL order")
+		}
+	}
+	binding.RuntimeStream = first.stream
+	binding.RuntimeCommitLSN = first.commit
+	binding.RuntimeEndLSN = first.end
+	binding.RuntimeRegistry = first.registry
+	binding.RuntimeEventOrdinals = ordinals
+	return nil
+}
+
+func resolveNativeEmptyRuntimeTransaction(ctx context.Context, database *sql.DB, binding *nativeTransactionBinding) error {
+	if binding.SourceXID == 0 {
+		return errors.New("native empty source transaction has no source transaction ID")
+	}
+	sourceXID := fmt.Sprintf("%d", binding.SourceXID)
+	var count int
+	if err := database.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM synchro.sync_wal_transactions
+		WHERE source_xid = $1::xid AND event_count = 0`, sourceXID).Scan(&count); err != nil || count != 1 {
+		return errors.New("native empty source transaction binding is unavailable")
+	}
+	if err := database.QueryRowContext(ctx, `
+		SELECT stream_generation, commit_lsn::text, end_lsn::text, registry_generation
+		FROM synchro.sync_wal_transactions
+		WHERE source_xid = $1::xid AND event_count = 0`, sourceXID).Scan(
+		&binding.RuntimeStream, &binding.RuntimeCommitLSN, &binding.RuntimeEndLSN, &binding.RuntimeRegistry,
+	); err != nil || binding.RuntimeStream == "" || binding.RuntimeCommitLSN == "" || binding.RuntimeEndLSN == "" || binding.RuntimeRegistry <= 0 {
+		return errors.New("native empty source transaction binding is invalid")
+	}
+	binding.RuntimeEventOrdinals = nil
+	return nil
+}
+
+func (c *NativeController) validateRuntimeTransactionOrder(ctx context.Context, current *nativeTransactionBinding) error {
+	c.mu.Lock()
+	others := make([]*nativeTransactionBinding, 0, len(c.transactions))
+	for _, other := range c.transactions {
+		if other != current && other.Materialized && other.AuthoredStream == current.AuthoredStream {
+			others = append(others, other)
+		}
+	}
+	c.mu.Unlock()
+	for _, other := range others {
+		authoredOrder, authoredValid := compareNativeLSN(other.AuthoredCommitLSN, current.AuthoredCommitLSN)
+		runtimeOrder, runtimeValid := compareNativeLSN(other.RuntimeCommitLSN, current.RuntimeCommitLSN)
+		if !authoredValid || !runtimeValid {
+			return errors.New("native WAL commit position is invalid")
+		}
+		if authoredOrder != 0 && runtimeOrder != 0 && authoredOrder != runtimeOrder {
+			return errors.New("authored WAL commit order does not match runtime commit order")
+		}
+	}
+	_ = ctx
+	return nil
+}
+
+func (c *NativeController) acknowledgeContiguousPrefix(ctx context.Context, operation scenarios.Operation) (NativeStepObservation, error) {
+	var payload struct {
+		StreamGeneration string `json:"stream_generation"`
+	}
+	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || payload.StreamGeneration == "" {
+		return NativeStepObservation{}, errors.New("native acknowledgement stream identity is invalid")
+	}
+	c.mu.Lock()
+	var latest *nativeTransactionBinding
+	for _, transaction := range c.transactions {
+		if transaction.AuthoredStream != payload.StreamGeneration || !transaction.Materialized {
+			continue
+		}
+		if latest == nil {
+			latest = transaction
+			continue
+		}
+		order, valid := compareNativeLSN(latest.AuthoredEndLSN, transaction.AuthoredEndLSN)
+		if !valid {
+			c.mu.Unlock()
+			return NativeStepObservation{}, errors.New("native acknowledgement position is invalid")
+		}
+		if order < 0 {
+			latest = transaction
+		}
+	}
+	c.mu.Unlock()
+	if latest == nil {
+		return NativeStepObservation{}, errors.New("native acknowledgement has no materialized transaction")
+	}
+	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
+	defer cancel()
+	for {
+		database, err := c.harness.openDatabase(deadline, c.harness.names.Database, c.harness.env.Admin, false)
+		if err == nil {
+			var acknowledged bool
+			err = database.QueryRowContext(deadline, `
+				SELECT acknowledged_end_lsn >= $1::pg_lsn
+				FROM synchro.sync_wal_progress WHERE singleton`, latest.RuntimeEndLSN).Scan(&acknowledged)
+			_ = database.Close()
+			if err == nil && acknowledged {
+				return nativeSuccess(), nil
+			}
+		}
+		if err := waitNativePoll(deadline); err != nil {
+			return NativeStepObservation{}, errors.New("native WAL acknowledgement did not reach the authored prefix")
+		}
+	}
+}
+
+// Capture returns one consistent server-state projection.
+func (c *NativeController) Capture(ctx context.Context, clientKeys, sources []string) ([]NativeCaptureFacts, error) {
+	if err := c.context(ctx); err != nil {
+		return nil, err
+	}
+	if len(sources) != 1 || sources[0] != "server-state" {
+		return nil, errors.New("native controller capture supports only one server-state source")
+	}
+	// Only a materialized source transaction resolves application push
+	// identities today. A rejected push never materializes, so resolve any
+	// pending binding here before capturing server state.
+	if err := c.resolvePendingApplicationPushRecords(ctx); err != nil {
+		return nil, fmt.Errorf("resolve native application push identities for capture: %w", err)
+	}
+	facts, err := c.captureServerState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []NativeCaptureFacts{{Source: "server-state", StateFacts: facts}}, nil
+}
+
+// resolvePendingApplicationPushRecords binds the runtime identities of each
+// application push that has none. A push the server rejected materializes no
+// row, so the source transaction path never resolves it.
+func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Context) error {
+	c.mu.Lock()
+	pending := make([]*nativeTransactionBinding, 0, len(c.transactions))
+	for _, transaction := range c.transactions {
+		if transaction.ApplicationPush && transaction.RuntimeBatchID == "" {
+			pending = append(pending, transaction)
+		}
+	}
+	c.mu.Unlock()
+	for _, transaction := range pending {
+		if err := c.resolveApplicationPushRecords(ctx, transaction); err != nil {
+			return fmt.Errorf("resolve pending native application push records: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *NativeController) captureServerState(ctx context.Context) (scenarios.StateFacts, error) {
+	c.mu.Lock()
+	installation := c.installation
+	transactions := make([]*nativeTransactionBinding, 0, len(c.transactions))
+	for _, value := range c.transactions {
+		copy := *value
+		copy.AuthoredMutationIDs = append([]string(nil), value.AuthoredMutationIDs...)
+		copy.Events = append([]nativeEventBinding(nil), value.Events...)
+		copy.RuntimeMutationIDs = append([]string(nil), value.RuntimeMutationIDs...)
+		copy.RuntimeEventOrdinals = append([]uint64(nil), value.RuntimeEventOrdinals...)
+		transactions = append(transactions, &copy)
+	}
+	records := make([]*nativeRecordBinding, 0, len(c.records))
+	for _, value := range c.records {
+		copy := *value
+		copy.AuthoredScopes = append([]string(nil), value.AuthoredScopes...)
+		records = append(records, &copy)
+	}
+	c.mu.Unlock()
+	if installation == nil {
+		return scenarios.StateFacts{}, errors.New("native controller contract is not installed")
+	}
+	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if err != nil {
+		return scenarios.StateFacts{}, errors.New("open native server-state capture failed")
+	}
+	defer database.Close()
+	tx, err := database.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return scenarios.StateFacts{}, errors.New("begin native server-state capture failed")
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "SET TRANSACTION READ ONLY"); err != nil {
+		return scenarios.StateFacts{}, errors.New("set native server-state capture read-only failed")
+	}
+
+	var facts scenarios.StateFacts
+	if err := captureNativeRegistryAndStream(ctx, tx, installation, transactions, &facts); err != nil {
+		return scenarios.StateFacts{}, err
+	}
+	if err := captureNativeTransactions(ctx, tx, installation, transactions, &facts); err != nil {
+		return scenarios.StateFacts{}, err
+	}
+	if err := captureNativeRowsAndScopes(ctx, tx, installation, transactions, records, &facts); err != nil {
+		return scenarios.StateFacts{}, err
+	}
+	if err := captureNativeCountsAndRebuilds(ctx, tx, installation, &facts); err != nil {
+		return scenarios.StateFacts{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return scenarios.StateFacts{}, errors.New("commit native server-state capture failed")
+	}
+	return facts, nil
+}
+
+func captureNativeRegistryAndStream(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, facts *scenarios.StateFacts) error {
+	var generation int64
+	var runtimeStream string
+	var materializedCommit, acknowledgedEnd sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT generation.generation, progress.stream_generation,
+		       progress.materialized_commit_lsn::text, progress.acknowledged_end_lsn::text
+		FROM synchro.sync_registry_generations generation
+		CROSS JOIN synchro.sync_wal_progress progress
+		WHERE generation.state = 'active' AND generation.validated AND progress.singleton`).Scan(
+		&generation, &runtimeStream, &materializedCommit, &acknowledgedEnd,
+	); err != nil {
+		return errors.New("read native registry and stream state failed")
+	}
+	if generation != installation.runtimeRegistryGeneration || runtimeStream == "" {
+		return errors.New("native runtime registry or stream binding changed")
+	}
+	facts.Registry = &scenarios.RegistryFact{CurrentGeneration: installation.authoredRegistryGeneration}
+	latest, err := latestNativeTransaction(transactions)
+	if err != nil {
+		return err
+	}
+	stream := scenarios.StreamFact{MaterializedStreamGeneration: installation.authoredStream, MaterializedKind: "generation_start"}
+	if latest != nil {
+		order, valid := compareNativeLSN(materializedCommit.String, latest.RuntimeCommitLSN)
+		if !materializedCommit.Valid || !valid || order < 0 {
+			return errors.New("native runtime materialized position is behind the authored binding")
+		}
+		stream.MaterializedKind = "transaction_end"
+		stream.MaterializedCommitLSN = latest.AuthoredCommitLSN
+		if acknowledgedEnd.Valid {
+			order, valid := compareNativeLSN(acknowledgedEnd.String, latest.RuntimeEndLSN)
+			if !valid {
+				return errors.New("native runtime acknowledgement position is invalid")
+			}
+			if order >= 0 {
+				stream.AcknowledgedEndLSN = latest.AuthoredEndLSN
+			}
+		}
+	}
+	facts.Stream = &stream
+	return nil
+}
+
+func captureNativeTransactions(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, facts *scenarios.StateFacts) error {
+	for _, binding := range transactions {
+		if !binding.Materialized {
+			continue
+		}
+		var eventCount int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT event_count FROM synchro.sync_wal_transactions
+			WHERE stream_generation = $1 AND commit_lsn = $2::pg_lsn AND end_lsn = $3::pg_lsn
+			  AND registry_generation = $4`, binding.RuntimeStream, binding.RuntimeCommitLSN, binding.RuntimeEndLSN, binding.RuntimeRegistry).Scan(&eventCount); err != nil || eventCount != int64(len(binding.Events)) {
+			return errors.New("native runtime WAL transaction no longer matches its authored binding")
+		}
+		ordinals := make([]uint64, len(binding.Events))
+		for index, event := range binding.Events {
+			ordinals[index] = event.AuthoredOrdinal
+		}
+		facts.Transactions = append(facts.Transactions, scenarios.TransactionFact{
+			StreamGeneration:   binding.AuthoredStream,
+			CommitLSN:          binding.AuthoredCommitLSN,
+			EndLSN:             binding.AuthoredEndLSN,
+			RegistryGeneration: installation.authoredRegistryGeneration,
+			Lifecycle:          "materialized",
+			EventOrdinals:      ordinals,
+		})
+	}
+	count := uint64(len(facts.Transactions))
+	facts.TransactionCount = &count
+	return nil
+}
+
+func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, records []*nativeRecordBinding, facts *scenarios.StateFacts) error {
+	scopeRows := make(map[string]uint64)
+	scopeVersions := make(map[string][]string)
+	facts.RowScopeEdges = make([]scenarios.RowScopeEdgeFact, 0)
+	var manifest vectors.Manifest
+	if len(records) != 0 {
+		var rawManifest []byte
+		if err := tx.QueryRowContext(ctx, `
+			SELECT (canonical_manifest_body::jsonb || jsonb_build_object('schema_hash', schema_hash))::text
+			FROM synchro.sync_schema_manifest
+			WHERE schema_version = $1 AND schema_hash = $2`,
+			installation.currentRuntimeSchema.Version, installation.currentRuntimeSchema.Hash,
+		).Scan(&rawManifest); err != nil {
+			return errors.New("read native captured-row schema failed")
+		}
+		var err error
+		manifest, err = vectors.ParseManifest(rawManifest)
+		if err != nil {
+			return errors.New("native captured-row schema is invalid")
+		}
+	}
+	for _, record := range records {
+		var rowData []byte
+		var runtimeVersion, runtimeChecksum string
+		var deleted bool
+		err := tx.QueryRowContext(ctx, `
+			SELECT captured.row_data, captured.row_version::text, encode(captured.checksum, 'hex'), captured.deleted
+			FROM synchro.sync_captured_rows captured
+			JOIN synchro.sync_registry registry
+			  ON registry.registry_generation = captured.registry_generation
+			 AND registry.relation_id = captured.relation_id
+			WHERE registry.table_name = $1 AND captured.record_id = $2`, record.Table.RuntimeName, record.RuntimeRecordID).Scan(&rowData, &runtimeVersion, &runtimeChecksum, &deleted)
+		if err != nil || deleted || !diagnosticUUIDPattern.MatchString(runtimeVersion) || len(runtimeChecksum) != 64 {
+			return errors.New("native runtime captured row is absent or invalid")
+		}
+		if err := validateNativeRuntimeRow(record, rowData); err != nil {
+			return err
+		}
+		var fields map[string]json.RawMessage
+		if err := jsonstrict.Decode(rowData, &fields); err != nil {
+			return errors.New("decode native captured-row digest input failed")
+		}
+		row := vectors.Row{PK: fields[record.Table.RuntimePrimary]}
+		for fieldID, value := range fields {
+			row.Fields = append(row.Fields, vectors.RowField{FieldID: fieldID, Value: value})
+		}
+		digest, err := vectors.RowDigest(manifest, record.Table.RuntimeID, row, runtimeVersion)
+		if err != nil || hex.EncodeToString(digest[:]) != runtimeChecksum {
+			return errors.New("native runtime captured row checksum is invalid")
+		}
+		facts.Rows = append(facts.Rows, scenarios.RowFact{
+			TableID:           record.Table.AuthoredID,
+			CanonicalWireJSON: record.Image.CanonicalWireJSON,
+			Version:           record.Image.Version,
+			Checksum:          record.Image.Checksum,
+		})
+		if installation.runtimeRowVersions == nil {
+			installation.runtimeRowVersions = make(map[string]string)
+		}
+		installation.runtimeRowVersions[record.Image.CanonicalWireJSON] = runtimeVersion
+		observedScopes, err := captureNativeRowScopeEdges(ctx, tx, installation, record, facts)
+		if err != nil {
+			return err
+		}
+		for authoredScope := range observedScopes {
+			scopeRows[authoredScope]++
+			scopeVersions[authoredScope] = append(scopeVersions[authoredScope], record.Image.Version)
+		}
+	}
+	for authoredScope := range installation.scopes {
+		versions := append([]string{}, scopeVersions[authoredScope]...)
+		sort.Strings(versions)
+		facts.Scopes = append(facts.Scopes, scenarios.ScopeFact{
+			ScopeID:              authoredScope,
+			MembershipGeneration: 1,
+			Cardinality:          scopeRows[authoredScope],
+			EffectVersions:       versions,
+		})
+	}
+	rowCount := uint64(len(facts.Rows))
+	scopeCount := uint64(len(facts.Scopes))
+	facts.RowCount = &rowCount
+	facts.ScopeCount = &scopeCount
+	_ = transactions
+	return nil
+}
+
+func captureNativeRowScopeEdges(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, record *nativeRecordBinding, facts *scenarios.StateFacts) (map[string]struct{}, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT bucket_id FROM synchro.sync_bucket_edges
+		WHERE table_name = $1 AND record_id = $2
+		ORDER BY bucket_id`, record.Table.RuntimeName, record.RuntimeRecordID)
+	if err != nil {
+		return nil, errors.New("read native runtime row scope edges failed")
+	}
+	defer rows.Close()
+	runtimeScopes := make([]string, 0)
+	for rows.Next() {
+		var runtimeScope string
+		if err := rows.Scan(&runtimeScope); err != nil {
+			return nil, errors.New("scan native runtime row scope edge failed")
+		}
+		runtimeScopes = append(runtimeScopes, runtimeScope)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("read native runtime row scope edges failed")
+	}
+	observed, edges, err := mapNativeRowScopeEdges(runtimeScopes, installation.scopes, installation.runtimeScopes, record)
+	if err != nil {
+		return nil, err
+	}
+	facts.RowScopeEdges = append(facts.RowScopeEdges, edges...)
+	return observed, nil
+}
+
+func mapNativeRowScopeEdges(runtimeScopeIDs []string, scopes, runtimeScopes map[string]string, record *nativeRecordBinding) (map[string]struct{}, []scenarios.RowScopeEdgeFact, error) {
+	for _, authoredScope := range record.AuthoredScopes {
+		if _, found := scopes[authoredScope]; !found {
+			return nil, nil, errors.New("native captured row scope has no runtime binding")
+		}
+	}
+	observed := make(map[string]struct{}, len(runtimeScopeIDs))
+	edges := make([]scenarios.RowScopeEdgeFact, 0, len(runtimeScopeIDs))
+	for _, runtimeScope := range runtimeScopeIDs {
+		authoredScope, found := runtimeScopes[runtimeScope]
+		if !found {
+			return nil, nil, errors.New("native runtime row scope edge has no authored binding")
+		}
+		if _, duplicate := observed[authoredScope]; duplicate {
+			return nil, nil, errors.New("native runtime row scope edge is duplicated")
+		}
+		forwardRuntimeScope, found := scopes[authoredScope]
+		if !found || forwardRuntimeScope != runtimeScope {
+			return nil, nil, errors.New("native runtime row scope edge does not match its forward binding")
+		}
+		observed[authoredScope] = struct{}{}
+		edges = append(edges, scenarios.RowScopeEdgeFact{
+			TableID:           record.Table.AuthoredID,
+			CanonicalWireJSON: record.Image.CanonicalWireJSON,
+			ScopeID:           authoredScope,
+		})
+	}
+	for _, authoredScope := range record.AuthoredScopes {
+		if _, found := observed[authoredScope]; !found {
+			return nil, nil, errors.New("native runtime scope edge does not match its authored binding")
+		}
+	}
+	return observed, edges, nil
+}
+
+func validateNativeRuntimeRow(record *nativeRecordBinding, raw []byte) error {
+	var values map[string]json.RawMessage
+	if err := jsonstrict.Decode(raw, &values); err != nil {
+		return errors.New("decode native runtime captured row failed")
+	}
+	for authoredField, expected := range record.Image.Fields {
+		runtimeField, found := record.Table.Fields[authoredField]
+		if !found {
+			return errors.New("native runtime captured field binding is absent")
+		}
+		actual, found := values[runtimeField]
+		if !found {
+			return errors.New("native runtime captured field is absent")
+		}
+		if authoredField == record.Table.AuthoredPrimary {
+			expected, _ = json.Marshal(record.RuntimeRecordID)
+		}
+		var authoredValue any
+		decoder := json.NewDecoder(bytes.NewReader(expected))
+		decoder.UseNumber()
+		if err := decoder.Decode(&authoredValue); err != nil {
+			return errors.New("decode native runtime authored field value failed")
+		}
+		runtimeValue, err := nativeRuntimeFieldValue(record.Table, authoredField, authoredValue)
+		if err != nil {
+			return err
+		}
+		expected, err = json.Marshal(runtimeValue)
+		if err != nil {
+			return errors.New("encode native runtime expected field value failed")
+		}
+		if !nativeJSONEqual(actual, expected) {
+			tableID := record.Table.AuthoredID
+			if len(tableID) > 128 {
+				tableID = "sha256:" + nativeCanonicalJSONFingerprint([]byte(tableID))
+			}
+			fieldID := authoredField
+			if len(fieldID) > 128 {
+				fieldID = "sha256:" + nativeCanonicalJSONFingerprint([]byte(fieldID))
+			}
+			runtimeFieldID := runtimeField
+			if len(runtimeFieldID) > 128 {
+				runtimeFieldID = "sha256:" + nativeCanonicalJSONFingerprint([]byte(runtimeFieldID))
+			}
+			return fmt.Errorf("native runtime captured field differs from the authored source image: table=%q field=%q runtime_field=%q expected_sha256=%s actual_sha256=%s", tableID, fieldID, runtimeFieldID, nativeCanonicalJSONFingerprint(expected), nativeCanonicalJSONFingerprint(actual))
+		}
+	}
+	return nil
+}
+
+func captureNativeCountsAndRebuilds(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, facts *scenarios.StateFacts) error {
+	var batchCount, mutationCount uint64
+	for _, client := range installation.clients {
+		var batches, mutations uint64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT (SELECT count(*) FROM synchro.sync_push_batches WHERE user_id = $1 AND client_id = $2),
+			       (SELECT count(*) FROM synchro.sync_push_mutations WHERE user_id = $1 AND client_id = $2)`, client.UserID, client.ClientID).Scan(&batches, &mutations); err != nil {
+			return errors.New("read native push ledger counts failed")
+		}
+		batchCount += batches
+		mutationCount += mutations
+	}
+	facts.BatchCount = &batchCount
+	facts.MutationCount = &mutationCount
+	if err := captureNativeMutationOutcomeIdentities(ctx, tx, installation, facts); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT session.user_id, session.client_id, session.scope_id, session.rebuild_id::text,
+		       session.page_limit, session.staged_row_count,
+		       (SELECT count(*) FROM synchro.sync_rebuild_pages page
+		        WHERE page.session_id = session.session_id),
+		       COALESCE((SELECT max(page.next_row_ordinal + jsonb_array_length(page.response->'records') + 1)
+		                 FROM synchro.sync_rebuild_pages page
+		                 WHERE page.session_id = session.session_id), 1),
+		       EXISTS (SELECT 1 FROM synchro.sync_rebuild_pages page
+		               WHERE page.session_id = session.session_id
+		                 AND NULLIF(page.response->>'cursor', '') IS NOT NULL),
+		       EXISTS (SELECT 1 FROM synchro.sync_rebuild_pages page
+		               WHERE page.session_id = session.session_id
+		                 AND NULLIF(page.response->>'final_scope_cursor', '') IS NOT NULL),
+		       CASE WHEN expires_at <= now() THEN 'expired' ELSE 'staged' END
+		FROM synchro.sync_rebuild_sessions session
+		ORDER BY session.user_id, session.client_id, session.scope_id, session.rebuild_id`)
+	if err != nil {
+		return errors.New("read native rebuild state failed")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var value scenarios.RebuildFact
+		var runtimeScope string
+		if err := rows.Scan(&value.UserID, &value.ClientID, &runtimeScope, &value.RebuildID, &value.PageLimit, &value.StagedRowCount, &value.PageCount, &value.NextRowOrdinal, &value.HasContinuation, &value.HasFinalCursor, &value.Status); err != nil {
+			return errors.New("scan native rebuild state failed")
+		}
+		authoredScope, found := installation.runtimeScopes[runtimeScope]
+		if !found {
+			continue
+		}
+		value.ScopeID = authoredScope
+		facts.Rebuilds = append(facts.Rebuilds, value)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read native rebuild state failed")
+	}
+	rebuildCount := uint64(len(facts.Rebuilds))
+	facts.RebuildCount = &rebuildCount
+	return nil
+}
+
+func captureNativeMutationOutcomeIdentities(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, facts *scenarios.StateFacts) error {
+	facts.MutationOutcomes = make([]scenarios.MutationOutcomeIdentityFact, 0)
+	userIDs := make([]string, len(installation.clients))
+	clientIDs := make([]string, len(installation.clients))
+	for index, client := range installation.clients {
+		userIDs[index] = client.UserID
+		clientIDs[index] = client.ClientID
+	}
+	rows, err := tx.QueryContext(ctx, `
+		WITH requested_clients(user_id, client_id) AS (
+			SELECT DISTINCT user_id, client_id
+			FROM unnest($1::text[], $2::text[]) AS requested(user_id, client_id)
+		)
+		SELECT mutation.user_id, mutation.client_id, mutation.mutation_id::text
+		FROM synchro.sync_push_mutations mutation
+		JOIN requested_clients requested
+		  ON requested.user_id = mutation.user_id
+		 AND requested.client_id = mutation.client_id
+		ORDER BY mutation.user_id, mutation.client_id, mutation.mutation_id
+		LIMIT $3`, userIDs, clientIDs, nativeCaptureMaximumMutationOutcomes+1)
+	if err != nil {
+		return errors.New("read native push mutation outcome identities failed")
+	}
+	defer rows.Close()
+	identities := make([]nativeMutationOutcomeIdentity, 0)
+	for rows.Next() {
+		var value nativeMutationOutcomeIdentity
+		if err := rows.Scan(&value.UserID, &value.ClientID, &value.MutationID); err != nil {
+			return errors.New("scan native push mutation outcome identity failed")
+		}
+		identities = append(identities, value)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read native push mutation outcome identities failed")
+	}
+	outcomes, err := mapNativeMutationOutcomeIdentities(identities)
+	if err != nil {
+		return err
+	}
+	facts.MutationOutcomes = outcomes
+	return nil
+}
+
+type nativeMutationOutcomeIdentity struct {
+	UserID     string
+	ClientID   string
+	MutationID string
+}
+
+func mapNativeMutationOutcomeIdentities(identities []nativeMutationOutcomeIdentity) ([]scenarios.MutationOutcomeIdentityFact, error) {
+	if len(identities) > nativeCaptureMaximumMutationOutcomes {
+		return nil, errors.New("native push mutation outcome identity observation limit exceeded")
+	}
+	outcomes := make([]scenarios.MutationOutcomeIdentityFact, len(identities))
+	for index, identity := range identities {
+		outcomes[index] = scenarios.MutationOutcomeIdentityFact{
+			UserID:     identity.UserID,
+			ClientID:   identity.ClientID,
+			MutationID: identity.MutationID,
+		}
+	}
+	return outcomes, nil
+}
+
+// RestoreSharedState removes scenario-specific server configuration before reset.
+func (c *NativeController) RestoreSharedState(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("native controller restore context is required")
+	}
+	c.mu.Lock()
+	configured := c.crossScopeConfigured
+	if !configured {
+		c.mu.Unlock()
+		return nil
+	}
+	if err := c.harness.Operator().RestoreCrossScopeTable(ctx); err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("restore native cross-scope registration: %w", err)
+	}
+	c.crossScopeConfigured = false
+	c.mu.Unlock()
+	return nil
+}
+
+// Close closes the controller and optionally the owned black-box harness.
+func (c *NativeController) Close(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("native controller close context is required")
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.mu.Unlock()
+	// The cross-scope registration reconfigures a shared fixture table and
+	// registers a shared scope. It must not outlive the scenario that staged it.
+	if err := c.RestoreSharedState(ctx); err != nil {
+		_ = c.harness.Close(ctx)
+		return err
+	}
+	return c.harness.Close(ctx)
+}
+
+func (c *NativeController) context(ctx context.Context) error {
+	if c == nil || c.harness == nil {
+		return errors.New("native controller is unavailable")
+	}
+	if ctx == nil {
+		return errors.New("native controller context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return errors.New("native controller is closed")
+	}
+	return nil
+}
+
+func nativeUnsupported(boundary string, operation scenarios.Operation) error {
+	return fmt.Errorf("native controller %s operation %q is unsupported", boundary, scenarios.OperationKey(operation))
+}
+
+func nativeSuccess() NativeStepObservation {
+	return NativeStepObservation{Disposition: "success"}
+}
+
+func validNativeSchemaReference(value nativeSchemaReference, fresh bool) bool {
+	if fresh && value.Version == 0 && value.Hash == "" {
+		return true
+	}
+	if value.Version <= 0 || len(value.Hash) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value.Hash)
+	return err == nil && strings.ToLower(value.Hash) == value.Hash
+}
+
+func nativeSchemaKey(value nativeSchemaReference) string {
+	return fmt.Sprintf("%d\x00%s", value.Version, value.Hash)
+}
+
+func nativeSchemaFromMap(value map[string]any) (nativeSchemaReference, error) {
+	version, ok := nativeJSONInt64(value["version"])
+	if !ok {
+		return nativeSchemaReference{}, errors.New("native schema version is invalid")
+	}
+	hash, ok := value["hash"].(string)
+	if !ok {
+		return nativeSchemaReference{}, errors.New("native schema hash is invalid")
+	}
+	result := nativeSchemaReference{Version: version, Hash: hash}
+	if !validNativeSchemaReference(result, true) {
+		return nativeSchemaReference{}, errors.New("native schema reference is invalid")
+	}
+	return result, nil
+}
+
+func nativeJSONInt64(value any) (int64, bool) {
+	switch value := value.(type) {
+	case json.Number:
+		result, err := value.Int64()
+		return result, err == nil
+	case float64:
+		result := int64(value)
+		return result, float64(result) == value
+	case int64:
+		return value, true
+	default:
+		return 0, false
+	}
+}
+
+func nativeMapString(value map[string]any, name string) string {
+	result, _ := value[name].(string)
+	return result
+}
+
+func nativeAuthoredRecordID(canonical string) (string, error) {
+	var result string
+	if err := json.Unmarshal([]byte(canonical), &result); err != nil || result == "" {
+		return "", errors.New("native authored row identity is not a nonempty canonical string")
+	}
+	encoded, _ := json.Marshal(result)
+	if string(encoded) != canonical {
+		return "", errors.New("native authored row identity is not canonical")
+	}
+	return result, nil
+}
+
+func nativeRuntimeUUID(tableID, canonical string) string {
+	digest := nativeSHA256([]byte("synchro:native-runtime-row:v1\x00" + tableID + "\x00" + canonical))
+	digest[6] = digest[6]&0x0f | 0x40
+	digest[8] = digest[8]&0x3f | 0x80
+	encoded := hex.EncodeToString(digest[:16])
+	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
+}
+
+func nativeSHA256(data []byte) [32]byte {
+	return sha256.Sum256(data)
+}
+
+func nativeTransactionKey(stream, commit string) string {
+	return stream + "\x00" + commit
+}
+
+// nativeCanonicalRecordKeyValue returns the canonical wire value that keys one
+// record binding. A deleted event carries no after image, so it falls back to
+// the canonical encoding of its authored record identity.
+func nativeCanonicalRecordKeyValue(event nativeEventBinding) string {
+	if event.After != nil && event.After.CanonicalWireJSON != "" {
+		return event.After.CanonicalWireJSON
+	}
+	if event.Before != nil && event.Before.CanonicalWireJSON != "" {
+		return event.Before.CanonicalWireJSON
+	}
+	encoded, err := json.Marshal(event.RecordID)
+	if err != nil {
+		return event.RecordID
+	}
+	return string(encoded)
+}
+
+func nativeRecordKey(table, record string) string {
+	return table + "\x00" + record
+}
+
+func nativeScopeCursorKey(client, scope string) string {
+	return client + "\x00" + scope
+}
+
+func compareNativeLSN(left, right string) (int, bool) {
+	leftValue, leftOK := parseNativeLSN(left)
+	rightValue, rightOK := parseNativeLSN(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	return cmp.Compare(leftValue, rightValue), true
+}
+
+func parseNativeLSN(value string) (uint64, bool) {
+	if strings.Contains(value, "/") {
+		return observer.ParsePostgreSQLLSN(value)
+	}
+	result, err := strconv.ParseUint(value, 10, 64)
+	return result, err == nil
+}
+
+func latestNativeTransaction(values []*nativeTransactionBinding) (*nativeTransactionBinding, error) {
+	var latest *nativeTransactionBinding
+	for _, value := range values {
+		if !value.Materialized {
+			continue
+		}
+		if _, valid := parseNativeLSN(value.AuthoredCommitLSN); !valid {
+			return nil, errors.New("native materialized transaction position is invalid")
+		}
+		if latest == nil {
+			latest = value
+			continue
+		}
+		if order, _ := compareNativeLSN(latest.AuthoredCommitLSN, value.AuthoredCommitLSN); order < 0 {
+			latest = value
+		}
+	}
+	return latest, nil
+}
+
+func nativeJSONEqual(left, right []byte) bool {
+	var leftValue any
+	var rightValue any
+	leftDecoder := json.NewDecoder(bytes.NewReader(left))
+	leftDecoder.UseNumber()
+	rightDecoder := json.NewDecoder(bytes.NewReader(right))
+	rightDecoder.UseNumber()
+	return leftDecoder.Decode(&leftValue) == nil && rightDecoder.Decode(&rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
+}
+
+func nativeCanonicalJSONFingerprint(raw []byte) string {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) == nil {
+		if canonical, err := json.Marshal(value); err == nil {
+			raw = canonical
+		}
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func waitNativePoll(ctx context.Context) error {
+	timer := time.NewTimer(nativeControllerPollInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// describeNativeRelationEvents summarizes the WAL events recorded for one
+// physical relation. A binding failure reports only that its own identity did
+// not resolve, which cannot distinguish an absent event from a fence that the
+// resolution join discards.
+func describeNativeRelationEvents(ctx context.Context, database *sql.DB, relation string, dependency *nativeCaptureDependencyBinding) string {
+	if relation == "" && dependency != nil {
+		relation = dependency.RuntimeName
+	}
+	// The resolution deadline is exhausted when this runs, so the summary uses
+	// its own bounded context rather than the expired one.
+	_ = ctx
+	diagnostic, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows, err := database.QueryContext(diagnostic, `
+		SELECT event.operation,
+		       COALESCE(fence.new_record_id::text, fence.old_record_id::text, 'no-fence'),
+		       COALESCE(fence.new_capture_key::text, fence.old_capture_key::text, 'no-key')
+		FROM synchro.sync_wal_events event
+		LEFT JOIN synchro.sync_write_fences fence ON fence.fence_id = event.fence_id
+		WHERE event.physical_relation = $1
+		ORDER BY event.commit_lsn DESC, event.event_ordinal DESC
+		LIMIT 8`, relation)
+	if err != nil {
+		return "query failed: " + err.Error()
+	}
+	defer rows.Close()
+	entries := make([]string, 0, 8)
+	for rows.Next() {
+		var operation, record, key string
+		if err := rows.Scan(&operation, &record, &key); err != nil {
+			return "unavailable"
+		}
+		entries = append(entries, operation+":"+record+":"+key)
+	}
+	if rows.Err() != nil {
+		return "unavailable"
+	}
+	if len(entries) == 0 {
+		entries = append(entries, "no-events")
+	}
+	var sourceRows int64
+	var registry int64
+	if err := database.QueryRowContext(diagnostic, "SELECT count(*) FROM public."+quoteIdentifier(relation)).Scan(&sourceRows); err != nil {
+		sourceRows = -1
+	}
+	if err := database.QueryRowContext(diagnostic, "SELECT COALESCE(max(registry_generation), -1) FROM synchro.sync_wal_transactions").Scan(&registry); err != nil {
+		registry = -1
+	}
+	transactions := make([]string, 0, 8)
+	if rows, err := database.QueryContext(diagnostic, `
+		SELECT commit_lsn::text, event_count
+		FROM synchro.sync_wal_transactions
+		ORDER BY commit_lsn DESC
+		LIMIT 8`); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var lsn string
+			var count int64
+			if rows.Scan(&lsn, &count) != nil {
+				break
+			}
+			transactions = append(transactions, lsn+":"+strconv.FormatInt(count, 10))
+		}
+	}
+	poison := make([]string, 0, 4)
+	if rows, err := database.QueryContext(diagnostic, `
+		SELECT commit_lsn::text, failure_class, lifecycle
+		FROM synchro.sync_wal_poison
+		ORDER BY id DESC
+		LIMIT 4`); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var lsn, class, lifecycle string
+			if rows.Scan(&lsn, &class, &lifecycle) != nil {
+				break
+			}
+			poison = append(poison, lsn+":"+class+":"+lifecycle)
+		}
+	}
+	if len(poison) == 0 {
+		poison = append(poison, "none")
+	}
+	// Sample the worker over time. A worker that stays in starting never ran a
+	// poll cycle, because the poll loop heartbeats running or blocked.
+	samples := make([]string, 0, 6)
+	for attempt := 0; attempt < 6; attempt++ {
+		var state, workerLSN string
+		var workerRegistry, pid int64
+		if err := database.QueryRowContext(diagnostic, `
+			SELECT state, registry_generation, backend_pid, COALESCE(materialized_commit_lsn::text, 'none')
+			FROM synchro.sync_wal_worker_state
+			ORDER BY heartbeat_at DESC
+			LIMIT 1`).Scan(&state, &workerRegistry, &pid, &workerLSN); err != nil {
+			samples = append(samples, "unavailable")
+		} else {
+			samples = append(samples, fmt.Sprintf("%s/gen%d/pid%d/%s", state, workerRegistry, pid, workerLSN))
+		}
+		if attempt < 5 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	slots := make([]string, 0, 4)
+	if rows, err := database.QueryContext(diagnostic, `
+		SELECT slot_name, active, COALESCE(active_pid, 0), COALESCE(restart_lsn::text, 'none')
+		FROM pg_catalog.pg_replication_slots
+		LIMIT 4`); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name, lsn string
+			var active bool
+			var pid int64
+			if rows.Scan(&name, &active, &pid, &lsn) != nil {
+				break
+			}
+			slots = append(slots, fmt.Sprintf("%s/active=%t/pid%d/%s", name, active, pid, lsn))
+		}
+	}
+	if len(slots) == 0 {
+		slots = append(slots, "none")
+	}
+	return fmt.Sprintf("%s; source rows %d; max wal registry %d; transactions %s; poison %s; worker %s; slots %s", strings.Join(entries, " "), sourceRows, registry, strings.Join(transactions, " "), strings.Join(poison, " "), strings.Join(samples, " "), strings.Join(slots, " "))
+}
+
+// rebindSchemaAfterCompositionChange rebinds the current authored schema to the
+// manifest an activation publishes. A staged composition change mints a manifest
+// without an authored publish step, so the install-time binding would keep
+// naming the retired manifest.
+func (c *NativeController) rebindSchemaAfterCompositionChange(ctx context.Context) error {
+	c.mu.Lock()
+	pending := c.installation != nil && c.installation.pendingCompositionChange
+	c.mu.Unlock()
+	if !pending {
+		return nil
+	}
+	runtime, runtimeRegistry, err := c.waitForRuntimeSchemaChange(ctx)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.installation == nil {
+		return errors.New("native controller contract is not installed")
+	}
+	runtimeRef := nativeSchemaReference{Version: runtime.SchemaVersion, Hash: runtime.SchemaHash}
+	c.installation.runtimeSchemas[nativeSchemaKey(c.installation.currentAuthoredSchema)] = runtimeRef
+	c.installation.currentRuntimeSchema = runtimeRef
+	c.installation.runtimeRegistryGeneration = runtimeRegistry
+	c.installation.pendingCompositionChange = false
+	return nil
+}
+
+// rewriteNativePushIdentities replaces an authored batch identity, and the
+// authored mutation identities it carries, with the runtime identities the
+// accepted application push recorded. A request that names no bound authored
+// batch keeps its authored identities.
+func (c *NativeController) rewriteNativePushIdentities(ctx context.Context, request map[string]any) error {
+	authoredBatch, ok := request["batch_id"].(string)
+	if !ok || authoredBatch == "" {
+		return errors.New("native push batch identity is invalid")
+	}
+	var binding *nativeTransactionBinding
+	for _, transaction := range c.transactions {
+		if transaction.AuthoredBatchID != authoredBatch || !transaction.ApplicationPush {
+			continue
+		}
+		if binding != nil {
+			return errors.New("native push batch identity binding is ambiguous")
+		}
+		binding = transaction
+	}
+	if binding == nil {
+		return nil
+	}
+	if binding.RuntimeBatchID == "" {
+		// Only a materialized source transaction resolves these records today. A
+		// scenario that replays an accepted push without materializing needs the
+		// same resolution, so resolve it here.
+		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+			return fmt.Errorf("resolve native application push identities: %w", err)
+		}
+	}
+	if binding.RuntimeBatchID == "" {
+		return errors.New("native push batch identity has no runtime binding")
+	}
+	request["batch_id"] = binding.RuntimeBatchID
+	mutations, ok := request["mutations"].([]any)
+	if !ok {
+		return errors.New("native push mutations are invalid")
+	}
+	for _, raw := range mutations {
+		mutation, ok := raw.(map[string]any)
+		if !ok {
+			return errors.New("native push mutation is invalid")
+		}
+		authoredMutation, ok := mutation["mutation_id"].(string)
+		if !ok || authoredMutation == "" {
+			return errors.New("native push mutation identity is invalid")
+		}
+		for index, candidate := range binding.AuthoredMutationIDs {
+			if candidate != authoredMutation || index >= len(binding.RuntimeMutationIDs) {
+				continue
+			}
+			mutation["mutation_id"] = binding.RuntimeMutationIDs[index]
+			break
+		}
+	}
+	return nil
+}
+
+// nativeAuthoredMutationsDigest identifies the authored mutation content of a
+// push operation. Two replays with the same digest carry the same content.
+func nativeAuthoredMutationsDigest(payload []byte) (string, error) {
+	var wrapper struct {
+		Request struct {
+			Mutations []json.RawMessage `json:"mutations"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(payload, &wrapper); err != nil || len(wrapper.Request.Mutations) == 0 {
+		return "", errors.New("native push mutations are unreadable")
+	}
+	// Encode through a decoded value so the digest depends on content and not on
+	// the key order a caller happened to produce.
+	canonical := make([]any, 0, len(wrapper.Request.Mutations))
+	for _, mutation := range wrapper.Request.Mutations {
+		var value any
+		if err := json.Unmarshal(mutation, &value); err != nil {
+			return "", errors.New("native push mutation is unreadable")
+		}
+		canonical = append(canonical, value)
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", errors.New("native push mutations are not encodable")
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// sealedNativePushReplay returns the stored canonical request when the operation
+// replays the accepted content of a bound batch. It returns nil when the
+// operation is not such a replay, so a new or changed push builds normally.
+func (c *NativeController) sealedNativePushReplay(ctx context.Context, operation scenarios.Operation, request map[string]any) ([]byte, error) {
+	authoredBatch, ok := request["batch_id"].(string)
+	if !ok || authoredBatch == "" {
+		return nil, nil
+	}
+	digest, err := nativeAuthoredMutationsDigest(operation.Payload)
+	if err != nil {
+		return nil, err
+	}
+	var binding *nativeTransactionBinding
+	for _, transaction := range c.transactions {
+		if transaction.AuthoredBatchID != authoredBatch || !transaction.ApplicationPush {
+			continue
+		}
+		if transaction.AuthoredMutationsDigest != digest {
+			return nil, nil
+		}
+		binding = transaction
+		break
+	}
+	if binding == nil {
+		return nil, nil
+	}
+	if binding.RuntimeBatchID == "" {
+		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+			return nil, fmt.Errorf("resolve native application push identities: %w", err)
+		}
+	}
+	if binding.RuntimeBatchID == "" {
+		return nil, errors.New("native push batch identity has no runtime binding")
+	}
+	sealed, err := c.harness.Operator().SealedPushRequest(ctx, binding.RuntimeBatchID)
+	if err != nil {
+		return nil, fmt.Errorf("read native sealed push request: %w", err)
+	}
+	if len(sealed) == 0 {
+		return nil, errors.New("native sealed push request is absent")
+	}
+	return sealed, nil
+}

@@ -1,0 +1,36 @@
+---
+title: Testing Evidence
+description: Rules for Synchro testing evidence.
+---
+
+# Testing Evidence
+
+The specifications in sections 00 through 05 define behavior.
+
+Testing evidence shows that an implementation executed required behavior.
+This document does not define another release procedure or add release gates.
+
+## Evidence Rules
+
+- Author expected results from the contract or an independent invariant.
+- Do not derive expected results from production output.
+- Use real extension, adapter, database, and client components for happy paths.
+- Keep shared scenarios in `conformance/`.
+- Record a replay seed for randomized execution.
+- Add a minimized scenario for each production defect.
+- Use meaningful negative controls where silent failure is a material risk.
+- Reject skipped, filtered, zero-test, and unexplained retry-only results.
+- Use structured result parsing for required gates.
+
+## Package Smoke
+
+Package smoke verifies installation boundaries.
+
+Each required support cell installs packaged artifacts. It then connects, pushes, pulls, terminates a process, and resumes.
+
+Package smoke does not replace semantic integration or scenario evidence.
+
+## Release Procedure
+
+Use [RELEASE.md](https://github.com/trainstar/synchro/blob/master/RELEASE.md) as the sole procedure for release operations, publication, approval, and recovery.
+Use [Testing Evidence Overview](/synchro/verification/overview/) for evidence records and [Support Policy](/synchro/reference/support-policy/) for maintained environments.

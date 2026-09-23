@@ -1,0 +1,42 @@
+---
+title: Testing Evidence Overview
+description: How Synchro records testing evidence.
+---
+
+# Testing Evidence Overview
+
+Synchro separates the contract from testing evidence.
+
+## What Is Authored
+
+The specification, requirements catalog, support matrix, and scenarios are reviewed source material. They define behavior, proof obligations, required environments, and expected outcomes. They do not contain hand-maintained coverage or release-readiness results.
+
+The support matrix defines PostgreSQL 18 on Ubuntu 24.04 Linux x64. It defines Swift on iOS 16 and current iOS. It defines Kotlin on Android API 24 and current Android. It defines React Native 0.83.x on current iOS and Android. PostgreSQL 14 through 17 are excluded. macOS hosts Swift validation and is not a PostgreSQL support cell.
+
+## What Is Generated
+
+Release records the exact environment, commands, results, replay information, and artifact hashes. `release-manifest.json` records resolved current versions.
+
+Tooling computes release eligibility from that evidence. Documentation, fixture presence, and the current handwritten test inventory do not certify a release.
+
+## Evidence Standard
+
+Release-critical proofs use independent expected results, real packaged components for happy paths, meaningful negative controls, and replayable fault or randomized cases. Implementation-derived fixtures and tautological assertions do not establish semantic correctness.
+
+Every required test must run. Skips, ignored tests, unexplained flakes, and retry-only passes block promotion. Reruns remain linked to their original failures with a recorded reason and diagnosis.
+
+The final support gate derives semantic obligations and packaged checks from the support matrix. It rejects missing, skipped, unavailable, malformed, zero-test, and nonterminal results.
+
+Each non-excluded support cell requires packaged connect, push, pull, process-kill, and resume checks. The package installation step must use the release artifact under test.
+
+The Makefile reads the generated packaged summary from `dist/verification/packaged-smoke-summary.json`. Missing summary data blocks the gate.
+
+Security evidence may be access-controlled while a finding is unresolved. Public reports describe scope and disposition without publishing exploit instructions.
+
+## Release Procedure
+
+Release builds final distributions once. Package checks and publication use the same sealed bytes.
+
+Read the [Support Policy](/synchro/reference/support-policy/) for required environments.
+Read [Testing Evidence](/synchro/spec/07-release-verification/) for evidence rules.
+Use [RELEASE.md](https://github.com/trainstar/synchro/blob/master/RELEASE.md) as the sole release procedure.

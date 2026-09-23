@@ -1,0 +1,60 @@
+name: Set up conformance PostgreSQL 18
+description: Verify PostgreSQL 18 and publish the immutable conformance artifacts.
+
+inputs:
+  expected-postgresql-version:
+    description: PostgreSQL version requirement. Use 18 for any PostgreSQL 18 patch release.
+    required: false
+    default: '18'
+  jwt-secret-file-name:
+    description: File name for the isolated conformance JWT secret.
+    required: false
+    default: jwt-secret
+
+runs:
+  using: composite
+  steps:
+    - name: Verify PostgreSQL 18 runtime
+      shell: bash
+      env:
+        EXPECTED_POSTGRESQL_VERSION: ${{ inputs.expected-postgresql-version }}
+      run: |
+        set -euxo pipefail
+        test -f "$HOME/.pgrx/config.toml"
+        pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$HOME/.pgrx/config.toml")"
+        test -x "$pg_config"
+        pg_bindir="$(dirname "$pg_config")"
+        for program in initdb pg_ctl postgres psql pg_isready pg_config; do
+          output="$("$pg_bindir/$program" --version)"
+          # A Homebrew build appends a suffix, so take the numeric token.
+          version="$(printf '%s\n' "$output" | grep -oE '[0-9]+[.][0-9]+' | head -n 1)"
+          if [ "$EXPECTED_POSTGRESQL_VERSION" = '18' ]; then
+            case "$version" in
+              18.*) ;;
+              *) exit 1 ;;
+            esac
+          else
+            test "$version" = "$EXPECTED_POSTGRESQL_VERSION"
+          fi
+        done
+
+    - name: Build immutable conformance artifacts
+      shell: bash
+      run: |
+        set -euo pipefail
+        make conformance-adapter-artifact
+        make conformance-seed-artifact
+        # CI provisions local test instances, so the artifact records the
+        # runner's actual PostgreSQL 18 minor. The certified release artifact
+        # keeps the exact pinned minor in its own target.
+        make conformance-pg18-extension-test-artifact
+        test "$(shasum -a 256 dist/conformance/synchrod-pg-adapter/synchrod-pg | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchrod-pg-adapter/synchrod-pg.sha256)"
+        test "$(shasum -a 256 dist/conformance/synchro-seed | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchro-seed.sha256)"
+        test -f dist/conformance/synchro-pg-pg18/artifact-manifest.json
+        test "$(shasum -a 256 dist/conformance/synchro-pg-pg18/artifact-manifest.json | cut -d ' ' -f 1)" = "$(tr -d '[:space:]' < dist/conformance/synchro-pg-pg18/artifact-manifest.json.sha256)"
+
+    - name: Create isolated conformance secrets
+      shell: bash
+      env:
+        SYNCHRO_CONFORMANCE_JWT_SECRET_FILE_NAME: ${{ inputs.jwt-secret-file-name }}
+      run: scripts/ci/configure-conformance-adapter.sh

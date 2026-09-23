@@ -1,0 +1,29 @@
+import {
+  coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
+  launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
+} from './corpus-harness';
+
+async function execute(command: Record<string, unknown>): Promise<string> {
+  const serialized = JSON.stringify(command);
+  await submitCorpusCommand(serialized);
+  const { raw } = await pollCorpusResult(120000, 'React Native forged-cursor command did not finish');
+  return raw;
+}
+
+it('executes the forged-cursor coordinator sequence', () => runCorpusCommandLoop(async () => {
+  const { endpoint, token } = coordinatorConfiguration();
+  const stageCount = coordinatorCount('STAGE_COUNT', 2);
+  await launchCorpusApp({ newInstance: true, delete: true, launchArgs: { synchroConformance: '1' } });
+  let result = 'null';
+  let commands = 0;
+  for (let sequence = 1; sequence <= stageCount; sequence += 1) {
+    const next = await exchange(endpoint, token, sequence, result);
+    if (next.state === 'complete') {
+      if (sequence !== stageCount || commands !== stageCount - 1) throw new Error('React Native forged-cursor coordinator completed at an invalid stage');
+      return;
+    }
+    commands += 1;
+    result = await execute(next.command);
+  }
+  throw new Error('React Native forged-cursor coordinator did not complete');
+}));

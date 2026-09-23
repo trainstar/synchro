@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/client.rs b/extensions/synchro-pg/src/client.rs
+--- a/extensions/synchro-pg/src/client.rs
++++ b/extensions/synchro-pg/src/client.rs
+@@ -789,7 +789,7 @@ fn ensure_client_connect_state(
+ 
+     let scope_set_version = if client_was_new {
+         1
+-    } else if prior_scopes != server_scopes {
++    } else if prior_scopes != server_scopes && false {
+         prior_scope_set_version
+             .checked_add(1)
+             .filter(|version| *version <= MAX_SAFE_INTEGER)

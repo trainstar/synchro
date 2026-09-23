@@ -1,205 +1,76 @@
 <p align="center">
-  <img src="docs/public/logo.svg" alt="Synchro" width="280"><br><br>
-  <a href="https://github.com/trainstar/synchro/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/trainstar/synchro/release.yml?branch=master&event=workflow_dispatch&label=release&logo=github" alt="Release"></a>
-  <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://img.shields.io/github/go-mod/go-version/trainstar/synchro?logo=go&logoColor=white" alt="Go"></a>
-  <a href="https://pkg.go.dev/github.com/trainstar/synchro"><img src="https://pkg.go.dev/badge/github.com/trainstar/synchro.svg" alt="Go Reference"></a>
-  <a href="https://www.npmjs.com/package/@trainstar/synchro-react-native"><img src="https://img.shields.io/npm/v/@trainstar/synchro-react-native?logo=npm&logoColor=white&label=npm" alt="npm"></a>
-  <a href="https://central.sonatype.com/artifact/fit.trainstar/synchro"><img src="https://img.shields.io/maven-central/v/fit.trainstar/synchro?logo=apache-maven&logoColor=white&label=maven" alt="Maven Central"></a>
-  <a href="https://github.com/trainstar/synchro"><img src="https://img.shields.io/github/v/tag/trainstar/synchro?filter=!v*&logo=swift&logoColor=white&label=SPM" alt="SPM"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/trainstar/synchro" alt="License"></a>
-  <a href="https://trainstar.github.io/synchro"><img src="https://img.shields.io/badge/docs-trainstar.github.io%2Fsynchro-blue" alt="Docs"></a>
+  <img src="docs/public/logo.svg" alt="Synchro" width="320">
 </p>
 
-<p align="center">Offline-first sync between PostgreSQL and native client SDKs for Swift, Kotlin, and React Native. Go server you can embed or deploy standalone. Your tables. Minimal changes.</p>
+# Synchro
 
----
+[![Release](https://img.shields.io/github/v/release/trainstar/synchro)](https://github.com/trainstar/synchro/releases/latest)
+[![CI](https://github.com/trainstar/synchro/actions/workflows/ci.yml/badge.svg?branch=master&event=push)](https://github.com/trainstar/synchro/actions/workflows/ci.yml?query=branch%3Amaster)
 
-## How It Works
+Synchro synchronizes PostgreSQL data with local SQLite databases in native applications.
+Applications can read and write local data offline, then synchronize through an authenticated HTTP adapter.
 
-```mermaid
-flowchart TB
-    subgraph Client["Client Device"]
-        direction LR
-        APP[Your App] -- "query / execute" --> SDK
-        subgraph SDK["Native SDK"]
-            direction TB
-            DB[(SQLite)]
-            CDC[CDC Triggers]
-            PQ[Pending Queue]
-            DB --> CDC --> PQ
-        end
-    end
+PostgreSQL owns server synchronization through the Synchro extension.
+Swift and Kotlin own local storage, change capture, durable queues, and synchronization.
+React Native wraps those native clients.
+The Go adapter handles HTTP and authentication without a separate synchronization service.
 
-    subgraph Server["Go Server"]
-        direction TB
-        PG[("PostgreSQL")]
-        WAL[WAL Consumer]
-        CL[Changelog]
-        PG --> WAL --> CL
-    end
+## Get started
 
-    PQ -- "push" --> PG
-    CL -- "pull" --> DB
+Follow the [first-sync tutorial](https://trainstar.github.io/synchro/getting-started/quickstart/).
+It connects a client, changes a note offline, and verifies the change on the server and another client.
 
-    style Client fill:#1a1a2e,color:#fff
-    style Server fill:#16213e,color:#fff
-```
+- [Set up PostgreSQL and the adapter](https://trainstar.github.io/synchro/getting-started/server-setup/)
+- [Install and initialize a client](https://trainstar.github.io/synchro/clients/consumption/)
+- [Configure authentication](https://trainstar.github.io/synchro/architecture/auth-integration/)
 
-> **Swift, Kotlin, and React Native** all use the same architecture. React Native bridges to the native Swift (iOS) and Kotlin (Android) SDKs. Your app writes standard SQL to a local SQLite database. CDC triggers detect changes and queue them for push. The server uses PostgreSQL WAL to detect changes and serves them to clients via pull.
+These guides describe the `0.3.0` source and package interfaces.
+Before that version is published, use the documented local-consumer installation.
+Do not substitute an older published package into the current tutorial.
 
-Every client reads and writes to a local SQLite database using standard SQL. Synchro syncs changes bidirectionally with your PostgreSQL server in the background. WAL-based change detection means no triggers, no polling, no custom APIs. Conflicts are resolved automatically using last-writer-wins with configurable strategies.
+## Supported environments
 
-## Why Synchro
+| Component | Supported environment |
+| --- | --- |
+| PostgreSQL extension and Go tools | PostgreSQL 18, Ubuntu 24.04, Linux x64 |
+| Swift client | iOS 16 and current stable iOS, Swift 6 toolchain |
+| Kotlin client | Android API 24 and current stable Android |
+| React Native bridge | React Native 0.83.x, current stable iOS and Android |
 
-- **Standard SQL.** `query()`, `execute()`, transactions, batch writes, prepared statements, and reactive observation. Plain SQL with parameter binding. No proprietary query language, no object wrappers.
-- **Full bidirectional sync with conflict resolution.** Reads and writes sync automatically. Not read-only replication, not bring-your-own-write-path.
-- **WAL-based change detection.** PostgreSQL logical replication captures changes at the database level. No triggers, no polling, no application-layer diffing.
-- **RLS-enforced authorization.** Row-level security policies in Postgres guard your data. Authorization lives in the database, not in application code.
-- **Embed or deploy standalone.** Import as a Go library into your existing server, or run `synchrod` as a standalone binary. Scale without rewriting.
-- **Native SDKs.** Swift, Kotlin, and React Native. Local SQLite, automatic change tracking, background sync, offline queue.
+macOS hosts Apple development and validation. It is not a supported PostgreSQL deployment target.
+See the [support policy](https://trainstar.github.io/synchro/reference/support-policy/) for dependency constraints and support boundaries.
 
-## Quick Start
+## Documentation
 
-### Install
+| Goal | Guide |
+| --- | --- |
+| Understand component responsibilities | [Architecture](https://trainstar.github.io/synchro/architecture/overview/) |
+| Assign private and shared data | [Scope modeling](https://trainstar.github.io/synchro/architecture/scope-modeling/) |
+| Bundle an initial SQLite database | [Portable seeds](https://trainstar.github.io/synchro/architecture/portable-seeds/) |
+| Use the client SQL APIs | [Application SQL limits](https://trainstar.github.io/synchro/clients/application-sql/) |
+| Configure and operate the server | [Configuration](https://trainstar.github.io/synchro/operations/configuration/) |
+| Implement or inspect protocol behavior | [Wire protocol](https://trainstar.github.io/synchro/spec/01-wire-protocol/) and [client contract](https://trainstar.github.io/synchro/spec/02-client-contract/) |
+| Understand validation evidence | [Testing evidence](https://trainstar.github.io/synchro/verification/overview/) |
+| Prepare or recover a release | [RELEASE.md](RELEASE.md) |
 
-**Server**
+Scopes are server-defined. Clients cannot supply arbitrary replication predicates.
+Synchro does not provide a browser synchronization client or support server databases other than PostgreSQL.
 
-```bash
-go get github.com/trainstar/synchro
-```
+## Development and contributions
 
-**Swift / iOS** (Swift Package Manager)
+The `Makefile` is the supported build, lint, and test entry point.
+Use the [local validation instructions](https://trainstar.github.io/synchro/getting-started/development/) before running integration tests.
+Tests require disposable fixtures, not an application database.
+The [client overview](clients/README.md) identifies the native and bridge packages.
 
-```swift
-.package(url: "https://github.com/trainstar/synchro.git", from: "0.1.2")
-```
+Report reproducible problems through [GitHub Issues](https://github.com/trainstar/synchro/issues).
+Include the version, platform, reproduction steps, and expected result.
+Do not include credentials or private application data.
+Keep pull requests focused and run the applicable Make checks.
+Target ordinary development pull requests at `dev`.
+`master` is the stable default branch and accepts checked release promotions and stable hotfixes.
+Return stable hotfixes to `dev` so subsequent releases retain their corrections.
 
-**Kotlin / Android** (Gradle)
+## License
 
-```kotlin
-implementation("fit.trainstar:synchro:0.1.2")
-```
-
-**React Native** (bridges to the native Swift and Kotlin SDKs above)
-
-```bash
-npm install @trainstar/synchro-react-native
-cd ios && pod install  # installs the native iOS dependency
-```
-
-### Server Setup
-
-Register the tables you want to sync and wire the HTTP endpoints. Synchro handles the rest: WAL subscription, changelog management, conflict resolution, and client state tracking.
-
-```go
-registry := synchro.NewRegistry()
-registry.Register(&synchro.TableConfig{
-    TableName:   "tasks",
-    OwnerColumn: "user_id",
-})
-registry.Register(&synchro.TableConfig{
-    TableName:    "comments",
-    OwnerColumn:  "user_id",
-    ParentTable:  "tasks",
-    ParentColumn: "task_id",
-})
-
-engine, _ := synchro.NewEngine(synchro.Config{
-    DB:       db,
-    Registry: registry,
-})
-
-h := handler.New(engine)
-http.HandleFunc("POST /sync/register",  h.ServeRegister)
-http.HandleFunc("POST /sync/pull",      h.ServePull)
-http.HandleFunc("POST /sync/push",      h.ServePush)
-http.HandleFunc("POST /sync/snapshot",  h.ServeSnapshot)
-http.HandleFunc("GET /sync/tables",     h.ServeTableMeta)
-http.HandleFunc("GET /sync/schema",     h.ServeSchema)
-```
-
-### Client Usage
-
-Every client SDK exposes a full SQL interface: `query()`, `execute()`, transactions, batch writes, prepared statements, and reactive observation. You pass standard SQL with parameter binding. Changes sync automatically in the background.
-
-**Swift**
-
-```swift
-let client = try SynchroClient(config: SynchroConfig(
-    dbPath: dbPath, serverURL: url,
-    authProvider: { token }, clientID: deviceID, appVersion: "1.0.0"
-))
-try await client.start()
-
-// Write locally, syncs to server automatically
-try client.execute("INSERT INTO tasks (id, user_id, title) VALUES (?, ?, ?)",
-    params: [uuid, userId, "Ship v1"])
-
-// Read from local SQLite, always fast
-let tasks = try client.query("SELECT * FROM tasks WHERE completed = 0")
-```
-
-**Kotlin**
-
-```kotlin
-val client = SynchroClient(SynchroConfig(
-    dbPath = "synchro.db", serverURL = url,
-    authProvider = { token }, clientID = deviceId, appVersion = "1.0.0"
-), context)
-client.start()
-
-// Write locally, syncs to server automatically
-client.execute("INSERT INTO tasks (id, user_id, title) VALUES (?, ?, ?)",
-    listOf(uuid, userId, "Ship v1"))
-
-// Read from local SQLite, always fast
-val tasks = client.query("SELECT * FROM tasks WHERE completed = 0")
-```
-
-**React Native**
-
-```typescript
-const client = new SynchroClient({
-    dbPath: 'synchro.db', serverURL: url,
-    authProvider: () => getToken(), clientID: deviceId, appVersion: '1.0.0',
-});
-await client.initialize();
-await client.start();
-
-// Write locally, syncs to server automatically
-await client.execute('INSERT INTO tasks (id, user_id, title) VALUES (?, ?, ?)',
-    [uuid, userId, 'Ship v1']);
-
-// Read from local SQLite, always fast
-const tasks = await client.query('SELECT * FROM tasks WHERE completed = 0');
-```
-
-## What You Need
-
-| Component | What Changes |
-|-----------|-------------|
-| Your tables | Add `deleted_at TIMESTAMPTZ NULL` column |
-| PostgreSQL | Set `wal_level = logical` (one-time config) |
-| Your server | Register tables + wire 6 HTTP endpoints |
-| Client app | `query()` and `execute()` against local SQLite |
-
-## Requirements
-
-| Component | Minimum Version |
-|-----------|----------------|
-| Go | 1.22+ |
-| PostgreSQL | 14+ (logical replication) |
-| iOS | 16.0+ |
-| macOS | 13.0+ |
-| Android | API 24+ (minSdk 24) |
-| React Native | 0.83+ |
-| Node.js | 20+ |
-| JDK | 17+ (for Android builds) |
-
-## Links
-
-- [Documentation](https://trainstar.github.io/synchro)
-- [Quick Start Guide](https://trainstar.github.io/synchro/getting-started/quickstart/)
-- [Architecture](https://trainstar.github.io/synchro/server/architecture/)
-- [API Reference](https://trainstar.github.io/synchro/protocol/api-reference/)
-- [License](LICENSE)
+Synchro uses the [MIT License](LICENSE).

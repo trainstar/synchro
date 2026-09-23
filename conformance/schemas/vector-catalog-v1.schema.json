@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/vector-catalog-v1.schema.json",
+  "title": "Synchro release vector-set catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "release", "vector_sets"],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/vector-catalog-v1.schema.json" },
+    "schema_version": { "const": 1 },
+    "release": { "const": "0.3.0" },
+    "vector_sets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/vectorSet" }
+    }
+  },
+  "$defs": {
+    "vectorSetId": {
+      "type": "string",
+      "pattern": "^VSET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "language": {
+      "type": "string",
+      "enum": ["go", "rust", "swift", "kotlin"]
+    },
+    "normalizedVectorsPath": {
+      "type": "string",
+      "pattern": "^conformance/vectors/(?!\\.(?:/|$))(?!.*\\/\\.(?:/|$))(?!\\.\\.(?:/|$))(?!.*\\/\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\\.json$"
+    },
+    "vectorSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vector_set_id", "path", "source_sha256", "vector_count", "aggregate_sha256", "required_languages"],
+      "properties": {
+        "vector_set_id": { "$ref": "#/$defs/vectorSetId" },
+        "path": { "$ref": "#/$defs/normalizedVectorsPath" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "vector_count": { "type": "integer", "minimum": 1 },
+        "aggregate_sha256": { "$ref": "#/$defs/sha256" },
+        "required_languages": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "prefixItems": [
+            { "const": "go" },
+            { "const": "rust" },
+            { "const": "swift" },
+            { "const": "kotlin" }
+          ],
+          "items": false
+        }
+      }
+    }
+  }
+}

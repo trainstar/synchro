@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/schema.rs b/extensions/synchro-pg/src/schema.rs
+--- a/extensions/synchro-pg/src/schema.rs
++++ b/extensions/synchro-pg/src/schema.rs
+@@ -824,7 +824,7 @@ fn immutable_manifest(stored: StoredManifest) -> SchemaManifest {
+         parent_schema: stored.body.parent_schema,
+         transition_class: stored.body.transition_class,
+         compatibility_floor: stored.body.compatibility_floor,
+-        tables: stored.body.tables,
++        tables: Vec::new(),
+     };
+     if let Err(error) = manifest.validate() {
+         pgrx::error!("stored schema manifest violates the contract: {}", error);

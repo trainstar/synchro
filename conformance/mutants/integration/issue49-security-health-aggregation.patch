@@ -1,0 +1,26 @@
+diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+--- a/extensions/synchro-pg/src/health.rs
++++ b/extensions/synchro-pg/src/health.rs
+@@ -648,7 +648,8 @@ impl ReadinessStatus {
+     pub(crate) fn ready(&self) -> bool {
+         self.checks
+             .values()
+-            .all(|check| check.state == CheckState::Ok)
++            // Mutant: one healthy check makes the whole database ready.
++            .any(|check| check.state == CheckState::Ok)
+     }
+ 
+     pub(crate) fn detail(&self) -> serde_json::Value {
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+@@ -2051,3 +2051,3 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1065
++-- synchro-pg/src/health.rs:1066
+ -- synchro_pg::health::synchro_health_detail
+@@ -2263,3 +2263,3 @@
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1058
++-- synchro-pg/src/health.rs:1059
+ -- synchro_pg::health::synchro_readiness

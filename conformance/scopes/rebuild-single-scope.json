@@ -1,0 +1,71 @@
+{
+  "fixture_version": 1,
+  "name": "rebuild_single_scope_paged_then_finalized",
+  "kind": "protocol.rebuild",
+  "summary": "Rebuild is paged per scope and ends with a final authoritative scope cursor and checksum.",
+  "spec_refs": [
+    "01-wire-protocol: Rebuild Model",
+    "03-state-machines: Rebuild Flow",
+    "04-invariants: Rebuild Finality"
+  ],
+  "input": {
+    "request": {
+      "client_id": "ios-device-123",
+      "client_generation": 1,
+      "schema": {
+        "version": 8,
+        "hash": "8b21d2a100000000000000000000000000000000000000000000000000000000"
+      },
+      "scope": "exercises_public",
+      "rebuild_id": "00000000-0000-4000-8000-000000000001",
+      "cursor": null,
+      "limit": 1000
+    }
+  },
+  "expected": {
+    "pages": [
+      {
+        "scope": "exercises_public",
+        "records": [
+          {
+            "table": "tbl_exercises",
+            "pk": {
+              "fld_exercises_id": "e_1"
+            },
+            "row": {
+              "fld_exercises_id": "e_1"
+            },
+            "row_checksum": {
+              "algorithm": "sha256",
+              "version": 1,
+              "encoding": "hex",
+              "digest": "4242424242424242424242424242424242424242424242424242424242424242"
+            },
+            "server_version": "sv_100"
+          }
+        ],
+        "cursor": "rb_002",
+        "has_more": true
+      },
+      {
+        "scope": "exercises_public",
+        "records": [],
+        "cursor": null,
+        "has_more": false,
+        "final_scope_cursor": "exercises_public_202.sig",
+        "checksum": {
+          "algorithm": "sha256",
+          "version": 1,
+          "encoding": "hex",
+          "digest": "0f220f220f220f220f220f220f220f220f220f220f220f220f220f220f220f22"
+        }
+      }
+    ],
+    "assertions": [
+      "intermediate pages must not finalize the scope cursor",
+      "final page must include final_scope_cursor",
+      "final page must include checksum when rebuild completes",
+      "client may resume normal incremental sync only after final page apply"
+    ]
+  }
+}

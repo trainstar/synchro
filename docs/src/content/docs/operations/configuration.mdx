@@ -1,0 +1,117 @@
+---
+title: PostgreSQL configuration
+description: Configure the Synchro WAL worker and capture readiness limits.
+---
+
+Set Synchro GUCs in `postgresql.conf` or with the equivalent PostgreSQL configuration mechanism.
+
+Reload PostgreSQL after a `SIGHUP` setting changes. Restart PostgreSQL after a `postmaster` setting changes.
+
+Use [server setup](/synchro/getting-started/server-setup/) for PostgreSQL 18
+installation, role separation, logical WAL prerequisites, and the first
+registration. Do not place application rows or internal diagnostics in a
+readiness endpoint.
+
+## WAL worker settings
+
+| GUC | Context | Default | Purpose |
+| --- | --- | --- | --- |
+| `synchro.replication_slot` | `SIGHUP` | `synchro_slot` | Names the logical replication slot. |
+| `synchro.publication_name` | `SIGHUP` | `synchro_pub` | Names the publication for registered relations. |
+| `synchro.database` | `postmaster` | Not configured | Selects the worker database. Configure this value for readiness. |
+| `synchro.worker_login` | `postmaster` | Not configured | Selects the dedicated worker login. Configure this value for readiness. |
+| `synchro.auto_start` | `postmaster` | `on` | Starts the WAL worker during server startup. |
+
+An empty publication, slot, database, or worker login makes the related readiness check fail.
+
+The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction. An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement. Candidate decoding also rejects the transaction. Split the source write into smaller transactions to stay below these fixed safety limits.
+
+The worker reads peeked pgoutput data one message at a time. It preserves each complete valid source transaction when a poll batch reaches its soft 16 MiB target.
+
+## Protocol request limits
+
+`pull.limit` and `rebuild.limit` are fixed inclusive ranges of `1..1000`.
+They are not PostgreSQL GUCs and cannot be raised through deployment
+configuration. The server rejects zero, negative, non-integer, and over-limit
+values. It does not clamp them.
+
+## Adapter process settings
+
+`synchrod-pg` requires `DATABASE_URL`. Its normal server mode supports these
+environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `LISTEN_ADDR` | HTTP listener. Bind `127.0.0.1:8091` only for the local tutorial. |
+| `JWT_SECRET` | HS256 secret. Mutually exclusive with `JWKS_URL`. |
+| `JWKS_URL` | RS256 or ES256 key set URL. Mutually exclusive with `JWT_SECRET`. |
+| `JWT_USER_CLAIM` | Canonical user claim. Defaults to `sub`. |
+| `MIN_CLIENT_VERSION` | Optional minimum client semantic version. |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, or `error`. |
+
+The standalone adapter does not terminate TLS. Bind it privately and terminate
+production HTTPS at a reverse proxy. The process creates and cancels its
+`JWKSContext` for the lifetime of the configured `JWKS_URL`. A library embedder
+must provide and cancel `JWKSContext` itself.
+
+## Readiness limits
+
+| GUC | Context | Default | Purpose |
+| --- | --- | --- | --- |
+| `synchro.max_worker_heartbeat_age_seconds` | `SIGHUP` | `30` | Limits the accepted worker heartbeat age. |
+| `synchro.max_wal_lag_bytes` | `SIGHUP` | `67108864` (64 MiB) | Limits current WAL beyond acknowledged WAL. |
+| `synchro.max_wal_lag_seconds` | `SIGHUP` | `30` | Limits the oldest unmaterialized registered write age. |
+
+Each readiness limit must be a positive integer. A zero value makes its readiness check fail with `invalid_limit`.
+
+Use stricter positive limits when your service-level objectives require faster failure detection.
+
+## Maintenance batches
+
+Reset staging reads source rows in 500-row pages.
+It batches version, projection, membership, and integrity work within the same snapshot-bound operation.
+Activation still requires the complete verified stage.
+
+Payload batches also use a soft 16 MiB serialized-byte target.
+Individual row payloads remain separate PostgreSQL values instead of one combined JSONB container.
+Large individual rows retain the existing PostgreSQL limits.
+This target changes batching, not the source-transaction limits above.
+
+Each `synchro_compact` call expires at most `p_batch_size` stale clients and deletes at most `p_batch_size` eligible effects.
+Clients outside the expiry batch continue to protect their checkpoints.
+Compaction locks only scopes represented in its selected effect batch.
+It rechecks retention after those locks and commits deletion with all affected floor updates.
+Repeat compaction while either `deactivated_clients` or `deleted_entries` is nonzero.
+
+## Development database reinstalls
+
+A running worker does not by itself prove that registry activation succeeded.
+Registrations can commit while the worker is disabled, before its replacement logical slot exists.
+Their original activation messages then precede the new slot boundary.
+Synchro preserves these requests and emits new transactional activation messages when the initial slot binds.
+Normal WAL processing activates the pending generations.
+
+Older builds without this replay can remain at registry generation 1 while later WAL advances.
+Publication readiness then reports `publication_mismatch` because the pending relations are not in the active registry.
+Restarting the already-bound worker does not recover messages that precede its slot.
+Do not force activation by editing internal tables or changing the slot boundary.
+
+The procedure below applies only to disposable development databases with empty registered source tables.
+It deletes synchronization metadata, schema identities, cursor keys, and client registrations.
+It is not a production upgrade or a data-preserving recovery procedure.
+Use current, matching extension library and SQL artifacts.
+
+1. Stop application writes.
+2. Set `synchro.auto_start = off`.
+3. Restart PostgreSQL.
+4. Verify that the configured replication slot is inactive.
+5. Drop that inactive slot.
+6. Recreate `synchro_pg` and its configured explicit publication in one transaction.
+7. Restore the application's grants, policies, projection views, membership functions, and registrations.
+8. Set `synchro.auto_start = on`.
+9. Restart PostgreSQL.
+10. Verify canonical readiness, no pending registry generations, and matching active and worker registry generations.
+11. Verify that a new source write reaches a reinitialized test client.
+
+Nonempty relations require the [projection bootstrap procedure](/synchro/spec/05-schema-evolution/).
+Their pending generations must not activate until the existing-data baseline and required WAL catch-up have been verified.

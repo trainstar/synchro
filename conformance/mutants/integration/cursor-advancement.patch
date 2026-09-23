@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -254,7 +254,7 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
+             let safe_position = if remaining {
+                 selected.last().map(|candidate| &candidate.entry.position)
+             } else {
+-                Some(&boundary.position)
++                selected.last().map(|candidate| &candidate.entry.position)
+             };
+             if let Some(safe_position) = safe_position {
+                 let context = ScopeCursorContext::new(

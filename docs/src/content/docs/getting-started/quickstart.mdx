@@ -1,0 +1,105 @@
+---
+title: First synchronization
+description: Connect a client, edit a note offline, and verify synchronization with another client.
+---
+
+This tutorial uses one private note and the authenticated user `alice`.
+You will read the note locally, change it offline, and observe the synchronized result.
+
+Use a disposable database and test identities.
+Do not run this tutorial against production data.
+The examples describe the `0.3.0` interfaces.
+Use local-consumer artifacts until the matching release is available.
+
+## 1. Prepare the server
+
+Complete [server setup](/synchro/getting-started/server-setup/).
+That guide creates the `synchro_quickstart` database, registers `public.notes`, starts the adapter, and inserts the first note.
+
+The first note has this identity:
+
+```text
+id:       00000000-0000-4000-8000-000000000001
+owner_id: alice
+```
+
+The registered membership function puts the note in `user:alice`.
+Connect assigns that scope from the authenticated identity, not from a client-supplied scope name.
+
+## 2. Open the first client
+
+Follow the initialization example for your platform:
+
+- [Swift](/synchro/clients/consumption/#swift)
+- [Kotlin](/synchro/clients/consumption/#kotlin)
+- [React Native](/synchro/clients/consumption/#react-native)
+
+Use the server URL and test token from server setup.
+Use a new writable SQLite database and a stable client ID.
+Never share one client ID between independent installations.
+
+Complete the initial synchronization before querying `notes`.
+Creating the client or opening SQLite does not prove that the server schema and rows have arrived.
+
+The initial query must return the note above with `owner_id` equal to `alice`.
+An empty result is not a successful tutorial outcome.
+
+## 3. Edit offline
+
+Stop synchronization with the client's `stop()` method.
+Keep the local database open.
+
+Use the platform's `execute` method with bound parameters:
+
+```sql
+UPDATE notes SET body = ?
+WHERE id = ?
+```
+
+Bind `Edited offline` and `00000000-0000-4000-8000-000000000001`, in that order.
+Read the row again through the client.
+Its body must now be `Edited offline`, even though synchronization is stopped.
+
+The local write and its queued mutation commit together.
+Do not write directly to Synchro metadata tables.
+
+## 4. Synchronize and verify the server
+
+Restart synchronization with `start()`.
+Then run the platform's `syncNow()` call as shown in its initialization example.
+Wait for that call to complete successfully.
+Do not replace completion with an arbitrary sleep.
+
+In a PostgreSQL session connected to `synchro_quickstart`, run:
+
+```sql
+SELECT id, owner_id, body
+FROM public.notes
+WHERE id = '00000000-0000-4000-8000-000000000001';
+```
+
+The query must return `alice` and `Edited offline`.
+The server observation proves that the local write reached PostgreSQL.
+An empty local pending queue alone does not prove that result.
+
+## 5. Verify another client
+
+Initialize another client with a different client ID and a different local database path.
+Authenticate as `alice` and complete its first synchronization.
+
+Read the same note.
+Its body must be `Edited offline`.
+This verifies that the server change reaches an independent local database.
+
+## 6. Finish
+
+Stop and close both clients.
+Stop the tutorial adapter using the procedure in server setup.
+Remove only the disposable database and local files created for this tutorial.
+
+## Continue
+
+- [Scope modeling](/synchro/architecture/scope-modeling/) explains membership and assignment.
+- [Application SQL limits](/synchro/clients/application-sql/) describes supported local statements.
+- [Portable seeds](/synchro/architecture/portable-seeds/) describes optional initial data.
+- [Local development](/synchro/getting-started/development/) covers contributor checks, not application onboarding.

@@ -1,0 +1,132 @@
+name: Scheduled Validation
+
+on:
+  schedule:
+    - cron: '17 6 * * 6'
+  workflow_dispatch:
+
+concurrency:
+  group: scheduled-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  stateful-seeds:
+    name: stateful seed ${{ matrix.seed }}
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [7, 101, 20260914, 4294967291]
+    runs-on: ubuntu-24.04
+    env:
+      GOWORK: 'off'
+      SOAK_SEED: ${{ matrix.seed }}
+      SOAK_DURATION: 2m
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Run wider live seeded stateful validation
+        run: make soak
+
+  broad-mutation:
+    name: broad core mutation search
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - name: Install exact Rust mutation runner
+        run: cargo install --locked --force cargo-mutants --version 27.1.0
+
+      - name: Run broad core mutation search
+        run: make test-rust-mutants-broad
+
+  broad-integration-mutation:
+    name: broad integration mutation search
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Run every integration mutant
+        run: make test-integration-mutants-broad
+
+  benchmark-characterization:
+    name: benchmark characterization
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+
+      - name: Record benchmark characterization
+        run: |
+          make record-r1-benchmark \
+            R1_BENCHMARK_EXTENSION_TARGET=conformance-pg18-extension-test-artifact \
+            R1_BENCHMARK_RESULT="$RUNNER_TEMP/r1-benchmark-characterization.json"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: r1-benchmark-characterization-${{ github.sha }}
+          path: ${{ runner.temp }}/r1-benchmark-characterization.json
+          if-no-files-found: error
+
+  scheduled:
+    name: scheduled
+    if: always()
+    needs:
+      - stateful-seeds
+      - broad-mutation
+      - benchmark-characterization
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every scheduled dependency
+        run: |
+          test "${{ needs.stateful-seeds.result }}" = success
+          test "${{ needs.broad-mutation.result }}" = success
+          test "${{ needs.benchmark-characterization.result }}" = success

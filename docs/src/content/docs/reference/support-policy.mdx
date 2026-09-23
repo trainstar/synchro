@@ -1,0 +1,57 @@
+---
+title: Support Policy
+description: Required and excluded Synchro environments.
+---
+
+# Support Policy
+
+## Support Tiers
+
+Tier 1 is certified support with release-blocking evidence for every required cell.
+
+Tier 2 is built and tested in CI without release certification.
+
+Synchro makes no support claim outside these tiers.
+
+## Supported Matrix
+
+The supported matrix is deliberately narrow:
+
+| Surface | Required environments |
+| --- | --- |
+| Server | PostgreSQL 18 on Ubuntu 24.04 Linux x64 |
+| Apple client | iOS 16 and current stable iOS |
+| Android client | Android API 24 and current stable Android API |
+| React Native bridge | React Native 0.83.x on current stable iOS and current stable Android |
+
+PostgreSQL 14, 15, 16, and 17 are excluded. Existing build features or incidental successful use do not expand this matrix.
+
+The React Native package supports `react-native >=0.83.0 <0.84.0` and the compatible React 19 line. React Native verification exercises both current bridge paths over the native SDKs. Native engine cells provide minimum operating system coverage.
+
+Current package consumers pin React Native 0.83.10.
+Use React Native 0.83.5 or later in the supported line with Xcode 26.4 or later.
+Earlier patches use an incompatible fmt release.
+The [upstream correction](https://github.com/react/react-native/commit/faeef2b90a56633ad44289b994d31e7ce590b145) updates fmt to 12.1.0.
+
+## Validation Hosts
+
+macOS hosts Apple toolchain and Swift scenario execution. A host role does not create a PostgreSQL support cell.
+
+## Minimum And Current Tracks
+
+Minimum tracks protect iOS 16 and Android API 24. Current tracks protect stable Apple and Android platform releases available when a candidate starts.
+
+`current-stable` is an authored policy selector, not a permanent version number. `release-manifest.json` records exact candidate versions.
+
+## Required Policy Is Not Evidence
+
+This page and `conformance/support-matrix.json` state required and excluded cells. They do not claim that a release passed those cells.
+
+Testing evidence records executed checks for required cells and sealed artifacts. A version does not become supported from an unrelated development test.
+
+Package smoke verifies install, connect, push, pull, process termination, and resume.
+
+A new Tier 1 cell requires named production demand that justifies its recurring evidence cost.
+
+See [Testing Evidence Overview](/synchro/verification/overview/) and [Testing Evidence](/synchro/spec/07-release-verification/).
+Use [RELEASE.md](https://github.com/trainstar/synchro/blob/master/RELEASE.md) as the sole release procedure.

@@ -1,0 +1,493 @@
+---
+title: "ADR 002: Mutation Idempotency and Conflict Semantics"
+description: Accepted protocol v3 decision for durable push replay, atomic compare-and-swap conflicts, and terminal mutation outcomes.
+status: Accepted
+---
+
+# ADR 002: Mutation Idempotency and Conflict Semantics
+
+**Status:** Accepted
+**Date:** 2026-07-18
+**Applies to:** Protocol version 3
+
+## Context
+
+Push crosses an unreliable response boundary. A database commit can succeed even when the client does not receive the response. Re-executing that request can duplicate hooks, overwrite a concurrent write, or turn an accepted insert into a conflict. An identifier that is only echoed in a response does not provide idempotency.
+
+The prior contract also mixed opaque versions with timestamp parsing and last-write-wins behavior. Update conflict checks were separated from writes, delete did not consistently use a version precondition, `upsert` was able to create or revive a row implicitly, and retryable failures were able to appear beside committed per-mutation outcomes. Those behaviors cannot provide deterministic replay or atomic conflict resolution.
+
+Protocol version 3 therefore treats push identity, replay, row versions, and outcome durability as one contract.
+
+## Decision
+
+The requirements in this record are normative for every protocol version 3 server, adapter, and client.
+
+### Push vocabulary
+
+Push accepts exactly three operations:
+
+- `insert`
+- `update`
+- `delete`
+
+`create` is not a wire operation. `upsert` is a pull operation only and is invalid in a push request. Protocol version 3 has no resurrection operation.
+
+### Scoped immutable identity
+
+`batch_id` and `mutation_id` are non-nil UUIDs in canonical lowercase, hyphenated text form.
+
+A batch is identified by:
+
+```text
+(authenticated_user_id, client_id, batch_id)
+```
+
+A mutation is identified by:
+
+```text
+(authenticated_user_id, client_id, mutation_id)
+```
+
+The authenticated user identity comes from the trusted authentication boundary, never from a user-controlled request field. `client_id` must resolve to a registered client owned by that authenticated user.
+
+Both identifiers are immutable. A client must generate each identifier once, persist it before network transmission, and never assign it to different authored intent. A batch is sealed before its first transmission. Retries send the same sealed request, including mutation order and all presence or absence distinctions.
+
+Before a mutation is included in any sealed batch, reconciliation of an earlier accepted mutation for the same row may refresh only that pending mutation's server-owned `base_version` precondition. This refresh does not change its mutation ID, authored operation, fields, values, schema, client timestamp, or local order. Once a mutation has entered a sealed batch, its base version and all other fingerprinted content are immutable. A sent or sealed mutation is never rebased in place.
+
+Native clients resolve same-row intent that has no legal server precondition
+before creating a wire batch. Every local action keeps an immutable local intent
+record and stable mutation ID. Before any member of a same-row chain is sealed,
+the client may create a new normalized wire mutation linked to those records:
+
+- insert followed by updates becomes one insert containing the final authored
+  fields;
+- insert followed by delete has no server effect;
+- update followed by updates becomes one update from the original known server
+  base with the final patch;
+- update followed by delete becomes one delete from that original base.
+
+The original local records become inspectable `superseded_before_send` or
+`cancelled_before_send` outcomes linked to the normalized mutation or
+cancellation. They are not silently deleted. A delete followed by update is not
+normalized because protocol version 3 has no resurrection.
+
+If a predecessor mutation is already sealed or transmitted, a later update or
+delete without a usable server base remains a durable dependent local intent
+and is not placed on the wire. An accepted predecessor supplies the opaque base
+for a new normal mutation. A conflicted or rejected predecessor leaves the
+dependent intent in inspectable `blocked_by_predecessor` state. No dependent
+intent is silently discarded or sent with a fabricated version.
+
+Mutation identity is unique across all batches for the scoped client. A request containing the same `mutation_id` more than once is invalid. Moving an already completed mutation into another batch does not authorize re-execution.
+
+### Canonical SHA-256 fingerprints
+
+The server computes fingerprints from complete normalized JSON arrays after
+duplicate-member rejection and before mutable schema, policy, or row-state
+evaluation. Normalized strings are exact decoded Unicode scalar sequences with
+no normalization. Schema versions and client generations are canonical unsigned
+base-10 JSON strings. UUIDs, schema hashes, timestamps, portable values, and
+opaque versions use their exact canonical wire strings or JSON values.
+
+The normalized forms are:
+
+```text
+schema_ref = [version_decimal_string, hash]
+pk = [field_id, wire_value]
+base = [0] when absent, [1, server_version] when present
+columns = [0] when absent,
+          [1, [[field_id, wire_value], ...]] when present
+
+normalized_mutation = [
+  "mutation-v1",
+  mutation_id,
+  table_id,
+  pk,
+  schema_ref(authored_schema),
+  operation,
+  base,
+  client_version,
+  columns
+]
+
+normalized_batch = [
+  "batch-v1",
+  authenticated_user_id,
+  client_id,
+  client_generation_decimal_string,
+  batch_id,
+  schema_ref(request_schema),
+  [normalized_mutation, ...]
+]
+
+normalized_mutation_scope = [
+  "mutation-scope-v1",
+  authenticated_user_id,
+  client_id,
+  normalized_mutation
+]
+```
+
+The mutation array preserves request member meaning in the fixed order above.
+The batch mutation array preserves request order. A present columns list is
+sorted by unsigned UTF-8 bytes of `field_id`; duplicate field IDs are invalid.
+The one primary-key pair is not converted to a map. `[0]` and `[1, null]` are
+different, so absent and null remain distinct. A portable `json` value remains
+its canonical JSON string wire representation. For an authored field whose
+historical manifest is unavailable, the exact submitted JSON value is still
+fingerprinted; it is not dropped or coerced.
+
+RFC 8785 serializes each complete normalized array. The fingerprints are:
+
+```text
+batch_fingerprint = SHA-256(
+  ASCII("synchro:v3:push-batch-fingerprint:v1") || 0x00 ||
+  RFC8785_UTF8(normalized_batch)
+)
+
+mutation_fingerprint = SHA-256(
+  ASCII("synchro:v3:push-mutation-fingerprint:v1") || 0x00 ||
+  RFC8785_UTF8(normalized_mutation_scope)
+)
+```
+
+The current request schema and client generation are intentionally absent from
+the mutation fingerprint and present in the batch fingerprint. This permits an
+unchanged authored mutation to move into a new batch after reconnect while
+preventing reuse of one batch identity for another request context. Raw HTTP
+bytes, serializer-native object order, resolved policy output, and any form with
+silently removed fields are not fingerprint inputs.
+
+Fingerprints are stored as the 32-byte SHA-256 result together with fingerprint
+version and domain. A later normalization revision requires a new version and
+domain and must not reinterpret an existing ledger entry. Fixed authored vectors
+must cover every presence form, operation, schema, opaque version, portable
+wire value, field order, and multi-mutation order.
+
+### Exact replay
+
+After authentication, protocol gating, structural parsing, and the permanent retirement check provide a valid active scoped identity and fingerprint, replay lookup occurs before mutable client-generation, schema, policy, row-state, or clock checks.
+
+For an existing batch identity:
+
+1. If the stored and presented batch fingerprints are equal, the server returns the original HTTP status and exact canonical response body. It preserves the original `server_time`, outcome order, rows, versions, codes, and messages.
+2. The server performs no source write, policy hook, version allocation, scope materialization, or mutation reclassification during replay.
+3. If the fingerprints differ, the server returns `409 idempotency_conflict` and performs no mutation work.
+
+Concurrent requests with the same identity and fingerprint serialize on the same ledger entry. One request performs first execution. The others return its completed response. If the server cannot wait for that completion, it returns a whole-request retryable error and does not invent a second execution.
+
+For a mutation identity already present in a different new batch:
+
+- an equal mutation fingerprint contributes the exact stored mutation outcome to the new batch without re-execution
+- a different mutation fingerprint makes the whole request `409 idempotency_conflict`
+
+A committed response can therefore be recovered after response loss without consulting current row state. An operational failure before commit leaves no completed batch response and is safe to retry because the first-execution transaction did not commit.
+
+When no completed batch replay exists, the server validates the presented
+client generation before allocating a batch or mutation ledger claim. A stale
+generation returns `409 client_generation_expired` with no ledger or source
+effect. After reconnect, the client preserves the rejected sealed batch as an
+immutable record and creates a successor batch with a new batch ID and the new
+generation. It may carry each byte-for-byte unchanged authored mutation with
+its existing mutation ID because the mutation fingerprint excludes request
+generation and schema; changed authored content requires a new mutation ID.
+The old batch is never edited or sent again.
+
+### Ledger retention and irreversible client retirement
+
+Batch and mutation ledger entries do not expire by age, inactivity, cursor retention, schema change, or compaction. Creation and completion timestamps are observational fields and must not drive automatic deletion.
+
+An explicit irreversible client-retirement transaction is the only event that makes that client's ledger entries eligible for deletion. Retirement writes a permanent retirement marker before ledger payloads can be removed. The scoped `client_id` can never be reactivated or reused after retirement. Any later request for it returns `409 client_retired`.
+
+Without that permanent marker and irreversible refusal of future requests, ledger deletion is forbidden. Normal stale-client handling and pull-history compaction do not constitute client retirement.
+
+### First-execution transaction boundary
+
+All work for a first execution occurs in one database transaction. That transaction contains:
+
+- the batch ledger claim, fingerprint, terminal outcome partition, and canonical response
+- every new mutation ledger identity, fingerprint, and terminal outcome
+- every accepted source-table insert, update, or delete
+- every opaque row-version allocation and durable write-fence transition
+- one increment of the client's durable `accepted_write_epoch` when the batch accepts at least one source write
+- deterministic policy and validation effects that are part of the accepted source write
+
+The transaction commits all of those records together or rolls all of them back together. A semantic rejection of one mutation does not roll back accepted mutations in the same batch. An operational failure does roll back the entire first execution and returns no per-mutation outcomes.
+
+The transaction must not append a pull-visible changelog record, advance a pull cursor, or synchronously publish scope effects. Source writes and their version fences produce WAL in the same transaction. The WAL pipeline later materializes pull-visible changes in commit-safe stream order and reuses the version allocated by the source transaction.
+
+The accepted push response can therefore arrive before the corresponding WAL effect is visible to pull. Client reconciliation from the accepted response provides immediate canonical state. Later pull delivery is an authoritative echo, not a second client mutation.
+
+`accepted_write_epoch` is positive, monotonic client state used only to
+invalidate rebuild snapshots older than an accepted write. A rejected batch,
+semantic rejection, or exact replay does not advance it. Every rebuild session
+binds the epoch observed at creation, and any later accepted write makes that
+session non-replayable even after WAL materialization catches up.
+
+### Exact mutation shapes
+
+The push envelope contains the bound `client_id`, positive `client_generation`, UUID `batch_id`, request `schema`, and an ordered `mutations` array containing `1..1000` entries. The decoded JSON request body is at most 1,048,576 octets. Each normalized mutation is at most 65,536 octets and contains at most 256 authored columns. The server enforces byte limits while reading and before ledger allocation, fingerprinting, policy execution, or source DML. Unknown envelope members and any missing, nonpositive, or exceeded limit are invalid. First execution requires the exact current client generation and schema; exact replay uses the sealed values stored with the completed batch.
+
+Every mutation contains a UUID `mutation_id`, immutable logical table ID, one-field typed `pk`, immutable `authored_schema` version and hash, one of the three push operations, and `client_version`. Authored column entries use immutable field IDs and retain their values.
+
+The primary-key field name and portable type must exactly match the current registered schema. Duplicate JSON member names are invalid. Server-owned, primary-key, generated, version, creation-time, update-time, and deletion-time fields are not writable columns.
+
+The operation-specific shapes are:
+
+| Operation | `base_version` | `columns` | `client_version` |
+| --- | --- | --- | --- |
+| `insert` | absent | required nonempty set of authored writable field IDs and values | required |
+| `update` | required nonempty opaque token | required nonempty patch of authored writable field IDs and values | required |
+| `delete` | required nonempty opaque token | absent | required |
+
+Present `null` does not satisfy an absent or required field rule. An empty object is not a nonempty patch. Unknown operations, missing common fields, invalid UUIDs, duplicate mutation IDs, and violations of this presence matrix make the whole request `400 invalid_request`.
+
+`client_version` is a required client-authored RFC 3339 UTC diagnostic timestamp. It records which local intent produced the mutation. It is not a row precondition, server version, source-row timestamp, ordering key, or conflict input. A client timestamp that is equal to, behind, or ahead of server time has exactly the same conflict authority: none.
+
+The server must inspect every submitted column. It must not remove an unknown, protected, or incompatible field and then report the mutation as applied. A known but non-writable field or invalid value produces terminal `validation_failed`. A field or table from retained queued intent that is incompatible with the current schema produces terminal `schema_incompatible`.
+
+### Opaque server versions and atomic compare-and-swap
+
+`server_version` is a nonempty, server-generated equality token. It is opaque on every wire and storage boundary outside the server version subsystem. Clients and adapters must not parse, sort, increment, timestamp-compare, or generate it.
+
+Every authoritative row-state transition allocates a new token through the
+registered relation's mandatory actual-operation row-level `AFTER` version-fence
+trigger. Push compare-and-swap locks and validates the canonical identity and
+prior version before issuing source DML; the matching `AFTER` trigger allocates
+the successor token after that row operation occurs and before the transaction
+can commit. The source write, version transition, and transactional logical
+message commit atomically. This includes push writes, direct application writes,
+insert, update, soft delete, and tracked hard delete. Tables without an
+`updated_at` column still have a server version in durable side metadata.
+`client_version` is never copied into `server_version` or used to choose a
+source-row `updated_at` value.
+
+`base_version` has one meaning: byte-for-byte equality with the current server version for the addressed row identity. Update and delete lock the source row and row-version identity, then perform the state check, equality check, source write, and version-fence transition as one atomic compare-and-swap. Direct writes use the same locked version-fence transition, so a direct write and a push cannot both advance one prior version. An unlocked check followed by an unconditional write is forbidden.
+
+Insert atomically reserves an absent row identity. Concurrent inserts cannot both observe absence and succeed. Concurrent update or delete attempts against the same current version cannot both succeed. After one transaction advances the version, every competing old-base attempt returns the current authoritative conflict outcome.
+
+### Complete operation and row-state matrix
+
+The authoritative state for a typed row identity is one of:
+
+- `absent`: no live row and no retained deletion fence
+- `live`: a live row with a current opaque version
+- `deleted`: a canonical tombstone or deletion fence with a current opaque version
+
+The matrix below is complete after request-shape, schema, policy, and value validation:
+
+| Current state | Version relation | `insert` | `update` | `delete` |
+| --- | --- | --- | --- | --- |
+| `absent` | no current version | applied, create live row and version | `row_not_found` conflict | `row_not_found` conflict |
+| `live` | update or delete base equals current | `row_already_exists` conflict | applied, patch row and advance version | applied, delete and advance version |
+| `live` | update or delete base differs from current | `row_already_exists` conflict | `version_conflict` | `version_conflict` |
+| `deleted` | any allowed base relation | `row_deleted` conflict | `row_deleted` conflict | `row_deleted` conflict |
+
+`insert` never carries a base version, so any live or deleted identity conflicts regardless of what the client previously observed. Replaying the original accepted delete is handled by the ledger, not by treating a new delete as state-idempotent.
+
+No matrix cell performs an implicit insert for `update`, an implicit update for `insert`, or resurrection from `deleted`. Protocol version 3 contains no other row-state transition.
+
+### Complete outcome partition
+
+A successful first execution returns HTTP 200, echoes the request `batch_id`, and partitions every request mutation exactly once:
+
+- `accepted` contains only status `applied`
+- `rejected` contains only status `conflict` or `rejected_terminal`
+
+No mutation ID can be omitted, duplicated, or appear in both arrays. Relative request order is preserved within each array.
+
+Every mutation outcome requires `outcome_schema`, the exact immutable schema
+reference used to classify the outcome, encode any authoritative row, and
+calculate its checksum. First execution uses the current request schema. Exact
+batch replay and cross-batch mutation replay preserve the original stored
+binding, so one newly assembled response may contain historical outcome schemas.
+The binding is not a request schema gate.
+
+Canonical field rules are:
+
+| Outcome | Status and code | Authoritative fields |
+| --- | --- | --- |
+| Accepted insert or update | `applied`, no rejection code | full canonical `server_row`, matching `row_checksum`, and new `server_version` are required |
+| Accepted delete | `applied`, no rejection code | new `server_version` is required; `server_row` and matching `row_checksum` are required for a source tombstone and both are absent for a fence-only delete |
+| State or version conflict | `conflict` with `version_conflict`, `row_already_exists`, `row_deleted`, or `row_not_found` | live row or source tombstone, matching `row_checksum`, and current version are required; a fence-only delete returns the current version without a row or checksum; true absence returns neither |
+| Terminal semantic rejection | `rejected_terminal` and one terminal code | no server row or server version is returned |
+
+Every outcome echoes the scoped mutation identity, table, typed primary key, and `outcome_schema`. A diagnostic message is required for conflicts and terminal rejections, but clients branch only on status and code. The original message is part of exact replay. A row checksum must bind `outcome_schema.hash`; validating a historical row under the current schema is invalid.
+
+Terminal rejection codes are:
+
+- `policy_rejected`: authenticated mutation is denied by deterministic write policy
+- `validation_failed`: known current shape has a non-writable field, invalid value, or failed domain constraint
+- `table_not_synced`: target has never been a synced table for this contract
+- `schema_incompatible`: retained authored intent cannot be represented by the current synced schema; the outcome requires `retryable: false`, `authored_schema`, `current_schema`, and sorted `incompatible_field_ids`
+
+The per-mutation statuses `rejected_retryable` and the code `server_retryable` are not valid in protocol version 3. `unknown_scope_effect` is not a push outcome because pull-visible scope effects are not computed synchronously in the push transaction.
+
+When more than one terminal semantic rule applies, classification uses this order: `schema_incompatible`, `table_not_synced`, `policy_rejected`, then `validation_failed`. Conflict evaluation occurs only after those checks pass. This ordering prevents implementation-dependent outcome changes.
+
+### Whole-request failures and HTTP dispatch
+
+Request-level errors never include `accepted` or `rejected`. The canonical error body is:
+
+```json
+{
+  "error": {
+    "code": "temporary_unavailable",
+    "message": "request could not be committed",
+    "retryable": true
+  }
+}
+```
+
+Protocol version 3 push uses this exact dispatch:
+
+| HTTP | Error code | Retryable | Condition |
+| --- | --- | --- | --- |
+| 200 | none | no error body | complete terminal mutation partition, including mixed semantic outcomes, or exact replay of one |
+| 400 | `invalid_request` | false | malformed JSON, invalid envelope or UUID, duplicate ID, unsupported operation, or operation-shape violation |
+| 401 | `auth_required` | false | authentication is absent or invalid, or the client is not bound to the authenticated user |
+| 409 | `idempotency_conflict` | false | an existing batch or mutation identity has a different canonical fingerprint |
+| 409 | `client_retired` | false | the scoped client identity was irreversibly retired |
+| 409 | `client_generation_expired` | false | a first-execution request has a missing, stale, or expired client generation and must reconnect |
+| 422 | `schema_mismatch` | false | a first-execution request does not carry the exact current schema reference |
+| 426 | `upgrade_required` | false | protocol or required client runtime is incompatible with version 3 |
+| 429 | `retry_later` | true | admission control or rate limiting prevents first execution |
+| 503 | `temporary_unavailable` | true | an operational failure prevents the complete first-execution transaction from committing |
+
+HTTP 429 and 503 responses include a valid `Retry-After` header. The `schema_mismatch` body requires `current_schema` and `received_schema`. A row conflict is always a per-mutation HTTP 200 outcome, never HTTP 409. Schema-incompatible queued intent is always a per-mutation HTTP 200 terminal outcome when the request itself carries the exact current schema reference.
+
+Dispatch precedence is authentication, protocol gate, structural validation, permanent client retirement, batch and mutation replay lookup, first-execution client-generation gate, first-execution schema gate, admission control, then transactional execution. An exact completed replay therefore does not change because the current schema or client generation later changes. A first-execution request error does not create a completed batch or mutation outcome.
+
+Database deadlocks, serialization exhaustion, lock timeouts, unavailable dependencies, policy infrastructure failure, ledger write failure, version-fence failure, and response-ledger failure are whole-request operational failures. The server rolls back the transaction and returns 503. It must not commit an earlier mutation and then return a retryable outcome for a later mutation.
+
+On 429 or 503, the client retains the sealed batch and retries the same identifiers and canonical request content after the prescribed delay. On every non-retryable request error, the client retains unresolved mutation intent for inspection and schema or application reconciliation.
+
+### Schema-incompatible queued intent
+
+A queued mutation retains its UUID, complete authored payload, authored schema identity, base version, client version, and local ordering metadata through canonical outcome reconciliation and until explicit application or user resolution.
+
+The client must not strip a removed or renamed field to make a queued mutation fit a newer manifest. On `schema_incompatible`, it stores the complete mutation and rejection durably in a blocked, inspectable state and excludes that mutation from automatic retry. It does not delete the original intent. A replacement or mapped intent is a new mutation with a new UUID and is created only by explicit application or user reconciliation.
+
+A request-level `schema_mismatch` also leaves the sealed batch and every mutation unresolved. Reconnection and schema reconciliation must not mutate or reuse the sealed `batch_id` for different canonical content. A reconciled successor uses a new batch UUID and the exact current request schema. An unchanged queued mutation keeps its UUID, complete authored payload, and authored schema. Every mutation whose authored identity or content changes receives a new mutation UUID, while the original intent remains inspectable.
+
+## Required durable ledger fields
+
+The physical schema can add indexes and operational metadata, but the following information is required.
+
+### Batch ledger
+
+- authenticated user identity
+- client identity
+- UUID batch identity
+- protocol version, presented client generation, and exact schema version and hash
+- fingerprint algorithm, fingerprint version, fingerprint domain, and 32-byte request fingerprint
+- execution state, where only a transactionally complete state is replayable
+- original HTTP status
+- exact canonical response body, including original `server_time` and ordered outcomes
+- creation and completion timestamps for operations and audit, never automatic expiry
+
+The scoped batch identity is unique. A committed batch row cannot exist without its complete canonical response.
+
+### Mutation ledger
+
+- authenticated user identity
+- client identity
+- UUID mutation identity
+- fingerprint algorithm, fingerprint version, fingerprint domain, and 32-byte mutation fingerprint
+- first batch identity and request ordinal
+- authored and submitted schema identities
+- logical table identity, typed primary-key identity, and operation
+- terminal status and rejection code when present
+- exact canonical mutation outcome, including returned row and server version when present
+- exact immutable outcome schema reference
+- completion timestamp for operations and audit, never automatic expiry
+
+The scoped mutation identity is unique. Every mutation ledger row has exactly one terminal outcome.
+
+### Row-version write fence
+
+- immutable logical table identity
+- canonical typed primary-key identity
+- current state, `live` or `deleted`
+- current opaque server version
+- source transaction and event replay identity after WAL reconciliation
+- accepted mutation identity when the transition came from push
+
+The fence and source row transition are atomic. A fence-only delete remains distinguishable from true absence. Client retirement does not remove row deletion fences.
+
+### Client-retirement marker
+
+- authenticated user identity
+- client identity
+- retirement identity and retirement timestamp
+- durable irreversible state that prevents reactivation and identity reuse
+
+Ledger tables and exact response payloads are protected as sync metadata. Operational logs must not copy request payloads, canonical rows, credentials, or ledger response bodies.
+
+## Rejected alternatives
+
+### Re-execute after response loss
+
+Rejected because database uniqueness alone does not replay policy hooks, updates, deletes, canonical rows, versions, or mixed outcomes exactly.
+
+### Automatic idempotency TTL
+
+Rejected because an offline client can retry after an arbitrary interval. Expiring identity while the client can still return makes duplicate execution possible. Only irreversible client retirement closes that retry domain.
+
+### Hash raw JSON or identifiers only
+
+Rejected because whitespace and object order are transport details, while omitting typed values permits one identity to represent different intent.
+
+### All-or-nothing semantic acceptance
+
+Rejected because independent valid mutations must commit beside terminal semantic rejections. The atomic guarantee is durability of writes and outcomes, not uniform semantic success.
+
+### Per-mutation retryable outcomes
+
+Rejected because they allow a response to mix committed work with an uncertain operational boundary. Retryable operational failure applies to the whole request and rolls back first execution.
+
+### Timestamp last-write-wins
+
+Rejected because client clock skew, exact ties, and future timestamps cannot provide a trustworthy cross-device order. `client_version` remains diagnostic only.
+
+### Unlocked check-then-write
+
+Rejected because another transaction can change the row between conflict evaluation and source write. Equality comparison and state transition must be one atomic compare-and-swap.
+
+### Push upsert, delete without a base, or implicit resurrection
+
+Rejected because each makes client intent and conflict behavior depend on race-time row state. Protocol version 3 requires one explicit transition with one exact precondition.
+
+### Synchronous push changelog publication
+
+Rejected because it creates a second pull-visible ordering path beside WAL. Push commits source rows, version fences, and replay outcomes; WAL alone creates pull-visible effects.
+
+### Silent unknown-field removal
+
+Rejected because reporting success after dropping authored data is silent mutation loss. Incompatible queued intent remains complete and inspectable.
+
+## Consequences
+
+- A lost successful response is recoverable by exact replay without another source write.
+- Conflicts are deterministic equality failures. Clock skew and timestamp ties cannot select a winner or poison future writes.
+- Delete participates in the same atomic version contract as update.
+- Clients must persist UUID identities, immutable sealed batches, authored schema metadata, and full schema-incompatible intent.
+- Clients may refresh only the server-owned base precondition of an unsealed successor after earlier accepted reconciliation; sealed or transmitted content remains immutable.
+- Servers must retain potentially large response ledgers for the active lifetime of every client and protect canonical row payloads as application data.
+- First execution holds one transaction across all accepted writes and terminal outcomes, which increases contention and makes strict batch limits necessary.
+- Push success does not imply immediate pull visibility. WAL processing remains the sole pull-visible publication path.
+- Durable deleted-state fences consume storage, but they prevent accidental resurrection and preserve compare-and-swap meaning.
+- A retired client identity can never reconnect. A replacement device or installation receives a new client identity.
+
+## Audit disposition
+
+| Finding | Contract disposition |
+| --- | --- |
+| S-11 | Scoped durable ledgers, exact response replay, one first-execution transaction, and atomic compare-and-swap replace re-execution and racing writes. Delete uses the same base-version rule. |
+| S-14 | UUID and uniqueness rules, one-field typed primary keys, exact operation shapes, strict vocabulary, and a complete outcome partition make invalid protocol states rejectable. |
+| S-15 | Server versions are opaque equality tokens. Timestamp parsing and sequence-derived version meaning are forbidden. |
+| S-16 | Identity retention, replay, mixed semantic atomicity, tie and skew behavior, and update-versus-delete rules are fully specified. |
+| S-17 | Push vocabulary is only insert, update, and delete. Server-generated versions, canonical rows, outcome classes, and HTTP dispatch no longer depend on contradictory timestamp examples. |
+| Related S-01 and S-10 constraints | WAL alone publishes pull-visible effects, and schema-incompatible queued fields are rejected without discarding intent. |
+
+This disposition freezes the protocol decision. Conformance and implementation evidence must still prove every rule against response loss, concurrent compare-and-swap, delete races, mixed outcomes, schema incompatibility, and identifier reuse.

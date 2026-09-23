@@ -1,13 +1,18 @@
 package com.trainstar.synchro
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import kotlinx.serialization.json.Json
+import java.util.concurrent.TimeUnit
 
 class HttpClientTests {
 
@@ -35,96 +40,188 @@ class HttpClientTests {
     }
 
     @Test
-    fun testRegisterSuccess() = runTest {
-        val responseBody = """
-            {
-                "id": "server-id-123",
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "checkpoint": 0,
-                "schema_version": 1,
-                "schema_hash": "abc123"
-            }
-        """.trimIndent()
+    fun rebuildRequestsKeepRequiredNullCursorAndExactRetryBytes() = runTest {
+        for (cursor in listOf(null, "rebuild-page-2")) {
+            val request = RebuildRequest(
+                clientID = "test-device",
+                clientGeneration = 1,
+                schema = SchemaRef(1, "a".repeat(64)),
+                scope = "scope-one",
+                rebuildID = "00000000-0000-4000-8000-000000000001",
+                cursor = cursor,
+                limit = 100,
+            )
+            val body = retryableRequestBody("/sync/rebuild") { httpClient.rebuild(request) }
+            val encoded = Json.parseToJsonElement(body).jsonObject
+            assertEquals(cursor?.let(::JsonPrimitive) ?: JsonNull, encoded["cursor"])
+            val replay = retryableRequestBody("/sync/rebuild") { httpClient.rebuildWithBody(request, body) }
+            assertEquals(body, replay)
+        }
+    }
 
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-
-        val req = RegisterRequest(
-            clientID = "test-device", platform = "android",
-            appVersion = "1.0.0", schemaVersion = 0, schemaHash = ""
+    @Test
+    fun connectRequestsKeepRequiredScopeCursorsAndOmitOptionalNulls() = runTest {
+        val request = ConnectRequest(
+            clientID = "test-device",
+            platform = "android",
+            appVersion = "1.0.0",
+            protocolVersion = 3,
+            schema = SchemaRef(1, "a".repeat(64)),
+            scopeSetVersion = 1,
+            knownScopes = mapOf(
+                "fresh" to ScopeCursorRef(),
+                "continued" to ScopeCursorRef("scope-cursor"),
+            ),
         )
-        val resp = httpClient.register(req)
-
-        assertEquals("server-id-123", resp.id)
-        assertEquals(1L, resp.schemaVersion)
-        assertEquals("abc123", resp.schemaHash)
-
-        // Verify request
-        val recorded = server.takeRequest()
-        assertEquals("POST", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/register"))
-        assertEquals("Bearer test-token", recorded.getHeader("Authorization"))
-        assertEquals("1.0.0", recorded.getHeader("X-App-Version"))
-        assertTrue(recorded.getHeader("Content-Type")!!.startsWith("application/json"))
-
-        val body = Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonElement>>(recorded.body.readUtf8())
-        assertEquals("\"test-device\"", body["client_id"].toString())
-        assertEquals("\"android\"", body["platform"].toString())
+        val body = retryableRequestBody("/sync/connect") { httpClient.connect(request) }
+        val encoded = Json.parseToJsonElement(body).jsonObject
+        assertEquals(
+            Json.parseToJsonElement("""{"fresh":{"cursor":null},"continued":{"cursor":"scope-cursor"}}"""),
+            encoded["known_scopes"],
+        )
+        assertFalse(encoded.containsKey("client_generation"))
+        assertFalse(encoded.containsKey("schema_reset"))
+        assertFalse(encoded.containsKey("seed_receipts"))
+        val replay = retryableRequestBody("/sync/connect") { httpClient.connectExact(request, body) }
+        assertEquals(body, replay)
     }
 
     @Test
-    fun testFetchSchemaSuccess() = runTest {
-        val responseBody = """
-            {
-                "schema_version": 3,
-                "schema_hash": "def456",
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "tables": [
-                    {
-                        "table_name": "orders",
-                        "push_policy": "owner_only",
-                        "updated_at_column": "updated_at",
-                        "deleted_at_column": "deleted_at",
-                        "primary_key": ["id"],
-                        "columns": [
-                            {"name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": true}
-                        ]
-                    }
-                ]
-            }
-        """.trimIndent()
+    fun pullRequestsKeepRequiredScopeCursorsAndExactRetryBytes() = runTest {
+        val request = PullRequest(
+            clientID = "test-device",
+            clientGeneration = 1,
+            schema = SchemaRef(1, "a".repeat(64)),
+            scopeSetVersion = 1,
+            scopes = mapOf(
+                "fresh" to ScopeCursorRef(),
+                "continued" to ScopeCursorRef("scope-cursor"),
+            ),
+            limit = 100,
+        )
+        val body = retryableRequestBody("/sync/pull") { httpClient.pull(request) }
+        assertEquals(
+            Json.parseToJsonElement("""{"fresh":{"cursor":null},"continued":{"cursor":"scope-cursor"}}"""),
+            Json.parseToJsonElement(body).jsonObject["scopes"],
+        )
+        val replay = retryableRequestBody("/sync/pull") { httpClient.pullExact(request, body) }
+        assertEquals(body, replay)
+    }
 
+    private suspend fun retryableRequestBody(path: String, send: suspend () -> Unit): String {
+        server.enqueue(
+            MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(RETRYABLE_503_ERROR_JSON),
+        )
+        val failure = runCatching { send() }.exceptionOrNull()
+        assertTrue("Expected the authored retryable response", failure is RetryableError)
+        val recorded = requireNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+        assertEquals(path, recorded.path)
+        val body = recorded.body.readUtf8()
+        assertEquals(body, (failure as RetryableError).workIdentity)
+        return body
+    }
+
+    @Test
+    fun testResponseBodyDisconnectWithoutDurableWorkIsNetworkError() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setBody("{" + "\"schema_version\":1,".repeat(2_000))
+                .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY),
+        )
+
+        try {
+            httpClient.fetchSchema()
+            fail("Expected retryable response-body disconnect")
+        } catch (error: SynchroError.NetworkError) {
+            assertNotNull(error.underlying)
+        }
+    }
+
+    @Test
+    fun testMalformedResponseBodyRemainsInvalidResponse() = runTest {
+        server.enqueue(MockResponse().setBody("{"))
+
+        assertThrows(SynchroError.InvalidResponse::class.java) {
+            kotlinx.coroutines.runBlocking { httpClient.fetchSchema() }
+        }
+    }
+
+    @Test
+    fun testConnectRejectsNoncanonicalSuccessJson() = runTest {
+        val responseBody = """
+            {"server_time":"2026-03-20T18:22:11Z","protocol_version":3,"client_generation":4.0,"scope_set_version":13,"schema":{"version":8,"hash":"${"8".repeat(64)}","action":"none"},"scopes":{"add":[],"remove":[]},"scope_cursor_updates":{}}
+        """.trimIndent()
         server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
 
-        val resp = httpClient.fetchSchema()
-        assertEquals(3L, resp.schemaVersion)
-        assertEquals(1, resp.tables.size)
-        assertEquals("orders", resp.tables[0].tableName)
-
-        val recorded = server.takeRequest()
-        assertEquals("GET", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/schema"))
+        val request = ConnectRequest(
+            clientID = "test-device",
+            platform = "android",
+            appVersion = "1.0.0",
+            protocolVersion = 3,
+            schema = SchemaRef(version = 8, hash = "8".repeat(64)),
+            scopeSetVersion = 13,
+            knownScopes = emptyMap(),
+        )
+        try {
+            httpClient.connect(request)
+            fail("Expected invalid response")
+        } catch (_: SynchroError.InvalidResponse) {
+        }
     }
 
     @Test
-    fun testSchemaMismatch409() = runTest {
+    fun testSchemaMismatch422() = runTest {
+        val currentHash = "b".repeat(64)
+        val receivedHash = "a".repeat(64)
         val responseBody = """
             {
-                "code": "schema_mismatch",
-                "message": "client schema does not match server schema",
-                "server_schema_version": 5,
-                "server_schema_hash": "newHash"
+                "error": {
+                    "code": "schema_mismatch",
+                    "message": "client schema does not match server schema",
+                    "retryable": false,
+                    "current_schema": {"version": 2, "hash": "$currentHash"},
+                    "received_schema": {"version": 1, "hash": "$receivedHash"}
+                }
             }
         """.trimIndent()
 
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(409))
+        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(422))
 
-        val req = PullRequest(clientID = "test", checkpoint = 0, schemaVersion = 1, schemaHash = "old")
+        val req = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(version = 1, hash = "old"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100
+        )
         try {
             httpClient.pull(req)
             fail("Expected schemaMismatch error")
         } catch (e: SynchroError.SchemaMismatch) {
-            assertEquals(5L, e.serverVersion)
-            assertEquals("newHash", e.serverHash)
+            assertEquals(2L, e.serverVersion)
+            assertEquals(currentHash, e.serverHash)
+        }
+    }
+
+    @Test
+    fun testSchemaMismatch422RejectsMissingSchemaReferences() = runTest {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"error":{"code":"schema_mismatch","message":"schema changed","retryable":false}}""",
+            ).setResponseCode(422),
+        )
+
+        val request = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(1, "a".repeat(64)),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100,
+        )
+        assertThrows(SynchroError.InvalidResponse::class.java) {
+            kotlinx.coroutines.runBlocking { httpClient.pull(request) }
         }
     }
 
@@ -132,9 +229,17 @@ class HttpClientTests {
     fun testUpgradeRequired426() = runTest {
         server.enqueue(MockResponse().setBody("""{"error":"client upgrade required"}""").setResponseCode(426))
 
-        val req = RegisterRequest(clientID = "test", platform = "android", appVersion = "0.1.0", schemaVersion = 0, schemaHash = "")
+        val req = ConnectRequest(
+            clientID = "test",
+            platform = "android",
+            appVersion = "0.1.0",
+            protocolVersion = 3,
+            schema = SchemaRef(version = 0, hash = ""),
+            scopeSetVersion = 0,
+            knownScopes = emptyMap()
+        )
         try {
-            httpClient.register(req)
+            httpClient.connect(req)
             fail("Expected upgradeRequired error")
         } catch (e: SynchroError.UpgradeRequired) {
             assertEquals("1.0.0", e.currentVersion)
@@ -145,12 +250,18 @@ class HttpClientTests {
     fun testRetryAfter429() = runTest {
         server.enqueue(
             MockResponse()
-                .setBody("""{"error":"rate limited"}""")
+                .setBody(RETRYABLE_429_ERROR_JSON)
                 .setResponseCode(429)
                 .setHeader("Retry-After", "10")
         )
 
-        val req = PushRequest(clientID = "test", changes = emptyList(), schemaVersion = 1, schemaHash = "abc")
+        val req = PushRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            batchID = "batch-1",
+            schema = SchemaRef(version = 1, hash = "abc"),
+            mutations = emptyList()
+        )
         try {
             httpClient.push(req)
             fail("Expected retryable error")
@@ -158,6 +269,9 @@ class HttpClientTests {
             assertEquals(10.0, e.retryAfter!!, 0.01)
             assertTrue(e.underlying is SynchroError.ServerError)
             assertEquals(429, (e.underlying as SynchroError.ServerError).status)
+            assertEquals(RetryOperation.PUSHING, e.interruptedOperation)
+            assertEquals("batch-1", e.workIdentity)
+            assertEquals(RetryClassification.HTTP_429, e.retryClassification)
         }
     }
 
@@ -165,25 +279,109 @@ class HttpClientTests {
     fun testRetryAfter503() = runTest {
         server.enqueue(
             MockResponse()
-                .setBody("""{"error":"service temporarily unavailable"}""")
+                .setBody(RETRYABLE_503_ERROR_JSON)
                 .setResponseCode(503)
                 .setHeader("Retry-After", "5")
         )
 
-        val req = PullRequest(clientID = "test", checkpoint = 0, schemaVersion = 1, schemaHash = "abc")
+        val req = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100
+        )
         try {
             httpClient.pull(req)
             fail("Expected retryable error")
         } catch (e: RetryableError) {
             assertEquals(5.0, e.retryAfter!!, 0.01)
+            assertEquals(RetryOperation.PULLING, e.interruptedOperation)
+            assertEquals(RetryClassification.HTTP_503, e.retryClassification)
+            assertEquals(server.takeRequest().body.readUtf8(), e.workIdentity)
         }
+    }
+
+    @Test
+    fun malformedRetryResponsesAreInvalidAndNeverRetryable() = runTest {
+        val request = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100,
+        )
+        val cases = listOf(
+            MockResponse().setResponseCode(429).setHeader("Retry-After", "1").setBody(
+                """{"error":{"code":"temporary_unavailable","message":"wrong code","retryable":true}}"""
+            ),
+            MockResponse().setResponseCode(429).setHeader("Retry-After", "1").setBody(
+                """{"error":{"code":"retry_later","message":"not retryable","retryable":false}}"""
+            ),
+            MockResponse().setResponseCode(429).setBody(RETRYABLE_429_ERROR_JSON),
+            MockResponse().setResponseCode(429).setHeader("Retry-After", "not-a-delay")
+                .setBody(RETRYABLE_429_ERROR_JSON),
+            MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(
+                """{"error":{"code":"retry_later","message":"wrong code","retryable":true}}"""
+            ),
+            MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(
+                """{"error":{"code":"capture_pending","message":"not retryable","retryable":false}}"""
+            ),
+            MockResponse().setResponseCode(503).setHeader("Retry-After", "1")
+                .setBody("""{"error":"legacy error"}"""),
+            MockResponse().setResponseCode(503).setBody(RETRYABLE_503_ERROR_JSON),
+            MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(
+                """{"error":{"code":"capture_pending","message":"unknown member","retryable":true,"extra":1}}"""
+            ),
+        )
+
+        for (response in cases) {
+            server.enqueue(response)
+            val failure = runCatching { httpClient.pull(request) }.exceptionOrNull()
+            assertTrue(failure is SynchroError.InvalidResponse)
+            assertFalse(failure is RetryableError)
+        }
+    }
+
+    @Test
+    fun capturePending503WithRetryAfterIsRetryable() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(503)
+                .setHeader("Retry-After", "1")
+                .setBody(
+                    """{"error":{"code":"capture_pending","message":"capture pending","retryable":true}}"""
+                )
+        )
+        val request = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100,
+        )
+
+        val failure = runCatching { httpClient.pull(request) }.exceptionOrNull()
+
+        assertTrue(failure is RetryableError)
+        assertEquals(RetryClassification.HTTP_503, (failure as RetryableError).retryClassification)
     }
 
     @Test
     fun testServerError500() = runTest {
         server.enqueue(MockResponse().setBody("""{"error":"internal server error"}""").setResponseCode(500))
 
-        val req = PullRequest(clientID = "test", checkpoint = 0, schemaVersion = 1, schemaHash = "abc")
+        val req = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
+            limit = 100
+        )
         try {
             httpClient.pull(req)
             fail("Expected serverError")
@@ -194,149 +392,22 @@ class HttpClientTests {
     }
 
     @Test
-    fun testPullRequestEncoding() = runTest {
-        val pullResponseBody = """
-            {
-                "changes": [],
-                "deletes": [],
-                "checkpoint": 42,
-                "has_more": false,
-                "schema_version": 1,
-                "schema_hash": "abc"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(pullResponseBody).setResponseCode(200))
-
-        val req = PullRequest(
-            clientID = "dev-1",
-            checkpoint = 100,
-            tables = listOf("orders"),
-            limit = 50,
-            knownBuckets = listOf("user:123", "global"),
-            schemaVersion = 7,
-            schemaHash = "hash7"
+    fun rejectsIdempotencyConflictOutsidePush() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(409)
+                .setBody("""{"error":{"code":"idempotency_conflict","message":"batch conflict","retryable":false}}"""),
         )
-        httpClient.pull(req)
-
-        val recorded = server.takeRequest()
-        val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
-        assertEquals("\"dev-1\"", body["client_id"].toString())
-        assertEquals("100", body["checkpoint"].toString())
-        assertEquals("[\"orders\"]", body["tables"].toString())
-        assertEquals("50", body["limit"].toString())
-        assertEquals("[\"user:123\",\"global\"]", body["known_buckets"].toString())
-        assertEquals("7", body["schema_version"].toString())
-        assertEquals("\"hash7\"", body["schema_hash"].toString())
-    }
-
-    @Test
-    fun testSnapshotRequestEncoding() = runTest {
-        val snapshotResponseBody = """
-            {
-                "records": [],
-                "checkpoint": 50,
-                "has_more": true,
-                "schema_version": 1,
-                "schema_hash": "abc"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(snapshotResponseBody).setResponseCode(200))
-
-        val req = SnapshotRequest(
-            clientID = "dev-1",
-            cursor = SnapshotCursor(checkpoint = 10, tableIndex = 0, afterID = "w5"),
+        val request = PullRequest(
+            clientID = "test",
+            clientGeneration = 1,
+            schema = SchemaRef(version = 1, hash = "abc"),
+            scopeSetVersion = 0,
+            scopes = emptyMap(),
             limit = 100,
-            schemaVersion = 3,
-            schemaHash = "hash3"
         )
-        val resp = httpClient.snapshot(req)
 
-        val recorded = server.takeRequest()
-        assertEquals("POST", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/snapshot"))
-
-        val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
-        assertEquals("\"dev-1\"", body["client_id"].toString())
-        assertEquals("100", body["limit"].toString())
-        assertEquals("3", body["schema_version"].toString())
-        val cursor = body["cursor"] as kotlinx.serialization.json.JsonObject
-        assertEquals("10", cursor["checkpoint"].toString())
-        assertEquals("0", cursor["table_idx"].toString())
-        assertEquals("\"w5\"", cursor["after_id"].toString())
-        assertEquals(50L, resp.checkpoint)
-        assertTrue(resp.hasMore)
+        assertTrue(runCatching { httpClient.pull(request) }.exceptionOrNull() is SynchroError.InvalidResponse)
     }
 
-    @Test
-    fun testFetchTablesSuccess() = runTest {
-        val responseBody = """
-            {
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "schema_version": 2,
-                "schema_hash": "xyz",
-                "tables": [
-                    {
-                        "table_name": "orders",
-                        "push_policy": "owner_only",
-                        "dependencies": []
-                    }
-                ]
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
-
-        val resp = httpClient.fetchTables()
-        assertEquals(2L, resp.schemaVersion)
-        assertEquals(1, resp.tables.size)
-        assertEquals("orders", resp.tables[0].tableName)
-        assertEquals("owner_only", resp.tables[0].pushPolicy)
-
-        val recorded = server.takeRequest()
-        assertEquals("GET", recorded.method)
-        assertTrue(recorded.path!!.endsWith("/sync/tables"))
-    }
-
-    @Test
-    fun testPushRequestEncoding() = runTest {
-        val pushResponseBody = """
-            {
-                "accepted": [],
-                "rejected": [],
-                "checkpoint": 0,
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "schema_version": 1,
-                "schema_hash": "abc"
-            }
-        """.trimIndent()
-
-        server.enqueue(MockResponse().setBody(pushResponseBody).setResponseCode(200))
-
-        val req = PushRequest(
-            clientID = "dev-1",
-            changes = listOf(
-                PushRecord(
-                    id = "rec-1",
-                    tableName = "orders",
-                    operation = "create",
-                    data = mapOf("ship_address" to AnyCodable("123 Main St")),
-                    clientUpdatedAt = "2026-01-01T12:00:00.000Z"
-                )
-            ),
-            schemaVersion = 7,
-            schemaHash = "hash7"
-        )
-        httpClient.push(req)
-
-        val recorded = server.takeRequest()
-        val body = Json.decodeFromString<kotlinx.serialization.json.JsonObject>(recorded.body.readUtf8())
-        assertEquals("\"dev-1\"", body["client_id"].toString())
-        val changes = body["changes"] as kotlinx.serialization.json.JsonArray
-        assertEquals(1, changes.size)
-        val change = changes[0] as kotlinx.serialization.json.JsonObject
-        assertEquals("\"rec-1\"", change["id"].toString())
-        assertEquals("\"create\"", change["operation"].toString())
-    }
 }

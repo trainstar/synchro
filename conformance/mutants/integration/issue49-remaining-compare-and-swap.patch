@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1555,7 +1555,7 @@ fn evaluate_mutation(
+                 .row_version
+                 .as_deref()
+                 .unwrap_or_else(|| pgrx::error!("authoritative row has no server version"));
+-            if mutation.base_version.as_deref() != Some(current_version) {
++            if current_version.is_empty() {
+                 return conflict_evaluation(
+                     mutation,
+                     outcome_schema,

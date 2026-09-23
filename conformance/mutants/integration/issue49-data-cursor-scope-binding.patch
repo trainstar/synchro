@@ -1,0 +1,11 @@
+diff --git a/extensions/synchro-pg/src/cursor_token.rs b/extensions/synchro-pg/src/cursor_token.rs
+--- a/extensions/synchro-pg/src/cursor_token.rs
++++ b/extensions/synchro-pg/src/cursor_token.rs
+@@ -148,7 +148,6 @@ pub(crate) fn parse_scope_cursor(
+     if payload.user_binding != context.user_binding
+         || payload.client_binding != context.client_binding
+         || payload.client_generation != context.client_generation
+-        || payload.scope_id != context.scope_id
+         || payload.schema_hash != context.schema_hash
+     {
+         return Err("incremental cursor binding is invalid".to_string());

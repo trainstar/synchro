@@ -1,0 +1,113 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/artifact-inventory-v1.schema.json",
+  "schema_version": 1,
+  "release": "0.3.0",
+  "artifacts": [
+    {
+      "id": "ARTDEF-CONFORMANCE-RUNNER-001",
+      "role": "conformance-runner",
+      "name": "Independent conformance runner binary",
+      "visibility": "internal",
+      "kind": "verification"
+    },
+    {
+      "id": "ARTDEF-PG-EXTENSION-001",
+      "role": "pg-extension",
+      "name": "PostgreSQL 18 Ubuntu 24.04 Linux x64 extension archive",
+      "visibility": "public",
+      "kind": "file",
+      "stage_root": "server",
+      "staging_path_template": "extension/synchro-pg-pg18-ubuntu24.04-linux-x64-{version}.tar.gz",
+      "release_path_template": "artifacts/synchro-pg-pg18-ubuntu24.04-linux-x64-{version}.tar.gz",
+      "destination_template": "github-release:v{version}"
+    },
+    {
+      "id": "ARTDEF-PG-SQL-001",
+      "role": "pg-install-sql",
+      "name": "pgrx-generated installation SQL",
+      "visibility": "internal",
+      "kind": "embedded"
+    },
+    {
+      "id": "ARTDEF-ADAPTER-001",
+      "role": "adapter",
+      "name": "Linux x64 synchrod-pg binary",
+      "visibility": "public",
+      "kind": "file",
+      "stage_root": "server",
+      "staging_path_template": "adapter/synchrod-pg-linux-x64-{version}",
+      "release_path_template": "artifacts/synchrod-pg-linux-x64-{version}",
+      "destination_template": "github-release:v{version}"
+    },
+    {
+      "id": "ARTDEF-SEED-TOOL-001",
+      "role": "seed-tool",
+      "name": "Linux x64 synchro-seed binary",
+      "visibility": "public",
+      "kind": "file",
+      "stage_root": "server",
+      "staging_path_template": "seed/synchro-seed-linux-x64-{version}",
+      "release_path_template": "artifacts/synchro-seed-linux-x64-{version}",
+      "destination_template": "github-release:v{version}"
+    },
+    {
+      "id": "ARTDEF-GO-MODULE-001",
+      "role": "go-module",
+      "name": "Go adapter module",
+      "visibility": "public",
+      "kind": "source",
+      "source_path": "api/go",
+      "source_tag_template": "api/go/v{version}",
+      "destination_template": "go-module:github.com/trainstar/synchro/api/go@v{version}"
+    },
+    {
+      "id": "ARTDEF-SWIFT-SPM-001",
+      "role": "swift-spm",
+      "name": "Swift package source",
+      "visibility": "public",
+      "kind": "source",
+      "source_path": "repo-root",
+      "source_tag_template": "v{version}",
+      "destination_template": "swift-package:https://github.com/trainstar/synchro.git@v{version}"
+    },
+    {
+      "id": "ARTDEF-COCOAPODS-001",
+      "role": "cocoapods",
+      "name": "Root CocoaPods metadata",
+      "visibility": "public",
+      "kind": "source",
+      "source_path": "repo-root",
+      "source_tag_template": "v{version}",
+      "destination_template": "podspec:https://github.com/trainstar/synchro.git@v{version}"
+    },
+    {
+      "id": "ARTDEF-KOTLIN-MAVEN-001",
+      "role": "kotlin-maven",
+      "name": "Signed Kotlin Maven Central bundle",
+      "visibility": "public",
+      "kind": "file",
+      "stage_root": "packages",
+      "staging_path_template": "maven/synchro-maven-{version}.zip",
+      "release_path_template": "artifacts/synchro-maven-{version}.zip",
+      "destination_template": "maven-central:fit.trainstar:synchro:{version}"
+    },
+    {
+      "id": "ARTDEF-RN-NPM-001",
+      "role": "react-native-npm",
+      "name": "React Native npm tarball",
+      "visibility": "public",
+      "kind": "file",
+      "stage_root": "packages",
+      "staging_path_template": "npm/trainstar-synchro-react-native-{version}.tgz",
+      "release_path_template": "artifacts/trainstar-synchro-react-native-{version}.tgz",
+      "destination_template": "npm:@trainstar/synchro-react-native@{version}"
+    },
+    {
+      "id": "ARTDEF-PORTABLE-SEED-001",
+      "role": "portable-seed",
+      "name": "Portable SQLite seed artifact",
+      "visibility": "internal",
+      "kind": "verification"
+    }
+  ]
+}

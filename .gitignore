@@ -1,11 +1,14 @@
 # Go
 bin/
+!extensions/synchro-pg/src/bin/
+!extensions/synchro-pg/src/bin/pgrx_embed.rs
 *.test
 *.out
 cover.out
 
 # macOS / IDE
 .DS_Store
+.watchman-cookie-*
 .idea/
 .vscode/
 *.swp
@@ -15,18 +18,54 @@ cover.out
 # Test artifacts
 .synchrod-test.log
 .synchrod-test.pid
+.synchrod-pg-test.log
+.synchrod-pg-test.pid
+
+# Seed database output
+seed.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+clients/react-native/example/android/app/src/main/assets/seed.db
+!clients/react-native/example/seed.db
+
+# Swift build cache
+.build/
+Package.resolved
 
 # Kotlin
 clients/kotlin/.gradle/
 clients/kotlin/**/build/
+clients/kotlin/local.properties
 
 # React Native artifacts
 clients/react-native/example/artifacts/
+
+# Local consumer artifacts
+dist/
+plans/
+docs/.vscode/
+.playwright-mcp/
+
+# Retired planning and tracker records
+.r2-completion-tracker.md
+.r3-completion-tracker.md
+clients/react-native/BUILD_TRACKER.md
+docs/agent-tasks/
+docs/superpowers/plans/
 
 # Docs build output
 docs/node_modules/
 docs/dist/
 docs/.astro/
+
+# Rust build artifacts
+extensions/target/
+extensions/mutants.out.old/
+.pgrx-target/
 
 # Local-only
 .ignore/
@@ -34,3 +73,17 @@ docs/.astro/
 # AI config
 AGENTS.md
 CLAUDE.md
+.opencode/
+synchrod-pg
+!api/go/cmd/
+!api/go/cmd/synchrod-pg/
+!api/go/cmd/synchrod-pg/main.go
+.synchrod-pg-test.log
+.synchrod-pg-test.pid
+
+# Consumer verification build outputs
+verification/consumers/**/.gradle/
+verification/consumers/**/build/
+verification/consumers/**/*.apk
+verification/consumers/**/*.dex
+__pycache__/

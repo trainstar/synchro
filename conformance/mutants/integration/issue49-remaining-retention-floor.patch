@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/cursor_token.rs b/extensions/synchro-pg/src/cursor_token.rs
+--- a/extensions/synchro-pg/src/cursor_token.rs
++++ b/extensions/synchro-pg/src/cursor_token.rs
+@@ -160,7 +160,7 @@ pub(crate) fn parse_scope_cursor(
+         || scope.stream_generation != payload.stream_generation
+         || scope.membership_generation != payload.membership_generation
+         || scope.retention_generation != payload.retention_generation
+-        || payload.position < scope.floor
++        || payload.position <= scope.floor
+     {
+         return Ok(ParsedScopeCursor::Stale);
+     }

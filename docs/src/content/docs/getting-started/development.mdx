@@ -1,0 +1,138 @@
+---
+title: Local development
+description: Prepare disposable PostgreSQL fixtures and run the supported contributor checks.
+---
+
+Use this guide to develop Synchro itself.
+For application integration, start with [First synchronization](/synchro/getting-started/quickstart/).
+
+Run Make commands from the repository root.
+Create ordinary work branches from `dev` and target their pull requests at `dev`.
+`master` is the stable default branch, not the target for unfinished development.
+The integration setup creates test tables, grants, registrations, and seed data.
+Never point it at a production database or a database with application data.
+
+## Tools
+
+| Work | Prerequisites |
+| --- | --- |
+| Server and Go | Go 1.25, Rust 1.92, cargo-pgrx 0.17, PostgreSQL 18, C build tools |
+| Swift and iOS | macOS, Xcode, Swift 6, an installed iOS simulator |
+| Kotlin and Android | JDK 17, Android SDK, platform tools, the required emulator image |
+| React Native | Node 22.20.0, Corepack/Yarn 4.11.0, the platform tools above, CocoaPods for iOS |
+| Documentation | Node 22.12 or later in the supported Node 22 line, npm, Python 3 |
+
+Configure pgrx for the PostgreSQL installation you will use.
+`PGRX_PG_CONFIG` must name that installation's executable `pg_config`.
+The default comes from the `pg18` entry in `~/.pgrx/config.toml`.
+The pgrx configuration and actual binaries must refer to the same PostgreSQL installation.
+
+Android targets use `ANDROID_HOME` for the SDK and `ANDROID_JAVA_HOME` for JDK 17.
+Set both to your installed tool locations.
+Install the SDK platform and build-tools versions declared in the Android Gradle projects.
+Start the emulator required by the selected test target.
+
+Install the React Native workspace dependencies before bridge checks:
+
+```sh
+cd clients/react-native
+corepack enable
+corepack yarn install --immutable
+cd ../..
+```
+
+## Checks without a running server
+
+Choose the checks relevant to your change:
+
+```sh
+make test-rust-core
+make test-swift-unit
+make test-kotlin-unit
+make test-rn-unit
+make docs-build
+```
+
+Run only platform targets supported by your installed toolchain.
+These commands do not replace the complete Candidate workflow.
+
+## Prepare integration artifacts
+
+Build fresh immutable artifacts in a clean checkout:
+
+```sh
+make conformance-adapter-artifact
+make conformance-seed-artifact
+make conformance-pg18-extension-test-artifact
+```
+
+The artifact targets refuse to replace existing output directories.
+After implementation changes, use a fresh worktree and rebuild the artifacts rather than accidentally testing stale output.
+These artifacts are local test inputs, not a published release.
+
+## Start a disposable database
+
+In the first terminal, run:
+
+```sh
+make local-postgres-run
+```
+
+Keep this process running.
+It creates an isolated PostgreSQL instance, role credentials, and a private connection file.
+The default state directory is `.ignore/r2/tmp/local-postgres`.
+Wait until its `attach.env` and `postgres.url` files exist.
+
+In a second terminal at the repository root, load that fixture:
+
+```sh
+export SYNCHRO_ATTACH_DIR="$PWD/.ignore/r2/tmp/local-postgres"
+export WARM_CONNECT_ENV_FILE="$SYNCHRO_ATTACH_DIR/attach.env"
+set -a
+. "$WARM_CONNECT_ENV_FILE"
+set +a
+export ADAPTER_TEST_URL="$(cat "$SYNCHRO_ATTACH_DIR/postgres.url")"
+export SYNCHRO_TEST_JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
+```
+
+Do not print or commit these values.
+The connection file authorizes test setup in this disposable instance.
+
+## Run integration checks
+
+The native and bridge Make targets prepare and start their adapter as needed:
+
+```sh
+make test-swift
+make test-kotlin
+make test-rn-e2e-ios
+make test-rn-e2e-android
+```
+
+Run these sequentially when they share the fixture, simulator, emulator, or package output.
+Use [conformance guidance](https://github.com/trainstar/synchro/blob/dev/conformance/README.md) for focused selectors and server-side suites.
+
+For manual requests, start the foreground adapter instead:
+
+```sh
+make synchrod-pg-test-serve
+```
+
+It prepares the disposable integration schema before listening on port 8091.
+Do not run another adapter owner on that port.
+The helper rejects an occupied port rather than terminating its owner.
+
+## Stop and clean up
+
+Stop the adapter before the database:
+
+```sh
+make synchrod-pg-test-stop
+```
+
+Then press Control-C in the first terminal.
+The provisioner closes its database and removes its generated credentials.
+Do not terminate unrelated port owners or delete another process's state directory.
+
+Local logs, credentials, build output, and test reports must remain outside tracked source.
+Use [RELEASE.md](https://github.com/trainstar/synchro/blob/master/RELEASE.md) for release operations.

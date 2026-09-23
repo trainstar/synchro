@@ -8,84 +8,7 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.*
 
-// MARK: - Register
-
-@Serializable
-data class RegisterRequest(
-    @SerialName("client_id") val clientID: String,
-    @SerialName("client_name") val clientName: String? = null,
-    val platform: String,
-    @SerialName("app_version") val appVersion: String,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class RegisterResponse(
-    val id: String,
-    @SerialName("server_time") val serverTime: String,
-    @SerialName("last_sync_at") val lastSyncAt: String? = null,
-    val checkpoint: Long,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-// MARK: - Pull
-
-@Serializable
-data class PullRequest(
-    @SerialName("client_id") val clientID: String,
-    val checkpoint: Long,
-    val tables: List<String>? = null,
-    val limit: Int? = null,
-    @SerialName("known_buckets") val knownBuckets: List<String>? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class PullResponse(
-    val changes: List<Record>,
-    val deletes: List<DeleteEntry>,
-    val checkpoint: Long,
-    @SerialName("has_more") val hasMore: Boolean,
-    @SerialName("snapshot_required") val snapshotRequired: Boolean? = null,
-    @SerialName("snapshot_reason") val snapshotReason: String? = null,
-    @SerialName("bucket_updates") val bucketUpdates: BucketUpdate? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class Record(
-    val id: String,
-    @SerialName("table_name") val tableName: String,
-    val data: Map<String, @Serializable(with = AnyCodableSerializer::class) AnyCodable>,
-    @SerialName("updated_at") val updatedAt: String,
-    @SerialName("deleted_at") val deletedAt: String? = null
-)
-
-@Serializable
-data class DeleteEntry(
-    val id: String,
-    @SerialName("table_name") val tableName: String
-)
-
-@Serializable
-data class BucketUpdate(
-    val added: List<String>? = null,
-    val removed: List<String>? = null
-)
-
 // MARK: - Push
-
-@Serializable
-data class PushRequest(
-    @SerialName("client_id") val clientID: String,
-    val changes: List<PushRecord>,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
 
 @Serializable
 data class PushRecord(
@@ -94,79 +17,8 @@ data class PushRecord(
     val operation: String,
     val data: Map<String, @Serializable(with = AnyCodableSerializer::class) AnyCodable>? = null,
     @SerialName("client_updated_at") val clientUpdatedAt: String,
-    @SerialName("base_updated_at") val baseUpdatedAt: String? = null
-)
-
-@Serializable
-data class PushResponse(
-    val accepted: List<PushResult>,
-    val rejected: List<PushResult>,
-    val checkpoint: Long,
-    @SerialName("server_time") val serverTime: String,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class PushResult(
-    val id: String,
-    @SerialName("table_name") val tableName: String,
-    val operation: String,
-    val status: String,
-    @SerialName("reason_code") val reasonCode: String? = null,
-    val message: String? = null,
-    @SerialName("server_version") val serverVersion: Record? = null,
-    @SerialName("server_updated_at") val serverUpdatedAt: String? = null,
-    @SerialName("server_deleted_at") val serverDeletedAt: String? = null
-) {
-    constructor(
-        id: String,
-        tableName: String,
-        operation: String,
-        status: String,
-        reason: String? = null,
-        serverVersion: Record? = null,
-        serverUpdatedAt: String? = null,
-        serverDeletedAt: String? = null
-    ) : this(
-        id = id,
-        tableName = tableName,
-        operation = operation,
-        status = status,
-        reasonCode = null,
-        message = reason,
-        serverVersion = serverVersion,
-        serverUpdatedAt = serverUpdatedAt,
-        serverDeletedAt = serverDeletedAt
-    )
-}
-
-// MARK: - Snapshot
-
-@Serializable
-data class SnapshotRequest(
-    @SerialName("client_id") val clientID: String,
-    val cursor: SnapshotCursor? = null,
-    val limit: Int? = null,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class SnapshotCursor(
-    val checkpoint: Long,
-    @SerialName("table_idx") val tableIndex: Int,
-    @SerialName("after_id") val afterID: String
-)
-
-@Serializable
-data class SnapshotResponse(
-    val records: List<Record>,
-    val cursor: SnapshotCursor? = null,
-    val checkpoint: Long,
-    @SerialName("has_more") val hasMore: Boolean,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
+    @SerialName("base_updated_at") val baseUpdatedAt: String? = null,
+    @Transient val localRevision: Long = 0,
 )
 
 // MARK: - Schema
@@ -176,73 +28,324 @@ data class SchemaResponse(
     @SerialName("schema_version") val schemaVersion: Long,
     @SerialName("schema_hash") val schemaHash: String,
     @SerialName("server_time") val serverTime: String,
-    val tables: List<SchemaTable>
-)
-
-@Serializable
-data class SchemaTable(
-    @SerialName("table_name") val tableName: String,
-    @SerialName("push_policy") val pushPolicy: String,
-    @SerialName("parent_table") val parentTable: String? = null,
-    @SerialName("parent_fk_col") val parentFKCol: String? = null,
-    val dependencies: List<String>? = null,
-    @SerialName("updated_at_column") val updatedAtColumn: String,
-    @SerialName("deleted_at_column") val deletedAtColumn: String,
-    @SerialName("primary_key") val primaryKey: List<String>,
-    @SerialName("bucket_by_column") val bucketByColumn: String? = null,
-    @SerialName("bucket_prefix") val bucketPrefix: String? = null,
-    @SerialName("global_when_bucket_null") val globalWhenBucketNull: Boolean? = null,
-    @SerialName("allow_global_read") val allowGlobalRead: Boolean? = null,
-    @SerialName("bucket_function") val bucketFunction: String? = null,
-    val columns: List<SchemaColumn>
-)
-
-@Serializable
-data class SchemaColumn(
-    val name: String,
-    @SerialName("db_type") val dbType: String,
-    @SerialName("logical_type") val logicalType: String,
-    val nullable: Boolean,
-    @SerialName("default_sql") val defaultSQL: String? = null,
-    @SerialName("default_kind") val defaultKind: String = "none",
-    @SerialName("sqlite_default_sql") val sqliteDefaultSQL: String? = null,
-    @SerialName("is_primary_key") val isPrimaryKey: Boolean
-)
+    val manifest: SchemaManifest
+) {
+    fun localTables(): List<LocalSchemaTable> = manifest.localTables()
+}
 
 // MARK: - Table Meta
 
-@Serializable
-data class TableMetaResponse(
-    val tables: List<TableMeta>,
-    @SerialName("server_time") val serverTime: String,
-    @SerialName("schema_version") val schemaVersion: Long,
-    @SerialName("schema_hash") val schemaHash: String
-)
-
-@Serializable
-data class TableMeta(
-    @SerialName("table_name") val tableName: String,
-    @SerialName("push_policy") val pushPolicy: String,
-    val dependencies: List<String>,
-    @SerialName("parent_table") val parentTable: String? = null,
-    @SerialName("parent_fk_col") val parentFKCol: String? = null,
-    @SerialName("updated_at_column") val updatedAtColumn: String? = null,
-    @SerialName("deleted_at_column") val deletedAtColumn: String? = null,
-    @SerialName("bucket_by_column") val bucketByColumn: String? = null,
-    @SerialName("bucket_prefix") val bucketPrefix: String? = null,
-    @SerialName("global_when_bucket_null") val globalWhenBucketNull: Boolean? = null,
-    @SerialName("allow_global_read") val allowGlobalRead: Boolean? = null,
-    @SerialName("bucket_function") val bucketFunction: String? = null
-)
-
 // MARK: - SDK Types
 
-sealed class SyncStatus {
-    data object Idle : SyncStatus()
-    data object Syncing : SyncStatus()
-    data class Error(val retryAt: java.time.Instant?) : SyncStatus()
-    data object Stopped : SyncStatus()
+/** The exact protocol 3 native-client lifecycle vocabulary. */
+enum class SyncLifecycleState(val wireName: String) {
+    UNINITIALIZED("uninitialized"),
+    LOCAL_READY("local_ready"),
+    CONNECTING("connecting"),
+    SCHEMA_APPLYING("schema_applying"),
+    READY("ready"),
+    PUSHING("pushing"),
+    PULLING("pulling"),
+    REBUILDING("rebuilding"),
+    BACKOFF("backoff"),
+    ERROR("error"),
+    STOPPED("stopped"),
 }
+
+internal object LifecycleTransitions {
+    fun requireAllowed(
+        from: SyncLifecycleState,
+        to: SyncLifecycleState,
+        processRecovery: Boolean = false,
+    ) {
+        val recoveryTransition = processRecovery && to == SyncLifecycleState.LOCAL_READY &&
+            from in RECOVERABLE_PROCESS_STATES
+        if (to !in LEGAL_TRANSITIONS.getValue(from) && !recoveryTransition) {
+            throw SynchroError.InvalidStateTransition(from, to)
+        }
+    }
+
+    private val LEGAL_TRANSITIONS = mapOf(
+        SyncLifecycleState.UNINITIALIZED to setOf(
+            SyncLifecycleState.LOCAL_READY,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.LOCAL_READY to setOf(
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.CONNECTING to setOf(
+            SyncLifecycleState.SCHEMA_APPLYING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.SCHEMA_APPLYING to setOf(
+            SyncLifecycleState.READY,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.READY to setOf(
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.PUSHING,
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.PUSHING to setOf(
+            SyncLifecycleState.PUSHING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.PULLING to setOf(
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.REBUILDING to setOf(
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.READY,
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.BACKOFF,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.BACKOFF to setOf(
+            SyncLifecycleState.CONNECTING,
+            SyncLifecycleState.PUSHING,
+            SyncLifecycleState.PULLING,
+            SyncLifecycleState.REBUILDING,
+            SyncLifecycleState.ERROR,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.ERROR to setOf(
+            SyncLifecycleState.LOCAL_READY,
+            SyncLifecycleState.STOPPED,
+        ),
+        SyncLifecycleState.STOPPED to setOf(SyncLifecycleState.LOCAL_READY),
+    )
+
+    private val RECOVERABLE_PROCESS_STATES = setOf(
+        SyncLifecycleState.CONNECTING,
+        SyncLifecycleState.SCHEMA_APPLYING,
+        SyncLifecycleState.READY,
+        SyncLifecycleState.PUSHING,
+        SyncLifecycleState.PULLING,
+        SyncLifecycleState.REBUILDING,
+        SyncLifecycleState.BACKOFF,
+    )
+}
+
+/** A bounded, stable diagnostic for a durable client failure. */
+enum class SyncOperationKind(val wireName: String) {
+    OPENING("opening"),
+    CONNECTING("connecting"),
+    SCHEMA("schema"),
+    PUSHING("pushing"),
+    PULLING("pulling"),
+    REBUILDING("rebuilding"),
+    LIFECYCLE("lifecycle"),
+    DATABASE("database");
+
+    companion object {
+        fun fromWireName(value: String): SyncOperationKind? =
+            entries.firstOrNull { it.wireName == value }
+    }
+}
+
+enum class SyncRecoveryAction(val wireName: String) {
+    RETRY("retry"),
+    SCHEMA_RESET("schema_reset"),
+    NONE("none");
+
+    companion object {
+        fun fromWireName(value: String): SyncRecoveryAction? =
+            entries.firstOrNull { it.wireName == value }
+    }
+}
+
+enum class SyncFailureCode(val wireName: String) {
+    AUTHENTICATION_REQUIRED("auth_required"),
+    CLIENT_RETIRED("client_retired"),
+    IDEMPOTENCY_CONFLICT("idempotency_conflict"),
+    INVALID_REQUEST("invalid_request"),
+    INVALID_RESPONSE("invalid_response"),
+    INVALID_SCHEMA_REFERENCE("invalid_schema_reference"),
+    INVALID_STATE_TRANSITION("invalid_state_transition"),
+    LOCAL_DATABASE("local_database"),
+    SCHEMA_APPLICATION_FAILED("schema_application_failed"),
+    SYNC_INTEGRITY_FAILURE("sync_integrity_failure"),
+    UNSUPPORTED_SCHEMA("unsupported_schema"),
+    UPGRADE_REQUIRED("upgrade_required"),
+    SCHEMA_MISMATCH("schema_mismatch"),
+    SERVER_ERROR("server_error"),
+    NETWORK_ERROR("network_error"),
+    DATABASE_ERROR("database_error"),
+    LOCAL_FAILURE("local_failure");
+
+    companion object {
+        fun fromWireName(value: String): SyncFailureCode? =
+            entries.firstOrNull { it.wireName == value }
+    }
+}
+
+data class SyncFailure(
+    val operation: SyncOperationKind,
+    val code: SyncFailureCode,
+    val retryable: Boolean,
+    val message: String,
+    val recoveryAction: SyncRecoveryAction,
+    val metadata: Map<String, String> = emptyMap(),
+) {
+    init {
+        require(message.isNotEmpty() && message.length <= 256) {
+            "sync failure message is invalid"
+        }
+        require(metadata.size <= 8 && metadata.all { (key, value) ->
+            key.isNotEmpty() && key.length <= 64 && value.length <= 128
+        }) {
+            "sync failure metadata is invalid"
+        }
+    }
+}
+
+sealed class SyncStatus(open val state: SyncLifecycleState) {
+    data object Uninitialized : SyncStatus(SyncLifecycleState.UNINITIALIZED)
+    data object LocalReady : SyncStatus(SyncLifecycleState.LOCAL_READY)
+    data object Connecting : SyncStatus(SyncLifecycleState.CONNECTING)
+    data object SchemaApplying : SyncStatus(SyncLifecycleState.SCHEMA_APPLYING)
+    data object Ready : SyncStatus(SyncLifecycleState.READY)
+    data object Pushing : SyncStatus(SyncLifecycleState.PUSHING)
+    data object Pulling : SyncStatus(SyncLifecycleState.PULLING)
+    data object Rebuilding : SyncStatus(SyncLifecycleState.REBUILDING)
+    data class Backoff(
+        val retryAt: java.time.Instant,
+        val operation: String,
+    ) : SyncStatus(SyncLifecycleState.BACKOFF)
+
+    data class Error(val failure: SyncFailure) : SyncStatus(SyncLifecycleState.ERROR)
+
+    data object Stopped : SyncStatus(SyncLifecycleState.STOPPED)
+}
+
+data class SyncStateChangeEvent(
+    val from: SyncLifecycleState,
+    val to: SyncLifecycleState,
+)
+
+data class SyncBackoffEvent(
+    val operation: SyncOperationKind,
+    val attempt: Long,
+    val retryAt: java.time.Instant,
+)
+
+data class SyncSchemaEvent(
+    val source: SchemaRef,
+    val target: SchemaRef,
+    val action: SchemaAction,
+)
+
+data class SyncMutationEvent(
+    val mutationID: String,
+    val tableID: String,
+    val status: MutationStatus,
+    val rejectionCode: MutationRejectionCode?,
+)
+
+data class SyncRebuildEvent(
+    val scopeID: String,
+    val rebuildID: String,
+)
+
+sealed interface SyncEvent {
+    data class StateChanged(val change: SyncStateChangeEvent) : SyncEvent
+
+    data class Backoff(val backoff: SyncBackoffEvent) : SyncEvent
+
+    data class SchemaApplying(val schema: SyncSchemaEvent) : SyncEvent
+
+    data class SchemaApplied(val schema: SyncSchemaEvent) : SyncEvent
+
+    data class MutationAccepted(val mutation: SyncMutationEvent) : SyncEvent
+
+    data class MutationRejected(val mutation: SyncMutationEvent) : SyncEvent
+
+    data class RebuildRequested(val rebuild: SyncRebuildEvent) : SyncEvent
+
+    data class RebuildCompleted(val rebuild: SyncRebuildEvent) : SyncEvent
+
+    data class Failure(val failure: SyncFailure) : SyncEvent
+}
+
+enum class LocalMutationStatus {
+    PENDING,
+    SEALED,
+    SUPERSEDED_BEFORE_SEND,
+    CANCELLED_BEFORE_SEND,
+    BLOCKED_BY_PREDECESSOR,
+
+    /**
+     * The server rejected this mutation and the client retains it. The mutation
+     * leaves the pending set but stays inspectable, so an application can report
+     * the rejection and recover the authored values.
+     */
+    SERVER_REJECTED,
+}
+
+data class AuthoredMutationField(
+    val fieldID: String,
+    val logicalType: String,
+    val value: AnyCodable,
+)
+
+data class PendingMutationInspection(
+    val mutationID: String,
+    val localOrder: Long,
+    val tableID: String,
+    val tableName: String,
+    val recordID: String,
+    val primaryKeyFieldID: String,
+    val primaryKeyLogicalType: String,
+    val operation: Operation,
+    val authoredSchema: SchemaRef,
+    val baseVersion: String?,
+    val clientVersion: String,
+    val status: LocalMutationStatus,
+    val sourceKind: String,
+    val dependsOnMutationID: String?,
+    val normalizedMutationID: String?,
+    val sealedBatchID: String?,
+    val sealedOrdinal: Int?,
+    val authoredFields: List<AuthoredMutationField>,
+)
+
+data class RejectedMutationInspection(
+    val mutationID: String,
+    val tableName: String,
+    val recordID: String,
+    val status: MutationStatus,
+    val code: MutationRejectionCode,
+    val message: String?,
+    val serverRowJSON: String?,
+    val serverVersion: String?,
+    val mutationJSON: String,
+    val rejectionJSON: String,
+    val createdAt: String,
+    val updatedAt: String,
+)
 
 data class ConflictEvent(
     val table: String,
@@ -372,22 +475,3 @@ object AnyCodableSerializer : KSerializer<AnyCodable> {
         is JsonObject -> element.mapValues { fromJsonElement(it.value) }
     }
 }
-
-// MARK: - Push Status Constants
-
-object PushStatus {
-    const val APPLIED = "applied"
-    const val CONFLICT = "conflict"
-    const val REJECTED_TERMINAL = "rejected_terminal"
-    const val REJECTED_RETRYABLE = "rejected_retryable"
-}
-
-// MARK: - Schema Mismatch Body (internal)
-
-@Serializable
-internal data class SchemaMismatchBody(
-    val code: String? = null,
-    val message: String? = null,
-    @SerialName("server_schema_version") val serverSchemaVersion: Long? = null,
-    @SerialName("server_schema_hash") val serverSchemaHash: String? = null
-)

@@ -1,0 +1,11 @@
+{
+  "ignore_dirs": [
+    ".git",
+    ".pgrx-target",
+    "clients/react-native/android/build",
+    "clients/react-native/example/android/.gradle",
+    "clients/react-native/example/android/build",
+    "clients/react-native/example/ios/Pods",
+    "clients/react-native/example/ios/build"
+  ]
+}

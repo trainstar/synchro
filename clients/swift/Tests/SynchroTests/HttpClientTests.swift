@@ -74,97 +74,240 @@ final class HttpClientTests: XCTestCase {
         super.tearDown()
     }
 
-    func testRegisterSuccess() async throws {
-        let responseBody: [String: Any] = [
-            "id": "server-id-123",
-            "server_time": "2026-01-01T12:00:00.000Z",
-            "checkpoint": 0,
-            "schema_version": 1,
-            "schema_hash": "abc123",
-        ]
+    func testRebuildRequestBodyEncodesRequiredNullCursorAndContinuation() throws {
+        let schemaHash = String(repeating: "a", count: 64)
+        var request = RebuildRequest(
+            clientID: "test-device",
+            clientGeneration: 1,
+            schema: SchemaRef(version: 1, hash: schemaHash),
+            scope: "known",
+            rebuildID: "00000000-0000-4000-8000-000000000001",
+            cursor: nil,
+            limit: 100
+        )
+        let firstPage = Data("""
+        {"client_generation":1,"client_id":"test-device","cursor":null,"limit":100,"rebuild_id":"00000000-0000-4000-8000-000000000001","schema":{"hash":"\(schemaHash)","version":1},"scope":"known"}
+        """.utf8)
+        XCTAssertEqual(try httpClient.rebuildRequestBody(request), firstPage)
 
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/register"))
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "X-App-Version"), "1.0.0")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-
-            // Verify request body
-            let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-            XCTAssertEqual(body["client_id"] as? String, "test-device")
-            XCTAssertEqual(body["platform"] as? String, "ios")
-
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
-            return (response, data)
-        }
-
-        let req = RegisterRequest(clientID: "test-device", platform: "ios", appVersion: "1.0.0", schemaVersion: 0, schemaHash: "")
-        let resp = try await httpClient.register(request: req)
-        XCTAssertEqual(resp.id, "server-id-123")
-        XCTAssertEqual(resp.schemaVersion, 1)
-        XCTAssertEqual(resp.schemaHash, "abc123")
+        request.cursor = "opaque-continuation"
+        let nextPage = Data("""
+        {"client_generation":1,"client_id":"test-device","cursor":"opaque-continuation","limit":100,"rebuild_id":"00000000-0000-4000-8000-000000000001","schema":{"hash":"\(schemaHash)","version":1},"scope":"known"}
+        """.utf8)
+        XCTAssertEqual(try httpClient.rebuildRequestBody(request), nextPage)
     }
 
-    func testFetchSchemaSuccess() async throws {
-        let responseBody: [String: Any] = [
-            "schema_version": 3,
-            "schema_hash": "def456",
-            "server_time": "2026-01-01T12:00:00.000Z",
-            "tables": [
-                [
-                    "table_name": "orders",
-                    "push_policy": "owner_only",
-                    "updated_at_column": "updated_at",
-                    "deleted_at_column": "deleted_at",
-                    "primary_key": ["id"],
-                    "columns": [
-                        ["name": "id", "db_type": "uuid", "logical_type": "string", "nullable": false, "default_kind": "none", "is_primary_key": true]
-                    ]
-                ] as [String : Any]
-            ]
+    func testConnectAndPullRequestBodiesEncodeRequiredKnownScopeNullCursor() throws {
+        let schemaHash = String(repeating: "a", count: 64)
+        let scopes = [
+            "known": ScopeCursorRef(cursor: nil),
+            "resumable": ScopeCursorRef(cursor: "opaque-cursor"),
         ]
+        let connect = ConnectRequest(
+            clientID: "test-device",
+            clientGeneration: nil,
+            platform: "ios",
+            appVersion: "1.0.0",
+            protocolVersion: 3,
+            schemaReset: nil,
+            schema: SchemaRef(version: 1, hash: schemaHash),
+            scopeSetVersion: 4,
+            knownScopes: scopes,
+            seedReceipts: nil
+        )
+        let connectBody = Data("""
+        {"app_version":"1.0.0","client_id":"test-device","known_scopes":{"known":{"cursor":null},"resumable":{"cursor":"opaque-cursor"}},"platform":"ios","protocol_version":3,"schema":{"hash":"\(schemaHash)","version":1},"scope_set_version":4}
+        """.utf8)
+        XCTAssertEqual(try httpClient.connectRequestBody(connect), connectBody)
 
+        let pull = PullRequest(
+            clientID: "test-device",
+            clientGeneration: 1,
+            schema: connect.schema,
+            scopeSetVersion: 4,
+            scopes: scopes,
+            limit: 100
+        )
+        let pullBody = Data("""
+        {"client_generation":1,"client_id":"test-device","limit":100,"schema":{"hash":"\(schemaHash)","version":1},"scope_set_version":4,"scopes":{"known":{"cursor":null},"resumable":{"cursor":"opaque-cursor"}}}
+        """.utf8)
+        XCTAssertEqual(try httpClient.pullRequestBody(pull), pullBody)
+    }
+
+    func testConnectRejectsNoncanonicalSuccessJSON() async throws {
+        let responseBody = Data("""
+        {"server_time":"2026-03-20T18:22:11Z","protocol_version":3,"client_generation":4.0,"scope_set_version":13,"schema":{"version":8,"hash":"\(String(repeating: "8", count: 64))","action":"none"},"scopes":{"add":[],"remove":[]},"scope_cursor_updates":{}}
+        """.utf8)
         MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/schema"))
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
+            return (response, responseBody)
         }
 
-        let resp = try await httpClient.fetchSchema()
-        XCTAssertEqual(resp.schemaVersion, 3)
-        XCTAssertEqual(resp.tables.count, 1)
-        XCTAssertEqual(resp.tables[0].tableName, "orders")
+        let request = ConnectRequest(
+            clientID: "test-device",
+            platform: "ios",
+            appVersion: "1.0.0",
+            protocolVersion: 3,
+            schema: .init(version: 8, hash: String(repeating: "8", count: 64)),
+            scopeSetVersion: 13,
+            knownScopes: [:]
+        )
+        do {
+            _ = try await httpClient.connect(request: request)
+            XCTFail("Expected invalid response")
+        } catch let error as SynchroError {
+            guard case .invalidResponse = error else {
+                return XCTFail("Expected invalid response, got \(error)")
+            }
+        }
     }
 
-    func testSchemaMismatch409() async throws {
+    func testConnectValidatesSemanticsForNormalAndExactRetryBodies() async throws {
+        let request = ConnectRequest(
+            clientID: "test-device", platform: "ios", appVersion: "1.0.0", protocolVersion: 3,
+            schema: .init(version: 1, hash: String(repeating: "a", count: 64)),
+            scopeSetVersion: 4, knownScopes: ["known": ScopeCursorRef(cursor: "cursor")]
+        )
+        let encoded = try httpClient.connectRequestBody(request)
+        let exactBody = Data(" \n".utf8) + encoded + Data("\n ".utf8)
+        let valid = """
+        {"server_time":"2026-01-01T00:00:00.000000Z","protocol_version":3,"client_generation":1,"scope_set_version":4,"schema":{"version":1,"hash":"\(String(repeating: "a", count: 64))","action":"none"},"scopes":{"add":[],"remove":[]},"scope_cursor_updates":{}}
+        """
+        let invalid = [
+            valid.replacingOccurrences(of: "\"protocol_version\":3", with: "\"protocol_version\":2"),
+            valid.replacingOccurrences(of: "\"scope_set_version\":4", with: "\"scope_set_version\":3"),
+            valid.replacingOccurrences(of: "\"remove\":[]", with: "\"remove\":[\"unknown\"]"),
+        ]
+        for body in [nil, exactBody] as [Data?] {
+            for responseBody in invalid {
+                MockURLProtocol.requestHandler = { outbound in
+                    XCTAssertEqual(outbound.bodyData(), body ?? encoded)
+                    return (
+                        HTTPURLResponse(url: outbound.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data(responseBody.utf8)
+                    )
+                }
+                do {
+                    _ = try await httpClient.connect(request: request, requestBody: body)
+                    XCTFail("Invalid connect semantics were accepted")
+                } catch is ContractViolation {
+                }
+            }
+        }
+    }
+
+    func testSchemaMismatch422() async throws {
+        let currentSchema = SchemaRef(version: 2, hash: String(repeating: "b", count: 64))
+        let receivedSchema = SchemaRef(version: 1, hash: String(repeating: "a", count: 64))
         let responseBody: [String: Any] = [
-            "code": "schema_mismatch",
-            "message": "client schema does not match server schema",
-            "server_schema_version": 5,
-            "server_schema_hash": "newHash",
+            "error": [
+                "code": "schema_mismatch",
+                "message": "client schema does not match server schema",
+                "retryable": false,
+                "current_schema": ["version": currentSchema.version, "hash": currentSchema.hash],
+                "received_schema": ["version": receivedSchema.version, "hash": receivedSchema.hash],
+            ],
         ]
 
         MockURLProtocol.requestHandler = { request in
             let data = try JSONSerialization.data(withJSONObject: responseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            let response = HTTPURLResponse(url: request.url!, statusCode: 422, httpVersion: nil, headerFields: nil)!
             return (response, data)
         }
 
-        let req = PullRequest(clientID: "test", checkpoint: 0, schemaVersion: 1, schemaHash: "old")
+        let req = PullRequest(
+            clientID: "test",
+            clientGeneration: 1,
+            schema: .init(version: 1, hash: "old"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100
+        )
         do {
             _ = try await httpClient.pull(request: req)
             XCTFail("Expected schemaMismatch error")
-        } catch let error as SynchroError {
-            switch error {
-            case .schemaMismatch(let version, let hash):
-                XCTAssertEqual(version, 5)
-                XCTAssertEqual(hash, "newHash")
-            default:
-                XCTFail("Expected schemaMismatch, got \(error)")
+        } catch let error as BindingRenewalError {
+            XCTAssertEqual(
+                error,
+                .schemaMismatch(currentSchema: currentSchema, receivedSchema: receivedSchema)
+            )
+        }
+    }
+
+    func testRebuildRestartRequired409IsTyped() async throws {
+        MockURLProtocol.requestHandler = { request in
+            let data = try JSONSerialization.data(withJSONObject: [
+                "error": [
+                    "code": "rebuild_restart_required",
+                    "message": "rebuild continuation expired",
+                    "retryable": false,
+                    "scope_id": "orders:user1",
+                ],
+            ])
+            let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            return (response, data)
+        }
+        let request = RebuildRequest(
+            clientID: "test-device",
+            clientGeneration: 1,
+            schema: SchemaRef(version: 1, hash: String(repeating: "a", count: 64)),
+            scope: "orders:user1",
+            rebuildID: "00000000-0000-4000-8000-000000000001",
+            cursor: "opaque-token",
+            limit: 100
+        )
+
+        do {
+            _ = try await httpClient.rebuild(request: request)
+            XCTFail("Expected rebuild restart requirement")
+        } catch let error as RebuildRestartRequiredError {
+            XCTAssertEqual(error.scopeID, "orders:user1")
+        }
+    }
+
+    func testRebuildRestartRequired409RejectsInvalidEnvelope() async throws {
+        let invalidErrors: [[String: Any]] = [
+            [
+                "code": "rebuild_restart_required",
+                "message": "incorrectly retryable",
+                "retryable": true,
+                "scope_id": "orders:user1",
+            ],
+            [
+                "code": "rebuild_restart_required",
+                "message": "scope absent",
+                "retryable": false,
+                "scope_id": "",
+            ],
+            [
+                "code": "rebuild_restart_required",
+                "message": "retryability absent",
+                "scope_id": "orders:user1",
+            ],
+        ]
+        let request = RebuildRequest(
+            clientID: "test-device",
+            clientGeneration: 1,
+            schema: SchemaRef(version: 1, hash: String(repeating: "a", count: 64)),
+            scope: "orders:user1",
+            rebuildID: "00000000-0000-4000-8000-000000000001",
+            cursor: "opaque-token",
+            limit: 100
+        )
+
+        for errorBody in invalidErrors {
+            MockURLProtocol.requestHandler = { request in
+                let data = try JSONSerialization.data(withJSONObject: ["error": errorBody])
+                let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            do {
+                _ = try await httpClient.rebuild(request: request)
+                XCTFail("Expected invalid response")
+            } catch let error as SynchroError {
+                guard case .invalidResponse = error else {
+                    return XCTFail("Expected invalid response, got \(error)")
+                }
             }
         }
     }
@@ -178,9 +321,17 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = RegisterRequest(clientID: "test", platform: "ios", appVersion: "0.1.0", schemaVersion: 0, schemaHash: "")
+        let req = ConnectRequest(
+            clientID: "test",
+            platform: "ios",
+            appVersion: "0.1.0",
+            protocolVersion: 3,
+            schema: .init(version: 0, hash: ""),
+            scopeSetVersion: 0,
+            knownScopes: [:]
+        )
         do {
-            _ = try await httpClient.register(request: req)
+            _ = try await httpClient.connect(request: req)
             XCTFail("Expected upgradeRequired error")
         } catch let error as SynchroError {
             switch error {
@@ -193,7 +344,13 @@ final class HttpClientTests: XCTestCase {
     }
 
     func testRetryAfter429() async throws {
-        let responseBody: [String: Any] = ["error": "rate limited", "retry_after": 10]
+        let responseBody: [String: Any] = [
+            "error": [
+                "code": "retry_later",
+                "message": "rate limited",
+                "retryable": true,
+            ] as [String: Any],
+        ]
 
         MockURLProtocol.requestHandler = { request in
             let data = try JSONSerialization.data(withJSONObject: responseBody)
@@ -201,7 +358,13 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = PushRequest(clientID: "test", changes: [], schemaVersion: 1, schemaHash: "abc")
+        let req = PushRequest(
+            clientID: "test",
+            clientGeneration: 1,
+            batchID: "batch-1",
+            schema: .init(version: 1, hash: "abc"),
+            mutations: []
+        )
         do {
             _ = try await httpClient.push(request: req)
             XCTFail("Expected retryable error")
@@ -217,7 +380,13 @@ final class HttpClientTests: XCTestCase {
     }
 
     func testRetryAfter503() async throws {
-        let responseBody: [String: Any] = ["error": "service temporarily unavailable", "retry_after": 5]
+        let responseBody: [String: Any] = [
+            "error": [
+                "code": "temporary_unavailable",
+                "message": "service temporarily unavailable",
+                "retryable": true,
+            ] as [String: Any],
+        ]
 
         MockURLProtocol.requestHandler = { request in
             let data = try JSONSerialization.data(withJSONObject: responseBody)
@@ -225,7 +394,14 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = PullRequest(clientID: "test", checkpoint: 0, schemaVersion: 1, schemaHash: "abc")
+        let req = PullRequest(
+            clientID: "test",
+            clientGeneration: 1,
+            schema: .init(version: 1, hash: "abc"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100
+        )
         do {
             _ = try await httpClient.pull(request: req)
             XCTFail("Expected retryable error")
@@ -234,8 +410,175 @@ final class HttpClientTests: XCTestCase {
         }
     }
 
+    func testHugeFiniteRetryAfterIsPreservedWithoutOverflow() async throws {
+        MockURLProtocol.requestHandler = { request in
+            let data = try JSONSerialization.data(withJSONObject: [
+                "error": [
+                    "code": "temporary_unavailable",
+                    "message": "service temporarily unavailable",
+                    "retryable": true,
+                ] as [String: Any],
+            ])
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 503,
+                httpVersion: nil,
+                headerFields: ["Retry-After": "100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"]
+            )!
+            return (response, data)
+        }
+        let request = PullRequest(
+            clientID: "test",
+            clientGeneration: 1,
+            schema: .init(version: 1, hash: "abc"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100
+        )
+
+        do {
+            _ = try await httpClient.pull(request: request)
+            XCTFail("Expected retryable error")
+        } catch let error as RetryableError {
+            XCTAssertEqual(error.retryAfter, 1e308)
+            XCTAssertEqual(
+                RetryTiming.deadline(nowMS: 1_000, delaySeconds: try XCTUnwrap(error.retryAfter)),
+                Int64.max
+            )
+        }
+    }
+
+    func testCanonicalProtocolErrorsPreserveStatusAndCode() async throws {
+        let cases: [(status: Int, code: ProtocolErrorCode)] = [
+            (400, .invalidRequest),
+            (400, .invalidSchemaReference),
+            (401, .authRequired),
+            (409, .idempotencyConflict),
+            (409, .clientRetired),
+            (500, .syncIntegrityFailure),
+        ]
+        let request = PullRequest(
+            clientID: "test",
+            clientGeneration: 1,
+            schema: .init(version: 1, hash: "abc"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100
+        )
+
+        for testCase in cases {
+            MockURLProtocol.requestHandler = { request in
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "error": [
+                        "code": testCase.code.rawValue,
+                        "message": "canonical protocol rejection",
+                        "retryable": false,
+                    ] as [String: Any],
+                ])
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: testCase.status,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (response, data)
+            }
+            do {
+                _ = try await httpClient.pull(request: request)
+                XCTFail("Expected protocol error")
+            } catch let error as SynchroError {
+                guard case let .protocolError(status, code, message) = error else {
+                    return XCTFail("Expected protocolError, got \(error)")
+                }
+                XCTAssertEqual(status, testCase.status)
+                XCTAssertEqual(code, testCase.code)
+                XCTAssertEqual(message, "canonical protocol rejection")
+            }
+        }
+    }
+
+    func testRetryableServiceResponsesRejectMalformedEnvelopesWithoutRetry() async throws {
+        let request = PullRequest(
+            clientID: "test",
+            clientGeneration: 1,
+            schema: .init(version: 1, hash: "abc"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100
+        )
+        let cases: [(status: Int, header: String?, body: [String: Any])] = [
+            (
+                429,
+                "1",
+                ["error": ["code": "temporary_unavailable", "message": "wrong code", "retryable": true]]
+            ),
+            (
+                429,
+                "1",
+                ["error": ["code": "retry_later", "message": "wrong retryability", "retryable": false]]
+            ),
+            (
+                429,
+                nil,
+                ["error": ["code": "retry_later", "message": "missing retry header", "retryable": true]]
+            ),
+            (
+                503,
+                "not-a-delay",
+                ["error": ["code": "capture_pending", "message": "invalid retry header", "retryable": true]]
+            ),
+            (
+                503,
+                "1",
+                ["error": ["code": "retry_later", "message": "wrong code", "retryable": true]]
+            ),
+            (
+                503,
+                "1",
+                ["error": ["code": "temporary_unavailable", "message": "wrong retryability", "retryable": false]]
+            ),
+            (
+                503,
+                "1",
+                ["error": "malformed envelope"]
+            ),
+        ]
+
+        for malformed in cases {
+            MockURLProtocol.requestHandler = { request in
+                let data = try JSONSerialization.data(withJSONObject: malformed.body)
+                let headers = malformed.header.map { ["Retry-After": $0] }
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: malformed.status,
+                    httpVersion: nil,
+                    headerFields: headers
+                )!
+                return (response, data)
+            }
+
+            do {
+                _ = try await httpClient.pull(request: request)
+                XCTFail("Expected invalid response")
+            } catch is RetryableError {
+                XCTFail("Malformed retry response must not enter backoff")
+            } catch let error as SynchroError {
+                guard case .invalidResponse = error else {
+                    XCTFail("Expected invalid response, got \(error)")
+                    continue
+                }
+            }
+        }
+    }
+
     func testServerError500() async throws {
-        let responseBody = ["error": "internal server error"]
+        let responseBody: [String: Any] = [
+            "error": [
+                "code": "sync_integrity_failure",
+                "message": "internal server integrity error",
+                "retryable": false,
+            ] as [String: Any],
+        ]
 
         MockURLProtocol.requestHandler = { request in
             let data = try JSONSerialization.data(withJSONObject: responseBody)
@@ -243,168 +586,27 @@ final class HttpClientTests: XCTestCase {
             return (response, data)
         }
 
-        let req = PullRequest(clientID: "test", checkpoint: 0, schemaVersion: 1, schemaHash: "abc")
+        let req = PullRequest(
+            clientID: "test",
+            clientGeneration: 1,
+            schema: .init(version: 1, hash: "abc"),
+            scopeSetVersion: 0,
+            scopes: [:],
+            limit: 100
+        )
         do {
             _ = try await httpClient.pull(request: req)
-            XCTFail("Expected serverError")
+            XCTFail("Expected protocolError")
         } catch let error as SynchroError {
             switch error {
-            case .serverError(let status, let msg):
+            case .protocolError(let status, let code, let message):
                 XCTAssertEqual(status, 500)
-                XCTAssertEqual(msg, "internal server error")
+                XCTAssertEqual(code, .syncIntegrityFailure)
+                XCTAssertEqual(message, "internal server integrity error")
             default:
-                XCTFail("Expected serverError, got \(error)")
+                XCTFail("Expected protocolError, got \(error)")
             }
         }
     }
 
-    func testPullRequestEncoding() async throws {
-        let pullResponseBody: [String: Any] = [
-            "changes": [] as [Any],
-            "deletes": [] as [Any],
-            "checkpoint": 42,
-            "has_more": false,
-            "schema_version": 1,
-            "schema_hash": "abc",
-        ]
-
-        var capturedBody: [String: Any]?
-
-        MockURLProtocol.requestHandler = { request in
-            capturedBody = try JSONSerialization.jsonObject(with: request.bodyData()!) as? [String: Any]
-            let data = try JSONSerialization.data(withJSONObject: pullResponseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
-        }
-
-        let req = PullRequest(
-            clientID: "dev-1",
-            checkpoint: 100,
-            tables: ["orders"],
-            limit: 50,
-            knownBuckets: ["user:123", "global"],
-            schemaVersion: 7,
-            schemaHash: "hash7"
-        )
-        _ = try await httpClient.pull(request: req)
-
-        XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
-        XCTAssertEqual(capturedBody?["checkpoint"] as? Int, 100)
-        XCTAssertEqual(capturedBody?["tables"] as? [String], ["orders"])
-        XCTAssertEqual(capturedBody?["limit"] as? Int, 50)
-        XCTAssertEqual(capturedBody?["known_buckets"] as? [String], ["user:123", "global"])
-        XCTAssertEqual(capturedBody?["schema_version"] as? Int, 7)
-        XCTAssertEqual(capturedBody?["schema_hash"] as? String, "hash7")
-    }
-
-    func testSnapshotRequestEncoding() async throws {
-        let snapshotResponseBody: [String: Any] = [
-            "records": [] as [Any],
-            "checkpoint": 50,
-            "has_more": true,
-            "schema_version": 1,
-            "schema_hash": "abc",
-        ]
-
-        var capturedBody: [String: Any]?
-
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/snapshot"))
-            capturedBody = try JSONSerialization.jsonObject(with: request.bodyData()!) as? [String: Any]
-            let data = try JSONSerialization.data(withJSONObject: snapshotResponseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
-        }
-
-        let req = SnapshotRequest(
-            clientID: "dev-1",
-            cursor: SnapshotCursor(checkpoint: 10, tableIndex: 0, afterID: "w5"),
-            limit: 100,
-            schemaVersion: 3,
-            schemaHash: "hash3"
-        )
-        let resp = try await httpClient.snapshot(request: req)
-
-        XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
-        XCTAssertEqual(capturedBody?["limit"] as? Int, 100)
-        XCTAssertEqual(capturedBody?["schema_version"] as? Int, 3)
-        let cursor = capturedBody?["cursor"] as? [String: Any]
-        XCTAssertEqual(cursor?["checkpoint"] as? Int, 10)
-        XCTAssertEqual(cursor?["table_idx"] as? Int, 0)
-        XCTAssertEqual(cursor?["after_id"] as? String, "w5")
-        XCTAssertEqual(resp.checkpoint, 50)
-        XCTAssertTrue(resp.hasMore)
-    }
-
-    func testFetchTablesSuccess() async throws {
-        let responseBody: [String: Any] = [
-            "server_time": "2026-01-01T12:00:00.000Z",
-            "schema_version": 2,
-            "schema_hash": "xyz",
-            "tables": [
-                [
-                    "table_name": "orders",
-                    "push_policy": "owner_only",
-                    "dependencies": [] as [String],
-                ] as [String : Any]
-            ]
-        ]
-
-        MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertTrue(request.url!.path.hasSuffix("/sync/tables"))
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
-        }
-
-        let resp = try await httpClient.fetchTables()
-        XCTAssertEqual(resp.schemaVersion, 2)
-        XCTAssertEqual(resp.tables.count, 1)
-        XCTAssertEqual(resp.tables[0].tableName, "orders")
-        XCTAssertEqual(resp.tables[0].pushPolicy, "owner_only")
-    }
-
-    func testPushRequestEncoding() async throws {
-        let pushResponseBody: [String: Any] = [
-            "accepted": [] as [Any],
-            "rejected": [] as [Any],
-            "checkpoint": 0,
-            "server_time": "2026-01-01T12:00:00.000Z",
-            "schema_version": 1,
-            "schema_hash": "abc",
-        ]
-
-        var capturedBody: [String: Any]?
-
-        MockURLProtocol.requestHandler = { request in
-            capturedBody = try JSONSerialization.jsonObject(with: request.bodyData()!) as? [String: Any]
-            let data = try JSONSerialization.data(withJSONObject: pushResponseBody)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, data)
-        }
-
-        let req = PushRequest(
-            clientID: "dev-1",
-            changes: [
-                PushRecord(
-                    id: "rec-1",
-                    tableName: "orders",
-                    operation: "create",
-                    data: ["ship_address": AnyCodable("123 Main St")],
-                    clientUpdatedAt: ISO8601DateFormatter().date(from: "2026-01-01T12:00:00Z")!
-                )
-            ],
-            schemaVersion: 7,
-            schemaHash: "hash7"
-        )
-        _ = try await httpClient.push(request: req)
-
-        XCTAssertEqual(capturedBody?["client_id"] as? String, "dev-1")
-        let changes = capturedBody?["changes"] as? [[String: Any]]
-        XCTAssertEqual(changes?.count, 1)
-        XCTAssertEqual(changes?[0]["id"] as? String, "rec-1")
-        XCTAssertEqual(changes?[0]["operation"] as? String, "create")
-    }
 }

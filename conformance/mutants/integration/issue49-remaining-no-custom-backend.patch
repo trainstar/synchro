@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1484,7 +1484,7 @@ fn evaluate_mutation(
+                     },
+                 );
+             }
+-            match push_insert(
++            match push_update(
+                 client,
+                 &mutation.mutation_id,
+                 &record_id,

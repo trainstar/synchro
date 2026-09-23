@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/stream_reset.rs b/extensions/synchro-pg/src/stream_reset.rs
+--- a/extensions/synchro-pg/src/stream_reset.rs
++++ b/extensions/synchro-pg/src/stream_reset.rs
+@@ -3291,7 +3291,7 @@ fn cover_pending_fences(
+     let covered = client
+         .update(
+             "UPDATE synchro.sync_write_fences fence
+-             SET coverage = 'reset_baseline',
++             SET coverage = 'projection_bootstrap_baseline',
+                  stream_generation = $2,
+                  commit_lsn = NULL, event_ordinal = NULL,
+                  reset_id = $1::uuid,

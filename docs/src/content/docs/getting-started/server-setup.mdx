@@ -1,0 +1,373 @@
+---
+title: Server setup
+description: Install the PostgreSQL 18 extension and prepare the disposable tutorial server.
+---
+
+This procedure creates an empty disposable database named
+`synchro_quickstart`. It creates one `public.notes` relation for the canonical
+authenticated user `alice`.
+
+Use a fresh disposable Ubuntu 24.04 x64 VM and a fresh PostgreSQL 18 cluster.
+Use the matching PostgreSQL 18 extension artifact. This is the packaged server
+support environment. Do not apply this procedure to an existing PostgreSQL
+cluster. Do not use it with production data.
+
+## Prerequisites
+
+You need:
+
+- a PostgreSQL 18 package installation;
+- a matching `synchro_pg` PostgreSQL 18 Ubuntu 24.04 x64 artifact;
+- the matching `synchrod-pg` binary;
+- Git, GitHub CLI (`gh`), `curl`, `openssl`, Python 3, and `psql`;
+- a PostgreSQL superuser for installation and cluster configuration.
+
+Run the shell examples in Bash from a checkout of the selected Synchro version.
+Keep that checkout unchanged while you install its matching artifacts.
+
+The `0.3.0` server artifact uses PostgreSQL 18.3.
+Install that version in the fresh VM from the PostgreSQL APT archive:
+
+```sh
+sudo install -d /usr/share/postgresql-common/pgdg
+sudo curl --fail --silent --show-error \
+  --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+  https://www.postgresql.org/media/keys/ACCC4CF8.asc
+echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" |
+  sudo tee /etc/apt/sources.list.d/pgdg-archive.list >/dev/null
+sudo apt-get update
+sudo apt-get install -y \
+  postgresql-18=18.3-1.pgdg24.04+1 \
+  postgresql-client-18=18.3-1.pgdg24.04+1 \
+  postgresql-server-dev-18=18.3-1.pgdg24.04+1
+sudo pg_createcluster 18 synchro_tutorial --port 55432 --start
+```
+
+## 1. Install the extension artifact
+
+The published artifact name is
+`synchro-pg-pg18-ubuntu24.04-linux-x64-<version>.tar.gz`. Download the artifact
+that matches `VERSION` from the matching release and verify its published
+checksum before extraction:
+
+```sh
+export SYNCHRO_VERSION="$(tr -d '\n' < VERSION)"
+export SYNCHRO_ARTIFACT_NAME="synchro-pg-pg18-ubuntu24.04-linux-x64-${SYNCHRO_VERSION}.tar.gz"
+export SYNCHRO_DOWNLOAD_DIR="$(mktemp -d)"
+mkdir "$SYNCHRO_DOWNLOAD_DIR/artifacts"
+gh release download "v${SYNCHRO_VERSION}" \
+  --repo trainstar/synchro \
+  --pattern "$SYNCHRO_ARTIFACT_NAME" \
+  --pattern "synchrod-pg-linux-x64-${SYNCHRO_VERSION}" \
+  --dir "$SYNCHRO_DOWNLOAD_DIR/artifacts"
+gh release download "v${SYNCHRO_VERSION}" \
+  --repo trainstar/synchro --pattern SHA256SUMS --dir "$SYNCHRO_DOWNLOAD_DIR"
+test -f "$SYNCHRO_DOWNLOAD_DIR/artifacts/$SYNCHRO_ARTIFACT_NAME"
+test -f "$SYNCHRO_DOWNLOAD_DIR/artifacts/synchrod-pg-linux-x64-${SYNCHRO_VERSION}"
+(cd "$SYNCHRO_DOWNLOAD_DIR" && sha256sum --check --ignore-missing SHA256SUMS)
+export SYNCHRO_EXTENSION_ARCHIVE="$SYNCHRO_DOWNLOAD_DIR/artifacts/$SYNCHRO_ARTIFACT_NAME"
+export SYNCHRO_ADAPTER="$SYNCHRO_DOWNLOAD_DIR/artifacts/synchrod-pg-linux-x64-${SYNCHRO_VERSION}"
+chmod 0755 "$SYNCHRO_ADAPTER"
+```
+
+Alternatively, before a release exists, build from the clean Linux x64 checkout.
+This path requires Go 1.25, Rust 1.92, and cargo-pgrx 0.17.
+Configure pgrx for the installed PostgreSQL version:
+
+```sh
+cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+make release-stage-server VERSION="$(tr -d '\n' < VERSION)" \
+  PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+export SYNCHRO_VERSION="$(tr -d '\n' < VERSION)"
+export SYNCHRO_EXTENSION_ARCHIVE="$PWD/dist/release-components/server/extension/synchro-pg-pg18-ubuntu24.04-linux-x64-${SYNCHRO_VERSION}.tar.gz"
+export SYNCHRO_ADAPTER="$PWD/dist/release-components/server/adapter/synchrod-pg-linux-x64-${SYNCHRO_VERSION}"
+```
+
+The local archive is
+`dist/release-components/server/extension/synchro-pg-pg18-ubuntu24.04-linux-x64-$(tr -d '\n' < VERSION).tar.gz`.
+The archive must contain exactly one `synchro_pg.control`, one
+`synchro_pg--*.sql`, and one `synchro_pg.so`.
+
+```sh
+: "${SYNCHRO_EXTENSION_ARCHIVE:?Select published or locally built artifacts first}"
+: "${SYNCHRO_ADAPTER:?Select the matching adapter binary first}"
+export SYNCHRO_UNPACK_DIR="$(mktemp -d)"
+tar -xzf "$SYNCHRO_EXTENSION_ARCHIVE" -C "$SYNCHRO_UNPACK_DIR"
+
+test "$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.control | wc -l)" -eq 1
+test "$(find "$SYNCHRO_UNPACK_DIR" -type f -name 'synchro_pg--*.sql' | wc -l)" -eq 1
+test "$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.so | wc -l)" -eq 1
+control="$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.control -print -quit)"
+sql="$(find "$SYNCHRO_UNPACK_DIR" -type f -name 'synchro_pg--*.sql' -print -quit)"
+library="$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.so -print -quit)"
+test -n "$control" && test -n "$sql" && test -n "$library"
+
+pg_config=/usr/lib/postgresql/18/bin/pg_config
+sudo install -m 0644 "$control" "$("$pg_config" --sharedir)/extension/"
+sudo install -m 0644 "$sql" "$("$pg_config" --sharedir)/extension/"
+sudo install -m 0755 "$library" "$("$pg_config" --pkglibdir)/"
+```
+
+The control, SQL, and library files must come from one release artifact. Do not
+mix artifact versions.
+
+## 2. Configure PostgreSQL before extension creation
+
+Create `/etc/postgresql/18/synchro_tutorial/conf.d/synchro.conf`. Preserve other
+`shared_preload_libraries` values when you edit the setting.
+
+```sh
+sudo install -d /etc/postgresql/18/synchro_tutorial/conf.d
+sudo tee /etc/postgresql/18/synchro_tutorial/conf.d/synchro.conf >/dev/null <<'CONF'
+wal_level = logical
+max_replication_slots = 10
+max_wal_senders = 10
+shared_preload_libraries = 'synchro_pg'
+synchro.auto_start = off
+synchro.database = 'synchro_quickstart'
+synchro.worker_login = 'synchro_quickstart_worker'
+synchro.replication_slot = 'synchro_quickstart_slot'
+synchro.publication_name = 'synchro_quickstart_pub'
+CONF
+```
+
+Restart PostgreSQL. `wal_level`, `shared_preload_libraries`, and the worker
+settings require a restart.
+
+```sh
+sudo pg_ctlcluster 18 synchro_tutorial restart
+```
+
+## 3. Create the database and separated roles
+
+Create passwords with the prompts. Do not put passwords in shell history, SQL
+files, or source control.
+
+```sh
+sudo -u postgres createdb --host /var/run/postgresql --port 55432 synchro_quickstart
+sudo -u postgres createuser --host /var/run/postgresql --port 55432 \
+  --login --inherit --pwprompt \
+  --no-superuser --no-createdb --no-createrole --no-replication \
+  synchro_quickstart_owner
+sudo -u postgres createuser --host /var/run/postgresql --port 55432 \
+  --login --inherit --pwprompt \
+  --no-superuser --no-createdb --no-createrole --no-replication \
+  synchro_quickstart_adapter
+sudo -u postgres createuser --host /var/run/postgresql --port 55432 \
+  --login --no-inherit --no-password \
+  --no-superuser --no-createdb --no-createrole --replication \
+  synchro_quickstart_worker
+
+sudo -u postgres psql -X -v ON_ERROR_STOP=1 \
+  --host /var/run/postgresql --port 55432 --dbname synchro_quickstart <<'SQL'
+CREATE EXTENSION synchro_pg;
+GRANT synchro_operator TO synchro_quickstart_owner;
+GRANT synchro_adapter TO synchro_quickstart_adapter;
+GRANT synchro_worker TO synchro_quickstart_worker;
+GRANT CREATE ON SCHEMA public TO synchro_quickstart_owner;
+GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
+GRANT CREATE ON DATABASE synchro_quickstart TO synchro_quickstart_owner;
+GRANT CONNECT ON DATABASE synchro_quickstart
+  TO synchro_quickstart_owner, synchro_quickstart_adapter,
+     synchro_quickstart_worker;
+SET ROLE synchro_quickstart_owner;
+CREATE PUBLICATION synchro_quickstart_pub;
+RESET ROLE;
+SQL
+```
+
+The worker login must have `REPLICATION`, `NOINHERIT`, and only the
+`synchro_worker` membership. The owner and adapter are separate login roles.
+The extension creates the `synchro_*` group roles. Do not grant application
+roles direct access to Synchro internal tables. The background worker opens an
+internal PostgreSQL connection with its configured worker login. It does not
+use a password or a `pg_hba.conf` rule.
+
+The application owner must own both the registered relations and the configured publication.
+The empty publication above establishes that ownership before registration.
+It does not need membership in the internal `synchro_owner` role.
+
+Enable the worker after the database and worker login exist:
+
+```sh
+sudo sed -i "s/^synchro\.auto_start = off$/synchro.auto_start = on/" \
+  /etc/postgresql/18/synchro_tutorial/conf.d/synchro.conf
+sudo pg_ctlcluster 18 synchro_tutorial restart
+```
+
+## 4. Register the empty tutorial relation
+
+Run the checked-in setup file from the repository root as the owner role.
+Supply its password at the prompt. The file creates `public.notes`, enables
+RLS, grants only the required owner and worker permissions, creates a
+projection-only membership function, and registers the relation. It does not
+create or connect to a database. It applies to the database named by the
+`psql` command.
+
+```sh
+psql --host 127.0.0.1 --username synchro_quickstart_owner \
+  --port 55432 --dbname synchro_quickstart -X -v ON_ERROR_STOP=1 \
+  --file docs/examples/quickstart.sql
+```
+
+The membership function reads only `synchro_projection.notes`. It returns
+`user:{owner_id}`. The RLS policy compares `owner_id` with the authenticated
+push identity in `synchro.user_id` when that context exists. It prevents a user
+from writing another user's row or changing `owner_id`. A missing context
+permits trusted database owner and operator maintenance. The adapter login
+cannot issue arbitrary application SQL. The first row is not inserted yet.
+
+Confirm that the owner role created and registered the relation:
+
+```sh
+psql --host 127.0.0.1 --username synchro_quickstart_owner \
+  --port 55432 --dbname synchro_quickstart -X -v ON_ERROR_STOP=1 \
+  --command "SELECT to_regclass('public.notes') IS NOT NULL AS notes_created"
+```
+
+## 5. Start the local tutorial adapter
+
+Run this block in Bash. It generates a temporary local HS256 secret without
+printing it:
+
+```sh
+export JWT_SECRET="$(openssl rand -hex 32)"
+export DATABASE_URL='postgres://synchro_quickstart_adapter@127.0.0.1:55432/synchro_quickstart'
+export LISTEN_ADDR=127.0.0.1:8091
+export MIN_CLIENT_VERSION=0.3.0
+read -rsp 'Adapter database password: ' PGPASSWORD
+echo
+export PGPASSWORD
+"$SYNCHRO_ADAPTER" &
+adapter_pid=$!
+unset PGPASSWORD
+```
+
+Do not add the adapter password to `DATABASE_URL` or shell history. The
+background process keeps its inherited password only for its own connection.
+
+Wait for capture readiness. Registration must finish before the first source
+write.
+
+```sh
+for attempt in $(seq 1 90); do
+  if test "$(curl --fail --silent http://127.0.0.1:8091/ready)" = '{"ready":true}'; then
+    break
+  fi
+  sleep 1
+done
+test "$(curl --fail --silent http://127.0.0.1:8091/ready)" = '{"ready":true}'
+```
+
+`http://127.0.0.1:8091` is only for this local tutorial. Production adapters
+must bind privately and run behind a reverse proxy that terminates HTTPS.
+
+## Connect a remote tutorial server
+
+When the Ubuntu tutorial VM is remote, run this command in a separate terminal
+on the Swift or React Native development Mac. Set `TUTORIAL_SSH_HOST` to the
+private SSH host name or address. The command keeps the tutorial HTTP listener
+private and forwards it to the development host loopback address.
+
+```sh
+printf 'Tutorial SSH host (user@host): '
+read -r TUTORIAL_SSH_HOST
+ssh -N -L 127.0.0.1:8091:127.0.0.1:8091 "$TUTORIAL_SSH_HOST"
+```
+
+Swift and React Native development on that Mac use
+`http://127.0.0.1:8091`. The Android emulator uses
+`http://10.0.2.2:8091` to reach the Mac loopback forward. Do not use either
+address for a physical device. A physical device has its own localhost and
+needs a private reachable endpoint with HTTPS.
+
+## 6. Insert and observe the first server row
+
+Insert only after readiness returns true:
+
+```sh
+psql --host 127.0.0.1 --username synchro_quickstart_owner \
+  --port 55432 --dbname synchro_quickstart -X -v ON_ERROR_STOP=1 <<'SQL'
+INSERT INTO public.notes (id, owner_id, body)
+VALUES (
+  '00000000-0000-4000-8000-000000000001',
+  'alice',
+  'Initial server note'
+);
+
+SELECT id, owner_id, body
+FROM public.notes
+WHERE id = '00000000-0000-4000-8000-000000000001';
+SQL
+```
+
+The query must return the UUID, `alice`, and `Initial server note`. The row
+belongs to `user:alice`.
+
+## Assignment operations
+
+The tutorial uses the default `user:alice` assignment. The server also supports
+fixed shared scopes and explicit grants. Run these statements as an operator:
+
+```sql
+SELECT synchro.synchro_register_shared_scope('notes:announcements', false);
+SELECT synchro.synchro_grant_user_scope('alice', 'notes:review');
+SELECT synchro.synchro_revoke_user_scope('alice', 'notes:review');
+```
+
+The next connect reconciles each change. An added scope rebuilds. A removed
+scope causes local provenance cleanup. A client cannot request an invented
+scope or grant itself one.
+
+## 7. Create the local tutorial token
+
+The adapter reads the canonical identity from the `sub` claim. This command
+creates a one-hour local token for `alice` and stores it only in the current
+shell environment:
+
+```sh
+export SYNCHRO_TUTORIAL_TOKEN="$(
+  python3 - <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import os
+import time
+
+def part(value):
+    return base64.urlsafe_b64encode(
+        json.dumps(value, separators=(',', ':')).encode()
+    ).rstrip(b'=')
+
+head = part({'alg': 'HS256', 'typ': 'JWT'})
+body = part({'sub': 'alice', 'exp': int(time.time()) + 3600})
+message = head + b'.' + body
+signature = hmac.new(
+    os.environ['JWT_SECRET'].encode(), message, hashlib.sha256
+).digest()
+print((message + b'.' + base64.urlsafe_b64encode(signature).rstrip(b'=')).decode())
+PY
+)"
+```
+
+Use this token only with the local tutorial client. Continue with
+[First synchronization](/synchro/getting-started/quickstart/).
+
+## Stop the tutorial
+
+Stop the adapter, remove the temporary environment variables, and remove only
+the disposable tutorial database:
+
+```sh
+kill "$adapter_pid"
+sudo sed -i "s/^synchro\.auto_start = on$/synchro.auto_start = off/" \
+  /etc/postgresql/18/synchro_tutorial/conf.d/synchro.conf
+sudo pg_ctlcluster 18 synchro_tutorial restart
+sudo -u postgres dropdb --host /var/run/postgresql --port 55432 synchro_quickstart
+unset JWT_SECRET SYNCHRO_TUTORIAL_TOKEN DATABASE_URL LISTEN_ADDR MIN_CLIENT_VERSION
+sudo pg_dropcluster 18 synchro_tutorial --stop
+```
+
+This removes only the disposable tutorial cluster. Do not use it for a shared
+cluster or a production database.

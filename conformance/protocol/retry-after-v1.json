@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "grammar": {
+    "delta_seconds": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?",
+    "http_date": "IMF-fixdate"
+  },
+  "cases": [
+    { "value": "0", "valid": true },
+    { "value": "1", "valid": true },
+    { "value": "0.5", "valid": true },
+    { "value": "10.125", "valid": true },
+    { "value": "123456789012345", "valid": true },
+    { "value": " 5 ", "valid": true },
+    { "value": "Sun, 06 Nov 1994 08:49:37 GMT", "valid": true },
+    { "value": "01", "valid": false },
+    { "value": "+1", "valid": false },
+    { "value": "-0", "valid": false },
+    { "value": "-1", "valid": false },
+    { "value": ".5", "valid": false },
+    { "value": "1.", "valid": false },
+    { "value": "1e3", "valid": false },
+    { "value": "NaN", "valid": false },
+    { "value": "Infinity", "valid": false },
+    { "value": "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999", "valid": false },
+    { "value": "", "valid": false },
+    { "value": "Sunday, 06-Nov-94 08:49:37 GMT", "valid": false },
+    { "value": "Sun Nov  6 08:49:37 1994", "valid": false },
+    { "value": "Sun, 32 Nov 1994 08:49:37 GMT", "valid": false }
+  ]
+}

@@ -1,0 +1,11 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -4086,7 +4086,6 @@ fn validate_fence_rows(
+           AND fence.physical_relation = input.physical_relation
+           AND fence.physical_relation_oid = input.physical_relation_oid::oid
+           AND fence.operation = input.operation
+-          AND fence.old_record_id IS NOT DISTINCT FROM input.old_record_id
+           AND fence.new_record_id IS NOT DISTINCT FROM input.new_record_id
+           AND fence.old_capture_key IS NOT DISTINCT FROM input.old_capture_key
+           AND fence.new_capture_key IS NOT DISTINCT FROM input.new_capture_key

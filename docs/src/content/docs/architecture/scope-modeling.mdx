@@ -1,0 +1,105 @@
+---
+title: Scope Modeling
+description: Best practices for defining shared, private, and portable scopes without creating avoidable fanout.
+---
+
+Scope design is the highest leverage selective-sync decision in Synchro.
+
+The main rule is:
+
+- optimize for low row-change fanout, not low total scope count
+
+What matters is not how many scopes exist globally. What matters is how many scope instances a single changed row forces the server to update.
+
+## What a scope boundary means
+
+A scope is not only a visibility boundary. It is also the unit for:
+
+- continuation state
+- checksum and rebuild behavior
+- change propagation
+- operational debugging
+
+That means scope design should follow runtime behavior, not only who can read a row.
+
+## Recommended baseline model
+
+Use:
+
+- the default identity scope `user:{user_id}` for private data
+- shared scopes for shared data, such as `templates_public`
+- one local table may be fed by multiple scopes
+
+Example:
+
+- every user should see the public template catalog
+- every user should also see their own private templates
+
+Model that as:
+
+- `templates_public`
+- `user:{user_id}`
+
+Do not copy the public template catalog into every private scope.
+One public row change should update one shared scope, not one scope per user.
+
+## Membership and assignment
+
+A registered membership function determines which scopes contain each row.
+That does not determine which clients can read those scopes.
+
+Connect assigns the authenticated identity scope `user:{user_id}` unless it was explicitly revoked.
+Registered shared scopes are assigned to every authenticated user.
+An administrator can assign another scope with `synchro.synchro_grant_user_scope(user_id, scope_id)`.
+Use `synchro.synchro_revoke_user_scope(user_id, scope_id)` to revoke an explicit assignment.
+Connect reconciles those changes on the user's next connection.
+
+For example, a private project scope needs both a membership function that returns `project:123` and an explicit grant:
+
+```sql
+SELECT synchro.synchro_grant_user_scope('alice', 'project:123');
+```
+
+Run this administrative operation through a trusted server-side authorization decision.
+Do not accept a requested scope or user ID from an untrusted client as authorization.
+A granted scope is not a portable public scope.
+See [server setup](/synchro/getting-started/server-setup/) for a complete default-scope example.
+
+## Shared scope grouping
+
+Do not create seed-only scopes. The seed should export the same shared runtime scopes that clients keep syncing after login.
+
+When deciding whether datasets belong in one shared scope or several, use operational behavior:
+
+- use one shared `global` scope only when datasets are small, stable, and tend to change together
+- split into multiple shared scopes when datasets differ in size, change rate, rebuild needs, or likely subscription patterns
+
+Practical examples:
+
+- tiny lookup tables can live in one `reference_public` scope
+- a larger public catalog should usually get its own scope such as `templates_public`
+
+## Anti-patterns
+
+Avoid these patterns:
+
+- duplicating shared data into every private scope
+- creating separate seed-only copies of runtime scopes
+- splitting scopes by table name alone when the data has the same change and rebuild behavior
+- stuffing unrelated large datasets into one `global` scope only because they are all public
+
+## Portable seed relationship
+
+Bundled portable seeds should include:
+
+- schema
+- any explicitly declared portable scopes
+- the continuation metadata for those scopes
+
+Clients then log in normally and continue sync from that seeded state. They do not wipe the database first.
+
+## Read next
+
+- [Architecture overview](/synchro/architecture/overview/)
+- [Portable seeds](/synchro/architecture/portable-seeds/)
+- [Invariants](/synchro/spec/04-invariants/)

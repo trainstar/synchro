@@ -1,0 +1,1021 @@
+package blackbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+func TestInstallExtensionRejectsBundleIdentityChangeAfterLoad(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		replace func(*testing.T, extensionBundle)
+	}{
+		{
+			name: "manifest",
+			replace: func(t *testing.T, bundle extensionBundle) {
+				replaceFileWithSameBytes(t, filepath.Join(bundle.root, extensionBundleManifestName))
+			},
+		},
+		{
+			name: "manifest digest",
+			replace: func(t *testing.T, bundle extensionBundle) {
+				replaceFileWithSameBytes(t, filepath.Join(bundle.root, extensionBundleManifestName+".sha256"))
+			},
+		},
+		{
+			name: "payload",
+			replace: func(t *testing.T, bundle extensionBundle) {
+				replaceFileWithSameBytes(t, filepath.Join(bundle.root, filepath.FromSlash(bundle.files[0].Path)))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := writeExtensionBundleFixture(t)
+			loaded, err := verifyExtensionBundle(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.replace(t, loaded)
+			harness := &Harness{env: EnvironmentConfig{
+				ExtensionArtifact: root,
+				postgresVersion:   postgresqlRuntimeVersion,
+				extension:         loaded,
+			}}
+			if err := harness.installExtension(context.Background()); err == nil {
+				t.Fatal("extension installation accepted a changed bundle identity")
+			}
+		})
+	}
+}
+
+func TestCleanupRejectsPostLoadCandidateArtifactChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, EnvironmentConfig)
+	}{
+		{
+			name: "extension manifest replacement",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				replaceFileWithSameBytes(t, filepath.Join(environment.ExtensionArtifact, extensionBundleManifestName))
+			},
+		},
+		{
+			name: "extension payload replacement",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				relative := environment.extension.files[0].Path
+				replaceFileWithSameBytes(t, filepath.Join(environment.ExtensionArtifact, filepath.FromSlash(relative)))
+			},
+		},
+		{
+			name: "extension manifest digest replacement",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				path := filepath.Join(environment.ExtensionArtifact, extensionBundleManifestName+".sha256")
+				replaceFileWithSameBytes(t, path)
+			},
+		},
+		{
+			name: "extension manifest digest tampering",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				path := filepath.Join(environment.ExtensionArtifact, extensionBundleManifestName+".sha256")
+				appendArtifactWhitespace(t, path)
+			},
+		},
+		{
+			name: "extension manifest tampering",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				path := filepath.Join(environment.ExtensionArtifact, extensionBundleManifestName)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "adapter executable replacement",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				replaceFileWithSameBytes(t, environment.AdapterArtifact)
+			},
+		},
+		{
+			name: "adapter digest replacement",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				replaceFileWithSameBytes(t, environment.AdapterArtifact+".sha256")
+			},
+		},
+		{
+			name: "adapter digest tampering",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				appendArtifactWhitespace(t, environment.AdapterArtifact+".sha256")
+			},
+		},
+		{
+			name: "adapter executable tampering",
+			mutate: func(t *testing.T, environment EnvironmentConfig) {
+				if err := os.WriteFile(environment.AdapterArtifact, []byte("tampered-adapter"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := candidateArtifactEnvironmentFixture(t)
+			test.mutate(t, environment)
+
+			lock, err := acquireInstallationLock(context.Background(), filepath.Join(t.TempDir(), "install.lock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			harness := &Harness{
+				config:  HarnessConfig{ShutdownTimeout: time.Second},
+				env:     environment,
+				runRoot: t.TempDir(),
+				lock:    lock,
+			}
+			runRoot := harness.runRoot
+			err = harness.cleanup(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "candidate") || !strings.Contains(err.Error(), "artifact identity changed after execution") {
+				t.Fatalf("cleanup artifact identity error = %v", err)
+			}
+			if _, statErr := os.Stat(runRoot); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("cleanup retained the safe run root: %v", statErr)
+			}
+			lock.mu.Lock()
+			released := lock.released
+			lock.mu.Unlock()
+			if !released || harness.lock != nil {
+				t.Fatal("cleanup retained the installation lock after safe restoration")
+			}
+		})
+	}
+}
+
+func TestCleanupAcceptsUnchangedCandidateArtifacts(t *testing.T) {
+	harness := &Harness{
+		config: HarnessConfig{ShutdownTimeout: time.Second},
+		env:    candidateArtifactEnvironmentFixture(t),
+	}
+	if err := harness.cleanup(context.Background()); err != nil {
+		t.Fatalf("cleanup rejected unchanged candidate artifacts: %v", err)
+	}
+}
+
+func TestInstallationLockSerializesOneSharedPath(t *testing.T) {
+	path, err := VerifyInstallationLockPath(filepath.Join(t.TempDir(), "installation.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireInstallationLock(context.Background(), path)
+	if err != nil {
+		t.Fatalf("acquire first installation lock: %v", err)
+	}
+	if lock.path != path {
+		t.Fatalf("acquired installation lock path = %q, want %q", lock.path, path)
+	}
+	contender, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer contender.Close()
+	err = syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		t.Fatalf("shared installation lock did not exclude a contender: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release first installation lock: %v", err)
+	}
+	if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("released installation lock still excluded a contender: %v", err)
+	}
+	if err := syscall.Flock(int(contender.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("release contender lock: %v", err)
+	}
+}
+
+func TestNormalizeHarnessConfigRejectsChangedInstallationLock(t *testing.T) {
+	installationLock, err := VerifyInstallationLockPath(filepath.Join(t.TempDir(), "installation.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := EnvironmentConfig{
+		PG18BinDir:       "/verified/postgresql/bin",
+		InstallationLock: installationLock,
+		installationLock: installationLock,
+		extension:        extensionBundle{root: "/verified/extension"},
+		verified:         true,
+	}
+	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: environment}); err != nil {
+		t.Fatalf("verified installation lock binding was rejected: %v", err)
+	}
+	environment.InstallationLock = filepath.Join(t.TempDir(), "changed.lock")
+	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: environment}); err == nil {
+		t.Fatal("changed public installation lock was accepted")
+	}
+}
+
+func TestCreateRunDirectoriesUsesShortExternalSocketAndCleansExactly(t *testing.T) {
+	longParent := filepath.Join(t.TempDir(), strings.Repeat("long-root-", 12))
+	if err := os.Mkdir(longParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{config: HarnessConfig{TempParent: longParent}}
+	if err := harness.createRunDirectories(); err != nil {
+		t.Fatalf("create run directories: %v", err)
+	}
+	runRoot := harness.runRoot
+	socketDir := harness.socketDir
+	t.Cleanup(func() {
+		_ = os.RemoveAll(socketDir)
+		_ = os.RemoveAll(runRoot)
+	})
+	if withinPath(socketDir, runRoot) {
+		t.Fatalf("PostgreSQL socket directory %q is inside long run root %q", socketDir, runRoot)
+	}
+	if path := filepath.Join(socketDir, ".s.PGSQL.65535"); len(path) > maximumPostgreSQLSocketPathBytes {
+		t.Fatalf("PostgreSQL socket path has %d bytes: %q", len(path), path)
+	}
+	info, err := os.Lstat(socketDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("PostgreSQL socket directory mode = %v", info.Mode())
+	}
+	unownedSibling := socketDir + "-unowned"
+	if err := os.Mkdir(unownedSibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(unownedSibling)
+	})
+	if err := harness.removeCluster(); err != nil {
+		t.Fatalf("remove cluster directories: %v", err)
+	}
+	if err := harness.removeRunRoot(); err != nil {
+		t.Fatalf("remove run root: %v", err)
+	}
+	if _, err := os.Stat(socketDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket directory remains after cleanup: %v", err)
+	}
+	if _, err := os.Stat(runRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("run root remains after cleanup: %v", err)
+	}
+	if _, err := os.Stat(unownedSibling); err != nil {
+		t.Fatalf("cleanup removed an unowned socket sibling: %v", err)
+	}
+}
+
+func TestAttachedLifecycleCommandUsesExactArgvAndOwnedIdentity(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	runID := strings.Repeat("b", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$ARGUMENTS_PATH\"\nprintf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"postgres://admin@127.0.0.1:55433/synchro_conformance_owned\",\"destroyed\":false}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	harness := attachedLifecycleHarnessFixture(script, runID)
+	response, err := harness.runAttachLifecycleCommand(context.Background(), "restart")
+	if err != nil {
+		t.Fatalf("valid attached lifecycle command failed: %v", err)
+	}
+	if response.RunID != runID || response.Destroyed == nil || *response.Destroyed || response.AttachDatabaseURL == "" {
+		t.Fatalf("attached lifecycle response = %#v", response)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arguments) != "fixed restart "+runID+"\n" {
+		t.Fatalf("lifecycle argv = %q", arguments)
+	}
+
+	harness.env.AttachRunID = strings.Repeat("c", 32)
+	if _, err := harness.runAttachLifecycleCommand(context.Background(), "restart"); err == nil {
+		t.Fatal("changed lifecycle identity was accepted")
+	}
+}
+
+func TestAttachedLifecycleCommandRejectsMismatchedResponseAndRedactsFailure(t *testing.T) {
+	root := t.TempDir()
+	runID := strings.Repeat("e", 32)
+	mismatched := filepath.Join(root, "mismatched")
+	if err := os.WriteFile(mismatched, []byte("#!/bin/sh\nprintf '%s\\n' '{\"run_id\":\""+strings.Repeat("f", 32)+"\",\"attach_database_url\":\"postgres://127.0.0.1/owned\",\"destroyed\":false}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attachedLifecycleHarnessFixture(mismatched, runID).runAttachLifecycleCommand(context.Background(), "restart"); err == nil {
+		t.Fatal("mismatched lifecycle response identity was accepted")
+	}
+
+	secret := "lifecycle-secret-value"
+	failing := filepath.Join(root, "failing")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\nprintf '%s\\n' '"+secret+"' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness := attachedLifecycleHarnessFixture(failing, runID)
+	harness.env.Admin.password = []byte(secret)
+	_, err := harness.runAttachLifecycleCommand(context.Background(), "restart")
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("lifecycle failure was not safely surfaced: %v", err)
+	}
+}
+
+func TestAttachedDefaultClosePreservesRepeatedHarnessReuse(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	destroyedPath := filepath.Join(root, "destroyed")
+	runID := strings.Repeat("c", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nif [ -e \"$DESTROYED_PATH\" ]; then exit 1; fi\nprintf '%s\\n' \"$*\" >> \"$ARGUMENTS_PATH\"\nif [ \"$2\" = destroy ]; then touch \"$DESTROYED_PATH\"; printf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"\",\"destroyed\":true}'; else printf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"postgres://admin@127.0.0.1:55433/synchro_conformance_owned\",\"destroyed\":false}'; fi\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	t.Setenv("DESTROYED_PATH", destroyedPath)
+	for scenario := 0; scenario < 2; scenario++ {
+		harness := attachedLifecycleHarnessFixture(script, runID)
+		harness.attached = true
+		harness.runRoot = filepath.Join(root, fmt.Sprintf("run-root-%d", scenario))
+		if err := os.Mkdir(harness.runRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := harness.runAttachLifecycleCommand(context.Background(), "restart"); err != nil {
+			t.Fatalf("scenario %d could not reuse attached lifecycle: %v", scenario, err)
+		}
+		if err := harness.Close(context.Background()); err != nil {
+			t.Fatalf("scenario %d close failed: %v", scenario, err)
+		}
+	}
+	if _, err := os.Stat(destroyedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("default attached close destroyed the outer lifecycle: %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "fixed restart " + runID + "\nfixed restart " + runID + "\n"
+	if string(arguments) != want {
+		t.Fatalf("reused lifecycle argv = %q", arguments)
+	}
+}
+
+func TestAttachedOwnedCloseRunsDestroyExactlyOnce(t *testing.T) {
+	root := t.TempDir()
+	argumentsPath := filepath.Join(root, "arguments")
+	runID := strings.Repeat("d", 32)
+	script := filepath.Join(root, "lifecycle-command")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$ARGUMENTS_PATH\"\nprintf '%s\\n' '{\"run_id\":\"" + runID + "\",\"attach_database_url\":\"\",\"destroyed\":true}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARGUMENTS_PATH", argumentsPath)
+	harness := attachedLifecycleHarnessFixture(script, runID)
+	harness.env.AttachDestroyOnClose = true
+	harness.env.attachLifecycle.destroyOnClose = true
+	harness.attached = true
+	harness.runRoot = filepath.Join(root, "run-root")
+	if err := os.Mkdir(harness.runRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.Close(context.Background()); err != nil {
+		t.Fatalf("attached cleanup failed: %v", err)
+	}
+	if err := harness.Close(context.Background()); err != nil {
+		t.Fatalf("repeated attached cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(harness.runRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attached cleanup retained local run root: %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arguments) != "fixed destroy "+runID+"\n" {
+		t.Fatalf("destroy argv = %q", arguments)
+	}
+}
+
+func attachedLifecycleHarnessFixture(executable, runID string) *Harness {
+	command := []string{executable, "fixed"}
+	return &Harness{
+		config: HarnessConfig{ProcessLogBytes: 1024, ShutdownTimeout: time.Second},
+		env: EnvironmentConfig{
+			AttachRunID:            runID,
+			AttachLifecycleCommand: append([]string(nil), command...),
+			attachLifecycle:        attachLifecycleConfig{runID: runID, argv: append([]string(nil), command...)},
+		},
+	}
+}
+
+func TestDatabaseDropErrorPreservesPostgreSQLStateAndMessage(t *testing.T) {
+	cause := &pgconn.PgError{Code: "55006", Message: "database is being accessed by other users"}
+	err := databaseDropError(cause)
+	if !strings.Contains(err.Error(), "SQLSTATE 55006") || !strings.Contains(err.Error(), cause.Message) {
+		t.Fatalf("database drop error = %v", err)
+	}
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError != cause {
+		t.Fatal("database drop error did not preserve PostgreSQL cause")
+	}
+}
+
+func appendArtifactWhitespace(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func candidateArtifactEnvironmentFixture(t *testing.T) EnvironmentConfig {
+	t.Helper()
+	extensionRoot := writeExtensionBundleFixture(t)
+	extension, err := verifyExtensionBundle(extensionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterRoot := t.TempDir()
+	adapterPath := filepath.Join(adapterRoot, "synchrod-pg")
+	if err := os.WriteFile(adapterPath, []byte("adapter-artifact"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(adapterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(adapterPath+".sha256", []byte(digest+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := loadAdapterArtifactIdentity(adapterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return EnvironmentConfig{
+		ExtensionArtifact: extensionRoot,
+		AdapterArtifact:   adapterPath,
+		adapterSHA256:     adapter.sha256,
+		adapterIdentity:   adapter,
+		postgresVersion:   postgresqlRuntimeVersion,
+		extension:         extension,
+		verified:          true,
+	}
+}
+
+func TestInstallVerifiedExtensionFileTracksReplacementBeforeSyncFailure(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "destination")
+	if err := os.WriteFile(source, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := installedExtensionFile{destination: destination, installedDigest: digest}
+	if err := installVerifiedExtensionFile(&record, source, 0o600, func(string) error {
+		return errors.New("injected directory sync failure")
+	}); err == nil {
+		t.Fatal("extension installation accepted a post-rename sync failure")
+	}
+	if !record.installed {
+		t.Fatal("extension replacement was not recorded after rename")
+	}
+	actual, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != "replacement" {
+		t.Fatalf("destination = %q", actual)
+	}
+}
+
+func TestValidateSourceDMLUsesClosedTableSet(t *testing.T) {
+	for _, statement := range []string{
+		"INSERT INTO cf_unlisted (id) VALUES ($1)",
+		"INSERT INTO cf_items (id) VALUES ($1); DELETE FROM cf_items",
+		"UPDATE synchro.sync_registry SET table_name = $1",
+	} {
+		if err := validateSourceDML(statement); err == nil {
+			t.Fatalf("accepted unsafe source DML %q", statement)
+		}
+	}
+	if err := validateSourceDML("UPDATE cf_items SET value = $1 WHERE id = $2"); err != nil {
+		t.Fatalf("rejected source DML: %v", err)
+	}
+	if err := validateSourceDML("INSERT INTO cf_item_impacts (id, scope_key) VALUES ($1, $2)"); err != nil {
+		t.Fatalf("rejected capture dependency source DML: %v", err)
+	}
+}
+
+func TestDiagnosticSourceTableShapeRestoreScriptUsesAuthoredSourceContract(t *testing.T) {
+	restore := diagnosticSourceTableShapeRestoreSQL()
+	if !strings.Contains(restore, "SET LOCAL search_path TO "+diagnosticSourceRestoreSchemaName+";") {
+		t.Fatal("source shape restore does not create an isolated authored reference schema")
+	}
+	if !strings.Contains(restore, diagnosticSchemaSQL) {
+		t.Fatal("source shape restore does not use the authored diagnostic source contract")
+	}
+	for _, table := range diagnosticSourceTables {
+		if !strings.Contains(restore, quotePostgresLiteral(table)) {
+			t.Fatalf("source shape restore omits diagnostic source table %q", table)
+		}
+	}
+	for _, statement := range []string{
+		"ALTER TABLE public.%I ADD COLUMN %I %s",
+		"ALTER TABLE public.%I ALTER COLUMN %I TYPE %s USING %I::%s",
+		"ALTER TABLE public.%I ALTER COLUMN %I SET DEFAULT %s",
+		"ALTER TABLE public.%I DROP COLUMN %I",
+	} {
+		if !strings.Contains(restore, statement) {
+			t.Fatalf("source shape restore does not restore authored columns with %q", statement)
+		}
+	}
+}
+
+func TestSourceMutationErrorPreservesOnlySQLState(t *testing.T) {
+	errorWithState := sourceMutationError("source mutation failed", &pgconn.PgError{
+		Code:    "42725",
+		Message: "private database detail",
+	})
+	if errorWithState.Error() != "source mutation failed (SQLSTATE 42725)" || strings.Contains(errorWithState.Error(), "private") {
+		t.Fatal("source mutation error did not preserve only SQLSTATE")
+	}
+	if sourceMutationError("source mutation failed", errors.New("private database detail")).Error() != "source mutation failed" {
+		t.Fatal("non-PostgreSQL source mutation error was not redacted")
+	}
+}
+
+func TestWorkerHBAConfigurationRestrictsCredential(t *testing.T) {
+	configuration := workerHBAConfiguration("synchro_conformance_test", "synchro_cf_worker")
+	wanted := "# Synchro conformance authentication boundary\n" +
+		"local \"synchro_conformance_test\" \"synchro_cf_worker\" scram-sha-256\n" +
+		"local all \"synchro_cf_worker\" reject\n" +
+		"local all all trust\n" +
+		"host \"synchro_conformance_test\" \"synchro_cf_worker\" 127.0.0.1/32 scram-sha-256\n" +
+		"host all \"synchro_cf_worker\" 127.0.0.1/32 reject\n" +
+		"host all all 127.0.0.1/32 scram-sha-256\n" +
+		"host all all ::1/128 scram-sha-256\n"
+	if configuration != wanted {
+		t.Fatalf("HBA configuration = %q", configuration)
+	}
+}
+
+func TestScrubPostgresEnvironmentRemovesWorkerConnectionString(t *testing.T) {
+	input := []string{
+		"DATABASE_URL=operator-dsn",
+		"WORKER_DATABASE_URL=worker-dsn",
+		"PGPASSWORD=password",
+		"KEEP=present",
+	}
+	output := strings.Join(scrubPostgresEnvironment(input), "\n")
+	if strings.Contains(output, "DATABASE_URL") || strings.Contains(output, "WORKER_DATABASE_URL") || strings.Contains(output, "PGPASSWORD") {
+		t.Fatalf("scrubbed environment retained a database credential: %q", output)
+	}
+	if !strings.Contains(output, "KEEP=present") {
+		t.Fatalf("scrubbed environment removed unrelated variable: %q", output)
+	}
+}
+
+func TestParseProjectionBootstrapResultRequiresStrictExactObject(t *testing.T) {
+	valid := `{"bootstrap_id":"10000000-0000-4000-8000-000000000001","registry_generation":7,"source_stream_generation":"20000000-0000-4000-8000-000000000001","active_slot_name":"synchro_active","candidate_slot_name":"synchro_active_bootstrap","schema_version":null,"schema_hash":null,"activation_barrier":"0/00000020","affected_scopes":["user:diagnostic-user"]}`
+	result, err := parseProjectionBootstrapResult([]byte(valid), 7)
+	if err != nil {
+		t.Fatalf("valid projection bootstrap result rejected: %v", err)
+	}
+	if result.RegistryGeneration != 7 || len(result.AffectedScopes) != 1 {
+		t.Fatalf("parsed projection bootstrap result = %#v", result)
+	}
+	for _, invalid := range []string{
+		strings.Replace(valid, `,"affected_scopes"`, `,"unknown":true,"affected_scopes"`, 1),
+		strings.Replace(valid, `,"registry_generation":7`, `,"registry_generation":7,"registry_generation":7`, 1),
+		valid + ` {"extra":true}`,
+		strings.Replace(valid, `,"schema_hash":null`, ``, 1),
+		strings.Replace(valid, `"schema_version":null,"schema_hash":null`, `"schema_version":1,"schema_hash":null`, 1),
+	} {
+		if _, err := parseProjectionBootstrapResult([]byte(invalid), 7); err == nil {
+			t.Fatalf("accepted invalid projection bootstrap result %s", invalid)
+		}
+	}
+}
+
+func TestProjectionBootstrapProcessSeparatesAndRedactsStreams(t *testing.T) {
+	root := t.TempDir()
+	script := filepath.Join(root, "projection-bootstrap")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' \"$SECRET\"\nprintf '%s' \"$SECRET\" >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := "operator-password"
+	_, _, err := runProjectionBootstrapProcess(
+		context.Background(), script, nil, []string{"SECRET=" + secret}, 1024, [][]byte{[]byte(secret)},
+	)
+	if err == nil {
+		t.Fatal("failed projection bootstrap process was accepted")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("process failure leaked a secret: %v", err)
+	}
+}
+
+func TestProjectionBootstrapProcessRejectsTruncatedStdout(t *testing.T) {
+	root := t.TempDir()
+	script := filepath.Join(root, "projection-bootstrap")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%0200d' 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runProjectionBootstrapProcess(context.Background(), script, nil, nil, 16, nil)
+	if err == nil || !strings.Contains(err.Error(), "stdout is truncated") {
+		t.Fatalf("truncated projection bootstrap stdout was accepted: %v", err)
+	}
+}
+
+func TestProjectionBootstrapResultJSONTagsRemainExact(t *testing.T) {
+	result := ProjectionBootstrapResult{AffectedScopes: []string{}}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"bootstrap_id"`) || strings.Contains(string(data), `"BootstrapID"`) {
+		t.Fatalf("projection bootstrap result JSON tags are not exact: %s", data)
+	}
+}
+
+func TestPostmasterConfigurationStagesWorkerAutoStartAfterBootstrap(t *testing.T) {
+	dataDir := t.TempDir()
+	configurationPath := filepath.Join(dataDir, "postgresql.conf")
+	if err := os.WriteFile(configurationPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{
+		dataDir:   dataDir,
+		socketDir: filepath.Join(dataDir, "socket"),
+		port:      55432,
+		names: HarnessNames{
+			Database:        "synchro_health_test",
+			ReplicationSlot: "synchro_health_slot",
+			Publication:     "synchro_health_publication",
+		},
+		worker: RoleCredential{Username: "synchro_health_worker"},
+	}
+	if err := harness.writePostmasterConfiguration(); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := os.ReadFile(configurationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, setting := range []string{
+		"max_replication_slots = 2",
+		"shared_preload_libraries = 'synchro_pg'",
+		"synchro.auto_start = off",
+		"synchro.max_worker_heartbeat_age_seconds = 30",
+		"synchro.max_wal_lag_bytes = 67108864",
+		"synchro.max_wal_lag_seconds = 30",
+	} {
+		if !strings.Contains(string(configuration), setting+"\n") {
+			t.Fatalf("PostgreSQL configuration does not contain %q", setting)
+		}
+	}
+	if strings.Contains(string(configuration), "synchro.auto_start = on") {
+		t.Fatal("bootstrap PostgreSQL configuration enables the WAL worker")
+	}
+	if err := harness.enableWorkerAutoStart(); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err = os.ReadFile(configurationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(configuration), "synchro.auto_start = on\n") != 1 {
+		t.Fatal("PostgreSQL configuration does not enable the WAL worker once after bootstrap")
+	}
+}
+
+func TestCaptureReadinessFailureIncludesLastObservedStateAndQueryError(t *testing.T) {
+	queryErr := context.DeadlineExceeded
+	err := captureReadinessFailure(
+		"heartbeat,worker",
+		`{"ready":false,"checks":{"worker":{"state":"failed"}}}`,
+		queryErr,
+	)
+	for _, wanted := range []string{
+		"checks=heartbeat,worker",
+		`last_state={"ready":false,"checks":{"worker":{"state":"failed"}}}`,
+		"query_error=context deadline exceeded",
+	} {
+		if !strings.Contains(err.Error(), wanted) {
+			t.Fatalf("capture readiness failure does not contain %q: %v", wanted, err)
+		}
+	}
+	if !errors.Is(err, queryErr) {
+		t.Fatalf("capture readiness failure does not wrap the query error: %v", err)
+	}
+}
+
+func TestOperationalLogDisclosureUsesCompleteUnsanitizedLogs(t *testing.T) {
+	const canary = "protected-log-canary"
+	for _, test := range []struct {
+		name      string
+		adapter   string
+		postgres  string
+		collector string
+		wantLeak  bool
+		wantError bool
+	}{
+		{name: "clean", adapter: "adapter started", collector: "database ready"},
+		{name: "redacted credential", adapter: canary, wantLeak: true},
+		{name: "outside diagnostic suffix", adapter: canary + strings.Repeat("x", 600), wantLeak: true},
+		{name: "postgres process", postgres: canary, wantLeak: true},
+		{name: "unfiltered collector", collector: "LOG: " + canary, wantLeak: true},
+		{name: "truncated process", adapter: strings.Repeat("x", 2049), wantError: true},
+		{name: "truncated collector", collector: strings.Repeat("x", 2049), wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			if err := os.Mkdir(filepath.Join(directory, "log"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "log", "postgresql.log"), []byte(test.collector), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			adapter := newBoundedLog(2048, [][]byte{[]byte(canary)})
+			postgres := newBoundedLog(2048, [][]byte{[]byte(canary)})
+			_, _ = adapter.Write([]byte(test.adapter))
+			_, _ = postgres.Write([]byte(test.postgres))
+			harness := &Harness{
+				config:   HarnessConfig{ProcessLogBytes: 2048, ShutdownTimeout: time.Second},
+				dataDir:  directory,
+				adapter:  &ownedProcess{log: adapter},
+				postgres: &ownedProcess{log: postgres},
+			}
+			leaked, err := harness.StopAdapterAndObserveLogDisclosure(context.Background(), []string{canary})
+			if (err != nil) != test.wantError || leaked != test.wantLeak {
+				t.Fatalf("log observation: disclosure=%t error=%v", leaked, err)
+			}
+		})
+	}
+}
+
+func TestFailureDiagnosticsIncludesRedactedPostgresFileLog(t *testing.T) {
+	dataDir := t.TempDir()
+	logDir := filepath.Join(dataDir, "log")
+	if err := os.Mkdir(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("worker-password")
+	if err := os.WriteFile(
+		filepath.Join(logDir, "postgresql.log"),
+		[]byte("synchro WAL worker preparation failed: "+string(secret)),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{
+		config:   HarnessConfig{ProcessLogBytes: 1024},
+		dataDir:  dataDir,
+		postgres: &ownedProcess{log: newBoundedLog(1024, [][]byte{secret})},
+	}
+	diagnostics := harness.FailureDiagnostics()
+	if !strings.Contains(diagnostics, "synchro WAL worker preparation failed") {
+		t.Fatalf("PostgreSQL collector log is absent: %s", diagnostics)
+	}
+	if strings.Contains(diagnostics, string(secret)) || !strings.Contains(diagnostics, "[REDACTED]") {
+		t.Fatalf("PostgreSQL collector log was not redacted: %s", diagnostics)
+	}
+}
+
+func TestCandidateOperationRecoveryPlanRoutesByOperationKind(t *testing.T) {
+	streamActivated, err := candidateOperationRecoveryPlan(
+		streamResetOperationKind,
+		"activated",
+		"stream_old",
+		"stream_candidate",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !streamActivated.Activated || streamActivated.RetiredSlotName != "stream_old" ||
+		streamActivated.CleanupFunction != "synchro_complete_stream_reset_cleanup" {
+		t.Fatalf("stream activation recovery plan = %#v", streamActivated)
+	}
+	bootstrapStaged, err := candidateOperationRecoveryPlan(
+		projectionBootstrapOperationKind,
+		"catching_up",
+		"stream_old",
+		"bootstrap_candidate",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapStaged.Activated || bootstrapStaged.RetiredSlotName != "bootstrap_candidate" ||
+		bootstrapStaged.AbortFunction != "synchro_abort_projection_bootstrap" {
+		t.Fatalf("bootstrap staging recovery plan = %#v", bootstrapStaged)
+	}
+	bootstrapActivated, err := candidateOperationRecoveryPlan(
+		projectionBootstrapOperationKind,
+		"activated",
+		"stream_old",
+		"bootstrap_candidate",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bootstrapActivated.Activated || bootstrapActivated.RetiredSlotName != "bootstrap_candidate" ||
+		bootstrapActivated.CleanupFunction != "synchro_complete_projection_bootstrap_cleanup" {
+		t.Fatalf("bootstrap activation recovery plan = %#v", bootstrapActivated)
+	}
+	if _, err := candidateOperationRecoveryPlan("unknown", "preparing", "old", "candidate"); err == nil {
+		t.Fatal("accepted an unknown candidate operation kind")
+	}
+	if _, err := candidateOperationRecoveryPlan(streamResetOperationKind, "catching_up", "old", "candidate"); err == nil {
+		t.Fatal("accepted stream reset catch-up lifecycle")
+	}
+}
+
+func TestOwnedProcessEscalatesFromTermToKill(t *testing.T) {
+	root := t.TempDir()
+	readyPath := filepath.Join(root, "ready")
+	termPath := filepath.Join(root, "term")
+	process, err := startOwnedProcess(
+		os.Args[0],
+		[]string{"-test.run=^TestTermResistantProcessHelper$"},
+		append(os.Environ(),
+			"GO_WANT_TERM_RESISTANT_PROCESS=1",
+			"TERM_RESISTANT_READY_PATH="+readyPath,
+			"TERM_RESISTANT_SIGNAL_PATH="+termPath,
+		),
+		defaultProcessLogBytes,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("start TERM-resistant process: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = process.Stop(cleanupContext, time.Second)
+	})
+	readyContext, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err := waitUntil(readyContext, func(context.Context) (bool, error) {
+		_, err := os.Stat(readyPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return err == nil, err
+	}); err != nil {
+		t.Fatalf("wait for TERM-resistant process readiness: %v", err)
+	}
+
+	stopContext, stopCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer stopCancel()
+	if err := process.Stop(stopContext, time.Second); err != nil {
+		t.Fatalf("stop TERM-resistant process: %v", err)
+	}
+	if _, err := os.Stat(termPath); err != nil {
+		t.Fatalf("TERM-resistant process did not observe SIGTERM: %v", err)
+	}
+	if !process.Exited() {
+		t.Fatal("TERM-resistant process survived SIGKILL escalation")
+	}
+}
+
+func TestDiagnosticBearerTokenIsRedactedFromProcessDiagnostics(t *testing.T) {
+	log := newBoundedLog(defaultProcessLogBytes, nil)
+	harness := &Harness{
+		sourceReady: true,
+		env:         EnvironmentConfig{jwtSecret: []byte("runtime-redaction-secret")},
+		adapter:     &ownedProcess{log: log},
+	}
+	token, err := harness.DiagnosticBearerToken(time.Unix(1_700_000_000, 0))
+	if err != nil {
+		t.Fatalf("sign diagnostic bearer token: %v", err)
+	}
+	if _, err := log.Write([]byte("adapter failure Authorization: Bearer " + token)); err != nil {
+		t.Fatalf("write process diagnostic: %v", err)
+	}
+	diagnostic := harness.adapter.diagnosticText()
+	if strings.Contains(diagnostic, token) {
+		t.Fatal("process diagnostic retained a runtime bearer token")
+	}
+	if !strings.Contains(diagnostic, "[REDACTED]") {
+		t.Fatalf("process diagnostic did not mark the redaction: %q", diagnostic)
+	}
+}
+
+func TestBoundedLogRedactsTruncatedCredentialPrefix(t *testing.T) {
+	credential := []byte("zQ7-private-credential-token")
+	prefix := []byte("failure: ")
+	input := append(append([]byte(nil), prefix...), credential...)
+	for visibleCredentialBytes := 1; visibleCredentialBytes < len(credential); visibleCredentialBytes++ {
+		log := newBoundedLog(len(prefix)+visibleCredentialBytes, [][]byte{credential})
+		if _, err := log.Write(input); err != nil {
+			t.Fatalf("write bounded credential log: %v", err)
+		}
+		if !log.isTruncated() {
+			t.Fatal("bounded credential log did not record truncation")
+		}
+		want := string(prefix) + "[REDACTED]"
+		if got := string(log.sanitizedBytes()); got != want {
+			t.Fatalf("sanitized bounded credential log = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestCleanupStageUsesAnIndependentBoundedContext(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	err := runCleanupStage(parent, time.Second, func(stageContext context.Context) error {
+		called = true
+		if stageContext.Err() != nil {
+			return errors.New("cleanup stage inherited cancellation")
+		}
+		if _, bounded := stageContext.Deadline(); !bounded {
+			return errors.New("cleanup stage has no deadline")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("run independent cleanup stage: %v", err)
+	}
+	if !called {
+		t.Fatal("independent cleanup stage did not run")
+	}
+}
+
+func TestCleanupRetainsInstallationLockWhenRestorationFails(t *testing.T) {
+	root := t.TempDir()
+	lock, err := acquireInstallationLock(context.Background(), filepath.Join(root, "installation.lock"))
+	if err != nil {
+		t.Fatalf("acquire installation lock: %v", err)
+	}
+	destination := filepath.Join(root, "installed-extension")
+	if err := os.WriteFile(destination, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	harness := &Harness{
+		config: HarnessConfig{ShutdownTimeout: time.Second},
+		lock:   lock,
+		installed: &installedExtension{files: []installedExtensionFile{{
+			destination:     destination,
+			installedDigest: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			installed:       true,
+		}}},
+	}
+	if err := harness.cleanup(context.Background()); err == nil {
+		t.Fatal("cleanup accepted failed extension restoration")
+	}
+	lock.mu.Lock()
+	released := lock.released
+	lock.mu.Unlock()
+	if released || harness.lock == nil {
+		t.Fatal("cleanup released the installation lock after failed restoration")
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release retained installation lock after test: %v", err)
+	}
+}
+
+func TestTermResistantProcessHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_TERM_RESISTANT_PROCESS") != "1" {
+		return
+	}
+	readyPath := os.Getenv("TERM_RESISTANT_READY_PATH")
+	termPath := os.Getenv("TERM_RESISTANT_SIGNAL_PATH")
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	if err := os.WriteFile(readyPath, []byte("ready"), 0o600); err != nil {
+		os.Exit(2)
+	}
+	for {
+		if <-signals == syscall.SIGTERM {
+			if err := os.WriteFile(termPath, []byte("term"), 0o600); err != nil {
+				os.Exit(3)
+			}
+		}
+	}
+}

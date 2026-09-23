@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/requirements-v2.schema.json",
+  "title": "Synchro release requirements",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "release", "requirements"],
+  "properties": {
+    "$schema": { "const": "./schemas/requirements-v2.schema.json" },
+    "schema_version": { "const": 2 },
+    "release": { "const": "0.3.0" },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/requirement" }
+    }
+  },
+  "$defs": {
+    "requirementId": {
+      "type": "string",
+      "pattern": "^SYNC-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-[0-9]{3}$"
+    },
+    "proofType": {
+      "type": "string",
+      "enum": [
+        "server-black-box",
+        "native-e2e",
+        "fault-injection",
+        "negative-control"
+      ]
+    },
+    "normativeReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "anchor"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^docs/src/content/docs/[a-z0-9_./-]+\\.mdx$"
+        },
+        "anchor": {
+          "type": "string",
+          "pattern": "^#[a-z0-9]+(?:-[a-z0-9]+)*$"
+        }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "category",
+        "statement",
+        "required_proof_types",
+        "applicable_components",
+        "normative_references"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/requirementId" },
+        "title": { "type": "string", "minLength": 1 },
+        "category": {
+          "type": "string",
+          "enum": [
+            "protocol",
+            "data-correctness",
+            "scope",
+            "cursor-rebuild",
+            "local-metadata",
+            "startup",
+            "failure",
+            "boundary",
+            "performance",
+            "schema",
+            "change-capture"
+          ]
+        },
+        "statement": { "type": "string", "minLength": 1 },
+        "required_proof_types": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/proofType" }
+        },
+        "applicable_components": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "postgresql-server",
+              "swift-client",
+              "kotlin-client",
+              "react-native-client"
+            ]
+          }
+        },
+        "normative_references": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/normativeReference" }
+        }
+      }
+    }
+  }
+}

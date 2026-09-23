@@ -1,44 +1,38 @@
 # Synchro Client SDKs
 
-Mobile and cross-platform SDKs for the Synchro sync library. Each SDK wraps a platform-native SQLite library and adds sync orchestration via HTTP calls to the Synchro server.
+Swift and Kotlin own local SQLite, mutation capture, durable queues, scheduling, and server-state application.
+React Native exposes these native engines through a TurboModule bridge.
+PostgreSQL owns authoritative server-side synchronization.
 
 ## SDKs
 
-| SDK | Platform | Wraps | Status |
-|-----|----------|-------|--------|
-| **Swift** | iOS / macOS | GRDB | In Progress |
-| **Kotlin** | Android | Room | In Progress |
-| **React Native** | iOS + Android | Swift + Kotlin | In Progress |
+| SDK | Implementation |
+| --- | --- |
+| [Swift](swift/) | GRDB and the native Apple sync engine |
+| [Kotlin](kotlin/) | Android SQLite APIs and the native Android sync engine |
+| [React Native](react-native/) | Bridge over the Swift and Kotlin engines |
 
-## Architecture
+## Maintained Guides
 
-All SDKs implement the same interface contract. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the shared design.
+- [Client SDK overview](../docs/src/content/docs/clients/overview.mdx)
+- [Client consumption](../docs/src/content/docs/clients/consumption.mdx)
+- [Application SQL limits](../docs/src/content/docs/clients/application-sql.mdx)
+- [Client contract](../docs/src/content/docs/spec/02-client-contract.mdx)
+- [Architecture overview](../docs/src/content/docs/architecture/overview.mdx)
+- [Support policy](../docs/src/content/docs/reference/support-policy.mdx)
 
-### Layer Model
+## Local Checks
 
-- **Layer 1 (Native)**: Swift wraps GRDB, Kotlin wraps Room. SQLite triggers on synced tables auto-track all writes (CDC). HTTP sync orchestration talks to the Synchro server.
-- **Layer 2 (React Native)**: TurboModule bridge wraps both Layer 1 SDKs. SQL strings down, JSON rows up, typed events up.
+Run the supported Make targets from the repository root.
 
-### Change Detection
+| Surface | Unit tests |
+| --- | --- |
+| Swift | `make test-swift-unit` |
+| Kotlin | `make test-kotlin-unit` |
+| React Native | `make test-rn-unit` |
 
-Client-side CDC mirrors the server's WAL approach using SQLite triggers:
+Use `make test-swift`, `make test-kotlin`, or `make test-rn` for the applicable integration suites.
+Use the [development guide](../docs/src/content/docs/getting-started/development.mdx) for the repository-owned fixture prerequisites and Make sequence.
 
-- Triggers are auto-created by the SDK when synced tables are built from server schema
-- A `sync_lock` flag prevents tracking during pull application
-- Pending queue deduplicates via `ON CONFLICT DO UPDATE`
-- On push, current record data is hydrated from the local table
-- `BEFORE DELETE` triggers convert hard deletes to soft deletes
-- No special write API needed -- standard GRDB/Room API works
-
-## Build
-
-```bash
-# Swift
-cd swift && swift build && swift test
-
-# Kotlin
-cd kotlin && ./gradlew build
-
-# React Native
-cd react-native && npm install && npm test
-```
+Use the [testing evidence guide](../docs/src/content/docs/spec/07-release-verification.mdx) for integration and platform checks.
+Use [RELEASE.md](../RELEASE.md) for release operations.

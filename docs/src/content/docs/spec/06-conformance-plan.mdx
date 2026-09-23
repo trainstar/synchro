@@ -1,0 +1,57 @@
+---
+title: Conformance Plan
+description: Durable conformance architecture for Synchro.
+---
+
+# Conformance Plan
+
+The normative specifications define Synchro behavior.
+
+Conformance inputs define expected behavior. Production output does not define expected behavior.
+
+## Conformance Inputs
+
+`conformance/` contains authored requirements, vectors, scenarios, faults, artifact inventory, and the support matrix.
+
+The support matrix is the sole machine-readable platform declaration.
+
+Shared scenarios use contract-derived expected results. Applicable implementations consume those scenarios without copied expectations.
+
+## Proof Architecture
+
+Each behavior has one authoritative proof home.
+
+1. Contract tests consume specifications and authored vectors.
+2. Unit tests prove deterministic local behavior.
+3. Real integration tests use the extension, adapter, and PostgreSQL.
+4. Scenario tests execute authored semantic flows.
+5. Package smoke tests verify installation and lifecycle boundaries.
+6. Adversarial tests use critical faults and negative controls.
+7. Seeded stateful tests check independent invariants and record replay seeds.
+
+Use real dependencies for happy-path integration and scenario flows.
+
+Use mocks only for failures that real dependencies cannot safely trigger.
+
+## Proof Rules
+
+Each production defect requires a permanent minimized scenario.
+
+Critical faults must preserve the contract state that the test observes.
+
+Expected values must come from the normative contract or an independent invariant.
+
+Field presence and implementation-derived fixtures do not prove semantics.
+
+Required gates use structured results. A missing, skipped, filtered, or zero-test result fails the gate.
+
+Package smoke installs the packaged artifact. It verifies connect, push, pull, process termination, and resume.
+
+## Scope
+
+This document defines durable proof architecture. It does not define release operations.
+
+Use [Testing Evidence](/synchro/spec/07-release-verification/) for evidence policy and [Testing Evidence Overview](/synchro/verification/overview/) for evidence records.
+Use the [Support Policy](/synchro/reference/support-policy/) for maintained environment requirements.
+
+Use [RELEASE.md](https://github.com/trainstar/synchro/blob/master/RELEASE.md) as the sole release procedure.

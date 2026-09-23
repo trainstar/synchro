@@ -1,0 +1,1234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "title": "Synchro semantic conformance scenario",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "id",
+    "title",
+    "requirement_ids",
+    "normative_references",
+    "proof_types",
+    "proof_obligations",
+    "ownership",
+    "model",
+    "barrier_plan",
+    "fault_plans",
+    "replay",
+    "negative_controls",
+    "steps",
+    "wire_expectations",
+    "assertions"
+  ],
+  "properties": {
+    "$schema": { "const": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json" },
+    "schema_version": { "const": 2 },
+    "id": { "$ref": "#/$defs/scenarioId" },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "requirement_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/requirementId" }
+    },
+    "normative_references": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/normativeReference" }
+    },
+    "proof_types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/proofType" }
+    },
+    "proof_obligations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/proofObligation" }
+    },
+    "ownership": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/ownership" }
+    },
+    "model": { "$ref": "#/$defs/model" },
+    "barrier_plan": { "$ref": "#/$defs/barrierPlan" },
+    "fault_plans": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/faultPlan" }
+    },
+    "replay": { "$ref": "#/$defs/replay" },
+    "negative_controls": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/catalogControl" }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "measurement_bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/measurementBinding" }
+    },
+    "wire_expectations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/wireExpectation" }
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/assertion" }
+    },
+    "native_identity_aliases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nativeIdentityAlias" }
+    },
+    "native_lifecycle_boundaries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nativeLifecycleBoundary" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "proof_obligations": {
+            "contains": {
+              "type": "object",
+              "properties": { "proof_type": { "const": "native-e2e" } },
+              "required": ["proof_type"]
+            }
+          }
+        },
+        "required": ["proof_obligations"]
+      },
+      "then": {
+        "required": ["native_identity_aliases"],
+        "properties": {
+          "steps": {
+            "items": { "required": ["native_binding"] }
+          }
+        }
+      },
+      "else": {
+        "allOf": [
+          {
+            "not": {
+              "anyOf": [
+                { "required": ["native_identity_aliases"] },
+                { "required": ["native_lifecycle_boundaries"] }
+              ]
+            }
+          },
+          {
+            "properties": {
+              "steps": {
+                "items": { "not": { "required": ["native_binding"] } }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "nativeClientKey": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "nativeCallId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "nativeStepBinding": {
+      "description": "A real native proof boundary. Equal call IDs bind one public call.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["controller", "artifact", "local-write", "public-call", "process", "workload"] },
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "call_id": { "$ref": "#/$defs/nativeCallId" },
+        "stage": { "type": "string", "enum": ["synchronous", "begin", "observe", "await-step", "await-call"] },
+        "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
+        "completion": { "type": "string", "enum": ["idle", "blocked", "error"] },
+        "workload": { "$ref": "#/$defs/nativeWorkloadParameters" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "controller" } }, "required": ["kind"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["user_id"] },
+                { "required": ["client_id"] },
+                { "required": ["call_id"] },
+                { "required": ["stage"] },
+                { "required": ["method"] },
+                { "required": ["completion"] }
+              ]
+            }
+          },
+          "else": { "required": ["user_id", "client_id"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "public-call" } }, "required": ["kind"] },
+          "then": {
+            "required": ["call_id", "stage"],
+            "allOf": [
+              {
+                "if": { "properties": { "stage": { "const": "synchronous" } }, "required": ["stage"] },
+                "then": { "required": ["method", "completion"] }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "begin" } }, "required": ["stage"] },
+                "then": {
+                  "required": ["method"],
+                  "not": { "required": ["completion"] }
+                }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "await-step" } }, "required": ["stage"] },
+                "then": {
+                  "not": {
+                    "anyOf": [
+                      { "required": ["method"] },
+                      { "required": ["completion"] }
+                    ]
+                  }
+                }
+              },
+              {
+                "if": { "properties": { "stage": { "const": "await-call" } }, "required": ["stage"] },
+                "then": {
+                  "required": ["completion"],
+                  "not": { "required": ["method"] }
+                }
+              }
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["call_id"] },
+                { "required": ["stage"] },
+                { "required": ["method"] },
+                { "required": ["completion"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "workload" } }, "required": ["kind"] },
+          "then": { "required": ["workload"] },
+          "else": { "not": { "required": ["workload"] } }
+        }
+      ]
+    },
+    "nativeWorkloadParameters": {
+      "description": "One bounded deterministic local-write generator. Native manifest derivation consumes this object.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_count", "batch_size", "seed", "authored_schema", "client_version", "targets", "mutation_kinds", "expectation"],
+      "properties": {
+        "record_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "batch_size": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "seed": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "authored_schema": { "$ref": "#/$defs/schemaFact" },
+        "client_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeWorkloadTarget" }
+        },
+        "mutation_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/nativeWorkloadMutationKind" }
+        },
+        "expectation": { "$ref": "#/$defs/nativeWorkloadExpectation" }
+      }
+    },
+    "nativeWorkloadTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "table_id", "primary_key_field_id"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/nativeClientKey" },
+        "table_id": { "$ref": "#/$defs/nativeClientKey" },
+        "primary_key_field_id": { "$ref": "#/$defs/nativeClientKey" }
+      }
+    },
+    "nativeWorkloadMutationKind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "count", "field_ids"],
+      "properties": {
+        "operation": { "const": "insert" },
+        "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "field_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeClientKey" }
+        }
+      }
+    },
+    "nativeWorkloadExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_count", "batch_count", "operation_digest", "per_scope_cardinalities"],
+      "properties": {
+        "operation_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "batch_count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "operation_digest": { "$ref": "#/$defs/sha256" },
+        "per_scope_cardinalities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nativeWorkloadScopeCardinality" }
+        }
+      }
+    },
+    "nativeWorkloadScopeCardinality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "cardinality"],
+      "properties": {
+        "scope_id": { "$ref": "#/$defs/nativeClientKey" },
+        "cardinality": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "nativeIdentityAlias": {
+      "description": "One typed authored identity value that a native proof resolves to one runtime value.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "alias", "value", "step_ids", "expectation_ids"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "batch-id",
+            "checksum",
+            "client-generation",
+            "cursor",
+            "mutation-id",
+            "primary-key",
+            "rebuild-id",
+            "row-version",
+            "schema",
+            "scope",
+            "scope-set-version",
+            "server-version",
+            "table"
+          ]
+        },
+        "alias": { "$ref": "#/$defs/nativeClientKey" },
+        "value": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["version", "hash"],
+              "properties": {
+                "version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                "hash": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          ]
+        },
+        "step_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stepId" }
+        },
+        "expectation_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/expectationId" }
+        }
+      }
+    },
+    "nativeLifecycleBoundary": {
+      "description": "One public lifecycle call placed after a terminal authored step.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "phase", "after_step_id", "user_id", "client_id", "method"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nativeClientKey" },
+        "phase": { "type": "string", "enum": ["setup", "exercise", "cleanup"] },
+        "after_step_id": { "$ref": "#/$defs/stepId" },
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "method": { "const": "stop" }
+      }
+    },
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^SCN-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "requirementId": {
+      "type": "string",
+      "pattern": "^SYNC-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*-[0-9]{3}$"
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^STEP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "assertionId": {
+      "type": "string",
+      "pattern": "^ASSERT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "faultId": {
+      "type": "string",
+      "pattern": "^FAULT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "controlId": {
+      "type": "string",
+      "pattern": "^CTRL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "faultPlanId": {
+      "type": "string",
+      "pattern": "^FPL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "barrierId": {
+      "type": "string",
+      "pattern": "^BAR-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "expectationId": {
+      "type": "string",
+      "pattern": "^EXPECT-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "supportCellId": {
+      "type": "string",
+      "pattern": "^SUP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "artifactInventoryId": {
+      "type": "string",
+      "pattern": "^ARTDEF-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "budgetId": {
+      "type": "string",
+      "pattern": "^BUD-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "measurementId": {
+      "type": "string",
+      "pattern": "^MEAS-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "stratumId": {
+      "type": "string",
+      "pattern": "^STR-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "vectorSetId": {
+      "type": "string",
+      "pattern": "^VSET-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "obligationId": {
+      "type": "string",
+      "pattern": "^OBL-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "normativeReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "anchor"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^docs/src/content/docs/[a-z0-9_./-]+\\.mdx$" },
+        "anchor": { "type": "string", "pattern": "^#[a-z0-9]+(?:-[a-z0-9]+)*$" }
+      }
+    },
+    "proofType": {
+      "type": "string",
+      "enum": [
+        "server-black-box",
+        "native-e2e",
+        "fault-injection",
+        "negative-control"
+      ]
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_operation", "name", "payload"],
+      "properties": {
+        "contract_operation": {
+          "type": "string",
+          "enum": ["connect", "push", "pull", "rebuild", "local", "artifact", "process", "model", "workload"]
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "payload": { "type": "object" },
+        "wire_fault": { "$ref": "#/$defs/wireFaultControl" }
+      }
+    },
+    "wireFaultControl": {
+      "description": "One bounded native-only push response fault.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["temporary_unavailable", "sealed_retry"] }
+      }
+    },
+    "expectedOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition"],
+          "properties": {
+            "disposition": { "const": "success" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "error_code"],
+          "properties": {
+            "disposition": { "const": "error" },
+            "error_code": {
+              "type": "string",
+              "enum": ["source_transaction_predecessor_pending", "source_transaction_poison_blocked"]
+            }
+          }
+        }
+      ]
+    },
+    "proofObligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["obligation_id", "requirement_ids", "assertion_ids", "proof_type", "support_cell_id", "artifact_inventory_ids", "performance_budget_ids", "required_measurement_ids", "required_vector_set_ids", "make_target", "argv", "fault_plan_id", "control_id"],
+      "properties": {
+        "obligation_id": { "$ref": "#/$defs/obligationId" },
+        "requirement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/requirementId" }
+        },
+        "assertion_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/assertionId" }
+        },
+        "proof_type": { "$ref": "#/$defs/proofType" },
+        "support_cell_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/supportCellId" },
+            { "type": "null" }
+          ]
+        },
+        "artifact_inventory_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifactInventoryId" }
+        },
+        "performance_budget_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/budgetId" }
+        },
+        "required_measurement_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/measurementId" }
+        },
+        "required_vector_set_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/vectorSetId" }
+        },
+        "make_target": { "$ref": "#/$defs/makeTarget" },
+        "argv": { "$ref": "#/$defs/canonicalMakeArgv" },
+        "fault_plan_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/faultPlanId" },
+            { "type": "null" }
+          ]
+        },
+        "control_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/controlId" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "proof_type": { "enum": ["fault-injection", "negative-control"] }
+            },
+            "required": ["proof_type"]
+          },
+          "then": {
+            "properties": {
+              "requirement_ids": { "minItems": 1, "maxItems": 1 },
+              "assertion_ids": { "minItems": 1, "maxItems": 1 },
+              "fault_plan_id": { "$ref": "#/$defs/faultPlanId" },
+              "control_id": { "$ref": "#/$defs/controlId" }
+            }
+          },
+          "else": {
+            "properties": {
+              "fault_plan_id": { "type": "null" },
+              "control_id": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "requirement_id", "proof_obligation_id", "assertion_id", "proof_type", "support_cell_id"],
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "requirement_id": { "$ref": "#/$defs/requirementId" },
+        "proof_obligation_id": { "$ref": "#/$defs/obligationId" },
+        "assertion_id": { "$ref": "#/$defs/assertionId" },
+        "proof_type": { "$ref": "#/$defs/proofType" },
+        "support_cell_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/supportCellId" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "makeTarget": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+    },
+    "canonicalMakeArgv": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        { "const": "make" },
+        { "$ref": "#/$defs/makeTarget" }
+      ],
+      "items": false
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setup", "expected_state"],
+      "properties": {
+        "setup": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/operation" } },
+        "expected_state": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/modelExpectation" } }
+      }
+    },
+    "modelExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "predicate"],
+      "properties": {
+        "id": { "$ref": "#/$defs/expectationId" },
+        "predicate": { "$ref": "#/$defs/predicate" },
+        "state_facts": { "$ref": "#/$defs/stateFacts" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "predicate": {
+                "properties": { "name": { "const": "state-equals-authored-model" } },
+                "required": ["name"]
+              }
+            },
+            "required": ["predicate"]
+          },
+          "then": { "required": ["state_facts"] },
+          "else": { "not": { "required": ["state_facts"] } }
+        }
+      ]
+    },
+    "stateFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "transaction_count": { "$ref": "#/$defs/count" },
+        "row_count": { "$ref": "#/$defs/count" },
+        "scope_count": { "$ref": "#/$defs/count" },
+        "rebuild_count": { "$ref": "#/$defs/count" },
+        "batch_count": { "$ref": "#/$defs/count" },
+        "mutation_count": { "$ref": "#/$defs/count" },
+        "configured_limits": { "$ref": "#/$defs/configuredLimitsFact" },
+        "transactions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/transactionFact" } },
+        "registry": { "$ref": "#/$defs/registryFact" },
+        "stream": { "$ref": "#/$defs/streamFact" },
+        "rows": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/rowFact" } },
+        "scopes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/scopeFact" } },
+        "poison": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/poisonFact" } },
+        "rebuilds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/rebuildFact" } },
+        "clients": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/clientDurabilityFact" } }
+      }
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "configuredLimitsFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_scope_fanout", "max_impact_rows", "pull_maximum", "rebuild_maximum", "compaction_batch_maximum", "backfill_batch_maximum"],
+      "properties": {
+        "max_scope_fanout": { "type": "integer", "minimum": 1 },
+        "max_impact_rows": { "type": "integer", "minimum": 1 },
+        "pull_maximum": { "type": "integer", "minimum": 1 },
+        "rebuild_maximum": { "type": "integer", "minimum": 1 },
+        "compaction_batch_maximum": { "type": "integer", "minimum": 1 },
+        "backfill_batch_maximum": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "decimalUint": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "transactionFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream_generation", "commit_lsn", "end_lsn", "registry_generation", "lifecycle", "event_ordinals"],
+      "properties": {
+        "stream_generation": { "type": "string", "minLength": 1 },
+        "commit_lsn": { "$ref": "#/$defs/decimalUint" },
+        "end_lsn": { "$ref": "#/$defs/decimalUint" },
+        "registry_generation": { "type": "integer", "minimum": 1 },
+        "lifecycle": { "type": "string", "enum": ["committed", "materialized", "poisoned"] },
+        "event_ordinals": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } }
+      }
+    },
+    "registryFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_generation"],
+      "properties": { "current_generation": { "type": "integer", "minimum": 1 } }
+    },
+    "streamFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["materialized_stream_generation", "materialized_kind", "materialized_commit_lsn", "acknowledged_end_lsn"],
+      "properties": {
+        "materialized_stream_generation": { "type": "string", "minLength": 1 },
+        "materialized_kind": { "type": "string", "enum": ["generation_start", "transaction_end"] },
+        "materialized_commit_lsn": { "$ref": "#/$defs/decimalUint" },
+        "acknowledged_end_lsn": { "$ref": "#/$defs/decimalUint" }
+      }
+    },
+    "rowFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table_id", "canonical_wire_json", "version", "checksum"],
+      "properties": {
+        "table_id": { "type": "string", "minLength": 1 },
+        "canonical_wire_json": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "checksum": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "scopeFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "membership_generation", "cardinality", "effect_versions"],
+      "properties": {
+        "scope_id": { "type": "string", "minLength": 1 },
+        "membership_generation": { "type": "integer", "minimum": 1 },
+        "cardinality": { "$ref": "#/$defs/count" },
+        "effect_versions": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "poisonFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream_generation", "commit_lsn", "relation", "reason", "lifecycle"],
+      "properties": {
+        "stream_generation": { "type": "string", "minLength": 1 },
+        "commit_lsn": { "$ref": "#/$defs/decimalUint" },
+        "relation": { "type": ["string", "null"], "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "lifecycle": { "type": "string", "enum": ["active", "repaired"] }
+      }
+    },
+    "rebuildFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "client_id", "scope_id", "rebuild_id", "page_limit", "staged_row_count", "page_count", "next_row_ordinal", "has_continuation", "has_final_cursor", "status"],
+      "properties": {
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "scope_id": { "type": "string", "minLength": 1 },
+        "rebuild_id": { "type": "string", "minLength": 1 },
+        "page_limit": { "type": "integer", "minimum": 1 },
+        "staged_row_count": { "$ref": "#/$defs/count" },
+        "page_count": { "$ref": "#/$defs/count" },
+        "next_row_ordinal": { "type": "integer", "minimum": 1 },
+        "has_continuation": { "type": "boolean" },
+        "has_final_cursor": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["staged", "complete", "expired", "invalidated"] }
+      }
+    },
+    "clientDurabilityFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "client_id"],
+      "minProperties": 3,
+      "properties": {
+        "user_id": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "current_schema": { "$ref": "#/$defs/schemaFact" },
+        "row_count": { "$ref": "#/$defs/count" },
+        "provenance_count": { "$ref": "#/$defs/count" },
+        "checkpoint_count": { "$ref": "#/$defs/count" },
+        "queue_count": { "$ref": "#/$defs/count" },
+        "outcome_count": { "$ref": "#/$defs/count" },
+        "sealed_batch_count": { "$ref": "#/$defs/count" },
+        "rebuild_attempt_count": { "$ref": "#/$defs/count" },
+        "provenance": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/provenanceFact" } },
+        "checkpoints": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/checkpointFact" } },
+        "queue": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/queuedMutationFact" } },
+        "outcomes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/mutationOutcomeFact" } }
+      }
+    },
+    "schemaFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "hash"],
+      "properties": { "version": { "type": "integer", "minimum": 1 }, "hash": { "$ref": "#/$defs/sha256" } }
+    },
+    "provenanceFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table_id", "canonical_wire_json", "scopes", "version"],
+      "properties": {
+        "table_id": { "type": "string", "minLength": 1 },
+        "canonical_wire_json": { "type": "string", "minLength": 1 },
+        "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "checkpointFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_id", "has_cursor", "has_checksum", "verified"],
+      "properties": {
+        "scope_id": { "type": "string", "minLength": 1 },
+        "has_cursor": { "type": "boolean" },
+        "has_checksum": { "type": "boolean" },
+        "checksum": { "$ref": "#/$defs/sha256" },
+        "verified": { "type": "boolean" }
+      }
+    },
+    "queuedMutationFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutation_id", "table_id", "canonical_wire_json", "authored_schema", "operation", "base_version", "client_version", "authored_columns", "local_order", "status"],
+      "properties": {
+        "mutation_id": { "type": "string", "minLength": 1 },
+        "table_id": { "type": "string", "minLength": 1 },
+        "canonical_wire_json": { "type": "string", "minLength": 1 },
+        "authored_schema": { "$ref": "#/$defs/schemaFact" },
+        "operation": { "type": "string", "enum": ["insert", "update", "delete"] },
+        "base_version": { "type": ["string", "null"], "minLength": 1 },
+        "client_version": { "type": "string", "minLength": 1 },
+        "authored_columns": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/fieldFact" } },
+        "local_order": { "type": "integer", "minimum": 1 },
+        "status": { "type": "string", "enum": ["pending", "sealed", "accepted", "server_rejected", "superseded_before_send", "cancelled_before_send", "blocked_by_predecessor"] }
+      }
+    },
+    "fieldFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field_id", "type", "wire_json"],
+      "properties": {
+        "field_id": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "wire_json": { "type": "string", "minLength": 1 }
+      }
+    },
+    "mutationOutcomeFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutation_id", "state", "reason"],
+      "properties": {
+        "mutation_id": { "type": "string", "minLength": 1 },
+        "state": { "type": "string", "enum": ["applied", "conflict", "rejected_terminal"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "barrierPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["barriers"],
+      "properties": {
+        "barriers": { "type": "array", "items": { "$ref": "#/$defs/barrier" } }
+      }
+    },
+    "barrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "release_order", "participants"],
+      "properties": {
+        "id": { "$ref": "#/$defs/barrierId" },
+        "name": { "type": "string", "minLength": 1 },
+        "release_order": { "type": "integer", "minimum": 1 },
+        "participants": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "faultPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "requirement_id", "fault_id", "control_id", "barrier_id", "expected_assertion_ids", "injection"],
+      "properties": {
+        "id": { "$ref": "#/$defs/faultPlanId" },
+        "requirement_id": { "$ref": "#/$defs/requirementId" },
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "control_id": { "$ref": "#/$defs/controlId" },
+        "barrier_id": { "$ref": "#/$defs/barrierId" },
+        "expected_assertion_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/assertionId" } },
+        "injection": { "$ref": "#/$defs/injectionRecipe" }
+      }
+    },
+    "injectionRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "target", "operator", "parameters"],
+      "properties": {
+        "mechanism": { "type": "string", "enum": ["source-mutant", "wire-fault", "state-fault", "process-fault", "infrastructure-fault", "artifact-tamper"] },
+        "target": { "type": "string", "minLength": 1 },
+        "operator": { "type": "string", "enum": ["replace", "inject", "omit", "duplicate", "reorder", "replay", "misbind", "bypass", "truncate", "crash", "corrupt", "reroute", "expose", "delay"] },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scenario", "defect"],
+          "properties": {
+            "scenario": { "type": "string", "minLength": 1 },
+            "defect": { "type": "string", "minLength": 1 },
+            "precondition": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "seed_required", "barrier_trace_required"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["deterministic", "randomized"] },
+        "seed_required": { "type": "boolean" },
+        "barrier_trace_required": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "const": "randomized" } },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": { "seed_required": { "const": true } }
+          }
+        }
+      ]
+    },
+    "catalogControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["control_id", "requirement_id", "fault_id", "subject_artifact_inventory_ids", "detected_by"],
+      "properties": {
+        "control_id": { "$ref": "#/$defs/controlId" },
+        "requirement_id": { "$ref": "#/$defs/requirementId" },
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "subject_artifact_inventory_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifactInventoryId" }
+        },
+        "detected_by": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/assertionId" } }
+      }
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_predicate", "name", "payload"],
+      "properties": {
+        "contract_predicate": {
+          "type": "string",
+          "enum": ["state-equality", "wire-outcome", "state-transition", "artifact-integrity", "performance-measurement"]
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "state-equals-authored-model",
+            "state-unchanged",
+            "canonical-wire-outcome",
+            "legal-state-transition",
+            "schema-dispatch-observations-satisfied",
+            "artifact-policy-satisfied",
+            "performance-contract-satisfied",
+            "schema-dispatch-measurement-satisfied"
+          ]
+        },
+        "payload": {
+          "oneOf": [
+            { "type": "object", "maxProperties": 0 },
+            { "$ref": "#/$defs/schemaDispatchPredicatePayload" }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "contract_predicate": { "const": "state-equality" },
+            "name": { "enum": ["state-equals-authored-model", "state-unchanged"] }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "wire-outcome" },
+            "name": { "const": "canonical-wire-outcome" }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "state-transition" },
+            "name": { "enum": ["legal-state-transition", "schema-dispatch-observations-satisfied"] }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "artifact-integrity" },
+            "name": { "const": "artifact-policy-satisfied" }
+          }
+        },
+        {
+          "properties": {
+            "contract_predicate": { "const": "performance-measurement" },
+            "name": { "enum": ["performance-contract-satisfied", "schema-dispatch-measurement-satisfied"] }
+          }
+        }
+      ]
+    },
+    "schemaDispatchPredicatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurement_id", "minimum_sample_count_per_stratum", "strata"],
+      "properties": {
+        "measurement_id": { "$ref": "#/$defs/measurementId" },
+        "minimum_sample_count_per_stratum": { "type": "integer", "minimum": 1 },
+        "strata": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["stratum_id", "schema_case"],
+            "properties": {
+              "stratum_id": { "$ref": "#/$defs/stratumId" },
+              "schema_case": {
+                "type": "string",
+                "enum": ["current", "class_1", "class_2", "class_3_affected", "class_3_unaffected", "class_4"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "measurementSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurement_id", "stratum_id", "sample_id", "parameters", "operation"],
+      "properties": {
+        "measurement_id": { "$ref": "#/$defs/measurementId" },
+        "stratum_id": { "$ref": "#/$defs/stratumId" },
+        "sample_id": {
+          "type": "string",
+          "pattern": "^SAMPLE-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+        },
+        "parameters": { "type": "object" },
+        "operation": { "$ref": "#/$defs/measurementOperationTarget" }
+      }
+    },
+    "measurementOperationId": {
+      "type": "string",
+      "pattern": "^MOP-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$"
+    },
+    "measurementOperationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "family", "boundary", "value"],
+      "properties": {
+        "id": { "$ref": "#/$defs/measurementOperationId" },
+        "family": { "type": "string", "pattern": "^[a-z]+(?:[-_][a-z0-9]+)*$" },
+        "boundary": { "type": "string", "pattern": "^[a-z]+(?:-[a-z0-9]+)*$" },
+        "value": { "not": { "type": "null" } }
+      }
+    },
+    "measurementBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "measurement_sample"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/stepId" },
+        "measurement_sample": { "$ref": "#/$defs/measurementSample" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "phase", "transport", "operation", "expected_outcome"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stepId" },
+        "phase": { "type": "string", "enum": ["setup", "exercise", "cleanup"] },
+		"transport": { "type": "string", "enum": ["http", "local", "artifact", "process", "model"] },
+		"description": { "type": "string", "minLength": 1 },
+		"native_binding": { "$ref": "#/$defs/nativeStepBinding" },
+		"measurement_sample": { "$ref": "#/$defs/measurementSample" },
+		"operation": { "$ref": "#/$defs/operation" },
+		"expected_outcome": { "$ref": "#/$defs/expectedOutcome" }
+      }
+    },
+    "wireExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "assertion_id", "contract_case", "http_status", "error_code", "retryable"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/stepId" },
+        "assertion_id": { "$ref": "#/$defs/assertionId" },
+        "contract_case": {
+          "type": "string",
+          "enum": [
+            "connect_success",
+            "push_success",
+            "pull_success",
+            "rebuild_success",
+            "transport_failure",
+            "invalid_request",
+            "invalid_schema_reference",
+            "auth_required",
+            "idempotency_conflict",
+            "client_retired",
+            "client_generation_expired",
+            "rebuild_restart_required",
+            "schema_mismatch",
+            "upgrade_required",
+            "retry_later",
+            "sync_integrity_failure",
+            "capture_pending",
+            "temporary_unavailable"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": ["none", "replace", "rebuild_local", "unsupported"]
+        },
+        "http_status": {
+          "oneOf": [
+            { "const": 0 },
+            { "type": "integer", "minimum": 100, "maximum": 599 }
+          ]
+        },
+        "error_code": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+            { "type": "null" }
+          ]
+        },
+        "retryable": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "contract_case": { "const": "transport_failure" } },
+            "required": ["contract_case"]
+          },
+          "then": {
+            "properties": {
+              "http_status": { "const": 0 },
+              "error_code": { "type": "null" },
+              "retryable": { "const": true }
+            }
+          },
+          "else": {
+            "properties": { "http_status": { "minimum": 100, "maximum": 599 } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "http_status": { "const": 0 } },
+            "required": ["http_status"]
+          },
+          "then": {
+            "properties": { "contract_case": { "const": "transport_failure" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "http_status": { "maximum": 399 } },
+            "required": ["http_status"]
+          },
+          "then": { "properties": { "error_code": { "type": "null" } } },
+          "else": { "properties": { "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } } }
+        }
+      ]
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "requirement_ids", "description", "expectation_ids", "predicate", "oracle", "detects_control_ids"],
+      "properties": {
+        "id": { "$ref": "#/$defs/assertionId" },
+        "requirement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/requirementId" }
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "expectation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/expectationId" } },
+        "predicate": { "$ref": "#/$defs/predicate" },
+        "oracle": { "$ref": "#/$defs/oracle" },
+        "detects_control_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/controlId" }
+        }
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "expected_source", "observed_source"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["model-state-equality", "wire-contract", "state-transition", "artifact-policy", "performance-budget"]
+        },
+        "expected_source": { "const": "authored-model" },
+        "observed_source": {
+          "type": "string",
+          "enum": ["system-under-test", "generated-artifact"]
+        }
+      }
+    }
+  }
+}

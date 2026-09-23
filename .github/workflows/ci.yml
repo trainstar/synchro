@@ -1,0 +1,562 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  source-quality:
+    name: source quality
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      GRADLE_TEST_ARGS: ''
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            extensions -> target
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+
+      - name: Validate contract and metadata
+        run: |
+          make verify-contract
+          make test-version-contract version-check release-npm-dry-run
+
+      - name: Build portable sources
+        run: make build-check build-seed build-conformance
+
+      - name: Run conformance checks
+        run: make lint-conformance test-conformance test-integration-mutant-manifest
+
+      - name: Run release and recovery controls
+        run: make test-release-artifacts test-release-publish test-server-consumer-helper test-packaged-smoke-structure
+
+      - name: Run source lint checks
+        run: make lint-go lint-rust-core lint-rust-pg check-pg-sql lint-rn PGRX_TARGET_DIR="$GITHUB_WORKSPACE/extensions/target"
+
+      - name: Install Android build components
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Run unit and client build checks
+        run: make test-rust-core test-rn-unit build-kotlin-library test-kotlin-unit
+
+  pull-request-swift:
+    name: pull-request Swift unit
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - name: Run Swift unit tests
+        run: make test-swift-unit
+
+  codeql:
+    name: CodeQL
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
+    with:
+      include-swift: true
+
+  dependency-scan:
+    name: dependency scan
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/dependency-review.yml
+
+  candidate-pgrx-runtime:
+    name: candidate PostgreSQL runtime
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+
+      - name: Archive PostgreSQL 18 pgrx runtime
+        run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux.tar
+          compression-level: 0
+
+  candidate-server:
+    name: candidate server
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    env:
+      GOWORK: 'off'
+      PGRX_VERSION: '0.17.0'
+      POSTGRESQL_VERSION: '18.3'
+      RUST_TOOLCHAIN: '1.92.0'
+      PGRX_TARGET_DIR: ${{ github.workspace }}/.pgrx-target
+      SOAK_SEED: '20260914'
+      SOAK_DURATION: '5s'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ github.workspace }}/.pgrx-target
+          key: candidate-cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('extensions/Cargo.lock') }}-pg${{ env.POSTGRESQL_VERSION }}-pgrx${{ env.PGRX_VERSION }}
+
+      - name: Install PostgreSQL extension build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison build-essential clang flex libclang-dev libreadline-dev libssl-dev libxml2-dev libxml2-utils libxslt-dev pkg-config xsltproc zlib1g-dev
+
+      - name: Install exact cargo-pgrx
+        run: cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
+
+      - name: Install certified PostgreSQL 18.3
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
+          sudo apt-get update
+          sudo apt-get install -y --allow-downgrades postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1 postgresql-server-dev-18=18.3-1.pgdg24.04+1
+          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
+          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+
+      - uses: ./.github/actions/setup-conformance-pg18
+        with:
+          expected-postgresql-version: ${{ env.POSTGRESQL_VERSION }}
+
+      - name: Run extension and SQL checks
+        run: make test-rust-pg check-pg-sql
+
+      - name: Run curated core mutants
+        run: |
+          cargo install --locked --force cargo-mutants --version 27.1.0
+          make test-rust-mutants
+
+      - name: Run adapter integration
+        run: |
+          make local-postgres-start
+          ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          export ADAPTER_TEST_URL
+          make test-adapter
+          make local-postgres-stop
+
+      - name: Run real server black box with deterministic stateful seed
+        run: make test-blackbox
+
+      - name: Run curated integration mutants
+        run: make test-integration-mutants
+
+  candidate-swift:
+    name: candidate Swift
+    if: github.event_name == 'push'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: brew
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Ensure CocoaPods is available
+        run: command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
+
+      - name: Start local PostgreSQL
+        run: |
+          set -euo pipefail
+          make local-postgres-start
+          attach="$GITHUB_WORKSPACE/.ignore/r2/tmp/local-postgres/attach.env"
+          SYNCHRO_ATTACH_DIR="$(dirname "$attach")"
+          export SYNCHRO_ATTACH_DIR
+          set -a
+          # shellcheck disable=SC1090
+          . "$attach"
+          set +a
+          adapter_test_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          echo "::add-mask::$adapter_test_url"
+          {
+            echo "ADAPTER_TEST_URL=$adapter_test_url"
+            echo "WARM_CONNECT_ENV_FILE=$attach"
+          } >> "$GITHUB_ENV"
+
+      - name: Run Swift checks against local PostgreSQL
+        run: make test-swift test-consumer-swift
+
+      - name: Stop local fixture
+        if: always()
+        run: |
+          make synchrod-pg-test-stop
+          make local-postgres-stop
+
+  candidate-kotlin:
+    name: candidate Kotlin
+    if: github.event_name == 'push'
+    needs: candidate-pgrx-runtime
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      KOTLIN_ANDROID_SERIAL: emulator-5554
+      GRADLE_TEST_ARGS: ''
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: artifact
+          cache-runtime: 'false'
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Install Android emulator components
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0" "emulator" "system-images;android-34;google_apis;x86_64"
+          echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Start local PostgreSQL
+        run: |
+          make local-postgres-start
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
+
+      - name: Enable KVM permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run full Kotlin semantics and consumers
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 34
+          arch: x86_64
+          avd-name: Synchro_Kotlin_API_34
+          profile: pixel_2
+          target: google_apis
+          force-avd-creation: true
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            make test-kotlin-instrumentation
+            make test-kotlin
+            make test-consumer-kotlin-device
+
+      - name: Build Kotlin source consumer
+        run: make test-consumer-kotlin
+
+  candidate-rn-ios:
+    name: candidate React Native iOS
+    if: github.event_name == 'push'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: brew
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Ensure iOS tools are available
+        run: |
+          command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
+          if ! command -v applesimutils >/dev/null 2>&1; then
+            brew install wix/brew/applesimutils
+          fi
+
+      - name: Start local PostgreSQL
+        run: |
+          set -euo pipefail
+          make local-postgres-start
+          attach="$GITHUB_WORKSPACE/.ignore/r2/tmp/local-postgres/attach.env"
+          SYNCHRO_ATTACH_DIR="$(dirname "$attach")"
+          export SYNCHRO_ATTACH_DIR
+          set -a
+          # shellcheck disable=SC1090
+          . "$attach"
+          set +a
+          adapter_test_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          echo "::add-mask::$adapter_test_url"
+          {
+            echo "ADAPTER_TEST_URL=$adapter_test_url"
+            echo "WARM_CONNECT_ENV_FILE=$attach"
+          } >> "$GITHUB_ENV"
+
+      - name: Run React Native iOS checks against local PostgreSQL
+        run: make test-rn-e2e-ios test-consumer-rn-ios
+
+      - name: Stop local fixture
+        if: always()
+        run: |
+          make synchrod-pg-test-stop
+          make local-postgres-stop
+
+  candidate-rn-android:
+    name: candidate React Native Android
+    if: github.event_name == 'push'
+    needs: candidate-pgrx-runtime
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      GRADLE_TEST_ARGS: ''
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: api/go/go.mod
+          cache-dependency-path: api/go/go.sum
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            clients/react-native/node_modules
+            clients/react-native/example/node_modules
+            clients/react-native/.yarn/install-state.gz
+          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
+
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+
+      - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: artifact
+          cache-runtime: 'false'
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pgrx-pg18-linux
+          path: ${{ runner.temp }}/pgrx-pg18-linux
+
+      - name: Restore PostgreSQL runtime
+        run: tar -C "$HOME" -xf "$RUNNER_TEMP/pgrx-pg18-linux/pgrx-pg18-linux.tar"
+
+      - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Install Android emulator components
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0" "emulator" "system-images;android-34;google_apis;x86_64"
+          echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
+
+      - name: Start local PostgreSQL
+        run: |
+          make local-postgres-start
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
+
+      - name: Build React Native Android app
+        run: make test-rn-e2e-android-build
+
+      - name: Enable KVM permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run full React Native Android semantics and consumers
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 34
+          arch: x86_64
+          avd-name: Pixel_7_API_34
+          profile: pixel_7
+          target: google_apis
+          force-avd-creation: true
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -memory 6144 -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            make test-rn-e2e-android-run
+            make test-consumer-rn-android
+
+  candidate-docs:
+    name: candidate docs
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Build documentation
+        run: make docs-build
+
+  pull-request:
+    name: pull-request
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs:
+      - source-quality
+      - pull-request-swift
+      - codeql
+      - dependency-scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every pull-request dependency
+        run: |
+          test "${{ needs.source-quality.result }}" = success
+          test "${{ needs.pull-request-swift.result }}" = success
+          test "${{ needs.codeql.result }}" = success
+          test "${{ needs.dependency-scan.result }}" = success
+
+  candidate:
+    name: candidate
+    if: ${{ always() && github.event_name == 'push' }}
+    needs:
+      - source-quality
+      - codeql
+      - dependency-scan
+      - candidate-pgrx-runtime
+      - candidate-server
+      - candidate-swift
+      - candidate-kotlin
+      - candidate-rn-ios
+      - candidate-rn-android
+      - candidate-docs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every candidate dependency
+        run: |
+          test "${{ needs.source-quality.result }}" = success
+          test "${{ needs.codeql.result }}" = success
+          test "${{ needs.dependency-scan.result }}" = success
+          test "${{ needs.candidate-pgrx-runtime.result }}" = success
+          test "${{ needs.candidate-server.result }}" = success
+          test "${{ needs.candidate-swift.result }}" = success
+          test "${{ needs.candidate-kotlin.result }}" = success
+          test "${{ needs.candidate-rn-ios.result }}" = success
+          test "${{ needs.candidate-rn-android.result }}" = success
+          test "${{ needs.candidate-docs.result }}" = success

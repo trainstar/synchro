@@ -1,0 +1,18 @@
+diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/rebuild.rs
+--- a/extensions/synchro-pg/src/rebuild.rs
++++ b/extensions/synchro-pg/src/rebuild.rs
+@@ -122,6 +122,14 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::J
+             .update("LOCK TABLE sync_wal_progress IN SHARE MODE", None, &[])
+             .unwrap_or_else(|error| pgrx::error!("locking rebuild boundary: {error}"));
+         lock_rebuild_identity(client, p_user_id, &request.client_id, &request.rebuild_id);
++        let _ = client
++            .update(
++                "UPDATE sync_clients SET scope_set_version = scope_set_version + 1
++                 WHERE user_id = $1 AND client_id = $2",
++                None,
++                &[p_user_id.into(), request.client_id.as_str().into()],
++            )
++            .unwrap_or_else(|error| pgrx::error!("mutating scope state during rebuild: {error}"));
+ 
+         let connected = match load_client_connect_state(client, p_user_id, &request.client_id) {
+             Ok(state) => state,

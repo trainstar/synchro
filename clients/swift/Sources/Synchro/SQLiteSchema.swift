@@ -7,17 +7,18 @@ enum SQLiteSchema {
         case "int":      return "INTEGER"
         case "int64":    return "INTEGER"
         case "float":    return "REAL"
+        case "decimal":  return "TEXT"
         case "boolean":  return "INTEGER"
         case "datetime": return "TEXT"
         case "date":     return "TEXT"
         case "time":     return "TEXT"
         case "json":     return "TEXT"
         case "bytes":    return "BLOB"
-        default:         return "TEXT"
+        default:         preconditionFailure("unsupported portable type \(logicalType)")
         }
     }
 
-    static func generateCreateTableSQL(table: SchemaTable) -> String {
+    static func generateCreateTableSQL(table: LocalSchemaTable) -> String {
         let quotedName = SQLiteHelpers.quoteIdentifier(table.tableName)
         var colDefs: [String] = []
 
@@ -40,22 +41,282 @@ enum SQLiteSchema {
         return "CREATE TABLE IF NOT EXISTS \(quotedName) (\(colDefs.joined(separator: ", ")))"
     }
 
-    static func generateCDCTriggers(table: SchemaTable) -> [String] {
+    static func generateIndexSQL(index: LocalSchemaIndex, table: LocalSchemaTable) throws -> String {
+        let columnsByID = Dictionary(uniqueKeysWithValues: table.columns.map { ($0.fieldID, $0.name) })
+        let columns = try index.fieldIDs.map { fieldID -> String in
+            guard let name = columnsByID[fieldID] else {
+                throw SynchroError.invalidResponse(message: "schema index references an unknown field")
+            }
+            return SQLiteHelpers.quoteIdentifier(name)
+        }
+        let uniqueness = index.unique ? "UNIQUE " : ""
+        return "CREATE \(uniqueness)INDEX IF NOT EXISTS \(SQLiteHelpers.quoteIdentifier(index.name)) ON \(SQLiteHelpers.quoteIdentifier(table.tableName)) (\(columns.joined(separator: ", ")))"
+    }
+
+    static func relaxedCreateTableSQL(
+        _ sql: String,
+        tableName: String,
+        nullableColumns: Set<String>
+    ) throws -> String {
+        // Keep local columns, constraints, and quoted SQL unchanged during table replacement.
+        let lexer = try NSRegularExpression(
+            pattern: #"--[^\r\n]*|/\*.*?\*/|"(?:[^"]|"")*"|'(?:[^']|'')*'|`(?:[^`]|``)*`|\[[^\]]*\]|[^\s(),"'`\[\]/-]+|[(),/-]"#,
+            options: [.dotMatchesLineSeparators]
+        )
+        let source = sql as NSString
+        let tokens = lexer.matches(in: sql, range: NSRange(location: 0, length: source.length))
+            .filter {
+                let text = source.substring(with: $0.range)
+                return !text.hasPrefix("--") && !text.hasPrefix("/*")
+            }
+        func text(_ index: Int) -> String { source.substring(with: tokens[index].range) }
+        func keyword(_ index: Int, _ value: String) -> Bool {
+            tokens.indices.contains(index) && text(index).uppercased() == value
+        }
+        guard let opening = tokens.indices.first(where: { text($0) == "(" }) else {
+            throw SynchroError.invalidResponse(message: "schema replacement table definition is invalid")
+        }
+        var depth = 1
+        var columnStart = true
+        var column = ""
+        var removed = Set<String>()
+        var removals: [NSRange] = []
+        var index = opening + 1
+        while index < tokens.count && depth > 0 {
+            let token = text(index)
+            if columnStart {
+                column = token
+                if let first = token.first, ["\"", "'", "`", "["].contains(first) {
+                    let closing = first == "[" ? "]" : String(first)
+                    column = String(token.dropFirst().dropLast())
+                        .replacingOccurrences(of: closing + closing, with: closing)
+                }
+                columnStart = false
+            } else if depth == 1, nullableColumns.contains(column),
+                      keyword(index, "NOT"), keyword(index + 1, "NULL") {
+                let start = index >= 2 && keyword(index - 2, "CONSTRAINT") ? index - 2 : index
+                var end = index + 1
+                if keyword(end + 1, "ON"), keyword(end + 2, "CONFLICT"), tokens.indices.contains(end + 3) {
+                    end += 3
+                }
+                removals.append(NSRange(
+                    location: tokens[start].range.location,
+                    length: NSMaxRange(tokens[end].range) - tokens[start].range.location
+                ))
+                removed.insert(column)
+                index = end
+            }
+            if token == "(" { depth += 1 }
+            if token == ")" { depth -= 1 }
+            if token == "," && depth == 1 { columnStart = true }
+            index += 1
+        }
+        guard depth == 0, removed == nullableColumns else {
+            throw SynchroError.invalidResponse(message: "schema replacement nullability constraints are inconsistent")
+        }
+        let result = NSMutableString(string: sql)
+        for range in removals.reversed() {
+            result.deleteCharacters(in: range)
+        }
+        result.replaceCharacters(
+            in: NSRange(location: 0, length: tokens[opening].range.location),
+            with: "CREATE TABLE \(SQLiteHelpers.quoteIdentifier(tableName)) "
+        )
+        return result as String
+    }
+
+    static func generateCDCTriggers(table: LocalSchemaTable) -> [String] {
         let name = table.tableName
         let quoted = SQLiteHelpers.quoteIdentifier(name)
         let pkCol = table.primaryKey.first ?? "id"
         let quotedPK = SQLiteHelpers.quoteIdentifier(pkCol)
-        let updatedAtCol = table.updatedAtColumn
         let deletedAtCol = table.deletedAtColumn
-        let quotedUpdatedAt = SQLiteHelpers.quoteIdentifier(updatedAtCol)
         let quotedDeletedAt = SQLiteHelpers.quoteIdentifier(deletedAtCol)
 
         let lockCheck = "(SELECT value FROM _synchro_meta WHERE key = 'sync_lock') = '0'"
-        let tsNow = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+        let tsNow = "substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z'"
+        let safeName = name
+        let safeTableID = table.tableID
+        let safePKFieldID = table.primaryKeyFieldID
+        let safePKLogicalType = table.columns.first(where: { $0.fieldID == table.primaryKeyFieldID })?.logicalType ?? "string"
+
+        // Each segment is generated by SQLite.  The fixed version and variant
+        // nibbles make the result a canonical lowercase UUID without Swift state.
+        let uuidExpression = "lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2, 3) || '-' || substr('89ab', (abs(random()) % 4) + 1, 1) || substr(hex(randomblob(2)), 2, 3) || '-' || hex(randomblob(6)))"
+        let schemaGuard = """
+            SELECT CASE WHEN COALESCE((SELECT value FROM _synchro_meta WHERE key = 'schema_version'), '') = ''
+              OR CAST((SELECT value FROM _synchro_meta WHERE key = 'schema_version') AS INTEGER) <= 0
+              OR COALESCE((SELECT value FROM _synchro_meta WHERE key = 'schema_hash'), '') = ''
+              OR NOT EXISTS (
+                    SELECT 1 FROM _synchro_schema_archive
+                    WHERE schema_version = CAST((SELECT value FROM _synchro_meta WHERE key = 'schema_version') AS INTEGER)
+                      AND schema_hash = (SELECT value FROM _synchro_meta WHERE key = 'schema_hash')
+                 )
+              THEN RAISE(ABORT, 'synchro capture requires verified schema metadata') END;
+            """
+
+        func sqlLiteral(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "''") + "'"
+        }
+
+        func changedExpression(_ column: LocalSchemaColumn) -> String {
+            let quotedColumn = SQLiteHelpers.quoteIdentifier(column.name)
+            return "NOT (NEW.\(quotedColumn) IS OLD.\(quotedColumn))"
+        }
+
+        // The capture context matches physical identifiers because the write
+        // author knows table and column names, not wire field IDs. Issue #42.
+        func intentHas(_ columnName: String) -> String {
+            """
+            EXISTS (
+                SELECT 1
+                FROM _synchro_capture_context AS context
+                JOIN _synchro_capture_fields AS field
+                  ON field.statement_token = context.statement_token
+                 AND field.table_name = context.table_name
+                WHERE context.table_name = \(sqlLiteral(safeName))
+                  AND field.column_name = \(sqlLiteral(columnName))
+            )
+            """.replacingOccurrences(of: "\n", with: " ")
+        }
+
+        let writableColumns = table.columns.filter(\.writable)
+        let intentHasWritable: String
+        if writableColumns.isEmpty {
+            intentHasWritable = "0"
+        } else {
+            let writableNames = writableColumns
+                .map { sqlLiteral($0.name) }
+                .joined(separator: ", ")
+            intentHasWritable = """
+                EXISTS (
+                    SELECT 1
+                    FROM _synchro_capture_context AS context
+                    JOIN _synchro_capture_fields AS field
+                      ON field.statement_token = context.statement_token
+                     AND field.table_name = context.table_name
+                    WHERE context.table_name = \(sqlLiteral(safeName))
+                      AND field.column_name IN (\(writableNames))
+                )
+                """.replacingOccurrences(of: "\n", with: " ")
+        }
+        let updateHasWritableChange = writableColumns
+            .map { "((\(intentHas($0.name))) AND \(changedExpression($0)))" }
+            .joined(separator: " OR ")
+        let updateIsDelete = !deletedAtCol.isEmpty
+            ? "(NEW.\(quotedDeletedAt) IS NOT NULL AND OLD.\(quotedDeletedAt) IS NULL)"
+            : "0"
+        let updateCaptureCondition = [updateHasWritableChange.isEmpty ? "0" : "(\(updateHasWritableChange))", updateIsDelete]
+            .joined(separator: " OR ")
+        func dependencyExpression(recordReference: String) -> String {
+            """
+            (SELECT mutation_id FROM _synchro_pending_changes
+             WHERE table_id = \(sqlLiteral(safeTableID))
+               AND pk_field_id = \(sqlLiteral(safePKFieldID))
+               AND pk_logical_type = \(sqlLiteral(safePKLogicalType))
+               AND record_id = CAST(\(recordReference) AS TEXT)
+               AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+             ORDER BY local_order DESC LIMIT 1)
+            """
+        }
+
+        func insertLedger(operation: String, captureCondition: String, baseVersion: String, recordReference: String) -> String {
+            let operationSQL = operation == "update"
+                ? "CASE WHEN \(updateIsDelete) THEN 'delete' ELSE 'update' END"
+                : sqlLiteral(operation)
+            let dependency = dependencyExpression(recordReference: recordReference)
+            return """
+                INSERT INTO _synchro_pending_changes
+                    (mutation_id, table_id, table_name, record_id, pk_field_id, pk_logical_type,
+                     operation, authored_schema_version, authored_schema_hash, base_version,
+                     client_version, lifecycle_state, source_kind, dependency_mutation_id,
+                     created_at, updated_at)
+                SELECT \(uuidExpression), \(sqlLiteral(safeTableID)), \(sqlLiteral(safeName)),
+                       CAST(\(recordReference) AS TEXT), \(sqlLiteral(safePKFieldID)), \(sqlLiteral(safePKLogicalType)),
+                       \(operationSQL),
+                       CAST((SELECT value FROM _synchro_meta WHERE key = 'schema_version') AS INTEGER),
+                       (SELECT value FROM _synchro_meta WHERE key = 'schema_hash'),
+                       \(baseVersion), \(tsNow), 'unsealed', 'application', \(dependency), \(tsNow), \(tsNow)
+                WHERE \(captureCondition);
+                UPDATE _synchro_pending_changes
+                SET capture_uuid = mutation_id
+                WHERE local_order = (SELECT MAX(local_order) FROM _synchro_pending_changes)
+                  AND capture_uuid IS NULL AND source_kind = 'application';
+                """
+        }
+
+        func valueInsert(_ column: LocalSchemaColumn, changed: String?) -> String {
+            let quotedColumn = SQLiteHelpers.quoteIdentifier(column.name)
+            let literalFieldID = sqlLiteral(column.fieldID)
+            let literalType = sqlLiteral(column.logicalType)
+            let valueKind: String
+            let valueInteger: String
+            let valueReal: String
+            let valueText: String
+            let valueBlob: String
+            if column.logicalType == "boolean" {
+                valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'boolean' END"
+                valueInteger = "NEW.\(quotedColumn)"
+                valueReal = "NULL"
+                valueText = "NULL"
+                valueBlob = "NULL"
+            } else if ["int", "int64"].contains(column.logicalType) {
+                valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'integer' END"
+                valueInteger = "NEW.\(quotedColumn)"
+                valueReal = "NULL"
+                valueText = "NULL"
+                valueBlob = "NULL"
+            } else if ["float"].contains(column.logicalType) {
+                valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'real' END"
+                valueInteger = "NULL"
+                valueReal = "NEW.\(quotedColumn)"
+                valueText = "NULL"
+                valueBlob = "NULL"
+            } else if column.logicalType == "bytes" {
+                valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'blob' END"
+                valueInteger = "NULL"
+                valueReal = "NULL"
+                valueText = "NULL"
+                valueBlob = "NEW.\(quotedColumn)"
+            } else {
+                valueKind = "CASE WHEN NEW.\(quotedColumn) IS NULL THEN 'null' ELSE 'text' END"
+                valueInteger = "NULL"
+                valueReal = "NULL"
+                valueText = "NEW.\(quotedColumn)"
+                valueBlob = "NULL"
+            }
+            let changedClause = changed.map { " AND \($0)" } ?? ""
+            let compatibleStorage: String
+            switch column.logicalType {
+            case "boolean", "int", "int64":
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) = 'integer'"
+            case "float":
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) IN ('integer', 'real')"
+            case "bytes":
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) = 'blob'"
+            default:
+                compatibleStorage = "typeof(NEW.\(quotedColumn)) = 'text'"
+            }
+            return """
+                SELECT CASE WHEN NEW.\(quotedColumn) IS NOT NULL
+                  AND NOT (\(compatibleStorage))
+                  AND EXISTS (
+                    SELECT 1 FROM _synchro_pending_changes
+                    WHERE local_order = (SELECT MAX(local_order) FROM _synchro_pending_changes)
+                      AND operation <> 'delete'\(changedClause)
+                  )
+                  THEN RAISE(ABORT, 'synchro capture storage type is invalid') END;
+                INSERT INTO _synchro_mutation_values
+                    (mutation_id, field_id, logical_type, value_kind, value_integer, value_real, value_text, value_blob)
+                SELECT mutation_id, \(literalFieldID), \(literalType), \(valueKind), \(valueInteger), \(valueReal), \(valueText), \(valueBlob)
+                FROM _synchro_pending_changes
+                WHERE local_order = (SELECT MAX(local_order) FROM _synchro_pending_changes)
+                  AND operation <> 'delete'\(changedClause);
+                """
+        }
 
         var triggers: [String] = []
 
-        let escapedName = name.replacingOccurrences(of: "'", with: "''")
         let quotedInsertTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_insert_\(name)")
         let quotedUpdateTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_update_\(name)")
         let quotedDeleteTrigger = SQLiteHelpers.quoteIdentifier("_synchro_cdc_delete_\(name)")
@@ -65,20 +326,20 @@ enum SQLiteSchema {
         triggers.append("DROP TRIGGER IF EXISTS \(quotedUpdateTrigger)")
         triggers.append("DROP TRIGGER IF EXISTS \(quotedDeleteTrigger)")
 
-        // INSERT trigger
+        // INSERT trigger. Inserts have no server base, and they retain every
+        // authored writable column the capture context names.
+        let insertIntentGuard = writableColumns.isEmpty
+            ? "SELECT RAISE(ABORT, 'synced insert has no writable fields');"
+            : "SELECT CASE WHEN NOT (\(intentHasWritable)) THEN RAISE(ABORT, 'synced insert has no authored writable fields') END;"
         triggers.append("""
             CREATE TRIGGER \(quotedInsertTrigger)
             AFTER INSERT ON \(quoted)
             WHEN \(lockCheck)
             BEGIN
-                INSERT INTO _synchro_pending_changes (record_id, table_name, operation, client_updated_at)
-                VALUES (NEW.\(quotedPK), '\(escapedName)', 'create', \(tsNow))
-                ON CONFLICT (table_name, record_id) DO UPDATE SET
-                    operation = CASE
-                        WHEN _synchro_pending_changes.operation = 'delete' THEN 'update'
-                        ELSE _synchro_pending_changes.operation
-                    END,
-                    client_updated_at = excluded.client_updated_at;
+                \(schemaGuard)
+                \(insertIntentGuard)
+                \(insertLedger(operation: "insert", captureCondition: "1", baseVersion: "NULL", recordReference: "NEW.\(quotedPK)") )
+                \(writableColumns.map { valueInsert($0, changed: intentHas($0.name)) }.joined())
             END
             """)
 
@@ -88,42 +349,49 @@ enum SQLiteSchema {
             AFTER UPDATE ON \(quoted)
             WHEN \(lockCheck)
             BEGIN
-                INSERT INTO _synchro_pending_changes (record_id, table_name, operation, base_updated_at, client_updated_at)
-                VALUES (
-                    NEW.\(quotedPK), '\(escapedName)',
-                    CASE WHEN NEW.\(quotedDeletedAt) IS NOT NULL AND OLD.\(quotedDeletedAt) IS NULL THEN 'delete' ELSE 'update' END,
-                    OLD.\(quotedUpdatedAt),
-                    \(tsNow)
-                )
-                ON CONFLICT (table_name, record_id) DO UPDATE SET
-                    operation = CASE
-                        WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'update' THEN 'create'
-                        WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'delete' THEN 'delete'
-                        ELSE excluded.operation
-                    END,
-                    base_updated_at = CASE
-                        WHEN _synchro_pending_changes.operation = 'create' AND excluded.operation = 'delete' THEN NULL
-                        ELSE COALESCE(_synchro_pending_changes.base_updated_at, excluded.base_updated_at)
-                    END,
-                    client_updated_at = excluded.client_updated_at;
-                DELETE FROM _synchro_pending_changes
-                WHERE table_name = '\(escapedName)' AND record_id = NEW.\(quotedPK)
-                  AND operation = 'delete'
-                  AND base_updated_at IS NULL;
+                SELECT CASE WHEN NOT (NEW.\(quotedPK) IS OLD.\(quotedPK))
+                    THEN RAISE(ABORT, 'synchro primary key changes are not supported') END;
+                \(schemaGuard)
+                \(insertLedger(
+                    operation: "update",
+                    captureCondition: updateCaptureCondition,
+                    baseVersion: "CASE WHEN \(dependencyExpression(recordReference: "NEW.\(quotedPK)")) IS NOT NULL THEN NULL ELSE (SELECT server_version FROM _synchro_row_versions WHERE table_name = \(sqlLiteral(name)) AND record_id = CAST(NEW.\(quotedPK) AS TEXT)) END",
+                    recordReference: "NEW.\(quotedPK)"
+                ))
+                \(writableColumns.map { valueInsert($0, changed: "(\(intentHas($0.name))) AND \(changedExpression($0))") }.joined())
             END
             """)
 
-        // BEFORE DELETE trigger (converts hard delete to soft delete)
-        triggers.append("""
-            CREATE TRIGGER \(quotedDeleteTrigger)
-            BEFORE DELETE ON \(quoted)
-            WHEN \(lockCheck)
-            BEGIN
-                UPDATE \(quoted) SET \(quotedDeletedAt) = \(tsNow) WHERE \(quotedPK) = OLD.\(quotedPK);
-                SELECT RAISE(IGNORE);
-            END
-            """)
+        if deletedAtCol.isEmpty {
+            let oldRecord = "OLD.\(quotedPK)"
+            triggers.append("""
+                CREATE TRIGGER \(quotedDeleteTrigger)
+                AFTER DELETE ON \(quoted)
+                WHEN \(lockCheck)
+                BEGIN
+                    \(schemaGuard)
+                    \(insertLedger(
+                        operation: "delete",
+                        captureCondition: "1",
+                        baseVersion: "CASE WHEN \(dependencyExpression(recordReference: oldRecord)) IS NOT NULL THEN NULL ELSE (SELECT server_version FROM _synchro_row_versions WHERE table_name = \(sqlLiteral(name)) AND record_id = CAST(\(oldRecord) AS TEXT)) END",
+                        recordReference: oldRecord
+                    ))
+                END
+                """)
+        } else {
+            triggers.append("""
+                CREATE TRIGGER \(quotedDeleteTrigger)
+                BEFORE DELETE ON \(quoted)
+                WHEN \(lockCheck)
+                BEGIN
+                    \(schemaGuard)
+                    UPDATE \(quoted) SET \(quotedDeletedAt) = \(tsNow) WHERE \(quotedPK) = OLD.\(quotedPK);
+                    SELECT RAISE(IGNORE);
+                END
+                """)
+        }
 
         return triggers
     }
+
 }

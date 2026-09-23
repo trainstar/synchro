@@ -1,0 +1,577 @@
+package reactnative
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/scenarios"
+)
+
+func TestValidatePushResponseLossScenarioAcceptsAuthoredContract(t *testing.T) {
+	scenario := loadPushResponseLossAuthoredScenario(t)
+	if err := ValidatePushResponseLossScenario(scenario); err != nil {
+		t.Fatalf("validate authored response-loss scenario: %v", err)
+	}
+}
+
+func TestValidatePushResponseLossScenarioRejectsContractChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*scenarios.Scenario)
+	}{
+		{"step order", func(scenario *scenarios.Scenario) {
+			scenario.Steps[0], scenario.Steps[1] = scenario.Steps[1], scenario.Steps[0]
+		}},
+		{"response-loss delivery", func(scenario *scenarios.Scenario) {
+			var payload map[string]any
+			if err := json.Unmarshal(scenario.Steps[1].Operation.Payload, &payload); err != nil {
+				panic(err)
+			}
+			payload["delivery"] = "apply"
+			scenario.Steps[1].Operation.Payload, _ = json.Marshal(payload)
+		}},
+		{"restart process", func(scenario *scenarios.Scenario) {
+			scenario.Steps[2].Operation.Name = "response-loss"
+		}},
+		{"changed replay", func(scenario *scenarios.Scenario) {
+			var payload map[string]any
+			if err := json.Unmarshal(scenario.Steps[5].Operation.Payload, &payload); err != nil {
+				panic(err)
+			}
+			request := payload["request"].(map[string]any)
+			mutation := request["mutations"].([]any)[0].(map[string]any)
+			mutation["columns"].(map[string]any)["value"] = "response-loss"
+			scenario.Steps[5].Operation.Payload, _ = json.Marshal(payload)
+		}},
+		{"wire status", func(scenario *scenarios.Scenario) {
+			scenario.WireExpectations[0].HTTPStatus = http.StatusOK
+		}},
+		{"identity kind", func(scenario *scenarios.Scenario) {
+			scenario.NativeIdentityAliases[0].Kind = "batch-id"
+		}},
+		{"assertion oracle", func(scenario *scenarios.Scenario) {
+			scenario.Assertions[0].Oracle.ExpectedSource = "system-under-test"
+		}},
+		{"Issue 49 assertion claim", func(scenario *scenarios.Scenario) {
+			scenario.Assertions[len(scenario.Assertions)-1].Oracle.ExpectedSource = "system-under-test"
+		}},
+		{"Issue 49 native proof claim", func(scenario *scenarios.Scenario) {
+			for index := range scenario.ProofObligations {
+				if string(scenario.ProofObligations[index].ObligationID) == "OBL-PUSH-RESPONSE-LOSS-RN-IOS-CURRENT-001" {
+					scenario.ProofObligations[index].RequirementIDs = scenario.ProofObligations[index].RequirementIDs[:1]
+				}
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := clonePushResponseLossScenario(loadPushResponseLossAuthoredScenario(t))
+			test.mutate(&scenario)
+			if err := ValidatePushResponseLossScenario(scenario); err == nil {
+				t.Fatal("changed response-loss contract was accepted")
+			}
+		})
+	}
+}
+
+func TestNewPushResponseLossCoordinatorUsesHostLoopbackProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+	})
+	if err != nil {
+		t.Fatalf("create response-loss coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	if !strings.HasPrefix(coordinator.URL(), "http://127.0.0.1:") {
+		t.Fatalf("coordinator URL = %q", coordinator.URL())
+	}
+	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
+		t.Fatalf("Android adapter URL = %q", coordinator.adapter)
+	}
+	if coordinator.upstream != upstream.URL {
+		t.Fatalf("upstream URL = %q, want %q", coordinator.upstream, upstream.URL)
+	}
+	if coordinator.ExchangeCount() != 12 {
+		t.Fatalf("exchange count = %d, want 12", coordinator.ExchangeCount())
+	}
+}
+
+func TestPushResponseLossIdentityPhasesDeferRuntimeReplayAliases(t *testing.T) {
+	identities := loadPushResponseLossAuthoredScenario(t).NativeIdentityAliases
+	tests := []struct {
+		phase pushResponseLossIdentityPhase
+		want  []string
+	}{
+		{
+			phase: pushResponseLossIdentityPrepare,
+			want:  []string{"current-schema", "items-table"},
+		},
+		{
+			phase: pushResponseLossIdentityReplay,
+			want:  []string{"response-loss-batch", "response-loss-mutation", "response-loss-primary-key"},
+		},
+	}
+	for _, test := range tests {
+		aliases, err := pushResponseLossAliasesForPhase(identities, test.phase)
+		if err != nil {
+			t.Fatalf("select push-response-loss identity phase %d: %v", test.phase, err)
+		}
+		actual := make([]string, 0, len(aliases))
+		for _, alias := range aliases {
+			actual = append(actual, alias.Alias)
+		}
+		sort.Strings(actual)
+		sort.Strings(test.want)
+		if !reflect.DeepEqual(actual, test.want) {
+			t.Fatalf("push-response-loss identity phase %d aliases = %v, want %v", test.phase, actual, test.want)
+		}
+	}
+}
+
+func TestPushResponseLossCaptureSelectionUsesBoundLocalInput(t *testing.T) {
+	valid := scenarios.Operation{
+		ContractOperation: "local",
+		Name:              "write",
+		Payload: json.RawMessage(
+			`{"authenticated_user_id":"user-a","table_id":"runtime_items","operation":"insert","pk":{"runtime_id":"runtime-row"},"columns":{"runtime_value":"value"},"client_version":"v1"}`,
+		),
+	}
+	field, recordID, err := pushResponseLossCaptureSelection(valid, "runtime_items")
+	if err != nil || field != "runtime_id" || recordID != "runtime-row" {
+		t.Fatalf("bound local capture selection = %q/%q, %v", field, recordID, err)
+	}
+	for name, operation := range map[string]scenarios.Operation{
+		"wrong table": func() scenarios.Operation {
+			changed := valid
+			changed.Payload = bytes.Replace(valid.Payload, []byte(`"runtime_items"`), []byte(`"other_items"`), 1)
+			return changed
+		}(),
+		"ambiguous key": func() scenarios.Operation {
+			changed := valid
+			changed.Payload = bytes.Replace(valid.Payload, []byte(`"runtime_id":"runtime-row"`), []byte(`"runtime_id":"runtime-row","other_id":"other-row"`), 1)
+			return changed
+		}(),
+		"empty key": func() scenarios.Operation {
+			changed := valid
+			changed.Payload = bytes.Replace(valid.Payload, []byte(`"runtime-row"`), []byte(`""`), 1)
+			return changed
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := pushResponseLossCaptureSelection(operation, "runtime_items"); err == nil {
+				t.Fatal("invalid bound local capture selection was accepted")
+			}
+		})
+	}
+}
+
+func TestPushResponseLossFormalIdentitiesMatchCaptureAndSealedInput(t *testing.T) {
+	valid := []blackbox.NativeIdentityValue{
+		{
+			Alias:                 "response-loss-primary-key",
+			RuntimeValue:          json.RawMessage(`"runtime-row"`),
+			ApplicationIdentifier: "runtime_id",
+		},
+		{Alias: "response-loss-batch", RuntimeValue: json.RawMessage(`"runtime-batch"`)},
+		{Alias: "response-loss-mutation", RuntimeValue: json.RawMessage(`"runtime-mutation"`)},
+	}
+	for _, value := range valid {
+		if err := validatePushResponseLossFormalIdentity(
+			value,
+			"runtime_id",
+			"runtime-row",
+			"runtime-batch",
+			"runtime-mutation",
+		); err != nil {
+			t.Fatalf("validate formal identity %s: %v", value.Alias, err)
+		}
+	}
+	for name, value := range map[string]blackbox.NativeIdentityValue{
+		"primary selection": {
+			Alias:                 "response-loss-primary-key",
+			RuntimeValue:          json.RawMessage(`"other-row"`),
+			ApplicationIdentifier: "runtime_id",
+		},
+		"batch input":    {Alias: "response-loss-batch", RuntimeValue: json.RawMessage(`"other-batch"`)},
+		"mutation input": {Alias: "response-loss-mutation", RuntimeValue: json.RawMessage(`"other-mutation"`)},
+		"unknown alias":  {Alias: "other", RuntimeValue: json.RawMessage(`"runtime"`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validatePushResponseLossFormalIdentity(
+				value,
+				"runtime_id",
+				"runtime-row",
+				"runtime-batch",
+				"runtime-mutation",
+			); err == nil {
+				t.Fatal("mismatched formal identity was accepted")
+			}
+		})
+	}
+}
+
+func TestPushResponseLossDurableCapturePreservesSealedLocalIntent(t *testing.T) {
+	coordinator := &PushResponseLossCoordinator{
+		tableName:           "runtime_items",
+		capturePrimaryKey:   "runtime_id",
+		capturePrimaryKeyID: "runtime-field-id",
+		captureRecordID:     "runtime-row",
+		sealedBatchID:       "runtime-batch",
+		sealedMutationIDs:   []string{"runtime-mutation"},
+	}
+	state := json.RawMessage(`{
+		"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"scopeStates":[{
+			"scopeID":"runtime-scope",
+			"cursor":"runtime-cursor",
+			"checksum":"runtime-checksum",
+			"localChecksum":"runtime-checksum",
+			"generation":1
+		}],
+		"scopeRows":[],
+		"rebuildAttempts":[],
+		"applicationRowCount":1,
+		"mutationLedgerCount":1,
+		"mutationOutcomeCount":0,
+		"sealedBatchCount":1,
+		"rejectedMutationCount":0,
+		"scopeStateCount":1,
+		"scopeRowCount":0,
+		"provenanceCount":0,
+		"rowMetadataCount":0,
+		"rebuildAttemptCount":0,
+		"rebuildReceiptCount":1,
+		"provenanceMaintenanceWorkCursor":"0"
+	}`)
+	pending := json.RawMessage(`[{
+		"mutationID":"runtime-mutation",
+		"tableName":"runtime_items",
+		"recordID":"runtime-row",
+		"primaryKeyFieldID":"runtime-field-id",
+		"operation":"insert",
+		"status":"sealed",
+		"sealedBatchID":"runtime-batch",
+		"sealedOrdinal":0
+	}]`)
+	valid := finalCapture{
+		ClientState: state,
+		Pending:     pending,
+		Rejected:    json.RawMessage(`[]`),
+		Status:      json.RawMessage(`{}`),
+		Provenance:  json.RawMessage(`[]`),
+		Trace:       json.RawMessage(`{"observations":[],"overflowed":false,"sequence_checkpoint":0}`),
+		DurableProof: json.RawMessage(`{
+			"row_metadata":null,
+			"rebuild_receipt_proofs":[{
+				"rebuild_id_fingerprint":"rebuild-fingerprint",
+				"page_count":1,
+				"returned_record_count":0,
+				"request_chain_valid":true,
+				"records_in_canonical_order":true,
+				"row_checksums_valid":true,
+				"scope_checksum_valid":true,
+				"final_checksum_matches_local":true
+			}]
+		}`),
+		Rows: json.RawMessage(`[{"runtime_id":"runtime-row","runtime_value":"value"}]`),
+	}
+	if _, err := coordinator.validateDurableCapture(valid); err != nil {
+		t.Fatalf("validate preserved sealed local intent: %v", err)
+	}
+	retrying := valid
+	retrying.Status = json.RawMessage(`{"state":"pushing","retry_at":null,"operation":null,"failure":null}`)
+	if err := coordinator.validatePreRestartCapture(retrying); err != nil {
+		t.Fatalf("held managed retry was rejected: %v", err)
+	}
+	retrying.Status = json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`)
+	if err := coordinator.validatePreRestartCapture(retrying); err == nil {
+		t.Fatal("unacknowledged sealed request was accepted as ready")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*finalCapture)
+	}{
+		{"scope row", func(capture *finalCapture) {
+			capture.ClientState = bytes.Replace(capture.ClientState, []byte(`"scopeRowCount":0`), []byte(`"scopeRowCount":1`), 1)
+		}},
+		{"missing pending", func(capture *finalCapture) {
+			capture.Pending = json.RawMessage(`[]`)
+		}},
+		{"changed sealed identity", func(capture *finalCapture) {
+			capture.Pending = bytes.Replace(capture.Pending, []byte(`"runtime-batch"`), []byte(`"other-batch"`), 1)
+		}},
+		{"false provenance", func(capture *finalCapture) {
+			capture.Provenance = json.RawMessage(`[{"scopeID":"scope-a"}]`)
+		}},
+		{"false base", func(capture *finalCapture) {
+			capture.DurableProof = json.RawMessage(`{"row_metadata":{},"rebuild_receipt_proofs":[]}`)
+		}},
+		{"changed empty-scope checksum", func(capture *finalCapture) {
+			capture.DurableProof = bytes.Replace(capture.DurableProof, []byte(`"final_checksum_matches_local":true`), []byte(`"final_checksum_matches_local":false`), 1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capture := valid
+			test.mutate(&capture)
+			if _, err := coordinator.validateDurableCapture(capture); err == nil {
+				t.Fatal("invalid preserved local intent was accepted")
+			}
+		})
+	}
+}
+
+func TestPushResponseLossObservesBackoffWithoutCompletingTheManagedCall(t *testing.T) {
+	process := actionProcessIdentity{
+		ProcessID: "original-process", DatabaseIdentityFingerprint: strings.Repeat("a", 64),
+	}
+	coordinator := &PushResponseLossCoordinator{
+		stage: pushResponseLossStagePreRestartCapture, process: &process,
+	}
+	for _, test := range []struct {
+		name      string
+		state     string
+		operation any
+		retryAt   any
+		wantError bool
+	}{
+		{"push backoff", "backoff", "pushing", "2026-09-16T00:00:00Z", false},
+		{"active retry is not backoff evidence", "pushing", nil, nil, true},
+		{"idle is not backoff evidence", "ready", nil, nil, true},
+		{"wrong interrupted operation", "backoff", "pulling", "2026-09-16T00:00:00Z", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := resultEnvelopeForTest(map[string]any{
+				"kind": "awaited", "process": process,
+				"status": map[string]any{
+					"state": test.state, "retry_at": test.retryAt, "operation": test.operation, "failure": nil,
+				},
+			})
+			if err := coordinator.acceptResultLocked(result); (err != nil) != test.wantError {
+				t.Fatalf("backoff observation error = %v, want error = %t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestPushResponseLossProxyWritesInvalidInitialResponseStart(t *testing.T) {
+	committed := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/sync/push" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		committed <- struct{}{}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+	})
+	if err != nil {
+		t.Fatalf("create response-loss coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	proxy := httptest.NewServer(coordinator.Handler())
+	defer proxy.Close()
+	connection, err := net.DialTimeout("tcp", proxy.Listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("connect initial push client: %v", err)
+	}
+	defer func() { _ = connection.Close() }()
+	body := []byte(`{"client_id":"client-a","batch_id":"batch-a","mutations":[{"mutation_id":"mutation-a"}]}`)
+	request := fmt.Sprintf("POST /sync/push HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", proxy.Listener.Addr().String(), len(body), body)
+	if _, err := io.WriteString(connection, request); err != nil {
+		t.Fatalf("send initial push request: %v", err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(time.Second):
+		t.Fatal("initial push did not reach the upstream server")
+	}
+	coordinator.releaseInitialResponse()
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set initial push read deadline: %v", err)
+	}
+	response, err := io.ReadAll(connection)
+	if err != nil {
+		t.Fatalf("read initial response loss: %v", err)
+	}
+	if string(response) != "SYNCHRO RESPONSE LOSS\r\n\r\n" {
+		t.Fatalf("initial response loss bytes = %q, want an invalid response start", response)
+	}
+	coordinator.proxyMu.Lock()
+	pushes, proxyErr := coordinator.pushRequests, coordinator.proxyErr
+	coordinator.proxyMu.Unlock()
+	if pushes != 1 {
+		t.Fatalf("initial response loss proxy pushes = %d, want 1 before the SDK replay", pushes)
+	}
+	if proxyErr != nil {
+		t.Fatalf("initial response loss proxy error = %v", proxyErr)
+	}
+}
+
+func TestPushResponseLossSealedRetryRejectsChangedCanonicalBytes(t *testing.T) {
+	coordinator := &PushResponseLossCoordinator{}
+	body := []byte(`{"client_id":"client-a","batch_id":"batch-a","mutations":[{"mutation_id":"mutation-a"}]}`)
+	for attempt := 1; attempt <= 4; attempt++ {
+		if observed, err := coordinator.beginPushRequest(body); err != nil || observed != uint64(attempt) {
+			t.Fatalf("record sealed retry attempt %d = %d, %v", attempt, observed, err)
+		}
+	}
+	if err := coordinator.validateSealedRetryEvidence(); err != nil {
+		t.Fatalf("validate sealed retry evidence: %v", err)
+	}
+
+	changed := bytes.Replace(body, []byte(`"mutation-a"`), []byte(`"mutation-b"`), 1)
+	coordinator = &PushResponseLossCoordinator{}
+	if _, err := coordinator.beginPushRequest(body); err != nil {
+		t.Fatalf("record initial sealed request: %v", err)
+	}
+	if _, err := coordinator.beginPushRequest(changed); err == nil {
+		t.Fatal("changed sealed request bytes passed validation")
+	}
+}
+
+func TestPushResponseLossCommandUsesNonNilEmptyStepManifest(t *testing.T) {
+	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
+	})
+	if err != nil {
+		t.Fatalf("create response-loss coordinator: %v", err)
+	}
+	defer func() { _ = coordinator.Close(context.Background()) }()
+	command := coordinator.command("client", "open", map[string]any{"client_key": coordinator.clientKey}, nil)
+	if command.Action.Steps == nil || len(command.Action.Steps) != 0 {
+		t.Fatalf("empty command steps = %#v", command.Action.Steps)
+	}
+}
+
+func TestValidatePushResponseLossTraceMatchesAuthoredReplay(t *testing.T) {
+	scenario := loadPushResponseLossAuthoredScenario(t)
+	if err := validatePushResponseLossTrace(scenario, validPushResponseLossTrace()); err != nil {
+		t.Fatalf("valid push replay trace failed: %v", err)
+	}
+}
+
+func TestCombinePushResponseLossTracesPreservesProcessBoundary(t *testing.T) {
+	initial := traceSnapshot{Observations: []transportObservation{{Sequence: 1, OperationClass: "push"}}, SequenceCheckpoint: 1}
+	retry := traceSnapshot{Observations: []transportObservation{{Sequence: 1, OperationClass: "push"}, {Sequence: 2, OperationClass: "push"}, {Sequence: 3, OperationClass: "push"}}, SequenceCheckpoint: 3}
+	combined, err := combinePushResponseLossTraces(initial, retry)
+	if err != nil {
+		t.Fatalf("combine per-process response-loss traces: %v", err)
+	}
+	if len(combined.Observations) != 4 || combined.Observations[3].Sequence != 4 || combined.SequenceCheckpoint != 4 {
+		t.Fatalf("combined response-loss trace = %#v", combined)
+	}
+	retry.Observations[1].Sequence = 3
+	if _, err := combinePushResponseLossTraces(initial, retry); err == nil {
+		t.Fatal("non-contiguous restarted trace was accepted")
+	}
+}
+
+func TestPushResponseLossTerminalStatusStopsRetry(t *testing.T) {
+	valid := json.RawMessage(`{"state":"error","retry_at":null,"operation":null,"failure":{"operation":"pushing","code":"idempotency_conflict","retryable":false,"recovery_action":"none"}}`)
+	if err := validatePushResponseLossErrorStatus(valid); err != nil {
+		t.Fatalf("validate terminal response-loss status: %v", err)
+	}
+	retryable := bytes.Replace(valid, []byte(`"retryable":false`), []byte(`"retryable":true`), 1)
+	if err := validatePushResponseLossErrorStatus(retryable); err == nil {
+		t.Fatal("retryable response-loss status was accepted as terminal")
+	}
+}
+
+func TestPushResponseLossDurableComparisonDetectsDrift(t *testing.T) {
+	state := json.RawMessage(`{"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"scopeStates":[],"scopeRows":[],"rebuildAttempts":[],"applicationRowCount":1,"mutationLedgerCount":1,"mutationOutcomeCount":0,"sealedBatchCount":1,"rejectedMutationCount":0,"scopeStateCount":0,"scopeRowCount":0,"provenanceCount":0,"rowMetadataCount":0,"rebuildAttemptCount":0,"rebuildReceiptCount":0,"provenanceMaintenanceWorkCursor":"1"}`)
+	before := finalCapture{ClientState: state, Pending: json.RawMessage(`[]`), Rejected: json.RawMessage(`[]`), Provenance: json.RawMessage(`[]`), DurableProof: json.RawMessage(`{"row_metadata":null,"rebuild_receipt_proofs":[]}`), Rows: json.RawMessage(`[{"id":"row-a"}]`)}
+	after := before
+	after.ClientState = bytes.Replace(state, []byte(`"provenanceMaintenanceWorkCursor":"1"`), []byte(`"provenanceMaintenanceWorkCursor":"2"`), 1)
+	equal, err := pushResponseLossDurableCapturesEqual(before, after)
+	if err != nil || !equal {
+		t.Fatalf("transient maintenance cursor changed durable result: equal=%t error=%v", equal, err)
+	}
+	after.Pending = json.RawMessage(`[{"mutation_id":"drift"}]`)
+	equal, err = pushResponseLossDurableCapturesEqual(before, after)
+	if err != nil || equal {
+		t.Fatalf("pending mutation drift result: equal=%t error=%v", equal, err)
+	}
+}
+
+func TestValidatePushResponseLossTraceReportsObservedAndExpectedValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*traceSnapshot)
+		wantDetail string
+	}{
+		{"initial status", func(trace *traceSnapshot) { trace.Observations[0].StatusCode = http.StatusOK }, "status:200"},
+		{"replay status", func(trace *traceSnapshot) { trace.Observations[1].StatusCode = http.StatusConflict }, "status:409"},
+		{"replay duration", func(trace *traceSnapshot) { trace.Observations[1].DurationNanoseconds = 0 }, "duration:0"},
+		{"replay request facts", func(trace *traceSnapshot) { trace.Observations[1].RequestFacts = nil }, "request_facts:false"},
+		{"push count", func(trace *traceSnapshot) { trace.Observations = trace.Observations[:1]; trace.SequenceCheckpoint = 1 }, "count 1"},
+		{"generation", func(trace *traceSnapshot) {
+			trace.Observations[1].RequestFacts = json.RawMessage(`{"client_generation":2}`)
+		}, "generation = 2, want 1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			trace := validPushResponseLossTrace()
+			test.mutate(&trace)
+			err := validatePushResponseLossTrace(loadPushResponseLossAuthoredScenario(t), trace)
+			if err == nil {
+				t.Fatal("invalid push replay trace was accepted")
+			}
+			if !strings.Contains(err.Error(), test.wantDetail) || !strings.Contains(err.Error(), "want") {
+				t.Fatalf("diagnostic = %q, want observed detail %q and expected value", err, test.wantDetail)
+			}
+		})
+	}
+}
+
+func validPushResponseLossTrace() traceSnapshot {
+	return traceSnapshot{
+		Observations: []transportObservation{
+			{Sequence: 1, OperationClass: "push", StatusCode: 0, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1}`)},
+			{Sequence: 2, OperationClass: "push", StatusCode: http.StatusTooManyRequests, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1}`)},
+			{Sequence: 3, OperationClass: "push", StatusCode: http.StatusServiceUnavailable, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1}`)},
+			{Sequence: 4, OperationClass: "push", StatusCode: http.StatusConflict, DurationNanoseconds: 1, RequestFacts: json.RawMessage(`{"client_generation":1}`)},
+		},
+		SequenceCheckpoint: 4,
+	}
+}
+
+func loadPushResponseLossAuthoredScenario(t *testing.T) scenarios.Scenario {
+	t.Helper()
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	scenario, err := LoadPushResponseLossScenario(context.Background(), repositoryRoot)
+	if err != nil {
+		t.Fatalf("load authored response-loss scenario: %v", err)
+	}
+	return scenario
+}
+
+func clonePushResponseLossScenario(scenario scenarios.Scenario) scenarios.Scenario {
+	encoded, _ := json.Marshal(scenario)
+	var clone scenarios.Scenario
+	_ = json.Unmarshal(encoded, &clone)
+	return clone
+}

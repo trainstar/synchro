@@ -1,25 +1,34 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Platform,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SynchroClient } from '@trainstar/synchro-react-native';
-import type { ConflictEvent } from '@trainstar/synchro-react-native';
+import { SynchroClient, TransactionTimeoutError } from '@trainstar/synchro-react-native';
+import type {
+  ConflictEvent,
+  SyncEvent,
+} from '@trainstar/synchro-react-native';
+import { ConformanceHarness } from './conformance/ConformanceHarness';
+import NativeSynchro from '../../src/NativeSynchro';
 
 const SYNCHRO_TEST_URL =
   Platform.OS === 'android'
-    ? 'http://10.0.2.2:8080'
-    : 'http://127.0.0.1:8080';
+    ? 'http://10.0.2.2:8091'
+    : 'http://127.0.0.1:8091';
 
 const USER1_JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJleHAiOjQxMDI0NDQ4MDB9.ZPjufmc-mgkQC6rc6GVNzH9V3jhqQZMl2AuF0Cleuz8';
 const USER1_ID = 'a1111111-1111-1111-1111-111111111111';
-const USER2_JWT =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiMjIyMjIyMi0yMjIyLTIyMjItMjIyMi0yMjIyMjIyMjIyMjIiLCJleHAiOjQxMDI0NDQ4MDB9.md1BWZARNDofCHihSjDmFY6Wr2L1MBf9r-BDc5zrhFE';
+const TEST_SYNC_INTERVAL_SECONDS = 300;
+const TEST_PUSH_DEBOUNCE_SECONDS = 60;
+interface AppProps {
+  conformanceDetox?: boolean;
+}
 
 type ResultKey =
   | 'init'
@@ -30,12 +39,18 @@ type ResultKey =
   | 'readTx'
   | 'txTimeout'
   | 'txRecovery'
+  | 'schemaDecode'
   | 'start'
+  | 'lifecycle'
   | 'pushPull'
   | 'conflict'
   | 'multiUser'
   | 'stop'
-  | 'errorMap';
+  | 'errorMap'
+  | 'offlineFirst'
+  | 'seedInit'
+  | 'seedResume'
+  | 'seedCorrupt';
 
 type TestResult = boolean | null;
 type Results = Record<ResultKey, TestResult>;
@@ -51,12 +66,18 @@ function createEmptyResults(): Results {
     readTx: null,
     txTimeout: null,
     txRecovery: null,
+    schemaDecode: null,
     start: null,
+    lifecycle: null,
     pushPull: null,
     conflict: null,
     multiUser: null,
     stop: null,
     errorMap: null,
+    offlineFirst: null,
+    seedInit: null,
+    seedResume: null,
+    seedCorrupt: null,
   };
 }
 
@@ -76,28 +97,9 @@ function createClient(): SynchroClient {
     authProvider: async () => USER1_JWT,
     clientID: `rn-test-device-${launchID}`,
     appVersion: '1.0.0',
-    syncInterval: 300,
+    syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+    pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
   });
-}
-
-async function syncHTTP(
-  method: string,
-  path: string,
-  token: string,
-  body?: object
-): Promise<any> {
-  const res = await fetch(`${SYNCHRO_TEST_URL}${path}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  }
-  return res.json();
 }
 
 async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
@@ -111,8 +113,90 @@ async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
   return false;
 }
 
-async function waitForWAL(delayMs = 1000) {
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
+async function waitForCondition(
+  condition: () => Promise<boolean>,
+  timeoutMs = 5000,
+  intervalMs = 250
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await condition()) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
+async function waitForSyncedTable(
+  client: SynchroClient,
+  tableName: string,
+  timeoutMs = 15000
+) {
+  return waitForCondition(async () => {
+    try {
+      await client.query(`SELECT 1 FROM ${tableName} LIMIT 1`);
+      return true;
+    } catch {
+      return false;
+    }
+  }, timeoutMs, 250);
+}
+
+async function runAndWaitForScheduledPullRetry(
+  client: SynchroClient,
+  operation: () => Promise<void>
+) {
+  try {
+    await operation();
+    return;
+  } catch (error) {
+    const status = await client.getSyncStatus();
+    if (status.status !== 'backoff' || status.operation !== 'pulling') {
+      throw error;
+    }
+    const retryCompleted = await waitForCondition(
+      async () => {
+        const current = await client.getSyncStatus();
+        if (current.status === 'error' || current.status === 'stopped') {
+          throw error;
+        }
+        return current.status === 'ready';
+      },
+      15000
+    );
+    if (!retryCompleted) {
+      throw new Error('scheduled pull retry did not return to ready state');
+    }
+  }
+}
+
+async function startAndWaitForScheduledPullRetry(client: SynchroClient) {
+  await runAndWaitForScheduledPullRetry(client, () => client.start());
+}
+
+async function syncAndWaitForScheduledPullRetry(client: SynchroClient) {
+  await runAndWaitForScheduledPullRetry(client, () => client.syncNow());
+}
+
+async function releaseClient(client: SynchroClient | null) {
+  try {
+    await client?.close();
+  } catch {
+    // Ownership release remains best-effort during harness cleanup.
+  }
+}
+
+async function insertCustomer(
+  client: SynchroClient,
+  id: string,
+  userID: string,
+  name: string
+) {
+  await client.execute(
+    "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, datetime('now'), datetime('now'))",
+    [id, userID, name]
+  );
 }
 
 function StatusBadge({ label, ok }: { label: string; ok: TestResult }) {
@@ -132,45 +216,104 @@ function StatusBadge({ label, ok }: { label: string; ok: TestResult }) {
   );
 }
 
-export default function App() {
+export default function App({ conformanceDetox = false }: AppProps) {
+  if (conformanceDetox) {
+    return (
+      <ConformanceHarness
+        appVersion="1.0.0"
+        authToken={USER1_JWT}
+        serverURL={SYNCHRO_TEST_URL}
+      />
+    );
+  }
+
+  return <StandardApp />;
+}
+
+function StandardApp() {
   const [client, setClient] = useState(() => createClient());
+  const clientRef = useRef(client);
   const initializedRef = useRef(false);
   const startedRef = useRef(false);
+  const statusSubscriptionRef = useRef<(() => void) | null>(null);
   const conflictSubscriptionRef = useRef<(() => void) | null>(null);
   const conflictsRef = useRef<ConflictEvent[]>([]);
+  const pendingConflictRecordRef = useRef<string | null>(null);
+  const pendingMultiUserRecordRef = useRef<string | null>(null);
+  const currentStepRef = useRef('idle');
 
   const [results, setResults] = useState<Results>(() => createEmptyResults());
-  const [displayStatus, setDisplayStatus] = useState('idle');
+  const [harnessGeneration, setHarnessGeneration] = useState(0);
+  const [displayStatus, setDisplayStatus] = useState('uninitialized');
+  const [currentStep, setCurrentStep] = useState('idle');
+  const [pendingConflictRecordID, setPendingConflictRecordID] = useState<string | null>(null);
+  const [pendingMultiUserRecordID, setPendingMultiUserRecordID] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<LastResult>({
     key: null,
     ok: null,
   });
 
   useEffect(() => {
-    return () => {
-      conflictSubscriptionRef.current?.();
-      void client.close().catch(() => {
-        // Cleanup is best-effort when Detox terminates the app.
-      });
-    };
+    clientRef.current = client;
   }, [client]);
+
+  useEffect(() => {
+    return () => {
+      const statusSubscription = statusSubscriptionRef.current;
+      const conflictSubscription = conflictSubscriptionRef.current;
+      statusSubscriptionRef.current = null;
+      conflictSubscriptionRef.current = null;
+      statusSubscription?.();
+      conflictSubscription?.();
+      void releaseClient(clientRef.current);
+    };
+  }, []);
 
   const update = useCallback((key: ResultKey, ok: boolean) => {
     setResults((prev) => ({ ...prev, [key]: ok }));
     setLastResult({ key, ok });
+    const nextStep = ok ? `${key}:pass` : `${key}:fail`;
+    currentStepRef.current = nextStep;
+    setCurrentStep(nextStep);
+    console.log(`step: ${nextStep}`);
+  }, [client]);
+
+  const markStep = useCallback((step: string) => {
+    currentStepRef.current = step;
+    setCurrentStep(step);
+    console.log(`step: ${step}`);
   }, []);
+
+  const formatError = useCallback((error: unknown) => {
+    if (error instanceof Error) {
+      return `${error.name}: ${error.message}`;
+    }
+    return String(error);
+  }, []);
+
+  const captureError = useCallback((key: ResultKey, error: unknown) => {
+    const message = `${key}@${currentStepRef.current}: ${formatError(error)}`;
+    setLastError(message);
+    setCurrentStep(`${key}:error`);
+    console.error(message, error);
+  }, [formatError]);
 
   const ensureInitialized = useCallback(async () => {
     if (initializedRef.current) {
       return;
     }
     await client.initialize();
+    statusSubscriptionRef.current?.();
+    statusSubscriptionRef.current = client.onStatusChange((status) => {
+      setDisplayStatus(status.status);
+    });
     conflictSubscriptionRef.current?.();
     conflictSubscriptionRef.current = client.onConflict((event) => {
       conflictsRef.current.push(event);
     });
     initializedRef.current = true;
-    setDisplayStatus('idle');
+    setDisplayStatus('local_ready');
   }, [client]);
 
   const ensureStarted = useCallback(async () => {
@@ -178,9 +321,8 @@ export default function App() {
     if (startedRef.current) {
       return;
     }
-    await client.start();
+    await startAndWaitForScheduledPullRetry(client);
     startedRef.current = true;
-    setDisplayStatus('syncing');
   }, [client, ensureInitialized]);
 
   const stopSync = useCallback(async () => {
@@ -189,7 +331,6 @@ export default function App() {
     }
     await client.stop();
     startedRef.current = false;
-    setDisplayStatus('stopped');
   }, [client]);
 
   const ensureLocalTable = useCallback(async () => {
@@ -197,25 +338,45 @@ export default function App() {
     await client.createTable('test_items', [
       { name: 'id', type: 'TEXT', primaryKey: true },
       { name: 'name', type: 'TEXT' },
+      { name: 'note', type: 'TEXT' },
     ]);
   }, [client, ensureInitialized]);
 
+  const releaseHarnessClient = useCallback(async () => {
+    statusSubscriptionRef.current?.();
+    statusSubscriptionRef.current = null;
+    conflictSubscriptionRef.current?.();
+    conflictSubscriptionRef.current = null;
+    await releaseClient(client);
+    initializedRef.current = false;
+    startedRef.current = false;
+  }, [client]);
+
   const resetHarness = useCallback(async () => {
-    try {
-      conflictSubscriptionRef.current?.();
-      conflictSubscriptionRef.current = null;
-      await client.close();
-    } catch {
-      // Best-effort reset for the harness.
-    }
+    currentStepRef.current = 'reset:start';
+    setCurrentStep('reset:start');
+    setDisplayStatus('resetting');
+    statusSubscriptionRef.current?.();
+    statusSubscriptionRef.current = null;
+    conflictSubscriptionRef.current?.();
+    conflictSubscriptionRef.current = null;
+    await releaseClient(client);
 
     conflictsRef.current = [];
+    pendingConflictRecordRef.current = null;
+    pendingMultiUserRecordRef.current = null;
     initializedRef.current = false;
     startedRef.current = false;
     setResults(createEmptyResults());
     setLastResult({ key: null, ok: null });
-    setDisplayStatus('idle');
+    setDisplayStatus('uninitialized');
+    setCurrentStep('reset:complete');
+    currentStepRef.current = 'reset:complete';
+    setPendingConflictRecordID(null);
+    setPendingMultiUserRecordID(null);
+    setLastError(null);
     setClient(createClient());
+    setHarnessGeneration((generation) => generation + 1);
   }, [client]);
 
   const runInit = useCallback(async () => {
@@ -240,11 +401,16 @@ export default function App() {
   const runExecute = useCallback(async () => {
     try {
       await ensureLocalTable();
+      const recordID = uuid();
       const result = await client.execute(
-        'INSERT INTO test_items (id, name) VALUES (?, ?)',
-        [uuid(), 'test']
+        'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+        [recordID, 'test', null]
       );
-      update('execute', result.rowsAffected === 1);
+      const row = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ? AND note IS ?',
+        [recordID, null]
+      );
+      update('execute', result.rowsAffected === 1 && row?.id === recordID);
     } catch {
       update('execute', false);
     }
@@ -256,12 +422,12 @@ export default function App() {
       const recordID = uuid();
       const value = await client.writeTransaction(async (tx) => {
         await tx.execute(
-          'INSERT INTO test_items (id, name) VALUES (?, ?)',
-          [recordID, 'txtest']
+          'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+          [recordID, 'txtest', null]
         );
         const rows = await tx.query(
-          'SELECT name FROM test_items WHERE id = ?',
-          [recordID]
+          'SELECT name FROM test_items WHERE id = ? AND note IS ?',
+          [recordID, null]
         );
         return rows[0]?.name;
       });
@@ -278,8 +444,8 @@ export default function App() {
       try {
         await client.writeTransaction(async (tx) => {
           await tx.execute(
-            'INSERT INTO test_items (id, name) VALUES (?, ?)',
-            [rollbackID, 'should-not-persist']
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+            [rollbackID, 'should-not-persist', null]
           );
           throw new Error('intentional rollback');
         });
@@ -300,15 +466,41 @@ export default function App() {
   const runReadTx = useCallback(async () => {
     try {
       await ensureLocalTable();
+      const rejectedWriteID = uuid();
+      let rejectedWrite = false;
+      try {
+        await client.readTransaction((tx) =>
+          tx.query(
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?) RETURNING id',
+            [rejectedWriteID, 'must-not-persist', null]
+          )
+        );
+      } catch {
+        rejectedWrite = true;
+      }
+      const rejectedWriteRow = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [rejectedWriteID]
+      );
+
       const seedID = uuid();
       await client.execute(
-        'INSERT INTO test_items (id, name) VALUES (?, ?)',
-        [seedID, 'read-seed']
+        'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+        [seedID, 'read-seed', null]
       );
       const rows = await client.readTransaction((tx) =>
-        tx.query('SELECT * FROM test_items WHERE id = ?', [seedID])
+        tx.query(
+          'SELECT * FROM test_items WHERE id = ? AND note IS ?',
+          [seedID, null]
+        )
       );
-      update('readTx', rows.length === 1 && rows[0].id === seedID);
+      update(
+        'readTx',
+        rejectedWrite &&
+          rejectedWriteRow === null &&
+          rows.length === 1 &&
+          rows[0].id === seedID
+      );
     } catch {
       update('readTx', false);
     }
@@ -317,42 +509,168 @@ export default function App() {
   const runTxTimeout = useCallback(async () => {
     try {
       await ensureLocalTable();
-      await client.writeTransaction(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 6000));
-      });
-      update('txTimeout', false);
-    } catch (error: any) {
-      update(
-        'txTimeout',
-        error?.code === 'TRANSACTION_TIMEOUT' ||
-          String(error?.message ?? '').includes('timeout')
+      const sentinelID = uuid();
+      let timedOut = false;
+      try {
+        await client.writeTransaction(async (tx) => {
+          await tx.execute(
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+            [sentinelID, 'must-rollback', null]
+          );
+          await new Promise((resolve) => setTimeout(resolve, 6000));
+        });
+      } catch (error) {
+        if (!(error instanceof TransactionTimeoutError)) throw error;
+        timedOut = true;
+      }
+      const sentinel = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [sentinelID]
       );
+      const committedID = uuid();
+      await client.writeTransaction(async (tx) => {
+        await tx.execute(
+          'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+          [committedID, 'after-timeout', null]
+        );
+      });
+      const committed = await client.queryOne(
+        'SELECT name FROM test_items WHERE id = ?',
+        [committedID]
+      );
+      update('txTimeout', timedOut && sentinel === null && committed?.name === 'after-timeout');
+    } catch (error) {
+      captureError('txTimeout', error);
+      update('txTimeout', false);
     }
-  }, [client, ensureLocalTable, update]);
+  }, [captureError, client, ensureLocalTable, update]);
+
+  const runSchemaDecode = useCallback(async () => {
+    try {
+      await ensureInitialized();
+      const table = `schema_decode_${uuid().replace(/-/g, '')}`;
+      const columns = '[{"name":"id","type":"TEXT","primaryKey":true}]';
+      const requireRejection = async (operation: () => Promise<void>) => {
+        try {
+          await operation();
+        } catch (error) {
+          if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'UNKNOWN') {
+            return;
+          }
+          throw error;
+        }
+        throw new Error('Malformed schema input was accepted');
+      };
+      for (const invalid of ['null', '{}', '[', '[null]', '["column"]', '[{}]', '[{"name":"id"}]', '[{"type":"TEXT"}]']) {
+        await requireRejection(() => NativeSynchro.createTable(table, invalid, null));
+        await requireRejection(() => NativeSynchro.alterTable(table, invalid));
+      }
+      for (const invalid of ['null', '[]', '"options"', '{']) {
+        await requireRejection(() => NativeSynchro.createTable(table, columns, invalid));
+      }
+      if (Platform.OS === 'ios') {
+        for (const invalid of [
+          '[{"name":1,"type":"TEXT"}]',
+          '[{"name":"id","type":false}]',
+          '[{"name":"id","type":"TEXT","nullable":1}]',
+          '[{"name":"id","type":"TEXT","primaryKey":"true"}]',
+          '[{"name":"id","type":"TEXT","defaultValue":1}]',
+        ]) {
+          await requireRejection(() => NativeSynchro.createTable(table, invalid, null));
+          await requireRejection(() => NativeSynchro.alterTable(table, invalid));
+        }
+        for (const invalid of ['{"ifNotExists":1}', '{"withoutRowid":"true"}']) {
+          await requireRejection(() => NativeSynchro.createTable(table, columns, invalid));
+        }
+      }
+      // A partial table makes this fail without querying reserved SQLite metadata.
+      await NativeSynchro.createTable(table, columns, '{"ifNotExists":false,"withoutRowid":true}');
+      await NativeSynchro.alterTable(
+        table,
+        '[{"name":"note","type":"TEXT","nullable":false,"defaultValue":"\'default-note\'"}]'
+      );
+      await client.execute(`INSERT INTO "${table}" (id) VALUES (?)`, ['valid']);
+      const row = await client.queryOne(`SELECT note FROM "${table}" WHERE id = ?`, ['valid']);
+      update('schemaDecode', row?.note === 'default-note');
+    } catch (error) {
+      captureError('schemaDecode', error);
+      update('schemaDecode', false);
+    }
+  }, [captureError, client, ensureInitialized, update]);
 
   const runTxRecovery = useCallback(async () => {
     try {
       await ensureLocalTable();
-      try {
-        await client.writeTransaction(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 6000));
+      const interruptWrite = async (
+        recordID: string,
+        interrupt: () => Promise<void>
+      ) => {
+        let releaseTransaction!: () => void;
+        let markTransactionStarted!: () => void;
+        const transactionGate = new Promise<void>((resolve) => {
+          releaseTransaction = resolve;
         });
-      } catch {
-        // expected timeout
-      }
+        const transactionStarted = new Promise<void>((resolve) => {
+          markTransactionStarted = resolve;
+        });
+        const transaction = client.writeTransaction(async (tx) => {
+          await tx.execute(
+            'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+            [recordID, 'must-rollback', null]
+          );
+          markTransactionStarted();
+          await transactionGate;
+        });
+        const rejected = transaction.then(
+          () => false,
+          () => true
+        );
+
+        await transactionStarted;
+        try {
+          await interrupt();
+        } finally {
+          releaseTransaction();
+        }
+        return rejected;
+      };
+
+      const closeID = uuid();
+      const closeRejected = await interruptWrite(closeID, () => client.close());
+      await client.initialize();
+
+      const reinitializeID = uuid();
+      const reinitializeRejected = await interruptWrite(
+        reinitializeID,
+        () => client.initialize()
+      );
+
+      const closeRow = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [closeID]
+      );
+      const reinitializeRow = await client.queryOne(
+        'SELECT id FROM test_items WHERE id = ?',
+        [reinitializeID]
+      );
 
       const recoveryID = uuid();
       const result = await client.execute(
-        'INSERT INTO test_items (id, name) VALUES (?, ?)',
-        [recoveryID, 'recovered']
+        'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
+        [recoveryID, 'recovered', null]
       );
       const row = await client.queryOne(
-        'SELECT name FROM test_items WHERE id = ?',
-        [recoveryID]
+        'SELECT name FROM test_items WHERE id = ? AND note IS ?',
+        [recoveryID, null]
       );
       update(
         'txRecovery',
-        result.rowsAffected === 1 && row?.name === 'recovered'
+        closeRejected &&
+          reinitializeRejected &&
+          closeRow === null &&
+          reinitializeRow === null &&
+          result.rowsAffected === 1 &&
+          row?.name === 'recovered'
       );
     } catch {
       update('txRecovery', false);
@@ -361,25 +679,51 @@ export default function App() {
 
   const runStart = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('start:start');
       await ensureStarted();
+      markStep('start:started');
       await stopSync();
+      markStep('start:stopped');
       update('start', true);
-    } catch {
+    } catch (error) {
+      captureError('start', error);
       update('start', false);
     }
-  }, [ensureStarted, stopSync, update]);
+  }, [captureError, ensureStarted, markStep, stopSync, update]);
 
   const runPushPull = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('pushPull:start');
       await ensureStarted();
-      const orderID = uuid();
-      await client.execute(
-        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-        [orderID, USER1_ID, 'push-test']
+      await syncAndWaitForScheduledPullRetry(client);
+      if (!(await waitForSyncedTable(client, 'customers'))) {
+        throw new Error('customers table was not ready after starting sync');
+      }
+      markStep('pushPull:started');
+      const customerID = uuid();
+      await insertCustomer(client, customerID, USER1_ID, 'push-test-customer');
+      markStep('pushPull:inserted');
+      await syncAndWaitForScheduledPullRetry(client);
+      markStep('pushPull:synced');
+      const pendingDrained = await waitForPendingDrain(client);
+      const rejection = (await client.inspectRejectedMutations()).find(
+        (mutation) => mutation.tableName === 'customers' && mutation.recordID === customerID
       );
-      await client.syncNow();
-      update('pushPull', await waitForPendingDrain(client));
-    } catch {
+      if (!pendingDrained || rejection !== undefined) {
+        throw new Error('push/pull mutation did not complete without rejection');
+      }
+      const localRow = await client.queryOne(
+        'SELECT name FROM customers WHERE id = ?',
+        [customerID]
+      );
+      if (localRow?.name !== 'push-test-customer') {
+        throw new Error('accepted push/pull customer row is missing locally');
+      }
+      update('pushPull', true);
+    } catch (error) {
+      captureError('pushPull', error);
       update('pushPull', false);
     } finally {
       try {
@@ -392,66 +736,77 @@ export default function App() {
 
   const runConflict = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('conflict:start');
+      const pendingRecordID = pendingConflictRecordRef.current;
+      if (pendingRecordID === null) {
+        await ensureStarted();
+        await syncAndWaitForScheduledPullRetry(client);
+        if (!(await waitForSyncedTable(client, 'customers'))) {
+          throw new Error('customers table was not ready after starting sync');
+        }
+        conflictsRef.current = [];
+        markStep('conflict:started');
+
+        const recordID = uuid();
+        await insertCustomer(client, recordID, USER1_ID, 'original');
+        markStep('conflict:inserted');
+        await syncAndWaitForScheduledPullRetry(client);
+        markStep('conflict:initial-sync');
+        if (!(await waitForPendingDrain(client))) {
+          throw new Error('initial conflict mutation did not drain');
+        }
+
+        await stopSync();
+        markStep('conflict:stopped');
+
+        const localVersion = '2026-01-01T00:00:00.000Z';
+        await client.execute(
+          'UPDATE customers SET name = ?, updated_at = ? WHERE id = ?',
+          ['client-version', localVersion, recordID]
+        );
+        pendingConflictRecordRef.current = recordID;
+        setPendingConflictRecordID(recordID);
+        markStep('conflict:awaiting-server');
+        return;
+      }
+
       await ensureStarted();
-      conflictsRef.current = [];
+      markStep('conflict:resync-started');
+      await syncAndWaitForScheduledPullRetry(client);
+      markStep('conflict:resynced');
 
-      const recordID = uuid();
-      await client.execute(
-        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-        [recordID, USER1_ID, 'original']
-      );
-      await client.syncNow();
-      await waitForPendingDrain(client);
-
-      const clientBID = `rn-conflict-client-${uuid()}`;
-      const schema = await syncHTTP('GET', '/sync/schema', USER1_JWT);
-      await syncHTTP('POST', '/sync/register', USER1_JWT, {
-        client_id: clientBID,
-        platform: 'test',
-        app_version: '1.0.0',
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-      });
-
-      const now = new Date().toISOString();
-      await syncHTTP('POST', '/sync/push', USER1_JWT, {
-        client_id: clientBID,
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-        changes: [
-          {
-            record_id: recordID,
-            table: 'orders',
-            operation: 'update',
-            data: {
-              id: recordID,
-              user_id: USER1_ID,
-              ship_address: 'server-version',
-              updated_at: now,
-            },
-            client_updated_at: now,
-          },
-        ],
-      });
-
-      await waitForWAL();
-
-      await client.execute(
-        "UPDATE orders SET ship_address = ?, updated_at = datetime('now') WHERE id = ?",
-        ['client-version', recordID]
-      );
-      await client.syncNow();
-      await waitForWAL(1500);
-
-      const row = await client.queryOne(
-        'SELECT ship_address FROM orders WHERE id = ?',
-        [recordID]
-      );
-      const conflictFired = conflictsRef.current.some(
-        (event) => event.recordID === recordID
-      );
-      update('conflict', conflictFired || row !== null);
-    } catch {
+      const conflictResolved = await waitForCondition(async () => {
+        const row = await client.queryOne(
+          'SELECT name FROM customers WHERE id = ?',
+          [pendingRecordID]
+        );
+        const conflictEvent = conflictsRef.current.find(
+          (event) => event.recordID === pendingRecordID
+        );
+        return (
+          conflictEvent?.serverData?.name === 'server-version' &&
+          row?.name === 'server-version' &&
+          (await client.pendingChangeCount()) === 0
+        );
+      }, 10000);
+      if (!conflictResolved) {
+        setLastError(
+          JSON.stringify({
+            conflicts: conflictsRef.current,
+            row: await client.queryOne(
+              'SELECT name, updated_at FROM customers WHERE id = ?',
+              [pendingRecordID]
+            ),
+            pendingCount: await client.pendingChangeCount(),
+          })
+        );
+      }
+      pendingConflictRecordRef.current = null;
+      setPendingConflictRecordID(null);
+      update('conflict', conflictResolved);
+    } catch (error) {
+      captureError('conflict', error);
       update('conflict', false);
     } finally {
       try {
@@ -464,38 +819,53 @@ export default function App() {
 
   const runMultiUser = useCallback(async () => {
     try {
-      await ensureStarted();
+      setLastError(null);
+      markStep('multiUser:start');
+      const pendingRecordID = pendingMultiUserRecordRef.current;
+      if (pendingRecordID === null) {
+        await ensureStarted();
+        await syncAndWaitForScheduledPullRetry(client);
+        if (!(await waitForSyncedTable(client, 'customers'))) {
+          throw new Error('customers table was not ready after starting sync');
+        }
+        markStep('multiUser:started');
 
-      const isolationID = uuid();
-      await client.execute(
-        "INSERT INTO orders (id, user_id, ship_address, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-        [isolationID, USER1_ID, 'user1-only']
+        const isolationID = uuid();
+        await insertCustomer(client, isolationID, USER1_ID, 'user1-only');
+        markStep('multiUser:inserted');
+        await syncAndWaitForScheduledPullRetry(client);
+        markStep('multiUser:synced');
+        const pendingDrained = await waitForPendingDrain(client);
+        const rejection = (await client.inspectRejectedMutations()).find(
+          (mutation) => mutation.tableName === 'customers' && mutation.recordID === isolationID
+        );
+        if (!pendingDrained || rejection !== undefined) {
+          throw new Error('isolation mutation did not complete without rejection');
+        }
+
+        await stopSync();
+        pendingMultiUserRecordRef.current = isolationID;
+        setPendingMultiUserRecordID(isolationID);
+        markStep('multiUser:awaiting-server');
+        return;
+      }
+
+      const localRow = await client.queryOne(
+        'SELECT user_id, name FROM customers WHERE id = ?',
+        [pendingRecordID]
       );
-      await client.syncNow();
-      await waitForPendingDrain(client);
-      await waitForWAL();
-
-      const client2ID = `rn-isolation-client-${uuid()}`;
-      const schema = await syncHTTP('GET', '/sync/schema', USER2_JWT);
-      const register = await syncHTTP('POST', '/sync/register', USER2_JWT, {
-        client_id: client2ID,
-        platform: 'test',
-        app_version: '1.0.0',
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-      });
-      const pull = await syncHTTP('POST', '/sync/pull', USER2_JWT, {
-        client_id: client2ID,
-        checkpoint: register.checkpoint,
-        schema_version: schema.schema_version,
-        schema_hash: schema.schema_hash,
-      });
-
-      const hasUser1Record = (pull.changes ?? []).some(
-        (record: any) => record.record_id === isolationID
+      const localMutation = (await client.inspectRejectedMutations()).find(
+        (mutation) => mutation.tableName === 'customers' && mutation.recordID === pendingRecordID
       );
-      update('multiUser', !hasUser1Record);
-    } catch {
+      const isolationVerified =
+        localRow?.user_id === USER1_ID &&
+        localRow?.name === 'user1-only' &&
+        localMutation === undefined;
+      pendingMultiUserRecordRef.current = null;
+      setPendingMultiUserRecordID(null);
+      update('multiUser', isolationVerified);
+    } catch (error) {
+      captureError('multiUser', error);
       update('multiUser', false);
     } finally {
       try {
@@ -508,15 +878,50 @@ export default function App() {
 
   const runStop = useCallback(async () => {
     try {
+      setLastError(null);
+      markStep('stop:start');
       await ensureStarted();
+      markStep('stop:started');
       await stopSync();
+      markStep('stop:stopped');
       update('stop', true);
-    } catch {
+    } catch (error) {
+      captureError('stop', error);
       update('stop', false);
     } finally {
       startedRef.current = false;
     }
-  }, [ensureStarted, stopSync, update]);
+  }, [captureError, ensureStarted, markStep, stopSync, update]);
+
+  const runLifecycle = useCallback(async () => {
+    try {
+      setLastError(null);
+      markStep('lifecycle:start');
+      await ensureStarted();
+      markStep('lifecycle:started');
+      await client.enterBackground();
+      markStep('lifecycle:background');
+      await client.enterForeground();
+      markStep('lifecycle:foreground');
+      await syncAndWaitForScheduledPullRetry(client);
+      const resumedStatus = await client.getSyncStatus();
+      if (resumedStatus.status !== 'ready') {
+        throw new Error(`foreground did not resume ready state: ${resumedStatus.status}`);
+      }
+      await stopSync();
+      const stoppedStatus = await client.getSyncStatus();
+      if (stoppedStatus.status !== 'stopped') {
+        throw new Error(`stop did not drain to stopped state: ${stoppedStatus.status}`);
+      }
+      markStep('lifecycle:stopped');
+      update('lifecycle', true);
+    } catch (error) {
+      captureError('lifecycle', error);
+      update('lifecycle', false);
+    } finally {
+      startedRef.current = false;
+    }
+  }, [captureError, client, ensureStarted, markStep, stopSync, update]);
 
   const runErrorMap = useCallback(async () => {
     try {
@@ -528,9 +933,317 @@ export default function App() {
     }
   }, [client, ensureInitialized, update]);
 
+  const runOfflineFirst = useCallback(async () => {
+    const runID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const dbPath = `synchro-offline-first-${runID}.db`;
+    const clientID = `rn-offline-first-device-${runID}`;
+    const customerID = uuid();
+    let offlineClient: SynchroClient | null = null;
+    let syncClient: SynchroClient | null = null;
+    try {
+      setLastError(null);
+      markStep('offlineFirst:offline');
+      await releaseHarnessClient();
+      offlineClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+        seedDatabasePath: 'seed.db',
+      });
+      await offlineClient.initialize();
+      await offlineClient.execute(
+        "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+        [customerID, USER1_ID, 'offline-first-customer', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z']
+      );
+      const pendingBeforeRestart = await offlineClient.pendingChangeCount();
+      const offlineRow = await offlineClient.queryOne(
+        'SELECT name FROM customers WHERE id = ?',
+        [customerID]
+      );
+      await offlineClient.close();
+      offlineClient = null;
+
+      markStep('offlineFirst:first-connect');
+      syncClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+      });
+      await syncClient.initialize();
+      await startAndWaitForScheduledPullRetry(syncClient);
+      await syncAndWaitForScheduledPullRetry(syncClient);
+
+      const pendingAfterSync = await syncClient.pendingChangeCount();
+      const localRow = await syncClient.queryOne(
+        'SELECT name FROM customers WHERE id = ?',
+        [customerID]
+      );
+      const rejectedAfterSync = await syncClient.inspectRejectedMutations();
+
+      update(
+        'offlineFirst',
+        pendingBeforeRestart === 1 &&
+          offlineRow?.name === 'offline-first-customer' &&
+          pendingAfterSync === 0 &&
+          localRow?.name === 'offline-first-customer' &&
+          rejectedAfterSync.length === 0
+      );
+    } catch (error) {
+      captureError('offlineFirst', error);
+      update('offlineFirst', false);
+    } finally {
+      await releaseClient(offlineClient);
+      await releaseClient(syncClient);
+    }
+  }, [captureError, markStep, releaseHarnessClient, update]);
+
+  const runSeedInit = useCallback(async () => {
+    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let seedClient: SynchroClient | null = null;
+    try {
+      await releaseHarnessClient();
+      const seededCategoryID = '10000000-0000-0000-0000-000000000006';
+      const insertedCategoryID = uuid();
+      seedClient = new SynchroClient({
+        dbPath: `synchro-seed-test-${seedID}.db`,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-device-${seedID}`,
+        appVersion: '1.0.0',
+        seedDatabasePath: 'seed.db',
+      });
+      await seedClient.initialize();
+
+      const initialStatus = await seedClient.getSyncStatus();
+      const seededRow = await seedClient.queryOne(
+        'SELECT id, name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
+
+      // Insert into a seeded synced table to prove local CDC is installed.
+      await seedClient.execute(
+        "INSERT INTO categories (id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
+        [insertedCategoryID, 'Seed Init Category', 999]
+      );
+
+      const pending = (await seedClient.inspectPendingMutations()).find(
+        (mutation) =>
+          mutation.tableName === 'categories' && mutation.recordID === insertedCategoryID
+      );
+      const seedInitOK =
+        (initialStatus.status === 'uninitialized' || initialStatus.status === 'local_ready') &&
+        seededRow?.id === seededCategoryID &&
+        seededRow?.name === 'Seed Category' &&
+        pending?.tableName === 'categories' &&
+        pending?.operation === 'insert';
+
+      if (!seedInitOK) {
+        setLastError(
+          JSON.stringify({
+            initialStatus,
+            seededRow,
+            pending,
+          })
+        );
+      }
+
+      update('seedInit', seedInitOK);
+    } catch {
+      update('seedInit', false);
+    } finally {
+      await releaseClient(seedClient);
+    }
+  }, [releaseHarnessClient, update]);
+
+  const runSeedResume = useCallback(async () => {
+    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let seedClient: SynchroClient | null = null;
+    let unsubscribe: (() => void) | null = null;
+    try {
+      await releaseHarnessClient();
+      const seededCategoryID = '10000000-0000-0000-0000-000000000006';
+      seedClient = new SynchroClient({
+        dbPath: `synchro-seed-resume-${seedID}.db`,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-resume-device-${seedID}`,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+        seedDatabasePath: 'seed.db',
+      });
+      await seedClient.initialize();
+
+      const initialStatus = await seedClient.getSyncStatus();
+      const initialRow = await seedClient.queryOne(
+        'SELECT name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
+
+      const syncEvents: SyncEvent[] = [];
+      unsubscribe = seedClient.onSyncEvent((event) => syncEvents.push(event));
+      await startAndWaitForScheduledPullRetry(seedClient);
+      await syncAndWaitForScheduledPullRetry(seedClient);
+
+      unsubscribe();
+      unsubscribe = null;
+      const resumedStatus = await seedClient.getSyncStatus();
+      const resumedRow = await seedClient.queryOne(
+        'SELECT name FROM categories WHERE id = ?',
+        [seededCategoryID]
+      );
+      const pendingCount = await seedClient.pendingChangeCount();
+      const rejectedMutations = await seedClient.inspectRejectedMutations();
+      const rebuiltSharedScope = syncEvents.some(
+        (event) =>
+          (event.type === 'rebuild_requested' || event.type === 'rebuild_completed') &&
+          event.scopeID === 'global'
+      );
+      const resumeOK =
+        (initialStatus.status === 'uninitialized' || initialStatus.status === 'local_ready') &&
+        resumedStatus.status === 'ready' &&
+        initialRow?.name === 'Seed Category' &&
+        resumedRow?.name === 'Seed Category' &&
+        pendingCount === 0 &&
+        rejectedMutations.length === 0 &&
+        !rebuiltSharedScope;
+
+      if (!resumeOK) {
+        setLastError(
+          JSON.stringify({
+            initialStatus,
+            resumedStatus,
+            initialRow,
+            resumedRow,
+            pendingCount,
+            rejectedMutations,
+            syncEvents,
+          })
+        );
+      }
+
+      update('seedResume', resumeOK);
+    } catch {
+      update('seedResume', false);
+    } finally {
+      unsubscribe?.();
+      await releaseClient(seedClient);
+    }
+  }, [releaseHarnessClient, update]);
+
+  const runSeedCorrupt = useCallback(async () => {
+    const seedID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const dbPath = `synchro-seed-corrupt-${seedID}.db`;
+    let corruptClient: SynchroClient | null = null;
+    let recoveryClient: SynchroClient | null = null;
+    try {
+      setLastError(null);
+      await releaseHarnessClient();
+      markStep('seedCorrupt:start');
+      corruptClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-corrupt-device-${seedID}`,
+        appVersion: '1.0.0',
+        seedDatabasePath: 'corrupt-seed.db',
+      });
+      let initializationCode: string | null = null;
+      try {
+        await corruptClient.initialize();
+      } catch (error: any) {
+        initializationCode = typeof error?.code === 'string' ? error.code : null;
+      }
+      if (initializationCode !== 'INVALID_SEED') {
+        throw new Error(`corrupt seed did not fail with INVALID_SEED: ${initializationCode ?? 'none'}`);
+      }
+      markStep('seedCorrupt:invalid-seed');
+
+      recoveryClient = new SynchroClient({
+        dbPath,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-seed-corrupt-recovery-${seedID}`,
+        appVersion: '1.0.0',
+      });
+      await recoveryClient.initialize();
+      markStep('seedCorrupt:recovery');
+
+      let categoriesAvailable = true;
+      try {
+        await recoveryClient.query('SELECT 1 FROM categories LIMIT 1');
+      } catch {
+        categoriesAvailable = false;
+      }
+      const recoveryStatus = await recoveryClient.getSyncStatus();
+      const pendingCount = await recoveryClient.pendingChangeCount();
+      await recoveryClient.createTable('seed_corrupt_probe', [
+        { name: 'id', type: 'TEXT', primaryKey: true },
+        { name: 'value', type: 'TEXT' },
+      ]);
+      const writeResult = await recoveryClient.execute(
+        'INSERT INTO seed_corrupt_probe (id, value) VALUES (?, ?)',
+        ['probe', 'ordinary-local-sql']
+      );
+      const probeRow = await recoveryClient.queryOne(
+        'SELECT value FROM seed_corrupt_probe WHERE id = ?',
+        ['probe']
+      );
+      const recoveryOK =
+        (recoveryStatus.status === 'uninitialized' || recoveryStatus.status === 'local_ready') &&
+        !categoriesAvailable &&
+        pendingCount === 0 &&
+        writeResult.rowsAffected === 1 &&
+        probeRow?.value === 'ordinary-local-sql';
+
+      if (!recoveryOK) {
+        setLastError(
+          JSON.stringify({
+            initializationCode,
+            recoveryStatus,
+            categoriesAvailable,
+            pendingCount,
+            writeResult,
+            probeRow,
+          })
+        );
+      }
+
+      update('seedCorrupt', recoveryOK);
+    } catch (error) {
+      captureError('seedCorrupt', error);
+      update('seedCorrupt', false);
+    } finally {
+      await releaseClient(corruptClient);
+      await releaseClient(recoveryClient);
+    }
+  }, [captureError, markStep, releaseHarnessClient, update]);
+
   return (
-    <View style={styles.container}>
-      <ScrollView testID="test-scroll" contentContainerStyle={styles.scroll}>
+    <SafeAreaView style={styles.container}>
+      <TouchableOpacity
+        style={[styles.button, styles.resetButton]}
+        onPress={() => {
+          void resetHarness();
+        }}
+        testID="btn-reset"
+      >
+        <Text>Reset Harness</Text>
+      </TouchableOpacity>
+      <ScrollView
+        key={harnessGeneration}
+        testID="test-scroll"
+        style={styles.scroller}
+        contentContainerStyle={styles.scroll}
+      >
         <Text style={styles.header} testID="header">
           Synchro RN Test Harness
         </Text>
@@ -539,20 +1252,10 @@ export default function App() {
           <Text>Status</Text>
           <Text testID="status-value">{displayStatus}</Text>
         </View>
-
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() => {
-            void resetHarness();
-          }}
-          testID="btn-reset"
-        >
-          <Text>Reset Harness</Text>
-        </TouchableOpacity>
-
-        {Object.entries(results).map(([key, value]) => (
-          <StatusBadge key={key} label={key} ok={value} />
-        ))}
+        <Text testID="step-value">{currentStep}</Text>
+        <Text testID="error-value">{lastError ?? 'none'}</Text>
+        <Text testID="conflict-record-id">{pendingConflictRecordID ?? 'none'}</Text>
+        <Text testID="multi-user-record-id">{pendingMultiUserRecordID ?? 'none'}</Text>
 
         <View style={styles.buttons}>
           <TouchableOpacity style={styles.button} onPress={runInit} testID="btn-init">
@@ -579,8 +1282,14 @@ export default function App() {
           <TouchableOpacity style={styles.button} onPress={runTxRecovery} testID="btn-txRecovery">
             <Text>Tx Recovery</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSchemaDecode} testID="btn-schemaDecode">
+            <Text>Schema Decoding</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runStart} testID="btn-start">
             <Text>Start Sync</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runLifecycle} testID="btn-lifecycle">
+            <Text>Lifecycle</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runPushPull} testID="btn-pushPull">
             <Text>Push/Pull</Text>
@@ -597,7 +1306,23 @@ export default function App() {
           <TouchableOpacity style={styles.button} onPress={runErrorMap} testID="btn-errorMap">
             <Text>Error Mapping</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runOfflineFirst} testID="btn-offlineFirst">
+            <Text>Offline First</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSeedInit} testID="btn-seedInit">
+            <Text>Seed Init</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSeedResume} testID="btn-seedResume">
+            <Text>Seed Resume</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runSeedCorrupt} testID="btn-seedCorrupt">
+            <Text>Seed Corrupt</Text>
+          </TouchableOpacity>
         </View>
+
+        {Object.entries(results).map(([key, value]) => (
+          <StatusBadge key={key} label={key} ok={value} />
+        ))}
       </ScrollView>
       <View style={styles.lastResult} testID="last-result">
         <Text testID="last-result-key">{lastResult.key ?? 'none'}</Text>
@@ -609,12 +1334,14 @@ export default function App() {
               : 'FAIL'}
         </Text>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
+  scroller: { flex: 1 },
+  resetButton: { marginHorizontal: 20, marginTop: 20 },
   scroll: { padding: 20, paddingBottom: 120 },
   header: { fontSize: 20, fontWeight: 'bold', marginBottom: 16 },
   statusRow: {
@@ -648,6 +1375,7 @@ const styles = StyleSheet.create({
   },
   button: {
     backgroundColor: '#e0e0e0',
+    minHeight: 44,
     padding: 12,
     borderRadius: 6,
     marginBottom: 8,
