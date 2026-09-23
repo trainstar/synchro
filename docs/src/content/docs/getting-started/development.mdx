@@ -7,6 +7,8 @@ Use this guide to develop Synchro itself.
 For application integration, start with [First synchronization](/synchro/getting-started/quickstart/).
 
 Run Make commands from the repository root.
+Create ordinary work branches from `dev` and target their pull requests at `dev`.
+`master` is the stable default branch, not the target for unfinished development.
 The integration setup creates test tables, grants, registrations, and seed data.
 Never point it at a production database or a database with application data.
 
@@ -133,4 +135,4 @@ The provisioner closes its database and removes its generated credentials.
 Do not terminate unrelated port owners or delete another process's state directory.
 
 Local logs, credentials, build output, and test reports must remain outside tracked source.
-Use [RELEASE.md](https://github.com/trainstar/synchro/blob/dev/RELEASE.md) for release operations.
+Use [RELEASE.md](https://github.com/trainstar/synchro/blob/master/RELEASE.md) for release operations.

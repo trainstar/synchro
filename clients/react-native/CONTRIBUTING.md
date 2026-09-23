@@ -80,6 +80,12 @@ Use the [development guide](../../docs/src/content/docs/getting-started/developm
 
 ## Sending A Pull Request
 
+Use `dev` as the base for ordinary development pull requests.
+The default branch, `master`, contains stable release code.
+Promote a verified release from `dev` through a pull request into `master`.
+Create urgent stable hotfixes from `master`, and merge their corrections back into `dev`.
+Delete temporary branches only after their current work is merged.
+
 > **Working on your first pull request?** You can learn how from this _free_ series: [How to Contribute to an Open Source Project on GitHub](https://app.egghead.io/playlists/how-to-contribute-to-an-open-source-project-on-github).
 
 When you're sending a pull request:

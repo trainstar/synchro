@@ -30,6 +30,14 @@ release_publish = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release_publish)
 
 
+def release_step_command(name: str) -> str:
+    lines = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8").splitlines()
+    start = lines.index(f"      - name: {name}")
+    run = next(index for index in range(start, len(lines)) if lines[index] == "        run: |")
+    end = next(index for index in range(run + 1, len(lines)) if lines[index] and not lines[index].startswith("          "))
+    return textwrap.dedent("\n".join(lines[run + 1:end]))
+
+
 class PublicationStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.commit = "a" * 40
@@ -55,6 +63,26 @@ class PublicationStateTests(unittest.TestCase):
 
     def test_candidate_identity_accepts_exact_commit_and_version(self) -> None:
         release_publish.validate_candidate_identity(self.commit, self.version)
+
+    def test_release_dispatch_requires_master(self) -> None:
+        command = release_step_command("Require dispatch from master")
+        for ref in (
+            "refs/heads/master",
+            "refs/heads/dev",
+            "refs/heads/main",
+            "refs/heads/master-copy",
+            "refs/heads/release/1.2.3",
+            "refs/tags/v1.2.3",
+            "refs/pull/1/merge",
+            "",
+        ):
+            with self.subTest(ref=ref):
+                result = subprocess.run(
+                    ["bash", "-eu", "-c", command],
+                    env={**os.environ, "GITHUB_REF": ref},
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                self.assertEqual(result.returncode == 0, ref == "refs/heads/master")
 
     def test_candidate_identity_rejects_invalid_commit_lengths(self) -> None:
         for commit in ("a" * 39, "a" * 41):
@@ -312,11 +340,7 @@ class PublicationStateTests(unittest.TestCase):
             release_publish.list_central_deployments("wanted")
 
     def test_release_workflow_executes_private_recovery_effects(self) -> None:
-        lines = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8").splitlines()
-        start = lines.index("      - name: Resolve or upload and validate Maven deployment")
-        run = next(index for index in range(start, len(lines)) if lines[index] == "        run: |")
-        end = next(index for index in range(run + 1, len(lines)) if lines[index] and not lines[index].startswith("          "))
-        command = textwrap.dedent("\n".join(lines[run + 1:end]))
+        command = release_step_command("Resolve or upload and validate Maven deployment")
         command = command.replace("${{ needs.candidate.outputs.release_dir_name }}", "fixture")
         self.assertNotIn("${{", command)
 

@@ -6,23 +6,43 @@ Use [GitHub Releases](https://github.com/trainstar/synchro/releases) to determin
 
 ## Routine Actions
 
-1. Merge the release pull request into `dev`.
-2. Dispatch the Release workflow for `dev`.
+1. Merge the verified release pull request from `dev` into `master`.
+2. Dispatch the Release workflow for `master`.
 3. Approve the protected `release` environment.
 
 The workflow builds and tests sealed artifacts before approval.
 
 The `publish` job performs every tag and public operation after approval.
 
+## Branch Policy
+
+`master` is the default branch and contains stable release code.
+`dev` receives ordinary development and prerelease integration.
+Create ordinary work branches from `dev` and target their pull requests at `dev`.
+
+Promote a verified release through a pull request from `dev` into `master`.
+Create urgent stable hotfixes from `master`.
+After merging a hotfix, merge its correction back into `dev`.
+Tag and publish releases only from `master`.
+
+Keep both permanent branches.
+Delete a temporary branch after its current work is merged and no unmerged commits remain.
+Do not delete active pull-request branches or discard unique unmerged work.
+
 ## One-Time Setup
 
-Configure protected `dev` and release tags.
+Protect `master`, `dev`, and release tags.
+Require pull requests and passing checks on both permanent branches.
+Block force pushes and deletion of permanent branches.
+Set the repository default to `master`.
+Keep ordinary dependency-update pull requests targeted at `dev`.
 
 Configure `release-signing` without required reviewers.
 Store only `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` in that environment.
 
 Configure the protected `release` environment with one required approval.
 Store only `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` there.
+Restrict `release` and `release-signing` deployments to the exact `master` branch.
 
 Configure npm trusted publishing for `.github/workflows/release.yml` and the `release` environment.
 Do not configure an npm publication token.
@@ -43,24 +63,26 @@ Do not continue when a required control, credential, or runtime is unavailable.
 4. Run `make set-version VERSION=X.Y.Z`.
 5. Run `make version-check`.
 6. Confirm the support matrix in `conformance/support-matrix.json`.
-7. Merge the release pull request into `dev`.
-8. Record the exact merged `dev` SHA.
-9. Confirm that the required CI completed successfully for that exact SHA.
-10. Confirm that exactly one `vX.Y.Z` milestone exists.
-11. Dispatch Release from the `dev` head.
+7. Merge the preparation changes into `dev` through a pull request.
+8. Confirm Candidate CI passed for the exact `dev` commit.
+9. Promote `dev` into `master` through a checked pull request.
+10. Record the exact merged `master` SHA.
+11. Confirm Candidate CI passed for that exact `master` commit.
+12. Confirm that exactly one `vX.Y.Z` milestone exists.
+13. Dispatch Release from the `master` head.
 
 `VERSION` is the release version authority.
 
 The workflow selects the version from the committed source.
 Do not dispatch a different branch or SHA after recording the candidate SHA.
 
-In the GitHub UI, select **Actions**, select **Release**, select **Run workflow**, and select `dev`.
+In the GitHub UI, select **Actions**, select **Release**, select **Run workflow**, and select `master`.
 Leave `resume_run_id` empty for a new candidate.
 
 Use this command for a new candidate:
 
 ```sh
-gh workflow run Release --repo trainstar/synchro --ref dev
+gh workflow run Release --repo trainstar/synchro --ref master
 ```
 
 Use this command only to resume a completed original Release run with a retained sealed candidate:
@@ -68,12 +90,13 @@ Use this command only to resume a completed original Release run with a retained
 ```sh
 printf 'Original Release run ID: '
 read -r ORIGINAL_RUN_ID
-gh workflow run Release --repo trainstar/synchro --ref dev -f resume_run_id="$ORIGINAL_RUN_ID"
+gh workflow run Release --repo trainstar/synchro --ref master -f resume_run_id="$ORIGINAL_RUN_ID"
 ```
 
 Set `ORIGINAL_RUN_ID` to the decimal ID of the original Release run that owns the sealed candidate receipt.
 `resume_run_id` must identify that run.
 It does not authorize a different candidate, version, source SHA, or artifact set.
+Recovery requires the original candidate's successful `master` CI evidence.
 
 ## Support And Compatibility
 
@@ -166,7 +189,7 @@ The manifest records candidate environment resolution in `release-manifest.json`
 
 ## Automated Release Sequence
 
-1. Verify the selected `dev` commit and Candidate CI result.
+1. Verify the selected `master` commit and Candidate CI result.
 2. Build, seal, hash, and verify each distribution once.
 3. Run clean package installation and lifecycle checks.
 4. Complete every Package-gate cell.
