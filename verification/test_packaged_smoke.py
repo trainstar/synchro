@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import copy
+import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
@@ -24,6 +27,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PackagedSmokeStructureTests(unittest.TestCase):
+    def test_generated_credential_covers_build_and_bounded_job(self) -> None:
+        issued_at = 1_800_000_000
+        secret = "fixture-signing-secret"
+        with mock.patch.dict(os.environ, {"SYNCHRO_TEST_JWT_SECRET": secret}, clear=True):
+            with mock.patch.object(packaged_smoke.time, "time", return_value=issued_at):
+                token = packaged_smoke.bearer_token("package-user")
+        header, payload, signature = token.split(".")
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        self.assertEqual(claims["sub"], "package-user")
+        self.assertEqual(claims["iat"], issued_at)
+        self.assertLess(issued_at + 65 * 60, claims["exp"])
+        self.assertEqual(claims["exp"], issued_at + 6 * 60 * 60)
+        expected_signature = hmac.new(
+            secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256
+        ).digest()
+        self.assertEqual(signature, packaged_smoke.base64url(expected_signature))
+        with mock.patch.dict(os.environ, {"SYNCHRO_PACKAGED_SMOKE_TOKEN": "supplied-token"}, clear=True):
+            self.assertEqual(packaged_smoke.bearer_token("package-user"), "supplied-token")
+
     def start_app_result_collector(
         self,
         directory: Path,
