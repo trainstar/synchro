@@ -821,9 +821,11 @@ def bearer_token(subject: str) -> str:
         )
     now = int(time.time())
     header = base64url(b'{"alg":"HS256","typ":"JWT"}')
+    # Native compilation precedes execution within a six-hour hosted job.
+    expires_at = now + 6 * 60 * 60
     payload = base64url(
         json.dumps(
-            {"sub": subject, "iat": now, "exp": now + 3600},
+            {"sub": subject, "iat": now, "exp": expires_at},
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")

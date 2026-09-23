@@ -105,6 +105,11 @@ The same assertion evaluates baseline and mutated subjects.
 
 Production-artifact control execution uses the release procedure in `RELEASE.md`.
 
+Generated package-fixture credentials cover the six-hour GitHub-hosted job limit.
+This includes dependency installation, native compilation, and the application lifecycle.
+The isolated fixture still requires signed, unexpired credentials.
+Production token policy and lifecycle timeouts do not change.
+
 ## Server Mutation Gate
 
 Run the production mutation gate with:
