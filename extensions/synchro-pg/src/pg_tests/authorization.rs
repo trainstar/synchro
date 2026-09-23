@@ -239,6 +239,14 @@ fn registration_functions_have_required_security_and_grants() {
         "synchro_operator",
         "synchro.synchro_capture_fence()"
     ));
+    assert!(has_function_privilege(
+        "synchro_operator",
+        "synchro.synchro_capture_truncate_guard()"
+    ));
+    assert!(!has_function_privilege(
+        "synchro_adapter",
+        "synchro.synchro_capture_truncate_guard()"
+    ));
 }
 
 #[pg_test]
