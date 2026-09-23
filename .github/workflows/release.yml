@@ -41,8 +41,9 @@ jobs:
       artifact_id: ${{ steps.resolve.outputs.artifact_id }}
       release_dir_name: ${{ steps.resolve.outputs.release_dir_name }}
     steps:
-      - name: Require dispatch from dev
-        run: test "$GITHUB_REF" = refs/heads/dev
+      - name: Require dispatch from master
+        run: |
+          test "$GITHUB_REF" = refs/heads/master
 
       - name: Checkout dispatch source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -101,9 +102,9 @@ jobs:
             artifact_id="$(jq -r '.artifact_id' "$RUNNER_TEMP/verified-sealed-receipt.json")"
           else
             mode=normal
-            git fetch --no-tags origin dev
+            git fetch --no-tags origin master
             source_commit="$(git rev-parse --verify HEAD)"
-            test "$source_commit" = "$(git rev-parse --verify origin/dev)" || { echo "normal release must select the current dev head" >&2; exit 1; }
+            test "$source_commit" = "$(git rev-parse --verify origin/master)" || { echo "normal release must select the current master head" >&2; exit 1; }
             version="$(tr -d '\n' < VERSION)"
             artifact_run_id="$GITHUB_RUN_ID"
             artifact_id=
@@ -115,7 +116,7 @@ jobs:
           test "$(tr -d '\n' < VERSION)" = "$version"
           make version-check
 
-          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=dev&event=push&status=completed&head_sha=$source_commit&per_page=100")"
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&head_sha=$source_commit&per_page=100")"
           candidate="$(jq -c --arg sha "$source_commit" '[.workflow_runs[] | select(.head_sha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")] | sort_by(.run_attempt) | last // empty' <<<"$runs")"
           test -n "$candidate" || { echo "exact candidate commit has no successful completed CI push run" >&2; exit 1; }
           candidate_ci_run_id="$(jq -r '.id' <<<"$candidate")"
@@ -908,7 +909,7 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             --summary dist/package-evidence/summary.json \
             --release-manifest "$release/release-manifest.json"
-          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=dev&event=push&status=completed&head_sha=$commit&per_page=100")"
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&head_sha=$commit&per_page=100")"
           jq -e --arg sha "$commit" --argjson id '${{ needs.candidate.outputs.candidate_ci_run_id }}' --argjson attempt '${{ needs.candidate.outputs.candidate_ci_run_attempt }}' \
             'any(.workflow_runs[]; .head_sha == $sha and .id == $id and .run_attempt == $attempt and .status == "completed" and .conclusion == "success")' <<<"$runs" >/dev/null
           milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"

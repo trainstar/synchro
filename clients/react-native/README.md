@@ -14,7 +14,7 @@ React Native TurboModule bridge for Synchro. The package wraps the native Swift 
 
 Install the published package only after `0.3.0` is available. Before that,
 use the local artifact flow in
-[Client Consumption](https://github.com/trainstar/synchro/tree/dev/docs/src/content/docs/clients/consumption.mdx).
+[Client Consumption](https://trainstar.github.io/synchro/clients/consumption/).
 
 ```sh
 npm install @trainstar/synchro-react-native@0.3.0

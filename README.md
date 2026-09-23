@@ -4,6 +4,9 @@
 
 # Synchro
 
+[![Release](https://img.shields.io/github/v/release/trainstar/synchro)](https://github.com/trainstar/synchro/releases/latest)
+[![CI](https://github.com/trainstar/synchro/actions/workflows/ci.yml/badge.svg?branch=master&event=push)](https://github.com/trainstar/synchro/actions/workflows/ci.yml?query=branch%3Amaster)
+
 Synchro synchronizes PostgreSQL data with local SQLite databases in native applications.
 Applications can read and write local data offline, then synchronize through an authenticated HTTP adapter.
 
@@ -64,6 +67,9 @@ Report reproducible problems through [GitHub Issues](https://github.com/trainsta
 Include the version, platform, reproduction steps, and expected result.
 Do not include credentials or private application data.
 Keep pull requests focused and run the applicable Make checks.
+Target ordinary development pull requests at `dev`.
+`master` is the stable default branch and accepts checked release promotions and stable hotfixes.
+Return stable hotfixes to `dev` so subsequent releases retain their corrections.
 
 ## License
 
