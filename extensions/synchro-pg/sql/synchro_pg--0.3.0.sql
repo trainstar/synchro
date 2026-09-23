@@ -2599,6 +2599,7 @@ BEGIN
                   'synchro_compact', 'synchro_inject_client_retention_expiry',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
+                 'synchro_capture_truncate_guard',
                  'synchro_prepare_stream_reset', 'synchro_lock_stream_reset_sources',
                  'synchro_mark_stream_reset_snapshot',
                  'synchro_stage_stream_reset', 'synchro_activate_stream_reset',

@@ -23,7 +23,9 @@ export default defineConfig({
 					label: 'Overview',
 					items: [
 						{ label: 'Welcome', slug: '' },
-						{ label: 'Quickstart', slug: 'getting-started/quickstart' },
+						{ label: 'First synchronization', slug: 'getting-started/quickstart' },
+						{ label: 'Server setup', slug: 'getting-started/server-setup' },
+						{ label: 'Local development', slug: 'getting-started/development' },
 					],
 				},
 				{
@@ -50,6 +52,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Overview', slug: 'clients/overview' },
 						{ label: 'Consumption', slug: 'clients/consumption' },
+						{ label: 'Application SQL limits', slug: 'clients/application-sql' },
 					],
 				},
 				{

@@ -1,125 +1,105 @@
 ---
-title: Quickstart
-description: Validate the current Synchro release surface locally and find the next integration path quickly.
+title: First synchronization
+description: Connect a client, edit a note offline, and verify synchronization with another client.
 ---
 
-Use this page when you want to validate the current release surface on your machine. If you want installation details for another repo, go to [Client consumption](/synchro/clients/consumption/). If you want the architectural model first, go to [Architecture overview](/synchro/architecture/overview/).
+This tutorial uses one private note and the authenticated user `alice`.
+You will read the note locally, change it offline, and observe the synchronized result.
 
-## Prerequisites
+Use a disposable database and test identities.
+Do not run this tutorial against production data.
+The examples describe the `0.3.0` interfaces.
+Use local-consumer artifacts until the matching release is available.
 
-- PostgreSQL 18 via `cargo pgrx`
-- Rust toolchain for `extensions/synchro-core` and `extensions/synchro-pg`
-- Go 1.25 for `api/go`
-- Xcode and Swift for Apple SDK validation
-- JDK 17 and Android SDK for Kotlin and Android validation
-- Node.js 22 for React Native validation
+## 1. Prepare the server
 
-## Auth mode
+Complete [server setup](/synchro/getting-started/server-setup/).
+That guide creates the `synchro_quickstart` database, registers `public.notes`, starts the adapter, and inserts the first note.
 
-Protected sync routes in `api/go` support two auth modes:
+The first note has this identity:
 
-- direct JWT validation with `JWTSecret` or `JWKSURL`
-- trusted upstream auth with `UserIDResolver`
-
-Use trusted upstream auth when Synchro is mounted behind an existing product API that already validates bearer tokens and resolves internal user IDs. See the [auth integration guide](/synchro/architecture/auth-integration/) for the decision framework.
-
-## Validate the core
-
-Run the shared Rust semantics tests:
-
-```bash
-make test-rust-core
+```text
+id:       00000000-0000-4000-8000-000000000001
+owner_id: alice
 ```
 
-Run the PostgreSQL extension tests on PG 18:
+The registered membership function puts the note in `user:alice`.
+Connect assigns that scope from the authenticated identity, not from a client-supplied scope name.
 
-```bash
-make test-rust-pg
+## 2. Open the first client
+
+Follow the initialization example for your platform:
+
+- [Swift](/synchro/clients/consumption/#swift)
+- [Kotlin](/synchro/clients/consumption/#kotlin)
+- [React Native](/synchro/clients/consumption/#react-native)
+
+Use the server URL and test token from server setup.
+Use a new writable SQLite database and a stable client ID.
+Never share one client ID between independent installations.
+
+Complete the initial synchronization before querying `notes`.
+Creating the client or opening SQLite does not prove that the server schema and rows have arrived.
+
+The initial query must return the note above with `owner_id` equal to `alice`.
+An empty result is not a successful tutorial outcome.
+
+## 3. Edit offline
+
+Stop synchronization with the client's `stop()` method.
+Keep the local database open.
+
+Use the platform's `execute` method with bound parameters:
+
+```sql
+UPDATE notes SET body = ?
+WHERE id = ?
 ```
 
-Run the Go adapter integration tests against the extension-backed database:
+Bind `Edited offline` and `00000000-0000-4000-8000-000000000001`, in that order.
+Read the row again through the client.
+Its body must now be `Edited offline`, even though synchronization is stopped.
 
-```bash
-make test-adapter
+The local write and its queued mutation commit together.
+Do not write directly to Synchro metadata tables.
+
+## 4. Synchronize and verify the server
+
+Restart synchronization with `start()`.
+Then run the platform's `syncNow()` call as shown in its initialization example.
+Wait for that call to complete successfully.
+Do not replace completion with an arbitrary sleep.
+
+In a PostgreSQL session connected to `synchro_quickstart`, run:
+
+```sql
+SELECT id, owner_id, body
+FROM public.notes
+WHERE id = '00000000-0000-4000-8000-000000000001';
 ```
 
-## Validate the clients
+The query must return `alice` and `Edited offline`.
+The server observation proves that the local write reached PostgreSQL.
+An empty local pending queue alone does not prove that result.
 
-Run the Apple SDK integration tests:
+## 5. Verify another client
 
-```bash
-make test-swift
-```
+Initialize another client with a different client ID and a different local database path.
+Authenticate as `alice` and complete its first synchronization.
 
-Run the Android SDK integration tests:
+Read the same note.
+Its body must be `Edited offline`.
+This verifies that the server change reaches an independent local database.
 
-```bash
-make test-kotlin
-```
+## 6. Finish
 
-Run the React Native bridge tests:
+Stop and close both clients.
+Stop the tutorial adapter using the procedure in server setup.
+Remove only the disposable database and local files created for this tutorial.
 
-```bash
-make test-rn
-```
+## Continue
 
-## Local adapter server
-
-Start the extension-backed adapter for manual work:
-
-```bash
-make synchrod-pg-test-start
-```
-
-The default test server URL is `http://localhost:8091`.
-Startup refuses an occupied port. Stop signals only the verified adapter owner.
-Use `make synchrod-pg-test-serve` for a foreground server owned by your terminal or test process.
-
-Stop it when you are done:
-
-```bash
-make synchrod-pg-test-stop
-```
-
-## Preinitialized seed databases
-
-Generate a client-compatible SQLite seed database directly from PostgreSQL:
-
-```bash
-cd api/go
-GOWORK=off go run ./cmd/synchro-seed \
-  --database-url "postgres://user:pass@localhost:5432/app?sslmode=disable" \
-  --output ./build/seed.db
-```
-
-Use this when you want to bundle a warm-start database with the app so clients begin with the correct synced-table schema and any portable or public reference data before the first `connect`.
-
-Protocol version 3 behavior:
-
-- one `SERIALIZABLE READ ONLY DEFERRABLE` transaction exports one WAL-materialized snapshot boundary
-- the generator verifies the immutable schema manifest and exports only server-declared portable scopes, never auth-scoped data
-- every seeded row carries its opaque server version and verified row digest
-- every seeded scope carries verified provenance, cardinality, scope digest, and an opaque portable seed receipt
-- the SQLite file is published atomically only after digest and integrity verification
-- if no portable scopes are configured, the output is a verified schema-only seed
-- the receipt is not a runtime cursor and grants no authorization
-- first authenticated `connect` validates current assignment and state before issuing a client-bound incremental cursor
-- an unassigned scope loses seed provenance and only unchanged zero-provenance cache rows; pending authored intent and its application-visible local row state remain for normal authorization and explicit outcome
-- an assigned stale scope loses only continuation state, reconciles eligible pending intent under push-first ordering, and then rebuilds
-- seed use does not create a separate sync mode
-
-Operational rules:
-
-- the generator is trusted tooling, not a client bootstrap API
-- it does not accept a JWT
-- clients keep valid seeded schema and portable data after authenticated receipt conversion, then sync forward from the issued cursor
-
-See [Portable seeds](/synchro/architecture/portable-seeds/) for the detailed rules.
-
-## What to read next
-
-- [Architecture overview](/synchro/architecture/overview/)
-- [Scope modeling](/synchro/architecture/scope-modeling/)
-- [Client consumption](/synchro/clients/consumption/)
-- [Wire Protocol](/synchro/spec/01-wire-protocol/)
-- [Conformance Plan](/synchro/spec/06-conformance-plan/)
+- [Scope modeling](/synchro/architecture/scope-modeling/) explains membership and assignment.
+- [Application SQL limits](/synchro/clients/application-sql/) describes supported local statements.
+- [Portable seeds](/synchro/architecture/portable-seeds/) describes optional initial data.
+- [Local development](/synchro/getting-started/development/) covers contributor checks, not application onboarding.

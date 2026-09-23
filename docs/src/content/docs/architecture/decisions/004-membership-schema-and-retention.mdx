@@ -226,22 +226,23 @@ impact_function(p_old_row jsonb, p_new_row jsonb)
 | `pk_type` | One of `string`, `int`, or `int64`. |
 | `pk_value` | The typed primary-key value of a row that must have membership reevaluated. |
 
-A registered assignment function, when a scope is assigned from authenticated
-identity rather than a fixed shared declaration, has this signature:
+Scope assignment uses three implemented sources:
 
-```text
-assignment_function(p_user_id text)
-  RETURNS SETOF text
-```
+- `user:{canonical_user_id}` is assigned by default.
+- A registered shared scope is assigned to every active client.
+- `synchro_grant_user_scope(user_id, scope_id)` assigns one scope to one
+  canonical user. `synchro_revoke_user_scope(user_id, scope_id)` removes
+  that explicit assignment. A user can also revoke its default private scope.
 
-An assignment dependency uses an impact function that returns the affected
-canonical user IDs. Assignment changes advance the affected clients'
-`scope_set_version`; they do not permit clients to invent scope IDs.
+Connect reconciles grants and revocations on the user's next connect. A changed
+assignment advances `scope_set_version`. Added scopes start with a null cursor
+and require rebuild. Removed scopes require provenance cleanup. A client cannot
+invent a scope ID or grant itself a scope.
 
 ### Function restrictions
 
-Membership, impact, and assignment functions must be schema-qualified
-`LANGUAGE SQL`, `STABLE`, and `SECURITY INVOKER`. Impact functions receive the
+Membership and impact functions must be schema-qualified `LANGUAGE SQL`,
+`STABLE`, and `SECURITY INVOKER`. Impact functions receive the
 captured old and new image of the dependency event. Membership functions may
 read only the extension's schema-qualified synchronized and capture-dependency
 projection views for the worker's current materialization transaction. They
@@ -709,23 +710,23 @@ max_scope_fanout
 max_impact_rows
 ```
 
-Each value must be in the inclusive range `1..configured_maximum`. The
-configured maximum itself must be positive. A request or administrative action
-outside that range fails before doing work:
+`pull.limit` and `rebuild.limit` are fixed at `1..1000`. Other configured
+bounds use the positive maximum registered for that administrative operation.
+A request or administrative action outside its applicable range fails before
+doing work:
 
 ```json
 {
   "error": {
     "code": "invalid_request",
-    "retryable": false,
-    "field": "pull.limit",
-    "minimum": 1,
-    "maximum": "configured maximum"
+    "message": "request is invalid",
+    "retryable": false
   }
 }
 ```
 
-Wire requests receive HTTP 400 `invalid_request` for an invalid limit.
+Wire requests receive HTTP 400 `invalid_request` for an invalid limit. The
+message is bounded but is not a stable field-level limit description.
 Administrative SQL entry points return SQLSTATE `22023`; a registration-bound
 failure uses `invalid_registration` with `reason: "invalid_limit"`. A runtime
 membership result that exceeds a registered positive bound blocks capture with
@@ -755,7 +756,7 @@ fields, and retryability are stable.
 | First-execution push, pull, or rebuild has a stale or expired client generation | 409 | `client_generation_expired` | `current_client_generation` | false |
 | Registered relation or scope evaluation blocks capture | 503 | `temporary_unavailable` | `reason: "capture_blocked"` | true |
 | Queued mutation references incompatible authored fields | 200 | `schema_incompatible` per-mutation outcome | `authored_schema`, `current_schema`, `incompatible_field_ids` | false |
-| Limit is absent, non-integer, nonpositive, or above its configured maximum | 400 | `invalid_request` | `field`, `minimum`, `maximum` | false |
+| Pull or rebuild limit is absent, non-integer, outside `1..1000`, or another bound exceeds its configured maximum | 400 | `invalid_request` | No field-level limit members are required. | false |
 
 `unsupported`, `replace`, `rebuild_local`, and `none` are schema actions, not
 error codes. `schema_incompatible` is a terminal mutation outcome, not a

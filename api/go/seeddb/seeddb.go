@@ -797,7 +797,11 @@ func verifySQLiteOutput(
 	if err := ensureSQLiteSidecarsAbsent(path); err != nil {
 		return err
 	}
-	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&immutable=1"}).String()
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving sqlite seed path: %w", err)
+	}
+	dsn := (&url.URL{Scheme: "file", Path: absolutePath, RawQuery: "mode=ro&immutable=1"}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("opening finalized sqlite seed: %w", err)

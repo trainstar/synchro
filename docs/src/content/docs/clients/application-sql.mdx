@@ -35,6 +35,31 @@ Use `client.transaction { ... }` on Kotlin or `client.writeTransaction { ... }` 
 
 These limits apply to the public client SQL surfaces, including the React Native bridge. React Native forwards SQL to the native SDK and does not add a separate SQL engine.
 
+## React Native lossless SQLite values
+
+JavaScript numbers cannot represent every SQLite `INTEGER` value. JavaScript
+also has no native SQLite BLOB type. Use tagged bind values for those cases:
+
+```ts
+const maximumInt64 = { type: 'int64', value: '9223372036854775807' } as const;
+const binaryValue = { type: 'bytes', base64: 'AP8' } as const;
+
+const rows = await client.query(
+  'SELECT ? AS sequence, ? AS payload',
+  [maximumInt64, binaryValue]
+);
+```
+
+Queries return integers outside JavaScript's safe range with the `int64` tag.
+BLOB values use the `bytes` tag. Integers within the safe range return as numbers.
+
+`int64.value` is a canonical signed decimal string in the inclusive int64
+range. `bytes.base64` is unpadded canonical base64url. Do not replace either
+tag with a JavaScript number, a `Buffer`, or an ordinary object. `null`,
+`string`, `boolean`, safe integer JavaScript numbers, and finite non-integer
+JavaScript numbers remain direct bind values. Use the `int64` tag for every
+integer outside the JavaScript safe-integer range.
+
 ## Source evidence
 
 - Kotlin statement parsing: `clients/kotlin/synchro/src/main/kotlin/com/trainstar/synchro/ApplicationSql.kt:172-237,290-324`

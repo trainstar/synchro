@@ -7,6 +7,11 @@ Set Synchro GUCs in `postgresql.conf` or with the equivalent PostgreSQL configur
 
 Reload PostgreSQL after a `SIGHUP` setting changes. Restart PostgreSQL after a `postmaster` setting changes.
 
+Use [server setup](/synchro/getting-started/server-setup/) for PostgreSQL 18
+installation, role separation, logical WAL prerequisites, and the first
+registration. Do not place application rows or internal diagnostics in a
+readiness endpoint.
+
 ## WAL worker settings
 
 | GUC | Context | Default | Purpose |
@@ -22,6 +27,32 @@ An empty publication, slot, database, or worker login makes the related readines
 The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction. An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement. Candidate decoding also rejects the transaction. Split the source write into smaller transactions to stay below these fixed safety limits.
 
 The worker reads peeked pgoutput data one message at a time. It preserves each complete valid source transaction when a poll batch reaches its soft 16 MiB target.
+
+## Protocol request limits
+
+`pull.limit` and `rebuild.limit` are fixed inclusive ranges of `1..1000`.
+They are not PostgreSQL GUCs and cannot be raised through deployment
+configuration. The server rejects zero, negative, non-integer, and over-limit
+values. It does not clamp them.
+
+## Adapter process settings
+
+`synchrod-pg` requires `DATABASE_URL`. Its normal server mode supports these
+environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `LISTEN_ADDR` | HTTP listener. Bind `127.0.0.1:8091` only for the local tutorial. |
+| `JWT_SECRET` | HS256 secret. Mutually exclusive with `JWKS_URL`. |
+| `JWKS_URL` | RS256 or ES256 key set URL. Mutually exclusive with `JWT_SECRET`. |
+| `JWT_USER_CLAIM` | Canonical user claim. Defaults to `sub`. |
+| `MIN_CLIENT_VERSION` | Optional minimum client semantic version. |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, or `error`. |
+
+The standalone adapter does not terminate TLS. Bind it privately and terminate
+production HTTPS at a reverse proxy. The process creates and cancels its
+`JWKSContext` for the lifetime of the configured `JWKS_URL`. A library embedder
+must provide and cancel `JWKSContext` itself.
 
 ## Readiness limits
 

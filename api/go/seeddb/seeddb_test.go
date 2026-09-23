@@ -1216,7 +1216,8 @@ func TestSQLiteSnapshotCompletionVerifiesStagedAndFinalArtifacts(t *testing.T) {
 	}
 	env, tables, portable := reconstructSeedVerificationInputs(t, db, finalPath)
 
-	stagedPath := filepath.Join(directory, "staged.db")
+	t.Chdir(directory)
+	stagedPath := "staged.db"
 	copySeedArtifact(t, finalPath, stagedPath)
 	mutateSeedSQLite(t, stagedPath, "UPDATE _synchro_meta SET value = ? WHERE key = 'snapshot_complete'", seedSnapshotIncomplete)
 

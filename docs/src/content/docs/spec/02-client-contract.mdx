@@ -881,31 +881,9 @@ identity and server state without producing another client mutation.
 
 ## Client state and lifecycle
 
-Protocol version 3 client states are exactly:
-
-```text
-uninitialized, local_ready, connecting, schema_applying, ready,
-pushing, pulling, rebuilding, backoff, error, stopped
-```
-
-The legal state adjacency is:
-
-| From | Allowed states |
-| --- | --- |
-| `uninitialized` | `local_ready`, `error`, `stopped` |
-| `local_ready` | `connecting`, `error`, `stopped` |
-| `connecting` | `schema_applying`, `ready`, `backoff`, `error`, `stopped` |
-| `schema_applying` | `ready`, `rebuilding`, `error`, `stopped` |
-| `ready` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
-| `pushing` | `pushing`, `ready`, `pulling`, `connecting`, `backoff`, `error`, `stopped` |
-| `pulling` | `pulling`, `ready`, `rebuilding`, `connecting`, `backoff`, `error`, `stopped` |
-| `rebuilding` | `rebuilding`, `ready`, `connecting`, `backoff`, `error`, `stopped` |
-| `backoff` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
-| `error` | `local_ready`, `stopped` |
-| `stopped` | `local_ready` |
-
-The operation self-transitions represent another sealed batch or page. An
-illegal transition is a non-retryable local contract error and does not
+The complete normative client state map and transition rules are in
+[State Transition Summary](/synchro/spec/03-state-machines/#state-transition-summary).
+An illegal transition is a non-retryable local contract error and does not
 mutate queue, cursor, rebuild, or schema state.
 
 An empty database and a seeded database both enter `local_ready` and use the

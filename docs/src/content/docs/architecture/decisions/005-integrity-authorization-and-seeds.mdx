@@ -266,32 +266,10 @@ Clients verify row digests before apply. After atomically applying a terminal pa
 
 ## Legal client state transitions
 
-The protocol version 3 client states are exactly:
-
-```text
-uninitialized, local_ready, connecting, schema_applying, ready,
-pushing, pulling, rebuilding, backoff, error, stopped
-```
-
-The complete legal adjacency map is:
-
-| From | Allowed `to` states |
-| --- | --- |
-| `uninitialized` | `local_ready`, `error`, `stopped` |
-| `local_ready` | `connecting`, `error`, `stopped` |
-| `connecting` | `schema_applying`, `ready`, `backoff`, `error`, `stopped` |
-| `schema_applying` | `ready`, `rebuilding`, `error`, `stopped` |
-| `ready` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
-| `pushing` | `pushing`, `ready`, `pulling`, `connecting`, `backoff`, `error`, `stopped` |
-| `pulling` | `pulling`, `ready`, `rebuilding`, `connecting`, `backoff`, `error`, `stopped` |
-| `rebuilding` | `rebuilding`, `ready`, `connecting`, `backoff`, `error`, `stopped` |
-| `backoff` | `connecting`, `pushing`, `pulling`, `rebuilding`, `error`, `stopped` |
-| `error` | `local_ready`, `stopped` |
-| `stopped` | `local_ready` |
-
-The `pushing`, `pulling`, and `rebuilding` self-transitions represent another sealed batch or another page. `backoff` returns only to the interrupted operation or to `connecting`. `error -> local_ready` requires an explicit reset or retry action. `stopped -> local_ready` requires an explicit new start and local metadata validation. In particular, `stopped -> pulling`, `error -> ready`, and all unlisted pairs are illegal.
-
-Unknown states and illegal transitions are non-retryable local contract errors. They must not mutate durable queue, cursor, rebuild, or schema state. Parsing two recognized state names is not transition validation.
+The complete normative client state map and transition rules are in
+[State Transition Summary](/synchro/spec/03-state-machines/#state-transition-summary).
+Unknown states and unlisted transitions are non-retryable local contract
+errors. They must not mutate durable queue, cursor, rebuild, or schema state.
 
 ## SemVer 2.0 precedence
 
@@ -336,18 +314,28 @@ synchro_worker` for its SQL object access. Its own replication attribute
 authorizes logical replication because PostgreSQL does not inherit role
 attributes through membership. No other login principal has `REPLICATION`.
 
-The worker credential is provisioned outside the extension, stored outside the
-database and repository, rotated by deployment tooling, and restricted by
-`pg_hba.conf` to the configured database, expected host or local transport, and
-SCRAM-SHA-256 or certificate authentication. Readiness verifies the configured
-worker login OID and that it remains the sole runtime replication principal.
+The WAL background worker opens an internal PostgreSQL connection as the
+configured worker login. This connection does not use a password or pass
+through `pg_hba.conf`. PostgreSQL role attributes, membership validation, and
+explicit role activation constrain its SQL access. Readiness verifies the
+configured worker login OID and that it remains the sole runtime replication
+principal.
+
+The projection-bootstrap coordinator separately opens external SQL and logical
+replication connections with that worker identity. Those connections require
+deployment-managed authentication and matching `pg_hba.conf` rules.
+Provision and rotate their password or certificate outside the extension and
+repository. Restrict external worker access to the configured database and
+expected transport. These external authentication controls do not authenticate
+the internal background-worker connection.
 
 Release verification receives the worker login through
 `SYNCHRO_CONFORMANCE_WORKER_USER`. It receives the secret through
-`SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE`. The harness does not create or copy
-the credential. It installs a database-specific SCRAM-SHA-256 rule before a
-worker-specific rejection rule. Negative controls reject a wrong secret,
-another database, and passwordless local access.
+`SYNCHRO_CONFORMANCE_WORKER_PASSWORD_FILE` for external connections.
+The fixture setup provisions that credential outside the extension.
+The harness installs a database-specific SCRAM-SHA-256 rule before a
+worker-specific rejection rule. External-connection negative controls reject
+a wrong secret, another database, and passwordless local access.
 
 The installation applies all of these default-deny rules:
 

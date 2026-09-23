@@ -171,8 +171,8 @@ reevaluate. The impact contract covers old and new dependency state. A
 revocation, deletion, reassignment, or parent change that can remove membership
 must identify removed as well as added members.
 
-Membership, impact, and assignment functions are schema-qualified `LANGUAGE
-SQL`, `STABLE`, and `SECURITY INVOKER`. Impact functions receive captured old
+Membership and impact functions are schema-qualified `LANGUAGE SQL`, `STABLE`,
+and `SECURITY INVOKER`. Impact functions receive captured old
 and new dependency images. Membership functions can access only declared,
 schema-qualified extension projection views for synchronized rows and
 capture-only dependencies in the worker's current materialization transaction.
@@ -182,11 +182,26 @@ random values, wall-clock time, or dynamic SQL.
 
 The validator verifies each exact signature and return type, every declared
 dependency, required impact function, privilege, bound, and referenced field.
-All configured fanout, impact, pull, rebuild, and backfill bounds are positive
-integers within their configured maximum. A failed function evaluation, an
+All configured fanout, impact, and backfill bounds are positive integers within
+their configured maximum. Pull and rebuild limits are fixed at `1..1000`. A
+failed function evaluation, an
 undeclared dependency, a bad result type, a null or invalid scope ID, or an
 exceeded bound blocks capture. It is never interpreted as an empty membership or
 impact result.
+
+### Scope Assignment
+
+The server assigns scopes from the canonical authenticated identity. Every user
+has the default `user:{user_id}` scope unless an operator revokes it. Registered
+shared scopes apply to every active client. An operator uses
+`synchro_grant_user_scope(user_id, scope_id)` and
+`synchro_revoke_user_scope(user_id, scope_id)` for explicit per-user
+assignments.
+
+Connect reconciles the authoritative assignment set. It advances
+`scope_set_version` when the set changes. Added scopes have null cursors and
+rebuild. Removed scopes require local provenance cleanup. A request cannot add
+an unassigned scope ID.
 
 ### Registration Errors
 
@@ -1060,7 +1075,7 @@ retryability.
 | Rebuild continuation is invalidated by schema, membership, retention, stream, or client generation change | 409 | `rebuild_restart_required` | `scope_id` | false |
 | Registered relation drift or membership evaluation blocks capture | 503 | `temporary_unavailable` | `reason: "capture_blocked"` | true |
 | Retained queued intent contains an incompatible table or field | 200 | Per-mutation `schema_incompatible` | `authored_schema`, `current_schema`, `incompatible_field_ids` | false |
-| Limit is absent, non-integer, nonpositive, or above its configured maximum | 400 | `invalid_request` | `field`, `minimum`, `maximum` | false |
+| Pull or rebuild limit is absent, non-integer, or outside `1..1000` | 400 | `invalid_request` | No field-level limit members are required. | false |
 
 `none`, `replace`, `rebuild_local`, and `unsupported` are schema actions, not
 error codes. `schema_incompatible` is a terminal per-mutation outcome, not a

@@ -129,45 +129,26 @@ Use `make test-conformance-invariants` for the invariant checkers and their nega
 Use `make test-blackbox` for the real extension-backed server tests.
 The `synchro-conformance` CLI manages the authored catalog.
 
-The removed synthetic HTTP wrapper used the reference model for both expected and observed results.
-Its fault classes remain covered by the independent checker controls and real protocol tests.
-The `reference/` and `modelrunner/` interpreters and their model-only Make target are removed.
-The existing deletion-contract tables retain every original check and its proof home or reason for retirement.
-
 ## Fixture Format
 
-Existing JSON fixtures with `fixture_version = 1` are legacy engineering assets. They are not authoritative certification evidence.
+The JSON fixtures under `protocol/`, `schema/`, and `scopes/` are legacy engineering assets.
+They illustrate focused wire, schema, and scope cases. They are not authoritative certification evidence.
 
-Fixture presence, decoder tests, and implementation-derived expected values are not proof of semantic conformance. Future scenarios must be schema-valid and independently authored from the normative specification.
+Fixture presence, decoder tests, and implementation-derived expected values are not proof of semantic conformance. Authored scenarios must be schema-valid and independently authored from the normative specification.
 
-If the corpus outgrows plain JSON later, the format can evolve deliberately.
+`scenarios/` holds the authored semantic corpus. Its expected state, wire expectations, assertions, faults, and negative controls are contract inputs.
 
 ## Directory Layout
 
-- `protocol/`: connect, push, pull, rebuild, and error fixtures
-- `schema/`: schema evolution fixtures
-- `scopes/`: scope composition, cursor, and rebuild fixtures
-- `mutations/`: mutation acceptance, rejection, and reconciliation fixtures
-- `traces/`: client and server state-machine traces
-- `performance/`: budgets and measurement scenario definitions
-- `artifacts/`: artifact roles
-- `faults/`: typed fault recipes and negative controls
-- `schemas/`: versioned contract schemas
-
-## Current Seed Corpus
-
-The initial fixture set is legacy engineering coverage for high-risk flows:
-
-- `connect` with no schema action
-- `connect` with `rebuild_local`
-- mixed push acceptance and rejection
-- pull returning delta plus rebuild request
-- single-scope rebuild pagination
-- offline write before first connect
-- additive schema change requiring rebuild
-- hot-path round-trip budgets
-
-These files are not a certification result. A decoder that accepts a legacy fixture does not prove contract conformance.
+- `scenarios/`: authored semantic scenarios
+- `vectors/`: canonical protocol-value vectors
+- `faults/`, `invariants/`, and `mutants/`: fault definitions, invariant checks, and adversarial controls
+- `blackbox/`, `swift/`, `kotlin/`, and `reactnative/`: real-server and native-client conformance drivers
+- `soak/`: seeded randomized invariant workloads
+- `protocol/`, `schema/`, and `scopes/`: legacy illustrative fixtures
+- `performance/`: authored budget inputs in `budgets.json`
+- `artifacts/`, `schemas/`, and `internal/`: contract metadata, schemas, and validation
+- `barriers/`, `execution/`, and `cmd/testresult/`: runtime trace coordination and structured test-result support
 
 ## Evidence
 

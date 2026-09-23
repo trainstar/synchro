@@ -31,5 +31,8 @@ Run the supported Make targets from the repository root.
 | Kotlin | `make test-kotlin-unit` |
 | React Native | `make test-rn-unit` |
 
+Use `make test-swift`, `make test-kotlin`, or `make test-rn` for the applicable integration suites.
+Use the [development guide](../docs/src/content/docs/getting-started/development.mdx) for the repository-owned fixture prerequisites and Make sequence.
+
 Use the [testing evidence guide](../docs/src/content/docs/spec/07-release-verification.mdx) for integration and platform checks.
 Use [RELEASE.md](../RELEASE.md) for release operations.

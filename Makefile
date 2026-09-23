@@ -423,8 +423,13 @@ build-check:
 run:
 	cd api/go && GOWORK=off go run ./cmd/synchrod-pg
 
-docs-build: verify-contract
+docs-build: verify-contract test-docs-links
 	cd docs && npm run build
+	python3 docs/scripts/check_links.py docs/dist
+
+.PHONY: test-docs-links
+test-docs-links: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests docs.scripts.test_check_links
 
 docs-dev:
 	cd docs && npm run dev

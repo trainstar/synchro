@@ -26,7 +26,7 @@ That means scope design should follow runtime behavior, not only who can read a 
 
 Use:
 
-- private scopes for private data, such as `documents_user:{user_id}`
+- the default identity scope `user:{user_id}` for private data
 - shared scopes for shared data, such as `templates_public`
 - one local table may be fed by multiple scopes
 
@@ -38,9 +38,32 @@ Example:
 Model that as:
 
 - `templates_public`
-- `templates_user:{user_id}`
+- `user:{user_id}`
 
-Do not copy the public template catalog into every `templates_user:{user_id}` scope. One public row change should update one shared scope, not one scope per user.
+Do not copy the public template catalog into every private scope.
+One public row change should update one shared scope, not one scope per user.
+
+## Membership and assignment
+
+A registered membership function determines which scopes contain each row.
+That does not determine which clients can read those scopes.
+
+Connect assigns the authenticated identity scope `user:{user_id}` unless it was explicitly revoked.
+Registered shared scopes are assigned to every authenticated user.
+An administrator can assign another scope with `synchro.synchro_grant_user_scope(user_id, scope_id)`.
+Use `synchro.synchro_revoke_user_scope(user_id, scope_id)` to revoke an explicit assignment.
+Connect reconciles those changes on the user's next connection.
+
+For example, a private project scope needs both a membership function that returns `project:123` and an explicit grant:
+
+```sql
+SELECT synchro.synchro_grant_user_scope('alice', 'project:123');
+```
+
+Run this administrative operation through a trusted server-side authorization decision.
+Do not accept a requested scope or user ID from an untrusted client as authorization.
+A granted scope is not a portable public scope.
+See [server setup](/synchro/getting-started/server-setup/) for a complete default-scope example.
 
 ## Shared scope grouping
 
