@@ -7,6 +7,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -125,6 +126,43 @@ class PublicationStateTests(unittest.TestCase):
                         capture_output=True, text=True, timeout=5, check=False,
                     )
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_jobs_below_conditional_jobs_check_each_dependency(self) -> None:
+        # An implicit success() skips a job when any ancestor is skipped, so recovery
+        # mode would silently skip Package and publish below the skipped build jobs.
+        lines = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8").splitlines()
+        jobs: dict[str, dict[str, object]] = {}
+        current = ""
+        for line in lines[lines.index("jobs:") + 1:]:
+            header = re.fullmatch(r"  ([a-z0-9-]+):", line)
+            if header:
+                current = header.group(1)
+                jobs[current] = {"if": "", "needs": [], "body": ""}
+            elif line.startswith("    if: "):
+                jobs[current]["if"] = line.removeprefix("    if: ")
+            elif line.startswith("    needs: "):
+                jobs[current]["needs"] = [need.strip() for need in line.removeprefix("    needs: ").strip("[]").split(",")]
+            else:
+                jobs[current]["body"] += line + "\n"
+
+        def ancestors(name: str) -> set[str]:
+            found: set[str] = set()
+            for need in jobs[name]["needs"]:
+                found |= {need} | ancestors(need)
+            return found
+
+        guarded = [name for name in jobs if any(jobs[ancestor]["if"] for ancestor in ancestors(name))]
+        self.assertTrue({"seal", "package-server", "package-android", "package-apple", "package-gate", "publish"} <= set(guarded))
+        for name in guarded:
+            job = jobs[name]
+            with self.subTest(job=name):
+                self.assertRegex(job["if"], r"^(always\(\)|\$\{\{ (always\(\)|!cancelled\(\)) && .+ \}\})$")
+                for need in job["needs"]:
+                    self.assertTrue(
+                        f"needs.{need}.result == 'success'" in job["if"]
+                        or f'test "${{{{ needs.{need}.result }}}}" = success' in job["body"],
+                        need,
+                    )
 
     def test_recovery_preserves_dispatch_helper_without_changing_candidate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="synchro-recovery-helper-") as directory:
