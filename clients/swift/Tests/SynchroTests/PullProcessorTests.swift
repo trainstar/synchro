@@ -1267,6 +1267,55 @@ final class PullProcessorTests: XCTestCase {
         XCTAssertNil(try db.readTransaction { try SynchroMeta.getBackoffRecord($0) })
     }
 
+    func testRebuildRestartRetiresReplacedAttemptRetry() throws {
+        let (db, processor) = try makeTestEnv()
+        let scopeID = "orders:user1"
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertScope(connection, scopeID: scopeID, cursor: nil, checksum: nil)
+        }
+        let attempt = try processor.beginScopeRebuild(
+            scopeID: scopeID,
+            clientGeneration: 1,
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            pageLimit: 100,
+            syncedTables: [testTable.localSchema]
+        )
+        let requestJSON = try XCTUnwrap(String(data: try rebuildRequestBody(RebuildRequest(
+            clientID: "test-client",
+            clientGeneration: attempt.clientGeneration,
+            schema: SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+            scope: scopeID,
+            rebuildID: attempt.rebuildID,
+            cursor: attempt.cursor,
+            limit: attempt.pageLimit
+        )), encoding: .utf8))
+        try db.writeTransaction { connection in
+            try SynchroMeta.upsertBackoffRecord(
+                connection,
+                record: LocalBackoffRecord(
+                    resumeState: .rebuilding,
+                    workIdentity: requestJSON,
+                    retryClassification: .network,
+                    attemptCount: 1,
+                    nextRetryAtMS: 1
+                )
+            )
+        }
+
+        let restarted = try processor.restartScopeRebuild(
+            scopeID: scopeID,
+            clientGeneration: 1,
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            pageLimit: 100,
+            syncedTables: [testTable.localSchema]
+        )
+
+        XCTAssertNotEqual(restarted.rebuildID, attempt.rebuildID)
+        XCTAssertNil(try db.readTransaction { try SynchroMeta.getBackoffRecord($0) })
+    }
+
     func testRebuildStartResetsOnlyTargetScopeProvenance() throws {
         let (db, processor) = try makeTestEnv()
         let scopeID = "orders:target"

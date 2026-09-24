@@ -298,6 +298,8 @@ While the running process remains alive, the deadline transitions `backoff` only
 
 After process death, the next instance reaches `local_ready`, reads the durable backoff record, and waits there until the stored deadline. It then uses `local_ready -> connecting`, validates current server state, and resumes safe durable work. It does not perform the illegal transition `local_ready -> backoff`.
 
+A connect can install state that supersedes a saved pull or rebuild request, for example a schema migration, a scope change, or a new client generation. The same installation transaction then discards that saved request. A saved pull request stays current only while it equals the request that the client derives from installed state. A saved rebuild request stays current only while it names the resumable rebuild attempt of its scope. Replacing a rebuild attempt discards the saved request of the replaced attempt. After connect, the client resumes only the durable record that remains.
+
 Non-retryable protocol errors enter `error` except for the three explicit
 recovery dispatches: `schema_mismatch` and `client_generation_expired`
 transition to `connecting`, while `rebuild_restart_required` creates a new
