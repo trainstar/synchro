@@ -259,7 +259,9 @@ function StandardApp() {
   }, [client]);
 
   useEffect(() => {
+    console.log('harness:mounted');
     return () => {
+      console.log('harness:unmounted');
       const statusSubscription = statusSubscriptionRef.current;
       const conflictSubscription = conflictSubscriptionRef.current;
       statusSubscriptionRef.current = null;
@@ -353,6 +355,7 @@ function StandardApp() {
   }, [client]);
 
   const resetHarness = useCallback(async () => {
+    console.log('harness:reset:start');
     currentStepRef.current = 'reset:start';
     setCurrentStep('reset:start');
     setDisplayStatus('resetting');
@@ -361,6 +364,7 @@ function StandardApp() {
     conflictSubscriptionRef.current?.();
     conflictSubscriptionRef.current = null;
     await releaseClient(client);
+    console.log('harness:reset:released');
 
     conflictsRef.current = [];
     pendingConflictRecordRef.current = null;
@@ -377,6 +381,7 @@ function StandardApp() {
     setLastError(null);
     setClient(createClient());
     setHarnessGeneration((generation) => generation + 1);
+    console.log('harness:reset:complete');
   }, [client]);
 
   const runInit = useCallback(async () => {
