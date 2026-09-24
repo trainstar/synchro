@@ -5,9 +5,17 @@ import android.app.Activity
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -23,8 +31,11 @@ import org.robolectric.Robolectric
 import org.robolectric.annotation.Config
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -431,14 +442,34 @@ class SynchroClientTests {
     }
 
     @Test
-    fun testCloseWaitsForCallerOwnedSyncBeforeClosingDatabase() {
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun testCloseDrainsEngineWorkBeforeClosingDatabaseWithoutWaitingForCaller() {
         val server = MockWebServer()
         server.start()
         val context = ApplicationProvider.getApplicationContext<Context>()
+        val suspendAuthentication = AtomicBoolean()
+        val authenticationEntered = CountDownLatch(1)
+        val cleanupEntered = CountDownLatch(1)
+        val releaseCleanup = CompletableDeferred<Unit>()
+        lateinit var client: SynchroClient
         val config = SynchroConfig(
             dbPath = "synchro_client_close_${UUID.randomUUID()}.sqlite",
             serverURL = server.url("/").toString().trimEnd('/'),
-            authProvider = { "test-token" },
+            authProvider = {
+                if (suspendAuthentication.get()) {
+                    try {
+                        authenticationEntered.countDown()
+                        awaitCancellation()
+                    } finally {
+                        withContext(NonCancellable) {
+                            cleanupEntered.countDown()
+                            releaseCleanup.await()
+                            client.execute("INSERT INTO local_close_probe (id) VALUES ('drained')")
+                        }
+                    }
+                }
+                "test-token"
+            },
             clientID = "test-device",
             appVersion = "1.0.0",
             syncInterval = 999.0,
@@ -452,7 +483,14 @@ class SynchroClientTests {
         )
         preparedDatabase.close()
 
-        val client = SynchroClient(config, context)
+        client = SynchroClient(config, context)
+        client.createTable("local_close_probe", listOf(
+            ColumnDef(name = "id", type = "TEXT", nullable = false, primaryKey = true),
+        ))
+        val databaseField = SynchroClient::class.java.getDeclaredField("database").apply { isAccessible = true }
+        val database = databaseField.get(client) as SynchroDatabase
+        // SQLiteOpenHelper can reopen a closed database, so retain the original handle.
+        val originalConnection = database.readTransaction { it }
         val scopeID = "caller-owned-scope"
         val emptyChecksum = Json.encodeToString(
             ChecksumObject.serializer(),
@@ -490,35 +528,53 @@ class SynchroClientTests {
                 ),
         )
 
-        val started = CountDownLatch(1)
-        var closed = false
+        val callerDispatcher = StandardTestDispatcher()
+        val callerScope = CoroutineScope(callerDispatcher)
+        var close: CompletableFuture<Void>? = null
         try {
-            val startJob = CoroutineScope(Dispatchers.Default).launch {
-                runCatching { client.start() }
-                started.countDown()
-            }
+            runBlocking { client.start() }
             assertEquals("/sync/connect", server.takeRequest(2, TimeUnit.SECONDS)?.path)
             assertEquals("/sync/pull", server.takeRequest(2, TimeUnit.SECONDS)?.path)
-            assertTrue("start must complete before caller-owned sync", started.await(2, TimeUnit.SECONDS))
 
-            server.enqueue(
-                MockResponse()
-                    .setBody("{}")
-                    .setBodyDelay(1, TimeUnit.SECONDS),
-            )
-            val syncJob = CoroutineScope(Dispatchers.Default).launch {
-                runCatching { client.syncNow() }
+            suspendAuthentication.set(true)
+            var syncFailure: Throwable? = null
+            val caller = callerScope.launch {
+                syncFailure = runCatching { client.syncNow() }.exceptionOrNull()
             }
-            assertEquals("/sync/pull", server.takeRequest(2, TimeUnit.SECONDS)?.path)
+            callerDispatcher.scheduler.runCurrent()
+            assertTrue("syncNow must enter authentication", authenticationEntered.await(5, TimeUnit.SECONDS))
 
-            client.close()
-            closed = true
+            close = CompletableFuture.runAsync { client.close() }
+            assertTrue("close must cancel engine work", cleanupEntered.await(5, TimeUnit.SECONDS))
+            assertTrue("SQLite must remain open while engine cleanup waits", originalConnection.isOpen)
+            assertThrows(TimeoutException::class.java) { close.get(200, TimeUnit.MILLISECONDS) }
+            releaseCleanup.complete(Unit)
+            close.get(5, TimeUnit.SECONDS)
 
-            assertTrue("close must cancel and drain the engine-owned syncNow job", syncJob.isCompleted)
-            assertTrue("close must wait for the managed job", startJob.isCompleted)
+            assertFalse("close must close the original SQLite handle", originalConnection.isOpen)
+            assertEquals(SyncStatus.Stopped, client.getSyncStatus())
+            assertFalse("close must not require the external caller dispatcher", caller.isCompleted)
+            runTest(callerDispatcher) { caller.join() }
+            assertTrue(syncFailure is CancellationException)
+            withInternalDatabase(config.dbPath) { reopened ->
+                reopened.readTransaction { database ->
+                    database.rawQuery("SELECT id FROM local_close_probe", null).use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        assertEquals("drained", cursor.getString(0))
+                        assertFalse(cursor.moveToNext())
+                    }
+                }
+            }
         } finally {
-            if (!closed) client.close()
-            runCatching { server.shutdown() }
+            releaseCleanup.complete(Unit)
+            callerScope.cancel()
+            try {
+                if (close == null) client.close() else close.get(5, TimeUnit.SECONDS)
+                callerDispatcher.scheduler.runCurrent()
+            } finally {
+                server.shutdown()
+                context.deleteDatabase(config.dbPath)
+            }
         }
     }
 
