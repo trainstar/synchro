@@ -18,7 +18,7 @@ Protocol version 3 is the only protocol governed by this ADR. A peer that does n
 
 The integrity authority is SHA-256 over the canonical typed binary grammar below. Row digests bind the immutable schema hash, logical table identity, primary-key identity, complete authoritative row, and opaque server version. Scope digests bind the schema hash, scope identity, exact cardinality, and the sorted sequence of canonical row identities paired with their row digests.
 
-PostgreSQL objects live in the fixed, nonrelocatable `synchro` schema. Access is default-deny and is split among owner, adapter, seed, monitor, operator, and worker roles. Readiness fails closed. Portable seed export uses one enforced `SERIALIZABLE READ ONLY DEFERRABLE` PostgreSQL transaction, authenticated page tokens, end-to-end digest verification, and a verified SQLite artifact. pgrx-generated SQL is the sole extension installation source, with `0.3.0` as the first extension migration baseline.
+PostgreSQL objects live in the fixed, nonrelocatable `synchro` schema. Access is default-deny and is split among owner, adapter, seed, monitor, operator, and worker roles. Readiness fails closed. Portable seed export uses one enforced `SERIALIZABLE READ ONLY DEFERRABLE` PostgreSQL transaction, authenticated page tokens, end-to-end digest verification, and a verified SQLite artifact. pgrx-generated SQL is the sole extension installation source, with `0.3.1` as the first extension migration baseline.
 
 ## Portable type system and wire JSON
 

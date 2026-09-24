@@ -14,7 +14,7 @@
     {
       "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
       "path": "conformance/scenarios/performance/core-sync-path-001.json",
-      "sha256": "355d541919d621801804e38ebd4d94685e099d8ac4736ad04c9cfb25b752cecc"
+      "sha256": "9123d54607ce25888764a539f09ce8ee271cf5e3689ea2d68576e116a81cade0"
     },
     {
       "scenario_id": "SCN-PERF-FANOUT-001",
