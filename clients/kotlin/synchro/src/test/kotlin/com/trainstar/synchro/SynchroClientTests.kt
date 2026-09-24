@@ -486,6 +486,10 @@ class SynchroClientTests {
         client.createTable("local_close_probe", listOf(
             ColumnDef(name = "id", type = "TEXT", nullable = false, primaryKey = true),
         ))
+        val databaseField = SynchroClient::class.java.getDeclaredField("database").apply { isAccessible = true }
+        val database = databaseField.get(client) as SynchroDatabase
+        // SQLiteOpenHelper can reopen a closed database, so retain the original handle.
+        val originalConnection = database.readTransaction { it }
         val scopeID = "caller-owned-scope"
         val emptyChecksum = Json.encodeToString(
             ChecksumObject.serializer(),
@@ -541,10 +545,12 @@ class SynchroClientTests {
 
             close = CompletableFuture.runAsync { client.close() }
             assertTrue("close must cancel engine work", cleanupEntered.await(5, TimeUnit.SECONDS))
+            assertTrue("SQLite must remain open while engine cleanup waits", originalConnection.isOpen)
             assertThrows(TimeoutException::class.java) { close.get(200, TimeUnit.MILLISECONDS) }
             releaseCleanup.complete(Unit)
             close.get(5, TimeUnit.SECONDS)
 
+            assertFalse("close must close the original SQLite handle", originalConnection.isOpen)
             assertEquals(SyncStatus.Stopped, client.getSyncStatus())
             assertFalse("close must not require the external caller dispatcher", caller.isCompleted)
             callerDispatcher.scheduler.runCurrent()
