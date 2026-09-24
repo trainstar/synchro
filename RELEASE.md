@@ -221,6 +221,7 @@ Synchro has no numeric performance guarantee. Performance budgets remain deferre
 | No sealed candidate | Start a new candidate. |
 | Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Resume with original sealed bytes and the original artifact-owner run ID. |
 | One source tag exists | Verify its commit and create the missing tag there. |
+| GitHub draft exists | Verify its existing assets and upload only missing sealed assets before publication. |
 | GitHub published and a registry is missing | Keep non-latest status and publish the original payload. |
 | Registry outcome is unknown | Query the recorded operation before retry. |
 | Published bytes match | Skip upload and repeat incomplete public checks only. |
@@ -236,7 +237,12 @@ Before a resume, verify that the receipt remains available and that its source S
 The workflow rejects an unavailable or mismatched receipt.
 Do not bypass this control or add a substitute gate.
 
-Before publication, source or dependency corrections require a new candidate.
+Recovery uses publication helpers from the dispatch commit and retains the original candidate checkout and sealed bytes.
+Candidate CI must pass for both commits when they differ.
+The protected publisher discovers drafts through the authenticated release list.
+Recovery Candidate checks and Public checks use anonymous published-release observations.
+
+Before publication, product source or dependency corrections require a new candidate.
 Retain the failed candidate unchanged and repeat every required gate.
 Its package results do not certify the new candidate.
 

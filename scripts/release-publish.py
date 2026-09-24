@@ -505,6 +505,41 @@ def list_central_deployments(name: str, *, page_size: int = 100) -> dict[str, An
     }
 
 
+def github_release(repository: str, tag: str, token: str | None) -> dict[str, Any] | None:
+    if repository != "trainstar/synchro":
+        raise PublicationError("publication repository is invalid")
+    if not re.fullmatch(r"v[0-9]+[.][0-9]+[.][0-9]+", tag):
+        raise PublicationError("GitHub release tag is invalid")
+    api = f"https://api.github.com/repos/{repository}"
+    if token is None:
+        value = request_json(f"{api}/releases/tags/{urllib.parse.quote(tag, safe='')}")
+        if value is not None and (not isinstance(value, dict) or value.get("tag_name") != tag):
+            raise PublicationError("GitHub release identity differs")
+        return value
+
+    page = 1
+    selected = None
+    seen: set[str] = set()
+    while True:
+        releases = request_json(f"{api}/releases?per_page=100&page={page}", token)
+        if not isinstance(releases, list):
+            raise PublicationError("GitHub release list is invalid")
+        for value in releases:
+            if not isinstance(value, dict) or not isinstance(value.get("tag_name"), str):
+                raise PublicationError("GitHub release list identity is invalid")
+            identifier = positive_identifier(value.get("id"), "GitHub release ID")
+            if identifier in seen:
+                raise PublicationError("GitHub release list repeats an identity")
+            seen.add(identifier)
+            if value["tag_name"] == tag:
+                if selected is not None:
+                    raise PublicationError("GitHub release tag has multiple releases")
+                selected = value
+        if len(releases) < 100:
+            return selected
+        page += 1
+
+
 def observe_public(identity: dict[str, Any], repository: str, token: str | None) -> dict[str, Any]:
     if repository != "trainstar/synchro":
         raise PublicationError("publication repository is invalid")
@@ -515,7 +550,7 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
         value = request_json(f"{api}/git/ref/tags/{encoded}", token)
         tags[tag] = None if value is None else str(value.get("object", {}).get("sha", ""))
 
-    release_value = request_json(f"{api}/releases/tags/{urllib.parse.quote(identity['root_tag'], safe='')}", token)
+    release_value = github_release(repository, identity["root_tag"], token)
     latest_value = request_json(f"{api}/releases/latest", token)
     github: dict[str, Any] | None = None
     if release_value is not None:
@@ -621,6 +656,11 @@ def main() -> int:
     observe_parser.add_argument("--repository", default="trainstar/synchro")
     observe_parser.add_argument("--github-token-environment", default="GITHUB_TOKEN")
     observe_parser.add_argument("--output", type=Path, required=True)
+    github_parser = subparsers.add_parser("github-release")
+    github_parser.add_argument("--tag", required=True)
+    github_parser.add_argument("--repository", default="trainstar/synchro")
+    github_parser.add_argument("--github-token-environment", default="GITHUB_TOKEN")
+    github_parser.add_argument("--output", type=Path, required=True)
     select_parser = subparsers.add_parser("central-select")
     select_parser.add_argument("--input", type=Path, required=True)
     select_parser.add_argument("--name", required=True)
@@ -660,6 +700,12 @@ def main() -> int:
             state = observe_public(identity, args.repository, token)
             write_json(args.output, state)
             write_json(args.output.with_name(args.output.stem + "-classification.json"), classify_publication(identity, state))
+        elif args.command == "github-release":
+            token = os.environ.get(args.github_token_environment, "").strip() or None
+            value = github_release(args.repository, args.tag, token)
+            if value is None:
+                raise PublicationError("GitHub release is not available")
+            write_json(args.output, value)
         elif args.command == "central-select":
             write_json(args.output, select_central(load_json(args.input, "Central deployments"), args.name))
         elif args.command == "central-list":
