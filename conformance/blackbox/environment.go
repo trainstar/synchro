@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
 const (
@@ -669,9 +670,9 @@ func extensionBundleDestinations() map[string]struct{} {
 		librarySuffix = "dylib"
 	}
 	return map[string]struct{}{
-		"pkglibdir/synchro_pg." + librarySuffix:    {},
-		"sharedir/extension/synchro_pg.control":    {},
-		"sharedir/extension/synchro_pg--0.3.0.sql": {},
+		"pkglibdir/synchro_pg." + librarySuffix:                      {},
+		"sharedir/extension/synchro_pg.control":                      {},
+		"sharedir/extension/synchro_pg--" + release.Version + ".sql": {},
 	}
 }
 

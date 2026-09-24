@@ -61,15 +61,19 @@ Do not continue when a required control, credential, or runtime is unavailable.
 2. Create or select exactly one GitHub milestone named `vX.Y.Z`.
 3. Assign every release issue to that milestone.
 4. Run `make set-version VERSION=X.Y.Z`.
-5. Run `make version-check`.
-6. Confirm the support matrix in `conformance/support-matrix.json`.
-7. Merge the preparation changes into `dev` through a pull request.
-8. Confirm Candidate CI passed for the exact `dev` commit.
-9. Promote `dev` into `master` through a checked pull request.
-10. Record the exact merged `master` SHA.
-11. Confirm Candidate CI passed for that exact `master` commit.
-12. Confirm that exactly one `vX.Y.Z` milestone exists.
-13. Dispatch Release from the `master` head.
+5. Run `make update-conformance-catalog` to record the changed scenario digests.
+6. Run `make release-npm-dry-run` to install the React Native package at the new version.
+7. Run `make rn-ios-pods` to refresh the example `Podfile.lock` checksums.
+8. Keep only the `Synchro` and `SynchroReactNative` changes in that `Podfile.lock`.
+9. Run `make version-check`.
+10. Confirm the support matrix in `conformance/support-matrix.json`.
+11. Merge the preparation changes into `dev` through a pull request.
+12. Confirm Candidate CI passed for the exact `dev` commit.
+13. Promote `dev` into `master` through a checked pull request.
+14. Record the exact merged `master` SHA.
+15. Confirm Candidate CI passed for that exact `master` commit.
+16. Confirm that exactly one `vX.Y.Z` milestone exists.
+17. Dispatch Release from the `master` head.
 
 `VERSION` is the release version authority.
 
