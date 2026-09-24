@@ -6,8 +6,10 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -431,6 +433,7 @@ class SynchroClientTests {
     }
 
     @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
     fun testCloseWaitsForCallerOwnedSyncBeforeClosingDatabase() {
         val server = MockWebServer()
         server.start()
@@ -506,9 +509,11 @@ class SynchroClientTests {
                     .setBody("{}")
                     .setBodyDelay(1, TimeUnit.SECONDS),
             )
-            val syncJob = CoroutineScope(Dispatchers.Default).launch {
+            val callerDispatcher = StandardTestDispatcher()
+            val syncJob = CoroutineScope(callerDispatcher).launch {
                 runCatching { client.syncNow() }
             }
+            callerDispatcher.scheduler.runCurrent()
             assertEquals("/sync/pull", server.takeRequest(2, TimeUnit.SECONDS)?.path)
 
             client.close()
