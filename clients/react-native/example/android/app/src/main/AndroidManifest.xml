@@ -12,10 +12,12 @@
       android:usesCleartextTraffic="${usesCleartextTraffic}"
       android:networkSecurityConfig="@xml/network_security_config"
       android:supportsRtl="true">
+      <!-- Runtime overlay changes after emulator boot must not recreate the
+           harness activity, because recreation discards the in-progress test state. -->
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"
-        android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+        android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|assetsPaths"
         android:launchMode="singleTask"
         android:windowSoftInputMode="adjustResize"
         android:exported="true">
