@@ -432,6 +432,7 @@ jobs:
 
   package-server:
     name: package server Ubuntu 24.04 x64
+    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
     needs: [candidate, seal]
     runs-on: ubuntu-24.04
     permissions:
@@ -492,6 +493,7 @@ jobs:
 
   package-android:
     name: package ${{ matrix.cell }}
+    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
     needs: [candidate, seal]
     runs-on: ubuntu-24.04
     permissions:
@@ -667,6 +669,7 @@ jobs:
 
   package-apple:
     name: package ${{ matrix.cell }}
+    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
     needs: [candidate, seal]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
@@ -856,6 +859,7 @@ jobs:
 
   publish:
     name: approve, publish, verify, and promote
+    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' && needs.package-gate.result == 'success' }}
     needs: [candidate, seal, package-gate]
     runs-on: macos-26
     environment: release
