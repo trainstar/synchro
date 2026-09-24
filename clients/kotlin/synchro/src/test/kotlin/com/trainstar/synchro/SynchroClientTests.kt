@@ -14,6 +14,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -553,8 +554,7 @@ class SynchroClientTests {
             assertFalse("close must close the original SQLite handle", originalConnection.isOpen)
             assertEquals(SyncStatus.Stopped, client.getSyncStatus())
             assertFalse("close must not require the external caller dispatcher", caller.isCompleted)
-            callerDispatcher.scheduler.runCurrent()
-            assertTrue(caller.isCompleted)
+            runTest(callerDispatcher) { caller.join() }
             assertTrue(syncFailure is CancellationException)
             withInternalDatabase(config.dbPath) { reopened ->
                 reopened.readTransaction { database ->
