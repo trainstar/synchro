@@ -6,14 +6,14 @@ module.exports = {
       _: ['e2e/conformance.test.ts', 'e2e/sync.test.ts', 'e2e/reset-diagnostic.test.ts'],
       config: 'e2e/jest.config.js',
     },
-    artifacts: {
-      plugins: {
-        log: 'all',
-        screenshot: 'failing',
-      },
-    },
     jest: {
       setupTimeout: 120000,
+    },
+  },
+  artifacts: {
+    plugins: {
+      log: 'all',
+      screenshot: 'failing',
     },
   },
   apps: {

@@ -1,15 +1,16 @@
 import { by, device, element, expect, waitFor } from 'detox';
 
 describe('reset acknowledgement diagnostic', () => {
-  beforeAll(async () => {
-    await device.launchApp({ newInstance: true, delete: false });
-    await waitFor(element(by.id('status-value')))
-      .toHaveText('uninitialized')
-      .withTimeout(10000);
-  });
-
   for (let iteration = 0; iteration < 30; iteration += 1) {
-    it(`resets after initialization ${iteration}`, async () => {
+    it(`resets after fresh-process initialization ${iteration}`, async () => {
+      await device.launchApp({ newInstance: true, delete: false });
+      await waitFor(element(by.id('status-value')))
+        .toHaveText('uninitialized')
+        .withTimeout(10000);
+      await element(by.id('btn-reset')).tap();
+      await waitFor(element(by.id('step-value')))
+        .toHaveText('reset:complete')
+        .withTimeout(30000);
       await element(by.id('btn-init')).tap();
       await waitFor(element(by.id('last-result-key')))
         .toHaveText('init')
