@@ -1547,6 +1547,14 @@ test-rn-e2e-android-smoke: android-emulator-prepare
 	rm -f clients/react-native/example/artifacts/android-test-results.json
 	mkdir -p clients/react-native/example/artifacts
 	@set +e; \
+		"$(ANDROID_HOME)/platform-tools/adb" -s emulator-5554 logcat -v threadtime -T 1 \
+			> clients/react-native/example/artifacts/diagnostic-device.log 2>&1 & \
+		log_pid=$$!; \
+		trap 'kill "$$log_pid" 2>/dev/null || true; wait "$$log_pid" 2>/dev/null || true' EXIT; \
+		"$(ANDROID_HOME)/platform-tools/adb" -s emulator-5554 shell log -t SynchroDiagnostic recording-ready; \
+		sleep 1; \
+		kill -0 "$$log_pid" || exit 1; \
+		grep -F recording-ready clients/react-native/example/artifacts/diagnostic-device.log >/dev/null || exit 1; \
 		cd clients/react-native/example && \
 			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
 			JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \

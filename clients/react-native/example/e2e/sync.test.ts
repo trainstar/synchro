@@ -107,6 +107,9 @@ async function resetHarnessForTest() {
   } catch (error) {
     const step = await element(by.id('step-value')).getAttributes();
     const detail = await element(by.id('error-value')).getAttributes();
+    await device.takeScreenshot('reset-acknowledgement-failure').catch((captureError) => {
+      console.error('Reset screenshot failed', captureError);
+    });
     throw new Error(
       `reset did not complete; step=${String(step.text)} error=${String(detail.text)} original=${String(error)}`
     );

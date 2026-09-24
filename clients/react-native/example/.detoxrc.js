@@ -12,8 +12,8 @@ module.exports = {
   },
   artifacts: {
     plugins: {
-      log: 'all',
-      screenshot: 'failing',
+      log: 'none',
+      screenshot: 'manual',
     },
   },
   apps: {
