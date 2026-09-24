@@ -9,9 +9,9 @@ It uses that guide's `synchro_quickstart` database, `alice` identity,
 
 ## Choose an artifact source
 
-Use local artifacts before Synchro `0.3.0` is published. Use the published commands
+Use local artifacts before Synchro `0.3.1` is published. Use the published commands
 only after the matching release artifact is available. Both paths use Synchro
-`0.3.0` and the same client APIs.
+`0.3.1` and the same client APIs.
 
 Build local artifacts from this repository:
 
@@ -23,17 +23,17 @@ This creates:
 
 - Apple package files in `dist/local-consumer/apple/Synchro`
 - a Kotlin Maven repository in `dist/local-consumer/maven`
-- `dist/local-consumer/npm/trainstar-synchro-react-native-0.3.0.tgz`
+- `dist/local-consumer/npm/trainstar-synchro-react-native-0.3.1.tgz`
 
 Do not link raw source directories into another application. The staged
 artifacts are the supported pre-release path.
 
 | Surface | Local artifact | Published artifact after release |
 | --- | --- | --- |
-| Swift | local package path | Git tag `v0.3.0` |
-| CocoaPods | local pod path | Git tag `v0.3.0` |
-| Kotlin | local Maven repository | Maven Central `fit.trainstar:synchro:0.3.0` |
-| React Native | local `.tgz` | npm `@trainstar/synchro-react-native@0.3.0` |
+| Swift | local package path | Git tag `v0.3.1` |
+| CocoaPods | local pod path | Git tag `v0.3.1` |
+| Kotlin | local Maven repository | Maven Central `fit.trainstar:synchro:0.3.1` |
+| React Native | local `.tgz` | npm `@trainstar/synchro-react-native@0.3.1` |
 
 ## Prerequisites
 
@@ -54,13 +54,13 @@ endpoint, not a host loopback address.
 
 ## Swift
 
-Add the package to `Package.swift` after Synchro `v0.3.0` is published:
+Add the package to `Package.swift` after Synchro `v0.3.1` is published:
 
 ```swift
 dependencies: [
     .package(
         url: "https://github.com/trainstar/synchro.git",
-        exact: "0.3.0"
+        exact: "0.3.1"
     )
 ],
 targets: [
@@ -154,7 +154,7 @@ local tutorial adapter. When the application exits, call
 
 ## Kotlin
 
-Add the published artifact after Synchro `0.3.0` is available:
+Add the published artifact after Synchro `0.3.1` is available:
 
 ```kotlin
 repositories {
@@ -162,7 +162,7 @@ repositories {
 }
 
 dependencies {
-    implementation("fit.trainstar:synchro:0.3.0")
+    implementation("fit.trainstar:synchro:0.3.1")
 }
 ```
 
@@ -239,25 +239,25 @@ local Android emulator tutorial adapter. Use an HTTPS URL in production.
 
 ## React Native
 
-Install the published package after Synchro `0.3.0` is available:
+Install the published package after Synchro `0.3.1` is available:
 
 ```sh
-npm install @trainstar/synchro-react-native@0.3.0
+npm install @trainstar/synchro-react-native@0.3.1
 ```
 
 For local development, install the staged package:
 
 ```sh
-npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.3.0.tgz
+npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.3.1.tgz
 ```
 
 ### React Native iOS Podfile requirements
 
 The React Native bridge requires both Synchro and GRDB. Use these exact Git
-dependencies for a published Synchro `0.3.0` integration:
+dependencies for a published Synchro `0.3.1` integration:
 
 ```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.3.0'
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.3.1'
 pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 ```
 

@@ -25,9 +25,9 @@ diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/b
                  }
                  blocked = true;
              }
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
 @@ -2356,3 +2356,3 @@
  /* <begin connected objects> */
 --- synchro-pg/src/bgworker.rs:758

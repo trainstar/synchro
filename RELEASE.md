@@ -136,7 +136,8 @@ Swift uses the root Git package. CocoaPods trunk publication does not occur.
 
 React Native iOS uses exact Git-backed Synchro and GRDB dependencies.
 
-Version `0.3.0` is the first supported Protocol 3 baseline.
+Version `0.3.1` is the first supported Protocol 3 baseline.
+Version `0.3.0` was not published.
 
 Synchro does not promise migration from `0.1.x` or preview databases.
 

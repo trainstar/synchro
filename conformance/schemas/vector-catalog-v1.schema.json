@@ -8,7 +8,7 @@
   "properties": {
     "$schema": { "const": "https://synchro.dev/conformance/schemas/vector-catalog-v1.schema.json" },
     "schema_version": { "const": 1 },
-    "release": { "const": "0.3.0" },
+    "release": { "const": "0.3.1" },
     "vector_sets": {
       "type": "array",
       "minItems": 1,

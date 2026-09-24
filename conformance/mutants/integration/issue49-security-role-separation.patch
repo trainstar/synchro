@@ -10,9 +10,9 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
 
  DO $function_grants$
  DECLARE
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
 @@ -2554,6 +2554,8 @@ GRANT USAGE ON SCHEMA synchro
      TO synchro_adapter, synchro_seed, synchro_monitor, synchro_operator, synchro_worker;
  GRANT USAGE ON SCHEMA synchro_projection TO synchro_owner, synchro_operator, synchro_worker;
