@@ -218,13 +218,13 @@ jobs:
           make release-stage-server VERSION="${{ needs.candidate.outputs.version }}" PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
           make build-local-postgres LOCAL_POSTGRES_BINARY=dist/release-provisioner/synchro-local-postgres
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-server-components
           path: dist/release-components/server
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-provisioner
           path: dist/release-provisioner/synchro-local-postgres
@@ -288,7 +288,7 @@ jobs:
           export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword="$GPG_PASSPHRASE"
           make release-stage-packages VERSION="$RELEASE_VERSION"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-package-components
           path: dist/release-components/packages
@@ -355,7 +355,7 @@ jobs:
 
       - name: Generate SPDX JSON SBOM
         if: needs.candidate.outputs.mode == 'normal'
-        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         env:
           SYFT_FILE_METADATA_SELECTION: all
         with:
@@ -383,7 +383,7 @@ jobs:
       - name: Upload sealed release
         if: needs.candidate.outputs.mode == 'normal'
         id: upload
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sealed-release
           path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
@@ -406,7 +406,7 @@ jobs:
 
       - name: Persist sealed artifact receipt
         if: needs.candidate.outputs.mode == 'normal'
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: publication-sealed-candidate
           path: ${{ runner.temp }}/sealed-release-receipt.json
@@ -482,7 +482,7 @@ jobs:
             RELEASE_EVIDENCE_DIR=dist/package-evidence \
             SUPPORT_CELL_ID=SUP-PG-LINUX-X64-001
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: package-evidence-server
           path: dist/package-evidence/cells
@@ -657,7 +657,7 @@ jobs:
             dist/release-provisioner/synchro-local-postgres lifecycle --state-dir "$work/state" destroy "$SYNCHRO_CONFORMANCE_ATTACH_RUN_ID" >/dev/null 2>&1 || true
           fi
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: package-evidence-${{ matrix.cell }}
@@ -791,7 +791,7 @@ jobs:
           xcrun simctl shutdown "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
           xcrun simctl delete "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: package-evidence-${{ matrix.cell }}
@@ -847,7 +847,7 @@ jobs:
             --summary dist/package-evidence/summary.json \
             --release-manifest "dist/releases/${{ needs.candidate.outputs.release_dir_name }}/release-manifest.json"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: package-gate-evidence
           path: dist/package-evidence/summary.json
@@ -1090,7 +1090,7 @@ jobs:
             '{release_id:$release_id,tag:$tag,source_commit:$commit,operation:$operation}' > "$RUNNER_TEMP/github-operation.json"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: publication-github
           path: ${{ runner.temp }}/github-operation.json
@@ -1218,7 +1218,7 @@ jobs:
           echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
           echo "deployment_state=$deployment_state" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: publication-maven
           path: ${{ runner.temp }}/maven-operation.json
@@ -1334,7 +1334,7 @@ jobs:
           jq -n --arg package "$package" --arg version "$version" --arg sha256 "$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)" \
             '{package:$package,version:$version,sha256:$sha256,dist_tag:"latest",provenance:"verified"}' > "$RUNNER_TEMP/npm-operation.json"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: publication-npm
           path: ${{ runner.temp }}/npm-operation.json
