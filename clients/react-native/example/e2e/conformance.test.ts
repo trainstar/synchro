@@ -88,6 +88,10 @@ function processIdentity(value: unknown): ProcessIdentity {
   return value.process as ProcessIdentity;
 }
 
+// Two launches, one with a reinstall, took up to 104 s on a slow hosted simulator.
+// The per-command deadlines still detect a hang.
+const RELAUNCH_TEST_TIMEOUT_MS = 300000;
+
 describe('React Native conformance host', () => {
   beforeAll(async () => {
     await device.launchApp({
@@ -160,7 +164,7 @@ describe('React Native conformance host', () => {
     ) {
       throw new Error('conformance relaunch changed the database identity');
     }
-  });
+  }, RELAUNCH_TEST_TIMEOUT_MS);
 
   it('treats unavailable as a failed required command', async () => {
     // The prior test ends on a handled open failure, and the development
