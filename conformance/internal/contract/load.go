@@ -13,11 +13,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/internal/release"
 	"github.com/trainstar/synchro/conformance/internal/schemavalidator"
 )
 
 const (
-	releaseVersion  = "0.3.0"
+	releaseVersion  = release.Version
 	protocolVersion = 3
 )
 

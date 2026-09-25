@@ -186,6 +186,7 @@ type QueueReplayCoordinator struct {
 	finalResult  *finalCapture
 	result       QueueReplayCoordinatorResult
 	responseLoss *queueReplayResponseLoss
+	replayPull   *queueReplayTerminalPull
 
 	successorClientKey  string
 	successorClientID   string
@@ -220,6 +221,7 @@ const (
 	queueReplayStageResponseLoss
 	queueReplayStageResponseLossCapture
 	queueReplayStageRestartedAfterLoss
+	queueReplayStageReplayBegun
 	queueReplayStageReplay
 	queueReplayStageReplayCapture
 	queueReplayStageCapture
@@ -251,6 +253,14 @@ type queueReplayResponseLoss struct {
 	claimed       bool
 	replayAllowed bool
 	err           error
+}
+
+// queueReplayTerminalPull closes when the proxy serves the last pull page of
+// the replay cycle. A sampled ready state before that page is not quiescent.
+type queueReplayTerminalPull struct {
+	served     chan struct{}
+	servedOnce sync.Once
+	err        error
 }
 
 // NewQueueReplayCoordinator creates an authenticated host-loopback listener.
@@ -412,7 +422,7 @@ func (c *QueueReplayCoordinator) ExchangeCount() int {
 func (c *QueueReplayCoordinator) exchangeCountLocked() int {
 	count := 14 // main open/bootstrap/captures, nine successor-proof commands, complete response
 	for _, workload := range c.steps {
-		count += queueReplayLocalBatchCount(workload) + 9 // stop, write batches, restart, schema check, begin loss, push barrier, await loss, trace, restart, replay
+		count += queueReplayLocalBatchCount(workload) + 10 // stop, write batches, restart, schema check, begin loss, push barrier, await loss, trace, restart, begin replay, await replay
 	}
 	if len(c.steps) > 1 {
 		count += len(c.steps) - 1 // retain the prior replay trace before each later restart
@@ -626,6 +636,68 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 	writer.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(responseBody)
+	if request.Method == http.MethodPost && request.URL.Path == "/sync/pull" {
+		c.observeReplayPull(response.StatusCode, responseBody)
+	}
+}
+
+func (c *QueueReplayCoordinator) armReplayPull() {
+	c.proxyMu.Lock()
+	c.replayPull = &queueReplayTerminalPull{served: make(chan struct{})}
+	c.proxyMu.Unlock()
+}
+
+func (c *QueueReplayCoordinator) observeReplayPull(status int, body []byte) {
+	c.proxyMu.Lock()
+	barrier := c.replayPull
+	c.proxyMu.Unlock()
+	if barrier == nil {
+		return
+	}
+	terminal, err := queueReplayTerminalPullPage(status, body)
+	if err == nil && !terminal {
+		return
+	}
+	barrier.servedOnce.Do(func() {
+		barrier.err = err
+		close(barrier.served)
+	})
+}
+
+func (c *QueueReplayCoordinator) waitForReplayPull(ctx context.Context) error {
+	c.proxyMu.Lock()
+	barrier := c.replayPull
+	c.proxyMu.Unlock()
+	if barrier == nil {
+		return errors.New("React Native queue-replay terminal replay pull barrier is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for React Native queue-replay terminal replay pull: %w", ctx.Err())
+	case <-barrier.served:
+	}
+	c.proxyMu.Lock()
+	c.replayPull = nil
+	c.proxyMu.Unlock()
+	if barrier.err != nil {
+		return fmt.Errorf("React Native queue-replay replay pull is invalid: %w", barrier.err)
+	}
+	return nil
+}
+
+// queueReplayTerminalPullPage reports whether a pull response is the last page
+// of a cycle. Both SDKs enter ready only after that page and its rebuilds.
+func queueReplayTerminalPullPage(status int, body []byte) (bool, error) {
+	if status != http.StatusOK {
+		return false, fmt.Errorf("status=%d want=%d", status, http.StatusOK)
+	}
+	var page struct {
+		HasMore *bool `json:"has_more"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil || page.HasMore == nil {
+		return false, fmt.Errorf("has_more is absent or invalid: %v", err)
+	}
+	return !*page.HasMore, nil
 }
 
 func (c *QueueReplayCoordinator) armResponseLossPush() {
@@ -762,8 +834,10 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return errors.New("React Native queue-replay stopped process identity is unavailable")
 		}
 		return validateStoppedLifecycleResult(envelope.Result, *c.process)
+	case queueReplayStageReplayBegun:
+		return c.validateCallBegun(envelope.Result, c.replayCallID())
 	case queueReplayStageReplay:
-		if err := c.validateSynchronized(envelope.Result, "idle"); err != nil {
+		if err := c.validateCallCompleted(envelope.Result, c.replayCallID(), "idle", "ready"); err != nil {
 			return err
 		}
 		c.stepIndex++
@@ -791,7 +865,7 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 	case queueReplayStageResponseLossBegun:
-		if err := c.validateResponseLossCallBegun(envelope.Result); err != nil {
+		if err := c.validateCallBegun(envelope.Result, c.responseLossCallID()); err != nil {
 			return err
 		}
 	case queueReplayStageResponseLossPushReady:
@@ -813,7 +887,7 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 			return err
 		}
 	case queueReplayStageResponseLoss:
-		if err := c.validateResponseLossCallCompleted(envelope.Result); err != nil {
+		if err := c.validateCallCompleted(envelope.Result, c.responseLossCallID(), "blocked", "backoff"); err != nil {
 			return err
 		}
 	case queueReplayStageResponseLossCapture, queueReplayStageReplayCapture:
@@ -996,7 +1070,17 @@ func (c *QueueReplayCoordinator) advanceLocked(ctx context.Context, sequence uin
 		response.Command = c.command("client", "open", map[string]any{"client_key": c.clientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil}, nil)
 		c.stage = queueReplayStageRestartedAfterLoss
 	case queueReplayStageRestartedAfterLoss:
-		response.Command = c.command("client", "synchronize-step", map[string]any{"client_key": c.clientKey, "method": "start", "completion": "idle"}, nil)
+		c.armReplayPull()
+		response.Command = c.command("client", "begin-call", map[string]any{"client_key": c.clientKey, "call_id": c.replayCallID(), "method": "start"}, nil)
+		c.stage = queueReplayStageReplayBegun
+	case queueReplayStageReplayBegun:
+		// start can return before the replay cycle when a recovered retry
+		// deadline is still in the future. The cycle passes through ready
+		// before it rebuilds and pulls, so idle is awaited after its last pull.
+		if err := c.waitForReplayPull(ctx); err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command("client", "await-call", map[string]any{"client_key": c.clientKey, "call_id": c.replayCallID(), "completion": "idle"}, nil)
 		c.stage = queueReplayStageReplay
 	case queueReplayStageReplayCapture:
 		response.Command = c.command("client", "lifecycle", map[string]any{"client_key": c.clientKey, "operation": "stop"}, nil)
@@ -1139,28 +1223,30 @@ func (c *QueueReplayCoordinator) validateSynchronized(raw json.RawMessage, compl
 	return nil
 }
 
-func (c *QueueReplayCoordinator) validateResponseLossCallBegun(raw json.RawMessage) error {
+func (c *QueueReplayCoordinator) validateCallBegun(raw json.RawMessage, wantCallID string) error {
 	if err := validateActionResult(raw, "call-begun"); err != nil {
 		return err
 	}
 	var members map[string]json.RawMessage
-	if err := decodeStrictMembers(raw, &members, 4, "queue-replay response-loss call-begun result"); err != nil {
+	if err := decodeStrictMembers(raw, &members, 4, "queue-replay call-begun result"); err != nil {
 		return err
 	}
 	var callID, state string
-	if json.Unmarshal(members["call_id"], &callID) != nil || callID != c.responseLossCallID() ||
+	if json.Unmarshal(members["call_id"], &callID) != nil || callID != wantCallID ||
 		json.Unmarshal(members["state"], &state) != nil || state != "in_flight" {
-		return errors.New("React Native queue-replay response-loss call did not enter flight")
+		return fmt.Errorf("React Native queue-replay call %q did not enter flight", wantCallID)
 	}
 	return c.validateProcess(members["process"])
 }
 
-func (c *QueueReplayCoordinator) validateResponseLossCallCompleted(raw json.RawMessage) error {
+// validateCallCompleted checks one awaited call. A backoff state must also
+// name its retry deadline and operation.
+func (c *QueueReplayCoordinator) validateCallCompleted(raw json.RawMessage, wantCallID, wantCompletion, wantState string) error {
 	var members map[string]json.RawMessage
 	actionErr := validateActionResult(raw, "call-completed")
-	membersErr := decodeStrictMembers(raw, &members, 6, "queue-replay response-loss call-completed result")
+	membersErr := decodeStrictMembers(raw, &members, 6, "queue-replay call-completed result")
 	if membersErr != nil {
-		return fmt.Errorf("React Native queue-replay response-loss call is invalid: members=%s want_count=6 raw=%s action_error=%v members_error=%v", queueReplayMemberNames(members), boundedRaw(raw), actionErr, membersErr)
+		return fmt.Errorf("React Native queue-replay call %q is invalid: members=%s want_count=6 raw=%s action_error=%v members_error=%v", wantCallID, queueReplayMemberNames(members), boundedRaw(raw), actionErr, membersErr)
 	}
 	var callID, state, completion string
 	callIDErr := json.Unmarshal(members["call_id"], &callID)
@@ -1174,13 +1260,14 @@ func (c *QueueReplayCoordinator) validateResponseLossCallCompleted(raw json.RawM
 	if c.process != nil {
 		expectedProcess = *c.process
 	}
-	if actionErr != nil || callIDErr != nil || callID != c.responseLossCallID() || stateErr != nil || state != "completed" ||
-		completionErr != nil || completion != "blocked" || statusDecodeErr != nil || statusErr != nil || status.State != "backoff" ||
-		isJSONNull(status.RetryAt) || isJSONNull(status.Operation) || processErr != nil || c.process == nil || actualProcess != expectedProcess {
+	backoffIncomplete := wantState == "backoff" && (isJSONNull(status.RetryAt) || isJSONNull(status.Operation))
+	if actionErr != nil || callIDErr != nil || callID != wantCallID || stateErr != nil || state != "completed" ||
+		completionErr != nil || completion != wantCompletion || statusDecodeErr != nil || statusErr != nil || status.State != wantState ||
+		backoffIncomplete || processErr != nil || c.process == nil || actualProcess != expectedProcess {
 		return fmt.Errorf(
-			"React Native queue-replay response-loss call is invalid: members=%s want_count=6, call_id=%q want=%q decode_error=%v, state=%q want=%q decode_error=%v, completion=%q want=%q decode_error=%v action_error=%v, status=%s state=%q want=%q retry_at=%s operation=%s status_decode_error=%v status_error=%v, process={process_id:%q database_identity_fingerprint:%q} want={process_id:%q database_identity_fingerprint:%q} process_error=%v",
-			queueReplayMemberNames(members), callID, c.responseLossCallID(), callIDErr, state, "completed", stateErr, completion, "blocked", completionErr, actionErr,
-			boundedRaw(members["status"]), status.State, "backoff", boundedRaw(status.RetryAt), boundedRaw(status.Operation), statusDecodeErr, statusErr,
+			"React Native queue-replay call is invalid: members=%s want_count=6, call_id=%q want=%q decode_error=%v, state=%q want=%q decode_error=%v, completion=%q want=%q decode_error=%v action_error=%v, status=%s state=%q want=%q retry_at=%s operation=%s status_decode_error=%v status_error=%v, process={process_id:%q database_identity_fingerprint:%q} want={process_id:%q database_identity_fingerprint:%q} process_error=%v",
+			queueReplayMemberNames(members), callID, wantCallID, callIDErr, state, "completed", stateErr, completion, wantCompletion, completionErr, actionErr,
+			boundedRaw(members["status"]), status.State, wantState, boundedRaw(status.RetryAt), boundedRaw(status.Operation), statusDecodeErr, statusErr,
 			actualProcess.ProcessID, actualProcess.DatabaseIdentityFingerprint, expectedProcess.ProcessID, expectedProcess.DatabaseIdentityFingerprint, processErr,
 		)
 	}
@@ -1277,6 +1364,10 @@ func (c *QueueReplayCoordinator) bindResponseLossPush() error {
 
 func (c *QueueReplayCoordinator) responseLossCallID() string {
 	return fmt.Sprintf("queue-replay-response-loss-%d", c.stepIndex+1)
+}
+
+func (c *QueueReplayCoordinator) replayCallID() string {
+	return fmt.Sprintf("queue-replay-replay-%d", c.stepIndex+1)
 }
 
 func (c *QueueReplayCoordinator) validateProcess(raw json.RawMessage) error {
@@ -1650,6 +1741,8 @@ func (stage queueReplayStage) String() string {
 		return "response-loss-capture"
 	case queueReplayStageRestartedAfterLoss:
 		return "restarted-after-loss"
+	case queueReplayStageReplayBegun:
+		return "replay-begun"
 	case queueReplayStageReplay:
 		return "replay"
 	case queueReplayStageReplayCapture:

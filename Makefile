@@ -1464,8 +1464,12 @@ rn-android-emulator-reset:
 	fi
 
 .PHONY: rn-ios-build rn-ios-bundle
-rn-ios-build: rn-watchman-reset rn-ios-pods
+# Callers such as test-rn-e2e-ios-build select the seed, so create the pinned seed only when none exists.
+rn-ios-build: rn-watchman-reset rn-ios-pods | $(RN_CONSUMER_SEED)
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+
+$(RN_CONSUMER_SEED):
+	@$(MAKE) --no-print-directory rn-seed-asset
 
 rn-ios-bundle:
 	@set -eu; \

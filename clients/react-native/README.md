@@ -12,19 +12,19 @@ React Native TurboModule bridge for Synchro. The package wraps the native Swift 
 
 ## Installation
 
-Install the published package only after `0.3.0` is available. Before that,
+Install the published package only after Synchro `0.3.1` is available. Before that,
 use the local artifact flow in
 [Client Consumption](https://trainstar.github.io/synchro/clients/consumption/).
 
 ```sh
-npm install @trainstar/synchro-react-native@0.3.0
+npm install @trainstar/synchro-react-native@0.3.1
 ```
 
-Before you run `pod install`, add these published `0.3.0` dependencies to the
+Before you run `pod install`, add these published Synchro `0.3.1` dependencies to the
 application `ios/Podfile`:
 
 ```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.3.0'
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.3.1'
 pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 ```
 

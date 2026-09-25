@@ -55,6 +55,25 @@ func TestSetSyncsAndChecksVersionedSurfaces(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "conformance/support-matrix.json"), `"release": "1.4.5"`)
 	assertFileContains(t, filepath.Join(root, "conformance/support-matrix.json"), `"schema_version": 1`)
 
+	assertFileContains(t, filepath.Join(root, "conformance/faults/catalog.json"), `"release": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/schemas/vector-catalog-v1.schema.json"), `"release": { "const": "1.4.5" }`)
+	assertFileContains(t, filepath.Join(root, "conformance/internal/release/release.go"), `const Version = "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "extensions/Cargo.lock"), "name = \"serde\"\nversion = \"1.0.0\"")
+	assertFileContains(t, filepath.Join(root, "extensions/Cargo.lock"), "name = \"synchro-core\"\nversion = \"1.4.5\"")
+	assertFileContains(t, filepath.Join(root, "extensions/Cargo.lock"), "name = \"synchro-pg\"\nversion = \"1.4.5\"")
+	assertFileContains(t, filepath.Join(root, "verification/consumers/go/go.mod"), "require github.com/trainstar/synchro/api/go v1.4.5")
+	assertFileContains(t, filepath.Join(root, "clients/react-native/example/ios/Podfile.lock"), "  - SynchroReactNative (1.4.5):\n    - Synchro (= 1.4.5)")
+	assertFileContains(t, filepath.Join(root, "conformance/mutants/integration/install.patch"), "synchro_pg--1.4.5.sql")
+	assertFileContains(t, filepath.Join(root, "conformance/scenarios/versioned.json"), `"extension_version": "1.4.5"`)
+	assertFileContains(t, filepath.Join(root, "conformance/scenarios/unversioned.json"), `"id": "SCN-FIXTURE"`)
+	readme, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.ReplaceAll(publishedReferenceFixture, "0.1.0", "1.4.5"); string(readme) != want {
+		t.Fatalf("README.md release references were not synced exactly:\n%s", readme)
+	}
+
 	if _, err := os.Stat(filepath.Join(root, "extensions/synchro-pg/sql/synchro_pg--1.4.5.sql")); err != nil {
 		t.Fatalf("expected PostgreSQL install SQL to be renamed: %v", err)
 	}
@@ -88,6 +107,77 @@ func TestCheckFailsOnDrift(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsAndSyncRepairsReleaseReferenceDrift(t *testing.T) {
+	cases := []struct {
+		path string
+		old  string
+		new  string
+	}{
+		{"extensions/Cargo.lock", "name = \"synchro-pg\"\nversion = \"1.4.5\"", "name = \"synchro-pg\"\nversion = \"9.9.9\""},
+		{"verification/consumers/go/go.mod", "api/go v1.4.5", "api/go v9.9.9"},
+		{"conformance/internal/release/release.go", `"1.4.5"`, `"9.9.9"`},
+		{"docs/src/content/docs/index.mdx", "exact: \"1.4.5\"", "exact: \"9.9.9\""},
+		{"clients/react-native/example/ios/Podfile.lock", "Synchro (= 1.4.5)", "Synchro (= 9.9.9)"},
+		{"conformance/mutants/integration/install.patch", "synchro_pg--1.4.5.sql", "synchro_pg--9.9.9.sql"},
+		{"conformance/scenarios/versioned.json", `"extension_version": "1.4.5"`, `"extension_version": "9.9.9"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			root := newFixtureRepo(t)
+			if err := Set(root, "1.4.5"); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, tc.path)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), tc.old) {
+				t.Fatalf("%s does not contain %q", tc.path, tc.old)
+			}
+			writeFixtureFile(t, root, tc.path, strings.Replace(string(data), tc.old, tc.new, 1))
+			if err := Check(root, ""); err == nil || !strings.Contains(err.Error(), tc.path) {
+				t.Fatalf("Check did not identify drift in %s: %v", tc.path, err)
+			}
+			if err := Sync(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := Check(root, ""); err != nil {
+				t.Fatal(err)
+			}
+			assertFileContains(t, path, tc.old)
+		})
+	}
+}
+
+func TestCheckRequiresReleaseReferences(t *testing.T) {
+	cases := []struct {
+		name    string
+		remove  []string
+		message string
+	}{
+		{"listed path", []string{"clients/react-native/README.md"}, "missing release-version reference in clients/react-native/README.md"},
+		{"directory set", []string{"conformance/mutants/integration/install.patch"}, "conformance/mutants/integration has no release-version reference"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newFixtureRepo(t)
+			if err := Set(root, "1.4.5"); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range tc.remove {
+				writeFixtureFile(t, root, path, "no release reference\n")
+			}
+			if err := Check(root, ""); err == nil || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("Check error = %v, want %q", err, tc.message)
+			}
+			if err := Sync(root); err == nil {
+				t.Fatal("Sync accepted a surface without a release reference")
+			}
+		})
+	}
+}
+
 func TestCheckFailsOnTagMismatch(t *testing.T) {
 	t.Parallel()
 
@@ -106,7 +196,14 @@ func TestCheckFailsOnTagMismatch(t *testing.T) {
 }
 
 func TestCheckRejectsDistributionCatalogDrift(t *testing.T) {
-	for _, path := range []string{"conformance/artifacts/inventory.json", "conformance/requirements.json", "conformance/support-matrix.json"} {
+	for _, path := range []string{
+		"conformance/artifacts/inventory.json",
+		"conformance/requirements.json",
+		"conformance/support-matrix.json",
+		"conformance/faults/catalog.json",
+		"conformance/performance/budgets.json",
+		"conformance/vectors/catalog.json",
+	} {
 		t.Run(path, func(t *testing.T) {
 			root := newFixtureRepo(t)
 			if err := Sync(root); err != nil {
@@ -149,6 +246,16 @@ func TestFindRepoRootSupportsGitDirectoryAndWorktreeFile(t *testing.T) {
 	}
 }
 
+// publishedReferenceFixture covers each published reference form and one
+// PostgreSQL version that the tool must not change.
+const publishedReferenceFixture = "Synchro `0.1.0` uses PostgreSQL 18.3.\n" +
+	"Git tag `v0.1.0`\n" +
+	"npm install @trainstar/synchro-react-native@0.1.0\n" +
+	"dist/local-consumer/npm/trainstar-synchro-react-native-0.1.0.tgz\n" +
+	"implementation(\"fit.trainstar:synchro:0.1.0\")\n" +
+	"pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.1.0'\n" +
+	".package(url: \"https://github.com/trainstar/synchro.git\",\n        exact: \"0.1.0\")\n"
+
 func newFixtureRepo(t *testing.T) string {
 	t.Helper()
 
@@ -166,6 +273,30 @@ func newFixtureRepo(t *testing.T) string {
 	writeFixtureFile(t, root, "conformance/requirements.json", "{\n  \"release\": \"0.1.0\",\n  \"protocol_version\": 3\n}\n")
 	writeFixtureFile(t, root, "conformance/support-matrix.json", "{\n  \"release\": \"0.1.0\",\n  \"schema_version\": 1\n}\n")
 	writeFixtureFile(t, root, "conformance/schemas/requirements-v2.schema.json", "{\n  \"properties\": {\n    \"release\": { \"const\": \"0.1.0\" },\n    \"schema_version\": { \"const\": 2 }\n  }\n}\n")
+	for _, path := range []string{"conformance/faults/catalog.json", "conformance/performance/budgets.json", "conformance/vectors/catalog.json"} {
+		writeFixtureFile(t, root, path, "{\n  \"release\": \"0.1.0\",\n  \"schema_version\": 1\n}\n")
+	}
+	for _, path := range []string{"conformance/schemas/fault-catalog-v1.schema.json", "conformance/schemas/performance-budgets-v2.schema.json", "conformance/schemas/vector-catalog-v1.schema.json"} {
+		writeFixtureFile(t, root, path, "{\n  \"properties\": {\n    \"release\": { \"const\": \"0.1.0\" },\n    \"schema_version\": { \"const\": 1 }\n  }\n}\n")
+	}
+	writeFixtureFile(t, root, "conformance/internal/release/release.go", "package release\n\nconst Version = \"0.1.0\"\n")
+	writeFixtureFile(t, root, "extensions/Cargo.lock", "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\n[[package]]\nname = \"synchro-core\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"synchro-pg\"\nversion = \"0.1.0\"\n")
+	writeFixtureFile(t, root, "verification/consumers/go/go.mod", "module example.com/consumer\n\ngo 1.25\n\nrequire github.com/trainstar/synchro/api/go v0.1.0\n")
+	for _, path := range []string{
+		"README.md",
+		"clients/react-native/README.md",
+		"docs/src/content/docs/clients/consumption.mdx",
+		"docs/src/content/docs/getting-started/quickstart.mdx",
+		"docs/src/content/docs/getting-started/server-setup.mdx",
+		"docs/src/content/docs/index.mdx",
+	} {
+		writeFixtureFile(t, root, path, publishedReferenceFixture)
+	}
+	writeFixtureFile(t, root, "clients/react-native/example/ios/Podfile.lock", "PODS:\n  - Synchro (0.1.0):\n    - SQLCipher\n  - SynchroReactNative (0.1.0):\n    - Synchro (= 0.1.0)\n")
+	writeFixtureFile(t, root, "conformance/mutants/integration/install.patch", "+SELECT 'synchro_pg--0.1.0.sql';\n")
+	writeFixtureFile(t, root, "conformance/mutants/integration/other.patch", "+SELECT 1;\n")
+	writeFixtureFile(t, root, "conformance/scenarios/versioned.json", "{\n  \"extension_version\": \"0.1.0\"\n}\n")
+	writeFixtureFile(t, root, "conformance/scenarios/unversioned.json", "{\n  \"id\": \"SCN-FIXTURE\"\n}\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/sql/synchro_pg--0.1.0.sql", "-- install script\n")
 	writeFixtureFile(t, root, "VERSION", "0.2.0\n")
 

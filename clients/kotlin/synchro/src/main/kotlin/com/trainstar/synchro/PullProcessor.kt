@@ -257,14 +257,9 @@ internal class PullProcessor(private val database: SynchroDatabase) {
             if (SynchroMeta.getScope(db, scopeId) == null) {
                 throw SynchroError.InvalidResponse("rebuild targets an unknown scope $scopeId")
             }
-            val scopeGeneration = SynchroMeta.getScopeGeneration(db, scopeId)
             val existing = SynchroMeta.getRebuildAttempt(db, scopeId)
             if (existing != null &&
-                existing.clientGeneration == clientGeneration &&
-                existing.schemaVersion == schemaVersion &&
-                existing.schemaHash == schemaHash &&
-                existing.pageLimit == pageLimit &&
-                existing.generation == scopeGeneration
+                isResumableRebuildAttempt(db, existing, clientGeneration, SchemaRef(schemaVersion, schemaHash), pageLimit)
             ) {
                 return@writeSyncLockedTransaction existing
             }
@@ -278,6 +273,33 @@ internal class PullProcessor(private val database: SynchroDatabase) {
             )
         }
     }
+
+    internal fun isCurrentRebuildRequestInTransaction(
+        db: SQLiteDatabase,
+        request: RebuildRequest,
+        clientID: String,
+        clientGeneration: Long,
+        schema: SchemaRef,
+        pageLimit: Int,
+    ): Boolean {
+        val attempt = SynchroMeta.getRebuildAttempt(db, request.scope) ?: return false
+        return request.clientID == clientID &&
+            request.rebuildID == attempt.rebuildID &&
+            isResumableRebuildAttempt(db, attempt, clientGeneration, schema, pageLimit)
+    }
+
+    private fun isResumableRebuildAttempt(
+        db: SQLiteDatabase,
+        attempt: LocalRebuildAttempt,
+        clientGeneration: Long,
+        schema: SchemaRef,
+        pageLimit: Int,
+    ): Boolean =
+        attempt.clientGeneration == clientGeneration &&
+            attempt.schemaVersion == schema.version &&
+            attempt.schemaHash == schema.hash &&
+            attempt.pageLimit == pageLimit &&
+            attempt.generation == SynchroMeta.getScopeGeneration(db, attempt.scopeID)
 
     fun restartScopeRebuild(
         scopeId: String,

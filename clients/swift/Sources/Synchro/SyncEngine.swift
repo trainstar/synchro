@@ -560,8 +560,9 @@ final class SyncEngine: @unchecked Sendable {
                 }
 
                 try ensureLifecycleActive(generation)
+                // Connect can retire superseded work, so resume only the durable record that remains.
                 try await runSerializedSyncCycle(
-                    resuming: replayCycleBackoff,
+                    resuming: replayCycleBackoff == nil ? nil : try loadPersistedBackoff(),
                     lifecycleGeneration: generation
                 )
                 replayCycleBackoff = nil
@@ -1114,12 +1115,13 @@ final class SyncEngine: @unchecked Sendable {
             let request: PullRequest
             if let replayRequestBody {
                 let replayRequest = try decodeBackoffRequest(PullRequest.self, body: replayRequestBody)
-                guard replayRequest.clientID == clientID,
-                      replayRequest.clientGeneration == clientGeneration,
-                      replayRequest.schema == SchemaRef(version: schemaVersion, hash: schemaHash),
-                      replayRequest.scopeSetVersion == scopeSetVersion,
-                      replayRequest.scopes == scopes,
-                      replayRequest.limit == config.pullPageSize else {
+                guard isCurrentPullRequest(
+                    replayRequest,
+                    clientGeneration: clientGeneration,
+                    schema: SchemaRef(version: schemaVersion, hash: schemaHash),
+                    scopeSetVersion: scopeSetVersion,
+                    scopes: scopes
+                ) else {
                     throw SynchroError.invalidResponse(message: "durable pull retry identity does not match local state")
                 }
                 request = replayRequest
@@ -1420,6 +1422,11 @@ final class SyncEngine: @unchecked Sendable {
                 syncedTables: connectSchema.tables,
                 scopeCursorUpdates: response.scopeCursorUpdates
             )
+            try retireSupersededReadRetry(
+                db,
+                clientGeneration: response.clientGeneration,
+                schema: installedSchema
+            )
             try SynchroMeta.bindClientIDAfterAuthenticatedConnect(db, clientID: clientID)
             try SynchroMeta.clearBlockingFailure(db)
             if let completedConnectRequestJSON {
@@ -1516,11 +1523,68 @@ final class SyncEngine: @unchecked Sendable {
     }
 
     private func loadKnownScopes() throws -> [String: ScopeCursorRef] {
-        try database.readTransaction { db in
-            Dictionary(
-                uniqueKeysWithValues: try SynchroMeta.getAllScopes(db).map { scope in
-                    (scope.scopeID, ScopeCursorRef(cursor: scope.cursor))
-                }
+        try database.readTransaction { db in try knownScopes(db) }
+    }
+
+    private func knownScopes(_ db: GRDB.Database) throws -> [String: ScopeCursorRef] {
+        Dictionary(
+            uniqueKeysWithValues: try SynchroMeta.getAllScopes(db).map { scope in
+                (scope.scopeID, ScopeCursorRef(cursor: scope.cursor))
+            }
+        )
+    }
+
+    private func isCurrentPullRequest(
+        _ request: PullRequest,
+        clientGeneration: Int64,
+        schema: SchemaRef,
+        scopeSetVersion: Int64,
+        scopes: [String: ScopeCursorRef]
+    ) -> Bool {
+        request.clientID == clientID &&
+            request.clientGeneration == clientGeneration &&
+            request.schema == schema &&
+            request.scopeSetVersion == scopeSetVersion &&
+            request.scopes == scopes &&
+            request.limit == config.pullPageSize
+    }
+
+    // Connect re-establishes current state. A saved pull or rebuild request that the
+    // installed state supersedes must not be repeated, so the install retires it.
+    private func retireSupersededReadRetry(
+        _ db: GRDB.Database,
+        clientGeneration: Int64,
+        schema: SchemaRef
+    ) throws {
+        guard let backoff = try SynchroMeta.getBackoffRecord(db) else { return }
+        let body = Data(backoff.workIdentity.utf8)
+        let current: Bool
+        switch backoff.resumeState {
+        case .pulling:
+            current = isCurrentPullRequest(
+                try decodeBackoffRequest(PullRequest.self, body: body),
+                clientGeneration: clientGeneration,
+                schema: schema,
+                scopeSetVersion: try SynchroMeta.getInt64(db, key: .scopeSetVersion),
+                scopes: try knownScopes(db)
+            )
+        case .rebuilding:
+            current = try pullProcessor.isCurrentRebuildRequest(
+                db,
+                request: try decodeBackoffRequest(RebuildRequest.self, body: body),
+                clientID: clientID,
+                clientGeneration: clientGeneration,
+                schema: schema,
+                pageLimit: config.pullPageSize
+            )
+        case .connecting, .pushing:
+            return
+        }
+        if !current {
+            try SynchroMeta.clearMatchingBackoffRecord(
+                db,
+                resumeState: backoff.resumeState,
+                workIdentity: backoff.workIdentity
             )
         }
     }

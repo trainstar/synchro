@@ -24,7 +24,7 @@ It connects a client, changes a note offline, and verifies the change on the ser
 - [Install and initialize a client](https://trainstar.github.io/synchro/clients/consumption/)
 - [Configure authentication](https://trainstar.github.io/synchro/architecture/auth-integration/)
 
-These guides describe the `0.3.0` source and package interfaces.
+These guides describe the Synchro `0.3.1` source and package interfaces.
 Before that version is published, use the documented local-consumer installation.
 Do not substitute an older published package into the current tutorial.
 

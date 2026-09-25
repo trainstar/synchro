@@ -1,7 +1,7 @@
 {
   "$schema": "https://synchro.dev/conformance/schemas/performance-budgets-v2.schema.json",
   "schema_version": 2,
-  "release": "0.3.0",
+  "release": "0.3.1",
   "budgets": [
     {
       "id": "BUD-WARM-CONNECT-001",

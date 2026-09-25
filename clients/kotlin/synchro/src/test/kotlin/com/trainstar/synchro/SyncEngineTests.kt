@@ -710,6 +710,142 @@ class SyncEngineTests {
     }
 
     @Test
+    fun testConnectMigrationRetiresSupersededRebuildRetry() = runTest {
+        assertConnectMigrationRetiresSupersededReadRetry(RetryOperation.REBUILDING) { db, httpClient ->
+            val attempt = PullProcessor(db).beginScopeRebuild(
+                scopeID,
+                clientGeneration = 1L,
+                schemaVersion = 1L,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                pageLimit = 100,
+            )
+            httpClient.rebuildRequestJSON(
+                RebuildRequest(
+                    clientID = "test-device",
+                    clientGeneration = attempt.clientGeneration,
+                    schema = SchemaRef(attempt.schemaVersion, attempt.schemaHash),
+                    scope = scopeID,
+                    rebuildID = attempt.rebuildID,
+                    cursor = attempt.cursor,
+                    limit = attempt.pageLimit,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun testConnectMigrationRetiresSupersededPullRetry() = runTest {
+        assertConnectMigrationRetiresSupersededReadRetry(RetryOperation.PULLING) { db, httpClient ->
+            db.writeTransaction { conn ->
+                SynchroMeta.upsertScope(
+                    conn,
+                    scopeId = scopeID,
+                    cursor = "scope_cursor_old",
+                    checksum = emptyScopeChecksumJSON(),
+                )
+            }
+            httpClient.pullRequestJSON(
+                PullRequest(
+                    clientID = "test-device",
+                    clientGeneration = 1L,
+                    schema = SchemaRef(1L, PROTOCOL_TEST_SCHEMA_HASH),
+                    scopeSetVersion = 1L,
+                    scopes = mapOf(scopeID to ScopeCursorRef("scope_cursor_old")),
+                    limit = 100,
+                ),
+            )
+        }
+    }
+
+    private suspend fun assertConnectMigrationRetiresSupersededReadRetry(
+        resumeState: String,
+        savedRequestJSON: (SynchroDatabase, HttpClient) -> String,
+    ) {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
+        val rebuiltRecord = protocolRecord(
+            schema = protocolOrdersSchema(includeNotes = true),
+            id = "w1",
+            shipAddress = "Rebuilt Address",
+            userID = "u1",
+            notes = "schema rebuild local",
+            updatedAt = "2026-01-01T12:00:00.000000Z",
+            serverVersion = "opaque_server_version_rebuild",
+            schemaHash = connectRebuildLocalSchemaHash,
+        )
+        val rebuiltChecksum = protocolScopeChecksum(rebuiltRecord)
+        val (engine, db) = makeIntegrationEnv { request ->
+            val path = request.path ?: ""
+            val body = request.body.readUtf8()
+            when {
+                path.endsWith("/sync/connect") -> {
+                    requests += "connect" to body
+                    mockResponse(connectRebuildLocalJSON)
+                }
+                path.endsWith("/sync/rebuild") -> {
+                    requests += "rebuild" to body
+                    mockResponse(
+                        rebuildJSON(
+                            records = "[${protocolRebuildRecordJSON(rebuiltRecord)}]",
+                            finalCursor = "scope_cursor_rebuilt",
+                            checksum = rebuiltChecksum,
+                        )
+                    )
+                }
+                path.endsWith("/sync/pull") -> {
+                    requests += "pull" to body
+                    mockResponse(scopePullJSON(
+                        cursor = "scope_cursor_after_rebuild",
+                        scopeSetVersion = 2,
+                        checksum = rebuiltChecksum,
+                    ))
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(ordersLocalSchemaTable(includeNotes = false)),
+            )
+            db.writeSyncLockedTransaction { conn ->
+                SynchroMeta.upsertScope(conn, scopeId = scopeID, cursor = null, checksum = null)
+                SynchroMeta.setInt64(conn, MetaKey.SCOPE_SET_VERSION, 1L)
+                SynchroMeta.setInt64(conn, MetaKey.CLIENT_GENERATION, 1L)
+            }
+            val encoder = HttpClient(
+                SynchroConfig(
+                    dbPath = "unused.sqlite",
+                    serverURL = "http://localhost",
+                    authProvider = { "token" },
+                    clientID = "test-device",
+                    appVersion = "1.0.0",
+                ),
+                OkHttpClient(),
+            )
+            val saved = savedRequestJSON(db, encoder)
+            installDurableBackoff(db, resumeState, saved)
+
+            engine.start()
+
+            assertEquals(listOf("connect", "rebuild", "pull"), requests.map { it.first })
+            val target = SchemaRef(2L, connectRebuildLocalSchemaHash)
+            assertEquals(target, Json.decodeFromString<RebuildRequest>(requests[1].second).schema)
+            assertEquals(target, Json.decodeFromString<PullRequest>(requests[2].second).schema)
+            assertTrue(requests.none { it.second == saved })
+            assertNull(DurableBackoffStore.load(db))
+            assertEquals(SyncStatus.Ready, engine.getSyncStatus())
+            val row = db.queryOne("SELECT ship_address, notes FROM orders WHERE id = ?", arrayOf("w1"))
+            assertEquals("Rebuilt Address", row?.get("ship_address"))
+            assertEquals("schema rebuild local", row?.get("notes"))
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testConnectSchemaAndBindingInstallationRollsBackTogether() = runTest {
         val (engine, db) = makeIntegrationEnv { mockResponse("{}", 500) }
         installTestSchema(

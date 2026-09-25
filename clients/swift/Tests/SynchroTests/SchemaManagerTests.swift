@@ -1433,6 +1433,153 @@ final class SchemaManagerTests: XCTestCase {
             1
         )
     }
+
+    func testNewServerMigrationSupersedesAppliedMigrationAwaitingRebuildAcrossReopen() throws {
+        let (source, intermediate, target) = try migrationChain()
+        for schemaReset in [false, true] {
+            let path = (NSTemporaryDirectory() as NSString)
+                .appendingPathComponent("synchro_superseded_migration_\(UUID().uuidString).sqlite")
+            let database = try SynchroDatabase(path: path)
+            let manager = SchemaManager(database: database)
+            try manager.createSyncedTables(schema: SchemaResponse(
+                schemaVersion: source.schemaVersion,
+                schemaHash: source.schemaHash,
+                serverTime: Date(),
+                manifest: source
+            ))
+            try database.writeTransaction { connection in
+                for scopeID in ["orders:final", "orders:pending"] {
+                    try SynchroMeta.upsertScope(
+                        connection, scopeID: scopeID, cursor: "c1", checksum: "k1", localChecksum: "l1"
+                    )
+                }
+            }
+            _ = try manager.prepareMigration(
+                targetManifest: intermediate,
+                action: .rebuildLocal,
+                affectedScopes: ["orders:final", "orders:pending"],
+                scopeCursorUpdates: [:],
+                schemaReset: false
+            )
+            _ = try database.writeSyncLockedTransaction { connection in
+                try manager.applyPreparedMigrationInTransaction(connection)
+            }
+            try database.writeTransaction { connection in
+                try SynchroMeta.upsertScope(
+                    connection, scopeID: "orders:final", cursor: "c2", checksum: "k2", localChecksum: "l2"
+                )
+            }
+
+            let reopened = try SynchroDatabase(path: path)
+            defer {
+                try? reopened.close()
+                try? database.close()
+            }
+            let reopenedManager = SchemaManager(database: reopened)
+            _ = try reopenedManager.recoverMigrationIfNeeded()
+            let superseding = try reopenedManager.prepareMigration(
+                targetManifest: target,
+                action: .replace,
+                affectedScopes: [],
+                scopeCursorUpdates: [:],
+                schemaReset: schemaReset
+            )
+            XCTAssertEqual(superseding.source, SchemaRef(version: 2, hash: intermediate.schemaHash))
+            XCTAssertEqual(superseding.target, SchemaRef(version: 3, hash: target.schemaHash))
+            XCTAssertEqual(superseding.affectedScopes, ["orders:pending"])
+            XCTAssertEqual(superseding.schemaReset, schemaReset)
+            let applied = try reopened.writeSyncLockedTransaction { connection in
+                try reopenedManager.applyPreparedMigrationInTransaction(connection)
+            }
+            XCTAssertEqual(applied.phase, .applied)
+            XCTAssertEqual(
+                try reopened.readTransaction { try SynchroMeta.get($0, key: .schemaHash) },
+                target.schemaHash
+            )
+
+            try reopenedManager.finishAppliedMigrationIfPossible()
+            XCTAssertNotNil(try reopenedManager.activeMigration())
+            try reopened.writeTransaction { connection in
+                try SynchroMeta.upsertScope(
+                    connection, scopeID: "orders:pending", cursor: "c3", checksum: "k3", localChecksum: "l3"
+                )
+            }
+            try reopenedManager.finishAppliedMigrationIfPossible()
+            XCTAssertNil(try reopenedManager.activeMigration())
+        }
+    }
+
+    func testDifferentServerMigrationStillRejectsUncommittedDetachedOrSameTargetJournal() throws {
+        let (source, intermediate, target) = try migrationChain()
+        let database = try makeTestDB()
+        defer { try? database.close() }
+        let manager = SchemaManager(database: database)
+        try manager.createSyncedTables(schema: SchemaResponse(
+            schemaVersion: source.schemaVersion,
+            schemaHash: source.schemaHash,
+            serverTime: Date(),
+            manifest: source
+        ))
+        func prepare(_ manifest: SchemaManifest, schemaReset: Bool = false) throws -> SchemaMigrationJournal {
+            try manager.prepareMigration(
+                targetManifest: manifest,
+                action: .replace,
+                affectedScopes: [],
+                scopeCursorUpdates: [:],
+                schemaReset: schemaReset
+            )
+        }
+        func setActiveSchema(_ manifest: SchemaManifest) throws {
+            try database.writeTransaction { connection in
+                try SynchroMeta.setInt64(connection, key: .schemaVersion, value: manifest.schemaVersion)
+                try SynchroMeta.set(connection, key: .schemaHash, value: manifest.schemaHash)
+            }
+        }
+
+        let prepared = try prepare(intermediate)
+        XCTAssertThrowsError(try prepare(target))
+        XCTAssertEqual(try manager.activeMigration(), prepared)
+
+        let applied = try database.writeSyncLockedTransaction { connection in
+            try manager.applyPreparedMigrationInTransaction(connection)
+        }
+        // Swift applies only a journal whose target differs from its source.
+        XCTAssertThrowsError(try prepare(intermediate, schemaReset: true))
+        XCTAssertEqual(try manager.activeMigration(), applied)
+
+        try setActiveSchema(source)
+        XCTAssertThrowsError(try prepare(target))
+        XCTAssertEqual(try manager.activeMigration(), applied)
+
+        try setActiveSchema(intermediate)
+        try database.writeTransaction { try SynchroMeta.clearSchemaMigrationJournal($0) }
+        let preparedSameTarget = try prepare(intermediate, schemaReset: true)
+        XCTAssertEqual(preparedSameTarget.phase, .prepared)
+        XCTAssertThrowsError(try prepare(target))
+        XCTAssertEqual(try manager.activeMigration(), preparedSameTarget)
+    }
+
+    private func migrationChain() throws -> (SchemaManifest, SchemaManifest, SchemaManifest) {
+        var source = protocolOrdersSchemaManifest(includeNotes: false)
+        source.schemaHash = try Integrity.schemaManifestHash(source)
+        var intermediate = protocolOrdersSchemaManifest(
+            includeNotes: true,
+            schemaVersion: 2,
+            parentSchema: SchemaRef(version: 1, hash: source.schemaHash),
+            transitionClass: "class_3",
+            compatibilityFloor: 2
+        )
+        intermediate.schemaHash = try Integrity.schemaManifestHash(intermediate)
+        var target = intermediate
+        target.schemaVersion = 3
+        target.parentSchema = SchemaRef(version: 2, hash: intermediate.schemaHash)
+        target.compatibilityFloor = 3
+        target.tables[0].indexes = [
+            IndexSchema(indexID: "idx-orders-user", name: "idx_orders_user", fieldIDs: ["field-user-id"], unique: false),
+        ]
+        target.schemaHash = try Integrity.schemaManifestHash(target)
+        return (source, intermediate, target)
+    }
 }
 
 private extension Array {

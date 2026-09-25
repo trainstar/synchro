@@ -21,6 +21,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
 // TestRealIssue49WALIsTheOnlyAtomicPublicationPath proves SYNC-WAL-001,
@@ -555,7 +556,7 @@ func TestRealIssue49DatabaseAuthorityAndInstallation(t *testing.T) {
 	var otherVersions, updatePaths int
 	if err := admin.QueryRowContext(ctx, `
 		SELECT count(*) FROM pg_catalog.pg_available_extension_versions
-		WHERE name = 'synchro_pg' AND version <> '0.3.0'`).Scan(&otherVersions); err != nil {
+		WHERE name = 'synchro_pg' AND version <> $1`, release.Version).Scan(&otherVersions); err != nil {
 		t.Fatalf("observe extension migration versions: %v", err)
 	}
 	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM pg_catalog.pg_extension_update_paths('synchro_pg')").Scan(&updatePaths); err != nil {
@@ -655,7 +656,7 @@ func TestRealIssue49DatabaseAuthorityAndInstallation(t *testing.T) {
 	trackedSQL, artifactSQL := loadIssue49InstallSQL(t, environment.ExtensionArtifact)
 
 	t.Run("assertion", func(t *testing.T) {
-		if serverMajor != 18 || extensionVersion != "0.3.0" || extensionSchema != "synchro" || otherVersions != 0 || updatePaths != 0 {
+		if serverMajor != 18 || extensionVersion != release.Version || extensionSchema != "synchro" || otherVersions != 0 || updatePaths != 0 {
 			t.Fatalf("clean PostgreSQL 18 installation has migration drift: major=%d version=%q schema=%q other=%d paths=%d", serverMajor, extensionVersion, extensionSchema, otherVersions, updatePaths)
 		}
 		if restrictedGroups != 6 || !workerBoundary || !soleWorker || !workerHBA {
@@ -1941,7 +1942,7 @@ func loadIssue49InstallSQL(t *testing.T, artifactRoot string) ([]byte, []byte) {
 	if !ok {
 		t.Fatal("locate Issue 49 test source")
 	}
-	trackedPath := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..", "..", "extensions", "synchro-pg", "sql", "synchro_pg--0.3.0.sql"))
+	trackedPath := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..", "..", "extensions", "synchro-pg", "sql", "synchro_pg--"+release.Version+".sql"))
 	tracked, err := os.ReadFile(trackedPath)
 	if err != nil {
 		t.Fatalf("read tracked generated pgrx SQL: %v", err)
@@ -1951,7 +1952,7 @@ func loadIssue49InstallSQL(t *testing.T, artifactRoot string) ([]byte, []byte) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if !entry.IsDir() && entry.Name() == "synchro_pg--0.3.0.sql" {
+		if !entry.IsDir() && entry.Name() == "synchro_pg--"+release.Version+".sql" {
 			candidates = append(candidates, path)
 		}
 		return nil

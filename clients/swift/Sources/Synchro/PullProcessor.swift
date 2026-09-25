@@ -284,13 +284,14 @@ final class PullProcessor: @unchecked Sendable {
             guard try SynchroMeta.getScope(db, scopeID: scopeID) != nil else {
                 throw SynchroError.invalidResponse(message: "rebuild targets an unknown scope \(scopeID)")
             }
-            let scopeGeneration = try SynchroMeta.getScopeGeneration(db, scopeID: scopeID)
             if let existing = try SynchroMeta.getRebuildAttempt(db, scopeID: scopeID),
-               existing.clientGeneration == clientGeneration,
-               existing.schemaVersion == schemaVersion,
-               existing.schemaHash == schemaHash,
-               existing.pageLimit == pageLimit,
-               existing.generation == scopeGeneration {
+               try isResumableRebuildAttempt(
+                   db,
+                   attempt: existing,
+                   clientGeneration: clientGeneration,
+                   schema: SchemaRef(version: schemaVersion, hash: schemaHash),
+                   pageLimit: pageLimit
+               ) {
                 return existing
             }
             return try startScopeRebuildAttempt(
@@ -303,6 +304,42 @@ final class PullProcessor: @unchecked Sendable {
                 tablesByName: tablesByName
             )
         }
+    }
+
+    func isCurrentRebuildRequest(
+        _ db: GRDB.Database,
+        request: RebuildRequest,
+        clientID: String,
+        clientGeneration: Int64,
+        schema: SchemaRef,
+        pageLimit: Int
+    ) throws -> Bool {
+        guard let attempt = try SynchroMeta.getRebuildAttempt(db, scopeID: request.scope) else {
+            return false
+        }
+        return try request.clientID == clientID &&
+            request.rebuildID == attempt.rebuildID &&
+            isResumableRebuildAttempt(
+                db,
+                attempt: attempt,
+                clientGeneration: clientGeneration,
+                schema: schema,
+                pageLimit: pageLimit
+            )
+    }
+
+    private func isResumableRebuildAttempt(
+        _ db: GRDB.Database,
+        attempt: LocalRebuildAttempt,
+        clientGeneration: Int64,
+        schema: SchemaRef,
+        pageLimit: Int
+    ) throws -> Bool {
+        try attempt.clientGeneration == clientGeneration &&
+            attempt.schemaVersion == schema.version &&
+            attempt.schemaHash == schema.hash &&
+            attempt.pageLimit == pageLimit &&
+            attempt.generation == SynchroMeta.getScopeGeneration(db, scopeID: attempt.scopeID)
     }
 
     func restartScopeRebuild(
@@ -892,6 +929,7 @@ final class PullProcessor: @unchecked Sendable {
         }
         try SynchroMeta.deleteRebuildPageReceipts(db, scopeID: scopeID)
         try SynchroMeta.deleteRebuildAttempt(db, scopeID: scopeID)
+        try SynchroMeta.clearRebuildingBackoffForScope(db, scopeID: scopeID)
         try resetScopeProvenanceForRebuild(
             db: db,
             scopeID: scopeID,

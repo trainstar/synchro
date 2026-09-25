@@ -294,6 +294,136 @@ class LifecycleDurabilityTests {
     }
 
     @Test
+    fun newServerMigrationSupersedesCommittedMigrationAwaitingRebuildAcrossReopen() {
+        val intermediate = targetManifest()
+        val target = nextIndexedManifest(intermediate)
+        for (resetMaterialization in listOf(false, true)) {
+            val dbName = databaseName()
+            try {
+                val first = SynchroDatabase.open(context, dbName)
+                try {
+                    installTestSchema(first, 1, PROTOCOL_TEST_SCHEMA_HASH, protocolOrdersSchemaManifest().localTables())
+                    first.writeTransaction { db ->
+                        SynchroMeta.upsertScope(db, "orders:final", "c1", "k1")
+                        SynchroMeta.upsertScope(db, "orders:pending", "c1", "k1")
+                    }
+                    val schemaManager = SchemaManager(first)
+                    schemaManager.prepareConnectMigration(
+                        response = migrationResponse(intermediate).copy(
+                            schema = SchemaDescriptor(
+                                intermediate.schemaVersion,
+                                intermediate.schemaHash,
+                                SchemaAction.REBUILD_LOCAL,
+                            ),
+                            affectedScopes = listOf("orders:final", "orders:pending"),
+                        ),
+                        targetTables = intermediate.localTables(),
+                        resetMaterialization = false,
+                    )
+                    first.writeSyncLockedTransaction { db -> schemaManager.applyPreparedMigrationInTransaction(db) }
+                    first.writeTransaction { db -> SynchroMeta.upsertScope(db, "orders:final", "c2", "k2") }
+                } finally {
+                    first.close()
+                }
+
+                val reopened = SynchroDatabase.open(context, dbName)
+                try {
+                    val schemaManager = SchemaManager(reopened)
+                    schemaManager.recoverPendingMigration()
+                    schemaManager.prepareConnectMigration(
+                        response = migrationResponse(target),
+                        targetTables = target.localTables(),
+                        resetMaterialization = resetMaterialization,
+                    )
+                    reopened.writeSyncLockedTransaction { db -> schemaManager.applyPreparedMigrationInTransaction(db) }
+
+                    val journal = reopened.queryOne(
+                        """
+                        SELECT source_schema_version, target_schema_version, affected_scopes_json,
+                               reset_materialization, phase
+                        FROM _synchro_migration_journal WHERE singleton = 1
+                        """.trimIndent(),
+                    )
+                    assertNotNull(journal)
+                    assertEquals(intermediate.schemaVersion, journal!!["source_schema_version"])
+                    assertEquals(target.schemaVersion, journal["target_schema_version"])
+                    assertEquals(
+                        listOf("orders:pending"),
+                        Json.decodeFromString<List<String>>(journal["affected_scopes_json"] as String),
+                    )
+                    assertEquals(if (resetMaterialization) 1L else 0L, journal["reset_materialization"])
+                    assertEquals("awaiting_rebuild", journal["phase"])
+                    assertEquals(
+                        target.schemaHash,
+                        reopened.readTransaction { db -> SynchroMeta.get(db, MetaKey.SCHEMA_HASH) },
+                    )
+
+                    reopened.writeTransaction { db -> SynchroMeta.upsertScope(db, "orders:pending", "c3", "k3") }
+                    schemaManager.completeMigrationIfReady()
+                    assertEquals(
+                        0L,
+                        reopened.queryOne("SELECT COUNT(*) AS count FROM _synchro_migration_journal")?.get("count"),
+                    )
+                } finally {
+                    reopened.close()
+                }
+            } finally {
+                context.deleteDatabase(dbName)
+            }
+        }
+    }
+
+    @Test
+    fun differentServerMigrationStillRejectsUncommittedOrDetachedJournal() {
+        val intermediate = targetManifest()
+        val target = nextIndexedManifest(intermediate)
+        val dbName = databaseName()
+        try {
+            val database = SynchroDatabase.open(context, dbName)
+            try {
+                installTestSchema(database, 1, PROTOCOL_TEST_SCHEMA_HASH, protocolOrdersSchemaManifest().localTables())
+                val schemaManager = SchemaManager(database)
+                schemaManager.prepareConnectMigration(migrationResponse(intermediate), intermediate.localTables(), false)
+                val journalQuery = "SELECT target_schema_version, phase FROM _synchro_migration_journal WHERE singleton = 1"
+                val prepared = database.queryOne(journalQuery)
+
+                assertThrows(SynchroError.InvalidResponse::class.java) {
+                    schemaManager.prepareConnectMigration(migrationResponse(target), target.localTables(), false)
+                }
+                assertEquals(prepared, database.queryOne(journalQuery))
+                assertEquals(intermediate.schemaVersion, prepared!!["target_schema_version"])
+                assertEquals("prepared", prepared["phase"])
+
+                // A prepared same-target reset has the active schema as its target.
+                database.writeSyncLockedTransaction { db -> schemaManager.applyPreparedMigrationInTransaction(db) }
+                schemaManager.prepareConnectMigration(migrationResponse(intermediate), intermediate.localTables(), true)
+                val preparedReset = database.queryOne(journalQuery)
+                assertEquals("prepared", preparedReset!!["phase"])
+                assertThrows(SynchroError.InvalidResponse::class.java) {
+                    schemaManager.prepareConnectMigration(migrationResponse(target), target.localTables(), false)
+                }
+                assertEquals(preparedReset, database.queryOne(journalQuery))
+
+                database.writeSyncLockedTransaction { db -> schemaManager.applyPreparedMigrationInTransaction(db) }
+                database.writeTransaction { db ->
+                    SynchroMeta.setInt64(db, MetaKey.SCHEMA_VERSION, 1)
+                    SynchroMeta.set(db, MetaKey.SCHEMA_HASH, PROTOCOL_TEST_SCHEMA_HASH)
+                }
+                val detached = database.queryOne(journalQuery)
+                assertEquals("ddl_applied", detached!!["phase"])
+                assertThrows(SynchroError.InvalidResponse::class.java) {
+                    schemaManager.prepareConnectMigration(migrationResponse(target), target.localTables(), false)
+                }
+                assertEquals(detached, database.queryOne(journalQuery))
+            } finally {
+                database.close()
+            }
+        } finally {
+            context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test
     fun schemaResetRenewsSealedIntentAndDropsStaleBackoffAfterAbruptReopen() = runBlocking {
         val dbName = databaseName()
         val server = MockWebServer()
@@ -581,6 +711,28 @@ class LifecycleDurabilityTests {
             ),
         )
         val draft = base.copy(schemaHash = "0".repeat(64), tables = listOf(indexedTable))
+        return draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
+    }
+
+    private fun nextIndexedManifest(parent: SchemaManifest): SchemaManifest {
+        val indexedTable = parent.tables.single().copy(
+            indexes = listOf(
+                IndexSchema(
+                    indexID = "idx-orders-user",
+                    name = "idx_orders_user",
+                    fieldIDs = listOf("field-user-id"),
+                    unique = false,
+                ),
+            ),
+        )
+        val draft = parent.copy(
+            schemaVersion = parent.schemaVersion + 1,
+            schemaHash = "0".repeat(64),
+            parentSchema = SchemaRef(parent.schemaVersion, parent.schemaHash),
+            transitionClass = "class_3",
+            compatibilityFloor = parent.schemaVersion + 1,
+            tables = listOf(indexedTable),
+        )
         return draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
     }
 
