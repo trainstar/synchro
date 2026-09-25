@@ -213,13 +213,14 @@ The manifest records candidate environment resolution in `release-manifest.json`
 5. Wait for the protected `release` environment approval.
 6. Recheck the approved candidate and sealed identity.
 7. Attest the sealed files with the exact sealed release manifest.
-8. Create immutable `v<version>` and `api/go/v<version>` tags.
-9. Publish GitHub assets without marking them latest.
-10. Verify source and asset access.
-11. Publish Maven and verify public consumption.
-12. Publish npm directly under `latest` through trusted OIDC.
-13. Verify the exact public npm bytes, provenance, and clean React Native builds.
-14. Mark GitHub latest after all public checks pass.
+8. Verify the Central credentials and the npm trusted publisher for each unpublished registry.
+9. Create immutable `v<version>` and `api/go/v<version>` tags.
+10. Publish GitHub assets without marking them latest.
+11. Verify source and asset access.
+12. Publish Maven and verify public consumption.
+13. Publish npm directly under `latest` through trusted OIDC.
+14. Verify the exact public npm bytes, provenance, and clean React Native builds.
+15. Mark GitHub latest after all public checks pass.
 
 ## Success Evidence
 
@@ -237,6 +238,7 @@ Synchro has no numeric performance guarantee. Performance budgets remain deferre
 | --- | --- |
 | No sealed candidate | Start a new candidate. |
 | Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Resume with original sealed bytes and the original artifact-owner run ID. |
+| Registry credential check fails | Correct the `release` environment Central secrets or the npm trusted publisher. Then resume with the original artifact-owner run ID. |
 | One source tag exists | Verify its commit and create the missing tag there. |
 | GitHub draft exists | Verify its existing assets and upload only missing sealed assets before publication. |
 | GitHub published and a registry is missing | Keep non-latest status and publish the original payload. |
@@ -256,8 +258,12 @@ Do not bypass this control or add a substitute gate.
 
 Recovery uses publication helpers from the dispatch commit and retains the original candidate checkout and sealed bytes.
 Candidate CI must pass for both commits when they differ.
-The protected publisher discovers drafts through the authenticated release list.
-Recovery Candidate checks and Public checks use anonymous published-release observations.
+The protected publisher discovers an existing draft through the authenticated release list.
+It addresses a new draft by the release ID from the create response, because the list can omit a new draft.
+Candidate lookups retry for a bounded time, because the filtered CI run list can omit a completed run.
+Public checks read published-release metadata with the job token, and those endpoints never return a draft.
+Public asset bytes, source tags, and registry files download without a token.
+Registry waits poll only the registry.
 
 Before publication, product source or dependency corrections require a new candidate.
 Retain the failed candidate unchanged and repeat every required gate.

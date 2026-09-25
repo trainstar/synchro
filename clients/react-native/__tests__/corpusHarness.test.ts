@@ -11,7 +11,7 @@ import {
   pollCorpusResult,
   runCorpusCommandLoop,
 } from '../example/e2e/corpus-harness';
-import { WAIT_TIMEOUT_MS } from '../example/e2e/timeouts';
+import { WAIT_TIMEOUT_MS } from '../example/src/timeouts';
 
 const detox = jest.requireMock<{
   device: { terminateApp: jest.Mock };

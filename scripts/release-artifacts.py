@@ -357,6 +357,15 @@ def validate_signed_maven_payloads(root: Path, version: str) -> list[str]:
     pom_identity = tuple((pom.find(f"{{*}}{field}").text or "") if pom.find(f"{{*}}{field}") is not None else "" for field in ("groupId", "artifactId", "version"))
     if pom_identity != ("fit.trainstar", "synchro", version):
         raise ReleaseError("Maven release bundle POM coordinates or version are wrong")
+    for container, entry in (("licenses", "license"), ("developers", "developer")):
+        entries = [
+            tuple((child.tag, (child.text or "").strip()) for child in element)
+            for element in pom.findall(f"{{*}}{container}/{{*}}{entry}")
+        ]
+        if not entries:
+            raise ReleaseError(f"Maven release bundle POM lacks a {entry}")
+        if len(entries) != len(set(entries)):
+            raise ReleaseError(f"Maven release bundle POM repeats a {entry}")
     artifact_root = "fit/trainstar/synchro/"
     version_file = re.compile(
         rf"^{re.escape(base)}(?:\.aar|\.pom|\.module|-sources\.jar|-javadoc\.jar)(?:\.asc)?(?:\.(?:md5|sha1|sha256|sha512))?$"

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import hashlib
 import json
@@ -14,13 +15,16 @@ import tempfile
 import textwrap
 import threading
 import unittest
+import urllib.error
 import urllib.parse
 import zipfile
+import email.message
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 
@@ -94,38 +98,70 @@ class PublicationStateTests(unittest.TestCase):
     def test_recovery_requires_successful_candidate_for_dispatch_commit(self) -> None:
         command = release_step_command("Verify recovery workflow Candidate")
         successful = {
-            "head_sha": self.commit, "event": "push", "status": "completed", "conclusion": "success",
+            "id": 7, "head_sha": self.commit, "event": "push", "head_branch": "master",
+            "path": ".github/workflows/ci.yml", "status": "completed", "conclusion": "success", "run_attempt": 1,
         }
         with tempfile.TemporaryDirectory(prefix="synchro-dispatch-candidate-") as directory:
-            tools = Path(directory)
-            gh = tools / "gh"
-            gh.write_text(
-                '#!/bin/sh\n'
-                'test "$1" = api || exit 1\n'
-                'test "$2" = "repos/trainstar/synchro/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&head_sha=$GITHUB_SHA&per_page=100" || exit 1\n'
-                'printf "%s\\n" "$TEST_CI_RUNS"\n',
-                encoding="utf-8",
-            )
-            gh.chmod(0o755)
-            for runs, accepted in (
-                ([], False),
-                ([{**successful, "head_sha": "b" * 40}], False),
-                ([{**successful, "event": "pull_request"}], False),
-                ([{**successful, "status": "in_progress"}], False),
-                ([{**successful, "conclusion": "failure"}], False),
-                ([successful], True),
+            tools = Path(directory) / "tools"
+            tools.mkdir()
+            proxy = tools / "python3"
+            proxy.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import importlib.util
+                import json
+                import os
+                import sys
+                assert sys.argv[1] == os.path.join(os.environ["RUNNER_TEMP"], "release-publish.py")
+                spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
+                publisher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(publisher)
+                responses = json.loads(os.environ["TEST_CI_RESPONSES"])
+                requests = []
+                def request_json(url, token=None):
+                    assert token == "fixture-token"
+                    assert url == (
+                        "https://api.github.com/repos/trainstar/synchro/actions/workflows/ci.yml/runs"
+                        f"?branch=master&event=push&head_sha={os.environ['GITHUB_SHA']}&per_page=100"
+                    )
+                    requests.append(url)
+                    return {"workflow_runs": responses[min(len(requests), len(responses)) - 1]}
+                publisher.request_json = request_json
+                publisher.time.sleep = lambda seconds: None
+                sys.argv = sys.argv[1:]
+                try:
+                    raise SystemExit(publisher.main())
+                finally:
+                    print(f"requests={len(requests)}", file=sys.stderr)
+                """), encoding="utf-8")
+            proxy.chmod(0o755)
+            attempts = release_publish.CI_RUN_LOOKUP_ATTEMPTS
+            for responses, accepted, requests in (
+                ([[]], False, attempts),
+                ([[{**successful, "head_sha": "b" * 40}]], False, attempts),
+                ([[{**successful, "event": "pull_request"}]], False, attempts),
+                ([[{**successful, "head_branch": "dev"}]], False, attempts),
+                ([[{**successful, "path": ".github/workflows/release.yml"}]], False, attempts),
+                ([[{**successful, "status": "in_progress", "conclusion": None}]], False, attempts),
+                ([[{**successful, "conclusion": "failure"}]], False, attempts),
+                ([[successful]], True, 1),
+                ([[], [], [successful]], True, 3),
             ):
-                with self.subTest(runs=runs):
+                with self.subTest(responses=responses), tempfile.TemporaryDirectory() as runner:
                     result = subprocess.run(
                         ["bash", "-c", command],
                         env={
                             **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
                             "GITHUB_SHA": self.commit, "GITHUB_REPOSITORY": "trainstar/synchro",
-                            "TEST_CI_RUNS": json.dumps({"workflow_runs": runs}),
+                            "GH_TOKEN": "fixture-token", "RUNNER_TEMP": runner,
+                            "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
+                            "TEST_CI_RESPONSES": json.dumps(responses),
                         },
-                        capture_output=True, text=True, timeout=5, check=False,
+                        capture_output=True, text=True, timeout=20, check=False,
                     )
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertIn(f"requests={requests}", result.stderr)
+                    if accepted:
+                        selected = json.loads((Path(runner) / "dispatch-ci-run.json").read_text(encoding="utf-8"))
+                        self.assertEqual(selected, successful)
 
     def test_candidate_reuse_requires_identical_parent_tree_and_passed_candidate(self) -> None:
         command = release_step_command("Find a passed Candidate for the identical tree", "ci.yml")
@@ -299,7 +335,7 @@ class PublicationStateTests(unittest.TestCase):
             [{"id": 101, "tag_name": self.identity["root_tag"], "draft": True, "assets": []}],
         ]
         request_json.side_effect = pages
-        draft = release_publish.github_release("trainstar/synchro", self.identity["root_tag"], "fixture-token")
+        draft = release_publish.github_release("trainstar/synchro", self.identity["root_tag"], "fixture-token", include_drafts=True)
         self.assertEqual(draft, pages[1][0])
         self.assertEqual(request_json.call_args_list, [
             mock.call("https://api.github.com/repos/trainstar/synchro/releases?per_page=100&page=1", "fixture-token"),
@@ -307,9 +343,14 @@ class PublicationStateTests(unittest.TestCase):
         ])
 
     @mock.patch.object(release_publish, "request_json", return_value=None)
-    def test_anonymous_lookup_does_not_discover_private_drafts(self, request_json: mock.Mock) -> None:
-        self.assertIsNone(release_publish.github_release("trainstar/synchro", self.identity["root_tag"], None))
-        request_json.assert_called_once_with("https://api.github.com/repos/trainstar/synchro/releases/tags/v1.2.3")
+    def test_published_lookup_does_not_discover_private_drafts(self, request_json: mock.Mock) -> None:
+        for token in (None, "fixture-token"):
+            with self.subTest(token=token):
+                request_json.reset_mock()
+                self.assertIsNone(release_publish.github_release("trainstar/synchro", self.identity["root_tag"], token))
+                request_json.assert_called_once_with("https://api.github.com/repos/trainstar/synchro/releases/tags/v1.2.3", token)
+        with self.assertRaisesRegex(release_publish.PublicationError, "requires a token"):
+            release_publish.github_release("trainstar/synchro", self.identity["root_tag"], None, include_drafts=True)
 
     @mock.patch.object(release_publish, "request_json")
     def test_authenticated_draft_lookup_rejects_ambiguous_or_invalid_responses(self, request_json: mock.Mock) -> None:
@@ -325,7 +366,7 @@ class PublicationStateTests(unittest.TestCase):
             with self.subTest(value=value):
                 request_json.return_value = value
                 with self.assertRaises(release_publish.PublicationError):
-                    release_publish.github_release("trainstar/synchro", self.identity["root_tag"], "fixture-token")
+                    release_publish.github_release("trainstar/synchro", self.identity["root_tag"], "fixture-token", include_drafts=True)
 
     @mock.patch.object(release_publish, "request_bytes", return_value=None)
     @mock.patch.object(release_publish, "request_json")
@@ -346,11 +387,56 @@ class PublicationStateTests(unittest.TestCase):
                 }]
             return None
         request_json.side_effect = response
-        state = release_publish.observe_public(self.identity, "trainstar/synchro", "fixture-token")
+        state = release_publish.observe_public(self.identity, "trainstar/synchro", "fixture-token", include_drafts=True)
         classified = release_publish.classify_publication(self.identity, state)
         self.assertEqual(classified["github"], "draft-partial")
         self.assertEqual(classified["next_operation"], "publish-github")
         self.assertEqual(state["github"]["assets"], {"server": self.identity["github_assets"]["server"]})
+
+    @staticmethod
+    def http_error(code: int, headers: dict[str, str]) -> urllib.error.HTTPError:
+        message = email.message.Message()
+        for name, value in headers.items():
+            message[name] = value
+        return urllib.error.HTTPError("https://api.github.com/fixture", code, "fixture", message, None)
+
+    def test_github_reads_wait_for_rate_limit_reset_then_retry(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        for headers, wait in (
+            ({"retry-after": "30"}, 30.0),
+            ({"retry-after": "0"}, 1.0),
+            ({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1060"}, 61.0),
+        ):
+            for code in (403, 429):
+                with self.subTest(headers=headers, code=code), \
+                        mock.patch.object(release_publish.time, "time", return_value=1000.0), \
+                        mock.patch.object(release_publish.time, "sleep") as sleep, \
+                        mock.patch.object(release_publish.urllib.request, "urlopen", side_effect=[self.http_error(code, headers), response]):
+                    self.assertEqual(release_publish.request_json("https://api.github.com/fixture", "fixture-token"), {})
+                    sleep.assert_called_once_with(wait)
+
+    def test_github_reads_fail_with_limit_headers_after_bounded_wait(self) -> None:
+        with mock.patch.object(release_publish.time, "sleep") as sleep, \
+                mock.patch.object(release_publish.urllib.request, "urlopen", side_effect=lambda *_args, **_kwargs: (_ for _ in ()).throw(self.http_error(429, {"retry-after": "0"}))):
+            with self.assertRaisesRegex(release_publish.PublicationError, "HTTP 429"):
+                release_publish.request_bytes("https://api.github.com/fixture", "fixture-token")
+            self.assertEqual(sum(call.args[0] for call in sleep.call_args_list), release_publish.RATE_LIMIT_WAIT_SECONDS)
+        exhausted = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(1000 + release_publish.RATE_LIMIT_WAIT_SECONDS), "retry-after": ""}
+        denied = {"x-ratelimit-remaining": "42"}
+        for code, headers in ((403, exhausted), (403, denied), (500, {"retry-after": "1"})):
+            with self.subTest(code=code, headers=headers), \
+                    mock.patch.object(release_publish.time, "time", return_value=1000.0), \
+                    mock.patch.object(release_publish.time, "sleep") as sleep, \
+                    mock.patch.object(release_publish.urllib.request, "urlopen", side_effect=self.http_error(code, headers)):
+                with self.assertRaises(release_publish.PublicationError) as raised:
+                    release_publish.request_bytes("https://api.github.com/fixture", "fixture-token")
+                sleep.assert_not_called()
+                message = str(raised.exception)
+                self.assertIn(f"HTTP {code}", message)
+                self.assertIn(f"x-ratelimit-remaining={headers.get('x-ratelimit-remaining')}", message)
+                self.assertIn(f"x-ratelimit-reset={headers.get('x-ratelimit-reset')}", message)
+                self.assertIn("retry-after=", message)
 
     def test_candidate_identity_rejects_noncanonical_values(self) -> None:
         invalid = (
@@ -637,12 +723,20 @@ class PublicationStateTests(unittest.TestCase):
                     assert token == "fixture-token"
                     assert url == "https://api.github.com/repos/trainstar/synchro/releases?per_page=100&page=1"
                     value = json.loads(Path(os.environ["TEST_GITHUB_STATE"]).read_text())["release"]
-                    return [] if value is None else [value]
+                    return [value] if value is not None and value["listed"] else []
                 publisher.request_json = request_json
                 sys.argv = sys.argv[1:]
                 raise SystemExit(publisher.main())
                 """), encoding="utf-8")
             proxy.chmod(0o755)
+            git = tools / "git"
+            git.write_text(
+                '#!/bin/sh\n'
+                'test "$*" = "ls-remote --tags origin refs/tags/v1.2.3" || exit 1\n'
+                'printf "%s\\trefs/tags/v1.2.3\\n" "$TEST_TAG_COMMIT"\n',
+                encoding="utf-8",
+            )
+            git.chmod(0o755)
             gh = tools / "gh"
             gh.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
                 import json
@@ -652,41 +746,54 @@ class PublicationStateTests(unittest.TestCase):
                 path = Path(os.environ["TEST_GITHUB_STATE"])
                 state = json.loads(path.read_text())
                 args = sys.argv[1:]
-                assert args[0] == "release", "published-tag lookup cannot retrieve a draft (HTTP 404)"
-                assert args[2] == "v1.2.3"
-                state["operations"].append(args[1])
-                if args[1] == "create":
-                    assert state["release"] is None
-                    assert "--draft" in args and "--latest=false" in args and "--verify-tag" in args
-                    state["release"] = {"id": 17, "tag_name": args[2], "draft": True, "assets": []}
-                elif args[1] == "upload":
-                    asset = Path(args[3])
-                    assert state["release"]["draft"]
-                    assert asset.name not in state["files"]
-                    state["files"][asset.name] = asset.read_bytes().hex()
-                    state["release"]["assets"].append({"name": asset.name})
-                elif args[1] == "download":
-                    name = args[args.index("--pattern") + 1]
-                    output = Path(args[args.index("--dir") + 1]) / name
-                    output.write_bytes(bytes.fromhex(state["files"][name]))
-                elif args[1] == "edit":
-                    assert "--draft=false" in args and "--latest=false" in args
-                    state["release"]["draft"] = False
+                assert args[0] == "api", args
+                release = state["release"]
+                upload = "https://uploads.github.com/repos/trainstar/synchro/releases/17/assets"
+                if args[1:4] == ["--method", "POST", "repos/trainstar/synchro/releases"]:
+                    assert release is None
+                    assert args[4:] == ["-f", "tag_name=v1.2.3", "-F", "draft=true", "-F", "generate_release_notes=true", "-f", "make_latest=false"], args
+                    release = state["release"] = {
+                        "id": 17, "tag_name": "v1.2.3", "draft": True, "assets": [], "listed": False,
+                        "upload_url": upload + "{?name,label}",
+                    }
+                    state["operations"].append("create")
+                    print(json.dumps(release))
+                elif args[1:3] == ["--method", "POST"] and args[3].startswith(upload + "?name="):
+                    assert args[4:7] == ["-H", "Content-Type: application/octet-stream", "--input"], args
+                    name = args[3].split("?name=", 1)[1]
+                    assert release["draft"] and name not in state["files"]
+                    state["files"][name] = Path(args[7]).read_bytes().hex()
+                    release["assets"].append({"name": name, "id": 100 + len(release["assets"])})
+                    state["operations"].append("upload")
+                elif args[1:3] == ["-H", "Accept: application/octet-stream"]:
+                    asset_id = int(args[3].rsplit("/", 1)[1])
+                    assert args[3] == f"repos/trainstar/synchro/releases/assets/{asset_id}"
+                    name = next(asset["name"] for asset in release["assets"] if asset["id"] == asset_id)
+                    sys.stdout.buffer.write(bytes.fromhex(state["files"][name]))
+                    state["operations"].append("download")
+                elif args[1:] == ["--method", "PATCH", "repos/trainstar/synchro/releases/17", "-F", "draft=false", "-f", "make_latest=false"]:
+                    release["draft"] = False
+                    state["operations"].append("publish")
                 else:
                     raise AssertionError(args)
                 path.write_text(json.dumps(state))
                 """), encoding="utf-8")
             gh.chmod(0o755)
-            for initial in ("absent", "draft-partial"):
-                with self.subTest(initial=initial):
-                    runner = root / initial
+            for initial, tag_commit, accepted in (
+                ("absent", self.commit, True),
+                ("draft-partial", self.commit, True),
+                ("absent", "b" * 40, False),
+            ):
+                with self.subTest(initial=initial, tag_commit=tag_commit):
+                    runner = root / f"{initial}-{tag_commit[0]}"
                     runner.mkdir()
                     existing = initial == "draft-partial"
                     state_path = runner / "github-state.json"
                     state_path.write_text(json.dumps({
                         "release": {
-                            "id": 17, "tag_name": "v1.2.3", "draft": True,
-                            "assets": [{"name": "release-manifest.json"}],
+                            "id": 17, "tag_name": "v1.2.3", "draft": True, "listed": True,
+                            "upload_url": "https://uploads.github.com/repos/trainstar/synchro/releases/17/assets{?name,label}",
+                            "assets": [{"name": "release-manifest.json", "id": 100}],
                         } if existing else None,
                         "files": {"release-manifest.json": payloads["release-manifest.json"].hex()} if existing else {},
                         "operations": [],
@@ -702,24 +809,239 @@ class PublicationStateTests(unittest.TestCase):
                             "RUNNER_TEMP": str(runner), "GITHUB_OUTPUT": str(runner / "outputs"),
                             "GITHUB_REPOSITORY": "trainstar/synchro", "GH_TOKEN": "fixture-token",
                             "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
-                            "TEST_GITHUB_STATE": str(state_path),
+                            "TEST_GITHUB_STATE": str(state_path), "TEST_TAG_COMMIT": tag_commit,
                         },
                         capture_output=True, text=True, timeout=20, check=False,
                     )
-                    self.assertEqual(result.returncode, 0, result.stderr)
                     state = json.loads(state_path.read_text(encoding="utf-8"))
+                    if not accepted:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("release tag is not at the candidate commit", result.stderr)
+                        self.assertEqual(state["operations"], [])
+                        continue
+                    self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(state["files"], {name: data.hex() for name, data in payloads.items()})
                     self.assertFalse(state["release"]["draft"])
-                    self.assertEqual(state["release"]["id"], 17)
                     self.assertEqual(
                         state["operations"],
-                        ["download", "upload", "upload", "upload", "edit"] if existing
-                        else ["create", "upload", "upload", "upload", "upload", "edit"],
+                        ["download", "upload", "upload", "upload", "publish"] if existing
+                        else ["create", "upload", "upload", "upload", "upload", "publish"],
                     )
                     self.assertEqual(
                         json.loads((runner / "github-operation.json").read_text(encoding="utf-8")),
                         {"release_id": "17", "tag": "v1.2.3", "source_commit": self.commit, "operation": "publish-draft"},
                     )
+
+    def write_release_fixture(self, release_dir: Path) -> dict[str, Any]:
+        release_dir.mkdir(parents=True)
+        distributions = []
+        for role, name in (
+            ("pg-extension", "postgres.tar.gz"),
+            ("adapter", "adapter.tar.gz"),
+            ("seed-tool", "seed.tar.gz"),
+            ("kotlin-maven", "maven.zip"),
+            ("react-native-npm", "react-native.tgz"),
+        ):
+            path = release_dir / name
+            if role == "kotlin-maven":
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("fit/trainstar/synchro/1.2.3/synchro-1.2.3.aar", b"sealed Maven payload")
+            else:
+                path.write_bytes(f"sealed {role} bytes".encode())
+            distributions.append({
+                "role": role, "kind": "file", "path": name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            })
+        (release_dir / "release-manifest.json").write_text(json.dumps({
+            "schema_version": 1,
+            "release_version": self.version,
+            "source": {"commit": self.commit, "source_tags": [f"api/go/v{self.version}", f"v{self.version}"]},
+            "distributions": distributions,
+        }), encoding="utf-8")
+        (release_dir / "SHA256SUMS").write_text(
+            "".join(f"{item['sha256']}  {item['path']}\n" for item in distributions), encoding="utf-8"
+        )
+        (release_dir / "sbom.spdx.json").write_text('{"spdxVersion":"SPDX-2.3"}', encoding="utf-8")
+        return release_publish.identity_for_directory(release_dir)
+
+    def test_registry_credential_preflight_fails_before_tags(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertLess(
+            workflow.index("      - name: Verify registry publication credentials\n"),
+            workflow.index("      - name: Create or verify immutable source tags\n"),
+        )
+        command = release_step_command("Verify registry publication credentials")
+        command = command.replace("${{ needs.candidate.outputs.release_dir_name }}", "fixture")
+        self.assertNotIn("${{", command)
+        central = "Bearer " + base64.b64encode(b"fixture-user:fixture-password").decode("ascii")
+        exchange = "/-/npm/v1/oidc/token/exchange/package/@trainstar%2fsynchro-react-native"
+        with tempfile.TemporaryDirectory(prefix="synchro-registry-preflight-") as directory:
+            root = Path(directory)
+            self.write_release_fixture(root / "dist/releases/fixture")
+            tools = root / "tools"
+            tools.mkdir()
+            proxy = tools / "python3"
+            proxy.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import importlib.util
+                import os
+                import sys
+                assert sys.argv[1] == os.path.join(os.environ["RUNNER_TEMP"], "release-publish.py")
+                spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
+                publisher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(publisher)
+                publisher.CENTRAL_API = os.environ["TEST_SERVER_URL"]
+                publisher.NPM_REGISTRY = os.environ["TEST_SERVER_URL"]
+                sys.argv = sys.argv[1:]
+                raise SystemExit(publisher.main())
+                """), encoding="utf-8")
+            proxy.chmod(0o755)
+            for maven, npm, password, oidc, exchange_status, error in (
+                ("absent", "absent", "fixture-password", True, 200, None),
+                ("absent", "absent", "wrong-password", True, 200, "Central request failed with HTTP 401"),
+                ("published", "absent", "", True, 404, "npm trusted publishing token exchange failed with HTTP 404"),
+                ("published", "absent", "", False, 200, "GitHub OIDC token request is unavailable"),
+                ("published", "published-latest", "", True, 200, None),
+            ):
+                with self.subTest(maven=maven, npm=npm, password=password, oidc=oidc, exchange_status=exchange_status):
+                    requests = []
+
+                    class Handler(BaseHTTPRequestHandler):
+                        def log_message(self, *_args: object) -> None:
+                            return
+
+                        def respond(self, status: int, value: object) -> None:
+                            payload = json.dumps(value).encode()
+                            self.send_response(status)
+                            self.send_header("Content-Length", str(len(payload)))
+                            self.end_headers()
+                            self.wfile.write(payload)
+
+                        def do_GET(self) -> None:
+                            parsed = urllib.parse.urlsplit(self.path)
+                            requests.append(("GET", parsed.path))
+                            authorization = self.headers["Authorization"]
+                            if parsed.path == "/deployments":
+                                if authorization != central:
+                                    self.respond(401, {"error": "not authenticated"})
+                                    return
+                                self.respond(200, {"deployments": [], "page": 0, "pageSize": 100, "pageCount": 0, "totalResultCount": 0})
+                            elif parsed.path == "/oidc":
+                                self.assertEqual(urllib.parse.parse_qs(parsed.query), {"run": ["1"], "audience": ["npm:registry.npmjs.org"]})
+                                self.assertEqual(authorization, "Bearer request-token-secret")
+                                self.respond(200, {"value": "id-token-secret"})
+                            else:
+                                self.respond(400, {})
+
+                        def do_POST(self) -> None:
+                            requests.append(("POST", self.path))
+                            if self.path != exchange or self.headers["Authorization"] != "Bearer id-token-secret":
+                                self.respond(400, {})
+                                return
+                            self.respond(exchange_status, {"token": "npm-token-secret"} if exchange_status == 200 else {"message": "no trusted publisher"})
+
+                        assertEqual = self.assertEqual
+
+                    runner = root / f"{maven}-{npm}-{password}-{oidc}-{exchange_status}"
+                    runner.mkdir()
+                    (runner / "public-before-classification.json").write_text(
+                        json.dumps({"maven": maven, "npm": npm}), encoding="utf-8",
+                    )
+                    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+                        thread = threading.Thread(target=server.serve_forever)
+                        thread.start()
+                        url = f"http://127.0.0.1:{server.server_port}"
+                        environment = {
+                            **os.environ,
+                            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                            "RUNNER_TEMP": str(runner),
+                            "MAVEN_CENTRAL_USERNAME": "fixture-user" if password else "",
+                            "MAVEN_CENTRAL_PASSWORD": password,
+                            "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
+                            "TEST_SERVER_URL": url,
+                        }
+                        environment.pop("ACTIONS_ID_TOKEN_REQUEST_URL", None)
+                        environment.pop("ACTIONS_ID_TOKEN_REQUEST_TOKEN", None)
+                        if oidc:
+                            environment["ACTIONS_ID_TOKEN_REQUEST_URL"] = f"{url}/oidc?run=1"
+                            environment["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = "request-token-secret"
+                        try:
+                            result = subprocess.run(
+                                ["bash", "-c", command], cwd=root, env=environment,
+                                capture_output=True, text=True, timeout=20, check=False,
+                            )
+                        finally:
+                            server.shutdown()
+                            thread.join()
+                    output = result.stdout + result.stderr
+                    for secret in ("request-token-secret", "id-token-secret", "npm-token-secret", "fixture-password"):
+                        self.assertNotIn(secret, output)
+                    if error is None:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(error, result.stderr)
+                    expected = []
+                    if maven != "published":
+                        expected.append(("GET", "/deployments"))
+                    if npm == "absent" and oidc and password != "wrong-password":
+                        expected.extend([("GET", "/oidc"), ("POST", exchange)])
+                    self.assertEqual(requests, expected)
+
+    def test_registry_polls_do_not_spend_github_api_requests(self) -> None:
+        command = release_step_command("Publish and verify Maven deployment")
+        command = command.replace("${{ needs.candidate.outputs.release_dir_name }}", "fixture")
+        self.assertNotIn("${{", command)
+        with tempfile.TemporaryDirectory(prefix="synchro-registry-poll-") as directory:
+            root = Path(directory)
+            self.write_release_fixture(root / "dist/releases/fixture")
+            tools = root / "tools"
+            tools.mkdir()
+            proxy = tools / "python3"
+            proxy.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import importlib.util
+                import os
+                import sys
+                from pathlib import Path
+                assert sys.argv[1] == os.path.join(os.environ["RUNNER_TEMP"], "release-publish.py")
+                spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
+                publisher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(publisher)
+                log = Path(os.environ["TEST_REQUEST_LOG"])
+                def request_bytes(url, token=None):
+                    assert "api.github.com" not in url, url
+                    with log.open("a") as stream:
+                        stream.write(url + "\\n")
+                    if len(log.read_text().splitlines()) < 3:
+                        return None
+                    return b"sealed Maven payload"
+                publisher.request_bytes = request_bytes
+                sys.argv = sys.argv[1:]
+                raise SystemExit(publisher.main())
+                """), encoding="utf-8")
+            proxy.chmod(0o755)
+            sleeper = tools / "sleep"
+            sleeper.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "$TEST_SLEEP_LOG"\n', encoding="utf-8")
+            sleeper.chmod(0o755)
+            request_log = root / "requests.log"
+            sleep_log = root / "sleep.log"
+            result = subprocess.run(
+                ["bash", "-c", command], cwd=root,
+                env={
+                    **os.environ,
+                    "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                    "GITHUB_WORKSPACE": str(root), "RUNNER_TEMP": str(root),
+                    "DEPLOYMENT_ID": "", "DEPLOYMENT_STATE": "PUBLIC",
+                    "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
+                    "TEST_REQUEST_LOG": str(request_log), "TEST_SLEEP_LOG": str(sleep_log),
+                },
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                request_log.read_text(encoding="utf-8").splitlines(),
+                [f"{release_publish.MAVEN_BASE}/fit/trainstar/synchro/1.2.3/synchro-1.2.3.aar"] * 3,
+            )
+            self.assertEqual(sleep_log.read_text(encoding="utf-8").splitlines(), ["15", "15"])
 
     def test_release_workflow_executes_private_recovery_effects(self) -> None:
         command = release_step_command("Resolve or upload and validate Maven deployment")
@@ -729,36 +1051,7 @@ class PublicationStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="synchro-publication-effects-") as directory:
             root = Path(directory)
             release_dir = root / "dist/releases/fixture"
-            release_dir.mkdir(parents=True)
-            distributions = []
-            for role, name in (
-                ("pg-extension", "postgres.tar.gz"),
-                ("adapter", "adapter.tar.gz"),
-                ("seed-tool", "seed.tar.gz"),
-                ("kotlin-maven", "maven.zip"),
-                ("react-native-npm", "react-native.tgz"),
-            ):
-                path = release_dir / name
-                if role == "kotlin-maven":
-                    with zipfile.ZipFile(path, "w") as archive:
-                        archive.writestr("fit/trainstar/synchro/1.2.3/synchro-1.2.3.aar", b"sealed Maven payload")
-                else:
-                    path.write_bytes(f"sealed {role} bytes".encode())
-                distributions.append({
-                    "role": role, "kind": "file", "path": name,
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                })
-            (release_dir / "release-manifest.json").write_text(json.dumps({
-                "schema_version": 1,
-                "release_version": self.version,
-                "source": {"commit": self.commit, "source_tags": [f"api/go/v{self.version}", f"v{self.version}"]},
-                "distributions": distributions,
-            }), encoding="utf-8")
-            (release_dir / "SHA256SUMS").write_text(
-                "".join(f"{item['sha256']}  {item['path']}\n" for item in distributions), encoding="utf-8"
-            )
-            (release_dir / "sbom.spdx.json").write_text('{"spdxVersion":"SPDX-2.3"}', encoding="utf-8")
-            identity = release_publish.identity_for_directory(release_dir)
+            identity = self.write_release_fixture(release_dir)
             bundle = (release_dir / "maven.zip").read_bytes()
             name = identity["maven_bundle"]["deployment_name"]
             tools = root / "tools"

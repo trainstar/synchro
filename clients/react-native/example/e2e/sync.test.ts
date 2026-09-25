@@ -1,7 +1,7 @@
 import { by, device, element, expect, waitFor } from 'detox';
 import { loadScenario } from './scenarioLoader';
 import { assertUserIsolation, prepareConflict } from './serverSetup';
-import { WAIT_TIMEOUT_MS } from './timeouts';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 async function scrollToAndTap(buttonId: string) {
   await waitFor(element(by.id(buttonId)))

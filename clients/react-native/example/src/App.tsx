@@ -15,6 +15,7 @@ import type {
 } from '@trainstar/synchro-react-native';
 import { ConformanceHarness } from './conformance/ConformanceHarness';
 import NativeSynchro from '../../src/NativeSynchro';
+import { WAIT_TIMEOUT_MS } from './timeouts';
 
 const SYNCHRO_TEST_URL =
   Platform.OS === 'android'
@@ -102,10 +103,10 @@ function createClient(): SynchroClient {
   });
 }
 
-async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if ((await client.pendingChangeCount()) === 0) {
+async function waitForCondition(condition: () => Promise<boolean>) {
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await condition()) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -113,26 +114,11 @@ async function waitForPendingDrain(client: SynchroClient, timeoutMs = 5000) {
   return false;
 }
 
-async function waitForCondition(
-  condition: () => Promise<boolean>,
-  timeoutMs = 5000,
-  intervalMs = 250
-) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (await condition()) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  return false;
+async function waitForPendingDrain(client: SynchroClient) {
+  return waitForCondition(async () => (await client.pendingChangeCount()) === 0);
 }
 
-async function waitForSyncedTable(
-  client: SynchroClient,
-  tableName: string,
-  timeoutMs = 15000
-) {
+async function waitForSyncedTable(client: SynchroClient, tableName: string) {
   return waitForCondition(async () => {
     try {
       await client.query(`SELECT 1 FROM ${tableName} LIMIT 1`);
@@ -140,7 +126,7 @@ async function waitForSyncedTable(
     } catch {
       return false;
     }
-  }, timeoutMs, 250);
+  });
 }
 
 async function runAndWaitForScheduledPullRetry(
@@ -162,8 +148,7 @@ async function runAndWaitForScheduledPullRetry(
           throw error;
         }
         return current.status === 'ready';
-      },
-      15000
+      }
     );
     if (!retryCompleted) {
       throw new Error('scheduled pull retry did not return to ready state');
@@ -517,6 +502,7 @@ function StandardApp() {
             'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
             [sentinelID, 'must-rollback', null]
           );
+          // Stay idle longer than the 5-second native transaction inactivity timeout.
           await new Promise((resolve) => setTimeout(resolve, 6000));
         });
       } catch (error) {
@@ -789,7 +775,7 @@ function StandardApp() {
           row?.name === 'server-version' &&
           (await client.pendingChangeCount()) === 0
         );
-      }, 10000);
+      });
       if (!conflictResolved) {
         setLastError(
           JSON.stringify({

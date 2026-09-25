@@ -2,7 +2,7 @@ import {
   coordinatorConfiguration, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
-import { WAIT_TIMEOUT_MS } from './timeouts';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);

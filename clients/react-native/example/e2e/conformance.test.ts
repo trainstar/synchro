@@ -1,5 +1,5 @@
 import { by, device, element, expect, waitFor } from 'detox';
-import { WAIT_TIMEOUT_MS } from './timeouts';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 type ConformanceEnvelope = {
   schema_version: number;

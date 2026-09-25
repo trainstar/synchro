@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,7 +28,12 @@ SLSA_PROVENANCE = re.compile(r"^https://slsa[.]dev/provenance/v[0-9]+(?:[.][0-9]
 MAVEN_STATES = {"PENDING", "VALIDATING", "VALIDATED", "PUBLISHING", "PUBLISHED", "FAILED"}
 NPM_PACKAGE = "@trainstar/synchro-react-native"
 MAVEN_BASE = "https://repo1.maven.org/maven2"
+NPM_REGISTRY = "https://registry.npmjs.org"
+NPM_OIDC_AUDIENCE = "npm:registry.npmjs.org"
 CENTRAL_API = "https://central.sonatype.com/api/v1/publisher"
+RATE_LIMIT_WAIT_SECONDS = 900
+CI_RUN_LOOKUP_ATTEMPTS = 20
+CI_RUN_LOOKUP_DELAY_SECONDS = 30
 
 
 class PublicationError(ValueError):
@@ -307,38 +313,8 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
             raise PublicationError("draft GitHub release cannot be latest")
         github_status = ("draft-complete" if complete else "draft-partial") if github["draft"] else ("public-latest" if github["latest"] else "public")
 
-    expected_maven = identity["maven_entries"]
-    maven = state["maven"]
-    if not isinstance(maven, dict) or set(maven) != {"public_files"}:
-        raise PublicationError("Maven state is invalid")
-    maven_public = require_hash_map(maven["public_files"], expected_maven, "public Maven repository", partial=False)
-    maven_status = "published" if maven_public else "absent"
-
-    npm = state["npm"]
-    if not isinstance(npm, dict) or set(npm) != {"sha256", "dist_tags", "provenance"} or not isinstance(npm["dist_tags"], dict):
-        raise PublicationError("npm state is invalid")
-    npm_hash = npm["sha256"]
-    if npm_hash is not None and npm_hash != identity["npm"]["sha256"]:
-        raise PublicationError("npm package bytes differ")
-    if not isinstance(npm["provenance"], bool):
-        raise PublicationError("npm provenance state is invalid")
-    for name, version in npm["dist_tags"].items():
-        if not isinstance(name, str) or not isinstance(version, str):
-            raise PublicationError("npm dist-tag state is invalid")
-        if name in {"candidate", "latest"} and version == identity["version"] and npm_hash is None:
-            raise PublicationError("npm dist-tag points to a missing package")
-    if npm["dist_tags"].get("candidate") == identity["version"]:
-        raise PublicationError("npm candidate dist-tag is obsolete")
-    if npm_hash is None:
-        if npm["provenance"]:
-            raise PublicationError("npm provenance points to a missing package")
-        npm_status = "absent"
-    elif not npm["provenance"]:
-        raise PublicationError("npm package provenance is missing")
-    elif npm["dist_tags"].get("latest") != identity["version"]:
-        raise PublicationError("npm package exists but is not published under latest")
-    else:
-        npm_status = "published-latest"
+    maven_status = classify_maven(identity, state["maven"])
+    npm_status = classify_npm(identity, state["npm"])
 
     complete = tag_status == "complete" and github_status == "public-latest" and maven_status == "published" and npm_status == "published-latest"
     if complete:
@@ -363,21 +339,76 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
     }
 
 
+def classify_maven(identity: dict[str, Any], maven: Any) -> str:
+    if not isinstance(maven, dict) or set(maven) != {"public_files"}:
+        raise PublicationError("Maven state is invalid")
+    maven_public = require_hash_map(maven["public_files"], identity["maven_entries"], "public Maven repository", partial=False)
+    return "published" if maven_public else "absent"
+
+
+def classify_npm(identity: dict[str, Any], npm: Any) -> str:
+    if not isinstance(npm, dict) or set(npm) != {"sha256", "dist_tags", "provenance"} or not isinstance(npm["dist_tags"], dict):
+        raise PublicationError("npm state is invalid")
+    npm_hash = npm["sha256"]
+    if npm_hash is not None and npm_hash != identity["npm"]["sha256"]:
+        raise PublicationError("npm package bytes differ")
+    if not isinstance(npm["provenance"], bool):
+        raise PublicationError("npm provenance state is invalid")
+    for name, version in npm["dist_tags"].items():
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise PublicationError("npm dist-tag state is invalid")
+        if name in {"candidate", "latest"} and version == identity["version"] and npm_hash is None:
+            raise PublicationError("npm dist-tag points to a missing package")
+    if npm["dist_tags"].get("candidate") == identity["version"]:
+        raise PublicationError("npm candidate dist-tag is obsolete")
+    if npm_hash is None:
+        if npm["provenance"]:
+            raise PublicationError("npm provenance points to a missing package")
+        return "absent"
+    if not npm["provenance"]:
+        raise PublicationError("npm package provenance is missing")
+    if npm["dist_tags"].get("latest") != identity["version"]:
+        raise PublicationError("npm package exists but is not published under latest")
+    return "published-latest"
+
+
+def rate_limit_wait(headers: Any, now: float) -> float | None:
+    retry_after = str(headers.get("retry-after") or "")
+    if retry_after.isdigit():
+        return max(1.0, float(retry_after))
+    reset = str(headers.get("x-ratelimit-reset") or "")
+    if headers.get("x-ratelimit-remaining") == "0" and reset.isdigit():
+        return max(0.0, int(reset) - now) + 1
+    return None
+
+
 def request_bytes(url: str, token: str | None = None) -> bytes | None:
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "synchro-release-verifier"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
         headers["X-GitHub-Api-Version"] = "2022-11-28"
     request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return response.read()
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return None
-        raise PublicationError(f"request failed with HTTP {error.code}: {url}") from error
-    except urllib.error.URLError as error:
-        raise PublicationError(f"request failed: {url}: {error.reason}") from error
+    waited = 0.0
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            wait = rate_limit_wait(error.headers, time.time()) if error.code in {403, 429} else None
+            if wait is not None and waited + wait <= RATE_LIMIT_WAIT_SECONDS:
+                print(f"release-publish: HTTP {error.code} rate limit, retry after {wait:.0f} s: {url}", file=sys.stderr)
+                time.sleep(wait)
+                waited += wait
+                continue
+            limits = ", ".join(
+                f"{name}={error.headers.get(name) if error.headers else None}"
+                for name in ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after")
+            )
+            raise PublicationError(f"request failed with HTTP {error.code} ({limits}): {url}") from error
+        except urllib.error.URLError as error:
+            raise PublicationError(f"request failed: {url}: {error.reason}") from error
 
 
 def request_json(url: str, token: str | None = None) -> Any | None:
@@ -435,6 +466,42 @@ def central_upload(bundle: Path, name: str) -> str:
     if not identifier or any(character.isspace() for character in identifier):
         raise PublicationError("Central upload returned an invalid deployment identifier")
     return identifier
+
+
+def bearer_json(url: str, token: str, label: str, *, method: str = "GET") -> Any:
+    request = urllib.request.Request(
+        url,
+        data=b"" if method == "POST" else None,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": "synchro-release-publisher"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise PublicationError(f"{label} failed with HTTP {error.code}") from error
+    except urllib.error.URLError as error:
+        raise PublicationError(f"{label} failed: {error.reason}") from error
+    except json.JSONDecodeError as error:
+        raise PublicationError(f"{label} response is not JSON") from error
+
+
+def verify_npm_trusted_publishing() -> None:
+    # This is the token exchange that npm CLI 11.6.2 runs before an OIDC publish (lib/utils/oidc.js).
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    if not request_url or not request_token:
+        raise PublicationError("GitHub OIDC token request is unavailable")
+    separator = "&" if "?" in request_url else "?"
+    audience = urllib.parse.urlencode({"audience": NPM_OIDC_AUDIENCE})
+    identity = bearer_json(f"{request_url}{separator}{audience}", request_token, "GitHub OIDC token request")
+    id_token = identity.get("value") if isinstance(identity, dict) else None
+    if not isinstance(id_token, str) or not id_token:
+        raise PublicationError("GitHub OIDC token response is invalid")
+    exchange_url = f"{NPM_REGISTRY}/-/npm/v1/oidc/token/exchange/package/{NPM_PACKAGE.replace('/', '%2f')}"
+    exchanged = bearer_json(exchange_url, id_token, "npm trusted publishing token exchange", method="POST")
+    if not isinstance(exchanged, dict) or not isinstance(exchanged.get("token"), str) or not exchanged["token"]:
+        raise PublicationError("npm trusted publishing token exchange returned no token")
 
 
 def central_recovery_action(deployment_state: str) -> str:
@@ -505,17 +572,54 @@ def list_central_deployments(name: str, *, page_size: int = 100) -> dict[str, An
     }
 
 
-def github_release(repository: str, tag: str, token: str | None) -> dict[str, Any] | None:
+def successful_ci_run(repository: str, sha: str, token: str | None) -> dict[str, Any]:
+    if repository != "trainstar/synchro":
+        raise PublicationError("publication repository is invalid")
+    if not COMMIT.fullmatch(sha):
+        raise PublicationError("CI run commit is invalid")
+    # The filtered run list can omit a run for a few minutes after it completes.
+    url = (
+        f"https://api.github.com/repos/{repository}/actions/workflows/ci.yml/runs"
+        f"?branch=master&event=push&head_sha={sha}&per_page=100"
+    )
+    for attempt in range(1, CI_RUN_LOOKUP_ATTEMPTS + 1):
+        value = request_json(url, token)
+        runs = value.get("workflow_runs") if isinstance(value, dict) else None
+        if not isinstance(runs, list):
+            raise PublicationError("CI run list is invalid")
+        matches = [
+            run for run in runs
+            if isinstance(run, dict)
+            and run.get("head_sha") == sha
+            and run.get("event") == "push"
+            and run.get("head_branch") == "master"
+            and run.get("path") == ".github/workflows/ci.yml"
+            and run.get("status") == "completed"
+            and run.get("conclusion") == "success"
+            and isinstance(run.get("run_attempt"), int)
+        ]
+        if matches:
+            return max(matches, key=lambda run: run["run_attempt"])
+        if attempt < CI_RUN_LOOKUP_ATTEMPTS:
+            print(f"release-publish: no successful master CI push run for {sha} yet, attempt {attempt}", file=sys.stderr)
+            time.sleep(CI_RUN_LOOKUP_DELAY_SECONDS)
+    raise PublicationError("exact commit has no successful completed CI push run on master")
+
+
+def github_release(repository: str, tag: str, token: str | None, include_drafts: bool = False) -> dict[str, Any] | None:
     if repository != "trainstar/synchro":
         raise PublicationError("publication repository is invalid")
     if not re.fullmatch(r"v[0-9]+[.][0-9]+[.][0-9]+", tag):
         raise PublicationError("GitHub release tag is invalid")
     api = f"https://api.github.com/repos/{repository}"
-    if token is None:
-        value = request_json(f"{api}/releases/tags/{urllib.parse.quote(tag, safe='')}")
+    if not include_drafts:
+        # This endpoint returns only a published release, also for an authenticated request.
+        value = request_json(f"{api}/releases/tags/{urllib.parse.quote(tag, safe='')}", token)
         if value is not None and (not isinstance(value, dict) or value.get("tag_name") != tag):
             raise PublicationError("GitHub release identity differs")
         return value
+    if token is None:
+        raise PublicationError("GitHub draft lookup requires a token")
 
     page = 1
     selected = None
@@ -540,7 +644,14 @@ def github_release(repository: str, tag: str, token: str | None) -> dict[str, An
         page += 1
 
 
-def observe_public(identity: dict[str, Any], repository: str, token: str | None) -> dict[str, Any]:
+def observe_public(identity: dict[str, Any], repository: str, token: str | None, include_drafts: bool = False) -> dict[str, Any]:
+    tags, github = observe_github(identity, repository, token, include_drafts)
+    return {"tags": tags, "github": github, "maven": observe_maven(identity), "npm": observe_npm(identity)}
+
+
+def observe_github(
+    identity: dict[str, Any], repository: str, token: str | None, include_drafts: bool,
+) -> tuple[dict[str, str | None], dict[str, Any] | None]:
     if repository != "trainstar/synchro":
         raise PublicationError("publication repository is invalid")
     api = f"https://api.github.com/repos/{repository}"
@@ -550,7 +661,7 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
         value = request_json(f"{api}/git/ref/tags/{encoded}", token)
         tags[tag] = None if value is None else str(value.get("object", {}).get("sha", ""))
 
-    release_value = github_release(repository, identity["root_tag"], token)
+    release_value = github_release(repository, identity["root_tag"], token, include_drafts)
     latest_value = request_json(f"{api}/releases/latest", token)
     github: dict[str, Any] | None = None
     if release_value is not None:
@@ -564,6 +675,7 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
             if release_value.get("draft") and digest_value is not None:
                 digest = normalize_sha256(digest_value, "GitHub release asset digest")
             else:
+                # A public asset downloads without a token, which proves anonymous consumer access.
                 data = request_bytes(asset["browser_download_url"])
                 if data is None:
                     raise PublicationError("GitHub release asset is unavailable")
@@ -573,9 +685,12 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
             assets[asset["name"]] = digest
         latest = isinstance(latest_value, dict) and latest_value.get("id") == release_value.get("id")
         github = {"draft": release_value.get("draft"), "latest": latest, "assets": assets}
+    return tags, github
 
+
+def observe_npm(identity: dict[str, Any]) -> dict[str, Any]:
     version = identity["version"]
-    npm_root = request_json(f"https://registry.npmjs.org/{urllib.parse.quote(NPM_PACKAGE, safe='@')}")
+    npm_root = request_json(f"{NPM_REGISTRY}/{urllib.parse.quote(NPM_PACKAGE, safe='@')}")
     npm_hash = None
     npm_provenance = False
     dist_tags: dict[str, str] = {}
@@ -600,18 +715,16 @@ def observe_public(identity: dict[str, Any], repository: str, token: str | None)
                 raise PublicationError("npm package tarball is unavailable")
             npm_hash = sha256_bytes(data)
             npm_provenance = has_npm_provenance(distribution)
+    return {"sha256": npm_hash, "dist_tags": dist_tags, "provenance": npm_provenance}
 
+
+def observe_maven(identity: dict[str, Any]) -> dict[str, Any]:
     public_maven: dict[str, str] = {}
     for relative in identity["maven_entries"]:
         data = request_bytes(f"{MAVEN_BASE}/{urllib.parse.quote(relative, safe='/.-')}")
         if data is not None:
             public_maven[relative] = sha256_bytes(data)
-    return {
-        "tags": tags,
-        "github": github,
-        "maven": {"public_files": public_maven},
-        "npm": {"sha256": npm_hash, "dist_tags": dist_tags, "provenance": npm_provenance},
-    }
+    return {"public_files": public_maven}
 
 
 def central_deployments(value: Any) -> list[dict[str, Any]]:
@@ -655,7 +768,16 @@ def main() -> int:
     observe_parser.add_argument("--release-dir", type=Path, required=True)
     observe_parser.add_argument("--repository", default="trainstar/synchro")
     observe_parser.add_argument("--github-token-environment", default="GITHUB_TOKEN")
+    observe_parser.add_argument("--include-drafts", action="store_true")
     observe_parser.add_argument("--output", type=Path, required=True)
+    registry_parser = subparsers.add_parser("registry-status")
+    registry_parser.add_argument("--release-dir", type=Path, required=True)
+    registry_parser.add_argument("--registry", choices=("maven", "npm"), required=True)
+    ci_run_parser = subparsers.add_parser("ci-run")
+    ci_run_parser.add_argument("--sha", required=True)
+    ci_run_parser.add_argument("--repository", default="trainstar/synchro")
+    ci_run_parser.add_argument("--github-token-environment", default="GITHUB_TOKEN")
+    ci_run_parser.add_argument("--output", type=Path, required=True)
     github_parser = subparsers.add_parser("github-release")
     github_parser.add_argument("--tag", required=True)
     github_parser.add_argument("--repository", default="trainstar/synchro")
@@ -665,6 +787,7 @@ def main() -> int:
     select_parser.add_argument("--input", type=Path, required=True)
     select_parser.add_argument("--name", required=True)
     select_parser.add_argument("--output", type=Path, required=True)
+    subparsers.add_parser("npm-trusted-publishing")
     central_list_parser = subparsers.add_parser("central-list")
     central_list_parser.add_argument("--name", required=True)
     central_list_parser.add_argument("--output", type=Path, required=True)
@@ -697,17 +820,28 @@ def main() -> int:
         elif args.command == "observe-public":
             identity = identity_for_directory(args.release_dir.resolve())
             token = os.environ.get(args.github_token_environment, "").strip() or None
-            state = observe_public(identity, args.repository, token)
+            state = observe_public(identity, args.repository, token, args.include_drafts)
             write_json(args.output, state)
             write_json(args.output.with_name(args.output.stem + "-classification.json"), classify_publication(identity, state))
+        elif args.command == "registry-status":
+            identity = identity_for_directory(args.release_dir.resolve())
+            if args.registry == "maven":
+                print(classify_maven(identity, observe_maven(identity)))
+            else:
+                print(classify_npm(identity, observe_npm(identity)))
+        elif args.command == "ci-run":
+            token = os.environ.get(args.github_token_environment, "").strip() or None
+            write_json(args.output, successful_ci_run(args.repository, args.sha, token))
         elif args.command == "github-release":
             token = os.environ.get(args.github_token_environment, "").strip() or None
-            value = github_release(args.repository, args.tag, token)
+            value = github_release(args.repository, args.tag, token, include_drafts=True)
             if value is None:
                 raise PublicationError("GitHub release is not available")
             write_json(args.output, value)
         elif args.command == "central-select":
             write_json(args.output, select_central(load_json(args.input, "Central deployments"), args.name))
+        elif args.command == "npm-trusted-publishing":
+            verify_npm_trusted_publishing()
         elif args.command == "central-list":
             write_json(args.output, list_central_deployments(args.name))
         elif args.command == "central-status":

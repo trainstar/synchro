@@ -4,7 +4,7 @@ import {
   coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
-import { WAIT_TIMEOUT_MS } from './timeouts';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 function isJSONObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

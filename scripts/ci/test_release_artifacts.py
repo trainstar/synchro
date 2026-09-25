@@ -122,6 +122,8 @@ class ReleaseArtifactsTests(unittest.TestCase):
         source: Path,
         pom_version: str = VERSION,
         missing_signature: str = "",
+        licenses: int = 1,
+        developers: int = 1,
     ) -> None:
         base = source / f"fit/trainstar/synchro/{VERSION}/synchro-{VERSION}"
         for suffix in (".pom", ".aar", ".module", "-sources.jar", "-javadoc.jar"):
@@ -129,7 +131,15 @@ class ReleaseArtifactsTests(unittest.TestCase):
             payload.parent.mkdir(parents=True, exist_ok=True)
             data = suffix + "\n"
             if suffix == ".pom":
-                data = f"<project><groupId>fit.trainstar</groupId><artifactId>synchro</artifactId><version>{pom_version}</version></project>\n"
+                license_entry = "<license><name>MIT License</name><url>https://opensource.org/licenses/MIT</url></license>"
+                developer_entry = "<developer><id>trainstar</id><name>Trainstar</name></developer>"
+                data = (
+                    "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">"
+                    f"<groupId>fit.trainstar</groupId><artifactId>synchro</artifactId><version>{pom_version}</version>"
+                    f"<licenses>{license_entry * licenses}</licenses>"
+                    f"<developers>{developer_entry * developers}</developers>"
+                    "</project>\n"
+                )
             elif suffix == ".module":
                 data = json.dumps({"formatVersion": "1.1", "component": {"group": "fit.trainstar", "module": "synchro", "version": VERSION}}) + "\n"
             payload.write_bytes(data.encode())
@@ -346,6 +356,19 @@ class ReleaseArtifactsTests(unittest.TestCase):
             root = Path(directory)
             with self.assertRaisesRegex(release_artifacts.ReleaseError, "coordinates or version"):
                 self.make_maven(root / "repository", root / "bundle.zip", pom_version="9.9.9")
+
+    def test_maven_preparation_rejects_missing_or_repeated_pom_metadata(self) -> None:
+        for field, count, message in (
+            ("licenses", 0, "lacks a license"),
+            ("licenses", 2, "repeats a license"),
+            ("developers", 0, "lacks a developer"),
+            ("developers", 2, "repeats a developer"),
+        ):
+            with self.subTest(field=field, count=count), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory) / "repository"
+                self.write_maven_repository(repository, **{field: count})
+                with self.assertRaisesRegex(release_artifacts.ReleaseError, message):
+                    release_artifacts.prepare_maven_repository(repository, VERSION)
 
     def test_maven_preparation_rejects_missing_signature(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
