@@ -386,6 +386,140 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(schemaVersion, 2)
     }
 
+    func testConnectMigrationRetiresSupersededRebuildRetry() async throws {
+        try await assertConnectMigrationRetiresSupersededReadRetry(resumeState: .rebuilding) { db in
+            let attempt = try PullProcessor(database: db).beginScopeRebuild(
+                scopeID: self.scopeID,
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                pageLimit: 100,
+                syncedTables: [ordersLocalSchemaTable(includeNotes: false)]
+            )
+            return try JSONEncoder.synchroEncoder().encode(RebuildRequest(
+                clientID: "test-device",
+                clientGeneration: attempt.clientGeneration,
+                schema: SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+                scope: attempt.scopeID,
+                rebuildID: attempt.rebuildID,
+                cursor: attempt.cursor,
+                limit: attempt.pageLimit
+            ))
+        }
+    }
+
+    func testConnectMigrationRetiresSupersededPullRetry() async throws {
+        try await assertConnectMigrationRetiresSupersededReadRetry(resumeState: .pulling) { db in
+            try db.writeTransaction { db in
+                try SynchroMeta.upsertScope(
+                    db,
+                    scopeID: self.scopeID,
+                    cursor: "scope_cursor_old",
+                    checksum: try checksumJSONString(emptyScopeChecksum)
+                )
+            }
+            return try JSONEncoder.synchroEncoder().encode(PullRequest(
+                clientID: "test-device",
+                clientGeneration: 1,
+                schema: SchemaRef(version: 1, hash: protocolTestSchemaHash),
+                scopeSetVersion: 1,
+                scopes: [self.scopeID: ScopeCursorRef(cursor: "scope_cursor_old")],
+                limit: 100
+            ))
+        }
+    }
+
+    private func assertConnectMigrationRetiresSupersededReadRetry(
+        resumeState: RetryResumeState,
+        savedRequest: (SynchroDatabase) throws -> Data
+    ) async throws {
+        let schemaHash = connectRebuildLocalSchemaHash
+        let rebuiltRecord = try authoritativeRecord(
+            id: "w1",
+            shipAddress: "Rebuilt Address",
+            notes: "schema rebuild local",
+            includeNotes: true,
+            updatedAt: "2026-01-01T12:00:00.000000Z",
+            serverVersion: "opaque_server_version_rebuild",
+            schemaHash: schemaHash
+        )
+        let rebuiltScopeChecksum = try authoritativeScopeChecksum([rebuiltRecord], schemaHash: schemaHash)
+        var requests: [(path: String, body: String)] = []
+
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            let body = request.bodyData().flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            if path.hasSuffix("/sync/connect") {
+                requests.append(("connect", body))
+                return try self.mockResponse(json: self.connectRebuildLocalJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                requests.append(("rebuild", body))
+                return try self.mockResponse(json: self.rebuildJSON(
+                    records: [rebuiltRecord.json],
+                    finalCursor: "scope_cursor_rebuilt",
+                    checksum: rebuiltScopeChecksum
+                ))
+            } else if path.hasSuffix("/sync/pull") {
+                requests.append(("pull", body))
+                return try self.mockResponse(json: [
+                    "changes": [] as [Any],
+                    "scope_set_version": 2,
+                    "scope_cursors": [self.scopeID: "scope_cursor_after_rebuild"],
+                    "scope_updates": [
+                        "add": [] as [Any],
+                        "remove": [] as [Any],
+                    ] as [String: Any],
+                    "rebuild": [] as [Any],
+                    "has_more": false,
+                    "checksums": [self.scopeID: try self.checksumJSONObject(rebuiltScopeChecksum)],
+                ])
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, db) = try makeIntegrationEnv()
+        addTeardownBlock { await engine.stop() }
+        try SchemaManager(database: db).reconcileLocalSchema(
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            tables: [ordersLocalSchemaTable(includeNotes: false)]
+        )
+        try db.writeTransaction { db in
+            try SynchroMeta.upsertScope(db, scopeID: self.scopeID, cursor: nil, checksum: nil)
+            try SynchroMeta.setInt64(db, key: .scopeSetVersion, value: 1)
+            try SynchroMeta.setInt64(db, key: .clientGeneration, value: 1)
+        }
+        let saved = String(data: try savedRequest(db), encoding: .utf8)!
+        try db.writeTransaction { db in
+            try SynchroMeta.upsertBackoffRecord(
+                db,
+                record: LocalBackoffRecord(
+                    resumeState: resumeState,
+                    workIdentity: saved,
+                    retryClassification: .network,
+                    attemptCount: 1,
+                    nextRetryAtMS: Int64(Date().timeIntervalSince1970 * 1_000) - 1
+                )
+            )
+        }
+
+        try await engine.start()
+
+        XCTAssertEqual(requests.map(\.path), ["connect", "rebuild", "pull"])
+        XCTAssertFalse(requests.contains { $0.body == saved })
+        let target = SchemaRef(version: 2, hash: schemaHash)
+        let decoder = JSONDecoder.synchroDecoder()
+        if requests.count == 3 {
+            XCTAssertEqual(try decoder.decode(RebuildRequest.self, from: Data(requests[1].body.utf8)).schema, target)
+            XCTAssertEqual(try decoder.decode(PullRequest.self, from: Data(requests[2].body.utf8)).schema, target)
+        }
+        XCTAssertNil(try db.readTransaction { db in try SynchroMeta.getBackoffRecord(db) })
+        XCTAssertEqual(engine.getSyncStatus(), .ready)
+        let row = try db.queryOne("SELECT ship_address, notes FROM orders WHERE id = ?", params: ["w1"])
+        XCTAssertEqual(row?["ship_address"] as? String, "Rebuilt Address")
+        XCTAssertEqual(row?["notes"] as? String, "schema rebuild local")
+    }
+
     func testScopeRemovalDeletesLocalRowWithoutQueueingPendingDelete() async throws {
         var pullCallCount = 0
         let record = try authoritativeRecord(

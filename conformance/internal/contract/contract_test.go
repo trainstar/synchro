@@ -480,7 +480,7 @@ func TestSnapshotFixtureIsDeterministicAndRejectsBindingMutants(t *testing.T) {
 		{"duplicate", func(s *Snapshot) { s.BehavioralFiles = append(s.BehavioralFiles, s.BehavioralFiles[0]) }},
 		{"path substitution", func(s *Snapshot) { s.Requirements.Path = "conformance/other.json" }},
 		{"invalid hash", func(s *Snapshot) { s.Requirements.SHA256 = "not-a-sha256" }},
-		{"release", func(s *Snapshot) { s.ReleaseVersion = "0.3.1" }},
+		{"release", func(s *Snapshot) { s.ReleaseVersion = "0.0.0" }},
 		{"protocol", func(s *Snapshot) { s.ProtocolVersion = 4 }},
 		{"spec status", func(s *Snapshot) { value := "Accepted"; s.BehavioralFiles[0].Status = &value }},
 		{"direct ADR status", func(s *Snapshot) { value := "Rejected"; s.BehavioralFiles[6].Status = &value }},

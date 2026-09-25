@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
 // TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary proves
@@ -848,19 +849,19 @@ func TestRealIssue49SecurityInstallationAuthority(t *testing.T) {
 	}
 	if err := admin.QueryRowContext(ctx, `
 		SELECT count(*) FROM pg_catalog.pg_available_extension_versions
-		WHERE name = 'synchro_pg' AND version <> '0.3.0'`).Scan(&otherVersions); err != nil {
+		WHERE name = 'synchro_pg' AND version <> $1`, release.Version).Scan(&otherVersions); err != nil {
 		t.Fatalf("inspect extension baseline versions: %v", err)
 	}
 	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM pg_catalog.pg_extension_update_paths('synchro_pg')").Scan(&updatePaths); err != nil {
 		t.Fatalf("inspect extension update paths: %v", err)
 	}
-	trackedSQL, packagedSQL := security49InstallationFiles(t, environment.ExtensionArtifact, "synchro_pg--0.3.0.sql")
+	trackedSQL, packagedSQL := security49InstallationFiles(t, environment.ExtensionArtifact, "synchro_pg--"+release.Version+".sql")
 	trackedControl, packagedControl := security49InstallationFiles(t, environment.ExtensionArtifact, "synchro_pg.control")
 	control := string(packagedControl)
 	nonSuperuserChecks := security49ExerciseRuntimeFunctions(t, ctx, admin)
 
 	t.Run("assertion", func(t *testing.T) {
-		if serverMajor != 18 || extensionVersion != "0.3.0" || extensionSchema != "synchro" || otherVersions != 0 || updatePaths != 0 {
+		if serverMajor != 18 || extensionVersion != release.Version || extensionSchema != "synchro" || otherVersions != 0 || updatePaths != 0 {
 			t.Fatalf(
 				"clean PostgreSQL 18 baseline is invalid: major=%d version=%q schema=%q other=%d paths=%d",
 				serverMajor,
@@ -877,7 +878,7 @@ func TestRealIssue49SecurityInstallationAuthority(t *testing.T) {
 			t.Fatal("packaged extension control metadata differs from its tracked pgrx output")
 		}
 		for _, clause := range []string{
-			"default_version = '0.3.0'",
+			"default_version = '" + release.Version + "'",
 			"relocatable = false",
 			"schema = 'synchro'",
 		} {

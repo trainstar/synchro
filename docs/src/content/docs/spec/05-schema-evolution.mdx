@@ -907,6 +907,14 @@ combination preserves queues and local-only data, issues no sync request, and
 enters an explicit non-retryable local error. Recovery never fetches schema;
 protocol version 3 has no such operation.
 
+A connect response can require a new migration while a committed journal still
+waits for rebuild. The client replaces the earlier journal in the transaction
+that persists the new journal, before any new DDL. The new journal uses the
+active schema as its source. Its affected scopes include each scope of the
+earlier journal whose rebuild is not final, so the rebuild obligation stays
+journaled. A journal before its DDL commit, or a journal whose target is not the
+active schema, still blocks every different migration.
+
 The durable journal makes process death safe at every boundary. A crash before
 the SQLite transaction leaves a pending journal and no target schema. A crash
 after the transaction leaves a target schema with durable rebuild requirements.

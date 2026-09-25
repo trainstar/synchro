@@ -270,7 +270,8 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 			exchange{actor: "client", command: "await-call", state: "command"},
 			exchange{actor: "observer", command: "capture", state: "command"},
 			exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
-			exchange{actor: "client", command: "synchronize-step", state: "command"},
+			exchange{actor: "client", command: "begin-call", state: "command"},
+			exchange{actor: "client", command: "await-call", state: "command"},
 		)
 		if workload.step.ID != workloads[len(workloads)-1].step.ID {
 			want = append(want, exchange{actor: "observer", command: "capture", state: "command"})
@@ -796,7 +797,7 @@ func TestQueueReplayResponseLossUsesAnAsynchronousBlockedCall(t *testing.T) {
 		t.Fatalf("queue-replay response-loss begin action = %#v", action)
 	}
 	process := `{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`
-	if err := coordinator.validateResponseLossCallBegun(json.RawMessage(`{"kind":"call-begun","call_id":"` + coordinator.responseLossCallID() + `","state":"in_flight","process":` + process + `}`)); err != nil {
+	if err := coordinator.validateCallBegun(json.RawMessage(`{"kind":"call-begun","call_id":"`+coordinator.responseLossCallID()+`","state":"in_flight","process":`+process+`}`), coordinator.responseLossCallID()); err != nil {
 		t.Fatalf("validate queue-replay response-loss call begin: %v", err)
 	}
 	barrierContext, cancelBarrier := context.WithTimeout(context.Background(), time.Second)
@@ -818,14 +819,138 @@ func TestQueueReplayResponseLossUsesAnAsynchronousBlockedCall(t *testing.T) {
 		t.Fatalf("accept queue-replay push preparation: %v", err)
 	}
 	blocked := json.RawMessage(`{"kind":"call-completed","call_id":"` + coordinator.responseLossCallID() + `","state":"completed","completion":"blocked","status":{"state":"backoff","retry_at":"2026-09-02T00:00:01Z","operation":"push","failure":null},"process":` + process + `}`)
-	if err := coordinator.validateResponseLossCallCompleted(blocked); err != nil {
+	if err := coordinator.validateCallCompleted(blocked, coordinator.responseLossCallID(), "blocked", "backoff"); err != nil {
 		t.Fatalf("validate queue-replay response-loss blocked call: %v", err)
 	}
 	forged := json.RawMessage(`{"kind":"call-completed","call_id":"` + coordinator.responseLossCallID() + `","state":"completed","completion":"blocked","status":{"state":"ready","retry_at":null,"operation":null,"failure":null},"process":` + process + `}`)
-	if err := coordinator.validateResponseLossCallCompleted(forged); err == nil {
+	if err := coordinator.validateCallCompleted(forged, coordinator.responseLossCallID(), "blocked", "backoff"); err == nil {
 		t.Fatal("queue-replay response-loss accepted blocked completion without a backoff")
 	} else if !strings.Contains(err.Error(), `state="ready" want="backoff"`) {
 		t.Fatalf("queue-replay response-loss diagnostic = %q, want observed and expected backoff states", err)
+	}
+}
+
+func TestQueueReplayAwaitsReplayIdleOnlyAfterTerminalPull(t *testing.T) {
+	pages := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/sync/pull" {
+			t.Errorf("queue-replay upstream request = %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(<-pages))
+	}))
+	defer upstream.Close()
+	coordinator := &QueueReplayCoordinator{
+		upstream:  upstream.URL,
+		clientKey: "client-a",
+		stage:     queueReplayStageRestartedAfterLoss,
+		steps:     []queueReplayWorkload{{}},
+		process: &actionProcessIdentity{
+			ProcessID:                   "process-a",
+			DatabaseIdentityFingerprint: strings.Repeat("a", 64),
+		},
+	}
+	proxy := httptest.NewServer(coordinator)
+	defer proxy.Close()
+
+	response, err := coordinator.advanceLocked(context.Background(), 9)
+	if err != nil || coordinator.stage != queueReplayStageReplayBegun || response.Command == nil {
+		t.Fatalf("queue-replay replay begin: response=%#v error=%v", response, err)
+	}
+	action := response.Command.Action.Action
+	if action.Actor != "client" || action.Command != "begin-call" || action.Parameters["method"] != "start" || action.Parameters["call_id"] != coordinator.replayCallID() {
+		t.Fatalf("queue-replay replay begin action = %#v", action)
+	}
+	process := json.RawMessage(`{"process_id":"process-a","database_identity_fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	begun := resultEnvelopeForTest(map[string]any{"kind": "call-begun", "call_id": coordinator.replayCallID(), "state": "in_flight", "process": process})
+	if err := coordinator.acceptResultLocked(begun); err != nil {
+		t.Fatalf("accept queue-replay replay begin: %v", err)
+	}
+
+	early, cancelEarly := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelEarly()
+	if response, err := coordinator.advanceLocked(early, 10); err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queue-replay awaited replay idle before a pull: response=%#v error=%v", response, err)
+	}
+	if coordinator.stage != queueReplayStageReplayBegun {
+		t.Fatalf("queue-replay stage after early await = %s, want %s", coordinator.stage, queueReplayStageReplayBegun)
+	}
+
+	coordinator.observeReplayPull(http.StatusOK, []byte(`{"has_more":true}`))
+	select {
+	case <-coordinator.replayPull.served:
+		t.Fatal("queue-replay released the replay barrier on a non-terminal pull page")
+	default:
+	}
+
+	pages <- `{"has_more":false}`
+	pull, err := proxy.Client().Post(proxy.URL+"/sync/pull", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("proxy queue-replay terminal pull: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, pull.Body)
+	_ = pull.Body.Close()
+	if pull.StatusCode != http.StatusOK {
+		t.Fatalf("proxy queue-replay terminal pull status = %d", pull.StatusCode)
+	}
+	barrier, cancelBarrier := context.WithTimeout(context.Background(), time.Second)
+	defer cancelBarrier()
+	response, err = coordinator.advanceLocked(barrier, 10)
+	if err != nil || coordinator.stage != queueReplayStageReplay || response.Command == nil {
+		t.Fatalf("queue-replay replay await: response=%#v error=%v", response, err)
+	}
+	action = response.Command.Action.Action
+	if action.Actor != "client" || action.Command != "await-call" || action.Parameters["completion"] != "idle" || action.Parameters["call_id"] != coordinator.replayCallID() {
+		t.Fatalf("queue-replay replay await action = %#v", action)
+	}
+	if coordinator.replayPull != nil {
+		t.Fatal("queue-replay kept a consumed replay barrier")
+	}
+
+	callID := coordinator.replayCallID()
+	stale := resultEnvelopeForTest(map[string]any{
+		"kind": "call-completed", "call_id": callID, "state": "completed", "completion": "idle",
+		"status":  map[string]any{"state": "pulling", "retry_at": nil, "operation": nil, "failure": nil},
+		"process": process,
+	})
+	if err := coordinator.acceptResultLocked(stale); err == nil || !strings.Contains(err.Error(), `state="pulling" want="ready"`) {
+		t.Fatalf("queue-replay accepted a replay idle without ready: %v", err)
+	}
+	idle := resultEnvelopeForTest(map[string]any{
+		"kind": "call-completed", "call_id": callID, "state": "completed", "completion": "idle",
+		"status":  map[string]any{"state": "ready", "retry_at": nil, "operation": nil, "failure": nil},
+		"process": process,
+	})
+	if err := coordinator.acceptResultLocked(idle); err != nil {
+		t.Fatalf("accept queue-replay replay idle: %v", err)
+	}
+	if coordinator.stepIndex != 1 {
+		t.Fatalf("queue-replay step index after replay = %d, want 1", coordinator.stepIndex)
+	}
+}
+
+func TestQueueReplayRejectsAnInvalidReplayPull(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "failed pull", status: http.StatusServiceUnavailable, body: `{}`, want: "status=503 want=200"},
+		{name: "page without has_more", status: http.StatusOK, body: `{"changes":[]}`, want: "has_more is absent or invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator := &QueueReplayCoordinator{}
+			coordinator.armReplayPull()
+			coordinator.observeReplayPull(test.status, []byte(test.body))
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := coordinator.waitForReplayPull(ctx); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("queue-replay invalid replay pull error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

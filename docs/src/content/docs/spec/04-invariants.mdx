@@ -19,7 +19,7 @@ This catalog defines the observable conditions that every conforming Synchro pro
 [ADR 004]: /synchro/architecture/decisions/004-membership-schema-and-retention/
 [ADR 005]: /synchro/architecture/decisions/005-integrity-authorization-and-seeds/
 
-For v0.3.0, every level-three invariant heading in this document maps to
+For every release, every level-three invariant heading in this document maps to
 exactly one requirement record, and every requirement maps through exactly one
 normative reference to a level-three invariant here. Supplemental references do
 not replace that binding. Orphaned, duplicate, or non-invariant mappings are
@@ -493,7 +493,7 @@ pgrx annotations and `extension_sql!` declarations in the Rust extension source 
 
 ### Extension Migration Baseline
 
-Version `0.3.0` MUST be the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks. Claiming an in-place update from deleted or experimental pre-`0.3.0` state, or using `IF NOT EXISTS` as migration logic, is a violation of Installation and migration baseline in [ADR 005].
+Version `0.3.1`, the first published Protocol 3 release, MUST be the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks. Claiming an in-place update from deleted or experimental pre-`0.3.0` state or from the unpublished `0.3.0` candidate, or using `IF NOT EXISTS` as migration logic, is a violation of Installation and migration baseline in [ADR 005].
 
 ## Adapter And Client Boundary Invariants
 

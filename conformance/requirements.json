@@ -1,7 +1,7 @@
 {
   "$schema": "./schemas/requirements-v2.schema.json",
   "schema_version": 2,
-  "release": "0.3.0",
+  "release": "0.3.1",
   "requirements": [
     {
       "id": "SYNC-TIME-001",
@@ -799,7 +799,7 @@
       "id": "SYNC-INSTALL-002",
       "title": "Extension migration baseline",
       "category": "schema",
-      "statement": "Version 0.3.0 is the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks, with no in-place pre-0.3.0 update or IF NOT EXISTS migration logic.",
+      "statement": "Version 0.3.1, the first published Protocol 3 release, is the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks, with no in-place update from pre-0.3.0 state or the unpublished 0.3.0 candidate and no IF NOT EXISTS migration logic.",
       "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#extension-migration-baseline" }]

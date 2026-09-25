@@ -47,9 +47,9 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
          RETURN OLD;
      END IF;
      IF TG_OP = 'DELETE'
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.0.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
 @@ -548,11 +548,7 @@ BEGIN
         AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
          RETURN NEW;

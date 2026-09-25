@@ -905,12 +905,13 @@ internal class SyncEngine(
 
             val request = if (nextReplayRequestJSON != null) {
                 decodeBackoffRequest<PullRequest>(nextReplayRequestJSON).also { replay ->
-                    if (replay.clientID != clientID ||
-                        replay.clientGeneration != clientGeneration ||
-                        replay.schema != SchemaRef(version = schemaVersion, hash = schemaHash) ||
-                        replay.scopeSetVersion != scopeSetVersion ||
-                        replay.scopes != scopes ||
-                        replay.limit != config.effectivePullPageSize
+                    if (!isCurrentPullRequest(
+                            replay,
+                            clientGeneration,
+                            SchemaRef(version = schemaVersion, hash = schemaHash),
+                            scopeSetVersion,
+                            scopes,
+                        )
                     ) {
                         throw SynchroError.InvalidResponse("durable pull retry identity does not match local state")
                     }
@@ -1195,6 +1196,11 @@ internal class SyncEngine(
                 connectSchema.first,
                 response.scopeCursorUpdates,
             )
+            retireSupersededReadRetry(
+                db,
+                response.clientGeneration,
+                SchemaRef(connectSchema.second.first, connectSchema.second.second),
+            )
             resolvedRequestJSON?.let { requestJSON ->
                 DurableBackoffStore.clearMatching(db, RetryOperation.CONNECTING, requestJSON)
             }
@@ -1267,11 +1273,56 @@ internal class SyncEngine(
         SynchroMeta.get(db, MetaKey.SNAPSHOT_COMPLETE) == "1" &&
             SynchroMeta.getInt64(db, MetaKey.CLIENT_GENERATION) == 0L
 
-    private fun loadKnownScopes(): Map<String, ScopeCursorRef> {
-        return database.readTransaction { db ->
-            SynchroMeta.getAllScopes(db).associate { scope ->
-                scope.scopeID to ScopeCursorRef(cursor = scope.cursor)
-            }
+    private fun loadKnownScopes(): Map<String, ScopeCursorRef> =
+        database.readTransaction(::knownScopes)
+
+    private fun knownScopes(db: android.database.sqlite.SQLiteDatabase): Map<String, ScopeCursorRef> =
+        SynchroMeta.getAllScopes(db).associate { scope ->
+            scope.scopeID to ScopeCursorRef(cursor = scope.cursor)
+        }
+
+    private fun isCurrentPullRequest(
+        request: PullRequest,
+        clientGeneration: Long,
+        schema: SchemaRef,
+        scopeSetVersion: Long,
+        scopes: Map<String, ScopeCursorRef>,
+    ): Boolean =
+        request.clientID == clientID &&
+            request.clientGeneration == clientGeneration &&
+            request.schema == schema &&
+            request.scopeSetVersion == scopeSetVersion &&
+            request.scopes == scopes &&
+            request.limit == config.effectivePullPageSize
+
+    // Connect re-establishes current state. A saved pull or rebuild request that the
+    // installed state supersedes must not be repeated, so the install retires it.
+    private fun retireSupersededReadRetry(
+        db: android.database.sqlite.SQLiteDatabase,
+        clientGeneration: Long,
+        schema: SchemaRef,
+    ) {
+        val backoff = DurableBackoffStore.load(db) ?: return
+        val current = when (backoff.resumeState) {
+            RetryOperation.PULLING -> isCurrentPullRequest(
+                decodeBackoffRequest<PullRequest>(backoff.workIdentity),
+                clientGeneration,
+                schema,
+                SynchroMeta.getInt64(db, MetaKey.SCOPE_SET_VERSION),
+                knownScopes(db),
+            )
+            RetryOperation.REBUILDING -> pullProcessor.isCurrentRebuildRequestInTransaction(
+                db,
+                decodeBackoffRequest<RebuildRequest>(backoff.workIdentity),
+                clientID,
+                clientGeneration,
+                schema,
+                config.effectivePullPageSize,
+            )
+            else -> return
+        }
+        if (!current) {
+            DurableBackoffStore.clearMatching(db, backoff.resumeState, backoff.workIdentity)
         }
     }
 

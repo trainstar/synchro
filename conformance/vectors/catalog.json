@@ -1,7 +1,7 @@
 {
   "$schema": "https://synchro.dev/conformance/schemas/vector-catalog-v1.schema.json",
   "schema_version": 1,
-  "release": "0.3.0",
+  "release": "0.3.1",
   "vector_sets": [
     {
       "vector_set_id": "VSET-CANONICAL-001",

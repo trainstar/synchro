@@ -24,14 +24,37 @@ var (
 	cargoWorkspaceVersionRE         = regexp.MustCompile(`(?ms)(\[workspace\.package\]\s+version = ")([^"]+)(")`)
 	controlVersionRE                = regexp.MustCompile(`(?m)^default_version = '.*'$`)
 	distributionReleaseRE           = regexp.MustCompile(`(?m)^  "release": ".*",$`)
-	requirementsSchemaReleaseRE     = regexp.MustCompile(`(?m)^    "release": \{ "const": ".*" \},$`)
+	schemaReleaseConstRE            = regexp.MustCompile(`(?m)^    "release": \{ "const": ".*" \},$`)
+	conformanceReleaseRE            = regexp.MustCompile(`(?m)^const Version = ".*"$`)
+	cargoLockCoreVersionRE          = regexp.MustCompile(`(?m)^name = "synchro-core"\nversion = ".*"$`)
+	cargoLockPGVersionRE            = regexp.MustCompile(`(?m)^name = "synchro-pg"\nversion = ".*"$`)
+	goConsumerRequireRE             = regexp.MustCompile(`(?m)^require github\.com/trainstar/synchro/api/go v.*$`)
 	baseSQLFileRE                   = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+)\.sql$`)
+)
+
+// Token patterns find release references inside content that the version tool
+// does not otherwise own. Group 1 holds the release version.
+var (
+	publishedReferenceRE   = regexp.MustCompile("(?:Synchro\\s+`v?|Git tag `v|@trainstar/synchro-react-native@|trainstar-synchro-react-native-|fit\\.trainstar:synchro:|trainstar/synchro\\.git', :tag => 'v|trainstar/synchro\\.git\",\\s+exact: \")(\\d+\\.\\d+\\.\\d+)")
+	installSQLReferenceRE  = regexp.MustCompile(`synchro_pg--(\d+\.\d+\.\d+)\.sql`)
+	extensionVersionRE     = regexp.MustCompile(`"extension_version":\s*"(\d+\.\d+\.\d+)"`)
+	podfileLockReferenceRE = regexp.MustCompile(`(?m)^(?:  - Synchro \(|  - SynchroReactNative \(|    - Synchro \(= )(\d+\.\d+\.\d+)\)`)
 )
 
 type fileExpectation struct {
 	path     string
 	pattern  *regexp.Regexp
 	expected string
+}
+
+// tokenExpectation requires each pattern match to name the release. Each listed
+// path must contain a match. A directory contributes every file with suffix
+// that contains a match, and it must contribute at least one file.
+type tokenExpectation struct {
+	paths   []string
+	dir     string
+	suffix  string
+	pattern *regexp.Regexp
 }
 
 func FindRepoRoot(start string) (string, error) {
@@ -168,9 +191,89 @@ func distributionExpectations(root, version string) []fileExpectation {
 			expected: fmt.Sprintf(`  "release": "%s",`, version),
 		},
 		{
+			path:     filepath.Join(root, "conformance/faults/catalog.json"),
+			pattern:  distributionReleaseRE,
+			expected: fmt.Sprintf(`  "release": "%s",`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/performance/budgets.json"),
+			pattern:  distributionReleaseRE,
+			expected: fmt.Sprintf(`  "release": "%s",`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/vectors/catalog.json"),
+			pattern:  distributionReleaseRE,
+			expected: fmt.Sprintf(`  "release": "%s",`, version),
+		},
+		{
 			path:     filepath.Join(root, "conformance/schemas/requirements-v2.schema.json"),
-			pattern:  requirementsSchemaReleaseRE,
+			pattern:  schemaReleaseConstRE,
 			expected: fmt.Sprintf(`    "release": { "const": "%s" },`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/schemas/fault-catalog-v1.schema.json"),
+			pattern:  schemaReleaseConstRE,
+			expected: fmt.Sprintf(`    "release": { "const": "%s" },`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/schemas/performance-budgets-v2.schema.json"),
+			pattern:  schemaReleaseConstRE,
+			expected: fmt.Sprintf(`    "release": { "const": "%s" },`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/schemas/vector-catalog-v1.schema.json"),
+			pattern:  schemaReleaseConstRE,
+			expected: fmt.Sprintf(`    "release": { "const": "%s" },`, version),
+		},
+		{
+			path:     filepath.Join(root, "conformance/internal/release/release.go"),
+			pattern:  conformanceReleaseRE,
+			expected: fmt.Sprintf(`const Version = "%s"`, version),
+		},
+		{
+			path:     filepath.Join(root, "extensions/Cargo.lock"),
+			pattern:  cargoLockCoreVersionRE,
+			expected: fmt.Sprintf("name = \"synchro-core\"\nversion = \"%s\"", version),
+		},
+		{
+			path:     filepath.Join(root, "extensions/Cargo.lock"),
+			pattern:  cargoLockPGVersionRE,
+			expected: fmt.Sprintf("name = \"synchro-pg\"\nversion = \"%s\"", version),
+		},
+		{
+			path:     filepath.Join(root, "verification/consumers/go/go.mod"),
+			pattern:  goConsumerRequireRE,
+			expected: fmt.Sprintf(`require github.com/trainstar/synchro/api/go v%s`, version),
+		},
+	}
+}
+
+func tokenExpectations(root string) []tokenExpectation {
+	return []tokenExpectation{
+		{
+			paths: []string{
+				filepath.Join(root, "README.md"),
+				filepath.Join(root, "clients/react-native/README.md"),
+				filepath.Join(root, "docs/src/content/docs/clients/consumption.mdx"),
+				filepath.Join(root, "docs/src/content/docs/getting-started/quickstart.mdx"),
+				filepath.Join(root, "docs/src/content/docs/getting-started/server-setup.mdx"),
+				filepath.Join(root, "docs/src/content/docs/index.mdx"),
+			},
+			pattern: publishedReferenceRE,
+		},
+		{
+			paths:   []string{filepath.Join(root, "clients/react-native/example/ios/Podfile.lock")},
+			pattern: podfileLockReferenceRE,
+		},
+		{
+			dir:     filepath.Join(root, "conformance/mutants/integration"),
+			suffix:  ".patch",
+			pattern: installSQLReferenceRE,
+		},
+		{
+			dir:     filepath.Join(root, "conformance/scenarios"),
+			suffix:  ".json",
+			pattern: extensionVersionRE,
 		},
 	}
 }
@@ -183,6 +286,17 @@ func Sync(root string) error {
 	for _, replacement := range distributionExpectations(root, version) {
 		if err := rewriteFile(replacement.path, replacement.pattern, replacement.expected); err != nil {
 			return err
+		}
+	}
+	for _, expectation := range tokenExpectations(root) {
+		paths, err := tokenPaths(root, expectation)
+		if err != nil {
+			return err
+		}
+		for _, path := range paths {
+			if err := rewriteTokens(path, expectation.pattern, version); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -209,6 +323,19 @@ func Check(root string, expectedTag string) error {
 		}
 		if !ok {
 			failures = append(failures, fmt.Sprintf("%s does not match expected value %q, found %q", relativePath(root, expectation.path), expectation.expected, actual))
+		}
+	}
+
+	for _, expectation := range tokenExpectations(root) {
+		paths, err := tokenPaths(root, expectation)
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		for _, path := range paths {
+			if err := checkTokens(root, path, expectation.pattern, version); err != nil {
+				failures = append(failures, err.Error())
+			}
 		}
 	}
 
@@ -267,6 +394,76 @@ func matchesExpectation(path string, pattern *regexp.Regexp, expected string) (b
 	}
 
 	return actual == expected, actual, nil
+}
+
+func tokenPaths(root string, expectation tokenExpectation) ([]string, error) {
+	if expectation.dir == "" {
+		return expectation.paths, nil
+	}
+	var paths []string
+	err := filepath.WalkDir(expectation.dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, expectation.suffix) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if expectation.pattern.Match(data) {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scanning %s: %w", relativePath(root, expectation.dir), err)
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("%s has no release-version reference", relativePath(root, expectation.dir))
+	}
+	return paths, nil
+}
+
+func rewriteTokens(path string, pattern *regexp.Regexp, version string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	matches := pattern.FindAllSubmatchIndex(data, -1)
+	if len(matches) == 0 {
+		return fmt.Errorf("could not find a release-version reference in %s", path)
+	}
+	var updated []byte
+	last := 0
+	for _, match := range matches {
+		updated = append(updated, data[last:match[2]]...)
+		updated = append(updated, version...)
+		last = match[3]
+	}
+	updated = append(updated, data[last:]...)
+	if err := os.WriteFile(path, updated, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+func checkTokens(root string, path string, pattern *regexp.Regexp, version string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	matches := pattern.FindAllSubmatch(data, -1)
+	if len(matches) == 0 {
+		return fmt.Errorf("missing release-version reference in %s", relativePath(root, path))
+	}
+	for _, match := range matches {
+		if string(match[1]) != version {
+			return fmt.Errorf("%s references release %q, expected %q", relativePath(root, path), match[1], version)
+		}
+	}
+	return nil
 }
 
 func syncPostgresInstallSQL(root string, version string) error {

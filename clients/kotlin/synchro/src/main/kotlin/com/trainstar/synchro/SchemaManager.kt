@@ -49,13 +49,19 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             val existing = loadMigrationJournal(db)
             if (existing != null) {
                 validateJournal(existing)
-                if (existing.target != target || existing.resetMaterialization != resetMaterialization ||
-                    existing.action != response.schema.action || existing.targetManifest != manifest
+                if (existing.target == target && existing.resetMaterialization == resetMaterialization &&
+                    existing.action == response.schema.action && existing.targetManifest == manifest
                 ) {
+                    return@writeTransaction existing
+                }
+                // A committed journal holds only rebuild work. The new journal
+                // carries that work, so the server schema action can proceed.
+                if (existing.phase == MigrationPhase.PREPARED || existing.target != source) {
                     throw SynchroError.InvalidResponse("a different schema migration is already pending")
                 }
-                return@writeTransaction existing
+                db.execSQL("DELETE FROM _synchro_migration_journal WHERE singleton = 1")
             }
+            val carriedScopes = existing?.affectedScopes.orEmpty().filterNot { scopeRebuildFinal(db, it) }
             val plan = buildMigrationPlan(db, source, target, targetTables, resetMaterialization)
             val planJSON = json.encodeToString(plan)
             val journal = LocalMigrationJournal(
@@ -63,7 +69,9 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 source = source,
                 target = target,
                 action = response.schema.action,
-                affectedScopes = response.affectedScopes.orEmpty().sortedWith(unsignedUTF8Comparator),
+                affectedScopes = (response.affectedScopes.orEmpty() + carriedScopes)
+                    .distinct()
+                    .sortedWith(unsignedUTF8Comparator),
                 scopeCursorUpdates = response.scopeCursorUpdates.toSortedMap(),
                 targetManifest = manifest,
                 targetTables = targetTables.sortedWith(compareBy { it.tableID }),
@@ -139,20 +147,18 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             validateTargetPhysicalSchema(db, journal.targetTables)
             val complete = when (journal.phase) {
                 MigrationPhase.DDL_APPLIED -> journal.affectedScopes.isEmpty()
-                MigrationPhase.AWAITING_REBUILD -> journal.affectedScopes.all { scopeID ->
-                    val scope = SynchroMeta.getScope(db, scopeID)
-                    scope == null || (
-                        scope.cursor != null &&
-                            scope.checksum != null &&
-                            SynchroMeta.getRebuildAttempt(db, scopeID) == null
-                        )
-                }
+                MigrationPhase.AWAITING_REBUILD -> journal.affectedScopes.all { scopeRebuildFinal(db, it) }
                 MigrationPhase.PREPARED -> false
             }
             if (complete) {
                 db.execSQL("DELETE FROM _synchro_migration_journal WHERE singleton = 1")
             }
         }
+    }
+
+    private fun scopeRebuildFinal(db: SQLiteDatabase, scopeID: String): Boolean {
+        val scope = SynchroMeta.getScope(db, scopeID) ?: return true
+        return scope.cursor != null && scope.checksum != null && SynchroMeta.getRebuildAttempt(db, scopeID) == null
     }
 
     fun loadStoredLocalSchema(): List<LocalSchemaTable>? {

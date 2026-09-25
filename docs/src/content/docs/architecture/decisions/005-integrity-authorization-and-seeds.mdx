@@ -18,7 +18,7 @@ Protocol version 3 is the only protocol governed by this ADR. A peer that does n
 
 The integrity authority is SHA-256 over the canonical typed binary grammar below. Row digests bind the immutable schema hash, logical table identity, primary-key identity, complete authoritative row, and opaque server version. Scope digests bind the schema hash, scope identity, exact cardinality, and the sorted sequence of canonical row identities paired with their row digests.
 
-PostgreSQL objects live in the fixed, nonrelocatable `synchro` schema. Access is default-deny and is split among owner, adapter, seed, monitor, operator, and worker roles. Readiness fails closed. Portable seed export uses one enforced `SERIALIZABLE READ ONLY DEFERRABLE` PostgreSQL transaction, authenticated page tokens, end-to-end digest verification, and a verified SQLite artifact. pgrx-generated SQL is the sole extension installation source, with `0.3.0` as the first extension migration baseline.
+PostgreSQL objects live in the fixed, nonrelocatable `synchro` schema. Access is default-deny and is split among owner, adapter, seed, monitor, operator, and worker roles. Readiness fails closed. Portable seed export uses one enforced `SERIALIZABLE READ ONLY DEFERRABLE` PostgreSQL transaction, authenticated page tokens, end-to-end digest verification, and a verified SQLite artifact. pgrx-generated SQL is the sole extension installation source, with `0.3.1` as the first extension migration baseline.
 
 ## Portable type system and wire JSON
 
@@ -527,9 +527,9 @@ The seed stores portable seed continuation receipts, not ordinary client cursors
 
 `synchro_pg` is nonrelocatable and its control metadata fixes installation to the `synchro` schema. pgrx annotations and `extension_sql!` declarations in the Rust extension source are the sole authored source for extension DDL, functions, revokes, grants, comments, and extension membership.
 
-The packaged `synchro_pg--0.3.0.sql` is generated from that pgrx source during the release build. A generated SQL file may be tracked only when CI regenerates it byte for byte and rejects drift. A hand-maintained or stale parallel SQL definition is not shipped and is not accepted as an installation path.
+The packaged `synchro_pg--<version>.sql` install script is generated from that pgrx source during the release build. A generated SQL file may be tracked only when CI regenerates it byte for byte and rejects drift. A hand-maintained or stale parallel SQL definition is not shipped and is not accepted as an installation path.
 
-Version `0.3.0` is the first supported extension migration baseline. Installation is proven by creating a clean PostgreSQL 18 database, provisioning or validating the fixed roles, installing the packaged extension, checking ownership and grants, and exercising the canonical contract and readiness functions as non-superuser runtime roles. The deleted non-extension architecture and experimental pre-`0.3.0` extension state have no in-place `ALTER EXTENSION UPDATE` path. They require controlled export, clean installation, and rebuild. Future extension versions require explicit generated and reviewed upgrade scripts from the `0.3.0` baseline. `CREATE TABLE IF NOT EXISTS` is not a substitute for a migration.
+Version `0.3.1`, the first published Protocol 3 release, is the first supported extension migration baseline. Installation is proven by creating a clean PostgreSQL 18 database, provisioning or validating the fixed roles, installing the packaged extension, checking ownership and grants, and exercising the canonical contract and readiness functions as non-superuser runtime roles. The deleted non-extension architecture, experimental pre-`0.3.0` extension state, and the unpublished `0.3.0` candidate have no in-place `ALTER EXTENSION UPDATE` path. They require controlled export, clean installation, and rebuild. Future extension versions require explicit generated and reviewed upgrade scripts from the `0.3.1` baseline. `CREATE TABLE IF NOT EXISTS` is not a substitute for a migration.
 
 ## Rejected alternatives
 
@@ -576,7 +576,7 @@ Release evidence must demonstrate at least these negative controls:
 - canary row and identity values never appear in logs, traces, health output, or quarantine error text;
 - concurrent source writes cannot alter later pages of one seed export, and modified, replayed-outside-transaction, cross-scope, and cross-export page tokens are rejected;
 - a missing row, altered row, missing or stale server version, wrong digest, incomplete page sequence, stale receipt, corrupt SQLite file, or nonempty pending queue prevents artifact publication or seed continuation; and
-- stale or hand-edited SQL fails regeneration checks, while a clean PostgreSQL 18 install from the packaged pgrx-generated `0.3.0` SQL passes ownership and role checks.
+- stale or hand-edited SQL fails regeneration checks, while a clean PostgreSQL 18 install from the packaged pgrx-generated baseline SQL passes ownership and role checks.
 
 ## Audit disposition
 
@@ -590,6 +590,6 @@ Release evidence must demonstrate at least these negative controls:
 | S-22 | Integrity, authorization, readiness, seed, clean-install, and SQL-generation checks are mandatory release evidence for every published artifact. |
 | S-23 | The fixed `synchro` schema, `PUBLIC` revocation, exact function grants, and six distinct least-privilege roles seal the database trust boundary. |
 | S-27 | One enforced deferrable serializable snapshot, transaction-bound HMAC page tokens, full digest verification, and authenticated continuation replace independent live seed queries. |
-| S-28 | pgrx-generated SQL is the sole installation source, stale parallel SQL is excluded, and `0.3.0` is the clean extension migration baseline. |
+| S-28 | pgrx-generated SQL is the sole installation source, stale parallel SQL is excluded, and `0.3.1` is the clean extension migration baseline. |
 
 The lower-severity SemVer and logging findings are disposed by exact SemVer 2.0.0 precedence and the prohibition on row and identity payloads in operational output. Implementation remediation and independent verification remain required before any release-readiness claim.

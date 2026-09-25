@@ -751,7 +751,7 @@ enum SynchroMeta {
         )
     }
 
-    /// Removes a rebuild retry only when its exact durable request targets the removed scope.
+    /// Removes a rebuild retry only when its exact durable request targets the scope.
     static func clearRebuildingBackoffForScope(
         _ db: GRDB.Database,
         scopeID: String

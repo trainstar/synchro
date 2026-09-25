@@ -1210,6 +1210,31 @@ class PullProcessorTests {
     }
 
     @Test
+    fun rebuildRestartRetiresReplacedAttemptRetry() {
+        val (database, processor) = makeTestEnv()
+        val scopeID = "orders:user1"
+        database.writeTransaction { SynchroMeta.upsertScope(it, scopeID, null, null) }
+        val attempt = processor.beginScopeRebuild(scopeID, 1, 1, PROTOCOL_TEST_SCHEMA_HASH, 100)
+        val requestJSON = rebuildRequestJSON(
+            RebuildRequest(
+                clientID = "test-client",
+                clientGeneration = attempt.clientGeneration,
+                schema = SchemaRef(attempt.schemaVersion, attempt.schemaHash),
+                scope = scopeID,
+                rebuildID = attempt.rebuildID,
+                cursor = attempt.cursor,
+                limit = attempt.pageLimit,
+            ),
+        )
+        installDurableBackoff(database, RetryOperation.REBUILDING, requestJSON)
+
+        val restarted = processor.restartScopeRebuild(scopeID, 1, 1, PROTOCOL_TEST_SCHEMA_HASH, 100)
+
+        assertNotEquals(attempt.rebuildID, restarted.rebuildID)
+        assertNull(DurableBackoffStore.load(database))
+    }
+
+    @Test
     fun testFinalizeScopeRebuildKeepsRecordBackedByAnotherScope() {
         val (db, processor) = makeTestEnv()
 

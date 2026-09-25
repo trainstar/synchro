@@ -68,6 +68,16 @@ final class SchemaManager: @unchecked Sendable {
             } else if source.version != 0 || !source.hash.isEmpty || !sourceTables.isEmpty {
                 throw SynchroError.invalidResponse(message: "fresh schema migration source is invalid")
             }
+            var carriedScopes: [String] = []
+            // A committed journal holds only rebuild work. The new journal
+            // carries that work, so the server schema action can proceed.
+            if let existing = try SynchroMeta.getSchemaMigrationJournal(db),
+               existing.phase == .applied,
+               existing.target == source,
+               SchemaRef(version: targetManifest.schemaVersion, hash: targetManifest.schemaHash) != source {
+                carriedScopes = try existing.affectedScopes.filter { try !scopeRebuildFinal(db, scopeID: $0) }
+                try SynchroMeta.clearSchemaMigrationJournal(db)
+            }
             let plan = try SchemaMigrationPlan.derive(
                 source: source,
                 sourceTables: sourceTables,
@@ -79,7 +89,7 @@ final class SchemaManager: @unchecked Sendable {
                 source: source,
                 targetManifest: targetManifest,
                 action: action,
-                affectedScopes: affectedScopes,
+                affectedScopes: Set(affectedScopes).union(carriedScopes).sorted(by: utf8Less),
                 scopeCursorUpdates: scopeCursorUpdates,
                 plan: plan,
                 planHash: Integrity.sha256Hex(
@@ -152,16 +162,23 @@ final class SchemaManager: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "schema migration has not applied local DDL")
             }
             for scopeID in journal.affectedScopes {
-                guard let scope = try SynchroMeta.getScope(db, scopeID: scopeID),
-                      scope.cursor != nil,
-                      scope.checksum != nil,
-                      !scope.localChecksum.isEmpty,
-                      try SynchroMeta.getRebuildAttempt(db, scopeID: scopeID) == nil else {
+                guard try scopeRebuildFinal(db, scopeID: scopeID) else {
                     return
                 }
             }
             try SynchroMeta.clearSchemaMigrationJournal(db)
         }
+    }
+
+    /// A scope that is no longer assigned has no rebuild left to finish.
+    private func scopeRebuildFinal(_ db: GRDB.Database, scopeID: String) throws -> Bool {
+        guard let scope = try SynchroMeta.getScope(db, scopeID: scopeID) else {
+            return true
+        }
+        guard scope.cursor != nil, scope.checksum != nil, !scope.localChecksum.isEmpty else {
+            return false
+        }
+        return try SynchroMeta.getRebuildAttempt(db, scopeID: scopeID) == nil
     }
 
     func activeMigration() throws -> SchemaMigrationJournal? {

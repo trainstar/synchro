@@ -1,13 +1,17 @@
 // Package faults loads typed fault recipes and provides cleanup-safe controls.
 package faults
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/trainstar/synchro/conformance/internal/release"
+)
 
 const (
 	// CatalogSchemaURI is the only accepted fault catalog schema URI.
 	CatalogSchemaURI = "https://synchro.dev/conformance/schemas/fault-catalog-v1.schema.json"
 	// CatalogRelease is the release bound by the fault catalog.
-	CatalogRelease = "0.3.0"
+	CatalogRelease = release.Version
 )
 
 // Catalog is the strict typed representation of conformance/faults/catalog.json.

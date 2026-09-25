@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
 func TestVerifyPG18BinariesRequiresExactRuntimeVersion(t *testing.T) {
@@ -496,7 +498,7 @@ func writeExtensionBundleFixture(t *testing.T) string {
 	files := []extensionBundleFile{
 		{Path: "payload/synchro_pg." + suffix, Destination: "pkglibdir/synchro_pg." + suffix},
 		{Path: "payload/synchro_pg.control", Destination: "sharedir/extension/synchro_pg.control"},
-		{Path: "payload/synchro_pg--0.3.0.sql", Destination: "sharedir/extension/synchro_pg--0.3.0.sql"},
+		{Path: "payload/synchro_pg--" + release.Version + ".sql", Destination: "sharedir/extension/synchro_pg--" + release.Version + ".sql"},
 	}
 	for index := range files {
 		path := filepath.Join(root, filepath.FromSlash(files[index].Path))
