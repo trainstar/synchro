@@ -991,6 +991,24 @@ jobs:
             test "$(shasum -a 256 "$release/$relative" | cut -d ' ' -f 1)" = "$digest"
           done < "$release/SHA256SUMS"
 
+      - name: Verify registry publication credentials
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          classification="$RUNNER_TEMP/public-before-classification.json"
+          if [ "$(jq -r '.maven' "$classification")" != published ]; then
+            python3 "$RUNNER_TEMP/release-publish.py" identity --release-dir "$release" --output "$RUNNER_TEMP/preflight-identity.json"
+            python3 "$RUNNER_TEMP/release-publish.py" central-list \
+              --name "$(jq -r '.maven_bundle.deployment_name' "$RUNNER_TEMP/preflight-identity.json")" \
+              --output "$RUNNER_TEMP/central-preflight.json"
+          fi
+          if [ "$(jq -r '.npm' "$classification")" = absent ]; then
+            python3 "$RUNNER_TEMP/release-publish.py" npm-trusted-publishing
+          fi
+
       - name: Create or verify immutable source tags
         env:
           GH_TOKEN: ${{ github.token }}

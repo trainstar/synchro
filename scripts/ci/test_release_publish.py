@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import hashlib
 import json
@@ -862,6 +863,129 @@ class PublicationStateTests(unittest.TestCase):
         )
         (release_dir / "sbom.spdx.json").write_text('{"spdxVersion":"SPDX-2.3"}', encoding="utf-8")
         return release_publish.identity_for_directory(release_dir)
+
+    def test_registry_credential_preflight_fails_before_tags(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertLess(
+            workflow.index("      - name: Verify registry publication credentials\n"),
+            workflow.index("      - name: Create or verify immutable source tags\n"),
+        )
+        command = release_step_command("Verify registry publication credentials")
+        command = command.replace("${{ needs.candidate.outputs.release_dir_name }}", "fixture")
+        self.assertNotIn("${{", command)
+        central = "Bearer " + base64.b64encode(b"fixture-user:fixture-password").decode("ascii")
+        exchange = "/-/npm/v1/oidc/token/exchange/package/@trainstar%2fsynchro-react-native"
+        with tempfile.TemporaryDirectory(prefix="synchro-registry-preflight-") as directory:
+            root = Path(directory)
+            self.write_release_fixture(root / "dist/releases/fixture")
+            tools = root / "tools"
+            tools.mkdir()
+            proxy = tools / "python3"
+            proxy.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import importlib.util
+                import os
+                import sys
+                assert sys.argv[1] == os.path.join(os.environ["RUNNER_TEMP"], "release-publish.py")
+                spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
+                publisher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(publisher)
+                publisher.CENTRAL_API = os.environ["TEST_SERVER_URL"]
+                publisher.NPM_REGISTRY = os.environ["TEST_SERVER_URL"]
+                sys.argv = sys.argv[1:]
+                raise SystemExit(publisher.main())
+                """), encoding="utf-8")
+            proxy.chmod(0o755)
+            for maven, npm, password, oidc, exchange_status, error in (
+                ("absent", "absent", "fixture-password", True, 200, None),
+                ("absent", "absent", "wrong-password", True, 200, "Central request failed with HTTP 401"),
+                ("published", "absent", "", True, 404, "npm trusted publishing token exchange failed with HTTP 404"),
+                ("published", "absent", "", False, 200, "GitHub OIDC token request is unavailable"),
+                ("published", "published-latest", "", True, 200, None),
+            ):
+                with self.subTest(maven=maven, npm=npm, password=password, oidc=oidc, exchange_status=exchange_status):
+                    requests = []
+
+                    class Handler(BaseHTTPRequestHandler):
+                        def log_message(self, *_args: object) -> None:
+                            return
+
+                        def respond(self, status: int, value: object) -> None:
+                            payload = json.dumps(value).encode()
+                            self.send_response(status)
+                            self.send_header("Content-Length", str(len(payload)))
+                            self.end_headers()
+                            self.wfile.write(payload)
+
+                        def do_GET(self) -> None:
+                            parsed = urllib.parse.urlsplit(self.path)
+                            requests.append(("GET", parsed.path))
+                            authorization = self.headers["Authorization"]
+                            if parsed.path == "/deployments":
+                                if authorization != central:
+                                    self.respond(401, {"error": "not authenticated"})
+                                    return
+                                self.respond(200, {"deployments": [], "page": 0, "pageSize": 100, "pageCount": 0, "totalResultCount": 0})
+                            elif parsed.path == "/oidc":
+                                self.assertEqual(urllib.parse.parse_qs(parsed.query), {"run": ["1"], "audience": ["npm:registry.npmjs.org"]})
+                                self.assertEqual(authorization, "Bearer request-token-secret")
+                                self.respond(200, {"value": "id-token-secret"})
+                            else:
+                                self.respond(400, {})
+
+                        def do_POST(self) -> None:
+                            requests.append(("POST", self.path))
+                            if self.path != exchange or self.headers["Authorization"] != "Bearer id-token-secret":
+                                self.respond(400, {})
+                                return
+                            self.respond(exchange_status, {"token": "npm-token-secret"} if exchange_status == 200 else {"message": "no trusted publisher"})
+
+                        assertEqual = self.assertEqual
+
+                    runner = root / f"{maven}-{npm}-{password}-{oidc}-{exchange_status}"
+                    runner.mkdir()
+                    (runner / "public-before-classification.json").write_text(
+                        json.dumps({"maven": maven, "npm": npm}), encoding="utf-8",
+                    )
+                    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+                        thread = threading.Thread(target=server.serve_forever)
+                        thread.start()
+                        url = f"http://127.0.0.1:{server.server_port}"
+                        environment = {
+                            **os.environ,
+                            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                            "RUNNER_TEMP": str(runner),
+                            "MAVEN_CENTRAL_USERNAME": "fixture-user" if password else "",
+                            "MAVEN_CENTRAL_PASSWORD": password,
+                            "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
+                            "TEST_SERVER_URL": url,
+                        }
+                        environment.pop("ACTIONS_ID_TOKEN_REQUEST_URL", None)
+                        environment.pop("ACTIONS_ID_TOKEN_REQUEST_TOKEN", None)
+                        if oidc:
+                            environment["ACTIONS_ID_TOKEN_REQUEST_URL"] = f"{url}/oidc?run=1"
+                            environment["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = "request-token-secret"
+                        try:
+                            result = subprocess.run(
+                                ["bash", "-c", command], cwd=root, env=environment,
+                                capture_output=True, text=True, timeout=20, check=False,
+                            )
+                        finally:
+                            server.shutdown()
+                            thread.join()
+                    output = result.stdout + result.stderr
+                    for secret in ("request-token-secret", "id-token-secret", "npm-token-secret", "fixture-password"):
+                        self.assertNotIn(secret, output)
+                    if error is None:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(error, result.stderr)
+                    expected = []
+                    if maven != "published":
+                        expected.append(("GET", "/deployments"))
+                    if npm == "absent" and oidc and password != "wrong-password":
+                        expected.extend([("GET", "/oidc"), ("POST", exchange)])
+                    self.assertEqual(requests, expected)
 
     def test_registry_polls_do_not_spend_github_api_requests(self) -> None:
         command = release_step_command("Publish and verify Maven deployment")

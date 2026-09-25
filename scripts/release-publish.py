@@ -28,6 +28,8 @@ SLSA_PROVENANCE = re.compile(r"^https://slsa[.]dev/provenance/v[0-9]+(?:[.][0-9]
 MAVEN_STATES = {"PENDING", "VALIDATING", "VALIDATED", "PUBLISHING", "PUBLISHED", "FAILED"}
 NPM_PACKAGE = "@trainstar/synchro-react-native"
 MAVEN_BASE = "https://repo1.maven.org/maven2"
+NPM_REGISTRY = "https://registry.npmjs.org"
+NPM_OIDC_AUDIENCE = "npm:registry.npmjs.org"
 CENTRAL_API = "https://central.sonatype.com/api/v1/publisher"
 RATE_LIMIT_WAIT_SECONDS = 900
 CI_RUN_LOOKUP_ATTEMPTS = 20
@@ -466,6 +468,42 @@ def central_upload(bundle: Path, name: str) -> str:
     return identifier
 
 
+def bearer_json(url: str, token: str, label: str, *, method: str = "GET") -> Any:
+    request = urllib.request.Request(
+        url,
+        data=b"" if method == "POST" else None,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": "synchro-release-publisher"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise PublicationError(f"{label} failed with HTTP {error.code}") from error
+    except urllib.error.URLError as error:
+        raise PublicationError(f"{label} failed: {error.reason}") from error
+    except json.JSONDecodeError as error:
+        raise PublicationError(f"{label} response is not JSON") from error
+
+
+def verify_npm_trusted_publishing() -> None:
+    # This is the token exchange that npm CLI 11.6.2 runs before an OIDC publish (lib/utils/oidc.js).
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    if not request_url or not request_token:
+        raise PublicationError("GitHub OIDC token request is unavailable")
+    separator = "&" if "?" in request_url else "?"
+    audience = urllib.parse.urlencode({"audience": NPM_OIDC_AUDIENCE})
+    identity = bearer_json(f"{request_url}{separator}{audience}", request_token, "GitHub OIDC token request")
+    id_token = identity.get("value") if isinstance(identity, dict) else None
+    if not isinstance(id_token, str) or not id_token:
+        raise PublicationError("GitHub OIDC token response is invalid")
+    exchange_url = f"{NPM_REGISTRY}/-/npm/v1/oidc/token/exchange/package/{NPM_PACKAGE.replace('/', '%2f')}"
+    exchanged = bearer_json(exchange_url, id_token, "npm trusted publishing token exchange", method="POST")
+    if not isinstance(exchanged, dict) or not isinstance(exchanged.get("token"), str) or not exchanged["token"]:
+        raise PublicationError("npm trusted publishing token exchange returned no token")
+
+
 def central_recovery_action(deployment_state: str) -> str:
     if deployment_state in {"PENDING", "VALIDATING"}:
         return "wait"
@@ -652,7 +690,7 @@ def observe_github(
 
 def observe_npm(identity: dict[str, Any]) -> dict[str, Any]:
     version = identity["version"]
-    npm_root = request_json(f"https://registry.npmjs.org/{urllib.parse.quote(NPM_PACKAGE, safe='@')}")
+    npm_root = request_json(f"{NPM_REGISTRY}/{urllib.parse.quote(NPM_PACKAGE, safe='@')}")
     npm_hash = None
     npm_provenance = False
     dist_tags: dict[str, str] = {}
@@ -749,6 +787,7 @@ def main() -> int:
     select_parser.add_argument("--input", type=Path, required=True)
     select_parser.add_argument("--name", required=True)
     select_parser.add_argument("--output", type=Path, required=True)
+    subparsers.add_parser("npm-trusted-publishing")
     central_list_parser = subparsers.add_parser("central-list")
     central_list_parser.add_argument("--name", required=True)
     central_list_parser.add_argument("--output", type=Path, required=True)
@@ -801,6 +840,8 @@ def main() -> int:
             write_json(args.output, value)
         elif args.command == "central-select":
             write_json(args.output, select_central(load_json(args.input, "Central deployments"), args.name))
+        elif args.command == "npm-trusted-publishing":
+            verify_npm_trusted_publishing()
         elif args.command == "central-list":
             write_json(args.output, list_central_deployments(args.name))
         elif args.command == "central-status":
