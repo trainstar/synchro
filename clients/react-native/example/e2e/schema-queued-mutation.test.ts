@@ -4,7 +4,7 @@ import {
   coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
-import { WAIT_TIMEOUT_MS } from './timeouts';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
   const manifest = command.action;
