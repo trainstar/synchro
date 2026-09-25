@@ -112,9 +112,44 @@ jobs:
       security-events: write
     uses: ./.github/workflows/dependency-review.yml
 
+  candidate-reuse:
+    name: candidate reuse
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      reuse: ${{ steps.evidence.outputs.reuse }}
+    steps:
+      - name: Find a passed Candidate for the identical tree
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Identical source trees give identical Candidate inputs. Promotions and
+          # back-merges reuse a parent result. A changed tree runs every suite.
+          reuse=false
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA")"
+          tree="$(jq -r '.tree.sha' <<<"$commit")"
+          for parent in $(jq -r '.parents[].sha' <<<"$commit"); do
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$parent" | jq -r '.tree.sha')" = "$tree" || continue
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&status=completed&head_sha=$parent&per_page=100")"
+            for run in $(jq -r --arg sha "$parent" '.workflow_runs[] | select(.head_sha == $sha and .event == "push" and (.head_branch == "dev" or .head_branch == "master") and .conclusion == "success") | .id' <<<"$runs"); do
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" | jq -e 'any(.jobs[]; .name == "candidate" and .conclusion == "success")' >/dev/null; then
+                reuse=true
+                echo "Reused Candidate run $run from parent $parent. Both commits have tree $tree." >> "$GITHUB_STEP_SUMMARY"
+                break 2
+              fi
+            done
+          done
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
+
   candidate-pgrx-runtime:
     name: candidate PostgreSQL runtime
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
+    needs: candidate-reuse
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -134,7 +169,8 @@ jobs:
 
   candidate-server:
     name: candidate server
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
+    needs: candidate-reuse
     runs-on: ubuntu-24.04
     env:
       GOWORK: 'off'
@@ -209,7 +245,8 @@ jobs:
 
   candidate-swift:
     name: candidate Swift
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
+    needs: candidate-reuse
     runs-on: macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -259,8 +296,8 @@ jobs:
 
   candidate-kotlin:
     name: candidate Kotlin
-    if: github.event_name == 'push'
-    needs: candidate-pgrx-runtime
+    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
+    needs: [candidate-reuse, candidate-pgrx-runtime]
     runs-on: ubuntu-24.04
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -340,7 +377,8 @@ jobs:
 
   candidate-rn-ios:
     name: candidate React Native iOS
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
+    needs: candidate-reuse
     runs-on: macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -404,8 +442,8 @@ jobs:
 
   candidate-rn-android:
     name: candidate React Native Android
-    if: github.event_name == 'push'
-    needs: candidate-pgrx-runtime
+    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
+    needs: [candidate-reuse, candidate-pgrx-runtime]
     runs-on: ubuntu-24.04
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -501,7 +539,8 @@ jobs:
 
   candidate-docs:
     name: candidate docs
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
+    needs: candidate-reuse
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -539,6 +578,7 @@ jobs:
       - source-quality
       - codeql
       - dependency-scan
+      - candidate-reuse
       - candidate-pgrx-runtime
       - candidate-server
       - candidate-swift
@@ -553,10 +593,13 @@ jobs:
           test "${{ needs.source-quality.result }}" = success
           test "${{ needs.codeql.result }}" = success
           test "${{ needs.dependency-scan.result }}" = success
-          test "${{ needs.candidate-pgrx-runtime.result }}" = success
-          test "${{ needs.candidate-server.result }}" = success
-          test "${{ needs.candidate-swift.result }}" = success
-          test "${{ needs.candidate-kotlin.result }}" = success
-          test "${{ needs.candidate-rn-ios.result }}" = success
-          test "${{ needs.candidate-rn-android.result }}" = success
-          test "${{ needs.candidate-docs.result }}" = success
+          test "${{ needs.candidate-reuse.result }}" = success
+          suite=success
+          if [ "${{ needs.candidate-reuse.outputs.reuse }}" = true ]; then suite=skipped; fi
+          test "${{ needs.candidate-pgrx-runtime.result }}" = "$suite"
+          test "${{ needs.candidate-server.result }}" = "$suite"
+          test "${{ needs.candidate-swift.result }}" = "$suite"
+          test "${{ needs.candidate-kotlin.result }}" = "$suite"
+          test "${{ needs.candidate-rn-ios.result }}" = "$suite"
+          test "${{ needs.candidate-rn-android.result }}" = "$suite"
+          test "${{ needs.candidate-docs.result }}" = "$suite"

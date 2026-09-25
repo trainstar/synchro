@@ -31,11 +31,11 @@ release_publish = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release_publish)
 
 
-def release_step_command(name: str) -> str:
-    lines = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8").splitlines()
+def release_step_command(name: str, workflow: str = "release.yml") -> str:
+    lines = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8").splitlines()
     start = lines.index(f"      - name: {name}")
     run = next(index for index in range(start, len(lines)) if lines[index] == "        run: |")
-    end = next(index for index in range(run + 1, len(lines)) if lines[index] and not lines[index].startswith("          "))
+    end = next((index for index in range(run + 1, len(lines)) if lines[index] and not lines[index].startswith("          ")), len(lines))
     return textwrap.dedent("\n".join(lines[run + 1:end]))
 
 
@@ -126,6 +126,86 @@ class PublicationStateTests(unittest.TestCase):
                         capture_output=True, text=True, timeout=5, check=False,
                     )
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_candidate_reuse_requires_identical_parent_tree_and_passed_candidate(self) -> None:
+        command = release_step_command("Find a passed Candidate for the identical tree", "ci.yml")
+        head, master, tested = "c" * 40, "a" * 40, "b" * 40
+        tree, other = "1" * 40, "2" * 40
+        repo = "repos/trainstar/synchro"
+
+        def runs_path(sha: str) -> str:
+            return f"{repo}/actions/workflows/ci.yml/runs?event=push&status=completed&head_sha={sha}&per_page=100"
+
+        run = {"id": 7, "head_sha": tested, "head_branch": "dev", "event": "push", "conclusion": "success"}
+        promotion = {
+            f"{repo}/git/commits/{head}": {"tree": {"sha": tree}, "parents": [{"sha": master}, {"sha": tested}]},
+            f"{repo}/git/commits/{master}": {"tree": {"sha": other}},
+            f"{repo}/git/commits/{tested}": {"tree": {"sha": tree}},
+            runs_path(tested): {"workflow_runs": [run]},
+            f"{repo}/actions/runs/7/jobs?filter=latest&per_page=100": {"jobs": [{"name": "candidate", "conclusion": "success"}]},
+        }
+        back_merge = {**promotion, f"{repo}/git/commits/{head}": {"tree": {"sha": tree}, "parents": [{"sha": tested}, {"sha": master}]}}
+        cases = (
+            ("promotion with the tested tree", promotion, True),
+            ("back-merge with the tested tree", back_merge, True),
+            ("hotfix with a changed tree", {**promotion, f"{repo}/git/commits/{tested}": {"tree": {"sha": other}}}, False),
+            ("failed parent run", {**promotion, runs_path(tested): {"workflow_runs": [{**run, "conclusion": "failure"}]}}, False),
+            ("unprotected branch run", {**promotion, runs_path(tested): {"workflow_runs": [{**run, "head_branch": "feature"}]}}, False),
+            ("pull-request run", {**promotion, runs_path(tested): {"workflow_runs": [{**run, "event": "pull_request"}]}}, False),
+            ("run for another commit", {**promotion, runs_path(tested): {"workflow_runs": [{**run, "head_sha": head}]}}, False),
+            ("failed candidate job", {**promotion, f"{repo}/actions/runs/7/jobs?filter=latest&per_page=100": {"jobs": [{"name": "candidate", "conclusion": "failure"}]}}, False),
+        )
+        with tempfile.TemporaryDirectory(prefix="synchro-candidate-reuse-") as directory:
+            tools = Path(directory)
+            gh = tools / "gh"
+            gh.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "fixtures = json.loads(os.environ['TEST_GH_FIXTURES'])\n"
+                "if sys.argv[1:2] != ['api'] or sys.argv[2] not in fixtures:\n"
+                "    sys.exit(f'unexpected gh call: {sys.argv[1:]}')\n"
+                "print(json.dumps(fixtures[sys.argv[2]]))\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            for label, fixtures, reused in cases:
+                with self.subTest(case=label):
+                    output, summary = tools / "output", tools / "summary"
+                    output.write_text("", encoding="utf-8")
+                    result = subprocess.run(
+                        ["bash", "-c", command],
+                        env={
+                            **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                            "GITHUB_SHA": head, "GITHUB_REPOSITORY": "trainstar/synchro",
+                            "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary),
+                            "TEST_GH_FIXTURES": json.dumps(fixtures),
+                        },
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text(encoding="utf-8"), f"reuse={str(reused).lower()}\n")
+
+    def test_candidate_gate_accepts_skipped_suites_only_with_verified_reuse(self) -> None:
+        template = release_step_command("Require every candidate dependency", "ci.yml")
+        suites = ("pgrx-runtime", "server", "swift", "kotlin", "rn-ios", "rn-android", "docs")
+        full = {"source-quality": "success", "codeql": "success", "dependency-scan": "success", "candidate-reuse": "success"}
+        full |= {f"candidate-{suite}": "success" for suite in suites}
+        reused = full | {f"candidate-{suite}": "skipped" for suite in suites}
+        cases = (
+            ("full run", full, "false", True),
+            ("skipped suites without reuse", reused, "false", False),
+            ("verified reuse", reused, "true", True),
+            ("reuse with a failed suite", reused | {"candidate-rn-ios": "failure"}, "true", False),
+            ("reuse with a skipped security scan", reused | {"codeql": "skipped"}, "true", False),
+            ("failed reuse lookup", full | {"candidate-reuse": "failure"}, "", False),
+        )
+        for label, results, reuse, accepted in cases:
+            with self.subTest(case=label):
+                command = template.replace("${{ needs.candidate-reuse.outputs.reuse }}", reuse)
+                command = re.sub(r"\$\{\{ needs\.([a-z0-9-]+)\.result \}\}", lambda match: results[match.group(1)], command)
+                self.assertNotIn("${{", command)
+                result = subprocess.run(["bash", "-ec", command], capture_output=True, text=True, timeout=5, check=False)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
     def test_jobs_below_conditional_jobs_check_each_dependency(self) -> None:
         # An implicit success() skips a job when any ancestor is skipped, so recovery

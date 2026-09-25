@@ -21,8 +21,11 @@ The `publish` job performs every tag and public operation after approval.
 Create ordinary work branches from `dev` and target their pull requests at `dev`.
 
 Promote a verified release through a pull request from `dev` into `master`.
+After each promotion, merge `master` back into `dev` through a pull request.
 Create urgent stable hotfixes from `master`.
 After merging a hotfix, merge its correction back into `dev`.
+Merge promotion and back-merge pull requests with a merge commit.
+A squash merge breaks the shared history and makes the next promotion out of date.
 Tag and publish releases only from `master`.
 
 Keep both permanent branches.
@@ -69,11 +72,12 @@ Do not continue when a required control, credential, or runtime is unavailable.
 10. Confirm the support matrix in `conformance/support-matrix.json`.
 11. Merge the preparation changes into `dev` through a pull request.
 12. Confirm Candidate CI passed for the exact `dev` commit.
-13. Promote `dev` into `master` through a checked pull request.
+13. Promote `dev` into `master` through a checked pull request with a merge commit.
 14. Record the exact merged `master` SHA.
 15. Confirm Candidate CI passed for that exact `master` commit.
 16. Confirm that exactly one `vX.Y.Z` milestone exists.
 17. Dispatch Release from the `master` head.
+18. Merge `master` back into `dev` through a pull request with a merge commit.
 
 `VERSION` is the release version authority.
 
@@ -155,6 +159,14 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 | Public | Public bytes match the sealed payloads, and clean consumers resolve and build from public coordinates. |
 
 Candidate CI owns source correctness. Release does not run completed source suites again.
+
+Candidate CI runs the platform suites one time for each source tree.
+A push reuses the passed Candidate of a parent commit that has the identical tree.
+Only a `dev` or `master` push run with a successful `candidate` job qualifies.
+A promotion or back-merge therefore reuses the `dev` result without a second suite run.
+A hotfix changes the tree and runs every platform suite.
+Source quality, CodeQL, and the dependency scan run on every push.
+These jobs are shorter, and security results depend on current advisory data.
 
 Each React Native Candidate job runs its smoke suite and all 14 authored journeys.
 Each journey uses a fresh local PostgreSQL instance.
