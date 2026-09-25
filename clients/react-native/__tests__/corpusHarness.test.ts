@@ -11,6 +11,7 @@ import {
   pollCorpusResult,
   runCorpusCommandLoop,
 } from '../example/e2e/corpus-harness';
+import { WAIT_TIMEOUT_MS } from '../example/e2e/timeouts';
 
 const detox = jest.requireMock<{
   device: { terminateApp: jest.Mock };
@@ -114,7 +115,7 @@ it('rejects HTTP errors without exposing the response body', async () => {
   await expect(failure).rejects.not.toThrow('private response');
 });
 
-it('aborts a stalled exchange after 30 seconds and clears its timer', async () => {
+it('aborts a stalled exchange at the hang budget and clears its timer', async () => {
   jest.useFakeTimers();
   const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation((_url, options) =>
     new Promise((_resolve, reject) => {
@@ -123,7 +124,7 @@ it('aborts a stalled exchange after 30 seconds and clears its timer', async () =
   );
   const pending = exchange('http://localhost/exchange', 'test', 1, 'null');
   const rejected = expect(pending).rejects.toThrow();
-  await jest.advanceTimersByTimeAsync(29999);
+  await jest.advanceTimersByTimeAsync(WAIT_TIMEOUT_MS - 1);
   expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(false);
   await jest.advanceTimersByTimeAsync(1);
   await rejected;
