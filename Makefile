@@ -1464,7 +1464,7 @@ rn-android-emulator-reset:
 	fi
 
 .PHONY: rn-ios-build rn-ios-bundle
-rn-ios-build: rn-watchman-reset rn-ios-pods
+rn-ios-build: rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
 
 rn-ios-bundle:
