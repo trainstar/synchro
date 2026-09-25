@@ -4,6 +4,7 @@ import {
   coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
+import { WAIT_TIMEOUT_MS } from './timeouts';
 
 function requiresProcessRelaunch(command: Record<string, unknown>): boolean {
   const manifest = command.action;
@@ -23,7 +24,7 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   }
   const serialized = JSON.stringify(command);
   await submitCorpusCommand(serialized);
-  const { raw, envelope } = await pollCorpusResult(45000, 'React Native schema-queued-mutation command did not finish');
+  const { raw, envelope } = await pollCorpusResult(WAIT_TIMEOUT_MS, 'React Native schema-queued-mutation command did not finish');
   if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}: ${envelope.error_detail}`);
   return raw;
 }

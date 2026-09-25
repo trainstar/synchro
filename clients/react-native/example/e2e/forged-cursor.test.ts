@@ -2,11 +2,12 @@ import {
   coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
+import { WAIT_TIMEOUT_MS } from './timeouts';
 
 async function execute(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);
   await submitCorpusCommand(serialized);
-  const { raw } = await pollCorpusResult(120000, 'React Native forged-cursor command did not finish');
+  const { raw } = await pollCorpusResult(WAIT_TIMEOUT_MS, 'React Native forged-cursor command did not finish');
   return raw;
 }
 
