@@ -256,8 +256,12 @@ Do not bypass this control or add a substitute gate.
 
 Recovery uses publication helpers from the dispatch commit and retains the original candidate checkout and sealed bytes.
 Candidate CI must pass for both commits when they differ.
-The protected publisher discovers drafts through the authenticated release list.
-Recovery Candidate checks and Public checks use anonymous published-release observations.
+The protected publisher discovers an existing draft through the authenticated release list.
+It addresses a new draft by the release ID from the create response, because the list can omit a new draft.
+Candidate lookups retry for a bounded time, because the filtered CI run list can omit a completed run.
+Public checks read published-release metadata with the job token, and those endpoints never return a draft.
+Public asset bytes, source tags, and registry files download without a token.
+Registry waits poll only the registry.
 
 Before publication, product source or dependency corrections require a new candidate.
 Retain the failed candidate unchanged and repeat every required gate.

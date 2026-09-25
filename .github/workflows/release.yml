@@ -61,10 +61,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&head_sha=$GITHUB_SHA&per_page=100")"
-          jq -e --arg sha "$GITHUB_SHA" \
-            'any(.workflow_runs[]; .head_sha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")' \
-            <<<"$runs" >/dev/null || { echo "recovery workflow commit has no successful completed CI push run" >&2; exit 1; }
+          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" ci-run \
+            --sha "$GITHUB_SHA" --output "$RUNNER_TEMP/dispatch-ci-run.json"
 
       - name: Download recovery candidate
         if: inputs.resume_run_id != ''
@@ -132,11 +130,10 @@ jobs:
           test "$(tr -d '\n' < VERSION)" = "$version"
           make version-check
 
-          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&head_sha=$source_commit&per_page=100")"
-          candidate="$(jq -c --arg sha "$source_commit" '[.workflow_runs[] | select(.head_sha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")] | sort_by(.run_attempt) | last // empty' <<<"$runs")"
-          test -n "$candidate" || { echo "exact candidate commit has no successful completed CI push run" >&2; exit 1; }
-          candidate_ci_run_id="$(jq -r '.id' <<<"$candidate")"
-          candidate_ci_run_attempt="$(jq -r '.run_attempt' <<<"$candidate")"
+          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" ci-run \
+            --sha "$source_commit" --output "$RUNNER_TEMP/candidate-ci-run.json"
+          candidate_ci_run_id="$(jq -r '.id' "$RUNNER_TEMP/candidate-ci-run.json")"
+          candidate_ci_run_attempt="$(jq -r '.run_attempt' "$RUNNER_TEMP/candidate-ci-run.json")"
 
           milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"
           milestone_count="$(jq --arg title "v$version" '[.[] | select(.title == $title)] | length' <<<"$milestones")"
@@ -146,7 +143,7 @@ jobs:
           if [ "$mode" = recovery ]; then
             mv "$RUNNER_TEMP/recovery" "$RUNNER_TEMP/$release_dir_name"
             make release-verify VERSION="$version" RELEASE_DIR="$RUNNER_TEMP/$release_dir_name"
-            env -u GITHUB_TOKEN python3 "$RUNNER_TEMP/release-publish.py" observe-public \
+            GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public \
               --release-dir "$RUNNER_TEMP/$release_dir_name" \
               --output "$RUNNER_TEMP/recovery-public-state.json"
           else
@@ -934,12 +931,12 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             --summary dist/package-evidence/summary.json \
             --release-manifest "$release/release-manifest.json"
-          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=master&event=push&status=completed&head_sha=$commit&per_page=100")"
-          jq -e --arg sha "$commit" --argjson id '${{ needs.candidate.outputs.candidate_ci_run_id }}' --argjson attempt '${{ needs.candidate.outputs.candidate_ci_run_attempt }}' \
-            'any(.workflow_runs[]; .head_sha == $sha and .id == $id and .run_attempt == $attempt and .status == "completed" and .conclusion == "success")' <<<"$runs" >/dev/null
+          ci_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ needs.candidate.outputs.candidate_ci_run_id }}")"
+          jq -e --arg sha "$commit" --argjson attempt '${{ needs.candidate.outputs.candidate_ci_run_attempt }}' \
+            '.head_sha == $sha and .run_attempt == $attempt and .event == "push" and .head_branch == "master" and .path == ".github/workflows/ci.yml" and .status == "completed" and .conclusion == "success"' <<<"$ci_run" >/dev/null
           milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"
           jq -e --arg title "v$version" '([.[] | select(.title == $title)] | length) == 1 and ([.[] | select(.title == $title)][0].open_issues == 0)' <<<"$milestones" >/dev/null
-          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-before.json"
+          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public --include-drafts --release-dir "$release" --output "$RUNNER_TEMP/public-before.json"
 
       - name: Check sealed file attestations
         id: sealed_attestations
@@ -1019,6 +1016,7 @@ jobs:
           set -euo pipefail
           release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           tag="v${{ needs.candidate.outputs.version }}"
+          commit="${{ needs.candidate.outputs.source_commit }}"
           github_state="$(jq -r '.github' "$RUNNER_TEMP/public-before-classification.json")"
           case "$github_state" in
             absent|draft-partial|draft-complete) operation=publish-draft ;;
@@ -1026,13 +1024,21 @@ jobs:
             *) echo "GitHub publication state is invalid" >&2; exit 1 ;;
           esac
           if [ "$github_state" = absent ]; then
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes --latest=false
+            test "$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)" = "$commit" || { echo "release tag is not at the candidate commit" >&2; exit 1; }
+            # The release list can omit a new draft, so later calls use the ID from this response.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$tag" -F draft=true -F generate_release_notes=true -f make_latest=false \
+              > "$RUNNER_TEMP/github-release.json"
+          else
+            GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" github-release \
+              --tag "$tag" --output "$RUNNER_TEMP/github-release.json"
           fi
-          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" github-release \
-            --tag "$tag" --output "$RUNNER_TEMP/github-release.json"
           release_json="$(cat "$RUNNER_TEMP/github-release.json")"
           release_id="$(jq -r '.id' <<<"$release_json")"
-          test -n "$release_id"
+          case "$release_id" in ''|*[!0-9]*|0) echo "GitHub release ID is invalid" >&2; exit 1 ;; esac
+          test "$(jq -r '.tag_name' <<<"$release_json")" = "$tag"
+          upload_url="$(jq -r '.upload_url | sub("[{].*$"; "")' <<<"$release_json")"
+          test "$upload_url" = "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets"
           if [ "$operation" = publish-draft ]; then
             test "$(jq -r '.draft' <<<"$release_json")" = true
           else
@@ -1044,10 +1050,15 @@ jobs:
             count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' <<<"$release_json")"
             if [ "$count" = 0 ]; then
               test "$operation" = publish-draft || { echo "published GitHub release is missing asset: $name" >&2; exit 1; }
-              gh release upload "$tag" "$path" --repo "$GITHUB_REPOSITORY"
+              encoded_name="$(jq -rn --arg name "$name" '$name | @uri')"
+              gh api --method POST "$upload_url?name=$encoded_name" \
+                -H 'Content-Type: application/octet-stream' --input "$path" >/dev/null
             elif [ "$count" = 1 ]; then
+              asset_id="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .id' <<<"$release_json")"
+              case "$asset_id" in ''|*[!0-9]*|0) echo "GitHub asset ID is invalid: $name" >&2; exit 1 ;; esac
               mkdir -p "$RUNNER_TEMP/github-existing"
-              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$RUNNER_TEMP/github-existing"
+              gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+                > "$RUNNER_TEMP/github-existing/$name"
               test "$(shasum -a 256 "$RUNNER_TEMP/github-existing/$name" | cut -d ' ' -f 1)" = "$(shasum -a 256 "$path" | cut -d ' ' -f 1)" || { echo "GitHub asset byte mismatch: $name" >&2; exit 1; }
             else
               echo "GitHub release repeats asset: $name" >&2
@@ -1055,9 +1066,9 @@ jobs:
             fi
           done
           if [ "$operation" = publish-draft ]; then
-            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" -F draft=false -f make_latest=false >/dev/null
           fi
-          jq -n --arg release_id "$release_id" --arg tag "$tag" --arg commit '${{ needs.candidate.outputs.source_commit }}' --arg operation "$operation" \
+          jq -n --arg release_id "$release_id" --arg tag "$tag" --arg commit "$commit" --arg operation "$operation" \
             '{release_id:$release_id,tag:$tag,source_commit:$commit,operation:$operation}' > "$RUNNER_TEMP/github-operation.json"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
@@ -1068,17 +1079,24 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Verify published GitHub release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public \
+            --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
+            --output "$RUNNER_TEMP/public-github.json"
+          jq -e '.source_tags == "complete" and (.github == "public" or .github == "public-latest")' "$RUNNER_TEMP/public-github-classification.json" >/dev/null
+
       - name: Verify anonymous GitHub and source consumers
         env:
           GITHUB_TOKEN: ''
           GOPROXY: https://proxy.golang.org,direct
         run: |
           set -euo pipefail
-          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           version="${{ needs.candidate.outputs.version }}"
           expected_commit="${{ needs.candidate.outputs.source_commit }}"
-          python3 "$RUNNER_TEMP/release-publish.py" observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-github.json"
-          jq -e '.source_tags == "complete" and (.github == "public" or .github == "public-latest")' "$RUNNER_TEMP/public-github-classification.json" >/dev/null
           SYNCHRO_GO_CONSUMER_MODE=public make test-consumer-go
           git clone --quiet --depth 1 --branch "v$version" https://github.com/trainstar/synchro.git "$RUNNER_TEMP/public-swift"
           test "$(git -C "$RUNNER_TEMP/public-swift" rev-parse HEAD)" = "$expected_commit"
@@ -1221,13 +1239,13 @@ jobs:
             done
           fi
           test "$deployment_state" = PUBLISHED
+          maven_state=
           for _ in $(seq 1 120); do
-            if env -u GITHUB_TOKEN python3 "$RUNNER_TEMP/release-publish.py" observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-maven.json"; then
-              [ "$(jq -r '.maven' "$RUNNER_TEMP/public-maven-classification.json")" = published ] && break
-            fi
+            maven_state="$(python3 "$RUNNER_TEMP/release-publish.py" registry-status --registry maven --release-dir "$release" || true)"
+            [ "$maven_state" = published ] && break
             sleep 15
           done
-          test "$(jq -r '.maven' "$RUNNER_TEMP/public-maven-classification.json")" = published
+          test "$maven_state" = published
 
       - name: Verify public Maven consumer
         env:
@@ -1246,6 +1264,15 @@ jobs:
           clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
             -PsynchroVersion="${{ needs.candidate.outputs.version }}" :app:assembleRelease
 
+      - name: Observe public state before npm publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public \
+            --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
+            --output "$RUNNER_TEMP/public-before-npm.json"
+
       - name: Publish or verify exact npm release through trusted OIDC
         env:
           GITHUB_TOKEN: ''
@@ -1257,7 +1284,6 @@ jobs:
           tarball="$release/artifacts/trainstar-synchro-react-native-$version.tgz"
           package='@trainstar/synchro-react-native'
           npm install --global npm@11.6.2 --cache "$RUNNER_TEMP/npm-bootstrap-cache"
-          python3 "$RUNNER_TEMP/release-publish.py" observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-before-npm.json"
           npm_state="$(jq -r '.npm' "$RUNNER_TEMP/public-before-npm-classification.json")"
           if [ "$npm_state" = absent ]; then
             github_state="$(jq -r '.github' "$RUNNER_TEMP/public-before-npm-classification.json")"
@@ -1270,10 +1296,8 @@ jobs:
             test "$npm_state" = published-latest
           fi
           for _ in $(seq 1 40); do
-            if python3 "$RUNNER_TEMP/release-publish.py" observe-public --release-dir "$release" --output "$RUNNER_TEMP/public-npm.json"; then
-              npm_state="$(jq -r '.npm' "$RUNNER_TEMP/public-npm-classification.json")"
-              [ "$npm_state" = published-latest ] && break
-            fi
+            npm_state="$(python3 "$RUNNER_TEMP/release-publish.py" registry-status --registry npm --release-dir "$release" || true)"
+            [ "$npm_state" = published-latest ] && break
             sleep 15
           done
           test "$npm_state" = published-latest
@@ -1326,13 +1350,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public \
+            --release-dir "$release" --output "$RUNNER_TEMP/public-npm.json"
+          jq -e '.maven == "published" and .npm == "published-latest"' "$RUNNER_TEMP/public-npm-classification.json" >/dev/null
           github_state="$(jq -r '.github' "$RUNNER_TEMP/public-npm-classification.json")"
           if [ "$github_state" = public ]; then
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/${{ steps.github_release.outputs.release_id }}" -f make_latest=true >/dev/null
           else
             test "$github_state" = public-latest
           fi
-          env -u GITHUB_TOKEN python3 "$RUNNER_TEMP/release-publish.py" observe-public \
-            --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
-            --output "$RUNNER_TEMP/public-final.json"
+          GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public \
+            --release-dir "$release" --output "$RUNNER_TEMP/public-final.json"
           jq -e '.complete == true and .next_operation == "complete"' "$RUNNER_TEMP/public-final-classification.json" >/dev/null
