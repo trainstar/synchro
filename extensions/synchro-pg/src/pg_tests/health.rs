@@ -528,6 +528,61 @@
         );
     }
 
+    fn filtered_publication_member_fails_publication_readiness(member: &str) {
+        Spi::run(
+            "DROP ROLE IF EXISTS synchro_filter_health_worker;
+             CREATE ROLE synchro_filter_health_worker
+                 LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+             GRANT synchro_worker TO synchro_filter_health_worker;
+             DROP PUBLICATION IF EXISTS synchro_pub",
+        )
+        .expect("provision publication filter health test identity");
+        setup_test_tables();
+
+        let database: String = Spi::get_one("SELECT current_database()::text")
+            .expect("load publication filter health test database")
+            .expect("publication filter health test database");
+        let mut configuration = crate::health::ReadinessConfiguration::configured();
+        configuration.database = Some(database);
+        configuration.worker_login = Some("synchro_filter_health_worker".to_string());
+
+        let exact_detail =
+            crate::health::load_readiness_status_with_configuration(configuration.clone())
+                .detail();
+        replace_orders_publication_member(member);
+        let filtered_detail =
+            crate::health::load_readiness_status_with_configuration(configuration).detail();
+
+        Spi::run(
+            "REVOKE synchro_worker FROM synchro_filter_health_worker;
+             DROP ROLE synchro_filter_health_worker",
+        )
+        .expect("remove publication filter health test identity");
+
+        assert_eq!(
+            exact_detail["checks"]["publication"]["state"].as_str(),
+            Some("ok")
+        );
+        assert_eq!(
+            filtered_detail["checks"]["publication"]["state"].as_str(),
+            Some("failed")
+        );
+        assert_eq!(
+            filtered_detail["checks"]["publication"]["reason"].as_str(),
+            Some("publication_mismatch")
+        );
+    }
+
+    #[pg_test]
+    fn publication_member_column_list_fails_publication_readiness() {
+        filtered_publication_member_fails_publication_readiness(ORDERS_COLUMN_LIST_MEMBER);
+    }
+
+    #[pg_test]
+    fn publication_member_row_filter_fails_publication_readiness() {
+        filtered_publication_member_fails_publication_readiness(ORDERS_ROW_FILTER_MEMBER);
+    }
+
     #[pg_test]
     fn public_readiness_is_generic_and_fail_closed() {
         let readiness: pgrx::JsonB = Spi::get_one("SELECT synchro.synchro_readiness()")

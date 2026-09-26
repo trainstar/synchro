@@ -240,6 +240,14 @@ SELECT
         )
         AND NOT EXISTS (
             SELECT 1
+            FROM configured_publication publication
+            JOIN pg_catalog.pg_publication_rel member
+              ON member.prpubid = publication.oid
+            WHERE member.prattrs IS NOT NULL
+               OR member.prqual IS NOT NULL
+        )
+        AND NOT EXISTS (
+            SELECT 1
             FROM active_registry
             JOIN synchro.sync_registry registry
               ON registry.registry_generation = active_registry.generation

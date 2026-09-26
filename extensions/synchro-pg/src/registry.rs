@@ -3648,15 +3648,21 @@ fn ensure_publication_membership(
         return Ok(());
     }
 
-    if !publication_contains_relation(client, &publication, relation.oid)? {
-        let add_sql = format!(
-            "ALTER PUBLICATION {} ADD TABLE {}",
-            crate::pull::pg_quote_ident(&publication),
-            qualified_relation_name(&relation.schema, &relation.relation),
-        );
-        client.update(&add_sql, None, &[])?;
+    match publication_membership(client, &publication, relation.oid)? {
+        PublicationMembership::Absent => {
+            let add_sql = format!(
+                "ALTER PUBLICATION {} ADD TABLE {}",
+                crate::pull::pg_quote_ident(&publication),
+                qualified_relation_name(&relation.schema, &relation.relation),
+            );
+            client.update(&add_sql, None, &[])?;
+            Ok(())
+        }
+        PublicationMembership::Exact => Ok(()),
+        PublicationMembership::Filtered => {
+            pgrx::error!("configured publication member must not use a column list or a row filter")
+        }
     }
-    Ok(())
 }
 
 /// Rejects a registered column that pgoutput does not send for the configured publication.
@@ -3728,7 +3734,8 @@ fn remove_capture_configuration(
     let publication = configured_publication_name();
     if !publication_exists(client, &publication)?
         || publication_is_for_all_tables(client, &publication)?
-        || !publication_contains_relation(client, &publication, registration.physical_relation_oid)?
+        || publication_membership(client, &publication, registration.physical_relation_oid)?
+            != PublicationMembership::Exact
     {
         pgrx::error!("registered relation is not an exact publication member");
     }
@@ -3961,25 +3968,33 @@ pub(crate) fn publication_is_for_all_tables(
         .unwrap_or(false))
 }
 
-pub(crate) fn publication_contains_relation(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationMembership {
+    Absent,
+    Exact,
+    Filtered,
+}
+
+fn publication_membership(
     client: &SpiClient<'_>,
     publication: &str,
     relation_oid: u32,
-) -> Result<bool, spi::Error> {
-    Ok(client
-        .select(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_catalog.pg_publication p
-                 JOIN pg_catalog.pg_publication_rel pr ON pr.prpubid = p.oid
-                 WHERE p.pubname = $1 AND pr.prrelid = $2::oid
-             ) AS contains_relation",
-            None,
-            &[publication.into(), i64::from(relation_oid).into()],
-        )?
-        .first()
-        .get_by_name("contains_relation")?
-        .unwrap_or(false))
+) -> Result<PublicationMembership, spi::Error> {
+    let rows = client.select(
+        "SELECT pr.prattrs IS NULL AND pr.prqual IS NULL AS exact
+         FROM pg_catalog.pg_publication p
+         JOIN pg_catalog.pg_publication_rel pr ON pr.prpubid = p.oid
+         WHERE p.pubname = $1 AND pr.prrelid = $2::oid",
+        None,
+        &[publication.into(), i64::from(relation_oid).into()],
+    )?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(PublicationMembership::Absent);
+    };
+    Ok(match row.get_by_name::<bool, &str>("exact")? {
+        Some(true) => PublicationMembership::Exact,
+        Some(false) | None => PublicationMembership::Filtered,
+    })
 }
 
 pub(crate) fn qualified_relation_name(schema: &str, relation: &str) -> String {
@@ -4538,6 +4553,8 @@ fn load_catalog_for_registrations(
           JOIN pg_catalog.pg_publication_rel publication_relation
             ON publication_relation.prpubid = publication.oid
            AND publication_relation.prrelid = registry.physical_relation_oid
+           AND publication_relation.prattrs IS NULL
+           AND publication_relation.prqual IS NULL
            WHERE registry.registry_generation = $1
              AND registry.physical_relation_oid = ANY($3::oid[])",
         None,
