@@ -17,7 +17,8 @@ type registryKeyTypeCase struct {
 }
 
 // registryKeyTypeKind is one registration kind. The setup is a format string
-// with the relation name as %[1]s and the key column type as %[2]s.
+// with the relation name as %[1]s, the key column type as %[2]s, and the
+// primary key attributes as %[3]s.
 type registryKeyTypeKind struct {
 	prefix   string
 	setup    string
@@ -58,7 +59,7 @@ var registryKeyTypeKinds = []registryKeyTypeKind{
 		prefix: "synced_",
 		setup: `
 			CREATE TABLE key_types.%[1]s (
-				id %[2]s PRIMARY KEY,
+				id %[2]s PRIMARY KEY%[3]s,
 				owner_id text NOT NULL,
 				value text NOT NULL,
 				updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -84,7 +85,7 @@ var registryKeyTypeKinds = []registryKeyTypeKind{
 		prefix: "capture_",
 		setup: `
 			CREATE TABLE key_types.%[1]s (
-				id %[2]s PRIMARY KEY,
+				id %[2]s PRIMARY KEY%[3]s,
 				scope_key text NOT NULL
 			);
 			ALTER TABLE key_types.%[1]s ENABLE ROW LEVEL SECURITY;
@@ -115,7 +116,7 @@ func TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm(t *testing.T) {
 	for _, keyType := range registryKeyTypeCases {
 		for _, kind := range registryKeyTypeKinds {
 			relation := kind.prefix + keyType.label
-			if _, err := admin.ExecContext(ctx, fmt.Sprintf(kind.setup, relation, keyType.sqlType)); err != nil {
+			if _, err := admin.ExecContext(ctx, fmt.Sprintf(kind.setup, relation, keyType.sqlType, "")); err != nil {
 				t.Fatalf("create key type relation %s: %v", relation, err)
 			}
 		}
@@ -144,6 +145,45 @@ func TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm(t *testing.T) {
 						keyType.sqlType, relation, registerErr, before, after, rows, portableType, keyType.portableType,
 					)
 				}
+			}
+		}
+	})
+}
+
+// TestRealRegistryRejectsDeferrablePrimaryKey proves SYNC-REGISTRY-002 for a
+// deferrable primary key. The uuid case of
+// TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm is the accepted control.
+func TestRealRegistryRejectsDeferrablePrimaryKey(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	admin := openIssue49Admin(t, ctx, harness)
+	waitForIssue49CanonicalHealth(t, ctx, admin, true)
+
+	if _, err := admin.ExecContext(ctx, `
+		CREATE SCHEMA key_types;
+		GRANT USAGE ON SCHEMA key_types TO synchro_owner, synchro_worker`); err != nil {
+		t.Fatalf("create deferrable key schema: %v", err)
+	}
+	for _, kind := range registryKeyTypeKinds {
+		relation := kind.prefix + "deferrable"
+		if _, err := admin.ExecContext(ctx, fmt.Sprintf(kind.setup, relation, "uuid", " DEFERRABLE")); err != nil {
+			t.Fatalf("create deferrable key relation %s: %v", relation, err)
+		}
+	}
+
+	t.Run("assertion", func(t *testing.T) {
+		for _, kind := range registryKeyTypeKinds {
+			relation := kind.prefix + "deferrable"
+			before := latestRegistryGeneration(t, ctx, admin)
+			_, registerErr := admin.ExecContext(ctx, kind.register, relation)
+			after := latestRegistryGeneration(t, ctx, admin)
+			rows, _ := registryKeyTypeRows(t, ctx, admin, after, relation)
+			if registerErr == nil || after != before || rows != 0 {
+				t.Errorf(
+					"deferrable primary key registered for %s: error=%v generation=%d->%d rows=%d",
+					relation, registerErr, before, after, rows,
+				)
 			}
 		}
 	})

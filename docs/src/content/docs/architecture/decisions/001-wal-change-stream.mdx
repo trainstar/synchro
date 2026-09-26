@@ -147,7 +147,7 @@ Direct rename, schema move, drop and recreate, primary-key change, or replica-id
 
 `TRUNCATE` on a registered relation is unsupported in protocol version 3. A decoded truncate record for a registered relation is a blocking capture failure. The system must not silently ignore it, convert it to inferred row deletes, or acknowledge beyond it. Recovery requires an operator-authorized stream reset followed by controlled reconfiguration and rebuild.
 
-Registration and every registry activation must validate exactly one non-null declared primary-key column. Its portable type must be `string`, `int`, or `int64`. Composite keys, partial keys, floating-point keys, timestamp keys, JSON keys, nullable keys, and key substitutions are unsupported.
+Registration and every registry activation must validate exactly one non-null declared primary-key column. Its portable type must be `string`, `int`, or `int64`. Composite keys, partial keys, deferrable keys, floating-point keys, timestamp keys, JSON keys, nullable keys, and key substitutions are unsupported.
 
 The only allowed replica identity is `REPLICA IDENTITY DEFAULT` backed by that validated primary key. `REPLICA IDENTITY FULL`, `REPLICA IDENTITY NOTHING`, and `REPLICA IDENTITY USING INDEX` are unsupported. Any nonconforming identity at registration is rejected. Any later drift blocks capture until controlled reconfiguration and required rebuild complete.
 

@@ -16,11 +16,11 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchr
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
 @@ -2051,3 +2051,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1097
-+-- synchro-pg/src/health.rs:1098
+--- synchro-pg/src/health.rs:1098
++-- synchro-pg/src/health.rs:1099
  -- synchro_pg::health::synchro_health_detail
 @@ -2263,3 +2263,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1090
-+-- synchro-pg/src/health.rs:1091
+--- synchro-pg/src/health.rs:1091
++-- synchro-pg/src/health.rs:1092
  -- synchro_pg::health::synchro_readiness

@@ -189,6 +189,7 @@ SELECT
                 AND primary_attribute.attnum = ANY(primary_index.indkey)
                WHERE primary_index.indrelid = registry.physical_relation_oid
                  AND primary_index.indisprimary
+                 AND primary_index.indimmediate
                  AND primary_index.indnkeyatts = 1
                  AND primary_index.indexprs IS NULL
                  AND primary_index.indpred IS NULL

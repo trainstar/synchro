@@ -2049,7 +2049,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1097
+-- synchro-pg/src/health.rs:1098
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2130,7 +2130,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:273
+-- synchro-pg/src/registry.rs:274
 -- synchro_pg::registry::synchro_prepare_projection_view
 CREATE  FUNCTION "synchro_prepare_projection_view"(
 	"p_relation_name" TEXT, /* &str */
@@ -2261,7 +2261,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1090
+-- synchro-pg/src/health.rs:1091
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2282,7 +2282,7 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:744
+-- synchro-pg/src/registry.rs:745
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2295,7 +2295,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1021
+-- synchro-pg/src/registry.rs:1022
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2322,7 +2322,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:427
+-- synchro-pg/src/registry.rs:428
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2440,7 +2440,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:978
+-- synchro-pg/src/registry.rs:979
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */

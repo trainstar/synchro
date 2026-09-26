@@ -46,6 +46,24 @@ ORDER BY registry.table_name;
 
 Remove each registration that the query returns.
 
+Version 0.3.2 also rejects a deferrable primary key. PostgreSQL uses only an
+immediate key as the replica identity. Find each such registration:
+
+```sql
+SELECT registry.table_name
+FROM synchro.sync_registry AS registry
+JOIN synchro.sync_registry_generations AS generation
+  ON generation.generation = registry.registry_generation
+JOIN pg_catalog.pg_index AS primary_index
+  ON primary_index.indrelid = registry.physical_relation_oid
+ AND primary_index.indisprimary
+WHERE generation.state = 'active'
+  AND NOT primary_index.indimmediate
+ORDER BY registry.table_name;
+```
+
+Replace the deferrable key with an immediate key, or remove the registration.
+
 ## 1. Install the new extension files
 
 Install the new library, the control file, the base script, and every update

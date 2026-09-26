@@ -279,6 +279,10 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		t.Fatalf("restore active replica identity: %v", err)
 	}
 	waitForIssue49CanonicalHealth(t, ctx, admin, true)
+	deferrableDrift := security49HealthDuringTransaction(t, ctx, admin, []string{
+		"ALTER TABLE public.cf_items DROP CONSTRAINT cf_items_pkey",
+		"ALTER TABLE public.cf_items ADD PRIMARY KEY (id) DEFERRABLE",
+	})
 
 	if _, err := admin.ExecContext(ctx, `
 		ALTER TABLE public.cf_items RENAME TO cf_items_registered_oid;
@@ -330,6 +334,9 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		}
 		if replicaDrift["ready"] != false || issue49HealthChecks(t, replicaDrift)["relation_identity"] != "failed" {
 			t.Fatalf("replica-identity drift remained active and ready: %#v", replicaDrift)
+		}
+		if deferrableDrift["ready"] != false || issue49HealthChecks(t, deferrableDrift)["relation_identity"] != "failed" {
+			t.Fatalf("deferrable primary-key drift did not fail relation identity: %#v", deferrableDrift)
 		}
 		if registeredOID != persistedOID || replacementOID == persistedOID || OIDDrift["ready"] != false ||
 			issue49HealthChecks(t, OIDDrift)["relation_identity"] != "failed" {

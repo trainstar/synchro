@@ -187,6 +187,7 @@ struct CatalogPrimaryKey {
     key_count: i32,
     is_not_partial: bool,
     has_no_expressions: bool,
+    is_immediate: bool,
     key_attnum: i32,
     replica_identity: String,
 }
@@ -2592,6 +2593,7 @@ fn load_and_validate_primary_key(
                 i.indnkeyatts::integer AS key_count,
                 (i.indpred IS NULL) AS is_not_partial,
                 (i.indexprs IS NULL) AS has_no_expressions,
+                i.indimmediate AS is_immediate,
                 key.attnum::integer AS key_attnum,
                 c.relreplident::text AS replica_identity
          FROM pg_catalog.pg_class c
@@ -2637,6 +2639,9 @@ fn catalog_primary_key_from_row(
         has_no_expressions: row
             .get_by_name::<bool, &str>("has_no_expressions")?
             .unwrap_or(false),
+        is_immediate: row
+            .get_by_name::<bool, &str>("is_immediate")?
+            .unwrap_or(false),
         key_attnum: row.get_by_name::<i32, &str>("key_attnum")?.unwrap_or(0),
         replica_identity: row
             .get_by_name::<String, &str>("replica_identity")?
@@ -2656,6 +2661,9 @@ fn primary_key_from_rows(
     }
     if !first.is_not_partial || !first.has_no_expressions {
         pgrx::error!("registered relation primary key must be a plain non-partial key");
+    }
+    if !first.is_immediate {
+        pgrx::error!("registered relation primary key must not be deferrable");
     }
     if first.replica_identity != "d" {
         pgrx::error!("registered relation requires REPLICA IDENTITY DEFAULT");
@@ -4317,6 +4325,7 @@ fn load_catalog_for_registrations(
                 index.indnkeyatts::integer AS key_count,
                 (index.indpred IS NULL) AS is_not_partial,
                 (index.indexprs IS NULL) AS has_no_expressions,
+                index.indimmediate AS is_immediate,
                 key.attnum::integer AS key_attnum,
                 relation.relreplident::text AS replica_identity
          FROM synchro.sync_registry registry
