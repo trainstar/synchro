@@ -1,4 +1,5 @@
 import { by, device, element, waitFor } from 'detox';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 type LaunchOptions = Parameters<typeof device.launchApp>[0];
 
@@ -121,7 +122,7 @@ export async function exchange(
     throw new Error('React Native coordinator sequence is invalid');
   }
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+  const timeout = setTimeout(() => controller.abort(), WAIT_TIMEOUT_MS);
   try {
     let response: Response;
     try {
@@ -178,16 +179,16 @@ export async function runCorpusCommandLoop(execute: () => Promise<void>): Promis
 export async function launchCorpusApp(options: LaunchOptions): Promise<void> {
   await device.launchApp(options);
   await device.disableSynchronization();
-  await waitFor(element(by.id('conformance-harness'))).toBeVisible().withTimeout(30000);
+  await waitFor(element(by.id('conformance-harness'))).toBeVisible().withTimeout(WAIT_TIMEOUT_MS);
 }
 
 export async function submitCorpusCommand(serialized: string): Promise<void> {
   const input = element(by.id('conformance-command-input'));
   const state = element(by.id('conformance-command-state'));
   await input.replaceText('');
-  await waitFor(state).toHaveText('idle').withTimeout(30000);
+  await waitFor(state).toHaveText('idle').withTimeout(WAIT_TIMEOUT_MS);
   await input.replaceText(serialized);
-  await waitFor(state).toHaveText('ready').withTimeout(30000);
+  await waitFor(state).toHaveText('ready').withTimeout(WAIT_TIMEOUT_MS);
   const attributes = await input.getAttributes();
   if (!('text' in attributes) || attributes.text !== serialized) {
     throw new Error('React Native conformance command input changed');

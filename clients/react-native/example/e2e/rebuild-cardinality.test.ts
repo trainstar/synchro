@@ -2,12 +2,13 @@ import {
   coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 async function execute(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);
   console.log(`rnmem execute start ${String((command.action as { action?: { actor?: unknown; command?: unknown } } | undefined)?.action?.actor)}/${String((command.action as { action?: { actor?: unknown; command?: unknown } } | undefined)?.action?.command)} bytes=${serialized.length}`);
   await submitCorpusCommand(serialized);
-  const { raw, envelope } = await pollCorpusResult(120000, 'React Native rebuild-cardinality command did not finish');
+  const { raw, envelope } = await pollCorpusResult(WAIT_TIMEOUT_MS, 'React Native rebuild-cardinality command did not finish');
   if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}${envelope.error_detail === null ? '' : `: ${envelope.error_detail}`}`);
   console.log(`rnmem execute complete result-bytes=${raw.length}`);
   return raw;

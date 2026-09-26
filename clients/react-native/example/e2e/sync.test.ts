@@ -1,23 +1,22 @@
 import { by, device, element, expect, waitFor } from 'detox';
-import jestConfig from './jest.config';
 import { loadScenario } from './scenarioLoader';
 import { assertUserIsolation, prepareConflict } from './serverSetup';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 async function scrollToAndTap(buttonId: string) {
   await waitFor(element(by.id(buttonId)))
     .toBeVisible()
     .whileElement(by.id('test-scroll'))
     .scroll(200, 'down');
-  await waitFor(element(by.id(buttonId))).toBeVisible().withTimeout(3000);
+  await waitFor(element(by.id(buttonId))).toBeVisible().withTimeout(WAIT_TIMEOUT_MS);
   await element(by.id(buttonId)).tap();
 }
 
 async function expectBadge(label: string) {
   try {
-    // Native retries share the test budget, not a shorter badge deadline.
     await waitFor(element(by.id('last-result-key')))
       .toHaveText(label)
-      .withTimeout(jestConfig.testTimeout);
+      .withTimeout(WAIT_TIMEOUT_MS);
     await expect(element(by.id('last-result-status'))).toHaveText('PASS');
   } catch (error) {
     const step = await element(by.id('step-value')).getAttributes();
@@ -54,11 +53,9 @@ async function readPendingRecord(testID: string): Promise<string> {
 async function runConflictAction() {
   await scrollToAndTap('btn-conflict');
   try {
-    // The setup runs two full sync cycles plus a pending drain, and one
-    // cycle alone costs several seconds on the CI emulator.
     await waitFor(element(by.id('step-value')))
       .toHaveText('conflict:awaiting-server')
-      .withTimeout(60000);
+      .withTimeout(WAIT_TIMEOUT_MS);
   } catch (error) {
     const step = await element(by.id('step-value')).getAttributes();
     const detail = await element(by.id('error-value')).getAttributes();
@@ -75,16 +72,16 @@ async function runMultiUserAction() {
   await scrollToAndTap('btn-multiUser');
   await waitFor(element(by.id('step-value')))
     .toHaveText('multiUser:awaiting-server')
-    .withTimeout(15000);
+    .withTimeout(WAIT_TIMEOUT_MS);
   await assertUserIsolation(await readPendingRecord('multi-user-record-id'));
   await scrollToAndTap('btn-multiUser');
   await expectBadge('multiUser');
 }
 
-async function waitForUninitializedStatus(timeout = 15000) {
+async function waitForUninitializedStatus() {
   await waitFor(element(by.id('status-value')))
     .toHaveText('uninitialized')
-    .withTimeout(timeout);
+    .withTimeout(WAIT_TIMEOUT_MS);
   await waitFor(element(by.id('sync-status')))
     .toBeVisible()
     .whileElement(by.id('test-scroll'))
@@ -93,17 +90,17 @@ async function waitForUninitializedStatus(timeout = 15000) {
 
 async function relaunchToIdle() {
   await device.launchApp({ newInstance: true, delete: false });
-  await waitForUninitializedStatus(10000);
-  await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(5000);
+  await waitForUninitializedStatus();
+  await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(WAIT_TIMEOUT_MS);
 }
 
 async function resetHarnessForTest() {
-  await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(5000);
+  await waitFor(element(by.id('btn-reset'))).toBeVisible().withTimeout(WAIT_TIMEOUT_MS);
   await element(by.id('btn-reset')).tap();
   try {
     await waitFor(element(by.id('step-value')))
       .toHaveText('reset:complete')
-      .withTimeout(30000);
+      .withTimeout(WAIT_TIMEOUT_MS);
   } catch (error) {
     const step = await element(by.id('step-value')).getAttributes();
     const detail = await element(by.id('error-value')).getAttributes();
@@ -111,16 +108,7 @@ async function resetHarnessForTest() {
       `reset did not complete; step=${String(step.text)} error=${String(detail.text)} original=${String(error)}`
     );
   }
-  if (device.getPlatform() !== 'ios') {
-    await waitForUninitializedStatus(15000);
-    return;
-  }
-
-  try {
-    await waitForUninitializedStatus(4000);
-  } catch {
-    await relaunchToIdle();
-  }
+  await waitForUninitializedStatus();
 }
 
 describe('Synchro RN E2E', () => {

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 const SYNCHRO_TEST_URL = process.env.SYNCHRO_TEST_URL ?? 'http://127.0.0.1:8091';
 const USER1_JWT =
@@ -115,12 +116,11 @@ async function findCustomer(
 }
 
 export async function prepareConflict(recordID: string): Promise<void> {
-  let found: Awaited<ReturnType<typeof findCustomer>> = null;
-  for (let attempt = 0; attempt < 5 && !found; attempt += 1) {
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  let found = await findCustomer(USER1_JWT, recordID, 'detox-conflict-setup');
+  while (!found && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 750));
     found = await findCustomer(USER1_JWT, recordID, 'detox-conflict-setup');
-    if (!found) {
-      await new Promise((resolve) => setTimeout(resolve, 750));
-    }
   }
   if (!found?.record?.server_version) {
     throw new Error(`server setup could not find customer ${recordID}`);

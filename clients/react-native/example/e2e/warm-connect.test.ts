@@ -2,12 +2,13 @@ import {
   coordinatorConfiguration, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 async function executeCommand(command: Record<string, unknown>): Promise<string> {
   const serialized = JSON.stringify(command);
   await submitCorpusCommand(serialized);
 
-  const { raw, envelope } = await pollCorpusResult(45000, 'React Native conformance command did not finish');
+  const { raw, envelope } = await pollCorpusResult(WAIT_TIMEOUT_MS, 'React Native conformance command did not finish');
   if (envelope.outcome === 'error') {
     throw new Error(`React Native conformance command failed: ${envelope.error_code}`);
   }

@@ -1,4 +1,5 @@
 import { by, device, element, expect, waitFor } from 'detox';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 type ConformanceEnvelope = {
   schema_version: number;
@@ -48,7 +49,7 @@ async function executeCommand(value: object): Promise<ConformanceEnvelope> {
     throw new Error(`conformance command input mismatch: ${String(input.text)}`);
   }
   await element(by.id('btn-conformance-execute')).tap();
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
   while (true) {
     const state = await element(by.id('conformance-command-state')).getAttributes();
     if (state.text === 'ok' || state.text === 'error') {
@@ -88,10 +89,6 @@ function processIdentity(value: unknown): ProcessIdentity {
   return value.process as ProcessIdentity;
 }
 
-// Two launches, one with a reinstall, took up to 104 s on a slow hosted simulator.
-// The per-command deadlines still detect a hang.
-const RELAUNCH_TEST_TIMEOUT_MS = 300000;
-
 describe('React Native conformance host', () => {
   beforeAll(async () => {
     await device.launchApp({
@@ -108,7 +105,7 @@ describe('React Native conformance host', () => {
     await element(by.id('btn-conformance-execute')).tap();
     await waitFor(element(by.id('conformance-command-state')))
       .toHaveText('error')
-      .withTimeout(5000);
+      .withTimeout(WAIT_TIMEOUT_MS);
     // The error detail carries an engine-specific parse message, so the
     // envelope is asserted by structure rather than by exact text.
     const attributes = await element(by.id('conformance-result')).getAttributes();
@@ -128,7 +125,7 @@ describe('React Native conformance host', () => {
     await element(by.id('conformance-command-input')).replaceText('');
     await waitFor(element(by.id('conformance-command-state')))
       .toHaveText('idle')
-      .withTimeout(5000);
+      .withTimeout(WAIT_TIMEOUT_MS);
     await expect(element(by.id('conformance-result'))).not.toExist();
   });
 
@@ -164,7 +161,7 @@ describe('React Native conformance host', () => {
     ) {
       throw new Error('conformance relaunch changed the database identity');
     }
-  }, RELAUNCH_TEST_TIMEOUT_MS);
+  });
 
   it('treats unavailable as a failed required command', async () => {
     // The prior test ends on a handled open failure, and the development
@@ -177,7 +174,7 @@ describe('React Native conformance host', () => {
     });
     await waitFor(element(by.id('conformance-harness')))
       .toBeVisible()
-      .withTimeout(15000);
+      .withTimeout(WAIT_TIMEOUT_MS);
     let commandError: unknown;
     try {
       await executeRequiredCommand(command('controller', 'unsupported', 'unused.db'));

@@ -2,6 +2,7 @@ import {
   coordinatorConfiguration, coordinatorCount, exchange, pollCorpusResult,
   launchCorpusApp, runCorpusCommandLoop, submitCorpusCommand,
 } from './corpus-harness';
+import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 function isJSONObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -22,7 +23,7 @@ async function execute(command: Record<string, unknown>): Promise<string> {
   }
   const serialized = JSON.stringify(command);
   await submitCorpusCommand(serialized);
-  const { raw, envelope } = await pollCorpusResult(120000, 'React Native multi-scope provenance command did not finish');
+  const { raw, envelope } = await pollCorpusResult(WAIT_TIMEOUT_MS, 'React Native multi-scope provenance command did not finish');
   if (envelope.outcome !== 'passed') throw new Error(`React Native conformance command failed: ${envelope.error_code}${envelope.error_detail === null ? '' : `: ${envelope.error_detail}`}`);
   return raw;
 }
