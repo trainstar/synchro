@@ -448,7 +448,7 @@
       "id": "SYNC-REGISTRY-002",
       "title": "Registered key and replica identity",
       "category": "schema",
-      "statement": "An active registered relation has exactly one non-null declared primary-key column of portable type string, int, or int64 and REPLICA IDENTITY DEFAULT backed by that key; nonconforming registration or later drift cannot remain active, and any key-value update fails before fence or row effects.",
+      "statement": "An active registered relation has exactly one non-null declared primary-key column of a built-in key type with one text form in every session (portable type string, int, or int64) and REPLICA IDENTITY DEFAULT backed by that key; nonconforming registration or later drift cannot remain active, and any key-value update fails before fence or row effects.",
       "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-key-and-replica-identity" }]

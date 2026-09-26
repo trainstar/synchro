@@ -122,6 +122,25 @@ trigger reject an update that changes the primary-key value before any fence or
 source-row effect. A logical identity change is an explicit delete and insert
 under their normal authorization and version rules, not an update.
 
+Fences, the WAL worker, row versions, and clients identify a row by the text
+form of its key. The fence makes that text in the writer session. The WAL
+worker makes it in its own session. Thus the key column type must be one of
+these built-in PostgreSQL types:
+
+```text
+int     smallint, integer
+int64   bigint
+string  text, character varying, character, uuid, inet, cidr, macaddr,
+        macaddr8, int4range, int8range, numrange, int4multirange,
+        int8multirange, nummultirange
+```
+
+The output function of each type reads no configuration parameter, and equal
+text means an equal key. The text form of `interval` and of the date and time
+ranges depends on `DateStyle`, `IntervalStyle`, or `TimeZone`. A user-defined
+type can have any output function. The registry identifies the key type by its
+OID, so it also rejects a domain over a type in the list.
+
 The following registrations are rejected:
 
 - no primary key
@@ -130,7 +149,7 @@ The following registrations are rejected:
 - an expression key
 - a partial unique index offered as a key
 - a non-primary unique index offered as a key
-- a key whose portable type is not `string`, `int`, or `int64`
+- a key whose column type is not in the list above
 
 The only accepted PostgreSQL replica identity is `DEFAULT` backed by the
 validated primary key. `FULL`, `NOTHING`, and `USING INDEX` are not supported

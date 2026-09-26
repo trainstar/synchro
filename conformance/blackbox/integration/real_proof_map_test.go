@@ -60,7 +60,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-PG-LINUX-X64-001", []string{"TestRealReleaseRegisteredFunctionContract"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-001-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-001-FAULT-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
-	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
+	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys", "TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm"}},
 	{"SCN-PERF-WARM-CONNECT-001", "OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001", []string{"TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues", "TestRealIssue49SemanticVersionPrecedence", "TestRealIssue49PortableIntegerBoundariesAndCounterOverflow"}},
 	{"SCN-PERF-REBUILD-REQUESTS-001", "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor", "TestRealIssue49RemainingSemantics", "TestRealS05SelectiveRebuildPreservesCheckpoints"}},
 	{"SCN-PERF-REBUILD-REQUESTS-001", "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-FAULT-LINUX-X64-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},

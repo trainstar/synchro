@@ -185,7 +185,7 @@ Every registry, catalog, publication, decoder, hydration, and scope-function loo
 
 ### Registered Key And Replica Identity
 
-An active registered relation MUST have exactly one non-null declared primary-key column of portable type `string`, `int`, or `int64`, with `REPLICA IDENTITY DEFAULT` backed by that key. Synced mutation validation and the source trigger MUST reject any update that changes the key value before fence or row effects. Accepting any other key shape or replica identity, continuing capture after drift, or capturing a key-value update as one event is a violation of Primary key and replica identity contract in [ADR 004].
+An active registered relation MUST have exactly one non-null declared primary-key column of portable type `string`, `int`, or `int64`, with `REPLICA IDENTITY DEFAULT` backed by that key. The key column type MUST be one of the built-in key types in Primary key and replica identity contract in [ADR 004], because every component identifies a row by the text form of its key. Synced mutation validation and the source trigger MUST reject any update that changes the key value before fence or row effects. Accepting any other key shape, key type, or replica identity, continuing capture after drift, or capturing a key-value update as one event is a violation of Primary key and replica identity contract in [ADR 004].
 
 ### Capture Readiness
 

@@ -2673,12 +2673,13 @@ fn primary_key_from_rows(
             first.column
         );
     }
-    let portable_type = primary_key_portable_type(&first.sql_type).unwrap_or_else(|| {
-        pgrx::error!(
-            "registered relation primary key type {:?} is not portable",
-            first.sql_type
-        )
-    });
+    let portable_type =
+        primary_key_portable_type(first.type_oid, &first.sql_type).unwrap_or_else(|| {
+            pgrx::error!(
+                "registered relation primary key type {:?} is not portable",
+                first.sql_type
+            )
+        });
     Ok(PrimaryKey {
         column: first.column.clone(),
         sql_type: first.sql_type.clone(),
@@ -2700,7 +2701,33 @@ fn primary_key_from_catalog(
     primary_key_from_rows(rows, requested_column)
 }
 
-fn primary_key_portable_type(sql_type: &str) -> Option<String> {
+/// Fences, the WAL worker, and clients identify a row by the text form of its
+/// key. The output function of each of these built-in types reads no
+/// configuration parameter, and equal text means an equal key.
+const REGISTERED_KEY_TYPE_OIDS: [pg_sys::Oid; 17] = [
+    pg_sys::INT2OID,
+    pg_sys::INT4OID,
+    pg_sys::INT8OID,
+    pg_sys::TEXTOID,
+    pg_sys::VARCHAROID,
+    pg_sys::BPCHAROID,
+    pg_sys::UUIDOID,
+    pg_sys::INETOID,
+    pg_sys::CIDROID,
+    pg_sys::MACADDROID,
+    pg_sys::MACADDR8OID,
+    pg_sys::INT4RANGEOID,
+    pg_sys::INT8RANGEOID,
+    pg_sys::NUMRANGEOID,
+    pg_sys::INT4MULTIRANGEOID,
+    pg_sys::INT8MULTIRANGEOID,
+    pg_sys::NUMMULTIRANGEOID,
+];
+
+fn primary_key_portable_type(type_oid: u32, sql_type: &str) -> Option<String> {
+    if !REGISTERED_KEY_TYPE_OIDS.contains(&pg_sys::Oid::from(type_oid)) {
+        return None;
+    }
     normalize_portable_type_name(sql_type)
         .filter(|portable| matches!(*portable, "string" | "int" | "int64"))
         .map(str::to_string)
