@@ -49,6 +49,17 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("usage: synchro-version set X.Y.Z")
 		}
 		return releaseversion.Set(root, args[1])
+	case "update-baseline-artifact":
+		if len(args) != 1 {
+			usage(stderr)
+			return fmt.Errorf("usage: synchro-version update-baseline-artifact")
+		}
+		baseline, err := releaseversion.ReadUpdateBaseline(root)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s %s\n", baseline.ArtifactURL, baseline.ArtifactSHA256)
+		return nil
 	default:
 		usage(stderr)
 		return fmt.Errorf("unknown command %q", args[0])
@@ -56,5 +67,5 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: synchro-version <print|check|sync|set>")
+	fmt.Fprintln(w, "usage: synchro-version <print|check|sync|set|update-baseline-artifact>")
 }

@@ -64,11 +64,14 @@ Build fresh immutable artifacts in a clean checkout:
 make conformance-adapter-artifact
 make conformance-seed-artifact
 make conformance-pg18-extension-test-artifact
+make conformance-update-baseline-extension-artifact
 ```
 
+The extension update test needs the baseline bundle from `make conformance-update-baseline-extension-artifact` in `SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT`.
 The artifact targets refuse to replace existing output directories.
 After implementation changes, use a fresh worktree and rebuild the artifacts rather than accidentally testing stale output.
-These artifacts are local test inputs, not a published release.
+The update baseline bundle is a pinned published release asset.
+The other artifacts are local test inputs, not a published release.
 
 ## Start a disposable database
 

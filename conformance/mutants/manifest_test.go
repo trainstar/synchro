@@ -19,7 +19,13 @@ import (
 	"testing"
 )
 
-const integrationManifestPath = "conformance/mutants/integration/manifest.json"
+const (
+	integrationManifestPath   = "conformance/mutants/integration/manifest.json"
+	integrationPatchDirectory = "conformance/mutants/integration/"
+	integrationGatePath       = "conformance/mutants/integration_gate.sh"
+)
+
+var mutantIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 type integrationManifest struct {
 	SchemaVersion int                 `json:"schema_version"`
@@ -119,6 +125,28 @@ func TestIntegrationManifestRejectsInvalidBindings(t *testing.T) {
 			},
 			want: "absent exact t.Run assertion",
 		},
+		{
+			name: "invalid ID",
+			mutate: func(m *integrationManifest) {
+				m.Mutants[0].ID = "Invalid_ID"
+			},
+			want: "invalid mutant ID",
+		},
+		{
+			name: "patch path differs from ID",
+			mutate: func(m *integrationManifest) {
+				m.Mutants[0].ID = "renamed-mutant"
+			},
+			want: "wrong patch path",
+		},
+		{
+			name: "fixed gate patch",
+			mutate: func(m *integrationManifest) {
+				m.Mutants[0].ID = "cursor-advancement"
+				m.Mutants[0].Patch = integrationPatchDirectory + "cursor-advancement.patch"
+			},
+			want: "manifest references fixed gate patch",
+		},
 	}
 
 	for _, test := range tests {
@@ -158,12 +186,16 @@ func validateIntegrationManifest(root string, manifest integrationManifest, chec
 	if err != nil {
 		return err
 	}
+	fixedPatches, err := loadFixedGatePatches(root)
+	if err != nil {
+		return err
+	}
 
 	manifestPatches := make(map[string]struct{}, len(manifest.Mutants))
 	ids := make(map[string]struct{}, len(manifest.Mutants))
 	for _, mutant := range manifest.Mutants {
-		if !strings.HasPrefix(mutant.ID, "issue49-") {
-			failures = append(failures, fmt.Sprintf("invalid Issue 49 mutant ID %q", mutant.ID))
+		if !mutantIDPattern.MatchString(mutant.ID) {
+			failures = append(failures, fmt.Sprintf("invalid mutant ID %q", mutant.ID))
 		}
 		if _, duplicate := ids[mutant.ID]; duplicate {
 			failures = append(failures, fmt.Sprintf("duplicate mutant ID %q", mutant.ID))
@@ -175,6 +207,8 @@ func validateIntegrationManifest(root string, manifest integrationManifest, chec
 		manifestPatches[mutant.Patch] = struct{}{}
 		if !validRelativePatch(mutant.Patch) || !fileExists(root, mutant.Patch) {
 			failures = append(failures, fmt.Sprintf("missing patch %q", mutant.Patch))
+		} else if expected := integrationPatchDirectory + mutant.ID + ".patch"; mutant.Patch != expected {
+			failures = append(failures, fmt.Sprintf("wrong patch path for mutant %q: got %q want %q", mutant.ID, mutant.Patch, expected))
 		} else if err := checkPatch(mutant.Patch); err != nil {
 			failures = append(failures, fmt.Sprintf("stale patch %q: %v", mutant.Patch, err))
 		}
@@ -191,13 +225,16 @@ func validateIntegrationManifest(root string, manifest integrationManifest, chec
 		}
 	}
 	for patch := range patches {
+		if _, fixed := fixedPatches[patch]; fixed {
+			continue
+		}
 		if _, present := manifestPatches[patch]; !present {
 			failures = append(failures, fmt.Sprintf("missing manifest entry for patch %q", patch))
 		}
 	}
 	for patch := range manifestPatches {
-		if _, present := patches[patch]; !present {
-			failures = append(failures, fmt.Sprintf("manifest references non-Issue 49 patch %q", patch))
+		if _, fixed := fixedPatches[patch]; fixed {
+			failures = append(failures, fmt.Sprintf("manifest references fixed gate patch %q", patch))
 		}
 	}
 	if len(failures) == 0 {
@@ -328,10 +365,26 @@ func hasAssertion(count int, assertion string) bool {
 	return err == nil && ordinal > 0 && ordinal < count
 }
 
-func integrationPatches(root string) (map[string]struct{}, error) {
-	paths, err := filepath.Glob(filepath.Join(root, "conformance/mutants/integration/issue49-*.patch"))
+var gatePatchPattern = regexp.MustCompile(`conformance/mutants/integration/[a-z0-9]+(?:-[a-z0-9]+)*\.patch`)
+
+// loadFixedGatePatches reads the patches that the integration gate runs
+// without a manifest row.
+func loadFixedGatePatches(root string) (map[string]struct{}, error) {
+	data, err := os.ReadFile(filepath.Join(root, integrationGatePath))
 	if err != nil {
-		return nil, fmt.Errorf("list Issue 49 patches: %w", err)
+		return nil, fmt.Errorf("read integration gate: %w", err)
+	}
+	patches := make(map[string]struct{})
+	for _, path := range gatePatchPattern.FindAllString(string(data), -1) {
+		patches[path] = struct{}{}
+	}
+	return patches, nil
+}
+
+func integrationPatches(root string) (map[string]struct{}, error) {
+	paths, err := filepath.Glob(filepath.Join(root, integrationPatchDirectory+"*.patch"))
+	if err != nil {
+		return nil, fmt.Errorf("list integration patches: %w", err)
 	}
 	patches := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
@@ -345,7 +398,7 @@ func integrationPatches(root string) (map[string]struct{}, error) {
 }
 
 func validRelativePatch(path string) bool {
-	return strings.HasPrefix(path, "conformance/mutants/integration/issue49-") && strings.HasSuffix(path, ".patch") && !filepath.IsAbs(path) && !strings.Contains(path, "..")
+	return strings.HasPrefix(path, integrationPatchDirectory) && strings.HasSuffix(path, ".patch") && !filepath.IsAbs(path) && !strings.Contains(path, "..")
 }
 
 func fileExists(root, path string) bool {

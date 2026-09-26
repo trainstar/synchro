@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
 const (
@@ -61,6 +62,7 @@ var diagnosticSchemaSQL string
 var diagnosticRegistrationSQL string
 
 var diagnosticUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var extensionVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 var adapterStartupMutex sync.Mutex
 
 var diagnosticSourceTables = []string{
@@ -100,6 +102,11 @@ type HarnessConfig struct {
 	ProcessLogBytes                     int
 	AllowInitialCaptureReadinessFailure bool
 	SkipAdapter                         bool
+	// UpdateBaselineExtensionArtifact and UpdateBaselineExtensionVersion select
+	// an extension bundle of an earlier version. Provision installs this bundle.
+	// UpdateExtension then updates the extension to the environment bundle.
+	UpdateBaselineExtensionArtifact string
+	UpdateBaselineExtensionVersion  string
 }
 
 // HarnessNames are the nonsecret isolated PostgreSQL object names.
@@ -138,6 +145,10 @@ type Harness struct {
 	publicationCreated bool
 	sourceReady        bool
 	restartCount       int
+	extensionUpdated   bool
+	// extensionUpdateCompleted is true after UpdateExtension returns without error.
+	extensionUpdateCompleted bool
+	cleanExtension           bool
 
 	closeMu      sync.Mutex
 	closeDone    chan struct{}
@@ -595,7 +606,7 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	} else if err := harness.grantRunRoles(ctx); err != nil {
 		return nil, err
 	}
-	if !config.SkipAdapter {
+	if !config.SkipAdapter && config.UpdateBaselineExtensionArtifact == "" {
 		if err := harness.startAdapter(ctx); err != nil {
 			return nil, err
 		}
@@ -630,6 +641,21 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 	}
 	if config.StartupTimeout <= 0 || config.ShutdownTimeout <= 0 || config.ProcessLogBytes < 1 || config.ProcessLogBytes > maximumProcessLogBytes || !validListenAddress(config.ListenAddress) {
 		return HarnessConfig{}, errors.New("harness configuration is invalid")
+	}
+	if (config.UpdateBaselineExtensionArtifact == "") != (config.UpdateBaselineExtensionVersion == "") {
+		return HarnessConfig{}, errors.New("harness update baseline configuration is invalid")
+	}
+	if config.UpdateBaselineExtensionArtifact != "" {
+		if config.Environment.AttachDatabaseURL != "" ||
+			!extensionVersionPattern.MatchString(config.UpdateBaselineExtensionVersion) ||
+			config.UpdateBaselineExtensionVersion == release.Version {
+			return HarnessConfig{}, errors.New("harness update baseline configuration is invalid")
+		}
+		artifact, err := filepath.Abs(config.UpdateBaselineExtensionArtifact)
+		if err != nil {
+			return HarnessConfig{}, errors.New("harness update baseline configuration is invalid")
+		}
+		config.UpdateBaselineExtensionArtifact = artifact
 	}
 	if config.TempParent != "" {
 		parent, err := filepath.Abs(config.TempParent)
@@ -767,25 +793,43 @@ func allocateLoopbackPort() (int, error) {
 	return address.Port, nil
 }
 
+// installExtension installs the update baseline bundle in baseline mode and
+// the environment bundle otherwise.
 func (h *Harness) installExtension(ctx context.Context) error {
-	bundle, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
+	if h.config.UpdateBaselineExtensionArtifact != "" {
+		return h.installExtensionBundle(ctx, h.config.UpdateBaselineExtensionArtifact, h.config.UpdateBaselineExtensionVersion, nil)
+	}
+	return h.installEnvironmentExtension(ctx)
+}
+
+func (h *Harness) installEnvironmentExtension(ctx context.Context) error {
+	return h.installExtensionBundle(ctx, h.env.ExtensionArtifact, release.Version, &h.env.extension)
+}
+
+// installExtensionBundle installs one verified bundle. It appends its records
+// to h.installed, so that restore also undoes an earlier installation. When
+// expected is not nil, the bundle identity must equal expected.
+func (h *Harness) installExtensionBundle(ctx context.Context, artifact, extensionVersion string, expected *extensionBundle) error {
+	bundle, err := verifyExtensionBundleForPostgreSQLVersion(artifact, h.env.postgresVersion, extensionVersion)
 	if err != nil {
 		return err
 	}
-	if !sameExtensionBundleIdentity(h.env.extension, bundle) {
+	if expected != nil && !sameExtensionBundleIdentity(*expected, bundle) {
 		return errors.New("extension bundle identity changed after environment load")
 	}
 	roots, err := h.extensionDestinationRoots(ctx)
 	if err != nil {
 		return err
 	}
-	backupRoot := filepath.Join(h.runRoot, "extension-backups")
-	if err := os.Mkdir(backupRoot, 0o700); err != nil {
-		return errors.New("create extension backup directory failed")
+	if h.installed == nil {
+		backupRoot := filepath.Join(h.runRoot, "extension-backups")
+		if err := os.Mkdir(backupRoot, 0o700); err != nil {
+			return errors.New("create extension backup directory failed")
+		}
+		h.installed = &installedExtension{backupRoot: backupRoot}
 	}
-	installed := &installedExtension{backupRoot: backupRoot}
-	h.installed = installed
-	for index, file := range bundle.files {
+	installed := h.installed
+	for _, file := range bundle.files {
 		source, err := safeBundleSourcePath(bundle.root, file.Path)
 		if err != nil {
 			return errors.New("extension bundle changed during installation")
@@ -803,7 +847,7 @@ func (h *Harness) installExtension(ctx context.Context) error {
 			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 				return errors.New("extension destination is unsafe")
 			}
-			backup := filepath.Join(backupRoot, fmt.Sprintf("%03d.original", index))
+			backup := filepath.Join(installed.backupRoot, fmt.Sprintf("%03d.original", len(installed.files)))
 			digest, err := copyVerifiedFile(destination, backup, "", info.Mode().Perm())
 			if err != nil {
 				return errors.New("back up installed extension file failed")
@@ -825,7 +869,7 @@ func (h *Harness) installExtension(ctx context.Context) error {
 			return errors.New("install extension file failed")
 		}
 	}
-	verifiedAfterInstall, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
+	verifiedAfterInstall, err := verifyExtensionBundleForPostgreSQLVersion(artifact, h.env.postgresVersion, extensionVersion)
 	if err != nil || !sameExtensionBundleIdentity(bundle, verifiedAfterInstall) {
 		return errors.New("extension bundle identity changed during installation")
 	}

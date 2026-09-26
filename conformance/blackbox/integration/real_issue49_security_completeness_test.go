@@ -837,7 +837,7 @@ func TestRealIssue49SecurityInstallationAuthority(t *testing.T) {
 	harness, _ := provisionRealProofHarness(t, ctx)
 	admin := openIssue49Admin(t, ctx, harness)
 
-	var serverMajor, otherVersions, updatePaths int
+	var serverMajor, otherVersions int
 	var extensionVersion, extensionSchema string
 	if err := admin.QueryRowContext(ctx, `
 		SELECT current_setting('server_version_num')::integer / 10000,
@@ -852,24 +852,25 @@ func TestRealIssue49SecurityInstallationAuthority(t *testing.T) {
 		WHERE name = 'synchro_pg' AND version <> $1`, release.Version).Scan(&otherVersions); err != nil {
 		t.Fatalf("inspect extension baseline versions: %v", err)
 	}
-	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM pg_catalog.pg_extension_update_paths('synchro_pg')").Scan(&updatePaths); err != nil {
-		t.Fatalf("inspect extension update paths: %v", err)
-	}
+	updatePaths := readExtensionUpdatePaths(t, ctx, admin)
+	baselineVersion := readUpdateBaselineVersion(t)
 	trackedSQL, packagedSQL := security49InstallationFiles(t, environment.ExtensionArtifact, "synchro_pg--"+release.Version+".sql")
 	trackedControl, packagedControl := security49InstallationFiles(t, environment.ExtensionArtifact, "synchro_pg.control")
 	control := string(packagedControl)
 	nonSuperuserChecks := security49ExerciseRuntimeFunctions(t, ctx, admin)
 
 	t.Run("assertion", func(t *testing.T) {
-		if serverMajor != 18 || extensionVersion != release.Version || extensionSchema != "synchro" || otherVersions != 0 || updatePaths != 0 {
+		if serverMajor != 18 || extensionVersion != release.Version || extensionSchema != "synchro" || otherVersions != 0 {
 			t.Fatalf(
-				"clean PostgreSQL 18 baseline is invalid: major=%d version=%q schema=%q other=%d paths=%d",
+				"clean PostgreSQL 18 baseline is invalid: major=%d version=%q schema=%q other=%d",
 				serverMajor,
 				extensionVersion,
 				extensionSchema,
 				otherVersions,
-				updatePaths,
 			)
+		}
+		if violation := extensionUpdatePathViolation(updatePaths, baselineVersion, release.Version); violation != "" {
+			t.Fatalf("extension update path is invalid: %s", violation)
 		}
 		if !bytes.Equal(trackedSQL, packagedSQL) {
 			t.Fatal("packaged extension SQL differs from its tracked pgrx output")

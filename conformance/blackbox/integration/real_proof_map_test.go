@@ -54,7 +54,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-LOGGING-PG-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics", "TestRealIssue49SecurityOperationalRedaction"}},
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-LOGGING-FAULT-001", []string{"TestRealIssue49RemainingSemantics", "TestRealIssue49SecurityOperationalRedaction"}},
 	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-INSTALL-001-PG-LINUX-X64-001", []string{"TestRealIssue49DatabaseAuthorityAndInstallation", "TestRealIssue49SecurityInstallationAuthority"}},
-	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-INSTALL-002-PG-LINUX-X64-001", []string{"TestRealIssue49DatabaseAuthorityAndInstallation", "TestRealIssue49SecurityInstallationAuthority"}},
+	{"SCN-PERF-CORE-SYNC-PATH-001", "OBL-PERF-CORE-SYNC-PATH-INSTALL-002-PG-LINUX-X64-001", []string{"TestRealIssue49DatabaseAuthorityAndInstallation", "TestRealIssue49SecurityInstallationAuthority", "TestRealExtensionUpdateFromBaseline"}},
 	{"SCN-PERF-SHARED-PRIVATE-SCOPES-001", "OBL-PERF-SHARED-PRIVATE-SCOPES-SCOPE-005-PG-LINUX-X64-001", []string{"TestRealIssue49AdapterDelegationAndServerScopes", "TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary"}},
 	{"SCN-PERF-SHARED-PRIVATE-SCOPES-001", "OBL-PERF-SHARED-PRIVATE-SCOPES-PG-LINUX-X64-001", []string{"TestRealReleaseScopeMembershipDeterminism"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-PG-LINUX-X64-001", []string{"TestRealReleaseRegisteredFunctionContract"}},

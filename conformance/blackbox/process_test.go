@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
 func TestInstallExtensionRejectsBundleIdentityChangeAfterLoad(t *testing.T) {
@@ -509,6 +511,328 @@ func TestInstallVerifiedExtensionFileTracksReplacementBeforeSyncFailure(t *testi
 	}
 	if string(actual) != "replacement" {
 		t.Fatalf("destination = %q", actual)
+	}
+}
+
+func TestNormalizeHarnessConfigValidatesUpdateBaseline(t *testing.T) {
+	installationLock, err := VerifyInstallationLockPath(filepath.Join(t.TempDir(), "installation.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := EnvironmentConfig{
+		PG18BinDir:       "/verified/postgresql/bin",
+		InstallationLock: installationLock,
+		installationLock: installationLock,
+		extension:        extensionBundle{root: "/verified/extension"},
+		verified:         true,
+	}
+	runID := strings.Repeat("a", 32)
+	command := []string{"/verified/lifecycle", "fixed"}
+	attached := EnvironmentConfig{
+		AttachDatabaseURL:      "postgres://cf_admin@127.0.0.1:5432/cf",
+		AttachRunID:            runID,
+		AttachLifecycleCommand: append([]string(nil), command...),
+		attachLifecycle:        attachLifecycleConfig{runID: runID, argv: append([]string(nil), command...)},
+		verified:               true,
+	}
+	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: attached}); err != nil {
+		t.Fatalf("attached environment without update baseline was rejected: %v", err)
+	}
+	normalized, err := normalizeHarnessConfig(HarnessConfig{
+		Environment:                     owned,
+		UpdateBaselineExtensionArtifact: filepath.Join("relative", "baseline"),
+		UpdateBaselineExtensionVersion:  updateBaselineVersionFixture,
+	})
+	if err != nil {
+		t.Fatalf("valid update baseline configuration was rejected: %v", err)
+	}
+	expectedArtifact, err := filepath.Abs(filepath.Join("relative", "baseline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.UpdateBaselineExtensionArtifact != expectedArtifact || normalized.UpdateBaselineExtensionVersion != updateBaselineVersionFixture {
+		t.Fatalf("normalized update baseline = %q %q", normalized.UpdateBaselineExtensionArtifact, normalized.UpdateBaselineExtensionVersion)
+	}
+	for _, test := range []struct {
+		name        string
+		environment EnvironmentConfig
+		artifact    string
+		version     string
+	}{
+		{name: "artifact without version", environment: owned, artifact: "/baseline"},
+		{name: "version without artifact", environment: owned, version: updateBaselineVersionFixture},
+		{name: "attached database", environment: attached, artifact: "/baseline", version: updateBaselineVersionFixture},
+		{name: "leading zero version", environment: owned, artifact: "/baseline", version: "0.0.01"},
+		{name: "prefixed version", environment: owned, artifact: "/baseline", version: "v0.0.1"},
+		{name: "partial version", environment: owned, artifact: "/baseline", version: "0.1"},
+		{name: "release version", environment: owned, artifact: "/baseline", version: release.Version},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := normalizeHarnessConfig(HarnessConfig{
+				Environment:                     test.environment,
+				UpdateBaselineExtensionArtifact: test.artifact,
+				UpdateBaselineExtensionVersion:  test.version,
+			}); err == nil {
+				t.Fatal("invalid update baseline configuration was accepted")
+			}
+		})
+	}
+}
+
+type extensionUpdateFixture struct {
+	harness      *Harness
+	baselineRoot string
+	currentRoot  string
+	library      string
+	control      string
+	baselineSQL  string
+	currentSQL   string
+}
+
+// newExtensionUpdateFixture gives a baseline mode harness that installs into
+// temporary PostgreSQL destinations. Its PostgreSQL process is absent.
+func newExtensionUpdateFixture(t *testing.T) extensionUpdateFixture {
+	t.Helper()
+	root := t.TempDir()
+	pkglibdir := filepath.Join(root, "pkglibdir")
+	sharedir := filepath.Join(root, "sharedir")
+	binDir := filepath.Join(root, "bin")
+	runRoot := filepath.Join(root, "run")
+	for _, directory := range []string{pkglibdir, filepath.Join(sharedir, "extension"), binDir, runRoot} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pgConfig := "#!/bin/sh\ncase \"$1\" in\n--pkglibdir) printf '%s\\n' '" + pkglibdir + "' ;;\n--sharedir) printf '%s\\n' '" + sharedir + "' ;;\n*) exit 1 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "pg_config"), []byte(pgConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baselineRoot := writeExtensionBundleFixtureForVersion(t, updateBaselineVersionFixture)
+	currentRoot := writeExtensionBundleFixture(t)
+	current, err := verifyExtensionBundle(currentRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix := "so"
+	if runtime.GOOS == "darwin" {
+		suffix = "dylib"
+	}
+	fixture := extensionUpdateFixture{
+		harness: &Harness{
+			config: HarnessConfig{
+				ShutdownTimeout:                 time.Second,
+				UpdateBaselineExtensionArtifact: baselineRoot,
+				UpdateBaselineExtensionVersion:  updateBaselineVersionFixture,
+			},
+			env: EnvironmentConfig{
+				PG18BinDir:        binDir,
+				ExtensionArtifact: currentRoot,
+				postgresVersion:   postgresqlRuntimeVersion,
+				extension:         current,
+			},
+			runRoot:     runRoot,
+			sourceReady: true,
+		},
+		baselineRoot: baselineRoot,
+		currentRoot:  currentRoot,
+		library:      filepath.Join(pkglibdir, "synchro_pg."+suffix),
+		control:      filepath.Join(sharedir, "extension", "synchro_pg.control"),
+		baselineSQL:  filepath.Join(sharedir, "extension", "synchro_pg--"+updateBaselineVersionFixture+".sql"),
+		currentSQL:   filepath.Join(sharedir, "extension", "synchro_pg--"+release.Version+".sql"),
+	}
+	if err := os.WriteFile(fixture.library, []byte("original-library"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.control, []byte("original-control"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func requireFileContent(t *testing.T, path, expected string) {
+	t.Helper()
+	actual, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", filepath.Base(path), err)
+	}
+	if string(actual) != expected {
+		t.Fatalf("%s = %q, want %q", filepath.Base(path), actual, expected)
+	}
+}
+
+func requireBundlePayload(t *testing.T, path, bundleRoot string) {
+	t.Helper()
+	expected, err := os.ReadFile(filepath.Join(bundleRoot, "payload", filepath.Base(path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireFileContent(t, path, string(expected))
+}
+
+func requireFileAbsent(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("%s exists or cannot be inspected: %v", filepath.Base(path), err)
+	}
+}
+
+func requireNoExtensionInstallation(t *testing.T, fixture extensionUpdateFixture, before *installedExtension) {
+	t.Helper()
+	if fixture.harness.installed != before {
+		t.Fatal("extension installation records changed")
+	}
+	requireFileContent(t, fixture.library, "original-library")
+	requireFileContent(t, fixture.control, "original-control")
+	requireFileAbsent(t, fixture.baselineSQL)
+	requireFileAbsent(t, fixture.currentSQL)
+}
+
+func TestExtensionUpdateInstallationsRestoreOriginalFiles(t *testing.T) {
+	fixture := newExtensionUpdateFixture(t)
+	ctx := context.Background()
+	if err := fixture.harness.installExtension(ctx); err != nil {
+		t.Fatalf("install update baseline bundle: %v", err)
+	}
+	requireBundlePayload(t, fixture.library, fixture.baselineRoot)
+	requireBundlePayload(t, fixture.control, fixture.baselineRoot)
+	requireBundlePayload(t, fixture.baselineSQL, fixture.baselineRoot)
+	requireFileAbsent(t, fixture.currentSQL)
+
+	if err := fixture.harness.installEnvironmentExtension(ctx); err != nil {
+		t.Fatalf("install environment bundle over update baseline: %v", err)
+	}
+	requireBundlePayload(t, fixture.library, fixture.currentRoot)
+	requireBundlePayload(t, fixture.control, fixture.currentRoot)
+	requireBundlePayload(t, fixture.currentSQL, fixture.currentRoot)
+	requireBundlePayload(t, fixture.baselineSQL, fixture.baselineRoot)
+
+	installed := fixture.harness.installed
+	if installed == nil || len(installed.files) != 6 {
+		t.Fatalf("installed extension records = %#v", installed)
+	}
+	backups := make(map[string]struct{})
+	for _, file := range installed.files {
+		if file.hadOriginal {
+			backups[file.originalPath] = struct{}{}
+		}
+	}
+	if len(backups) != 4 {
+		t.Fatalf("unique extension backups = %d, want 4", len(backups))
+	}
+
+	if err := installed.restore(); err != nil {
+		t.Fatalf("restore two extension installations: %v", err)
+	}
+	requireFileContent(t, fixture.library, "original-library")
+	requireFileContent(t, fixture.control, "original-control")
+	requireFileAbsent(t, fixture.baselineSQL)
+	requireFileAbsent(t, fixture.currentSQL)
+}
+
+func TestUpdateExtensionRejectsFalsePreconditions(t *testing.T) {
+	t.Run("control", func(t *testing.T) {
+		fixture := newExtensionUpdateFixture(t)
+		if _, err := fixture.harness.UpdateExtension(context.Background()); err == nil {
+			t.Fatal("extension update without PostgreSQL succeeded")
+		}
+		if fixture.harness.installed == nil {
+			t.Fatal("control harness did not reach the extension installation")
+		}
+	})
+	var missingContext context.Context
+	expiredContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, test := range []struct {
+		name   string
+		ctx    context.Context
+		mutate func(*Harness)
+	}{
+		{name: "missing context", ctx: missingContext},
+		{name: "expired context", ctx: expiredContext},
+		{name: "source not ready", ctx: context.Background(), mutate: func(h *Harness) { h.sourceReady = false }},
+		{name: "baseline mode unset", ctx: context.Background(), mutate: func(h *Harness) {
+			h.config.UpdateBaselineExtensionArtifact = ""
+			h.config.UpdateBaselineExtensionVersion = ""
+		}},
+		{name: "attached", ctx: context.Background(), mutate: func(h *Harness) { h.attached = true }},
+		{name: "earlier update", ctx: context.Background(), mutate: func(h *Harness) { h.extensionUpdated = true }},
+		{name: "adapter runs", ctx: context.Background(), mutate: func(h *Harness) { h.adapter = &ownedProcess{} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExtensionUpdateFixture(t)
+			if test.mutate != nil {
+				test.mutate(fixture.harness)
+			}
+			if _, err := fixture.harness.UpdateExtension(test.ctx); err == nil {
+				t.Fatal("extension update accepted a false precondition")
+			}
+			requireNoExtensionInstallation(t, fixture, nil)
+		})
+	}
+	var missingHarness *Harness
+	if _, err := missingHarness.UpdateExtension(context.Background()); err == nil {
+		t.Fatal("extension update accepted a missing harness")
+	}
+}
+
+func TestObserveExtensionCatalogsRejectsFalsePreconditions(t *testing.T) {
+	completedFixture := func(t *testing.T) extensionUpdateFixture {
+		fixture := newExtensionUpdateFixture(t)
+		harness := fixture.harness
+		harness.socketDir = t.TempDir()
+		harness.port = 1
+		harness.extensionUpdated = true
+		harness.extensionUpdateCompleted = true
+		t.Cleanup(func() {
+			if err := harness.closeDatabaseHandles(context.Background()); err != nil {
+				t.Error(err)
+			}
+		})
+		return fixture
+	}
+	t.Run("control", func(t *testing.T) {
+		harness := completedFixture(t).harness
+		if _, err := harness.ObserveExtensionCatalogs(context.Background()); err == nil {
+			t.Fatal("extension catalog observation without PostgreSQL succeeded")
+		}
+		if len(harness.databaseHandles) == 0 {
+			t.Fatal("control harness did not reach the database connection")
+		}
+	})
+	var missingContext context.Context
+	expiredContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, test := range []struct {
+		name   string
+		ctx    context.Context
+		mutate func(*Harness)
+	}{
+		{name: "missing context", ctx: missingContext},
+		{name: "expired context", ctx: expiredContext},
+		{name: "no update", ctx: context.Background(), mutate: func(h *Harness) {
+			h.extensionUpdated = false
+			h.extensionUpdateCompleted = false
+		}},
+		{name: "incomplete update", ctx: context.Background(), mutate: func(h *Harness) { h.extensionUpdateCompleted = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := completedFixture(t)
+			harness := fixture.harness
+			if test.mutate != nil {
+				test.mutate(harness)
+			}
+			if _, err := harness.ObserveExtensionCatalogs(test.ctx); err == nil {
+				t.Fatal("extension catalog observation accepted a false precondition")
+			}
+			if len(harness.databaseHandles) != 0 || harness.cleanExtension {
+				t.Fatal("extension catalog observation used PostgreSQL before it checked its preconditions")
+			}
+			requireNoExtensionInstallation(t, fixture, nil)
+		})
+	}
+	var missingHarness *Harness
+	if _, err := missingHarness.ObserveExtensionCatalogs(context.Background()); err == nil {
+		t.Fatal("extension catalog observation accepted a missing harness")
 	}
 }
 

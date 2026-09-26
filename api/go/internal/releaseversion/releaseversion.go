@@ -16,6 +16,8 @@ import (
 
 var semverRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
+var sha256HexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 const (
 	postgresSQLDir     = "extensions/synchro-pg/sql"
 	updateBaselinePath = "extensions/synchro-pg/update-baseline.json"
@@ -524,7 +526,7 @@ func postgresInstallSQLRename(root string, version string) (string, error) {
 // of update scripts from the pinned update baseline to version.
 func checkPostgresInstallSQL(root string, version string) []string {
 	var failures []string
-	baseline, baselineErr := readUpdateBaseline(root)
+	baseline, baselineErr := ReadUpdateBaseline(root)
 	if baselineErr != nil {
 		failures = append(failures, baselineErr.Error())
 	}
@@ -550,7 +552,7 @@ func checkPostgresInstallSQL(root string, version string) []string {
 	if baselineErr != nil {
 		return failures
 	}
-	return append(failures, checkUpdateChain(scripts.updates, baseline, version)...)
+	return append(failures, checkUpdateChain(scripts.updates, baseline.Version, version)...)
 }
 
 // checkUpdateChain requires the update scripts to form exactly one chain from
@@ -644,30 +646,49 @@ func readPostgresSQLScripts(root string) (postgresSQLScripts, error) {
 	return scripts, nil
 }
 
-// readUpdateBaseline returns the version of the update baseline pin. The pin is
-// one JSON object with exactly the keys version, artifact_url, and artifact_sha256.
-func readUpdateBaseline(root string) (string, error) {
+// UpdateBaseline is the update baseline pin: the first extension version that
+// has an update path and its published extension artifact.
+type UpdateBaseline struct {
+	Version        string
+	ArtifactURL    string
+	ArtifactSHA256 string
+}
+
+// ReadUpdateBaseline reads the update baseline pin. The pin is one JSON object
+// with exactly the keys version, artifact_url, and artifact_sha256.
+func ReadUpdateBaseline(root string) (UpdateBaseline, error) {
 	data, err := os.ReadFile(filepath.Join(root, updateBaselinePath))
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", updateBaselinePath, err)
+		return UpdateBaseline{}, fmt.Errorf("reading %s: %w", updateBaselinePath, err)
 	}
 	fields, err := decodeObjectFields(data)
 	if err != nil {
-		return "", fmt.Errorf("%s is invalid: %w", updateBaselinePath, err)
+		return UpdateBaseline{}, fmt.Errorf("%s is invalid: %w", updateBaselinePath, err)
 	}
 	for _, key := range []string{"version", "artifact_url", "artifact_sha256"} {
 		if _, exists := fields[key]; !exists {
-			return "", fmt.Errorf("%s is invalid: missing key %q", updateBaselinePath, key)
+			return UpdateBaseline{}, fmt.Errorf("%s is invalid: missing key %q", updateBaselinePath, key)
 		}
 	}
 	if len(fields) != 3 {
-		return "", fmt.Errorf("%s is invalid: it must contain only version, artifact_url, and artifact_sha256", updateBaselinePath)
+		return UpdateBaseline{}, fmt.Errorf("%s is invalid: it must contain only version, artifact_url, and artifact_sha256", updateBaselinePath)
 	}
-	var version string
-	if err := json.Unmarshal(fields["version"], &version); err != nil || !semverRE.MatchString(version) {
-		return "", fmt.Errorf("%s is invalid: version must be a string that matches X.Y.Z", updateBaselinePath)
+	var baseline UpdateBaseline
+	if err := json.Unmarshal(fields["version"], &baseline.Version); err != nil || !semverRE.MatchString(baseline.Version) {
+		return UpdateBaseline{}, fmt.Errorf("%s is invalid: version must be a string that matches X.Y.Z", updateBaselinePath)
 	}
-	return version, nil
+	wantURL := updateBaselineArtifactURL(baseline.Version)
+	if err := json.Unmarshal(fields["artifact_url"], &baseline.ArtifactURL); err != nil || baseline.ArtifactURL != wantURL {
+		return UpdateBaseline{}, fmt.Errorf("%s is invalid: artifact_url must be the string %q", updateBaselinePath, wantURL)
+	}
+	if err := json.Unmarshal(fields["artifact_sha256"], &baseline.ArtifactSHA256); err != nil || !sha256HexRE.MatchString(baseline.ArtifactSHA256) {
+		return UpdateBaseline{}, fmt.Errorf("%s is invalid: artifact_sha256 must be a string of 64 lowercase hexadecimal digits", updateBaselinePath)
+	}
+	return baseline, nil
+}
+
+func updateBaselineArtifactURL(version string) string {
+	return "https://github.com/trainstar/synchro/releases/download/v" + version + "/synchro-pg-pg18-ubuntu24.04-linux-x64-" + version + ".tar.gz"
 }
 
 // decodeObjectFields decodes one JSON object. It rejects a duplicate key and

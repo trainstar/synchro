@@ -493,7 +493,7 @@ pgrx annotations and `extension_sql!` declarations in the Rust extension source 
 
 ### Extension Migration Baseline
 
-Version `0.3.1`, the first published Protocol 3 release, MUST be the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks. Claiming an in-place update from deleted or experimental pre-`0.3.0` state or from the unpublished `0.3.0` candidate, or using `IF NOT EXISTS` as migration logic, is a violation of Installation and migration baseline in [ADR 005].
+Version `0.3.1`, the first published Protocol 3 release, MUST be the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks. Each later version MUST be reachable from `0.3.1` through one chain of update scripts. A `0.3.1` installation updated through the chain MUST have the same extension objects as a clean installation of the current version. Claiming an in-place update from deleted or experimental pre-`0.3.0` state or from the unpublished `0.3.0` candidate, using `IF NOT EXISTS` as migration logic, or shipping an update chain whose result differs from a clean installation is a violation of Installation and migration baseline in [ADR 005].
 
 ## Adapter And Client Boundary Invariants
 

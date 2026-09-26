@@ -89,6 +89,11 @@ jobs:
         with:
           expected-postgresql-version: '18.3'
 
+      - name: Fetch extension update baseline
+        run: |
+          make conformance-update-baseline-extension-artifact
+          echo "SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-baseline" >> "$GITHUB_ENV"
+
       - name: Run every integration mutant
         run: make test-integration-mutants-broad
 

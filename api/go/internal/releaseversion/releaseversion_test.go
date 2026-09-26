@@ -402,7 +402,7 @@ func TestCheckRejectsInvalidPostgresSQLState(t *testing.T) {
 			},
 			names: "synchro_pg--1.4.5--1.5.0.sql",
 		},
-		pinCase("missing key", `{"version": "0.1.0", "artifact_url": "https://example.invalid/synchro-pg.tar.gz"}`),
+		pinCase("missing key", `{"version": "0.1.0", "artifact_url": "https://github.com/trainstar/synchro/releases/download/v0.1.0/synchro-pg-pg18-ubuntu24.04-linux-x64-0.1.0.tar.gz"}`),
 		pinCase("extra key", strings.Replace(valid, "{", `{"extra": "value",`, 1)),
 		pinCase("duplicate key", strings.Replace(valid, "{", `{"version": "0.1.0",`, 1)),
 		pinCase("key case", strings.Replace(valid, `"version"`, `"Version"`, 1)),
@@ -411,6 +411,14 @@ func TestCheckRejectsInvalidPostgresSQLState(t *testing.T) {
 		pinCase("trailing value", valid+"{}\n"),
 		pinCase("not object", `["0.1.0"]`),
 		pinCase("malformed", `{"version": "0.1.0",`),
+		pinCase("artifact URL of another version", strings.Replace(valid, "/v0.1.0/", "/v0.1.1/", 1)),
+		pinCase("artifact URL of another asset", strings.Replace(valid, "linux-x64-0.1.0.tar.gz", "linux-arm64-0.1.0.tar.gz", 1)),
+		pinCase("artifact URL with HTTP", strings.Replace(valid, "https://", "http://", 1)),
+		pinCase("artifact URL not string", strings.Replace(valid, `"https://github.com/trainstar/synchro/releases/download/v0.1.0/synchro-pg-pg18-ubuntu24.04-linux-x64-0.1.0.tar.gz"`, "null", 1)),
+		pinCase("artifact digest too short", strings.Replace(valid, strings.Repeat("0", 64), strings.Repeat("0", 63), 1)),
+		pinCase("artifact digest uppercase", strings.Replace(valid, strings.Repeat("0", 64), strings.Repeat("A", 64), 1)),
+		pinCase("artifact digest not hexadecimal", strings.Replace(valid, strings.Repeat("0", 64), strings.Repeat("g", 64), 1)),
+		pinCase("artifact digest not string", strings.Replace(valid, `"`+strings.Repeat("0", 64)+`"`, "0", 1)),
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -431,6 +439,26 @@ func TestCheckRejectsInvalidPostgresSQLState(t *testing.T) {
 				t.Fatalf("Check error did not name %s: %v", tc.names, err)
 			}
 		})
+	}
+}
+
+func TestReadUpdateBaselineReturnsValidPin(t *testing.T) {
+	t.Parallel()
+
+	root := newFixtureRepo(t)
+	digest := strings.Repeat("0123456789abcdef", 4)
+	writeFixtureFile(t, root, updateBaselinePath, strings.Replace(updateBaselineFixture("0.1.0"), strings.Repeat("0", 64), digest, 1))
+	got, err := ReadUpdateBaseline(root)
+	if err != nil {
+		t.Fatalf("ReadUpdateBaseline rejected a valid pin: %v", err)
+	}
+	want := UpdateBaseline{
+		Version:        "0.1.0",
+		ArtifactURL:    "https://github.com/trainstar/synchro/releases/download/v0.1.0/synchro-pg-pg18-ubuntu24.04-linux-x64-0.1.0.tar.gz",
+		ArtifactSHA256: digest,
+	}
+	if got != want {
+		t.Fatalf("ReadUpdateBaseline = %+v, want %+v", got, want)
 	}
 }
 
@@ -517,7 +545,7 @@ func newFixtureRepo(t *testing.T) string {
 func updateBaselineFixture(version string) string {
 	return "{\n" +
 		"  \"version\": \"" + version + "\",\n" +
-		"  \"artifact_url\": \"https://example.invalid/synchro-pg-" + version + ".tar.gz\",\n" +
+		"  \"artifact_url\": \"https://github.com/trainstar/synchro/releases/download/v" + version + "/synchro-pg-pg18-ubuntu24.04-linux-x64-" + version + ".tar.gz\",\n" +
 		"  \"artifact_sha256\": \"" + strings.Repeat("0", 64) + "\"\n" +
 		"}\n"
 }

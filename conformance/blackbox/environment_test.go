@@ -356,6 +356,19 @@ func attachEnvironmentValuesFixture(t *testing.T) map[string]string {
 	return values
 }
 
+// updateBaselineVersionFixture is an extension version that differs from release.Version.
+const updateBaselineVersionFixture = "0.0.1"
+
+func TestVerifyExtensionBundleUsesRequestedExtensionVersion(t *testing.T) {
+	root := writeExtensionBundleFixtureForVersion(t, updateBaselineVersionFixture)
+	if _, err := verifyExtensionBundleForPostgreSQLVersion(root, postgresqlRuntimeVersion, updateBaselineVersionFixture); err != nil {
+		t.Fatalf("extension bundle for its own version was rejected: %v", err)
+	}
+	if _, err := verifyExtensionBundleForPostgreSQLVersion(root, postgresqlRuntimeVersion, release.Version); err == nil {
+		t.Fatal("extension bundle for another version was accepted as the release version")
+	}
+}
+
 func TestVerifyExtensionBundleRejectsTamperingAndWrongDestinations(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		if _, err := verifyExtensionBundle(writeExtensionBundleFixture(t)); err != nil {
@@ -544,6 +557,11 @@ func writePostgresVersionFixtures(t *testing.T, versions map[string]string) stri
 
 func writeExtensionBundleFixture(t *testing.T) string {
 	t.Helper()
+	return writeExtensionBundleFixtureForVersion(t, release.Version)
+}
+
+func writeExtensionBundleFixtureForVersion(t *testing.T, extensionVersion string) string {
+	t.Helper()
 	root := t.TempDir()
 	suffix := "so"
 	if runtime.GOOS == "darwin" {
@@ -552,14 +570,14 @@ func writeExtensionBundleFixture(t *testing.T) string {
 	files := []extensionBundleFile{
 		{Path: "payload/synchro_pg." + suffix, Destination: "pkglibdir/synchro_pg." + suffix},
 		{Path: "payload/synchro_pg.control", Destination: "sharedir/extension/synchro_pg.control"},
-		{Path: "payload/synchro_pg--" + release.Version + ".sql", Destination: "sharedir/extension/synchro_pg--" + release.Version + ".sql"},
+		{Path: "payload/synchro_pg--" + extensionVersion + ".sql", Destination: "sharedir/extension/synchro_pg--" + extensionVersion + ".sql"},
 	}
 	for index := range files {
 		path := filepath.Join(root, filepath.FromSlash(files[index].Path))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		data := []byte("fixture-" + files[index].Destination)
+		data := []byte("fixture-" + extensionVersion + "-" + files[index].Destination)
 		if err := os.WriteFile(path, data, 0o644); err != nil {
 			t.Fatal(err)
 		}

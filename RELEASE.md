@@ -93,6 +93,10 @@ WHERE singleton;
 The statement records the build of the new library.
 Without it, readiness and the adapter report stale extension objects after the update.
 
+Candidate CI runs `TestRealExtensionUpdateFromBaseline`.
+The test updates the pinned baseline through the update chain.
+Then it compares the extension objects with a clean installation of `X.Y.Z`.
+
 `VERSION` is the release version authority.
 
 The workflow selects the version from the committed source.

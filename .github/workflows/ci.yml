@@ -228,6 +228,11 @@ jobs:
           make test-adapter
           make local-postgres-stop
 
+      - name: Fetch extension update baseline
+        run: |
+          make conformance-update-baseline-extension-artifact
+          echo "SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-baseline" >> "$GITHUB_ENV"
+
       - name: Run real server black box with deterministic stateful seed
         run: make test-blackbox
 
