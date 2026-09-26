@@ -143,6 +143,8 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealWALPipeline":                                  "regression",
 	"TestRealIssue50ActiveWALIntakeBounds":                 "regression",
 	"TestRealIssue50ValidTransactionsCrossSoftBatchTarget": "regression",
+	"TestRealWALSkipsUnpublishedGeneratedColumns":          "regression",
+	"TestRealWALCapturesPublishedStoredGeneratedColumn":    "regression",
 	"TestRealWALObservationUsesOneSnapshot":                "framework",
 }
 

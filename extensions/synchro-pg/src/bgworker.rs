@@ -3000,9 +3000,16 @@ fn preload_relations(
                  FROM pg_catalog.pg_attribute a
                  JOIN pg_catalog.pg_index i
                    ON i.indrelid = a.attrelid AND i.indisprimary
+                 JOIN synchro.sync_runtime_state runtime ON runtime.singleton
+                 JOIN pg_catalog.pg_publication publication
+                   ON publication.pubname = runtime.active_publication_name
                  WHERE a.attrelid = $1::oid
                    AND a.attnum > 0
                    AND NOT a.attisdropped
+                   AND (
+                       a.attgenerated = ''
+                       OR (a.attgenerated = 's' AND publication.pubgencols = 's')
+                   )
                  ORDER BY a.attnum",
                 None,
                 &[i64::from(registration.physical_relation_oid).into()],

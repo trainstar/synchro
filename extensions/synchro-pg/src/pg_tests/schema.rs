@@ -2193,6 +2193,200 @@
         );
     }
 
+    fn create_generated_column_fixture() {
+        Spi::run(
+            "CREATE TABLE public.test_generated_items (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL,
+                 value_length INTEGER GENERATED ALWAYS AS (length(value)) STORED,
+                 value_upper TEXT GENERATED ALWAYS AS (upper(value)) VIRTUAL,
+                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                 deleted_at TIMESTAMPTZ
+             )",
+        )
+        .expect("create generated column fixture");
+    }
+
+    fn set_test_publication_generated_columns(mode: &str) {
+        Spi::run(&format!(
+            "ALTER PUBLICATION synchro_pub SET (publish_generated_columns = {mode})"
+        ))
+        .expect("set test publication generated column mode");
+    }
+
+    fn generated_fixture_registration(exclude_columns: &str) -> String {
+        format!(
+            "tests.register_test_table(
+                 'test_generated_items',
+                 $$SELECT 'global'::text$$,
+                 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'enabled',
+                 {exclude_columns}
+             )"
+        )
+    }
+
+    fn reject_generated_fixture_registration(registration: &str) {
+        Spi::run(&format!(
+            "DO $test$
+             DECLARE
+                 rejected boolean := false;
+             BEGIN
+                 BEGIN
+                     PERFORM {registration};
+                 EXCEPTION WHEN OTHERS THEN
+                     rejected := true;
+                 END;
+                 IF NOT rejected THEN
+                     RAISE EXCEPTION 'registration unexpectedly succeeded';
+                 END IF;
+             END
+             $test$"
+        ))
+        .expect("reject generated column registration");
+    }
+
+    fn generated_fixture_registry_count() -> i64 {
+        Spi::get_one::<i64>(
+            "SELECT count(*)
+             FROM synchro.sync_registry
+             WHERE physical_relation_oid = 'public.test_generated_items'::pg_catalog.regclass",
+        )
+        .expect("generated fixture registry count query")
+        .expect("generated fixture registry count")
+    }
+
+    fn generated_fixture_field_writability() -> Value {
+        Spi::get_one::<pgrx::JsonB>(
+            "SELECT COALESCE(
+                 jsonb_object_agg(field.physical_column::text, field.writable),
+                 '{}'::jsonb
+             )
+             FROM synchro.sync_registry registry
+             JOIN synchro.sync_registry_fields field
+               ON field.registry_generation = registry.registry_generation
+              AND field.relation_id = registry.relation_id
+             WHERE registry.physical_relation_oid =
+                 'public.test_generated_items'::pg_catalog.regclass",
+        )
+        .expect("generated fixture field query")
+        .expect("generated fixture fields")
+        .0
+    }
+
+    #[pg_test]
+    fn test_register_table_rejects_synced_virtual_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("stored");
+        create_generated_column_fixture();
+
+        reject_generated_fixture_registration(&generated_fixture_registration(
+            "'{}'::text[]",
+        ));
+        assert_eq!(generated_fixture_registry_count(), 0);
+
+        Spi::run(&format!(
+            "SELECT {}",
+            generated_fixture_registration("ARRAY['value_upper']")
+        ))
+        .expect("register fixture without the virtual generated column");
+        assert_eq!(generated_fixture_registry_count(), 1);
+    }
+
+    #[pg_test]
+    fn test_register_table_rejects_unpublished_stored_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("none");
+        create_generated_column_fixture();
+
+        let registration = generated_fixture_registration("ARRAY['value_upper']");
+        reject_generated_fixture_registration(&registration);
+        assert_eq!(generated_fixture_registry_count(), 0);
+
+        set_test_publication_generated_columns("stored");
+        Spi::run(&format!("SELECT {registration}"))
+            .expect("register stored generated column after publication change");
+        assert_eq!(generated_fixture_registry_count(), 1);
+    }
+
+    #[pg_test]
+    fn test_register_table_accepts_excluded_generated_columns() {
+        setup_test_tables();
+        set_test_publication_generated_columns("none");
+        create_generated_column_fixture();
+
+        Spi::run(&format!(
+            "SELECT {}",
+            generated_fixture_registration("ARRAY['value_length', 'value_upper']")
+        ))
+        .expect("register fixture with excluded generated columns");
+
+        assert_eq!(
+            generated_fixture_field_writability(),
+            json!({
+                "id": false,
+                "value": true,
+                "updated_at": false,
+                "deleted_at": false
+            })
+        );
+    }
+
+    #[pg_test]
+    fn test_register_table_accepts_published_stored_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("stored");
+        create_generated_column_fixture();
+
+        Spi::run(&format!(
+            "SELECT {}",
+            generated_fixture_registration("ARRAY['value_upper']")
+        ))
+        .expect("register fixture with a published stored generated column");
+
+        assert_eq!(
+            generated_fixture_field_writability(),
+            json!({
+                "id": false,
+                "value": true,
+                "value_length": false,
+                "updated_at": false,
+                "deleted_at": false
+            })
+        );
+    }
+
+    #[pg_test]
+    fn test_capture_dependency_rejects_unpublished_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("none");
+        create_generated_column_fixture();
+        Spi::run(
+            "GRANT SELECT ON TABLE public.test_generated_items TO synchro_owner;
+             ALTER TABLE public.test_generated_items ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY test_generated_items_owner_policy
+                 ON public.test_generated_items
+                 AS PERMISSIVE FOR ALL TO synchro_owner
+                 USING (true) WITH CHECK (true)",
+        )
+        .expect("prepare generated capture dependency fixture");
+
+        reject_generated_fixture_registration(
+            "synchro.synchro_register_capture_dependency(
+                 'public.test_generated_items', ARRAY['id'], ARRAY['value_length']
+             )",
+        );
+        assert_eq!(generated_fixture_registry_count(), 0);
+
+        Spi::run(
+            "SELECT synchro.synchro_register_capture_dependency(
+                 'public.test_generated_items', ARRAY['id'], ARRAY['value']
+             )",
+        )
+        .expect("register capture dependency without generated columns");
+        assert_eq!(generated_fixture_registry_count(), 1);
+    }
+
     #[pg_test]
     fn test_unregister_table_for_all_publication() {
         setup_test_tables();

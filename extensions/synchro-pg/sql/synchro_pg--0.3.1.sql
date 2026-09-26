@@ -2049,7 +2049,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1065
+-- synchro-pg/src/health.rs:1089
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2261,7 +2261,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1058
+-- synchro-pg/src/health.rs:1082
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2282,7 +2282,7 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:743
+-- synchro-pg/src/registry.rs:744
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2295,7 +2295,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1019
+-- synchro-pg/src/registry.rs:1021
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2440,7 +2440,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:976
+-- synchro-pg/src/registry.rs:978
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */

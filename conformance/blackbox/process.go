@@ -74,6 +74,7 @@ var diagnosticSourceTables = []string{
 	"cf_schema_queue",
 	"cf_decode_trap",
 	"cf_late_registration",
+	"cf_generated_items",
 }
 
 var diagnosticLegacyInternalTables = []string{
@@ -3109,6 +3110,7 @@ BEGIN
 			       expected.atttypmod,
 			       pg_catalog.format_type(expected.atttypid, expected.atttypmod) AS type_name,
 			       expected.attnotnull,
+			       expected.attgenerated <> '' AS generated,
 			       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
 			FROM pg_catalog.pg_attribute AS expected
 			LEFT JOIN pg_catalog.pg_attrdef AS default_value
@@ -3147,7 +3149,10 @@ BEGIN
 				);
 			END IF;
 
-			IF authored_column.default_expression IS NULL THEN
+			IF authored_column.generated THEN
+				-- PostgreSQL rejects a default change on a generated column.
+				NULL;
+			ELSIF authored_column.default_expression IS NULL THEN
 				EXECUTE pg_catalog.format(
 					'ALTER TABLE public.%I ALTER COLUMN %I DROP DEFAULT',
 					source_table, authored_column.attname
@@ -4237,6 +4242,39 @@ func (executor *OperatorExecutor) RegisterLateSourceTable(ctx context.Context) e
         'single_scope',
         'id', 'updated_at', 'deleted_at', 'enabled'
     )`)
+}
+
+// RegisterGeneratedSourceTableWithoutGeneratedColumns registers the fixed
+// generated-column table and excludes all of its generated columns.
+func (executor *OperatorExecutor) RegisterGeneratedSourceTableWithoutGeneratedColumns(ctx context.Context) error {
+	return executor.exec(ctx, `SELECT synchro.synchro_register_table(
+		'public.cf_generated_items',
+		'public.cf_generated_items_membership',
+		'single_scope',
+		'id', 'updated_at', 'deleted_at', 'enabled',
+		ARRAY['value_length', 'search_vector', 'value_upper']
+	)`)
+}
+
+// RegisterGeneratedSourceTableWithStoredColumn registers the fixed
+// generated-column table with value_length synced. It excludes search_vector
+// and the virtual value_upper column.
+func (executor *OperatorExecutor) RegisterGeneratedSourceTableWithStoredColumn(ctx context.Context) error {
+	return executor.exec(ctx, `SELECT synchro.synchro_register_table(
+		'public.cf_generated_items',
+		'public.cf_generated_items_membership',
+		'single_scope',
+		'id', 'updated_at', 'deleted_at', 'enabled',
+		ARRAY['search_vector', 'value_upper']
+	)`)
+}
+
+// PublishStoredGeneratedColumns makes the isolated publication send stored generated columns.
+func (executor *OperatorExecutor) PublishStoredGeneratedColumns(ctx context.Context) error {
+	if executor == nil || executor.harness == nil {
+		return errors.New("operator executor is unavailable")
+	}
+	return executor.exec(ctx, "ALTER PUBLICATION "+quoteIdentifier(executor.harness.names.Publication)+" SET (publish_generated_columns = stored)")
 }
 
 // PendingLateSourceRegistryGeneration returns the validated pending generation for the fixed late table.

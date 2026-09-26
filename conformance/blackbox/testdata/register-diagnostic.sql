@@ -12,6 +12,7 @@ SELECT synchro.synchro_prepare_projection_view('public.cf_document_notes', 'cf_d
 SELECT synchro.synchro_prepare_projection_view('public.cf_schema_queue', 'cf_schema_queue', ARRAY['owner_id']);
 SELECT synchro.synchro_prepare_projection_view('public.cf_decode_trap', 'cf_decode_trap', ARRAY['owner_id']);
 SELECT synchro.synchro_prepare_projection_view('public.cf_late_registration', 'cf_late_registration', ARRAY['owner_id']);
+SELECT synchro.synchro_prepare_projection_view('public.cf_generated_items', 'cf_generated_items', ARRAY['owner_id']);
 
 CREATE OR REPLACE FUNCTION public.cf_global_items_membership(p_id uuid)
 RETURNS SETOF text
@@ -90,15 +91,23 @@ BEGIN ATOMIC
     FROM synchro_projection.cf_late_registration AS p
     WHERE p.record_id = p_id::text AND NOT p.deleted;
 END;
+CREATE OR REPLACE FUNCTION public.cf_generated_items_membership(p_id uuid)
+RETURNS SETOF text
+LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+BEGIN ATOMIC
+    SELECT 'user:' || (p.owner_id #>> '{}')
+    FROM synchro_projection.cf_generated_items AS p
+    WHERE p.record_id = p_id::text AND NOT p.deleted;
+END;
 
-REVOKE ALL ON FUNCTION public.cf_global_items_membership(uuid), public.cf_items_membership(uuid), public.cf_items_cross_scope_membership(uuid), public.cf_documents_membership(uuid), public.cf_document_members_membership(uuid), public.cf_document_notes_membership(uuid), public.cf_schema_queue_membership(uuid), public.cf_decode_trap_membership(uuid), public.cf_late_registration_membership(uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.cf_global_items_membership(uuid), public.cf_items_membership(uuid), public.cf_items_cross_scope_membership(uuid), public.cf_documents_membership(uuid), public.cf_document_members_membership(uuid), public.cf_document_notes_membership(uuid), public.cf_schema_queue_membership(uuid), public.cf_decode_trap_membership(uuid), public.cf_late_registration_membership(uuid) TO synchro_owner, synchro_worker;
+REVOKE ALL ON FUNCTION public.cf_global_items_membership(uuid), public.cf_items_membership(uuid), public.cf_items_cross_scope_membership(uuid), public.cf_documents_membership(uuid), public.cf_document_members_membership(uuid), public.cf_document_notes_membership(uuid), public.cf_schema_queue_membership(uuid), public.cf_decode_trap_membership(uuid), public.cf_late_registration_membership(uuid), public.cf_generated_items_membership(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.cf_global_items_membership(uuid), public.cf_items_membership(uuid), public.cf_items_cross_scope_membership(uuid), public.cf_documents_membership(uuid), public.cf_document_members_membership(uuid), public.cf_document_notes_membership(uuid), public.cf_schema_queue_membership(uuid), public.cf_decode_trap_membership(uuid), public.cf_late_registration_membership(uuid), public.cf_generated_items_membership(uuid) TO synchro_owner, synchro_worker;
 GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
 GRANT SELECT ON TABLE public.cf_global_items TO synchro_owner;
 GRANT SELECT ON TABLE public.cf_document_access TO synchro_owner;
 GRANT SELECT ON TABLE public.cf_item_impacts TO synchro_owner;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration TO synchro_owner;
-GRANT SELECT ON TABLE public.cf_global_items, public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_access, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration, public.cf_item_impacts TO synchro_worker;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration, public.cf_generated_items TO synchro_owner;
+GRANT SELECT ON TABLE public.cf_global_items, public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_access, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration, public.cf_generated_items, public.cf_item_impacts TO synchro_worker;
 
 DO $rls$
 DECLARE
@@ -107,7 +116,8 @@ BEGIN
     FOREACH relation_name IN ARRAY ARRAY[
         'cf_global_items', 'cf_items', 'cf_documents', 'cf_document_members',
         'cf_document_access', 'cf_document_notes', 'cf_schema_queue',
-        'cf_decode_trap', 'cf_late_registration', 'cf_item_impacts'
+        'cf_decode_trap', 'cf_late_registration', 'cf_generated_items',
+        'cf_item_impacts'
     ]
     LOOP
         EXECUTE pg_catalog.format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation_name);

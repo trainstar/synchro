@@ -727,6 +727,7 @@ fn synchro_register_table(
                 install_capture_triggers(client, &registration)
             }),
         )?;
+        validate_registered_columns_are_published(client, &registration)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -955,6 +956,7 @@ fn synchro_register_capture_dependency(
                 install_capture_triggers(client, &registration)
             }),
         )?;
+        validate_registered_columns_are_published(client, &registration)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -3653,6 +3655,68 @@ fn ensure_publication_membership(
             qualified_relation_name(&relation.schema, &relation.relation),
         );
         client.update(&add_sql, None, &[])?;
+    }
+    Ok(())
+}
+
+/// Rejects a registered column that pgoutput does not send for the configured publication.
+fn validate_registered_columns_are_published(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+) -> Result<(), spi::Error> {
+    let publication = configured_publication_name();
+    let columns = registration
+        .fields
+        .iter()
+        .map(|field| field.physical_column.clone())
+        .chain(
+            registration
+                .capture_fields
+                .iter()
+                .map(|field| field.physical_column.clone()),
+        )
+        .collect::<Vec<_>>();
+    let rows = client.select(
+        "SELECT attribute.attname::text AS column_name,
+                attribute.attgenerated::text AS generated,
+                publication.pubgencols::text AS published_generated
+         FROM pg_catalog.pg_attribute attribute
+         LEFT JOIN pg_catalog.pg_publication publication
+           ON publication.pubname = $3
+         WHERE attribute.attrelid = $1::oid
+           AND attribute.attnum > 0
+           AND NOT attribute.attisdropped
+           AND attribute.attgenerated <> ''
+           AND attribute.attname::text = ANY($2::text[])
+         ORDER BY attribute.attnum",
+        None,
+        &[
+            i64::from(registration.physical_relation_oid).into(),
+            columns.into(),
+            publication.as_str().into(),
+        ],
+    )?;
+    for row in rows {
+        let column = row
+            .get_by_name::<String, &str>("column_name")?
+            .unwrap_or_default();
+        let generated = row
+            .get_by_name::<String, &str>("generated")?
+            .unwrap_or_default();
+        if generated == "v" {
+            pgrx::error!(
+                "registered column {:?} is a virtual generated column",
+                column
+            );
+        }
+        let published_generated = row.get_by_name::<String, &str>("published_generated")?;
+        if published_generated.as_deref() != Some("s") {
+            pgrx::error!(
+                "registered column {:?} is a stored generated column that publication {:?} does not publish",
+                column,
+                publication
+            );
+        }
     }
     Ok(())
 }
