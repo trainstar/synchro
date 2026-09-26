@@ -3,11 +3,13 @@ description: Install the PostgreSQL 18 pgrx dependencies, cache cargo-pgrx, and 
 
 inputs:
   runtime-source:
-    description: Source for the PostgreSQL 18 runtime. Use download, brew, or artifact.
-    required: false
-    default: download
+    description: >-
+      Source for the PostgreSQL 18 runtime. Use certified, download, brew, or artifact.
+      certified installs the certified PGDG PostgreSQL 18.3 packages on Linux.
+      download installs the current PostgreSQL 18 minor release.
+    required: true
   cache-runtime:
-    description: Cache the pgrx runtime directory.
+    description: Cache the pgrx runtime directory. The certified source never uses this cache.
     required: false
     default: 'true'
   pgrx-version:
@@ -47,8 +49,21 @@ runs:
           brew list --versions "$formula" >/dev/null 2>&1 || brew install "$formula"
         done
 
+    - name: Install certified PostgreSQL 18.3
+      if: inputs.runtime-source == 'certified'
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$RUNNER_OS" = Linux || { echo "The certified PostgreSQL 18 runtime requires Linux" >&2; exit 1; }
+        sudo install -d /usr/share/postgresql-common/pgdg
+        sudo curl --fail --silent --show-error --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list >/dev/null
+        sudo apt-get update
+        sudo apt-get install -y --allow-downgrades postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1 postgresql-server-dev-18=18.3-1.pgdg24.04+1
+        sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
+
     - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-      if: inputs.cache-runtime == 'true'
+      if: inputs.cache-runtime == 'true' && inputs.runtime-source != 'certified'
       with:
         path: ~/.pgrx
         key: pgrx-${{ runner.os }}-${{ inputs.pgrx-version }}-pg18
@@ -72,7 +87,9 @@ runs:
       if: inputs.runtime-source != 'artifact'
       shell: bash
       run: |
-        if [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
+        if [ "${{ inputs.runtime-source }}" = 'certified' ]; then
+          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+        elif [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
           echo "Using cached PG18 pgrx runtime"
         elif [ "${{ inputs.runtime-source }}" = 'brew' ]; then
           cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config" || {

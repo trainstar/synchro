@@ -38,8 +38,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
 
       - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: certified
 
       - uses: ./.github/actions/setup-conformance-pg18
+        with:
+          expected-postgresql-version: '18.3'
 
       - name: Run wider live seeded stateful validation
         run: make soak
@@ -78,8 +82,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
 
       - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: certified
 
       - uses: ./.github/actions/setup-conformance-pg18
+        with:
+          expected-postgresql-version: '18.3'
 
       - name: Run every integration mutant
         run: make test-integration-mutants-broad
@@ -103,6 +111,8 @@ jobs:
             extensions -> target
 
       - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: certified
 
       - name: Record benchmark characterization
         run: |
@@ -122,6 +132,7 @@ jobs:
     needs:
       - stateful-seeds
       - broad-mutation
+      - broad-integration-mutation
       - benchmark-characterization
     runs-on: ubuntu-24.04
     steps:
@@ -129,4 +140,5 @@ jobs:
         run: |
           test "${{ needs.stateful-seeds.result }}" = success
           test "${{ needs.broad-mutation.result }}" = success
+          test "${{ needs.broad-integration-mutation.result }}" = success
           test "${{ needs.benchmark-characterization.result }}" = success
