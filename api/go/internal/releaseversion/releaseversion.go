@@ -1,15 +1,25 @@
 package releaseversion
 
 import (
+	"bytes"
+	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 var semverRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+const (
+	postgresSQLDir     = "extensions/synchro-pg/sql"
+	updateBaselinePath = "extensions/synchro-pg/update-baseline.json"
+)
 
 var (
 	synchroPodspecVersionRE         = regexp.MustCompile(`(?m)^  s\.version = ".*"$`)
@@ -30,6 +40,7 @@ var (
 	cargoLockPGVersionRE            = regexp.MustCompile(`(?m)^name = "synchro-pg"\nversion = ".*"$`)
 	goConsumerRequireRE             = regexp.MustCompile(`(?m)^require github\.com/trainstar/synchro/api/go v.*$`)
 	baseSQLFileRE                   = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+)\.sql$`)
+	updateSQLFileRE                 = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+)--(\d+\.\d+\.\d+)\.sql$`)
 )
 
 // Token patterns find release references inside content that the version tool
@@ -110,6 +121,9 @@ func ReadVersion(root string) (string, error) {
 
 func Set(root string, version string) error {
 	if err := Validate(version); err != nil {
+		return err
+	}
+	if _, err := postgresInstallSQLRename(root, version); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte(version+"\n"), 0o644); err != nil {
@@ -283,6 +297,10 @@ func Sync(root string) error {
 	if err != nil {
 		return err
 	}
+	baseScript, err := postgresInstallSQLRename(root, version)
+	if err != nil {
+		return err
+	}
 	for _, replacement := range distributionExpectations(root, version) {
 		if err := rewriteFile(replacement.path, replacement.pattern, replacement.expected); err != nil {
 			return err
@@ -300,8 +318,11 @@ func Sync(root string) error {
 		}
 	}
 
-	if err := syncPostgresInstallSQL(root, version); err != nil {
-		return err
+	if baseScript != "" {
+		target := filepath.Join(root, postgresSQLDir, baseSQLName(version))
+		if err := os.Rename(baseScript, target); err != nil {
+			return fmt.Errorf("renaming PostgreSQL install SQL to %s: %w", filepath.Base(target), err)
+		}
 	}
 
 	return nil
@@ -339,9 +360,7 @@ func Check(root string, expectedTag string) error {
 		}
 	}
 
-	if err := checkPostgresInstallSQL(root, version); err != nil {
-		failures = append(failures, err.Error())
-	}
+	failures = append(failures, checkPostgresInstallSQL(root, version)...)
 
 	if expectedTag != "" && expectedTag != "v"+version {
 		failures = append(failures, fmt.Sprintf("expected release tag %q to match v%s", expectedTag, version))
@@ -466,73 +485,251 @@ func checkTokens(root string, path string, pattern *regexp.Regexp, version strin
 	return nil
 }
 
-func syncPostgresInstallSQL(root string, version string) error {
-	sqlDir := filepath.Join(root, "extensions", "synchro-pg", "sql")
-	baseFiles, upgradeFiles, err := postgresSQLFiles(sqlDir)
+type updateScript struct {
+	from string
+	to   string
+}
+
+type postgresSQLScripts struct {
+	baseVersions []string
+	updates      []updateScript
+	invalid      []string
+}
+
+// postgresInstallSQLRename checks that Sync can give the base script the
+// version. It returns the base script that Sync renames, or an empty path when
+// the base script already has the version.
+func postgresInstallSQLRename(root string, version string) (string, error) {
+	scripts, err := readPostgresSQLScripts(root)
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	target := filepath.Join(sqlDir, fmt.Sprintf("synchro_pg--%s.sql", version))
-	if _, err := os.Stat(target); err == nil {
-		return nil
+	if len(scripts.baseVersions) != 1 {
+		return "", fmt.Errorf("%s must contain exactly one PostgreSQL install SQL file, found %d", postgresSQLDir, len(scripts.baseVersions))
 	}
+	current := scripts.baseVersions[0]
+	if current == version {
+		return "", nil
+	}
+	if compareVersions(version, current) < 0 {
+		return "", fmt.Errorf("version %s is lower than the PostgreSQL install SQL version in %s", version, sqlPath(baseSQLName(current)))
+	}
+	if !slices.Contains(scripts.updates, updateScript{from: current, to: version}) {
+		return "", fmt.Errorf("missing PostgreSQL update SQL %s", sqlPath(updateSQLName(current, version)))
+	}
+	return filepath.Join(root, postgresSQLDir, baseSQLName(current)), nil
+}
 
-	if len(baseFiles) == 1 && len(upgradeFiles) == 0 {
-		if err := os.Rename(baseFiles[0], target); err != nil {
-			return fmt.Errorf("renaming PostgreSQL install SQL to %s: %w", filepath.Base(target), err)
+// checkPostgresInstallSQL requires one base script for version and one chain
+// of update scripts from the pinned update baseline to version.
+func checkPostgresInstallSQL(root string, version string) []string {
+	var failures []string
+	baseline, baselineErr := readUpdateBaseline(root)
+	if baselineErr != nil {
+		failures = append(failures, baselineErr.Error())
+	}
+	scripts, err := readPostgresSQLScripts(root)
+	if err != nil {
+		return append(failures, err.Error())
+	}
+	failures = append(failures, scripts.invalid...)
+
+	switch len(scripts.baseVersions) {
+	case 0:
+		failures = append(failures, fmt.Sprintf("missing PostgreSQL install SQL %s", sqlPath(baseSQLName(version))))
+	case 1:
+		if scripts.baseVersions[0] != version {
+			failures = append(failures, fmt.Sprintf("PostgreSQL install SQL %s does not match VERSION, expected %s", sqlPath(baseSQLName(scripts.baseVersions[0])), baseSQLName(version)))
 		}
-		return nil
+	default:
+		for _, base := range scripts.baseVersions {
+			failures = append(failures, fmt.Sprintf("PostgreSQL install SQL %s is not the only install SQL file", sqlPath(baseSQLName(base))))
+		}
 	}
 
-	return fmt.Errorf("manual PostgreSQL extension version update required: expected %s to exist", relativePath(root, target))
+	if baselineErr != nil {
+		return failures
+	}
+	return append(failures, checkUpdateChain(scripts.updates, baseline, version)...)
 }
 
-func checkPostgresInstallSQL(root string, version string) error {
-	sqlDir := filepath.Join(root, "extensions", "synchro-pg", "sql")
-	target := filepath.Join(sqlDir, fmt.Sprintf("synchro_pg--%s.sql", version))
-	if _, err := os.Stat(target); err == nil {
-		return nil
+// checkUpdateChain requires the update scripts to form exactly one chain from
+// baseline to version that uses every update script.
+func checkUpdateChain(updates []updateScript, baseline string, version string) []string {
+	var failures []string
+	switch compareVersions(version, baseline) {
+	case -1:
+		return []string{fmt.Sprintf("VERSION %s is lower than the update baseline %s in %s", version, baseline, updateBaselinePath)}
+	case 0:
+		for _, update := range updates {
+			failures = append(failures, fmt.Sprintf("PostgreSQL update SQL %s is not allowed when VERSION is the update baseline %s", sqlPath(update.name()), baseline))
+		}
+		return failures
 	}
 
-	baseFiles, upgradeFiles, scanErr := postgresSQLFiles(sqlDir)
-	if scanErr != nil {
-		return scanErr
+	reported := make(map[updateScript]bool)
+	next := make(map[string]updateScript)
+	for _, update := range updates {
+		if compareVersions(update.from, update.to) >= 0 {
+			failures = append(failures, fmt.Sprintf("PostgreSQL update SQL %s does not go from a lower version to a higher version", sqlPath(update.name())))
+			reported[update] = true
+			continue
+		}
+		if previous, exists := next[update.from]; exists {
+			failures = append(failures, fmt.Sprintf("PostgreSQL update SQL %s starts at the same version as %s", sqlPath(update.name()), sqlPath(previous.name())))
+			reported[update] = true
+			continue
+		}
+		next[update.from] = update
 	}
 
-	if len(baseFiles) == 1 && len(upgradeFiles) == 0 {
-		return fmt.Errorf("PostgreSQL install SQL is still versioned as %s, expected %s", filepath.Base(baseFiles[0]), filepath.Base(target))
+	used := make(map[updateScript]bool)
+	for current := baseline; current != version; {
+		update, exists := next[current]
+		if !exists {
+			missing := updateSQLName(current, missingUpdateTarget(next, current, version))
+			failures = append(failures, fmt.Sprintf("missing PostgreSQL update SQL %s: the update chain from %s stops at %s", sqlPath(missing), baseline, current))
+			break
+		}
+		used[update] = true
+		if compareVersions(update.to, version) > 0 {
+			failures = append(failures, fmt.Sprintf("PostgreSQL update SQL %s goes past VERSION %s", sqlPath(update.name()), version))
+			break
+		}
+		current = update.to
 	}
-
-	return fmt.Errorf("missing PostgreSQL install SQL %s", relativePath(root, target))
+	for _, update := range updates {
+		if !used[update] && !reported[update] {
+			failures = append(failures, fmt.Sprintf("PostgreSQL update SQL %s is not in the update chain from %s to %s", sqlPath(update.name()), baseline, version))
+		}
+	}
+	return failures
 }
 
-func postgresSQLFiles(sqlDir string) ([]string, []string, error) {
-	entries, err := os.ReadDir(sqlDir)
+// missingUpdateTarget returns the target version of the update script that the
+// chain needs at current: the next start version of an update script, or version.
+func missingUpdateTarget(next map[string]updateScript, current string, version string) string {
+	target := version
+	for from := range next {
+		if compareVersions(current, from) < 0 && compareVersions(from, target) < 0 {
+			target = from
+		}
+	}
+	return target
+}
+
+// readPostgresSQLScripts returns the base script versions and the update
+// scripts in the PostgreSQL SQL directory. It reports each other entry as invalid.
+func readPostgresSQLScripts(root string) (postgresSQLScripts, error) {
+	entries, err := os.ReadDir(filepath.Join(root, postgresSQLDir))
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading %s: %w", sqlDir, err)
+		return postgresSQLScripts{}, fmt.Errorf("reading %s: %w", postgresSQLDir, err)
 	}
 
-	var baseFiles []string
-	var upgradeFiles []string
+	var scripts postgresSQLScripts
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
 		name := entry.Name()
-		fullPath := filepath.Join(sqlDir, name)
-		if baseSQLFileRE.MatchString(name) {
-			baseFiles = append(baseFiles, fullPath)
-			continue
+		if entry.Type().IsRegular() {
+			if match := baseSQLFileRE.FindStringSubmatch(name); match != nil && semverRE.MatchString(match[1]) {
+				scripts.baseVersions = append(scripts.baseVersions, match[1])
+				continue
+			}
+			if match := updateSQLFileRE.FindStringSubmatch(name); match != nil && semverRE.MatchString(match[1]) && semverRE.MatchString(match[2]) {
+				scripts.updates = append(scripts.updates, updateScript{from: match[1], to: match[2]})
+				continue
+			}
 		}
+		scripts.invalid = append(scripts.invalid, fmt.Sprintf("%s is not a regular PostgreSQL install SQL or update SQL file", sqlPath(name)))
+	}
+	return scripts, nil
+}
 
-		if strings.HasPrefix(name, "synchro_pg--") && strings.HasSuffix(name, ".sql") {
-			upgradeFiles = append(upgradeFiles, fullPath)
+// readUpdateBaseline returns the version of the update baseline pin. The pin is
+// one JSON object with exactly the keys version, artifact_url, and artifact_sha256.
+func readUpdateBaseline(root string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(root, updateBaselinePath))
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", updateBaselinePath, err)
+	}
+	fields, err := decodeObjectFields(data)
+	if err != nil {
+		return "", fmt.Errorf("%s is invalid: %w", updateBaselinePath, err)
+	}
+	for _, key := range []string{"version", "artifact_url", "artifact_sha256"} {
+		if _, exists := fields[key]; !exists {
+			return "", fmt.Errorf("%s is invalid: missing key %q", updateBaselinePath, key)
 		}
 	}
+	if len(fields) != 3 {
+		return "", fmt.Errorf("%s is invalid: it must contain only version, artifact_url, and artifact_sha256", updateBaselinePath)
+	}
+	var version string
+	if err := json.Unmarshal(fields["version"], &version); err != nil || !semverRE.MatchString(version) {
+		return "", fmt.Errorf("%s is invalid: version must be a string that matches X.Y.Z", updateBaselinePath)
+	}
+	return version, nil
+}
 
-	return baseFiles, upgradeFiles, nil
+// decodeObjectFields decodes one JSON object. It rejects a duplicate key and
+// data after the object.
+func decodeObjectFields(data []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, errors.New("content must be one JSON object")
+	}
+	fields := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("malformed JSON: %w", err)
+		}
+		key, _ := token.(string)
+		if _, exists := fields[key]; exists {
+			return nil, fmt.Errorf("duplicate key %q", key)
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("malformed JSON: %w", err)
+		}
+		fields[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("malformed JSON: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("content must be one JSON object")
+	}
+	return fields, nil
+}
+
+// compareVersions compares two versions that semverRE accepts by numeric
+// major, then minor, then patch. semverRE rejects leading zeros, so a longer
+// component is a larger number.
+func compareVersions(left string, right string) int {
+	leftParts := strings.Split(left, ".")
+	rightParts := strings.Split(right, ".")
+	for index := range leftParts {
+		if order := cmp.Or(cmp.Compare(len(leftParts[index]), len(rightParts[index])), strings.Compare(leftParts[index], rightParts[index])); order != 0 {
+			return order
+		}
+	}
+	return 0
+}
+
+func (update updateScript) name() string {
+	return updateSQLName(update.from, update.to)
+}
+
+func baseSQLName(version string) string {
+	return "synchro_pg--" + version + ".sql"
+}
+
+func updateSQLName(from string, to string) string {
+	return "synchro_pg--" + from + "--" + to + ".sql"
+}
+
+func sqlPath(name string) string {
+	return filepath.Join(postgresSQLDir, name)
 }
 
 func relativePath(root string, path string) string {

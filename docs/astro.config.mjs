@@ -84,6 +84,7 @@ export default defineConfig({
 					label: 'Operations',
 					items: [
 						{ label: 'Configuration', slug: 'operations/configuration' },
+						{ label: 'Extension Update', slug: 'operations/extension-update' },
 					],
 				},
 			],

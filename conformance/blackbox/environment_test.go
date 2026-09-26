@@ -417,6 +417,60 @@ func TestVerifyExtensionBundleRejectsTamperingAndWrongDestinations(t *testing.T)
 		}
 	})
 
+	updateDestination := "sharedir/extension/synchro_pg--0.3.0--" + release.Version + ".sql"
+	baseDestination := "sharedir/extension/synchro_pg--" + release.Version + ".sql"
+
+	t.Run("update script", func(t *testing.T) {
+		root := writeExtensionBundleFixture(t)
+		manifest := appendExtensionBundleFileFixture(t, root, readExtensionManifestFixture(t, root), "update.sql", updateDestination)
+		writeExtensionManifestFixture(t, root, manifest)
+		bundle, err := verifyExtensionBundle(root)
+		if err != nil {
+			t.Fatalf("extension bundle with an update script rejected: %v", err)
+		}
+		if len(bundle.files) != 4 {
+			t.Fatalf("extension bundle has %d files, want 4", len(bundle.files))
+		}
+	})
+
+	t.Run("unexpected SQL destination", func(t *testing.T) {
+		for _, destination := range []string{
+			"sharedir/extension/synchro_pg--0.3.0.sql",
+			updateDestination + ".bak",
+			"sharedir/extension/synchro_pg--0.3--" + release.Version + ".sql",
+			"sharedir/extension/other--0.3.0--" + release.Version + ".sql",
+			"pkglibdir/synchro_pg--0.3.0--" + release.Version + ".sql",
+		} {
+			root := writeExtensionBundleFixture(t)
+			manifest := appendExtensionBundleFileFixture(t, root, readExtensionManifestFixture(t, root), "extra.sql", destination)
+			writeExtensionManifestFixture(t, root, manifest)
+			if _, err := verifyExtensionBundle(root); err == nil {
+				t.Fatalf("extension bundle with destination %s was accepted", destination)
+			}
+		}
+	})
+
+	t.Run("missing base script", func(t *testing.T) {
+		for _, withUpdate := range []bool{false, true} {
+			root := writeExtensionBundleFixture(t)
+			manifest := readExtensionManifestFixture(t, root)
+			var files []extensionBundleFile
+			for _, file := range manifest.Files {
+				if file.Destination != baseDestination {
+					files = append(files, file)
+				}
+			}
+			manifest.Files = files
+			if withUpdate {
+				manifest = appendExtensionBundleFileFixture(t, root, manifest, "update.sql", updateDestination)
+			}
+			writeExtensionManifestFixture(t, root, manifest)
+			if _, err := verifyExtensionBundle(root); err == nil {
+				t.Fatalf("extension bundle without the base script was accepted, update script present: %v", withUpdate)
+			}
+		}
+	})
+
 	t.Run("wrong PostgreSQL version", func(t *testing.T) {
 		root := writeExtensionBundleFixture(t)
 		manifest := readExtensionManifestFixture(t, root)
@@ -519,6 +573,21 @@ func writeExtensionBundleFixture(t *testing.T) string {
 		Files:             files,
 	})
 	return root
+}
+
+func appendExtensionBundleFileFixture(t *testing.T, root string, manifest extensionBundleManifest, name string, destination string) extensionBundleManifest {
+	t.Helper()
+	data := []byte("fixture-" + destination)
+	if err := os.WriteFile(filepath.Join(root, "payload", name), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	manifest.Files = append(manifest.Files, extensionBundleFile{
+		Path:        "payload/" + name,
+		Destination: destination,
+		SHA256:      hex.EncodeToString(digest[:]),
+	})
+	return manifest
 }
 
 func readExtensionManifestFixture(t *testing.T, root string) extensionBundleManifest {

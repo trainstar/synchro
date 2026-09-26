@@ -664,6 +664,7 @@ conformance-pg18-extension-artifact: override CONFORMANCE_PG18_EXTENSION_ARTIFAC
 conformance-pg18-extension-test-artifact: override CONFORMANCE_PG18_EXTENSION_ARTIFACT_POLICY := runtime
 conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 	@set -eu; \
+		export LC_ALL=C; \
 		test -n "$(PGRX_PG_CONFIG)" || { echo "PGRX_PG_CONFIG is required" >&2; exit 1; }; \
 		postgresql_version="$$($(PGRX_PG_CONFIG) --version | awk '{print $$2}')"; \
 		case "$(CONFORMANCE_PG18_EXTENSION_ARTIFACT_POLICY)" in \
@@ -692,6 +693,25 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		perl -0pi -e 's/\n+\z/\n/' "$$sql"; \
 		cmp -s extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql "$$sql" || { echo "packaged PostgreSQL SQL differs from the tracked artifact. Run make generate-pg-sql" >&2; exit 1; }; \
 		cmp -s extensions/synchro-pg/synchro_pg.control "$$control" || { echo "packaged PostgreSQL control file differs from the tracked artifact" >&2; exit 1; }; \
+		update_records=""; \
+		for tracked in extensions/synchro-pg/sql/synchro_pg--*--*.sql; do \
+			test -e "$$tracked" || continue; \
+			name="$${tracked##*/}"; \
+			update="$$out$$sharedir/extension/$$name"; \
+			test -f "$$update" && cmp -s "$$tracked" "$$update" || { echo "packaged PostgreSQL update SQL differs from the tracked artifact: $$name" >&2; exit 1; }; \
+			update_path="$${update#"$$out"/}"; \
+			update_hash="$$(shasum -a 256 "$$update" | cut -d ' ' -f 1)"; \
+			test -n "$$update_hash"; \
+			update_records="$$update_records$$(printf ',\n    {"path": "%s", "destination": "sharedir/extension/%s", "sha256": "%s"}' "$$update_path" "$$name" "$$update_hash")"; \
+		done; \
+		for packaged in "$$out$$sharedir"/extension/synchro_pg--*.sql; do \
+			name="$${packaged##*/}"; \
+			case "$$name" in \
+				"synchro_pg--$(CURRENT_VERSION).sql") ;; \
+				synchro_pg--*--*.sql) test -f "extensions/synchro-pg/sql/$$name" || { echo "pgrx package contains an untracked extension SQL file: $$name" >&2; exit 1; } ;; \
+				*) echo "pgrx package contains an untracked extension SQL file: $$name" >&2; exit 1 ;; \
+			esac; \
+		done; \
 		library_path="$${library#"$$out"/}"; \
 		control_path="$${control#"$$out"/}"; \
 		sql_path="$${sql#"$$out"/}"; \
@@ -706,7 +726,7 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 			'  "files": [' \
 			"    {\"path\": \"$$library_path\", \"destination\": \"pkglibdir/synchro_pg.$$suffix\", \"sha256\": \"$$library_hash\"}," \
 			"    {\"path\": \"$$control_path\", \"destination\": \"sharedir/extension/synchro_pg.control\", \"sha256\": \"$$control_hash\"}," \
-			"    {\"path\": \"$$sql_path\", \"destination\": \"sharedir/extension/synchro_pg--$(CURRENT_VERSION).sql\", \"sha256\": \"$$sql_hash\"}" \
+			"    {\"path\": \"$$sql_path\", \"destination\": \"sharedir/extension/synchro_pg--$(CURRENT_VERSION).sql\", \"sha256\": \"$$sql_hash\"}$$update_records" \
 			'  ]' \
 			'}' > "$$out/artifact-manifest.json.tmp"; \
 		mv "$$out/artifact-manifest.json.tmp" "$$out/artifact-manifest.json"; \

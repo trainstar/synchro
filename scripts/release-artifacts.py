@@ -261,7 +261,7 @@ def validate_extension_archive(path: Path, version: str) -> None:
     if manifest["format"] != "synchro-pg18-extension-bundle-v1" or manifest["postgresql_major"] != 18:
         raise ReleaseError("extension archive does not target PostgreSQL 18")
     records = manifest.get("files")
-    if not isinstance(records, list) or len(records) != 3:
+    if not isinstance(records, list) or len(records) < 3:
         raise ReleaseError("extension archive must contain one library, control file, and install SQL")
     expected = {manifest_name, checksum_name}
     destinations: set[str] = set()
@@ -275,13 +275,21 @@ def validate_extension_archive(path: Path, version: str) -> None:
         if hashlib.sha256(files[archive_name]).hexdigest() != record["sha256"]:
             raise ReleaseError("extension archive file hash does not match its manifest")
         expected.add(archive_name)
-        destinations.add(str(record["destination"]))
+        destination = str(record["destination"])
+        if destination in destinations:
+            raise ReleaseError("extension archive contains a duplicate destination")
+        destinations.add(destination)
     wanted_destinations = {
         "pkglibdir/synchro_pg.so",
         "sharedir/extension/synchro_pg.control",
         f"sharedir/extension/synchro_pg--{version}.sql",
     }
-    if destinations != wanted_destinations or set(files) != expected:
+    update_destination = re.compile(r"^sharedir/extension/synchro_pg--\d+\.\d+\.\d+--\d+\.\d+\.\d+\.sql$", re.ASCII)
+    if (
+        not wanted_destinations <= destinations
+        or any(not update_destination.fullmatch(destination) for destination in destinations - wanted_destinations)
+        or set(files) != expected
+    ):
         raise ReleaseError("extension archive content set does not match the PostgreSQL 18 distribution")
     expected_manifest_hash = hashlib.sha256(files[manifest_name]).hexdigest()
     if files[checksum_name].decode("ascii", "strict").strip() != expected_manifest_hash:

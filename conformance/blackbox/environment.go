@@ -611,7 +611,7 @@ func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion string) (ex
 	if err := decodeStrictManifest(manifestData, &manifest); err != nil {
 		return extensionBundle{}, errors.New("extension artifact manifest is invalid")
 	}
-	if !postgresql18VersionPattern.MatchString(requiredVersion) || manifest.Format != extensionBundleManifestFormat || manifest.PostgreSQLMajor != 18 || manifest.PostgreSQLVersion != requiredVersion || len(manifest.Files) != 3 {
+	if !postgresql18VersionPattern.MatchString(requiredVersion) || manifest.Format != extensionBundleManifestFormat || manifest.PostgreSQLMajor != 18 || manifest.PostgreSQLVersion != requiredVersion {
 		return extensionBundle{}, errors.New("extension artifact manifest is invalid")
 	}
 	files := append([]extensionBundleFile(nil), manifest.Files...)
@@ -620,7 +620,8 @@ func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion string) (ex
 	})
 	seenSource := make(map[string]struct{}, len(files))
 	seenDestination := make(map[string]struct{}, len(files))
-	expectedDestinations := extensionBundleDestinations()
+	requiredDestinations := extensionBundleDestinations()
+	requiredSeen := 0
 	for index := range files {
 		file := &files[index]
 		if !safeBundleRelativePath(file.Path) || !safeBundleDestination(file.Destination) || !validSHA256(file.SHA256) {
@@ -634,7 +635,9 @@ func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion string) (ex
 		}
 		seenSource[file.Path] = struct{}{}
 		seenDestination[file.Destination] = struct{}{}
-		if _, expected := expectedDestinations[file.Destination]; !expected {
+		if _, required := requiredDestinations[file.Destination]; required {
+			requiredSeen++
+		} else if !extensionUpdateDestinationPattern.MatchString(file.Destination) {
 			return extensionBundle{}, errors.New("extension artifact manifest has an unexpected destination")
 		}
 		actualPath, err := safeBundleSourcePath(root, file.Path)
@@ -650,7 +653,7 @@ func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion string) (ex
 			return extensionBundle{}, errors.New("extension artifact contains an unavailable file")
 		}
 	}
-	if len(seenDestination) != len(expectedDestinations) {
+	if requiredSeen != len(requiredDestinations) {
 		return extensionBundle{}, errors.New("extension artifact is incomplete")
 	}
 	return extensionBundle{
@@ -663,6 +666,8 @@ func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion string) (ex
 		files:                files,
 	}, nil
 }
+
+var extensionUpdateDestinationPattern = regexp.MustCompile(`^sharedir/extension/synchro_pg--\d+\.\d+\.\d+--\d+\.\d+\.\d+\.sql$`)
 
 func extensionBundleDestinations() map[string]struct{} {
 	librarySuffix := "so"

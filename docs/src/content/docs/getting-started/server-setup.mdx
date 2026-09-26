@@ -85,26 +85,31 @@ export SYNCHRO_ADAPTER="$PWD/dist/release-components/server/adapter/synchrod-pg-
 
 The local archive is
 `dist/release-components/server/extension/synchro-pg-pg18-ubuntu24.04-linux-x64-$(tr -d '\n' < VERSION).tar.gz`.
-The archive must contain exactly one `synchro_pg.control`, one
-`synchro_pg--*.sql`, and one `synchro_pg.so`.
+The archive contains one `synchro_pg.control`, one `synchro_pg.so`, one base
+script `synchro_pg--<version>.sql`, and zero or more update scripts
+`synchro_pg--<from>--<to>.sql`. The procedure requires exactly one control file,
+exactly one library, and exactly one base script
+`synchro_pg--${SYNCHRO_VERSION}.sql`. It installs the control file, the library,
+and every `synchro_pg--*.sql` file in the archive.
 
 ```sh
 : "${SYNCHRO_EXTENSION_ARCHIVE:?Select published or locally built artifacts first}"
 : "${SYNCHRO_ADAPTER:?Select the matching adapter binary first}"
+: "${SYNCHRO_VERSION:?Select the Synchro version first}"
 export SYNCHRO_UNPACK_DIR="$(mktemp -d)"
 tar -xzf "$SYNCHRO_EXTENSION_ARCHIVE" -C "$SYNCHRO_UNPACK_DIR"
 
 test "$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.control | wc -l)" -eq 1
-test "$(find "$SYNCHRO_UNPACK_DIR" -type f -name 'synchro_pg--*.sql' | wc -l)" -eq 1
+test "$(find "$SYNCHRO_UNPACK_DIR" -type f -name "synchro_pg--${SYNCHRO_VERSION}.sql" | wc -l)" -eq 1
 test "$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.so | wc -l)" -eq 1
 control="$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.control -print -quit)"
-sql="$(find "$SYNCHRO_UNPACK_DIR" -type f -name 'synchro_pg--*.sql' -print -quit)"
 library="$(find "$SYNCHRO_UNPACK_DIR" -type f -name synchro_pg.so -print -quit)"
-test -n "$control" && test -n "$sql" && test -n "$library"
+test -n "$control" && test -n "$library"
 
 pg_config=/usr/lib/postgresql/18/bin/pg_config
 sudo install -m 0644 "$control" "$("$pg_config" --sharedir)/extension/"
-sudo install -m 0644 "$sql" "$("$pg_config" --sharedir)/extension/"
+find "$SYNCHRO_UNPACK_DIR" -type f -name 'synchro_pg--*.sql' \
+  -exec sudo install -m 0644 {} "$("$pg_config" --sharedir)/extension/" \;
 sudo install -m 0755 "$library" "$("$pg_config" --pkglibdir)/"
 ```
 

@@ -1,0 +1,68 @@
+---
+title: Extension Update
+description: Update the synchro_pg PostgreSQL extension from the 0.3.1 baseline to a later version.
+---
+
+This procedure updates an installed `synchro_pg` extension to a new version.
+
+The supported update path starts at the `0.3.1` baseline.
+A state before `0.3.1` has no update path.
+For that state, use the export, clean installation, and rebuild path of
+[ADR 005](/synchro/architecture/decisions/005-integrity-authorization-and-seeds/).
+
+You need:
+
+- the extension archive of the new version;
+- a PostgreSQL superuser.
+
+## 1. Install the new extension files
+
+Install the new library, the control file, the base script, and every update
+script from the new archive. Use the commands in the extension artifact step of
+[server setup](/synchro/getting-started/server-setup/).
+
+## 2. Restart PostgreSQL
+
+`shared_preload_libraries` loads the library only when the postmaster starts.
+The server uses the new library only after the restart.
+Run the update only after the restart.
+
+For the server setup cluster, use this command:
+
+```sh
+sudo pg_ctlcluster 18 synchro_tutorial restart
+```
+
+Between the restart and the update, readiness fails closed and the adapter
+refuses to start. This occurs because the installed extension objects still
+have the old version and the old build fingerprint.
+
+## 3. Update the extension
+
+Connect as a superuser to the database that `synchro.database` names.
+Run the update:
+
+```sql
+ALTER EXTENSION synchro_pg UPDATE;
+```
+
+PostgreSQL runs the update scripts from the installed version to the
+`default_version` of the new control file.
+
+## 4. Verify the update
+
+Examine the installed extension version:
+
+```sql
+SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'synchro_pg';
+```
+
+The result must be the new version.
+
+Examine readiness:
+
+```sql
+SELECT synchro.synchro_readiness();
+```
+
+The result must be `{"ready": true}`.

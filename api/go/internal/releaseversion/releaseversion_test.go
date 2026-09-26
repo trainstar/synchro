@@ -3,6 +3,7 @@ package releaseversion
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,7 @@ func TestSetSyncsAndChecksVersionedSurfaces(t *testing.T) {
 	t.Parallel()
 
 	root := newFixtureRepo(t)
+	writeUpdateScript(t, root, "0.1.0", "1.4.5")
 
 	if err := Set(root, "1.4.5"); err != nil {
 		t.Fatalf("Set returned error: %v", err)
@@ -83,6 +85,7 @@ func TestCheckFailsOnDrift(t *testing.T) {
 	t.Parallel()
 
 	root := newFixtureRepo(t)
+	writeUpdateScript(t, root, "0.1.0", "1.4.5")
 	if err := Set(root, "1.4.5"); err != nil {
 		t.Fatalf("Set returned error: %v", err)
 	}
@@ -124,6 +127,7 @@ func TestCheckRejectsAndSyncRepairsReleaseReferenceDrift(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
 			root := newFixtureRepo(t)
+			writeUpdateScript(t, root, "0.1.0", "1.4.5")
 			if err := Set(root, "1.4.5"); err != nil {
 				t.Fatal(err)
 			}
@@ -162,6 +166,7 @@ func TestCheckRequiresReleaseReferences(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := newFixtureRepo(t)
+			writeUpdateScript(t, root, "0.1.0", "1.4.5")
 			if err := Set(root, "1.4.5"); err != nil {
 				t.Fatal(err)
 			}
@@ -182,6 +187,7 @@ func TestCheckFailsOnTagMismatch(t *testing.T) {
 	t.Parallel()
 
 	root := newFixtureRepo(t)
+	writeUpdateScript(t, root, "0.1.0", "1.4.5")
 	if err := Set(root, "1.4.5"); err != nil {
 		t.Fatalf("Set returned error: %v", err)
 	}
@@ -206,6 +212,7 @@ func TestCheckRejectsDistributionCatalogDrift(t *testing.T) {
 	} {
 		t.Run(path, func(t *testing.T) {
 			root := newFixtureRepo(t)
+			writeUpdateScript(t, root, "0.1.0", "0.2.0")
 			if err := Sync(root); err != nil {
 				t.Fatal(err)
 			}
@@ -220,6 +227,209 @@ func TestCheckRejectsDistributionCatalogDrift(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertFileContains(t, filepath.Join(root, path), `"protocol_version": 3`)
+		})
+	}
+}
+
+func TestSetWithoutUpdateScriptChangesNoFile(t *testing.T) {
+	t.Parallel()
+
+	root := newFixtureRepo(t)
+	before := readFixtureTree(t, root)
+	err := Set(root, "1.4.5")
+	if err == nil {
+		t.Fatal("Set accepted a version without an update script")
+	}
+	if !strings.Contains(err.Error(), "synchro_pg--0.1.0--1.4.5.sql") {
+		t.Fatalf("Set error did not name the missing update script: %v", err)
+	}
+	assertFixtureTreeEqual(t, before, readFixtureTree(t, root))
+}
+
+func TestSetWithUpdateScriptRenamesBaseScript(t *testing.T) {
+	t.Parallel()
+
+	root := newFixtureRepo(t)
+	writeUpdateScript(t, root, "0.1.0", "1.4.5")
+	if err := Set(root, "1.4.5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(root, "v1.4.5"); err != nil {
+		t.Fatalf("Check returned error after Set: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, postgresSQLDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if want := []string{"synchro_pg--0.1.0--1.4.5.sql", "synchro_pg--1.4.5.sql"}; !slices.Equal(names, want) {
+		t.Fatalf("SQL directory = %v, want %v", names, want)
+	}
+	assertFileContains(t, filepath.Join(root, postgresSQLDir, "synchro_pg--1.4.5.sql"), "-- install script")
+}
+
+func TestSetToLowerVersionChangesNoFile(t *testing.T) {
+	t.Parallel()
+
+	root := newFixtureRepo(t)
+	writeUpdateScript(t, root, "0.1.0", "0.0.9")
+	before := readFixtureTree(t, root)
+	if err := Set(root, "0.0.9"); err == nil {
+		t.Fatal("Set accepted a version lower than the install SQL version")
+	}
+	assertFixtureTreeEqual(t, before, readFixtureTree(t, root))
+}
+
+func TestSyncWithoutUpdateScriptChangesNoFile(t *testing.T) {
+	t.Parallel()
+
+	root := newFixtureRepo(t)
+	before := readFixtureTree(t, root)
+	err := Sync(root)
+	if err == nil {
+		t.Fatal("Sync accepted a VERSION without an update script")
+	}
+	if !strings.Contains(err.Error(), "synchro_pg--0.1.0--0.2.0.sql") {
+		t.Fatalf("Sync error did not name the missing update script: %v", err)
+	}
+	assertFixtureTreeEqual(t, before, readFixtureTree(t, root))
+}
+
+func TestCheckAcceptsUpdateChain(t *testing.T) {
+	t.Parallel()
+
+	root := newFixtureRepo(t)
+	writeUpdateScript(t, root, "0.1.0", "1.0.0")
+	if err := Set(root, "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	writeUpdateScript(t, root, "1.0.0", "1.4.5")
+	if err := Set(root, "1.4.5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(root, "v1.4.5"); err != nil {
+		t.Fatalf("Check rejected a chain of two update scripts: %v", err)
+	}
+}
+
+func TestCheckRejectsInvalidPostgresSQLState(t *testing.T) {
+	type sqlStateCase struct {
+		name   string
+		mutate func(t *testing.T, root string)
+		names  string
+	}
+	sqlFile := func(name string) string { return filepath.Join(postgresSQLDir, name) }
+	pinCase := func(name string, pin string) sqlStateCase {
+		return sqlStateCase{
+			name:   "pin " + name,
+			mutate: func(t *testing.T, root string) { writeFixtureFile(t, root, updateBaselinePath, pin) },
+			names:  updateBaselinePath,
+		}
+	}
+	valid := updateBaselineFixture("0.1.0")
+	cases := []sqlStateCase{
+		{
+			name:   "version above baseline without update script",
+			mutate: func(t *testing.T, root string) { removeFixtureFile(t, root, sqlFile("synchro_pg--0.1.0--1.4.5.sql")) },
+			names:  "synchro_pg--0.1.0--1.4.5.sql",
+		},
+		{
+			name: "gap in chain",
+			mutate: func(t *testing.T, root string) {
+				removeFixtureFile(t, root, sqlFile("synchro_pg--0.1.0--1.4.5.sql"))
+				writeUpdateScript(t, root, "0.1.0", "1.0.0")
+				writeUpdateScript(t, root, "1.2.0", "1.4.5")
+			},
+			names: "synchro_pg--1.0.0--1.2.0.sql",
+		},
+		{
+			name:   "extra update script",
+			mutate: func(t *testing.T, root string) { writeUpdateScript(t, root, "1.0.0", "1.2.0") },
+			names:  "synchro_pg--1.0.0--1.2.0.sql",
+		},
+		{
+			name:   "update script to lower version",
+			mutate: func(t *testing.T, root string) { writeUpdateScript(t, root, "1.4.5", "1.0.0") },
+			names:  "synchro_pg--1.4.5--1.0.0.sql",
+		},
+		{
+			name:   "two update scripts from one version",
+			mutate: func(t *testing.T, root string) { writeUpdateScript(t, root, "0.1.0", "1.0.0") },
+			names:  "synchro_pg--0.1.0--1.0.0.sql",
+		},
+		{
+			name: "update script at baseline version",
+			mutate: func(t *testing.T, root string) {
+				writeFixtureFile(t, root, updateBaselinePath, updateBaselineFixture("1.4.5"))
+			},
+			names: "synchro_pg--0.1.0--1.4.5.sql",
+		},
+		{
+			name: "two base scripts",
+			mutate: func(t *testing.T, root string) {
+				writeFixtureFile(t, root, sqlFile("synchro_pg--1.0.0.sql"), "-- install script\n")
+			},
+			names: "synchro_pg--1.0.0.sql",
+		},
+		{
+			name: "base script version is not VERSION",
+			mutate: func(t *testing.T, root string) {
+				if err := os.Rename(filepath.Join(root, sqlFile("synchro_pg--1.4.5.sql")), filepath.Join(root, sqlFile("synchro_pg--1.0.0.sql"))); err != nil {
+					t.Fatal(err)
+				}
+			},
+			names: "synchro_pg--1.0.0.sql",
+		},
+		{
+			name: "version below baseline",
+			mutate: func(t *testing.T, root string) {
+				writeFixtureFile(t, root, updateBaselinePath, updateBaselineFixture("2.0.0"))
+			},
+			names: updateBaselinePath,
+		},
+		{
+			name:   "unknown file name",
+			mutate: func(t *testing.T, root string) { writeFixtureFile(t, root, sqlFile("notes.txt"), "notes\n") },
+			names:  "notes.txt",
+		},
+		{
+			name: "directory entry",
+			mutate: func(t *testing.T, root string) {
+				mustMkdirAll(t, filepath.Join(root, sqlFile("synchro_pg--1.4.5--1.5.0.sql")))
+			},
+			names: "synchro_pg--1.4.5--1.5.0.sql",
+		},
+		pinCase("missing key", `{"version": "0.1.0", "artifact_url": "https://example.invalid/synchro-pg.tar.gz"}`),
+		pinCase("extra key", strings.Replace(valid, "{", `{"extra": "value",`, 1)),
+		pinCase("duplicate key", strings.Replace(valid, "{", `{"version": "0.1.0",`, 1)),
+		pinCase("key case", strings.Replace(valid, `"version"`, `"Version"`, 1)),
+		pinCase("invalid version", updateBaselineFixture("0.1")),
+		pinCase("null version", strings.Replace(valid, `"0.1.0"`, "null", 1)),
+		pinCase("trailing value", valid+"{}\n"),
+		pinCase("not object", `["0.1.0"]`),
+		pinCase("malformed", `{"version": "0.1.0",`),
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newFixtureRepo(t)
+			writeUpdateScript(t, root, "0.1.0", "1.4.5")
+			if err := Set(root, "1.4.5"); err != nil {
+				t.Fatal(err)
+			}
+			if err := Check(root, ""); err != nil {
+				t.Fatalf("Check rejected the valid state: %v", err)
+			}
+			tc.mutate(t, root)
+			err := Check(root, "")
+			if err == nil {
+				t.Fatal("Check accepted an invalid PostgreSQL SQL state")
+			}
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("Check error did not name %s: %v", tc.names, err)
+			}
 		})
 	}
 }
@@ -298,9 +508,78 @@ func newFixtureRepo(t *testing.T) string {
 	writeFixtureFile(t, root, "conformance/scenarios/versioned.json", "{\n  \"extension_version\": \"0.1.0\"\n}\n")
 	writeFixtureFile(t, root, "conformance/scenarios/unversioned.json", "{\n  \"id\": \"SCN-FIXTURE\"\n}\n")
 	writeFixtureFile(t, root, "extensions/synchro-pg/sql/synchro_pg--0.1.0.sql", "-- install script\n")
+	writeFixtureFile(t, root, updateBaselinePath, updateBaselineFixture("0.1.0"))
 	writeFixtureFile(t, root, "VERSION", "0.2.0\n")
 
 	return root
+}
+
+func updateBaselineFixture(version string) string {
+	return "{\n" +
+		"  \"version\": \"" + version + "\",\n" +
+		"  \"artifact_url\": \"https://example.invalid/synchro-pg-" + version + ".tar.gz\",\n" +
+		"  \"artifact_sha256\": \"" + strings.Repeat("0", 64) + "\"\n" +
+		"}\n"
+}
+
+func writeUpdateScript(t *testing.T, root string, from string, to string) {
+	t.Helper()
+
+	writeFixtureFile(t, root, filepath.Join(postgresSQLDir, updateSQLName(from, to)), "-- update script\n")
+}
+
+func removeFixtureFile(t *testing.T, root string, relativePath string) {
+	t.Helper()
+
+	if err := os.Remove(filepath.Join(root, relativePath)); err != nil {
+		t.Fatalf("removing %s: %v", relativePath, err)
+	}
+}
+
+// readFixtureTree maps each path below root to its file content. A directory
+// maps to a marker that no fixture file contains.
+func readFixtureTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+
+	tree := make(map[string]string)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			tree[relative] = "\x00directory"
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		tree[relative] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading fixture tree: %v", err)
+	}
+	return tree
+}
+
+func assertFixtureTreeEqual(t *testing.T, before map[string]string, after map[string]string) {
+	t.Helper()
+
+	for path, contents := range before {
+		if changed, exists := after[path]; !exists || changed != contents {
+			t.Errorf("fixture path %s changed or was removed", path)
+		}
+	}
+	for path := range after {
+		if _, exists := before[path]; !exists {
+			t.Errorf("fixture path %s was added", path)
+		}
+	}
 }
 
 func writeFixtureFile(t *testing.T, root string, relativePath string, contents string) {
