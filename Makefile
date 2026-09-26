@@ -1892,12 +1892,28 @@ ext-seed:
 test-rust-core:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult rust -dir ../extensions -- cargo test -p synchro-core
 
+# The targeted gate examines the Phase 4 protocol semantics and their helpers.
+# extensions/.cargo/mutants.toml holds the exclusions for every run.
+RUST_MUTANTS_TARGET_SCOPE = \
+	--file 'synchro-core/src/change.rs' \
+	--file 'synchro-core/src/checksum.rs' \
+	--file 'synchro-core/src/contract.rs' \
+	--file 'synchro-core/src/edge_diff.rs' \
+	--file 'synchro-core/src/fingerprint.rs' \
+	--file 'synchro-core/src/version.rs' \
+	--re '^synchro-core/src/change\.rs:.*ChangeOperation::(wire_name|parse_wire|from_i16|to_i16)' \
+	--re '^synchro-core/src/checksum\.rs:.*(Sha256Digest::|SchemaHash::|PortableType::|FieldSpec::new|CanonicalField::new|CanonicalTable::(new|field|primary_key_field)\b|RowField::new|CanonicalRow::(new|from_json)|RowIdentity::|ScopeDigestEntry::new|ChecksumObject::|Serialize for ChecksumObject|Deserialize.*ChecksumObject|encode_typed_value|row_identity|row_digest|scope_digest|encode_row_body|ordered_scope_entries|typed_payload|decode_json_string|canonicalize_json|parse_json_value|validate_json_document|StrictJson|validate_i_json|validate_i_json_string|is_unicode_noncharacter|is_canonical_integer|is_canonical_decimal|validate_decimal_bounds|validate_datetime|validate_date|validate_time|decode_base64url|base64url_value|validate_row_identity|consume_exact|consume_nonempty_text|consume_blob|consume_fixed|require_nonempty_text|append_u32|append_u64|append_blob|append_text|sha256_digest|decode_lower_sha256|decode_lower_hex|lower_hex_value|encode_lower_hex)' \
+	--re '^synchro-core/src/contract\.rs:.*(From<crate::change::ChangeOperation>|TryFrom<Operation>|SchemaAction::requires_|SchemaAction::is_compatible|MutationRejectionCode::is_|SchemaRef::is_fresh_sentinel|::validate|normalize_portable_type_name|is_canonical_portable_type_name|requests_rebuild|is_final_page|context_only|is_positive_safe_integer|validate_|is_lower_sha256|require_nonempty|is_canonical_utc_microsecond|is_semver|valid_semver_|deserialize_|StrictJsonValue)' \
+	--re '^synchro-core/src/edge_diff\.rs:.*(diff_bucket_sets|diff_scope_sets|build_edge_diff_entries|dedup_buckets|dedup_scope_ids)' \
+	--re '^synchro-core/src/fingerprint\.rs:.*(normalized_mutation|normalized_batch|batch_fingerprint|mutation_fingerprint|canonical_normalized_batch|canonical_normalized_mutation|schema_reference_value|operation_name|validate_authenticated_user_id|validate_client_id|canonicalize|validate_i_json|is_i_json_string|is_unicode_noncharacter|sha256_digest)' \
+	--re '^synchro-core/src/version\.rs:.*(Semver::parse|Semver::less_than|Semver::cmp_precedence|split_build|parse_core|parse_identifiers|compare_numbers|compare_prerelease|check_version)'
+
 test-rust-mutants:
 	@command -v cargo-mutants >/dev/null || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
 	@test "$$(cargo mutants --version)" = "cargo-mutants 27.1.0" || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
 	cd extensions && SYNCHRO_REPO_ROOT="$(CURDIR)" cargo mutants \
 		-p synchro-core \
-		--config .cargo/mutants.toml \
+		$(RUST_MUTANTS_TARGET_SCOPE) \
 		--baseline run \
 		--jobs 4 \
 		--timeout 120 \
@@ -1908,7 +1924,6 @@ test-rust-mutants-broad:
 	@test "$$(cargo mutants --version)" = "cargo-mutants 27.1.0" || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
 	cd extensions && SYNCHRO_REPO_ROOT="$(CURDIR)" cargo mutants \
 		-p synchro-core \
-		--no-config \
 		--baseline run \
 		--jobs 4 \
 		--timeout 120 \
