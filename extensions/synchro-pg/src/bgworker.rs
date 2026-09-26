@@ -3927,7 +3927,9 @@ fn correlate_events<'a>(
         convert_capture_dependency_key_batches(client, registry, &pending_capture_keys)
             .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
 
-    for ((event, registration), fence) in applicable_events.into_iter().zip(applicable_fences) {
+    let mut event_keys = Vec::with_capacity(applicable_events.len());
+    let mut event_identities = Vec::with_capacity(applicable_events.len());
+    for &(event, registration) in &applicable_events {
         let (old_record_id, new_record_id, old_capture_key, new_capture_key) =
             if registration.is_synced() {
                 let old_record_id = event
@@ -3980,13 +3982,63 @@ fn correlate_events<'a>(
                     };
                 (None, None, old_capture_key, new_capture_key)
             };
+        let identity_key = if registration.is_synced() {
+            new_record_id.clone().or_else(|| old_record_id.clone())
+        } else {
+            new_capture_key
+                .as_ref()
+                .or(old_capture_key.as_ref())
+                .map(capture_key_identity)
+                .transpose()
+                .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+        };
+        let identity_key =
+            identity_key.ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        event_identities.push((registration.relation_id.as_str(), identity_key));
+        event_keys.push((
+            old_record_id,
+            new_record_id,
+            old_capture_key,
+            new_capture_key,
+        ));
+    }
+    let fence_identities = applicable_fences
+        .iter()
+        .map(|fence| {
+            let identity_key = match fence.registration_kind.as_str() {
+                "synced" => fence
+                    .new_record_id
+                    .clone()
+                    .or_else(|| fence.old_record_id.clone()),
+                "capture_dependency" => fence
+                    .new_capture_key
+                    .as_ref()
+                    .or(fence.old_capture_key.as_ref())
+                    .map(capture_key_identity)
+                    .transpose()
+                    .map_err(|_| failure("fence_correlation_failed", transaction.commit_lsn))?,
+                _ => None,
+            };
+            identity_key
+                .map(|identity_key| (fence.relation_id.as_str(), identity_key))
+                .ok_or_else(|| failure("fence_correlation_failed", transaction.commit_lsn))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(fence_indexes) = pair_fences_by_row_identity(&event_identities, &fence_identities)
+    else {
+        log!("synchro WAL fence row identity correlation failed");
+        return Err(failure("fence_correlation_failed", transaction.commit_lsn));
+    };
+
+    for (((event, registration), keys), fence_index) in applicable_events
+        .into_iter()
+        .zip(event_keys)
+        .zip(fence_indexes)
+    {
+        let (old_record_id, new_record_id, old_capture_key, new_capture_key) = keys;
+        let fence = applicable_fences[fence_index];
         let operation_name = operation_name(event.operation);
-        let expected_ordinal = event
-            .event_ordinal
-            .checked_add(1)
-            .ok_or_else(|| failure("fence_correlation_failed", transaction.commit_lsn))?;
-        if fence.dml_ordinal != expected_ordinal
-            || fence.relation_id != registration.relation_id
+        if fence.relation_id != registration.relation_id
             || fence.registration_kind != registration.registration_kind.as_str()
             || fence.table_id.as_deref()
                 != registration
@@ -4079,6 +4131,24 @@ fn correlate_events<'a>(
     )?;
 
     Ok(applicable)
+}
+
+/// Pairs the k-th registered row event of a row identity with the k-th fence of
+/// the same identity in `dml_ordinal` order. Returns the fence index of each event.
+fn pair_fences_by_row_identity(
+    event_identities: &[(&str, String)],
+    fence_identities: &[(&str, String)],
+) -> Option<Vec<usize>> {
+    let mut unpaired = HashMap::<&(&str, String), Vec<usize>>::new();
+    // Reverse insertion makes `pop` return the lowest unpaired fence index.
+    for (index, identity) in fence_identities.iter().enumerate().rev() {
+        unpaired.entry(identity).or_default().push(index);
+    }
+    let pairs = event_identities
+        .iter()
+        .map(|identity| unpaired.get_mut(identity)?.pop())
+        .collect::<Option<Vec<_>>>()?;
+    unpaired.values().all(Vec::is_empty).then_some(pairs)
 }
 
 fn validate_fence_rows(
@@ -7181,6 +7251,108 @@ mod tests {
         assert_eq!(
             bounded_poison_detail(&detail).len(),
             MAX_POISON_DETAIL_BYTES
+        );
+    }
+
+    fn row_identities(identities: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        identities
+            .iter()
+            .map(|(relation_id, key)| (*relation_id, (*key).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn fence_pairing_accepts_interleaved_row_identities() {
+        let events = row_identities(&[
+            ("child", "c1"),
+            ("child", "c2"),
+            ("parent", "p"),
+            ("parent", "p"),
+        ]);
+        let fences = row_identities(&[
+            ("child", "c1"),
+            ("parent", "p"),
+            ("child", "c2"),
+            ("parent", "p"),
+        ]);
+        assert_eq!(
+            pair_fences_by_row_identity(&events, &fences),
+            Some(vec![0, 2, 1, 3])
+        );
+    }
+
+    #[test]
+    fn fence_pairing_keeps_the_order_of_repeated_row_events() {
+        let events = row_identities(&[
+            ("items", "a"),
+            ("items", "b"),
+            ("items", "a"),
+            ("items", "a"),
+        ]);
+        let fences = row_identities(&[
+            ("items", "a"),
+            ("items", "a"),
+            ("items", "b"),
+            ("items", "a"),
+        ]);
+        assert_eq!(
+            pair_fences_by_row_identity(&events, &fences),
+            Some(vec![0, 2, 1, 3])
+        );
+    }
+
+    #[test]
+    fn fence_pairing_rejects_a_missing_row_fence() {
+        let events = row_identities(&[("items", "a"), ("items", "b")]);
+        assert_eq!(
+            pair_fences_by_row_identity(&events, &row_identities(&[("items", "a")])),
+            None
+        );
+        assert_eq!(
+            pair_fences_by_row_identity(
+                &events,
+                &row_identities(&[("items", "b"), ("items", "b")])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn fence_pairing_rejects_an_extra_row_fence() {
+        let events = row_identities(&[("items", "a")]);
+        assert_eq!(
+            pair_fences_by_row_identity(
+                &events,
+                &row_identities(&[("items", "a"), ("items", "b")])
+            ),
+            None
+        );
+        let events = row_identities(&[("items", "a"), ("items", "b")]);
+        assert_eq!(
+            pair_fences_by_row_identity(
+                &events,
+                &row_identities(&[("items", "a"), ("items", "a")])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn fence_pairing_separates_equal_keys_in_different_relations() {
+        let events = row_identities(&[("child", "k"), ("parent", "k")]);
+        assert_eq!(
+            pair_fences_by_row_identity(
+                &events,
+                &row_identities(&[("parent", "k"), ("child", "k")])
+            ),
+            Some(vec![1, 0])
+        );
+        assert_eq!(
+            pair_fences_by_row_identity(
+                &events,
+                &row_identities(&[("child", "k"), ("child", "k")])
+            ),
+            None
         );
     }
 }

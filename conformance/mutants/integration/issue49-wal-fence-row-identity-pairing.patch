@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -4024,6 +4024,8 @@ fn correlate_events<'a>(
+                 .ok_or_else(|| failure("fence_correlation_failed", transaction.commit_lsn))
+         })
+         .collect::<Result<Vec<_>, _>>()?;
++    let event_identities = vec![("", String::new()); event_identities.len()];
++    let fence_identities = vec![("", String::new()); fence_identities.len()];
+     let Some(fence_indexes) = pair_fences_by_row_identity(&event_identities, &fence_identities)
+     else {
+         log!("synchro WAL fence row identity correlation failed");
