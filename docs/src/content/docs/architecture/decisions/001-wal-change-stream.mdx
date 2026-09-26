@@ -65,6 +65,8 @@ The logical replication slot may advance only to the `end_lsn` of the largest co
 
 Acknowledgement must occur after the materialization transaction commits. It must not advance to an individual event, an arbitrary decoder batch maximum, a later noncontiguous transaction, or a source transaction whose durable work is incomplete. If processing stops after durable materialization but before slot acknowledgement, replay must recognize the durable replay identity and acknowledgement may resume from the contiguous prefix without duplicating effects.
 
+PostgreSQL does not make a slot advance durable when the advance returns. After a crash, the slot position can be behind the durable acknowledgement. At startup, the worker must advance the slot to the durable acknowledgement when the slot position is at or after the generation start and before that acknowledgement. Every transaction in that interval is durably materialized and acknowledged, so this advance skips no work and replays no work. The worker must reject a slot position before the generation start.
+
 A decode or application failure blocks acknowledgement at the prior contiguous boundary and blocks later source-transaction processing. The worker must not acknowledge around a failed transaction.
 
 ## Poison-event quarantine and recovery

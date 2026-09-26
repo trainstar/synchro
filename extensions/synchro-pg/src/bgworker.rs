@@ -228,6 +228,13 @@ pub(crate) enum SlotBindingDecision {
     Fail,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotReconciliation {
+    Current,
+    AdoptSlot(u64),
+    RestoreSlot(u64),
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct RuntimeCaptureIdentity {
     stream_generation: String,
@@ -1008,7 +1015,13 @@ fn initialize_worker(
         if active_slot_is_unbound {
             return Err("active replication slot is unavailable".to_string());
         }
-        validate_bound_slot(client, &runtime, &connected_database, &publication)?;
+        validate_bound_slot(
+            client,
+            &runtime,
+            &connected_database,
+            &publication,
+            worker_role_oid,
+        )?;
         let stream_generation = active_stream_generation(client)?;
         retire_prior_generation_poison(client, &stream_generation)?;
         client
@@ -1320,6 +1333,7 @@ fn prepare_bound_worker_slot(
                 &preparation.startup.runtime,
                 &preparation.connected_database,
                 &publication,
+                preparation.worker_role_oid,
             )?;
             let prepared = capture_worker_startup_identity(client, configured_slot)?;
             if prepared.active_slot_is_unbound {
@@ -1488,6 +1502,7 @@ fn validate_bound_slot(
     runtime: &WorkerRuntimeIdentity,
     connected_database: &str,
     publication: &PublicationIdentity,
+    worker_role_oid: pg_sys::Oid,
 ) -> Result<(), String> {
     let valid = client
         .select(
@@ -1547,6 +1562,7 @@ fn validate_bound_slot(
                         progress.acknowledged_end_lsn,
                         progress.generation_start_lsn
                     )::text AS expected_lsn,
+                    progress.generation_start_lsn::text AS generation_start_lsn,
                     progress.materialized_end_lsn::text AS materialized_end_lsn
              FROM synchro.sync_runtime_state runtime
              JOIN synchro.sync_wal_progress progress
@@ -1576,32 +1592,57 @@ fn validate_bound_slot(
         .map_err(|_| "reading active replication slot boundary failed".to_string())?
         .and_then(|value| parse_lsn(&value))
         .ok_or_else(|| "active replication acknowledgement is invalid".to_string())?;
+    let generation_start = row
+        .get_by_name::<String, &str>("generation_start_lsn")
+        .map_err(|_| "reading active replication slot boundary failed".to_string())?
+        .and_then(|value| parse_lsn(&value))
+        .ok_or_else(|| "active replication generation start is invalid".to_string())?;
     let materialized_end = row
         .get_by_name::<String, &str>("materialized_end_lsn")
         .map_err(|_| "reading active materialized boundary failed".to_string())?
         .and_then(|value| parse_lsn(&value));
-    if let Some(reconciled) = startup_slot_reconciliation(actual, expected, materialized_end)? {
-        let requested = format_lsn(reconciled);
-        let expected = format_lsn(expected);
-        let updated = client
-            .update(
-                "UPDATE synchro.sync_wal_progress
-                 SET acknowledged_end_lsn = $1::pg_lsn, updated_at = now()
-                 WHERE singleton
-                   AND stream_generation = $2
-                   AND COALESCE(acknowledged_end_lsn, generation_start_lsn) = $3::pg_lsn
-                   AND materialized_end_lsn >= $1::pg_lsn",
-                None,
-                &[
-                    requested.as_str().into(),
-                    runtime.stream_generation.as_str().into(),
-                    expected.as_str().into(),
-                ],
-            )
-            .map_err(|_| "reconciling active replication slot failed".to_string())?
-            .len();
-        if updated != 1 {
-            return Err("active replication slot boundary changed".to_string());
+    match startup_slot_reconciliation(actual, generation_start, expected, materialized_end)? {
+        SlotReconciliation::Current => {}
+        SlotReconciliation::AdoptSlot(reconciled) => {
+            let requested = format_lsn(reconciled);
+            let expected = format_lsn(expected);
+            let updated = client
+                .update(
+                    "UPDATE synchro.sync_wal_progress
+                     SET acknowledged_end_lsn = $1::pg_lsn, updated_at = now()
+                     WHERE singleton
+                       AND stream_generation = $2
+                       AND COALESCE(acknowledged_end_lsn, generation_start_lsn) = $3::pg_lsn
+                       AND materialized_end_lsn >= $1::pg_lsn",
+                    None,
+                    &[
+                        requested.as_str().into(),
+                        runtime.stream_generation.as_str().into(),
+                        expected.as_str().into(),
+                    ],
+                )
+                .map_err(|_| "reconciling active replication slot failed".to_string())?
+                .len();
+            if updated != 1 {
+                return Err("active replication slot boundary changed".to_string());
+            }
+        }
+        SlotReconciliation::RestoreSlot(acknowledged) => {
+            let requested = format_lsn(acknowledged);
+            // The worker group role has NOREPLICATION. The session login can advance the slot.
+            activate_session_login();
+            let restored = client
+                .select(
+                    "SELECT end_lsn::text AS end_lsn
+                     FROM pg_catalog.pg_replication_slot_advance($1, $2::pg_lsn)",
+                    None,
+                    &[runtime.slot_name.as_str().into(), requested.as_str().into()],
+                )
+                .and_then(|rows| rows.first().get_by_name::<String, &str>("end_lsn"));
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            if restored.ok().flatten().and_then(|value| parse_lsn(&value)) != Some(acknowledged) {
+                return Err("active replication slot restore failed".to_string());
+            }
         }
     }
     Ok(())
@@ -1609,14 +1650,19 @@ fn validate_bound_slot(
 
 fn startup_slot_reconciliation(
     actual: u64,
-    expected: u64,
+    generation_start: u64,
+    acknowledged: u64,
     materialized_end: Option<u64>,
-) -> Result<Option<u64>, String> {
-    if actual == expected {
-        return Ok(None);
+) -> Result<SlotReconciliation, String> {
+    if actual == acknowledged {
+        return Ok(SlotReconciliation::Current);
     }
-    if actual > expected && materialized_end.is_some_and(|materialized| actual <= materialized) {
-        return Ok(Some(actual));
+    if actual > acknowledged && materialized_end.is_some_and(|materialized| actual <= materialized)
+    {
+        return Ok(SlotReconciliation::AdoptSlot(actual));
+    }
+    if generation_start <= actual && actual < acknowledged {
+        return Ok(SlotReconciliation::RestoreSlot(acknowledged));
     }
     Err("active replication slot is invalid".to_string())
 }
@@ -7079,9 +7125,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_slot_reconciliation_stays_within_materialized_state() {
-        assert_eq!(startup_slot_reconciliation(20, 10, Some(30)), Ok(Some(20)));
-        assert!(startup_slot_reconciliation(40, 10, Some(30)).is_err());
+    fn startup_slot_reconciliation_covers_every_boundary() {
+        assert_eq!(
+            startup_slot_reconciliation(20, 10, 20, Some(30)),
+            Ok(SlotReconciliation::Current)
+        );
+        assert_eq!(
+            startup_slot_reconciliation(25, 10, 20, Some(30)),
+            Ok(SlotReconciliation::AdoptSlot(25))
+        );
+        assert_eq!(
+            startup_slot_reconciliation(30, 10, 20, Some(30)),
+            Ok(SlotReconciliation::AdoptSlot(30))
+        );
+        assert!(startup_slot_reconciliation(25, 10, 20, None).is_err());
+        assert!(startup_slot_reconciliation(40, 10, 20, Some(30)).is_err());
+        assert_eq!(
+            startup_slot_reconciliation(15, 10, 20, Some(30)),
+            Ok(SlotReconciliation::RestoreSlot(20))
+        );
+        assert_eq!(
+            startup_slot_reconciliation(10, 10, 20, Some(30)),
+            Ok(SlotReconciliation::RestoreSlot(20))
+        );
+        assert!(startup_slot_reconciliation(5, 10, 20, Some(30)).is_err());
     }
 
     #[test]

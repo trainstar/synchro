@@ -1521,12 +1521,16 @@ func (h *Harness) restartPostgres(ctx context.Context) error {
 	if h.attached {
 		return h.restartAttachedPostgres(ctx)
 	}
+	return h.restartOwnedPostgres(ctx, syscall.SIGINT)
+}
+
+func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Signal) error {
 	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
 	defer cancel()
 	if h.postgres == nil {
 		return errors.New("PostgreSQL process is unavailable")
 	}
-	if err := h.postgres.StopPostmasterFast(stopContext, h.config.ShutdownTimeout); err != nil {
+	if err := h.postgres.StopPostmaster(stopContext, h.config.ShutdownTimeout, shutdown); err != nil {
 		return err
 	}
 	h.postgres = nil
@@ -2226,6 +2230,18 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 		return errors.New("isolated PostgreSQL restart is unavailable")
 	}
 	return h.restartPostgres(ctx)
+}
+
+// CrashRestartPostgres simulates a PostgreSQL crash with an immediate shutdown
+// and starts the isolated postmaster again for a process-fault test.
+func (h *Harness) CrashRestartPostgres(ctx context.Context) error {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return errors.New("isolated PostgreSQL restart is unavailable")
+	}
+	if h.attached {
+		return errors.New("isolated PostgreSQL crash restart requires an owned postmaster")
+	}
+	return h.restartOwnedPostgres(ctx, syscall.SIGQUIT)
 }
 
 // ReinstallExtension replaces the extension atomically without restarting the postmaster.
@@ -6831,9 +6847,11 @@ func (process *ownedProcess) Stop(ctx context.Context, timeout time.Duration) er
 	return waitForOwnedProcess(ctx, process.done)
 }
 
-// StopPostmasterFast requests PostgreSQL fast shutdown without signaling its
-// child backends directly. This preserves durable replication-slot state.
-func (process *ownedProcess) StopPostmasterFast(ctx context.Context, timeout time.Duration) error {
+// StopPostmaster sends signal only to the postmaster and waits for its process
+// group to exit. SIGINT requests fast shutdown, which writes a shutdown
+// checkpoint. SIGQUIT requests immediate shutdown, which simulates a crash and
+// writes no shutdown checkpoint.
+func (process *ownedProcess) StopPostmaster(ctx context.Context, timeout time.Duration, signal syscall.Signal) error {
 	if process == nil || process.command == nil || process.command.Process == nil {
 		return nil
 	}
@@ -6850,11 +6868,11 @@ func (process *ownedProcess) StopPostmasterFast(ctx context.Context, timeout tim
 		process.cancel()
 		return waitForOwnedProcess(ctx, process.done)
 	}
-	if err := process.command.Process.Signal(syscall.SIGINT); err != nil {
-		return errors.New("request PostgreSQL fast shutdown failed")
+	if err := process.command.Process.Signal(signal); err != nil {
+		return errors.New("request PostgreSQL shutdown failed")
 	}
 	if !process.waitForGroupExit(ctx, pid, timeout) {
-		return errors.New("bounded PostgreSQL fast shutdown wait expired")
+		return errors.New("bounded PostgreSQL shutdown wait expired")
 	}
 	process.cancel()
 	return waitForOwnedProcess(ctx, process.done)

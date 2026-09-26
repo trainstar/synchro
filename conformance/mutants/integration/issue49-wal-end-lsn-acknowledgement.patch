@@ -30,6 +30,6 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql b/extensions/synchr
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
 @@ -2356,3 +2356,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/bgworker.rs:758
-+-- synchro-pg/src/bgworker.rs:775
+--- synchro-pg/src/bgworker.rs:765
++-- synchro-pg/src/bgworker.rs:782
  -- synchro_pg::bgworker::synchro_retry_wal_poison
