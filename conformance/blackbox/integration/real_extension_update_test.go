@@ -98,6 +98,13 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 // transaction on retry, and it then decodes another valid Relation refresh
 // without a new poison or restart.
 func TestRealExtensionUpdateRepairsRetainedDecoderPoison(t *testing.T) {
+	// The published 0.3.1 decoder rejects a valid Relation refresh. A change of
+	// the migration floor must reconsider this case, so another pinned version
+	// is a setup failure and not a later wait for a poison that cannot occur.
+	const affectedBaselineVersion = "0.3.1"
+	if version := readUpdateBaselineVersion(t); version != affectedBaselineVersion {
+		t.Fatalf("retained decoder poison requires update baseline %s, found %s", affectedBaselineVersion, version)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	harness, baselineVersion := provisionRealUpdateBaselineHarness(t, ctx)
