@@ -95,6 +95,10 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 	if rebound.ActiveRegistryGeneration <= 0 {
 		t.Fatalf("reinstalled worker has no active registry generation: %#v", rebound)
 	}
+	// Client performance suites restore the authored source shapes at this point.
+	if err := harness.Operator().RestoreDiagnosticSourceTableShapes(ctx); err != nil {
+		t.Fatalf("restore diagnostic source table shapes: %v", err)
+	}
 	if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
 		t.Fatalf("restore diagnostic registrations: %v", err)
 	}
