@@ -50,7 +50,7 @@ done
 case "$pid" in *[!0-9]*|'') printf '%s\n' "$package did not start" >&2; exit 1 ;; esac
 
 status=1
-for _ in $(seq 1 900); do
+for _ in $(seq 1 300); do
   if [ -f "$done_file" ]; then status=0; break; fi
   if [ "$(device shell pidof "$package" 2>/dev/null | tr -d '\r' || true)" != "$pid" ]; then break; fi
   sleep 1

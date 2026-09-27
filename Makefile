@@ -276,7 +276,8 @@ UPGRADE_PREDECESSOR_VERSION ?= 0.3.1
 # The commit of the published v0.3.1 tag. A moved tag fails the Swift upgrade build.
 UPGRADE_PREDECESSOR_SWIFT_REVISION ?= 234d18d0f8f1751927ca58544863688ebc2fb70a
 UPGRADE_WORK_DIR ?= $(CURDIR)/.ignore/upgrade
-UPGRADE_CONTROL_ADDRESS ?= 127.0.0.1:0
+# React Native builds this address into its bundle, so the port is fixed.
+UPGRADE_CONTROL_ADDRESS ?= 127.0.0.1:8095
 UPGRADE_ANDROID_PACKAGE := com.trainstar.synchro.upgrade
 RELEASE_INVENTORY := $(CURDIR)/conformance/artifacts/inventory.json
 RELEASE_SUPPORT_MATRIX := $(CURDIR)/conformance/support-matrix.json
@@ -1226,13 +1227,66 @@ test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
 		status=0; \
 		(cd conformance && \
 			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
-			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/kotlin/run-phase.sh" \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/run-android-phase.sh" \
 			SYNCHRO_UPGRADE_ANDROID_PACKAGE="$(UPGRADE_ANDROID_PACKAGE)" \
 			SYNCHRO_UPGRADE_ANDROID_ACTIVITY=.MainActivity \
 			SYNCHRO_UPGRADE_PREDECESSOR_APK="$$work/predecessor/app/build/outputs/apk/debug/app-debug.apk" \
 			SYNCHRO_UPGRADE_CANDIDATE_APK="$$work/candidate/app/build/outputs/apk/debug/app-debug.apk" \
 			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
 		"$(ANDROID_HOME)/platform-tools/adb" -s "$(KOTLIN_ANDROID_SERIAL)" uninstall "$(UPGRADE_ANDROID_PACKAGE)" >/dev/null 2>&1 || true; \
+		exit "$$status"
+
+# React Native reaches the native SDKs through the published bridge package.
+test-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifact client-consumer-rn-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
+	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/rn-android"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work"; \
+		control_url="http://$(UPGRADE_CONTROL_ADDRESS)/upgrade"; \
+		for side in predecessor candidate; do \
+			if [ "$$side" = predecessor ]; then version="$(UPGRADE_PREDECESSOR_VERSION)"; else version="$(CURRENT_VERSION)"; fi; \
+			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+				sh verification/consumers/upgrade/react-native/build-app.sh android "$$work" "$$side" "$$version" "$$control_url"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/run-android-phase.sh" \
+			SYNCHRO_UPGRADE_ANDROID_PACKAGE=com.synchroupgrade \
+			SYNCHRO_UPGRADE_ANDROID_ACTIVITY=.MainActivity \
+			SYNCHRO_UPGRADE_PREDECESSOR_APK="$$work/predecessor.apk" \
+			SYNCHRO_UPGRADE_CANDIDATE_APK="$$work/candidate.apk" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		"$(ANDROID_HOME)/platform-tools/adb" -s "$(KOTLIN_ANDROID_SERIAL)" uninstall com.synchroupgrade >/dev/null 2>&1 || true; \
+		exit "$$status"
+
+test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact client-consumer-rn-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/rn-ios"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work"; \
+		udid="$${IOS_SIMULATOR_UDID:-$$(xcrun simctl list devices booted -j | ruby -rjson -e 'device = JSON.parse(STDIN.read).fetch("devices").values.flatten.find { |item| item["state"] == "Booted" }; abort "no booted iOS simulator" unless device; puts device.fetch("udid")')}"; \
+		control_url="http://$(UPGRADE_CONTROL_ADDRESS)/upgrade"; \
+		for side in predecessor candidate; do \
+			if [ "$$side" = predecessor ]; then version="$(UPGRADE_PREDECESSOR_VERSION)"; else version="$(CURRENT_VERSION)"; fi; \
+			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
+				sh verification/consumers/upgrade/react-native/build-app.sh ios "$$work" "$$side" "$$version" "$$control_url"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/react-native/run-ios-phase.sh" \
+			SYNCHRO_UPGRADE_IOS_SIMULATOR="$$udid" \
+			SYNCHRO_UPGRADE_IOS_BUNDLE=dev.synchro.upgrade \
+			SYNCHRO_UPGRADE_WORK_DIR="$$work" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		xcrun simctl uninstall "$$udid" dev.synchro.upgrade >/dev/null 2>&1 || true; \
 		exit "$$status"
 
 test-rn-unit:

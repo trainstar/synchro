@@ -85,10 +85,21 @@ func inspection(_ mutation: PendingMutationInspection) throws -> [String: Any] {
 }
 
 // A retryable failure moves the engine to backoff. The engine retries on its
-// own schedule, so the step waits for that retry to reach ready.
+// own schedule, so the step waits for that retry to reach ready. A sync that
+// does not finish fails the step, so the earlier observations still report.
 func synchronize(_ client: SynchroClient) async throws {
     do {
-        try await client.syncNow()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await client.syncNow() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 120_000_000_000)
+                throw UpgradeFailure(description: "sync did not finish within 120 seconds")
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+    } catch let failure as UpgradeFailure {
+        throw failure
     } catch {
         let deadline = Date().addingTimeInterval(60)
         while Date() < deadline {
@@ -105,6 +116,7 @@ func synchronize(_ client: SynchroClient) async throws {
 // Observations collect in order, so a failed step still reports the earlier ones.
 var observations: [[String: Any]] = []
 
+@MainActor
 func run(_ config: [String: Any]) async throws {
     guard let serverText = config["server_url"] as? String, let serverURL = URL(string: serverText),
           let token = config["token"] as? String,

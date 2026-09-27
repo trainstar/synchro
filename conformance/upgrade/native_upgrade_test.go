@@ -41,7 +41,7 @@ import (
 const (
 	appVersion      = "1.0.0"
 	clientTimestamp = "2026-09-01T10:00:00.000000Z"
-	phaseTimeout    = 20 * time.Minute
+	phaseTimeout    = 10 * time.Minute
 )
 
 // step is one public SDK action. The platform applications run steps in
@@ -833,11 +833,9 @@ type control struct {
 
 func startControl(t *testing.T, address string) *control {
 	t.Helper()
-	var secret [16]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		t.Fatalf("generate control path: %v", err)
-	}
-	path := "/" + hex.EncodeToString(secret[:])
+	// React Native builds the control URL into its bundle before the test
+	// starts, so the path is fixed and the address comes from the caller.
+	const path = "/upgrade"
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		t.Fatalf("listen for upgrade control: %v", err)

@@ -8,8 +8,10 @@ import com.trainstar.synchro.PendingMutationInspection
 import com.trainstar.synchro.SyncStatus
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -162,11 +164,14 @@ class MainActivity : Activity() {
         )
 
     // syncNow requires a connected engine. A retryable failure moves the
-    // engine to backoff, and the step waits for its scheduled retry.
+    // engine to backoff, and the step waits for its scheduled retry. A sync
+    // that does not finish fails the step, so the earlier observations report.
     private suspend fun synchronize(client: SynchroClient) {
         awaitReady(client)
         try {
-            client.syncNow()
+            withTimeout(120_000) { client.syncNow() }
+        } catch (failure: TimeoutCancellationException) {
+            throw IllegalStateException("sync did not finish within 120 seconds", failure)
         } catch (failure: Exception) {
             if (!awaitReady(client, failOnError = false)) throw failure
         }
