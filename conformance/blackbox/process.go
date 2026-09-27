@@ -1893,12 +1893,36 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 		return false, err
 	}
 	if setup != nil {
+		// A second registration transaction starts after the worker activates
+		// the first one, as a separate application migration would.
+		if err := h.waitForRegistryActivation(ctx); err != nil {
+			return false, err
+		}
 		if err := h.executeSourceScript(ctx, setup.Name+" registration", setup.RegistrationSQL); err != nil {
 			return false, err
 		}
 	}
 	h.sourceReady = true
 	return false, nil
+}
+
+func (h *Harness) waitForRegistryActivation(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect for registry activation wait failed")
+	}
+	defer database.Close()
+	waitContext, cancel := context.WithTimeout(ctx, h.config.StartupTimeout)
+	defer cancel()
+	return waitUntil(waitContext, func(ctx context.Context) (bool, error) {
+		var pending bool
+		if err := database.QueryRowContext(ctx,
+			"SELECT EXISTS (SELECT 1 FROM synchro.sync_registry_generations WHERE state = 'pending')",
+		).Scan(&pending); err != nil {
+			return false, errors.New("observe registry activation failed")
+		}
+		return !pending, nil
+	})
 }
 
 // sourceTables lists the diagnostic tables and any additional setup tables.
