@@ -452,11 +452,11 @@ mod tests {
             batch_fingerprint("user-a", &reversed).unwrap()
         );
 
-        let mut changed_generation = ordered_request;
+        let mut changed_generation = ordered_request.clone();
         changed_generation.client_generation = 2;
         assert_ne!(
-            batch_fingerprint("user-a", &changed_generation).unwrap(),
-            batch_fingerprint("user-b", &changed_generation).unwrap()
+            batch_fingerprint("user-a", &ordered_request).unwrap(),
+            batch_fingerprint("user-a", &changed_generation).unwrap()
         );
     }
 
