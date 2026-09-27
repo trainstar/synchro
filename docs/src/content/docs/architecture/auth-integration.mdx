@@ -44,6 +44,15 @@ Use one of these modes when the adapter validates bearer tokens:
 the handler lifetime. Cancel it during server shutdown. `JWTUserClaim` selects
 the canonical user claim and defaults to `sub`.
 
+The adapter checks the token signature and algorithm. It rejects a token with
+a past `exp` or a future `nbf`. It does not require `exp`, and it does not check
+`aud` or `iss`. The user claim must be a nonempty string. Every rejected token
+returns `401 auth_required`.
+
+A key set refreshes every hour. When a token names an unknown `kid`, the
+adapter also fetches the key set again, at most once in five minutes. Publish a
+new key before the identity provider signs tokens with it.
+
 ```go
 jwksContext, cancelJWKS := context.WithCancel(context.Background())
 defer cancelJWKS()
