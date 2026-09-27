@@ -50,11 +50,12 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         val INT64_PATTERN = Regex("^(?:0|-?[1-9][0-9]*)$")
     }
 
-    private var client: SynchroClient? = null
+    internal var client: SynchroClient? = null
+        private set
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
     private val transactionLock = Any()
-    private val sessions = ConcurrentHashMap<String, TransactionSession>()
+    internal val sessions = ConcurrentHashMap<String, TransactionSession>()
     private var acceptingTransactions = false
     private val observers = ConcurrentHashMap<String, Cancellable>()
     private val pendingAuthContinuations = ConcurrentHashMap<String, CancellableContinuation<String>>()
@@ -422,11 +423,15 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
     // MARK: - Transactions
 
-    private class TransactionSession(val isWrite: Boolean) {
+    internal class TransactionSession(
+        val isWrite: Boolean,
+        private var beginSettlement: ((Result<String>) -> Unit)?,
+    ) {
         val operations = Channel<TransactionOp>(Channel.RENDEZVOUS)
         lateinit var job: Job
         private var abortCause: Throwable? = null
         private var terminal = false
+        private var terminalCompletion: CompletableDeferred<Unit>? = null
 
         @Synchronized
         fun abort(cause: Throwable) {
@@ -442,6 +447,55 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             terminal = true
             operations.close()
             return true
+        }
+
+        /**
+         * Settles begin when the transaction callback starts.
+         * A close that aborted the session earlier rejects begin instead.
+         */
+        @Synchronized
+        fun acceptBegin(txID: String) {
+            val settle = beginSettlement
+            beginSettlement = null
+            val cause = abortCause
+            if (cause != null) {
+                settle?.invoke(Result.failure(cause))
+                throw cause
+            }
+            settle?.invoke(Result.success(txID))
+        }
+
+        /** Rejects begin when the transaction fails before its callback starts. */
+        @Synchronized
+        fun rejectBegin(error: Throwable) {
+            val settle = beginSettlement ?: return
+            beginSettlement = null
+            settle(Result.failure(error))
+        }
+
+        /**
+         * Takes ownership of a received commit or rollback completion before the terminal decision.
+         * The job settles the owned completion after the database transaction ends.
+         */
+        @Synchronized
+        fun acceptTerminal(completion: CompletableDeferred<Unit>): Boolean {
+            terminalCompletion = completion
+            if (terminal) return false
+            terminal = true
+            operations.close()
+            return true
+        }
+
+        /** Settles the owned terminal completion after the database transaction ends. */
+        @Synchronized
+        fun finishTerminal(error: Throwable?) {
+            val completion = terminalCompletion ?: return
+            terminalCompletion = null
+            if (error == null) {
+                completion.complete(Unit)
+            } else {
+                completion.completeExceptionally(error)
+            }
         }
 
         @Synchronized
@@ -460,7 +514,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private sealed class TransactionOp {
+    internal sealed class TransactionOp {
         data class Query(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableArray>) : TransactionOp()
         data class QueryOne(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap?>) : TransactionOp()
         data class Execute(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap>) : TransactionOp()
@@ -468,9 +522,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         class Rollback(val deferred: CompletableDeferred<Unit>) : TransactionOp()
     }
 
-    private class TransactionRollbackException(
-        val completion: CompletableDeferred<Unit>,
-    ) : Exception("rollback")
+    internal class TransactionRollbackException : Exception("rollback")
 
     private class TransactionAbortedException : Exception("Client closed during transaction")
     private class TransactionExpiredException : Exception("Transaction timed out due to inactivity")
@@ -494,17 +546,20 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
 
         val txID = UUID.randomUUID().toString()
-        val session = TransactionSession(isWrite)
+        val session = TransactionSession(isWrite) { result ->
+            result.fold(
+                onSuccess = { promise.resolve(it) },
+                onFailure = { rejectWithError(promise, it) },
+            )
+        }
 
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            var finalDeferred: CompletableDeferred<Unit>? = null
             try {
                 if (isWrite) {
                     c.writeTransaction { transaction ->
-                        finalDeferred = runTransactionLoop(
+                        runTransactionLoop(
                             txID = txID,
                             session = session,
-                            promise = promise,
                             query = transaction::query,
                             queryOne = transaction::queryOne,
                             execute = transaction::execute,
@@ -512,10 +567,9 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                     }
                 } else {
                     c.readTransaction { transaction ->
-                        finalDeferred = runTransactionLoop(
+                        runTransactionLoop(
                             txID = txID,
                             session = session,
-                            promise = promise,
                             query = transaction::query,
                             queryOne = transaction::queryOne,
                             execute = { _, _ ->
@@ -524,15 +578,17 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                         )
                     }
                 }
-                finalDeferred?.complete(Unit)
+                session.finishTerminal(null)
             } catch (e: TimeoutCancellationException) {
                 val timeout = TransactionExpiredException()
                 session.abort(timeout)
-                finalDeferred?.completeExceptionally(timeout)
+                session.finishTerminal(timeout)
             } catch (e: TransactionRollbackException) {
-                e.completion.complete(Unit)
+                session.finishTerminal(null)
             } catch (e: Exception) {
-                finalDeferred?.completeExceptionally(e)
+                // Acquisition can fail before the callback settles begin.
+                session.rejectBegin(e)
+                session.finishTerminal(e)
             } finally {
                 session.completeNormally()
                 sessions.remove(txID, session)
@@ -555,16 +611,14 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         job.start()
     }
 
-    private fun runTransactionLoop(
+    internal fun runTransactionLoop(
         txID: String,
         session: TransactionSession,
-        promise: Promise,
         query: (String, Array<out Any?>?) -> List<Row>,
         queryOne: (String, Array<out Any?>?) -> Row?,
         execute: (String, Array<out Any?>?) -> ExecResult,
-    ): CompletableDeferred<Unit>? {
-        promise.resolve(txID)
-        var finalDeferred: CompletableDeferred<Unit>? = null
+    ) {
+        session.acceptBegin(txID)
         runBlocking {
             transactionLoop@ while (true) {
                 val result = withTimeout(5000) { session.operations.receiveCatching() }
@@ -604,19 +658,16 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                         }
                     }
                     is TransactionOp.Commit -> {
-                        finalDeferred = op.deferred
-                        if (!session.completeNormally()) throw TransactionAbortedException()
+                        if (!session.acceptTerminal(op.deferred)) throw TransactionAbortedException()
                         break@transactionLoop
                     }
                     is TransactionOp.Rollback -> {
-                        finalDeferred = op.deferred
-                        if (!session.completeNormally()) throw TransactionAbortedException()
-                        throw TransactionRollbackException(op.deferred)
+                        if (!session.acceptTerminal(op.deferred)) throw TransactionAbortedException()
+                        throw TransactionRollbackException()
                     }
                 }
             }
         }
-        return finalDeferred
     }
 
     @ReactMethod
@@ -699,13 +750,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         scope.launch {
+            val deferred = CompletableDeferred<Unit>()
             try {
-                val deferred = CompletableDeferred<Unit>()
                 session.operations.send(TransactionOp.Rollback(deferred))
+            } catch (e: Exception) {
+                // The session ended before it received this rollback.
+                promise.resolve(null)
+                return@launch
+            }
+            try {
                 deferred.await()
                 promise.resolve(null)
             } catch (e: Exception) {
-                promise.resolve(null) // Best-effort
+                rejectWithError(promise, e)
             }
         }
     }

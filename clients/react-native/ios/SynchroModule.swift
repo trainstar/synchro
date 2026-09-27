@@ -12,7 +12,7 @@ import GRDB
 
 // MARK: - Transaction Session
 
-private class TransactionSession {
+class TransactionSession {
     private let condition = NSCondition()
     private var operations: [TransactionOp] = []
     private var closed = false
@@ -20,10 +20,36 @@ private class TransactionSession {
     private var finalCompletion: ((Result<Void, Error>) -> Void)?
     private var finished = false
     private var finishWaiters: [CheckedContinuation<Void, Never>] = []
+    private var beginCompletion: ((Result<String, Error>) -> Void)?
     let isWrite: Bool
 
-    init(isWrite: Bool) {
+    init(isWrite: Bool, beginCompletion: @escaping (Result<String, Error>) -> Void) {
         self.isWrite = isWrite
+        self.beginCompletion = beginCompletion
+    }
+
+    /// Settles begin when the native transaction callback starts. A close that
+    /// aborted the session before the callback started rejects begin instead.
+    func acceptBegin(_ txID: String) throws {
+        condition.lock()
+        let completion = beginCompletion
+        beginCompletion = nil
+        let error = abortError
+        condition.unlock()
+        if let error {
+            completion?(.failure(error))
+            throw error
+        }
+        completion?(.success(txID))
+    }
+
+    /// Rejects begin when the transaction fails before its callback starts.
+    func rejectBegin(_ error: Error) {
+        condition.lock()
+        let completion = beginCompletion
+        beginCompletion = nil
+        condition.unlock()
+        completion?(.failure(error))
     }
 
     func enqueue(_ op: TransactionOp) -> Bool {
@@ -132,7 +158,7 @@ private class TransactionSession {
     }
 }
 
-private enum TransactionOp {
+enum TransactionOp {
     case query(sql: String, params: [Any], completion: (Result<[[String: Any]], Error>) -> Void)
     case queryOne(sql: String, params: [Any], completion: (Result<[String: Any]?, Error>) -> Void)
     case execute(sql: String, params: [Any], completion: (Result<[String: Any], Error>) -> Void)
@@ -191,10 +217,10 @@ private actor LifecycleMutex {
 public class SynchroModuleImpl: NSObject {
     @objc public weak var eventDelegate: SynchroEventEmitting?
 
-    private var client: SynchroClient?
+    private(set) var client: SynchroClient?
     private let lifecycleMutex = LifecycleMutex()
-    private var sessions: [String: TransactionSession] = [:]
-    private let sessionsLock = NSLock()
+    var sessions: [String: TransactionSession] = [:]
+    let sessionsLock = NSLock()
     private var acceptingTransactions = false
     private var observers: [String: any Synchro.Cancellable] = [:]
     private var statusSubscription: (any Synchro.Cancellable)?
@@ -595,12 +621,11 @@ public class SynchroModuleImpl: NSObject {
     private func runTransactionLoop(
         session: TransactionSession,
         txID: String,
-        resolve: @escaping RCTPromiseResolveBlock,
         query: (String, [(any DatabaseValueConvertible)?]) throws -> [Row],
         queryOne: (String, [(any DatabaseValueConvertible)?]) throws -> Row?,
         execute: ((String, [(any DatabaseValueConvertible)?]) throws -> Int)?
     ) throws {
-        resolve(txID)
+        try session.acceptBegin(txID)
 
         while true {
             guard let op = try session.nextOperation(timeout: 5) else {
@@ -680,7 +705,12 @@ public class SynchroModuleImpl: NSObject {
         }
 
         let txID = UUID().uuidString
-        let session = TransactionSession(isWrite: isWrite)
+        let session = TransactionSession(isWrite: isWrite) { result in
+            switch result {
+            case .success(let acceptedID): resolve(acceptedID)
+            case .failure(let error): self.rejectWithError(reject, error)
+            }
+        }
         sessions[txID] = session
         sessionsLock.unlock()
 
@@ -699,7 +729,6 @@ public class SynchroModuleImpl: NSObject {
                         try self.runTransactionLoop(
                             session: session,
                             txID: txID,
-                            resolve: resolve,
                             query: { sql, params in
                                 try transaction.query(sql, params: params)
                             },
@@ -716,7 +745,6 @@ public class SynchroModuleImpl: NSObject {
                         try self.runTransactionLoop(
                             session: session,
                             txID: txID,
-                            resolve: resolve,
                             query: { sql, params in
                                 let statement = try db.makeStatement(sql: sql)
                                 guard statement.isReadonly else {
@@ -748,6 +776,8 @@ public class SynchroModuleImpl: NSObject {
             } catch is TransactionRollbackError {
                 session.completeFinal(.success(()))
             } catch {
+                // Acquisition can fail before the callback settles begin.
+                session.rejectBegin(error)
                 session.completeFinal(.failure(error))
             }
         }
