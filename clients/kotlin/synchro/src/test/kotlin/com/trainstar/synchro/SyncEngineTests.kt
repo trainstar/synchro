@@ -608,6 +608,85 @@ class SyncEngineTests {
     }
 
     @Test
+    fun testLaterWriteDoesNotCancelRunningDebouncedCycle() = runTest {
+        val holdNextPull = AtomicBoolean(false)
+        val heldPullStarted = CountDownLatch(1)
+        val releaseHeldPull = CountDownLatch(1)
+        val pushCount = AtomicInteger()
+        val (engine, db) = makeIntegrationEnv(pushDebounce = 0.01) { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
+                path.endsWith("/sync/push") -> {
+                    pushCount.incrementAndGet()
+                    val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
+                    val accepted = body.getValue("mutations").jsonArray.map { mutation ->
+                        acceptedPushOutcomeJSON(
+                            mutation = mutation.jsonObject,
+                            serverVersion = "debounced-server-version",
+                        )
+                    }
+                    mockResponse(
+                        """{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""",
+                    )
+                }
+                path.endsWith("/sync/pull") -> {
+                    if (holdNextPull.compareAndSet(true, false)) {
+                        heldPullStarted.countDown()
+                        releaseHeldPull.await(5, TimeUnit.SECONDS)
+                    }
+                    mockResponse(scopePullJSON(cursor = "scope_cursor_debounced"))
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(ordersLocalSchemaTable(includeNotes = false)),
+            )
+            db.writeTransaction { connection ->
+                SynchroMeta.upsertScope(
+                    connection,
+                    scopeId = scopeID,
+                    cursor = "scope_cursor_1",
+                    checksum = emptyScopeChecksumJSON(),
+                )
+            }
+
+            engine.start()
+            holdNextPull.set(true)
+            db.applicationExecute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "first", "u1", "2026-01-01T10:00:00.000Z"),
+            )
+            assertTrue(heldPullStarted.await(2, TimeUnit.SECONDS))
+            db.applicationExecute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w2", "second", "u1", "2026-01-01T10:00:01.000Z"),
+            )
+            releaseHeldPull.countDown()
+
+            val tracker = ChangeTracker(db)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while ((tracker.hasPendingChanges() || engine.getSyncStatus() !is SyncStatus.Ready) &&
+                System.nanoTime() < deadline
+            ) {
+                Thread.sleep(20)
+            }
+            assertFalse(tracker.hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+            assertEquals(2, pushCount.get())
+        } finally {
+            releaseHeldPull.countDown()
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testConnectRebuildLocalReconcilesSchemaAndRebuildsExistingScope() = runTest {
         val callLog = mutableListOf<String>()
         val rebuiltRecord = protocolRecord(

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -173,13 +174,73 @@ class PushProcessorTests {
         ),
     )
 
-    private fun installServerRow(database: SynchroDatabase, title: String, serverVersion: String) {
+    private fun installServerRow(
+        database: SynchroDatabase,
+        title: String,
+        serverVersion: String,
+        recordID: String = "o1",
+    ) {
         database.writeSyncLockedTransaction { connection ->
             connection.execSQL(
                 "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
-                arrayOf("o1", title, "2026-01-01T00:00:00.000000Z"),
+                arrayOf(recordID, title, "2026-01-01T00:00:00.000000Z"),
             )
-            SynchroMeta.upsertRowVersion(connection, "orders", "o1", serverVersion, null)
+            SynchroMeta.upsertRowVersion(connection, "orders", recordID, serverVersion, null)
+        }
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private val pushJSON = Json {
+        ignoreUnknownKeys = false
+        encodeDefaults = true
+        explicitNulls = false
+    }
+
+    private fun insertOrder(database: SynchroDatabase, id: String, title: String, score: Double? = null) {
+        if (score == null) {
+            database.execute(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf(id, title, "2026-01-01T00:00:00.000000Z"),
+            )
+        } else {
+            database.execute(
+                "INSERT INTO orders (id, title, score, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf(id, title, score, "2026-01-01T00:00:00.000000Z"),
+            )
+        }
+    }
+
+    private fun ledgerID(database: SynchroDatabase, recordID: String, operation: String = "insert"): String =
+        database.queryOne(
+            "SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = ? AND operation = ?",
+            arrayOf(recordID, operation),
+        )!!.getValue("mutation_id") as String
+
+    private fun lifecycleState(database: SynchroDatabase, mutationID: String): Any? =
+        database.queryOne(
+            "SELECT lifecycle_state FROM _synchro_pending_changes WHERE mutation_id = ?",
+            arrayOf(mutationID),
+        )?.get("lifecycle_state")
+
+    private fun octets(text: String): Int = text.toByteArray(Charsets.UTF_8).size
+
+    private fun canonicalOctets(body: String): Int = octets(Integrity.canonicalJSON(Json.parseToJsonElement(body)))
+
+    private fun retryableResponse(): MockResponse =
+        MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(RETRYABLE_503_ERROR_JSON)
+
+    /** Seals one insert with an empty title in a new database and returns the sent request. */
+    private suspend fun sealedEmptyTitleInsert(score: Double? = null): PushRequest {
+        val (database, _, processor) = environment()
+        insertOrder(database, "o0", "", score)
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            sealWithRetryableFailure(processor, server)
+            return pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+        } finally {
+            server.shutdown()
         }
     }
 
@@ -1227,6 +1288,350 @@ class PushProcessorTests {
                     ?.get("state"),
             )
             assertNull(DurableBackoffStore.load(database))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun pushLimitCompositionEqualsTheCompleteRequestEncoding() = runTest {
+        val (database, _, processor) = environment()
+        installServerRow(database, "server one", "sv-1")
+        installServerRow(database, "server two", "sv-2", recordID = "o2")
+        database.execute(
+            "INSERT INTO orders (id, title, score, document, updated_at) VALUES (?, ?, ?, ?, ?)",
+            arrayOf(
+                "o3",
+                "quote \" backslash \\ slash / tab \t line \n control \u0001 \u007f \u00e9 \uD83D\uDE00 \u2028",
+                1e-7,
+                """{"a":"${"\u00fc"}","b":[1.5,0.1]}""",
+                "2026-01-01T00:00:00.000000Z",
+            ),
+        )
+        database.execute("UPDATE orders SET title = ?, score = ? WHERE id = ?", arrayOf("\u00fc \"updated\"", 12345.678, "o1"))
+        database.execute("DELETE FROM orders WHERE id = ?", arrayOf("o2"))
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            sealWithRetryableFailure(processor, server)
+            val body = server.takeRequest().body.readUtf8()
+            val request = pushJSON.decodeFromString<PushRequest>(body)
+            assertEquals(body, pushJSON.encodeToString(request))
+            assertEquals(
+                setOf(Operation.INSERT, Operation.UPDATE, Operation.DELETE),
+                request.mutations.map { it.op }.toSet(),
+            )
+
+            val composed = request.mutations.fold(PushLimits.envelope(pushJSON, request)) { size, mutation ->
+                size.adding(PushLimits.mutation(pushJSON, mutation))
+            }
+
+            assertEquals(octets(body).toLong(), composed.body)
+            assertEquals(canonicalOctets(body).toLong(), composed.canonical)
+            assertNotEquals(composed.body, composed.canonical)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun pendingEntriesOverTheRequestLimitSealInOrderedBatchesWithinBothMeasures() = runTest {
+        // The canonical form writes 1e20 with 15 more octets than the body form.
+        val score = 1e20
+        val probe = sealedEmptyTitleInsert(score)
+        val element = PushLimits.mutation(pushJSON, probe.mutations.single())
+        val reserved = PushLimits.reservedEnvelope(pushJSON, probe.clientID, probe.batchID, probe.schema.hash)
+        assertEquals(reserved.body, reserved.canonical)
+        assertTrue(element.canonical > element.body)
+        // The body measure fits bodyFit rows in one request, but the canonical measure fits one row fewer.
+        val bodyFit = 20
+        val title = ((PushLimits.MAX_REQUEST_OCTETS - reserved.body - bodyFit * element.body - (bodyFit - 1)) / bodyFit).toInt()
+        val (database, _, processor) = environment()
+        val titles = (0 until 2 * bodyFit).associate { index -> "${'a' + index / 10}${index % 10}" to "${index % 10}".repeat(title) }
+        titles.forEach { (id, text) -> insertOrder(database, id, text, score) }
+        val bodies = mutableListOf<String>()
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val body = request.body.readUtf8()
+                bodies += body
+                val sealed = pushJSON.decodeFromString<PushRequest>(body)
+                val accepted = sealed.mutations.map { mutation ->
+                    val recordID = mutation.pk.getValue("id").jsonPrimitive.content
+                    acceptedFor(mutation.mutationID, recordID, titles.getValue(recordID), "sv-${mutation.mutationID}")
+                }
+                return MockResponse().setBody(
+                    wireJSON.encodeToString(
+                        PushResponse(
+                            batchID = sealed.batchID,
+                            serverTime = "2026-01-01T01:00:00.000000Z",
+                            accepted = accepted,
+                            rejected = emptyList(),
+                        ),
+                    ),
+                )
+            }
+        }
+        server.start()
+        try {
+            var pushes = 0
+            while (
+                processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable)) != null
+            ) {
+                pushes += 1
+                assertTrue(pushes <= titles.size)
+            }
+
+            assertTrue(bodies.size >= 2)
+            assertTrue(bodies.sumOf { canonicalOctets(it) } > PushLimits.MAX_REQUEST_OCTETS)
+            assertEquals(bodyFit - 1, pushJSON.decodeFromString<PushRequest>(bodies.first()).mutations.size)
+            bodies.forEach { body ->
+                assertTrue(octets(body) <= PushLimits.MAX_REQUEST_OCTETS)
+                assertTrue(canonicalOctets(body) <= PushLimits.MAX_REQUEST_OCTETS)
+            }
+            val sealedIDs = bodies.flatMap { body ->
+                pushJSON.decodeFromString<PushRequest>(body).mutations.map { it.mutationID }
+            }
+            val ledgerIDs = database.query("SELECT mutation_id FROM _synchro_pending_changes ORDER BY local_order")
+                .map { it.getValue("mutation_id") }
+            assertEquals(titles.size, ledgerIDs.size)
+            assertEquals(ledgerIDs, sealedIDs)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun normalizedLimitIsInclusiveAndAnOversizeMutationLeavesTheQueue() = runTest {
+        val overhead = PushLimits.mutation(pushJSON, sealedEmptyTitleInsert().mutations.single()).normalized
+        val atLimit = PushLimits.MAX_NORMALIZED_MUTATION_OCTETS - overhead
+        val (database, tracker, processor) = environment()
+        insertOrder(database, "o1", "a".repeat(atLimit))
+        insertOrder(database, "o2", "b".repeat(atLimit + 1))
+        val currentHash = "1".repeat(64)
+        installTestSchema(database, 2, currentHash, listOf(localTable))
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("dependent", "o2"))
+        insertOrder(database, "o3", "later")
+        val exact = ledgerID(database, "o1")
+        val oversize = ledgerID(database, "o2")
+        val dependent = ledgerID(database, "o2", "update")
+        val later = ledgerID(database, "o3")
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            assertTrue(
+                runCatching {
+                    processor.processPush(http(server), "device-1", 1, 2, currentHash, listOf(localTable))
+                }.exceptionOrNull() is RetryableError,
+            )
+            val request = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+
+            assertEquals(listOf(exact, later), request.mutations.map { it.mutationID })
+            assertEquals(
+                PushLimits.MAX_NORMALIZED_MUTATION_OCTETS,
+                PushLimits.mutation(pushJSON, request.mutations.first()).normalized,
+            )
+            assertEquals("exceeds_push_limit", lifecycleState(database, oversize))
+            assertEquals("blocked_by_predecessor", lifecycleState(database, dependent))
+            assertTrue(
+                database.query(
+                    "SELECT 1 FROM _synchro_push_batch_members WHERE mutation_id = ?",
+                    arrayOf(oversize),
+                ).isEmpty(),
+            )
+            val retained = tracker.inspectRetainedMutations().single { it.mutationID == oversize }
+            assertEquals(LocalMutationStatus.EXCEEDS_PUSH_LIMIT, retained.status)
+            assertEquals(
+                AnyCodable("b".repeat(atLimit + 1)),
+                retained.authoredFields.single { it.fieldID == "title" }.value,
+            )
+            assertEquals(4, tracker.retainedMutationCount())
+            assertFalse(tracker.inspectPendingMutations().any { it.mutationID == oversize })
+            assertTrue(database.readTransaction { SynchroMeta.listRejectedMutations(it) }.isEmpty())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun authoredColumnLimitIsInclusive() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val database = databases.create(context)
+        val fields = (0..PushLimits.MAX_AUTHORED_COLUMNS).map { "c$it" }
+        val wide = SchemaTable(
+            tableName = "wide",
+            updatedAtColumn = "updated_at",
+            deletedAtColumn = "deleted_at",
+            primaryKey = listOf("id"),
+            columns = listOf(SchemaColumn("id", logicalType = "string", nullable = false, isPrimaryKey = true)) +
+                fields.map { SchemaColumn(it, logicalType = "string") } +
+                listOf(
+                    SchemaColumn("updated_at", logicalType = "datetime", nullable = false),
+                    SchemaColumn("deleted_at", logicalType = "datetime"),
+                ),
+        ).localSchema
+        val hash = "2".repeat(64)
+        installTestSchema(database, 1, hash, listOf(wide))
+        val processor = PushProcessor(database, ChangeTracker(database))
+        fun insertWide(id: String, columns: List<String>) {
+            database.execute(
+                "INSERT INTO wide (id, ${columns.joinToString()}, updated_at) VALUES (?, ${columns.joinToString { "?" }}, ?)",
+                arrayOf(id, *columns.toTypedArray(), "2026-01-01T00:00:00.000000Z"),
+            )
+        }
+        insertWide("w1", fields)
+        insertWide("w2", fields.dropLast(1))
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            assertTrue(
+                runCatching {
+                    processor.processPush(http(server), "device-1", 1, 1, hash, listOf(wide))
+                }.exceptionOrNull() is RetryableError,
+            )
+            val request = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+
+            assertEquals(listOf(ledgerID(database, "w2")), request.mutations.map { it.mutationID })
+            assertEquals(PushLimits.MAX_AUTHORED_COLUMNS, request.mutations.single().columns?.size)
+            assertEquals("exceeds_push_limit", lifecycleState(database, ledgerID(database, "w1")))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun sealingContinuesWhenEveryFirstPassCandidateExceedsALimit() = runTest {
+        val (database, _, processor) = environment()
+        insertOrder(database, "o1", "x".repeat(PushLimits.MAX_NORMALIZED_MUTATION_OCTETS))
+        insertOrder(database, "o2", "y".repeat(PushLimits.MAX_NORMALIZED_MUTATION_OCTETS))
+        insertOrder(database, "o3", "fits")
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            assertTrue(
+                runCatching {
+                    processor.processPush(
+                        http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable), batchSize = 2,
+                    )
+                }.exceptionOrNull() is RetryableError,
+            )
+            val request = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+
+            assertEquals(listOf(ledgerID(database, "o3")), request.mutations.map { it.mutationID })
+            assertEquals(
+                listOf("exceeds_push_limit", "exceeds_push_limit"),
+                listOf("o1", "o2").map { lifecycleState(database, ledgerID(database, it)) },
+            )
+            assertEquals(1, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun reservedEnvelopeKeepsARenewedSuccessorWithinTheRequestLimit() = runTest {
+        val probe = sealedEmptyTitleInsert()
+        val probeEnvelope = PushLimits.envelope(pushJSON, probe)
+        val probeElement = PushLimits.mutation(pushJSON, probe.mutations.single())
+        val envelope = maxOf(probeEnvelope.body, probeEnvelope.canonical)
+        val element = maxOf(probeElement.body, probeElement.canonical).toLong()
+        val title = 60_000
+        // Each reserve adds 15 octets. The last row fits only when the sealer omits a reserve.
+        // Then the renewed successor is larger than the limit.
+        val slack = 20L
+        val fullRows = ((PushLimits.MAX_REQUEST_OCTETS - slack - envelope - element) / (element + title + 1)).toInt()
+        val lastTitle = PushLimits.MAX_REQUEST_OCTETS - slack - envelope - fullRows * (element + title + 1) - element
+        val (database, _, processor) = environment()
+        (0 until fullRows).forEach { index -> insertOrder(database, "r${'a' + index}", "x".repeat(title)) }
+        insertOrder(database, "zz", "x".repeat(lastTitle.toInt()))
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(409).setBody(
+                """
+                {"error":{"code":"client_generation_expired","message":"generation expired","retryable":false,"current_client_generation":2}}
+                """.trimIndent(),
+            ),
+        )
+        server.start()
+        try {
+            assertTrue(
+                runCatching {
+                    processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable))
+                }.exceptionOrNull() is PushRenewalRequiredException,
+            )
+            val original = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+            assertEquals(fullRows, original.mutations.size)
+
+            val renewedHash = "3".repeat(64)
+            installTestSchema(database, PushLimits.MAX_PROTOCOL_INTEGER, renewedHash, listOf(localTable))
+            assertTrue(
+                processor.renewRequiredBatches(
+                    "device-1",
+                    PushLimits.MAX_PROTOCOL_INTEGER,
+                    PushLimits.MAX_PROTOCOL_INTEGER,
+                    renewedHash,
+                    listOf(localTable),
+                ),
+            )
+            val successorJSON = database.queryOne(
+                "SELECT request_json FROM _synchro_push_batches WHERE state = 'pending'",
+            )!!.getValue("request_json") as String
+            val successor = pushJSON.decodeFromString<PushRequest>(successorJSON)
+
+            assertEquals(PushLimits.MAX_PROTOCOL_INTEGER, successor.clientGeneration)
+            assertEquals(SchemaRef(PushLimits.MAX_PROTOCOL_INTEGER, renewedHash), successor.schema)
+            assertEquals(original.mutations.map { it.mutationID }, successor.mutations.map { it.mutationID })
+            assertTrue(octets(successorJSON) <= PushLimits.MAX_REQUEST_OCTETS)
+            assertTrue(canonicalOctets(successorJSON) <= PushLimits.MAX_REQUEST_OCTETS)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun invalidStoredValueKeepsTheInvalidResponseErrorAtSeal() = runTest {
+        val (database, _, processor) = environment()
+        insertOrder(database, "o1", "valid")
+        // The UTF-8 octets ED A0 80 decode to an unpaired surrogate.
+        database.execute("UPDATE _synchro_mutation_values SET value_text = CAST(x'EDA080' AS TEXT) WHERE field_id = 'title'")
+        val server = MockWebServer()
+        server.start()
+        try {
+            val failure = runCatching {
+                processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable))
+            }.exceptionOrNull()
+
+            assertTrue(failure is SynchroError.InvalidResponse)
+            assertEquals("captured", lifecycleState(database, ledgerID(database, "o1")))
+            assertEquals(0, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun slashOnlyTextAtTheNormalizedLimitSealsAloneBelowTheRequestLimit() = runTest {
+        val overhead = PushLimits.mutation(pushJSON, sealedEmptyTitleInsert().mutations.single()).normalized
+        val (database, _, processor) = environment()
+        insertOrder(database, "o1", "/".repeat(PushLimits.MAX_NORMALIZED_MUTATION_OCTETS - overhead))
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            sealWithRetryableFailure(processor, server)
+            val body = server.takeRequest().body.readUtf8()
+            val request = pushJSON.decodeFromString<PushRequest>(body)
+
+            assertEquals(
+                PushLimits.MAX_NORMALIZED_MUTATION_OCTETS,
+                PushLimits.mutation(pushJSON, request.mutations.single()).normalized,
+            )
+            assertTrue(octets(body) < PushLimits.MAX_REQUEST_OCTETS)
+            assertTrue(canonicalOctets(body) < PushLimits.MAX_REQUEST_OCTETS)
         } finally {
             server.shutdown()
         }

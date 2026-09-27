@@ -485,4 +485,126 @@ final class IntegrationTests: XCTestCase {
         XCTAssertEqual(collector.snapshot().observations.count, 1)
     }
 
+    func testPushDrainsQueueAboveRequestLimitInSeveralBatchesAgainstExtension() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await self.stopAndClose(writer)
+            await self.stopAndClose(reader)
+        }
+        try await writer.start()
+        await writer.enterBackground()
+        let names = Dictionary(uniqueKeysWithValues: (0..<20).map { index in
+            (UUID().uuidString.lowercased(), String(format: "%02d", index) + String(repeating: "n", count: 60_000))
+        })
+        _ = try writer.executeBatch(names.map { customerID, name in
+            customerInsert(customerID: customerID, userID: userID, name: name)
+        })
+        let queueCanonicalOctets = try writer.inspectPendingMutations().reduce(0) { total, pending in
+            total + (try pushMeasure(pending).element.canonical)
+        }
+        XCTAssertGreaterThan(queueCanonicalOctets, PushLimits.maxRequestOctets)
+
+        try await writer.enterForeground()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try writer.pendingChangeCount() == 0
+        }
+
+        let capture = try writer.inspectClientStateCapture(maximumRecords: 1)
+        XCTAssertGreaterThanOrEqual(capture.sealedBatchCount, 2)
+        XCTAssertEqual(capture.mutationOutcomeCount, names.count)
+        XCTAssertEqual(capture.rejectedMutationCount, 0)
+        XCTAssertTrue(try writer.inspectRetainedMutations().isEmpty)
+        XCTAssertEqual(try customerNames(writer, userID: userID), names)
+        try await reader.start()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(reader)
+            return try self.customerNames(reader, userID: userID) == names
+        }
+    }
+
+    func testPushAppliesNormalizedMutationLimitAgainstExtension() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await self.stopAndClose(writer)
+            await self.stopAndClose(reader)
+        }
+        try await writer.start()
+        await writer.enterBackground()
+        let probeID = UUID().uuidString.lowercased()
+        _ = try writer.executeBatch([customerInsert(customerID: probeID, userID: userID, name: "")])
+        let probe = try XCTUnwrap(writer.inspectPendingMutations().first { $0.recordID == probeID })
+        XCTAssertEqual(probe.authoredFields.filter { $0.value == AnyCodable("") }.count, 1)
+        let emptyNameOctets = try pushMeasure(probe).normalizedJSON.count
+        let fitID = UUID().uuidString.lowercased()
+        let oversizeID = UUID().uuidString.lowercased()
+        let laterID = UUID().uuidString.lowercased()
+        let fitName = String(repeating: "f", count: PushLimits.maxNormalizedMutationOctets - emptyNameOctets)
+        let oversizeName = String(repeating: "o", count: PushLimits.maxNormalizedMutationOctets + 1 - emptyNameOctets)
+        _ = try writer.executeBatch([
+            customerInsert(customerID: fitID, userID: userID, name: fitName),
+            customerInsert(customerID: oversizeID, userID: userID, name: oversizeName),
+            customerInsert(customerID: laterID, userID: userID, name: "later row"),
+        ])
+        let pending = try writer.inspectPendingMutations()
+        let fit = try XCTUnwrap(pending.first { $0.recordID == fitID })
+        let oversize = try XCTUnwrap(pending.first { $0.recordID == oversizeID })
+        XCTAssertEqual(try pushMeasure(fit).normalizedJSON.count, PushLimits.maxNormalizedMutationOctets)
+        XCTAssertEqual(try pushMeasure(oversize).normalizedJSON.count, PushLimits.maxNormalizedMutationOctets + 1)
+
+        try await writer.enterForeground()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try writer.pendingChangeCount() == 0
+        }
+
+        let retained = try writer.inspectRetainedMutations()
+        XCTAssertEqual(retained.map(\.mutationID), [oversize.mutationID])
+        XCTAssertEqual(retained.first?.status, .exceedsPushLimit)
+        XCTAssertTrue(try writer.inspectRejectedMutations().isEmpty)
+        XCTAssertEqual(
+            try writer.queryOne(
+                "SELECT COUNT(*) AS count FROM _synchro_push_batch_members WHERE mutation_id = ?",
+                params: [oversize.mutationID]
+            )?["count"] as Int?,
+            0
+        )
+        let expected = [probeID: "", fitID: fitName, laterID: "later row"]
+        try await reader.start()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(reader)
+            return try self.customerNames(reader, userID: userID) == expected
+        }
+    }
+
+    private func customerInsert(customerID: String, userID: String, name: String) -> SQLStatement {
+        SQLStatement(
+            sql: "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            params: [customerID, userID, name, "2026-01-08T00:00:00.000Z", "2026-01-08T00:00:00.000Z"]
+        )
+    }
+
+    private func customerNames(_ client: SynchroClient, userID: String) throws -> [String: String] {
+        let rows = try client.query("SELECT id, name FROM customers WHERE user_id = ?", params: [userID])
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0["id"] as String, $0["name"] as String) })
+    }
+
+    /// Measures the push form of a pending mutation as the push path sends it.
+    private func pushMeasure(_ pending: PendingMutationInspection) throws -> PushLimits.MutationMeasure {
+        try PushLimits.measure(
+            Mutation(
+                mutationID: pending.mutationID,
+                table: pending.tableID,
+                op: pending.operation,
+                pk: [pending.primaryKeyFieldID: AnyCodable(pending.recordID)],
+                authoredSchema: pending.authoredSchema,
+                baseVersion: pending.baseVersion,
+                clientVersion: pending.clientVersion,
+                columns: Dictionary(uniqueKeysWithValues: pending.authoredFields.map { ($0.fieldID, $0.value) })
+            ),
+            encoder: JSONEncoder.synchroEncoder()
+        )
+    }
 }

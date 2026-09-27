@@ -74,8 +74,9 @@ normalized because protocol version 3 has no resurrection.
 If a predecessor mutation is already sealed or transmitted, a later update or
 delete without a usable server base remains a durable dependent local intent
 and is not placed on the wire. An accepted predecessor supplies the opaque base
-for a new normal mutation. A conflicted or rejected predecessor leaves the
-dependent intent in inspectable `blocked_by_predecessor` state. No dependent
+for a new normal mutation. A conflicted or rejected predecessor, or a
+predecessor that exceeds a push limit, leaves the dependent intent in
+inspectable `blocked_by_predecessor` state. No dependent
 intent is silently discarded or sent with a fabricated version.
 
 Mutation identity is unique across all batches for the scoped client. A request containing the same `mutation_id` more than once is invalid. Moving an already completed mutation into another batch does not authorize re-execution.
@@ -226,7 +227,7 @@ session non-replayable even after WAL materialization catches up.
 
 ### Exact mutation shapes
 
-The push envelope contains the bound `client_id`, positive `client_generation`, UUID `batch_id`, request `schema`, and an ordered `mutations` array containing `1..1000` entries. The decoded JSON request body is at most 1,048,576 octets. Each normalized mutation is at most 65,536 octets and contains at most 256 authored columns. The server enforces byte limits while reading and before ledger allocation, fingerprinting, policy execution, or source DML. Unknown envelope members and any missing, nonpositive, or exceeded limit are invalid. First execution requires the exact current client generation and schema; exact replay uses the sealed values stored with the completed batch.
+The push envelope contains the bound `client_id`, positive `client_generation`, UUID `batch_id`, request `schema`, and an ordered `mutations` array containing `1..1000` entries. The decoded JSON request body is at most 1,048,576 octets. The RFC 8785 form of the parsed request is also at most 1,048,576 octets. Each normalized mutation is at most 65,536 octets and contains at most 256 authored columns. The server enforces byte limits while reading and before ledger allocation, fingerprinting, policy execution, or source DML. Unknown envelope members and any missing, nonpositive, or exceeded limit are invalid. First execution requires the exact current client generation and schema; exact replay uses the sealed values stored with the completed batch.
 
 Every mutation contains a UUID `mutation_id`, immutable logical table ID, one-field typed `pk`, immutable `authored_schema` version and hash, one of the three push operations, and `client_version`. Authored column entries use immutable field IDs and retain their values.
 

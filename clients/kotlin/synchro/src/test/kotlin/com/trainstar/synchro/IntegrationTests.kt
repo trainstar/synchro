@@ -4,8 +4,13 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
@@ -116,6 +121,37 @@ class IntegrationTests {
         )
     }
 
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private val pushJSON = Json {
+        ignoreUnknownKeys = false
+        encodeDefaults = true
+        explicitNulls = false
+    }
+
+    private fun database(client: SynchroClient): SynchroDatabase =
+        SynchroClient::class.java.getDeclaredField("database").apply { isAccessible = true }.get(client) as SynchroDatabase
+
+    private fun insertCustomer(userID: String, customerID: String, name: String): SQLStatement =
+        SQLStatement(
+            "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
+            arrayOf(customerID, userID, name, "2026-01-05T00:00:00.000Z", "2026-01-05T00:00:00.000Z"),
+        )
+
+    private fun sentRequests(database: SynchroDatabase): List<Pair<String, PushRequest>> =
+        database.query("SELECT request_json FROM _synchro_push_batches WHERE state = 'completed'")
+            .map { row ->
+                val body = row.getValue("request_json") as String
+                body to pushJSON.decodeFromString<PushRequest>(body)
+            }
+
+    private fun octets(text: String): Int = text.toByteArray(Charsets.UTF_8).size
+
+    private fun ledgerState(database: SynchroDatabase, recordID: String): Any? =
+        database.queryOne(
+            "SELECT lifecycle_state FROM _synchro_pending_changes WHERE table_name = 'customers' AND record_id = ?",
+            arrayOf(recordID),
+        )?.get("lifecycle_state")
 
     private suspend fun waitForCondition(timeoutMs: Long = 5000, intervalMs: Long = 250, condition: suspend () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -239,4 +275,114 @@ class IntegrationTests {
         }
     }
 
+    @Test
+    fun testPushQueueOverTheRequestLimitDrainsInSeveralBatches() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val clientA = SynchroClient(makeConfig(userID = userID), context)
+        val clientB = SynchroClient(makeConfig(userID = userID), context)
+        val names = (0 until 20).associate { index -> UUID.randomUUID().toString() to "${'a' + index}".repeat(60_000) }
+
+        try {
+            clientA.start()
+            clientA.executeBatch(names.map { (id, name) -> insertCustomer(userID, id, name) })
+            val database = database(clientA)
+            waitForCondition(timeoutMs = 30_000) {
+                clientA.syncNow()
+                names.keys.all { ledgerState(database, it) == "accepted" }
+            }
+
+            val requests = sentRequests(database)
+            assertTrue(requests.size >= 2)
+            assertTrue(
+                requests.sumOf { (body, _) -> octets(Integrity.canonicalJSON(Json.parseToJsonElement(body))) } >
+                    PushLimits.MAX_REQUEST_OCTETS,
+            )
+            requests.forEach { (body, _) ->
+                assertTrue(octets(body) <= PushLimits.MAX_REQUEST_OCTETS)
+                assertTrue(octets(Integrity.canonicalJSON(Json.parseToJsonElement(body))) <= PushLimits.MAX_REQUEST_OCTETS)
+            }
+            val sentIDs = requests.flatMap { (_, request) -> request.mutations.map { it.mutationID } }
+            val ledgerIDs = database.query(
+                "SELECT mutation_id FROM _synchro_pending_changes WHERE table_name = 'customers'",
+            ).map { it.getValue("mutation_id") }
+            assertEquals(names.size, sentIDs.size)
+            assertEquals(ledgerIDs.toSet(), sentIDs.toSet())
+            assertEquals(
+                names,
+                clientA.query("SELECT id, name FROM customers").associate { it["id"] as String to it["name"] as String },
+            )
+
+            clientB.start()
+            waitForCondition(timeoutMs = 30_000) {
+                clientB.syncNow()
+                clientB.query("SELECT id, name FROM customers")
+                    .associate { it["id"] as String to it["name"] as String } == names
+            }
+        } finally {
+            clientA.stop()
+            clientA.close()
+            clientB.stop()
+            clientB.close()
+        }
+    }
+
+    @Test
+    fun testNormalizedMutationLimitAtTheServer() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val clientA = SynchroClient(makeConfig(userID = userID), context)
+        val clientB = SynchroClient(makeConfig(userID = userID), context)
+        val probeID = UUID.randomUUID().toString()
+        val exactID = UUID.randomUUID().toString()
+        val oversizeID = UUID.randomUUID().toString()
+        val laterID = UUID.randomUUID().toString()
+
+        try {
+            clientA.start()
+            val database = database(clientA)
+            clientA.executeBatch(listOf(insertCustomer(userID, probeID, "")))
+            waitForCondition(timeoutMs = 30_000) {
+                clientA.syncNow()
+                ledgerState(database, probeID) == "accepted"
+            }
+            val probe = sentRequests(database).single().second.mutations.single()
+            val atLimit = PushLimits.MAX_NORMALIZED_MUTATION_OCTETS - PushLimits.mutation(pushJSON, probe).normalized
+            val exactName = "e".repeat(atLimit)
+
+            clientA.executeBatch(
+                listOf(
+                    insertCustomer(userID, exactID, exactName),
+                    insertCustomer(userID, oversizeID, "o".repeat(atLimit + 1)),
+                    insertCustomer(userID, laterID, "later"),
+                ),
+            )
+            waitForCondition(timeoutMs = 30_000) {
+                clientA.syncNow()
+                ledgerState(database, exactID) == "accepted" && ledgerState(database, laterID) == "accepted"
+            }
+
+            val sent = sentRequests(database).flatMap { (_, request) -> request.mutations }
+            val exact = sent.single { it.pk.values.single().jsonPrimitive.content == exactID }
+            assertEquals(PushLimits.MAX_NORMALIZED_MUTATION_OCTETS, PushLimits.mutation(pushJSON, exact).normalized)
+            assertTrue(sent.none { it.pk.values.single().jsonPrimitive.content == oversizeID })
+            assertEquals("exceeds_push_limit", ledgerState(database, oversizeID))
+            assertEquals(
+                LocalMutationStatus.EXCEEDS_PUSH_LIMIT,
+                clientA.inspectRetainedMutations().single { it.recordID == oversizeID }.status,
+            )
+
+            clientB.start()
+            waitForCondition(timeoutMs = 30_000) {
+                clientB.syncNow()
+                val later = clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(laterID))
+                val exactRow = clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(exactID))
+                later?.get("name") == "later" && exactRow?.get("name") == exactName
+            }
+            assertNull(clientB.queryOne("SELECT id FROM customers WHERE id = ?", arrayOf(oversizeID)))
+        } finally {
+            clientA.stop()
+            clientA.close()
+            clientB.stop()
+            clientB.close()
+        }
+    }
 }

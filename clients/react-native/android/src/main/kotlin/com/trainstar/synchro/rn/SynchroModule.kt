@@ -1451,6 +1451,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         LocalMutationStatus.CANCELLED_BEFORE_SEND -> "cancelled_before_send"
         LocalMutationStatus.BLOCKED_BY_PREDECESSOR -> "blocked_by_predecessor"
         LocalMutationStatus.SERVER_REJECTED -> "server_rejected"
+        LocalMutationStatus.EXCEEDS_PUSH_LIMIT -> "exceeds_push_limit"
     }
 
     private fun mutationStatusWireValue(status: MutationStatus): String = when (status) {

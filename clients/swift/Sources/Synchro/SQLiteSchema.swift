@@ -215,7 +215,7 @@ enum SQLiteSchema {
                AND pk_field_id = \(sqlLiteral(safePKFieldID))
                AND pk_logical_type = \(sqlLiteral(safePKLogicalType))
                AND record_id = CAST(\(recordReference) AS TEXT)
-               AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+               AND lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
              ORDER BY local_order DESC LIMIT 1)
             """
         }

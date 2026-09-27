@@ -96,7 +96,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-PG-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-IDEMPOTENCY-003-FAULT-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-PG-LINUX-X64-001", []string{"TestRealIssue49RemainingSemantics"}},
-	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-FAULT-LINUX-X64-001", []string{"TestRealIssue49FirstPushResponseFailureRollsBackEveryDurableEffect", "TestRealIssue49RemainingSemantics"}},
+	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-ATOMICITY-001-FAULT-LINUX-X64-001", []string{"TestRealIssue49FirstPushLateFailureRollsBackEveryDurableEffect", "TestRealIssue49RemainingSemantics"}},
 	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-PG-LINUX-X64-001", []string{"TestRealS04RebuildRejectsForgedCursorAndFreezesBoundary", "TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-REBUILD-FORGED-CURSOR-001", "OBL-REBUILD-FORGED-CURSOR-EPOCH-FAULT-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
 	{"SCN-SCHEMA-QUEUED-MUTATION-001", "OBL-SCHEMA-QUEUED-MUTATION-PG-LINUX-X64-001", []string{"TestRealSchemaIncompatibleMutationPersistsCanonicalIntent", "TestRealIssue49PublishedSchemaIdentityIsImmutable"}},

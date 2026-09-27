@@ -355,7 +355,7 @@ internal object Integrity {
         return true
     }
 
-    private fun canonicalJSON(value: JsonElement): String = when (value) {
+    internal fun canonicalJSON(value: JsonElement): String = when (value) {
         JsonNull -> "null"
         is JsonPrimitive -> when {
             value.isString -> {
@@ -602,7 +602,7 @@ internal object Integrity {
         return output.toString()
     }
 
-    private fun compareUnsigned(left: ByteArray, right: ByteArray): Int {
+    internal fun compareUnsigned(left: ByteArray, right: ByteArray): Int {
         val count = minOf(left.size, right.size)
         for (index in 0 until count) {
             val comparison = (left[index].toInt() and 0xff).compareTo(right[index].toInt() and 0xff)

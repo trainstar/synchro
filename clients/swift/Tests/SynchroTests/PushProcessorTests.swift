@@ -33,6 +33,20 @@ final class PushProcessorTests: XCTestCase {
         ]
     )
 
+    private let notesTable = SchemaTable(
+        tableName: "notes",
+        updatedAtColumn: "updated_at",
+        deletedAtColumn: "deleted_at",
+        primaryKey: ["id"],
+        columns: [
+            SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            SchemaColumn(name: "body", logicalType: "string", nullable: true),
+            SchemaColumn(name: "score", logicalType: "float", nullable: true),
+            SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
+        ]
+    )
+
     private func makeTestEnv(table: SchemaTable? = nil) throws -> (SynchroDatabase, ChangeTracker, PushProcessor) {
         let t = table ?? testTable
         let tmpDir = NSTemporaryDirectory()
@@ -1416,5 +1430,530 @@ final class PushProcessorTests: XCTestCase {
 
         // sync_lock should have prevented CDC triggers from re-queuing
         XCTAssertFalse(try tracker.hasPendingChanges())
+    }
+
+    // MARK: - Push limits
+
+    func testPushRequestOctetsComposeFromEnvelopeAndMutationElements() async throws {
+        let (db, tracker, processor) = try makeTestEnv(table: notesTable)
+        _ = try db.execute(
+            "INSERT INTO notes (id, body, score, updated_at) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+            params: ["n2", "old", 1.0, "2026-01-01T10:00:00.000Z", "n3", "old", 2.0, "2026-01-01T10:00:00.000Z"]
+        )
+        try db.writeTransaction { connection in
+            for recordID in ["n2", "n3"] {
+                try SynchroMeta.upsertRowVersion(
+                    connection,
+                    tableName: "notes",
+                    recordID: recordID,
+                    serverVersion: "opaque-\(recordID)",
+                    rowChecksum: nil
+                )
+            }
+        }
+        try tracker.clearAll()
+        _ = try db.execute(
+            "INSERT INTO notes (id, body, score, updated_at) VALUES (?, ?, ?, ?)",
+            params: [
+                "n1",
+                "quote \" back \\ slash / tab \t line \n control \u{01} é 😀 \u{2028}",
+                1.5e-7,
+                "2026-01-01T10:00:00.000Z",
+            ]
+        )
+        _ = try db.execute("UPDATE notes SET body = ?, score = ? WHERE id = ?", params: ["ünïcödé / ✓", 1e21, "n2"])
+        _ = try db.execute("DELETE FROM notes WHERE id = ?", params: ["n3"])
+
+        let body = try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [notesTable])
+
+        let encoder = JSONEncoder.synchroEncoder()
+        let request = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: body)
+        XCTAssertEqual(try encoder.encode(request), body)
+        XCTAssertEqual(request.mutations.map(\.op), [.insert, .update, .delete])
+        var envelope = request
+        envelope.mutations = []
+        var composed = try PushLimits.requestOctets(envelope, encoder: encoder)
+        for (index, mutation) in request.mutations.enumerated() {
+            composed = composed.appending(
+                try PushLimits.measure(mutation, encoder: encoder).element,
+                afterElement: index > 0
+            )
+        }
+        let complete = try requestOctets(body)
+        XCTAssertEqual(composed, complete)
+        XCTAssertNotEqual(complete.body, complete.canonical)
+        XCTAssertEqual(try PushLimits.measure(request.mutations[2], encoder: encoder).authoredColumns, 0)
+    }
+
+    func testSealSplitsPendingEntriesAtCanonicalRequestOctetLimit() async throws {
+        let (db, _, processor) = try makeTestEnv(table: notesTable)
+        let encoder = JSONEncoder.synchroEncoder()
+        let decoder = JSONDecoder.synchroDecoder()
+        let reserve = try PushLimits.envelopeReserve(
+            clientID: "test-device",
+            batchID: UUID().uuidString.lowercased(),
+            schemaHash: protocolTestSchemaHash,
+            encoder: encoder
+        )
+        // The body writes the score 1e20 as 1e+20 and RFC 8785 writes all 21 digits.
+        // All rows fit in one request by body octets but not by canonical octets.
+        let emptyInsert = try PushLimits.measure(notesInsert(recordID: "n00", body: ""), encoder: encoder)
+        let maxText = PushLimits.maxNormalizedMutationOctets - emptyInsert.normalizedJSON.count
+        let available = PushLimits.maxRequestOctets - reserve.body + 1
+        let elementStep = emptyInsert.element.body + 1
+        let count = (available + elementStep + maxText - 1) / (elementStep + maxText)
+        let totalText = available - count * elementStep
+        for index in 0..<count {
+            let length = totalText / count + (index < totalText % count ? 1 : 0)
+            _ = try db.execute(
+                "INSERT INTO notes (id, body, score, updated_at) VALUES (?, ?, ?, ?)",
+                params: [
+                    String(format: "n%02d", index),
+                    String(repeating: "a", count: length),
+                    1e20,
+                    "2026-01-01T10:00:00.000Z",
+                ]
+            )
+        }
+        let localOrder = try db.query(
+            "SELECT mutation_id FROM _synchro_pending_changes ORDER BY local_order",
+            params: nil
+        ).map { $0["mutation_id"] as String }
+        XCTAssertEqual(localOrder.count, count)
+
+        let (httpClient, session) = makeMockPushClient(dbPath: db.path)
+        defer {
+            MockURLProtocol.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        var bodies: [Data] = []
+        MockURLProtocol.requestHandler = { [notesTable] request in
+            let body = try XCTUnwrap(request.bodyData())
+            bodies.append(body)
+            let pushRequest = try decoder.decode(PushRequest.self, from: body)
+            let accepted = try pushRequest.mutations.map { mutation in
+                var serverRow = try XCTUnwrap(mutation.columns)
+                serverRow["id"] = try XCTUnwrap(mutation.pk["id"])
+                serverRow["updated_at"] = AnyCodable("2026-01-01T11:00:00.000000Z")
+                serverRow["deleted_at"] = AnyCodable(NSNull())
+                return try makeAcceptedMutation(
+                    mutationID: mutation.mutationID,
+                    schema: notesTable,
+                    pk: mutation.pk,
+                    status: .applied,
+                    serverRow: serverRow,
+                    serverVersion: "opaque-\(mutation.mutationID)"
+                )
+            }
+            let response = PushResponse(
+                batchID: pushRequest.batchID,
+                serverTime: "2026-01-01T11:00:00.000000Z",
+                accepted: accepted,
+                rejected: []
+            )
+            let httpResponse = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            // The client accepts only canonical numbers in a response.
+            return (httpResponse, try PushLimits.canonicalJSON(encoder.encode(response)))
+        }
+        for _ in localOrder {
+            let outcome = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "test-device",
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [notesTable]
+            )
+            if outcome == nil { break }
+        }
+
+        XCTAssertGreaterThanOrEqual(bodies.count, 2)
+        var sealedIDs: [String] = []
+        var singleRequest = reserve
+        for body in bodies {
+            let octets = try requestOctets(body)
+            XCTAssertLessThanOrEqual(octets.body, PushLimits.maxRequestOctets)
+            XCTAssertLessThanOrEqual(octets.canonical, PushLimits.maxRequestOctets)
+            for mutation in try decoder.decode(PushRequest.self, from: body).mutations {
+                singleRequest = singleRequest.appending(
+                    try PushLimits.measure(mutation, encoder: encoder).element,
+                    afterElement: !sealedIDs.isEmpty
+                )
+                sealedIDs.append(mutation.mutationID)
+            }
+        }
+        XCTAssertLessThanOrEqual(singleRequest.body, PushLimits.maxRequestOctets)
+        XCTAssertGreaterThan(singleRequest.canonical, PushLimits.maxRequestOctets)
+        XCTAssertEqual(sealedIDs, localOrder)
+        XCTAssertEqual(
+            try db.queryOne("SELECT COUNT(*) AS count FROM _synchro_push_batch_members", params: nil)?["count"] as Int?,
+            localOrder.count
+        )
+        XCTAssertEqual(
+            try db.queryOne(
+                "SELECT COUNT(*) AS count FROM _synchro_pending_changes WHERE lifecycle_state = 'accepted'",
+                params: nil
+            )?["count"] as Int?,
+            localOrder.count
+        )
+    }
+
+    func testSealMovesOversizeMutationToLocalTerminalStateAndSealsLaterRow() async throws {
+        let (db, tracker, processor) = try makeTestEnv()
+        let encoder = JSONEncoder.synchroEncoder()
+        try insertOrder(db, id: "w-fit", address: ordersAddress(recordID: "w-fit", normalizedOctets: 65_536))
+        let oversizeAddress = try ordersAddress(recordID: "w-big", normalizedOctets: 65_537)
+        try insertOrder(db, id: "w-big", address: oversizeAddress)
+        try insertOrder(db, id: "w-end", address: "later row")
+        _ = try db.execute(
+            "UPDATE orders SET deleted_at = ? WHERE id = ?",
+            params: ["2026-01-01T10:30:00.000Z", "w-big"]
+        )
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["after delete", "w-big"])
+        let fitID = try mutationID(db, recordID: "w-fit", operation: "insert")
+        let oversizeID = try mutationID(db, recordID: "w-big", operation: "insert")
+        let laterID = try mutationID(db, recordID: "w-end", operation: "insert")
+        let dependentIDs = try db.query(
+            "SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = ? AND operation <> 'insert'",
+            params: ["w-big"]
+        ).map { $0["mutation_id"] as String }
+        XCTAssertEqual(dependentIDs.count, 2)
+
+        let request = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [testTable])
+        )
+
+        XCTAssertEqual(request.mutations.map(\.mutationID), [fitID, laterID])
+        XCTAssertEqual(try PushLimits.measure(request.mutations[0], encoder: encoder).normalizedJSON.count, 65_536)
+        XCTAssertEqual(try lifecycleState(db, mutationID: oversizeID), "exceeds_push_limit")
+        for dependentID in dependentIDs {
+            XCTAssertEqual(try lifecycleState(db, mutationID: dependentID), "blocked_by_predecessor")
+        }
+        let retained = try XCTUnwrap(tracker.inspectRetainedMutations().first { $0.mutationID == oversizeID })
+        XCTAssertEqual(retained.status, .exceedsPushLimit)
+        XCTAssertEqual(
+            retained.authoredFields.first { $0.fieldID == "ship_address" }?.value,
+            AnyCodable(oversizeAddress)
+        )
+        let retainedMutation = Mutation(
+            mutationID: retained.mutationID,
+            table: retained.tableID,
+            op: retained.operation,
+            pk: [retained.primaryKeyFieldID: AnyCodable(retained.recordID)],
+            authoredSchema: retained.authoredSchema,
+            baseVersion: retained.baseVersion,
+            clientVersion: retained.clientVersion,
+            columns: Dictionary(uniqueKeysWithValues: retained.authoredFields.map { ($0.fieldID, $0.value) })
+        )
+        XCTAssertEqual(try PushLimits.measure(retainedMutation, encoder: encoder).normalizedJSON.count, 65_537)
+        XCTAssertFalse(try tracker.inspectPendingMutations().contains { $0.mutationID == oversizeID })
+        XCTAssertTrue(try db.readTransaction { try SynchroMeta.listRejectedMutations($0) }.isEmpty)
+        XCTAssertNil(try db.queryOne(
+            "SELECT batch_id FROM _synchro_push_batch_members WHERE mutation_id = ?",
+            params: [oversizeID]
+        ))
+    }
+
+    func testSealMovesMutationAboveAuthoredColumnLimitToLocalTerminalState() async throws {
+        let authoredColumns = (0...PushLimits.maxAuthoredColumns).map { SchemaColumn(name: String(format: "c%03d", $0)) }
+        let wideTable = SchemaTable(
+            tableName: "wide_items",
+            updatedAtColumn: "updated_at",
+            deletedAtColumn: "deleted_at",
+            primaryKey: ["id"],
+            columns: [SchemaColumn(name: "id", nullable: false, isPrimaryKey: true)]
+                + authoredColumns
+                + [
+                    SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+                    SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
+                ]
+        )
+        let (db, _, processor) = try makeTestEnv(table: wideTable)
+        func insert(id: String, columns: ArraySlice<SchemaColumn>) throws {
+            let names = ["id"] + columns.map(\.name) + ["updated_at"]
+            let values = [id] + columns.map { _ in "v" } + ["2026-01-01T10:00:00.000Z"]
+            _ = try db.execute(
+                "INSERT INTO wide_items (\(names.joined(separator: ", "))) VALUES (\(names.map { _ in "?" }.joined(separator: ", ")))",
+                params: values
+            )
+        }
+        try insert(id: "w257", columns: authoredColumns[...])
+        try insert(id: "w256", columns: authoredColumns.dropLast())
+        let overLimitID = try mutationID(db, recordID: "w257", operation: "insert")
+        let atLimitID = try mutationID(db, recordID: "w256", operation: "insert")
+
+        let request = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [wideTable])
+        )
+
+        XCTAssertEqual(request.mutations.map(\.mutationID), [atLimitID])
+        XCTAssertEqual(request.mutations[0].columns?.count, PushLimits.maxAuthoredColumns)
+        XCTAssertEqual(try lifecycleState(db, mutationID: overLimitID), "exceeds_push_limit")
+    }
+
+    func testSealReadsNextCandidatesWhenEveryCandidateExceedsLimits() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        let oversizeAddress = String(repeating: "a", count: PushLimits.maxNormalizedMutationOctets)
+        try insertOrder(db, id: "w1", address: oversizeAddress)
+        try insertOrder(db, id: "w2", address: oversizeAddress)
+        try insertOrder(db, id: "w3", address: "fits")
+        let oversizeIDs = try ["w1", "w2"].map { try mutationID(db, recordID: $0, operation: "insert") }
+        let fitID = try mutationID(db, recordID: "w3", operation: "insert")
+
+        let request = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: try await sealBatchWithLostResponse(
+                db,
+                processor: processor,
+                syncedTables: [testTable],
+                batchSize: oversizeIDs.count
+            )
+        )
+
+        XCTAssertEqual(request.mutations.map(\.mutationID), [fitID])
+        for oversizeID in oversizeIDs {
+            XCTAssertEqual(try lifecycleState(db, mutationID: oversizeID), "exceeds_push_limit")
+        }
+    }
+
+    func testBatchSealedNearRequestLimitRenewsWithinLimitsAtMaximumGeneration() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        let encoder = JSONEncoder.synchroEncoder()
+        let decoder = JSONDecoder.synchroDecoder()
+        let envelope = try PushLimits.requestOctets(
+            PushRequest(
+                clientID: "test-device",
+                clientGeneration: 1,
+                batchID: UUID().uuidString.lowercased(),
+                schema: SchemaRef(version: 1, hash: protocolTestSchemaHash),
+                mutations: []
+            ),
+            encoder: encoder
+        )
+        let emptyInsert = try PushLimits.measure(ordersInsert(recordID: "r00", address: ""), encoder: encoder)
+        XCTAssertEqual(envelope.body, envelope.canonical)
+        XCTAssertEqual(emptyInsert.element.body, emptyInsert.element.canonical)
+        // All rows in one generation 1 request give exactly the request limit.
+        // Each element is the empty insert element plus its address length.
+        let maxAddress = PushLimits.maxNormalizedMutationOctets - emptyInsert.normalizedJSON.count
+        let available = PushLimits.maxRequestOctets - envelope.body + 1
+        let elementStep = emptyInsert.element.body + 1
+        let count = (available + elementStep + maxAddress - 1) / (elementStep + maxAddress)
+        let totalAddress = available - count * elementStep
+        XCTAssertLessThanOrEqual(count, 100)
+        var lengths: [Int] = []
+        for index in 0..<count {
+            lengths.append(totalAddress / count + (index < totalAddress % count ? 1 : 0))
+            try insertOrder(db, id: String(format: "r%02d", index), address: String(repeating: "a", count: lengths[index]))
+        }
+        let lastID = try mutationID(db, recordID: String(format: "r%02d", count - 1), operation: "insert")
+
+        let (httpClient, session) = makeMockPushClient(dbPath: db.path)
+        defer {
+            MockURLProtocol.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 409,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = try JSONSerialization.data(withJSONObject: [
+                "error": [
+                    "code": "client_generation_expired",
+                    "message": "generation expired",
+                    "retryable": false,
+                    "current_client_generation": PushLimits.maxProtocolInteger,
+                ] as [String: Any]
+            ])
+            return (response, body)
+        }
+        do {
+            _ = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "test-device",
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable]
+            )
+            XCTFail("expected binding renewal")
+        } catch is BindingRenewalError {
+        }
+
+        // The envelope reserve keeps the last row out of the generation 1 batch.
+        let sealedJSON = try batchJSON(db, state: "renewal_required")
+        let sealed = try decoder.decode(PushRequest.self, from: sealedJSON)
+        XCTAssertEqual(sealed.mutations.count, count - 1)
+        XCTAssertEqual(try lifecycleState(db, mutationID: lastID), "unsealed")
+        XCTAssertEqual(
+            try requestOctets(sealedJSON).body + 1 + emptyInsert.element.body + lengths[count - 1],
+            PushLimits.maxRequestOctets
+        )
+
+        XCTAssertTrue(
+            try processor.renewSealedBatchesAfterBindingChange(
+                clientID: "test-device",
+                clientGeneration: PushLimits.maxProtocolInteger,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: [testTable]
+            )
+        )
+        let successorJSON = try batchJSON(db, state: "pending")
+        let successor = try decoder.decode(PushRequest.self, from: successorJSON)
+        XCTAssertEqual(successor.clientGeneration, PushLimits.maxProtocolInteger)
+        XCTAssertEqual(successor.mutations, sealed.mutations)
+        let successorOctets = try requestOctets(successorJSON)
+        XCTAssertLessThanOrEqual(successorOctets.body, PushLimits.maxRequestOctets)
+        XCTAssertLessThanOrEqual(successorOctets.canonical, PushLimits.maxRequestOctets)
+    }
+
+    func testInsertAtNormalizedLimitWithOnlySlashTextSealsAlone() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        let address = try ordersAddress(recordID: "w1", normalizedOctets: 65_536, fill: "/")
+        try insertOrder(db, id: "w1", address: address)
+        let insertID = try mutationID(db, recordID: "w1", operation: "insert")
+
+        let body = try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [testTable])
+
+        let request = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: body)
+        XCTAssertEqual(request.mutations.map(\.mutationID), [insertID])
+        let measure = try PushLimits.measure(request.mutations[0], encoder: JSONEncoder.synchroEncoder())
+        XCTAssertEqual(measure.normalizedJSON.count, 65_536)
+        XCTAssertGreaterThan(measure.element.body, 2 * address.utf8.count)
+        let octets = try requestOctets(body)
+        XCTAssertLessThan(octets.body, PushLimits.maxRequestOctets)
+        XCTAssertLessThan(octets.canonical, PushLimits.maxRequestOctets)
+    }
+
+    private func makeMockPushClient(dbPath: String) -> (HttpClient, URLSession) {
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: sessionConfiguration)
+        let config = SynchroConfig(
+            dbPath: dbPath,
+            serverURL: URL(string: "http://test.local")!,
+            authProvider: { "test-token" },
+            clientID: "test-device",
+            appVersion: "1.0.0"
+        )
+        return (HttpClient(config: config, session: session), session)
+    }
+
+    /// Seals one batch through the production push path and keeps it pending.
+    private func sealBatchWithLostResponse(
+        _ db: SynchroDatabase,
+        processor: PushProcessor,
+        syncedTables: [LocalSchemaTable],
+        batchSize: Int = 100
+    ) async throws -> Data {
+        let (httpClient, session) = makeMockPushClient(dbPath: db.path)
+        defer {
+            MockURLProtocol.requestHandler = nil
+            session.invalidateAndCancel()
+        }
+        var sentBody: Data?
+        MockURLProtocol.requestHandler = { request in
+            sentBody = request.bodyData()
+            throw URLError(.networkConnectionLost)
+        }
+        do {
+            _ = try await processor.processPush(
+                httpClient: httpClient,
+                clientID: "test-device",
+                clientGeneration: 1,
+                schemaVersion: 1,
+                schemaHash: protocolTestSchemaHash,
+                syncedTables: syncedTables,
+                batchSize: batchSize
+            )
+            XCTFail("expected response loss")
+        } catch is RetryableError {
+        }
+        let stored = try batchJSON(db, state: "pending")
+        XCTAssertEqual(sentBody, stored)
+        return stored
+    }
+
+    private func batchJSON(_ db: SynchroDatabase, state: String) throws -> Data {
+        let requestJSON = try XCTUnwrap(
+            db.queryOne(
+                "SELECT request_json FROM _synchro_push_batches WHERE state = ?",
+                params: [state]
+            )?["request_json"] as String?
+        )
+        return Data(requestJSON.utf8)
+    }
+
+    private func requestOctets(_ json: Data) throws -> PushLimits.Octets {
+        PushLimits.Octets(body: json.count, canonical: try PushLimits.canonicalJSON(json).count)
+    }
+
+    private func ordersInsert(recordID: String, address: String) -> Mutation {
+        Mutation(
+            mutationID: UUID().uuidString.lowercased(),
+            table: testTable.tableID,
+            op: .insert,
+            pk: ["id": AnyCodable(recordID)],
+            authoredSchema: SchemaRef(version: 1, hash: protocolTestSchemaHash),
+            baseVersion: nil,
+            clientVersion: "2026-01-01T10:00:00.000000Z",
+            columns: ["ship_address": AnyCodable(address), "user_id": AnyCodable("u1")]
+        )
+    }
+
+    private func notesInsert(recordID: String, body: String) -> Mutation {
+        Mutation(
+            mutationID: UUID().uuidString.lowercased(),
+            table: notesTable.tableID,
+            op: .insert,
+            pk: ["id": AnyCodable(recordID)],
+            authoredSchema: SchemaRef(version: 1, hash: protocolTestSchemaHash),
+            baseVersion: nil,
+            clientVersion: "2026-01-01T10:00:00.000000Z",
+            columns: ["body": AnyCodable(body), "score": AnyCodable(1e20)]
+        )
+    }
+
+    /// Gives an address that makes a captured `orders` insert have exactly the given normalized octets.
+    private func ordersAddress(recordID: String, normalizedOctets: Int, fill: Character = "a") throws -> String {
+        let empty = try PushLimits.measure(
+            ordersInsert(recordID: recordID, address: ""),
+            encoder: JSONEncoder.synchroEncoder()
+        )
+        return String(repeating: fill, count: normalizedOctets - empty.normalizedJSON.count)
+    }
+
+    private func insertOrder(_ db: SynchroDatabase, id: String, address: String) throws {
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: [id, address, "u1", "2026-01-01T10:00:00.000Z"]
+        )
+    }
+
+    private func mutationID(_ db: SynchroDatabase, recordID: String, operation: String) throws -> String {
+        try XCTUnwrap(
+            db.queryOne(
+                "SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = ? AND operation = ?",
+                params: [recordID, operation]
+            )?["mutation_id"] as String?
+        )
+    }
+
+    private func lifecycleState(_ db: SynchroDatabase, mutationID: String) throws -> String? {
+        try db.queryOne(
+            "SELECT lifecycle_state FROM _synchro_pending_changes WHERE mutation_id = ?",
+            params: [mutationID]
+        )?["lifecycle_state"] as String?
     }
 }

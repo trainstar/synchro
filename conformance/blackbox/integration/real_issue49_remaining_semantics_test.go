@@ -362,42 +362,16 @@ func issue49RemainingAtomicPush(t *testing.T) {
 	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-atomicity")
 	table := requireRealTable(t, client, "cf_items")
 	ownerField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id")
-	const mutationCount = 17
-	const requestLimit = 1 << 20
-	recordIDs := make([]string, 0, mutationCount)
-	mutations := make([]map[string]any, 0, mutationCount)
-	for index := 1; index <= mutationCount; index++ {
-		recordID := fmt.Sprintf("00000000-0000-4000-8e10-%012x", index)
-		recordIDs = append(recordIDs, recordID)
-		mutations = append(mutations, phase4InsertMutation(
-			client,
-			table,
-			ownerField,
-			fmt.Sprintf("00000000-0000-4000-8e11-%012x", index),
-			recordID,
-			"",
-		))
+	recordIDs := []string{
+		"00000000-0000-4000-8e10-000000000001",
+		"00000000-0000-4000-8e10-000000000002",
 	}
+	mutations := []map[string]any{
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8e11-000000000001", recordIDs[0], "atomic-written"),
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8e11-000000000002", recordIDs[1], "atomic-suppressed"),
+	}
+	suppressIssue49ItemInsert(t, ctx, harness, recordIDs[1])
 	payload := phase4PushPayload(client, "00000000-0000-4000-8e10-000000000000", mutations)
-	emptyBody, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("encode atomic push control: %v", err)
-	}
-	available := requestLimit - len(emptyBody) - 1
-	if available <= mutationCount {
-		t.Fatal("atomic push control has no bounded payload capacity")
-	}
-	for index, mutation := range mutations {
-		length := available / mutationCount
-		if index < available%mutationCount {
-			length++
-		}
-		mutation["columns"].(map[string]any)[table.ValueField] = strings.Repeat("x", length)
-	}
-	body, err := json.Marshal(payload)
-	if err != nil || len(body) != requestLimit-1 {
-		t.Fatalf("atomic push control size = %d: %v", len(body), err)
-	}
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", payload)
 	requireRealProtocolError(t, status, response, http.StatusInternalServerError, "sync_integrity_failure")
 	observation, err := harness.Operator().ObserveDiagnosticPush(ctx, client.ID, recordIDs)
@@ -406,6 +380,26 @@ func issue49RemainingAtomicPush(t *testing.T) {
 	}
 	if observation.BatchCount != 0 || observation.MutationCount != 0 || observation.SourceRowCount != 0 || observation.AcceptedWriteEpoch != 1 {
 		t.Fatalf("failed first push committed a durable subset: %#v", observation)
+	}
+}
+
+// suppressIssue49ItemInsert adds a BEFORE INSERT trigger that discards the
+// source insert of one cf_items row. A first push that inserts this row after
+// an earlier source write then fails before it commits.
+func suppressIssue49ItemInsert(t *testing.T, ctx context.Context, harness *blackbox.Harness, recordID string) {
+	t.Helper()
+	admin := openIssue49Admin(t, ctx, harness)
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf(`CREATE FUNCTION public.cf_suppress_item_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+	BEGIN
+		IF NEW.id = '%s'::uuid THEN
+			RETURN NULL;
+		END IF;
+		RETURN NEW;
+	END
+	$$;
+	CREATE TRIGGER zz_suppress_item_insert BEFORE INSERT ON public.cf_items
+	FOR EACH ROW EXECUTE FUNCTION public.cf_suppress_item_insert()`, recordID)); err != nil {
+		t.Fatalf("create insert-suppressing BEFORE INSERT trigger: %v", err)
 	}
 }
 

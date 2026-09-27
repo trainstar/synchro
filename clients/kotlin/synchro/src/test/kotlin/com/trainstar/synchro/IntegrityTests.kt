@@ -2,6 +2,7 @@ package com.trainstar.synchro
 
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -95,6 +96,28 @@ class IntegrityTests {
             Integrity.decodeCanonicalWireJSON(byteArrayOf(0x22, 0xc3.toByte(), 0x28, 0x22))
         }
         Integrity.validateCanonicalWireJSON("{\"float\":9007199254740992}")
+    }
+
+    @Test
+    fun canonicalJsonWriterMatchesServerCanonicalizerVectors() {
+        val controls = (0x00..0x1f).map { it.toChar() }.joinToString("")
+        val raw = "\u007f\u2028\u2029\u00e9\uD83D\uDE00\uFFFE"
+        val string = Integrity.canonicalJSON(JsonPrimitive(controls + "\"\\/" + raw))
+        val expectedString = "\"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r" +
+            "\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a" +
+            "\\u001b\\u001c\\u001d\\u001e\\u001f\\\"\\\\/" + raw + "\""
+        assertEquals(expectedString, string)
+        assertEquals(195, string.toByteArray(Charsets.UTF_8).size)
+
+        val numbers = Json.parseToJsonElement(
+            "[0,-0.0,1,1.5,0.1,1e-7,1e16,123456789012345680,1e21,5e-324,18446744073709552000," +
+                "9223372036854775807,-2.5e-8,1e-6,999999999999999900000]",
+        )
+        assertEquals(
+            "[0,0,1,1.5,0.1,1e-7,10000000000000000,123456789012345680,1e+21,5e-324,18446744073709552000," +
+                "9223372036854776000,-2.5e-8,0.000001,999999999999999900000]",
+            Integrity.canonicalJSON(numbers),
+        )
     }
 
     @Test

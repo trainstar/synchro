@@ -320,7 +320,7 @@ final class DatabaseMigrationTests: XCTestCase {
         let lookup = """
             SELECT mutation_id FROM _synchro_pending_changes
             WHERE table_id = ? AND pk_field_id = ? AND pk_logical_type = ? AND record_id = ?
-              AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+              AND lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
             ORDER BY local_order DESC LIMIT 1
             """
         let params = ["items", "id", "string", "1"]
@@ -349,6 +349,99 @@ final class DatabaseMigrationTests: XCTestCase {
         }
         XCTAssertFalse(withoutIndex.0.contains("idx_synchro_pending_protocol_row_order"), withoutIndex.0)
         XCTAssertEqual(withoutIndex.1, "mutation-2")
+    }
+
+    func testVersionSeventeenUpgradeExcludesPushLimitMutationsFromCaptureDependency() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("synchro_push_limit_capture_\(UUID().uuidString).sqlite")
+        let table = SchemaTable(
+            tableName: "orders",
+            updatedAtColumn: "updated_at",
+            deletedAtColumn: "deleted_at",
+            primaryKey: ["id"],
+            columns: [
+                SchemaColumn(name: "id", nullable: false, isPrimaryKey: true),
+                SchemaColumn(name: "ship_address", nullable: true),
+                SchemaColumn(name: "user_id", nullable: false),
+                SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+                SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
+            ]
+        )
+        let legacy = try SynchroDatabase(path: path)
+        try SchemaManager(database: legacy).createSyncedTables(
+            schema: SchemaResponse(schemaVersion: 1, schemaHash: protocolTestSchemaHash, serverTime: Date(), tables: [table])
+        )
+        let installed = try legacy.readTransaction { connection in
+            try JSONDecoder().decode(
+                [LocalSchemaTable].self,
+                from: Data(XCTUnwrap(SynchroMeta.get(connection, key: .localSchema)).utf8)
+            )
+        }
+        XCTAssertEqual(installed.count, 1)
+        let current = SQLiteSchema.generateCDCTriggers(table: try XCTUnwrap(installed.first))
+        let earlier = current.map { $0.replacingOccurrences(of: "'exceeds_push_limit', ", with: "") }
+        XCTAssertNotEqual(earlier, current)
+        try legacy.writeTransaction { connection in
+            for statement in earlier {
+                try connection.execute(sql: statement)
+            }
+            try connection.execute(
+                sql: "DELETE FROM grdb_migrations WHERE identifier = 'synchro_v17_push_limit_capture_dependency'"
+            )
+        }
+
+        XCTAssertNotNil(try dependencyAfterPushLimitMutation(legacy, recordID: "r1"))
+        try legacy.writeSyncLockedTransaction { connection in
+            try connection.execute(sql: """
+                DELETE FROM _synchro_mutation_values
+                WHERE mutation_id IN (SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = 'r1')
+                """)
+            try connection.execute(sql: "DELETE FROM _synchro_pending_changes WHERE record_id = 'r1'")
+            try connection.execute(sql: "DELETE FROM orders WHERE id = 'r1'")
+        }
+        XCTAssertEqual(
+            try legacy.queryOne("SELECT COUNT(*) AS count FROM _synchro_pending_changes", params: nil)?["count"] as Int?,
+            0
+        )
+        try legacy.close()
+
+        let db = try SynchroDatabase(path: path)
+        defer { try? db.close() }
+        XCTAssertNil(try dependencyAfterPushLimitMutation(db, recordID: "r2"))
+        XCTAssertEqual(
+            try db.queryOne(
+                "SELECT COUNT(*) AS count FROM grdb_migrations WHERE identifier = 'synchro_v17_push_limit_capture_dependency'",
+                params: nil
+            )?["count"] as Int?,
+            1
+        )
+    }
+
+    /// Inserts a row, moves its mutation to `exceeds_push_limit`, updates the row,
+    /// and gives the dependency of the update mutation.
+    private func dependencyAfterPushLimitMutation(_ db: SynchroDatabase, recordID: String) throws -> String? {
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, 'a', 'u1', '2026-01-01T10:00:00.000Z')",
+            params: [recordID]
+        )
+        try db.writeTransaction { connection in
+            try connection.execute(
+                sql: """
+                    UPDATE _synchro_pending_changes SET lifecycle_state = 'exceeds_push_limit'
+                    WHERE record_id = ? AND operation = 'insert'
+                    """,
+                arguments: [recordID]
+            )
+            XCTAssertEqual(connection.changesCount, 1)
+        }
+        _ = try db.execute("UPDATE orders SET ship_address = 'b' WHERE id = ?", params: [recordID])
+        let update = try XCTUnwrap(
+            db.queryOne(
+                "SELECT dependency_mutation_id FROM _synchro_pending_changes WHERE record_id = ? AND operation = 'update'",
+                params: [recordID]
+            )
+        )
+        return update["dependency_mutation_id"] as String?
     }
 
     private func recordMigrationsThroughVersionTwelve(_ db: GRDB.Database) throws {

@@ -1009,7 +1009,7 @@ fn load_seed_rows(
         let canonical_row = CanonicalRow::from_json(
             serde_json::to_string(&primary_key)
                 .map_err(|error| format!("encoding portable primary key: {error}"))?,
-            &serde_json::to_string(&row)
+            &serde_json_canonicalizer::to_string(&row)
                 .map_err(|error| format!("encoding portable row: {error}"))?,
         )
         .map_err(|error| format!("validating portable row: {error}"))?;

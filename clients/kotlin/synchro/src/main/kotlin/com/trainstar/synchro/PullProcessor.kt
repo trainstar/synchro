@@ -1064,7 +1064,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
           AND (
             pending.lifecycle_state IN ('captured', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
             OR (
-                pending.lifecycle_state = 'rejected_terminal'
+                pending.lifecycle_state IN ('rejected_terminal', 'exceeds_push_limit')
                 AND NOT EXISTS (
                     SELECT 1
                     FROM _synchro_pending_changes AS replacement

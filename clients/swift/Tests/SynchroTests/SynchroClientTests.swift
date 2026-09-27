@@ -165,7 +165,7 @@ final class SynchroClientTests: XCTestCase {
                 ON _synchro_rejected_mutations (table_name, record_id)
                 """)
             try db.execute(
-                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?, ?, ?, ?, ?)",
+                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 arguments: [
                     "synchro_v9_mutation_ledger",
                     "synchro_v10_rebuild_page_receipts",
@@ -175,6 +175,7 @@ final class SynchroClientTests: XCTestCase {
                     "synchro_v14_capture_context",
                     "synchro_v15_pending_protocol_identity_index",
                     "synchro_v16_capture_storage_validation",
+                    "synchro_v17_push_limit_capture_dependency",
                 ]
             )
         }

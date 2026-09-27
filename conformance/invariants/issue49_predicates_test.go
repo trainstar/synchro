@@ -99,6 +99,7 @@ func issue49MutationConservationValid(observation issue49MutationConservation) b
 		"superseded_before_send": "superseded_before_send",
 		"cancelled_before_send":  "cancelled_before_send",
 		"blocked_by_predecessor": "blocked_by_predecessor",
+		"exceeds_push_limit":     "exceeds_push_limit",
 	}
 	captured := make(map[string]struct{}, len(observation.Captured))
 	for _, id := range observation.Captured {

@@ -156,8 +156,9 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
 
     /**
      * Returns every mutation the client retains, including one the server
-     * rejected. A rejected mutation leaves the pending set, so an application
-     * that reports the complete retained ledger reads this instead.
+     * rejected and one that is larger than a push limit. These mutations leave the
+     * pending set, so an application that reports the complete retained
+     * ledger reads this instead.
      */
     fun inspectRetainedMutations(): List<PendingMutationInspection> =
         changeTracker.inspectRetainedMutations()
