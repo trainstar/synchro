@@ -359,15 +359,15 @@ internal class SyncEngine(
             val generation = lifecycleGeneration
             if (!beginOperationLocked()) throw SynchroError.NotStarted()
             val job = owner.async {
-                try {
-                    runSyncCycleWithRetry(retryWakeupGeneration = generation)
-                } finally {
-                    endOperation()
-                }
+                runSyncCycleWithRetry(retryWakeupGeneration = generation)
             }
             ownedCycleJobs += job
+            // Cancellation before dispatch skips the body, so only completion can release the operation.
             job.invokeOnCompletion {
-                synchronized(lifecycleLock) { ownedCycleJobs.remove(job) }
+                synchronized(lifecycleLock) {
+                    ownedCycleJobs.remove(job)
+                    endOperation()
+                }
             }
             return job
         }

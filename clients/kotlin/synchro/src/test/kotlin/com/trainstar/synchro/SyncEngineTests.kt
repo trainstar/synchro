@@ -2,17 +2,27 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -41,7 +51,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.UUID
 import java.lang.reflect.InvocationTargetException
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -50,6 +62,7 @@ import kotlin.coroutines.CoroutineContext
 import kotlin.reflect.full.callSuspend
 import kotlin.reflect.full.declaredFunctions
 import kotlin.reflect.jvm.isAccessible
+import kotlin.time.Duration.Companion.seconds
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -422,6 +435,112 @@ class SyncEngineTests {
             releaseDispatch.countDown()
             scheduler.join(2_000)
             runBlocking { engine.stop() }
+        }
+    }
+
+    @Test
+    fun ownedCycleCancelledAfterBodyEntryReleasesItsOperationAfterCleanup() {
+        val holdAuthentication = AtomicBoolean(false)
+        val authenticationEntered = CountDownLatch(1)
+        val cleanupEntered = CountDownLatch(1)
+        val releaseCleanup = CompletableDeferred<Unit>()
+        val (engine, _) = makeIntegrationEnv(
+            authProvider = {
+                if (holdAuthentication.get()) {
+                    try {
+                        authenticationEntered.countDown()
+                        awaitCancellation()
+                    } finally {
+                        withContext(NonCancellable) {
+                            cleanupEntered.countDown()
+                            releaseCleanup.await()
+                        }
+                    }
+                }
+                "token"
+            },
+            handler = ::readyServerResponse,
+        )
+        val statuses = CopyOnWriteArrayList<SyncStatus>()
+        withCleanup { defer ->
+            val cycleThread = OwnedCycleThread()
+            defer(cycleThread::shutdown)
+            val callerDispatcher = StandardTestDispatcher()
+            val callerScope = CoroutineScope(callerDispatcher)
+            defer { callerScope.cancel() }
+            val stopDispatcher = StandardTestDispatcher()
+            val stopScope = CoroutineScope(stopDispatcher)
+            defer { stopScope.cancel() }
+            defer { runBlocking { withTimeout(5_000) { engine.stop() } } }
+            runBlocking { engine.start() }
+            val ownedWork = observeEngineOwnedWork(engine, cycleThread.dispatcher)
+            val managedLoop = ownedWork.lifecycleJob.children.single()
+            val registration = engine.onStatusChange { statuses += it }
+            defer(registration::cancel)
+
+            defer { releaseCleanup.complete(Unit) }
+            holdAuthentication.set(true)
+            var callerFailure: Throwable? = null
+            val caller = callerScope.launch {
+                callerFailure = runCatching { engine.syncNow() }.exceptionOrNull()
+            }
+            callerDispatcher.scheduler.runCurrent()
+            assertTrue("the cycle body must start", authenticationEntered.await(5, TimeUnit.SECONDS))
+
+            val stop = stopScope.launch { engine.stop() }
+            stopDispatcher.scheduler.runCurrent()
+            assertTrue("stop must cancel the running cycle", cleanupEntered.await(5, TimeUnit.SECONDS))
+            // The held cycle is now the only operation that stop can wait for.
+            runBlocking { withTimeout(5_000) { managedLoop.join() } }
+            stopDispatcher.scheduler.runCurrent()
+            assertFalse("stop must wait for the cancelled cycle cleanup", stop.isCompleted)
+            assertEquals(listOf<SyncStatus>(SyncStatus.Pulling), statuses.toList())
+
+            releaseCleanup.complete(Unit)
+            runTest(stopDispatcher, timeout = 5.seconds) { stop.join() }
+            cycleThread.awaitEarlierTasks()
+
+            assertEquals(listOf(SyncStatus.Pulling, SyncStatus.Stopped), statuses.toList())
+            assertEquals(SyncStatus.Stopped, engine.getSyncStatus())
+            assertFalse("stop must not require the external caller dispatcher", caller.isCompleted)
+            runTest(callerDispatcher, timeout = 5.seconds) { caller.join() }
+            assertTrue(callerFailure is CancellationException)
+            assertEquals(emptyList<Throwable>(), ownedWork.uncaughtFailures.toList())
+        }
+    }
+
+    @Test
+    fun completedOwnedCyclesReleaseTheirOperationsOnce() {
+        val (engine, _) = makeIntegrationEnv(handler = ::readyServerResponse)
+        val statuses = CopyOnWriteArrayList<SyncStatus>()
+        withCleanup { defer ->
+            val cycleThread = OwnedCycleThread()
+            defer(cycleThread::shutdown)
+            defer { runBlocking { withTimeout(5_000) { engine.stop() } } }
+            runBlocking { engine.start() }
+            val ownedWork = observeEngineOwnedWork(engine, cycleThread.dispatcher)
+            val registration = engine.onStatusChange { statuses += it }
+            defer(registration::cancel)
+
+            // A repeated release in the first cycle makes the second cycle release underflow.
+            runBlocking {
+                engine.syncNow()
+                engine.syncNow()
+                withTimeout(5_000) { engine.stop() }
+            }
+            cycleThread.awaitEarlierTasks()
+
+            assertEquals(
+                listOf(
+                    SyncStatus.Pulling,
+                    SyncStatus.Ready,
+                    SyncStatus.Pulling,
+                    SyncStatus.Ready,
+                    SyncStatus.Stopped,
+                ),
+                statuses.toList(),
+            )
+            assertEquals(emptyList<Throwable>(), ownedWork.uncaughtFailures.toList())
         }
     }
 
@@ -3528,6 +3647,7 @@ class SyncEngineTests {
         syncInterval: Double = 999.0,
         pushDebounce: Double = 0.5,
         retryTiming: RetryTiming? = null,
+        authProvider: suspend () -> String = { "token" },
         handler: (RecordedRequest) -> MockResponse
     ): Pair<SyncEngine, SynchroDatabase> {
         server?.shutdown()
@@ -3541,7 +3661,7 @@ class SyncEngineTests {
         val config = SynchroConfig(
             dbPath = dbName,
             serverURL = server!!.url("/").toString().trimEnd('/'),
-            authProvider = { "token" },
+            authProvider = authProvider,
             clientID = clientID,
             appVersion = "1.0.0",
             syncInterval = syncInterval,
@@ -4082,7 +4202,73 @@ class SyncEngineTests {
     private fun mockResponse(body: String, statusCode: Int = 200): MockResponse =
         MockResponse().setBody(body).setResponseCode(statusCode)
 
+    private fun readyServerResponse(request: RecordedRequest): MockResponse {
+        val path = request.path.orEmpty()
+        return when {
+            path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+            path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+            path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+            else -> mockResponse("""{"error":"unexpected"}""", 500)
+        }
+    }
+
     private fun ordersLocalSchemaTable(includeNotes: Boolean): LocalSchemaTable {
         return protocolOrdersSchema(includeNotes)
     }
+
+    /**
+     * Runs engine-owned cycles on one thread. A cycle completes on its dispatcher thread, so a later
+     * barrier task starts only after that completion and its exception handler return.
+     */
+    private class OwnedCycleThread {
+        private val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "synchro-test-owned-cycle") }
+        val dispatcher = executor.asCoroutineDispatcher()
+
+        fun awaitEarlierTasks() {
+            executor.submit(Runnable {}).get(5, TimeUnit.SECONDS)
+        }
+
+        fun shutdown() {
+            executor.shutdownNow()
+            check(executor.awaitTermination(5, TimeUnit.SECONDS)) { "the owned cycle thread did not terminate" }
+        }
+    }
+}
+
+internal class EngineOwnedWork(val lifecycleJob: Job, val uncaughtFailures: List<Throwable>)
+
+/**
+ * Reuses the engine lifecycle job, so stop still cancels the observed work. Later engine-owned
+ * coroutines use [dispatcher], and the added handler records each uncaught failure, such as an
+ * operation-release underflow.
+ */
+internal fun observeEngineOwnedWork(engine: SyncEngine, dispatcher: CoroutineDispatcher): EngineOwnedWork {
+    val lock = SyncEngine::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(engine)
+    val scopeField = SyncEngine::class.java.getDeclaredField("scope").apply { isAccessible = true }
+    val failures = CopyOnWriteArrayList<Throwable>()
+    return synchronized(requireNotNull(lock)) {
+        val lifecycleScope = requireNotNull(scopeField.get(engine) as CoroutineScope?) { "the engine has no lifecycle scope" }
+        val context = lifecycleScope.coroutineContext +
+            CoroutineExceptionHandler { _, error -> failures += error } +
+            dispatcher
+        scopeField.set(engine, CoroutineScope(context))
+        EngineOwnedWork(lifecycleScope.coroutineContext.job, failures)
+    }
+}
+
+/**
+ * Runs [body] with a cleanup registry. The body registers each cleanup step with `defer` when it
+ * acquires the resource. The steps run in reverse registration order after [body], and every step runs.
+ * A body failure stays the reported failure. Each cleanup failure is suppressed into the first failure.
+ */
+internal fun <T> withCleanup(body: (defer: (() -> Unit) -> Unit) -> T): T {
+    val steps = mutableListOf<() -> Unit>()
+    val outcome = runCatching { body { step -> steps += step } }
+    var failure = outcome.exceptionOrNull()
+    for (step in steps.asReversed()) {
+        val error = runCatching(step).exceptionOrNull() ?: continue
+        if (failure == null) failure = error else failure.addSuppressed(error)
+    }
+    if (failure != null) throw failure
+    return outcome.getOrThrow()
 }
