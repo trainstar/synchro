@@ -846,14 +846,16 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     fun <T> applicationReadTransaction(block: (ApplicationReadTransaction) -> T): T =
-        readTransaction { db ->
-            withApplicationTransactionScope {
-                val transaction = ApplicationReadTransaction(db)
-                try {
-                    block(transaction)
-                } finally {
-                    transaction.invalidate()
-                }
+        readTransaction { db -> applicationRead(db, block) }
+
+    /** Runs an application read on a transaction that the caller already owns. */
+    internal fun <T> applicationRead(db: SQLiteDatabase, block: (ApplicationReadTransaction) -> T): T =
+        withApplicationTransactionScope {
+            val transaction = ApplicationReadTransaction(db)
+            try {
+                block(transaction)
+            } finally {
+                transaction.invalidate()
             }
         }
 

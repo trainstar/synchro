@@ -1635,7 +1635,7 @@ final class PushProcessorTests: XCTestCase {
         for dependentID in dependentIDs {
             XCTAssertEqual(try lifecycleState(db, mutationID: dependentID), "blocked_by_predecessor")
         }
-        let retained = try XCTUnwrap(tracker.inspectRetainedMutations().first { $0.mutationID == oversizeID })
+        let retained = try XCTUnwrap(tracker.inspectRetainedMutations().currentRecords().first { $0.mutationID == oversizeID })
         XCTAssertEqual(retained.status, .exceedsPushLimit)
         XCTAssertEqual(
             retained.authoredFields.first { $0.fieldID == "ship_address" }?.value,
@@ -1652,7 +1652,7 @@ final class PushProcessorTests: XCTestCase {
             columns: Dictionary(uniqueKeysWithValues: retained.authoredFields.map { ($0.fieldID, $0.value) })
         )
         XCTAssertEqual(try PushLimits.measure(retainedMutation, encoder: encoder).normalizedJSON.count, 65_537)
-        XCTAssertFalse(try tracker.inspectPendingMutations().contains { $0.mutationID == oversizeID })
+        XCTAssertFalse(try tracker.inspectPendingMutations().currentRecords().contains { $0.mutationID == oversizeID })
         XCTAssertTrue(try db.readTransaction { try SynchroMeta.listRejectedMutations($0) }.isEmpty)
         XCTAssertNil(try db.queryOne(
             "SELECT batch_id FROM _synchro_push_batch_members WHERE mutation_id = ?",
@@ -1903,7 +1903,7 @@ final class PushProcessorTests: XCTestCase {
                     "SELECT batch_id FROM _synchro_push_batch_members WHERE mutation_id = ?",
                     params: [bigID]
                 ))
-                let retained = try XCTUnwrap(tracker.inspectRetainedMutations().first { $0.mutationID == bigID })
+                let retained = try XCTUnwrap(tracker.inspectRetainedMutations().currentRecords().first { $0.mutationID == bigID })
                 XCTAssertEqual(retained.status, .exceedsPushLimit)
                 XCTAssertEqual(retained.authoredFields.first { $0.fieldID == "body" }?.value, AnyCodable(testCase.text))
                 XCTAssertEqual(retained.authoredFields.first { $0.fieldID == "score" }?.value, AnyCodable(testCase.score))
@@ -1981,7 +1981,7 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertNil(outcome)
         XCTAssertEqual(try lifecycleState(db, mutationID: insertID), "exceeds_push_limit")
         XCTAssertEqual(
-            try tracker.inspectRetainedMutations().first { $0.mutationID == insertID }?.status,
+            try tracker.inspectRetainedMutations().currentRecords().first { $0.mutationID == insertID }?.status,
             .exceedsPushLimit
         )
         XCTAssertNil(try db.queryOne("SELECT batch_id FROM _synchro_push_batches", params: nil))

@@ -951,6 +951,13 @@ semantics:
 - `inspectRejectedMutations()` for durable terminal outcomes and authored data
 - an explicit policy operation to clear retained rejected records
 
+Each pending or retained record is either a current record or a legacy record.
+A current record has its table ID, primary-key binding, authored schema, and
+authored field values. A legacy record comes from a queue that existed before the
+mutation ledger. It has only the fields that the old queue stored. Its binding
+fields and authored values are absent, and the SDK does not fill them with
+placeholder values. A record with only some bindings fails inspection.
+
 An application transaction callback must return before the application calls a
 sync lifecycle method. A client rejects this call before it acquires a lifecycle
 lock. This rule prevents opposite lock acquisition between application writes

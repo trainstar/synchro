@@ -23,6 +23,7 @@ class InspectionFacadeContractTests {
     private data class FacadeContract(
         @SerialName("schema_version") val schemaVersion: Int,
         val facade: String,
+        val references: List<String>,
         val operations: List<Operation>,
         val models: List<Model>,
     )
@@ -51,14 +52,16 @@ class InspectionFacadeContractTests {
         val name: String,
         val nullable: Boolean,
         val element: TypeShape? = null,
+        val parameters: List<TypeShape>? = null,
+        val result: TypeShape? = null,
     )
 
     @Test
     fun kotlinInspectionFacadeMatchesSharedContract() {
         val contract = Json { ignoreUnknownKeys = false }.decodeFromString<FacadeContract>(
-            String(Files.readAllBytes(repositoryRoot().resolve("conformance/protocol/inspection-facade-v1.json"))),
+            String(Files.readAllBytes(repositoryRoot().resolve("conformance/protocol/inspection-facade-v2.json"))),
         )
-        assertEquals(1, contract.schemaVersion)
+        assertEquals(2, contract.schemaVersion)
         assertEquals(SynchroInspection::class.simpleName, contract.facade)
 
         val functions = SynchroInspection::class.declaredMemberFunctions
@@ -75,11 +78,13 @@ class InspectionFacadeContractTests {
         assertEquals(contract.operations.sortedBy(Operation::name), actualOperations)
 
         val reachableModels = linkedMapOf<String, KClass<*>>()
+        val reachedReferences = sortedSetOf<String>()
         functions.forEach { function ->
             function.parameters.filter { it.kind == KParameter.Kind.VALUE }
-                .forEach { collectModels(it.type, reachableModels) }
-            collectModels(function.returnType, reachableModels)
+                .forEach { collectModels(it.type, contract.references, reachableModels, reachedReferences) }
+            collectModels(function.returnType, contract.references, reachableModels, reachedReferences)
         }
+        assertEquals(contract.references.sorted(), reachedReferences.toList())
         val actualModels = reachableModels.values.map { model ->
             Model(
                 name = requireNotNull(model.simpleName),
@@ -91,17 +96,31 @@ class InspectionFacadeContractTests {
         assertEquals(contract.models.sortedBy(Model::name), actualModels)
     }
 
-    private fun collectModels(type: KType, result: MutableMap<String, KClass<*>>) {
+    /** Walks facade-owned models. The public client API owns each named reference. */
+    private fun collectModels(
+        type: KType,
+        references: List<String>,
+        result: MutableMap<String, KClass<*>>,
+        reachedReferences: MutableSet<String>,
+    ) {
         val classifier = type.classifier as? KClass<*> ?: error("facade type classifier is unavailable")
-        if (classifier == List::class) {
-            collectModels(requireNotNull(type.arguments.single().type), result)
+        if (classifier == List::class || classifier.isFunction()) {
+            type.arguments.forEach { collectModels(requireNotNull(it.type), references, result, reachedReferences) }
             return
         }
-        if (classifier in setOf(String::class, Boolean::class, Int::class, Long::class)) return
+        if (classifier in setOf(String::class, Boolean::class, Int::class, Long::class, Unit::class)) return
         val name = requireNotNull(classifier.simpleName)
+        if (name in references) {
+            reachedReferences += name
+            return
+        }
         if (result.putIfAbsent(name, classifier) != null) return
-        requireNotNull(classifier.primaryConstructor).parameters.forEach { collectModels(it.type, result) }
+        requireNotNull(classifier.primaryConstructor).parameters.forEach {
+            collectModels(it.type, references, result, reachedReferences)
+        }
     }
+
+    private fun KClass<*>.isFunction(): Boolean = qualifiedName?.matches(Regex("kotlin\\.Function\\d+")) == true
 
     private fun KType.toShape(): TypeShape {
         val classifier = classifier as? KClass<*> ?: error("facade type classifier is unavailable")
@@ -115,14 +134,20 @@ class InspectionFacadeContractTests {
             Boolean::class -> TypeShape("bool", isMarkedNullable)
             Int::class -> TypeShape("int", isMarkedNullable)
             Long::class -> TypeShape("int64", isMarkedNullable)
-            else -> TypeShape(requireNotNull(classifier.simpleName), isMarkedNullable)
+            Unit::class -> TypeShape("void", isMarkedNullable)
+            else -> if (classifier.isFunction()) {
+                val shapes = arguments.map { requireNotNull(it.type).toShape() }
+                TypeShape("function", isMarkedNullable, parameters = shapes.dropLast(1), result = shapes.last())
+            } else {
+                TypeShape(requireNotNull(classifier.simpleName), isMarkedNullable)
+            }
         }
     }
 
     private fun repositoryRoot(): Path {
         var current: Path? = Paths.get("").toAbsolutePath().normalize()
         repeat(8) {
-            if (Files.exists(current!!.resolve("conformance/protocol/inspection-facade-v1.json"))) return current!!
+            if (Files.exists(current!!.resolve("conformance/protocol/inspection-facade-v2.json"))) return current!!
             current = current!!.parent
         }
         error("repository root was not found")
