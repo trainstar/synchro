@@ -80,7 +80,7 @@ type Plan struct {
 	Initial []Transaction `json:"-"`
 	History []Transaction `json:"-"`
 	Stats   Stats         `json:"stats"`
-	// SetsByUser lists live exercise sets that each user owns after History.
+	// SetsByUser lists the exercise sets that each user owns after Initial.
 	SetsByUser map[string][]string `json:"-"`
 }
 
@@ -140,6 +140,10 @@ func Generate(seed uint64, size Size) (Plan, error) {
 	g.flush()
 	for _, transaction := range g.plan.Initial {
 		g.plan.Stats.InitialRecords += transaction.Records
+	}
+	g.plan.SetsByUser = make(map[string][]string)
+	for _, current := range g.sets {
+		g.plan.SetsByUser[current.owner] = append(g.plan.SetsByUser[current.owner], current.id)
 	}
 	for index := 0; index < size.HistoryOperations; index++ {
 		g.historyOperation()
@@ -520,12 +524,6 @@ func (g *generator) finishStats() {
 	for column, widths := range g.widths {
 		slices.Sort(widths)
 		stats.TextBytes[column] = [3]int{widths[len(widths)/2], widths[len(widths)*9/10], widths[len(widths)-1]}
-	}
-	g.plan.SetsByUser = make(map[string][]string)
-	for _, current := range g.sets {
-		if !current.dead && !g.programOf(current.entry).dead {
-			g.plan.SetsByUser[current.owner] = append(g.plan.SetsByUser[current.owner], current.id)
-		}
 	}
 }
 

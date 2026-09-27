@@ -728,6 +728,20 @@ func prepareDataset(ctx context.Context, database *sql.DB) error {
 		return errors.New("inspect dataset tables failed")
 	}
 	if exists {
+		// Only a complete earlier preparation is reused.
+		var complete bool
+		if err := database.QueryRowContext(ctx, `
+			SELECT (SELECT count(*)
+			        FROM synchro.sync_registry registry
+			        JOIN synchro.sync_registry_generations generation
+			          ON generation.generation = registry.registry_generation AND generation.state = 'active'
+			        WHERE registry.physical_schema = 'public' AND registry.physical_relation = ANY($1)) = cardinality($1)
+			   AND EXISTS (SELECT 1 FROM public.organizations WHERE id = $2::uuid)
+			   AND NOT EXISTS (SELECT 1 FROM synchro.sync_write_fences WHERE coverage = 'pending')`,
+			dataset.TableNames(), dataset.OrgA,
+		).Scan(&complete); err != nil || !complete {
+			return errors.New("an earlier dataset preparation is incomplete; prepare a new database")
+		}
 		return nil
 	}
 	if err := waitFor(ctx, database, func(ctx context.Context, database *sql.DB) (bool, error) {

@@ -17,6 +17,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/gowebpki/jcs"
 )
 
 // SchemaSQL creates the source tables, indexes, and application triggers.
@@ -228,8 +230,8 @@ func CompareWire(portableType string, wire json.RawMessage, source *string) erro
 		}
 		got, gotErr := strconv.ParseFloat(number.String(), 64)
 		want, wantErr := strconv.ParseFloat(*source, 64)
-		if gotErr != nil || wantErr != nil || got != want {
-			return fmt.Errorf("%w: float %s, want %s", ErrValueMismatch, number, *source)
+		if gotErr != nil || wantErr != nil || got != want || !canonicalJSON(wire) {
+			return fmt.Errorf("%w: float %s, want canonical %s", ErrValueMismatch, number, *source)
 		}
 		return nil
 	}
@@ -245,8 +247,8 @@ func CompareWire(portableType string, wire json.RawMessage, source *string) erro
 	case "json":
 		got, gotErr := decodeJSON(text)
 		want, wantErr := decodeJSON(*source)
-		if gotErr != nil || wantErr != nil || !reflect.DeepEqual(got, want) {
-			return fmt.Errorf("%w: json %q, want %q", ErrValueMismatch, text, *source)
+		if gotErr != nil || wantErr != nil || !reflect.DeepEqual(got, want) || !canonicalJSON([]byte(text)) {
+			return fmt.Errorf("%w: json %q, want canonical %q", ErrValueMismatch, text, *source)
 		}
 	case "bytes":
 		got, err := base64.RawURLEncoding.DecodeString(text)
@@ -257,6 +259,12 @@ func CompareWire(portableType string, wire json.RawMessage, source *string) erro
 		return fmt.Errorf("%w: unsupported type %s", ErrValueMismatch, portableType)
 	}
 	return nil
+}
+
+// canonicalJSON reports whether data is already in RFC 8785 form.
+func canonicalJSON(data []byte) bool {
+	canonical, err := jcs.Transform(data)
+	return err == nil && bytes.Equal(canonical, data)
 }
 
 func decodeJSON(text string) (any, error) {
