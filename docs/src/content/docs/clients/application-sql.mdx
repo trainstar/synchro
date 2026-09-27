@@ -46,6 +46,8 @@ The Swift SDK selects captured fields from the statement and the capture context
 - While that mask is active, an `UPDATE` of another synced table creates no update mutation. An empty column list also creates no update mutation.
 - A soft-delete transition records a delete mutation without field values. A mask does not change this rule.
 
+An `INSERT` that names no writable column is a key-only create. Swift and Kotlin capture it as an insert with empty `columns`, and the server supplies the other values. An `INSERT` into a synced table without its own capture context aborts, because its authored fields are unknown. A trigger on a local table that inserts a synced row is one example.
+
 The SDK removes an inferred `INSERT` context after its statement. It removes an authored mask when the authored transaction callback ends. If a removal fails, the SDK throws a database error. A managed write with remaining capture context fails and rolls back. This also occurs when the callback caught the earlier error.
 
 ## React Native lossless SQLite values

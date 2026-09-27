@@ -794,14 +794,14 @@ impl Mutation {
                 if self.base_version.is_some() {
                     return Err(ContractViolation::UnexpectedMutationBaseVersion);
                 }
-                validate_columns(self.columns.as_ref())
+                validate_columns(self.columns.as_ref(), true)
                     .map_err(|_| ContractViolation::MissingMutationColumns)?;
             }
             Operation::Update => {
                 if self.base_version.as_deref().is_none_or(str::is_empty) {
                     return Err(ContractViolation::MissingMutationBaseVersion);
                 }
-                validate_columns(self.columns.as_ref())
+                validate_columns(self.columns.as_ref(), false)
                     .map_err(|_| ContractViolation::MissingMutationColumns)?;
             }
             Operation::Delete => {
@@ -1838,11 +1838,13 @@ fn validate_one_field_pk(value: &Value) -> Result<(), ContractViolation> {
     Ok(())
 }
 
-fn validate_columns(value: Option<&Value>) -> Result<(), ContractViolation> {
+/// An insert can author no fields, so the server key and source defaults create the row.
+/// An update must change at least one field.
+fn validate_columns(value: Option<&Value>, allow_empty: bool) -> Result<(), ContractViolation> {
     let object = value
         .and_then(Value::as_object)
         .ok_or(ContractViolation::InvalidColumns)?;
-    if object.is_empty()
+    if (object.is_empty() && !allow_empty)
         || object.len() > MAX_PUSH_COLUMNS
         || object.keys().any(|field_id| field_id.is_empty())
     {

@@ -20,7 +20,7 @@ use crate::rebuild_token::{
     RebuildContinuationInput,
 };
 use crate::registry::{load_registry_from_client, TableRegistration};
-use crate::spi_helpers::{current_utc_timestamp, decode_digest, required_text};
+use crate::spi_helpers::{current_utc_timestamp, decode_digest, required_record_id, required_text};
 use crate::stream_position::{load_materialized_boundary, StreamBoundary, StreamPosition};
 
 const SESSION_COLUMNS: &str = "
@@ -581,7 +581,7 @@ fn stage_records(
     for row in rows {
         let relation_id = required_text(&row, "relation_id", "rebuild ")?;
         let table_name = required_text(&row, "table_name", "rebuild ")?;
-        let record_id = required_text(&row, "record_id", "rebuild ")?;
+        let record_id = required_record_id(&row)?;
         let table = registry
             .iter()
             .find(|table| table.relation_id == relation_id)
