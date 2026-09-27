@@ -57,7 +57,7 @@ Recommended baseline:
 
 Row membership and client assignment are different operations.
 A membership function selects the scopes that contain a row.
-Connect assigns the authenticated user's identity scope, registered shared scopes, and explicit user grants.
+Connect and pull assign the authenticated user's identity scope, registered shared scopes, explicit user grants, and the results of the registered assignment function.
 A custom scope name does not assign itself to a client.
 
 This page is only the mental model. Detailed operational guidance, grouping rules, and anti-patterns live in [Scope modeling](/synchro/architecture/scope-modeling/).

@@ -312,7 +312,8 @@ belongs to `user:alice`.
 ## Assignment operations
 
 The tutorial uses the default `user:alice` assignment. The server also supports
-fixed shared scopes and explicit grants. Run these statements as an operator:
+fixed shared scopes, explicit grants, and one assignment function. Run these
+statements as an operator:
 
 ```sql
 SELECT synchro.synchro_register_shared_scope('notes:announcements', false);
@@ -320,9 +321,67 @@ SELECT synchro.synchro_grant_user_scope('alice', 'notes:review');
 SELECT synchro.synchro_revoke_user_scope('alice', 'notes:review');
 ```
 
-The next connect reconciles each change. An added scope rebuilds. A removed
-scope causes local provenance cleanup. A client cannot request an invented
-scope or grant itself one.
+An assignment function derives scopes from application data. This example
+assigns review scopes from an application table. Run it as
+`synchro_quickstart_owner`, because that role has `synchro_operator` membership
+and must own the function:
+
+```sql
+CREATE TABLE public.note_reviewers (
+    user_id text NOT NULL,
+    scope_id text NOT NULL,
+    PRIMARY KEY (user_id, scope_id)
+);
+GRANT SELECT ON public.note_reviewers TO synchro_owner;
+
+CREATE FUNCTION public.note_review_scopes(p_user_id text)
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, synchro
+BEGIN ATOMIC
+    SELECT scope_id FROM public.note_reviewers WHERE user_id = p_user_id;
+END;
+
+REVOKE ALL ON FUNCTION public.note_review_scopes(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.note_review_scopes(text) TO synchro_owner;
+
+SELECT synchro.synchro_register_assignment_function('public.note_review_scopes', 100);
+
+INSERT INTO public.note_reviewers (user_id, scope_id)
+VALUES ('alice', 'notes:review');
+```
+
+The extension requires these function attributes and grants:
+
+- `LANGUAGE sql` with a `BEGIN ATOMIC` body.
+- Exactly one `text` argument. The argument is the canonical user ID.
+- `RETURNS SETOF text`.
+- `STABLE`, and not `SECURITY DEFINER`.
+- `SET search_path = pg_catalog, synchro`.
+- EXECUTE for `synchro_owner` and no EXECUTE for PUBLIC.
+- SELECT for `synchro_owner` on each relation that the function reads.
+
+Step 3 already grants `synchro_owner` USAGE on schema `public`. Schema-qualify
+each relation in the function body. The second registration argument limits
+each user to 100 function scopes. A function result must not start with
+`user:`. A scope holds rows only when a membership function returns that scope
+for the rows.
+
+Register the function again after you change its definition. Until then,
+connect and pull fail with `500 sync_integrity_failure`. Remove the
+registration with this statement:
+
+```sql
+SELECT synchro.synchro_unregister_assignment_function();
+```
+
+The next successful connect or pull reconciles each assignment change. A
+change to `public.note_reviewers` needs no grant call. A changed set advances
+`scope_set_version` by one, and the same response reports the change. An added
+scope rebuilds. A removed scope causes local provenance cleanup. Rebuild does
+not reconcile assignment. A client cannot request an invented scope or grant
+itself one.
 
 ## 7. Create the local tutorial token
 
