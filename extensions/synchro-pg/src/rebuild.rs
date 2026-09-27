@@ -136,7 +136,7 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
         let client_state = match load_rebuild_client_state(client, p_user_id, &request.client_id) {
             Ok(Some(state)) => state,
             Ok(None) => return invalid_request_response(),
-            Err(error) => return integrity_failure_with_log("loading client state", &error),
+            Err(_) => return integrity_failure_with_log("loading client state"),
         };
         if request.client_generation != client_state.client_generation {
             return crate::client::client_generation_expired_response(
@@ -239,19 +239,19 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
         }
         let boundary = match load_materialized_boundary(client) {
             Ok(boundary) => boundary,
-            Err(error) => return integrity_failure_with_log("loading boundary", &error),
+            Err(_) => return integrity_failure_with_log("loading boundary"),
         };
         let scope_binding = match load_scope_binding(client, &request.scope) {
             Ok(Some(binding)) => binding,
             Ok(None) => return integrity_failure_response(),
-            Err(error) => return integrity_failure_with_log("loading scope state", &error),
+            Err(_) => return integrity_failure_with_log("loading scope state"),
         };
         if scope_binding.stream_generation != boundary.stream_generation {
             return integrity_failure_response();
         }
         let registry = match load_registry_from_client(client) {
             Ok(registry) => registry,
-            Err(error) => return integrity_failure_with_log("loading registry", &error),
+            Err(_) => return integrity_failure_with_log("loading registry"),
         };
         let (staged_records, checksum) = match stage_records(
             client,
@@ -261,7 +261,7 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
             &boundary,
         ) {
             Ok(staged) => staged,
-            Err(error) => return integrity_failure_with_log("staging snapshot", &error),
+            Err(_) => return integrity_failure_with_log("staging snapshot"),
         };
         let session = match create_session(
             client,
@@ -274,7 +274,7 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
             &staged_records,
         ) {
             Ok(session) => session,
-            Err(error) => return integrity_failure_with_log("creating session", &error),
+            Err(_) => return integrity_failure_with_log("creating session"),
         };
         insert_staged_records(client, &session, &staged_records)
             .unwrap_or_else(|error| pgrx::error!("staging rebuild snapshot: {error}"));
@@ -672,16 +672,7 @@ fn stage_records(
             .ok_or_else(|| "rebuild captured row is missing".to_string())?;
         let computed = synced_row_digest(client, table, &row, &record_id, &server_version)?;
         if computed != row_checksum {
-            return Err(format!(
-                "rebuild captured row checksum does not match: table {} relation {} record {} captured generation {} table generation {} stored {} computed {}",
-                table_name,
-                relation_id,
-                record_id,
-                captured_generation,
-                table.registry_generation,
-                row_checksum.to_lower_hex(),
-                computed.to_lower_hex()
-            ));
+            return Err("rebuild captured row checksum does not match".to_string());
         }
         let primary_key = row_primary_key_json(table, &record_id)?;
         let canonical_table = canonical_table(table)?;
@@ -1077,8 +1068,10 @@ fn integrity_failure_response() -> pgrx::JsonB {
     )
 }
 
-fn integrity_failure_with_log(operation: &str, error: &impl std::fmt::Display) -> pgrx::JsonB {
-    pgrx::warning!("rebuild {} failed: {}", operation, error);
+// Rebuild failure details can contain record identity, row values, or SQL text.
+// The log names only the fixed rebuild operation.
+fn integrity_failure_with_log(operation: &str) -> pgrx::JsonB {
+    pgrx::warning!("rebuild {} failed", operation);
     integrity_failure_response()
 }
 

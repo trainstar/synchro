@@ -441,5 +441,75 @@ BEGIN
 END
 $dependencies$;
 
+-- Document members read sibling rows of the same document, so a member insert,
+-- move, or delete changes the membership of every sibling in both documents.
+DO $self_impact$
+DECLARE
+    current_generation bigint;
+    target_table_id uuid;
+    document_field_id text;
+    dependency_field_ids text[];
+BEGIN
+    SELECT generation
+    INTO STRICT current_generation
+    FROM synchro.sync_registry_generations
+    WHERE state IN ('active', 'pending') AND validated
+    ORDER BY generation DESC
+    LIMIT 1;
+
+    SELECT registry.table_id
+    INTO STRICT target_table_id
+    FROM synchro.sync_registry AS registry
+    WHERE registry.registry_generation = current_generation
+      AND registry.physical_schema = 'public'
+      AND registry.physical_relation = 'document_members';
+
+    SELECT pg_catalog.array_agg(field.field_id::text ORDER BY field.field_id),
+           pg_catalog.max(field.field_id::text) FILTER (WHERE field.physical_column = 'document_id')
+    INTO dependency_field_ids, document_field_id
+    FROM synchro.sync_registry_fields AS field
+    JOIN synchro.sync_registry AS registry
+      ON registry.registry_generation = field.registry_generation
+     AND registry.relation_id = field.relation_id
+    WHERE registry.registry_generation = current_generation
+      AND registry.physical_schema = 'public'
+      AND registry.physical_relation = 'document_members'
+      AND field.physical_column = ANY(ARRAY['id', 'document_id', 'user_id', 'deleted_at']::text[]);
+
+    IF pg_catalog.cardinality(dependency_field_ids) <> 4 OR document_field_id IS NULL THEN
+        RAISE EXCEPTION 'self-impact field identity is incomplete';
+    END IF;
+
+    EXECUTE pg_catalog.format(
+        'CREATE OR REPLACE FUNCTION public.test_document_members_sibling_impact(p_old_row jsonb, p_new_row jsonb)
+         RETURNS SETOF synchro.synchro_row_ref
+         LANGUAGE SQL STABLE SECURITY INVOKER
+         SET search_path = pg_catalog, synchro
+         BEGIN ATOMIC
+             SELECT ROW(%L::uuid, ''string'', pg_catalog.to_jsonb(sibling.record_id))::synchro.synchro_row_ref
+             FROM synchro_projection.document_members AS sibling
+             WHERE NOT sibling.deleted
+               AND sibling.document_id #>> ''{}'' IN (
+                   p_old_row ->> %L, p_new_row ->> %L
+               );
+         END',
+        target_table_id,
+        document_field_id,
+        document_field_id
+    );
+    REVOKE EXECUTE ON FUNCTION public.test_document_members_sibling_impact(jsonb, jsonb) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.test_document_members_sibling_impact(jsonb, jsonb)
+        TO synchro_owner, synchro_worker;
+
+    PERFORM synchro.synchro_register_membership_dependency(
+        'document_members',
+        'document_members',
+        'public.test_document_members_sibling_impact',
+        dependency_field_ids,
+        1000
+    );
+END
+$self_impact$;
+
 DELETE FROM synchro.sync_scope_state
 WHERE scope_id = 'bootstrap';

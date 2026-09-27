@@ -296,7 +296,6 @@ CREATE TABLE sync_membership_dependencies (
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     FOREIGN KEY (registry_generation, target_relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
-    CHECK (dependency_relation_id <> target_relation_id),
     CHECK (
         (dependency_registration_kind = 'synced'
          AND cardinality(dependency_field_ids) > 0)
@@ -2295,7 +2294,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1022
+-- synchro-pg/src/registry.rs:1025
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2354,7 +2353,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:765
+-- synchro-pg/src/bgworker.rs:760
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2460,7 +2459,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1930
+-- synchro-pg/src/lib.rs:1929
 -- finalize
 
 DO $roles$
