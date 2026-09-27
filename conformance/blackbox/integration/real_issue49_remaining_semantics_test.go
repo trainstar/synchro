@@ -1418,12 +1418,29 @@ func issue49RemainingEffectProgress(t *testing.T) {
 	}
 }
 
+// issue49RemainingWALWorkerGateLockKey mirrors WAL_WORKER_GATE_LOCK_KEY in
+// extensions/synchro-pg/src/lib.rs. A shared hold lets source writes commit
+// while projection activation waits for its exclusive worker gate.
+const issue49RemainingWALWorkerGateLockKey int64 = 0x7761_6c72
+
 func issue49RemainingProjectionBootstrap(t *testing.T) {
-	ctx, harness, _ := issue49RemainingHarness(t, 5*time.Minute)
+	ctx, harness, token := issue49RemainingHarness(t, 5*time.Minute)
 	historicalID := "00000000-0000-4000-8e27-000000000001"
 	catchupID := "00000000-0000-4000-8e27-000000000002"
-	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_late_registration (id, owner_id, value) VALUES ($1, $2, $3)", historicalID, "diagnostic-user", "bootstrap-historical"); err != nil {
-		t.Fatalf("insert projection-bootstrap history: %v", err)
+	// These rows change after the activation barrier. Activation must keep
+	// their source-owned versions and tombstone. Issue #198.
+	laterUpdateID := "00000000-0000-4000-8e27-000000000003"
+	laterDeleteID := "00000000-0000-4000-8e27-000000000004"
+	laterInsertID := "00000000-0000-4000-8e27-000000000005"
+	laterIDs := []string{laterUpdateID, laterDeleteID, laterInsertID}
+	for recordID, value := range map[string]string{
+		historicalID:  "bootstrap-historical",
+		laterUpdateID: "bootstrap-later-update-base",
+		laterDeleteID: "bootstrap-later-delete-base",
+	} {
+		if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_late_registration (id, owner_id, value) VALUES ($1, $2, $3)", recordID, "diagnostic-user", value); err != nil {
+			t.Fatalf("insert projection-bootstrap history: %v", err)
+		}
 	}
 	if err := harness.Source().ExecContext(ctx, `
 		INSERT INTO cf_late_registration (id, owner_id, value)
@@ -1480,8 +1497,155 @@ func issue49RemainingProjectionBootstrap(t *testing.T) {
 	if err := harness.Source().ExecContext(ctx, "INSERT INTO cf_late_registration (id, owner_id, value) VALUES ($1, $2, $3)", catchupID, "diagnostic-user", "bootstrap-catchup"); err != nil {
 		t.Fatalf("insert projection-bootstrap catch-up row: %v", err)
 	}
+	admin := openIssue49Admin(t, ctx, harness)
+	workerGate, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin shared WAL worker gate: %v", err)
+	}
+	defer workerGate.Rollback()
+	var gatePID int
+	if err := workerGate.QueryRowContext(ctx, "SELECT pg_catalog.pg_backend_pid()").Scan(&gatePID); err != nil {
+		t.Fatalf("identify shared WAL worker gate: %v", err)
+	}
+	if _, err := workerGate.ExecContext(ctx, "SELECT pg_catalog.pg_advisory_xact_lock_shared($1::bigint)", issue49RemainingWALWorkerGateLockKey); err != nil {
+		t.Fatalf("hold shared WAL worker gate: %v", err)
+	}
 	if err := barrier.ReleaseBarrier(); err != nil {
 		t.Fatalf("release projection-bootstrap barrier: %v", err)
+	}
+	activationQueued := false
+	for deadline := time.Now().Add(90 * time.Second); time.Now().Before(deadline); {
+		select {
+		case finished := <-completed:
+			t.Fatalf("projection bootstrap ended before its activation waited: %v", finished.err)
+		default:
+		}
+		if err := admin.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_locks waiting
+				WHERE waiting.locktype = 'advisory'
+				  AND waiting.mode = 'ExclusiveLock'
+				  AND NOT waiting.granted
+				  AND waiting.classid = (($2::bigint >> 32) & 4294967295)::oid
+				  AND waiting.objid = ($2::bigint & 4294967295)::oid
+				  AND waiting.objsubid = 1
+				  AND $1 = ANY(pg_catalog.pg_blocking_pids(waiting.pid))
+			)`, gatePID, issue49RemainingWALWorkerGateLockKey).Scan(&activationQueued); err != nil {
+			t.Fatalf("observe queued projection activation: %v", err)
+		}
+		if activationQueued {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !activationQueued {
+		t.Fatalf("projection activation did not wait for the worker gate: %s", harness.FailureDiagnostics())
+	}
+	var bootstrapID, activationBarrier string
+	var candidateAtBarrier, mainAtBarrier bool
+	if err := admin.QueryRowContext(ctx, `
+		SELECT reset.reset_id::text, reset.activation_barrier::text,
+		       reset.candidate_verified
+		       AND reset.candidate_materialized_end_lsn = reset.activation_barrier,
+		       progress.materialized_end_lsn = reset.activation_barrier
+		FROM synchro.sync_stream_resets reset
+		CROSS JOIN synchro.sync_wal_progress progress
+		WHERE reset.operation_kind = 'projection_bootstrap'
+		  AND reset.lifecycle = 'catching_up'
+		  AND progress.singleton`).Scan(&bootstrapID, &activationBarrier, &candidateAtBarrier, &mainAtBarrier); err != nil {
+		t.Fatalf("observe projection activation barrier: %v", err)
+	}
+	if !candidateAtBarrier || !mainAtBarrier {
+		t.Fatalf("projection activation window is not at its barrier: candidate=%t main=%t", candidateAtBarrier, mainAtBarrier)
+	}
+	for _, statement := range []struct {
+		query    string
+		recordID string
+	}{
+		{"UPDATE cf_late_registration SET value = 'bootstrap-later-update', updated_at = clock_timestamp() WHERE id = $1", laterUpdateID},
+		{"DELETE FROM cf_late_registration WHERE id = $1", laterDeleteID},
+		{"INSERT INTO cf_late_registration (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'bootstrap-later-insert')", laterInsertID},
+	} {
+		if err := harness.Source().ExecContext(ctx, statement.query, statement.recordID); err != nil {
+			t.Fatalf("commit source write after the projection barrier: %v", err)
+		}
+	}
+	type laterSourceState struct {
+		RowVersion     string  `json:"row_version"`
+		FenceID        string  `json:"fence_id"`
+		Deleted        bool    `json:"deleted"`
+		Operation      string  `json:"operation"`
+		Coverage       string  `json:"coverage"`
+		CandidateEvent bool    `json:"candidate_event"`
+		StagedValue    *string `json:"staged_value"`
+		StagedVersion  *string `json:"staged_version"`
+	}
+	loadLaterState := func() map[string]laterSourceState {
+		var encoded string
+		if err := admin.QueryRowContext(ctx, `
+			WITH late AS (
+				SELECT registry.relation_id, field.field_id::text AS value_field
+				FROM synchro.sync_stream_resets reset
+				JOIN synchro.sync_registry registry
+				  ON registry.registry_generation = reset.target_registry_generation
+				 AND registry.physical_relation = 'cf_late_registration'
+				JOIN synchro.sync_registry_fields field
+				  ON field.registry_generation = registry.registry_generation
+				 AND field.relation_id = registry.relation_id
+				 AND field.physical_column = 'value'
+				WHERE reset.reset_id = $1::uuid
+			)
+			SELECT COALESCE(jsonb_object_agg(version.record_id, jsonb_build_object(
+			           'row_version', version.row_version::text,
+			           'fence_id', version.fence_id::text,
+			           'deleted', version.deleted,
+			           'operation', fence.operation,
+			           'coverage', fence.coverage,
+			           'candidate_event', EXISTS (
+			               SELECT 1 FROM synchro.sync_projection_bootstrap_events event
+			               WHERE event.bootstrap_id = $1::uuid AND event.fence_id = fence.fence_id
+			           ),
+			           'staged_value', staged.row_data->>late.value_field,
+			           'staged_version', staged.row_version::text
+			       )), '{}'::jsonb)::text
+			FROM late
+			JOIN synchro.sync_row_versions version ON version.relation_id = late.relation_id
+			JOIN synchro.sync_write_fences fence ON fence.fence_id = version.fence_id
+			LEFT JOIN synchro.sync_stream_reset_captured_rows staged
+			  ON staged.reset_id = $1::uuid
+			 AND staged.relation_id = version.relation_id
+			 AND staged.record_id = version.record_id
+			WHERE version.record_id = ANY($2)`, bootstrapID, laterIDs).Scan(&encoded); err != nil {
+			t.Fatalf("observe source versions after the projection barrier: %v", err)
+		}
+		var state map[string]laterSourceState
+		if err := json.Unmarshal([]byte(encoded), &state); err != nil {
+			t.Fatalf("decode source versions after the projection barrier: %v", err)
+		}
+		return state
+	}
+	later := loadLaterState()
+	for recordID, want := range map[string]struct {
+		operation   string
+		deleted     bool
+		stagedValue string
+	}{
+		laterUpdateID: {"update", false, "bootstrap-later-update-base"},
+		laterDeleteID: {"delete", true, "bootstrap-later-delete-base"},
+		laterInsertID: {"insert", false, ""},
+	} {
+		state, found := later[recordID]
+		stagedMatches := want.stagedValue == "" && state.StagedValue == nil && state.StagedVersion == nil ||
+			want.stagedValue != "" && state.StagedValue != nil && *state.StagedValue == want.stagedValue &&
+				state.StagedVersion != nil && *state.StagedVersion != state.RowVersion
+		if !found || state.Operation != want.operation || state.Deleted != want.deleted ||
+			state.Coverage != "pending" || state.CandidateEvent || !stagedMatches {
+			t.Fatalf("source write did not follow the captured barrier for %s: %#v", recordID, state)
+		}
+	}
+	if err := workerGate.Rollback(); err != nil {
+		t.Fatalf("release shared WAL worker gate: %v", err)
 	}
 	var finished outcome
 	select {
@@ -1493,6 +1657,74 @@ func issue49RemainingProjectionBootstrap(t *testing.T) {
 		t.Fatalf("run projection bootstrap: %v", finished.err)
 	}
 	result := finished.result
+	activated := loadLaterState()
+	for _, recordID := range laterIDs {
+		if activated[recordID].RowVersion != later[recordID].RowVersion ||
+			activated[recordID].FenceID != later[recordID].FenceID ||
+			activated[recordID].Deleted != later[recordID].Deleted {
+			t.Fatalf("projection activation replaced a later source version for %s: before=%#v after=%#v", recordID, later[recordID], activated[recordID])
+		}
+	}
+	converged := false
+	var convergence string
+	for deadline := time.Now().Add(30 * time.Second); !converged && time.Now().Before(deadline); {
+		if err := admin.QueryRowContext(ctx, `
+			WITH late AS (
+				SELECT registry.relation_id, field.field_id::text AS value_field
+				FROM synchro.sync_registry registry
+				JOIN synchro.sync_registry_fields field
+				  ON field.registry_generation = registry.registry_generation
+				 AND field.relation_id = registry.relation_id
+				 AND field.physical_column = 'value'
+				WHERE registry.registry_generation = $1
+				  AND registry.physical_relation = 'cf_late_registration'
+			), expected(record_id, fence_id, row_version, value) AS (
+				SELECT * FROM unnest($2::text[], $3::text[], $4::text[], $5::text[])
+			)
+			SELECT count(*) = 3 AND bool_and(COALESCE(
+			           fence.coverage = 'materialized'
+			           AND fence.stream_generation = $6
+			           AND transaction.end_lsn > $7::pg_lsn
+			           AND CASE
+			               WHEN expected.value = '' THEN captured.record_id IS NULL
+			               ELSE captured.row_version = expected.row_version::uuid
+			                    AND captured.row_data->>late.value_field = expected.value
+			           END,
+			           false
+			       )),
+			       COALESCE(jsonb_agg(jsonb_build_object(
+			           'record_id', expected.record_id,
+			           'coverage', fence.coverage,
+			           'end_lsn', transaction.end_lsn::text,
+			           'captured_version', captured.row_version::text
+			       )), '[]'::jsonb)::text
+			FROM expected
+			CROSS JOIN late
+			JOIN synchro.sync_write_fences fence ON fence.fence_id = expected.fence_id::uuid
+			LEFT JOIN synchro.sync_wal_transactions transaction
+			  ON transaction.stream_generation = fence.stream_generation
+			 AND transaction.commit_lsn = fence.commit_lsn
+			LEFT JOIN synchro.sync_captured_rows captured
+			  ON captured.relation_id = late.relation_id
+			 AND captured.record_id = expected.record_id
+			 AND NOT captured.deleted`,
+			generation,
+			laterIDs,
+			[]string{later[laterUpdateID].FenceID, later[laterDeleteID].FenceID, later[laterInsertID].FenceID},
+			[]string{later[laterUpdateID].RowVersion, later[laterDeleteID].RowVersion, later[laterInsertID].RowVersion},
+			[]string{"bootstrap-later-update", "", "bootstrap-later-insert"},
+			result.SourceStreamGeneration,
+			activationBarrier,
+		).Scan(&converged, &convergence); err != nil {
+			t.Fatalf("observe later WAL convergence: %v", err)
+		}
+		if !converged {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !converged {
+		t.Fatalf("later source writes did not converge through WAL after activation: %s; %s", convergence, harness.FailureDiagnostics())
+	}
 	observation, err := harness.Operator().ObserveProjectionBootstrap(ctx, result.BootstrapID, historicalID, catchupID)
 	if err != nil {
 		t.Fatalf("observe projection bootstrap: %v", err)
@@ -1503,9 +1735,133 @@ func issue49RemainingProjectionBootstrap(t *testing.T) {
 		!observation.RegistryActive || !observation.ManifestPublished || !observation.HistoricalRecordPresent ||
 		!observation.CatchupRecordPresent || !observation.HistoricalMembershipPresent || !observation.CatchupMembershipPresent ||
 		observation.CatchupFenceCoverage != "projection_bootstrap" || !observation.CatchupFenceProvenanceMatches ||
-		!observation.NoPendingFences || !observation.StageCleared {
+		!observation.NoPendingFences || !observation.StageCleared || result.BootstrapID != bootstrapID {
 		t.Fatalf("projection bootstrap was not complete and causally bound: result=%#v observation=%#v", result, observation)
 	}
+
+	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-remaining-bootstrap-versions")
+	table := requireRealTable(t, client, "cf_late_registration")
+	records, _ := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8e27-000000000011")
+	rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8e27-000000000012")
+	if version := requireRebuildRecordVersion(t, records, table, laterUpdateID, "bootstrap-later-update"); version != later[laterUpdateID].RowVersion {
+		t.Fatal("rebuild did not return the later update version")
+	}
+	if version := requireRebuildRecordVersion(t, records, table, laterInsertID, "bootstrap-later-insert"); version != later[laterInsertID].RowVersion {
+		t.Fatal("rebuild did not return the later insert version")
+	}
+	for _, record := range records {
+		pk, _ := record["pk"].(map[string]any)
+		if record["table"] == table.ID && pk[table.PrimaryKeyField] == laterDeleteID {
+			t.Fatal("rebuild returned the row deleted after the barrier")
+		}
+	}
+	push := func(attempt realPushAttempt, recordID, baseVersion string) map[string]any {
+		t.Helper()
+		status, body, err := executeSyncRequest(ctx, harness.AdapterURL(), token, "/sync/push", realPushPayload(attempt, table, recordID, baseVersion))
+		if err != nil || status != http.StatusOK || body["batch_id"] != attempt.batchID {
+			t.Fatalf("projection activation push failed: status=%d err=%v body=%#v", status, err, body)
+		}
+		return body
+	}
+	onlyOutcome := func(body map[string]any, list string) map[string]any {
+		t.Helper()
+		outcomes := requireOutcomeList(t, body, list)
+		other := "accepted"
+		if list == "accepted" {
+			other = "rejected"
+		}
+		if len(outcomes) != 1 || len(requireOutcomeList(t, body, other)) != 0 {
+			t.Fatalf("projection activation push returned the wrong outcome: %#v", body)
+		}
+		return outcomes[0]
+	}
+	staleAttempt := realPushAttempt{client: client, batchID: "00000000-0000-4000-8e27-000000000021", mutationID: "00000000-0000-4000-8e27-000000000022", clientVersion: "2032-01-01T00:00:00.000000Z", value: "bootstrap-stale-push"}
+	stale := onlyOutcome(push(staleAttempt, laterUpdateID, *later[laterUpdateID].StagedVersion), "rejected")
+	if stale["status"] != "conflict" || stale["code"] != "version_conflict" || stale["server_version"] != later[laterUpdateID].RowVersion {
+		t.Fatalf("stale barrier version was not rejected by the current source version: %#v", stale)
+	}
+	assertOutcomeValue(t, stale, table, "bootstrap-later-update")
+	deletedAttempt := realPushAttempt{client: client, batchID: "00000000-0000-4000-8e27-000000000023", mutationID: "00000000-0000-4000-8e27-000000000024", clientVersion: "2032-01-01T00:00:00.000000Z", value: "bootstrap-deleted-push"}
+	deleted := onlyOutcome(push(deletedAttempt, laterDeleteID, *later[laterDeleteID].StagedVersion), "rejected")
+	if deleted["status"] != "conflict" || deleted["code"] != "row_deleted" || deleted["server_version"] != later[laterDeleteID].RowVersion {
+		t.Fatalf("stale barrier version did not meet the later tombstone: %#v", deleted)
+	}
+	currentAttempt := realPushAttempt{client: client, batchID: "00000000-0000-4000-8e27-000000000025", mutationID: "00000000-0000-4000-8e27-000000000026", clientVersion: "2032-01-01T00:00:00.000000Z", value: "bootstrap-current-push"}
+	currentPayload := realPushPayload(currentAttempt, table, laterUpdateID, later[laterUpdateID].RowVersion)
+	currentRaw, currentBody := issue49RawSync(t, ctx, harness.AdapterURL(), token, "/sync/push", currentPayload)
+	if currentRaw.Status != http.StatusOK || currentBody["batch_id"] != currentAttempt.batchID {
+		t.Fatalf("projection activation current-version push failed: status=%d body=%#v", currentRaw.Status, currentBody)
+	}
+	current := onlyOutcome(currentBody, "accepted")
+	pushedVersion, _ := current["server_version"].(string)
+	if current["status"] != "applied" || !uuidPattern.MatchString(pushedVersion) || pushedVersion == later[laterUpdateID].RowVersion {
+		t.Fatalf("current source version did not pass compare-and-swap: %#v", current)
+	}
+	replayRaw, _ := issue49RawSync(t, ctx, harness.AdapterURL(), token, "/sync/push", currentPayload)
+	if err := blackbox.CompareExactReplay(currentRaw, replayRaw); err != nil || !bytes.Equal(currentRaw.Body, replayRaw.Body) {
+		t.Fatalf("projection activation push replay was not exact: %v", err)
+	}
+	insertAttempt := realPushAttempt{client: client, batchID: "00000000-0000-4000-8e27-000000000027", mutationID: "00000000-0000-4000-8e27-000000000028", clientVersion: "2032-01-01T00:00:00.000000Z", value: "bootstrap-insert-push"}
+	inserted := onlyOutcome(push(insertAttempt, laterInsertID, later[laterInsertID].RowVersion), "accepted")
+	insertedVersion, _ := inserted["server_version"].(string)
+	if inserted["status"] != "applied" || !uuidPattern.MatchString(insertedVersion) || insertedVersion == later[laterInsertID].RowVersion {
+		t.Fatalf("later insert version did not pass compare-and-swap: %#v", inserted)
+	}
+	wantPulled := map[string][2]string{
+		laterUpdateID: {"bootstrap-current-push", pushedVersion},
+		laterInsertID: {"bootstrap-insert-push", insertedVersion},
+	}
+	pulled := make(map[string]bool, len(wantPulled))
+	capturePending := 0
+	for deadline := time.Now().Add(30 * time.Second); len(pulled) < len(wantPulled) && time.Now().Before(deadline); {
+		status, response, err := executeSyncRequest(ctx, harness.AdapterURL(), token, "/sync/pull", map[string]any{
+			"client_id":         client.ID,
+			"client_generation": client.Generation,
+			"schema":            client.Schema,
+			"scope_set_version": client.ScopeSetVersion,
+			"scopes":            client.Scopes,
+			"limit":             100,
+		})
+		if err != nil {
+			t.Fatalf("pull pushed later versions: %v", err)
+		}
+		// Pull stays capture_pending until WAL materializes the accepted pushes.
+		if status == http.StatusServiceUnavailable {
+			assertIssue49CapturePending(t, status, response)
+			capturePending++
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if rebuild, _ := response["rebuild"].([]any); status != http.StatusOK || len(rebuild) != 0 {
+			t.Fatalf("pull pushed later versions status = %d: %#v", status, response)
+		}
+		cursors, _ := response["scope_cursors"].(map[string]any)
+		for scopeID, cursor := range cursors {
+			client.Scopes[scopeID] = map[string]any{"cursor": cursor}
+		}
+		changes, _ := response["changes"].([]any)
+		for _, rawChange := range changes {
+			change, _ := rawChange.(map[string]any)
+			pk, _ := change["pk"].(map[string]any)
+			recordID, _ := pk[table.PrimaryKeyField].(string)
+			want, expected := wantPulled[recordID]
+			if change["table"] != table.ID || !expected {
+				continue
+			}
+			row, _ := change["row"].(map[string]any)
+			if pulled[recordID] || row[table.ValueField] != want[0] || change["server_version"] != want[1] {
+				t.Fatalf("pull delivered an inexact later version for %s: %#v", recordID, change)
+			}
+			pulled[recordID] = true
+		}
+		if len(pulled) < len(wantPulled) {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if len(pulled) != len(wantPulled) {
+		t.Fatalf("pull did not deliver the pushed later versions: %#v; %s", pulled, harness.FailureDiagnostics())
+	}
+	t.Logf("pull returned %d canonical capture_pending responses before delivery", capturePending)
 }
 
 func issue49RemainingSchemaCursorContinuity(t *testing.T) {

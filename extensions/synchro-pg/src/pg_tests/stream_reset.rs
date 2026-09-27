@@ -296,6 +296,416 @@
     }
 
     #[pg_test]
+    fn stream_reset_verifies_final_state_and_every_history_fence() {
+        setup_test_tables();
+        let dependency = create_capture_dependency_table(false);
+        register_capture_dependency_table(&dependency);
+        configure_reset_test_slot("synchro_reset_old");
+        let updated_id = "28000000-0000-4000-8000-000000000001";
+        let deleted_id = "28000000-0000-4000-8000-000000000002";
+        Spi::run_with_args(
+            "INSERT INTO public.test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'u1', 'first'), ($2::uuid, 'u1', 'removed');
+             UPDATE public.test_orders SET title = 'second' WHERE id = $1::uuid;
+             UPDATE public.test_orders SET title = 'final' WHERE id = $1::uuid;
+             DELETE FROM public.test_orders WHERE id = $2::uuid",
+            &[updated_id.into(), deleted_id.into()],
+        )
+        .expect("write repeated synced histories");
+        Spi::run(&format!(
+            "INSERT INTO public.{dependency} (id, target_id) VALUES (1, 7), (2, 7);
+             UPDATE public.{dependency} SET target_id = 8 WHERE id = 1;
+             DELETE FROM public.{dependency} WHERE id = 2"
+        ))
+        .expect("write repeated capture dependency histories");
+        // TRUNCATE leaves the fences pending and removes the rows before the
+        // snapshot. The soft-delete update sets a deletion version without a
+        // delete fence. Issue #198.
+        let absent_inserted_id = "28000000-0000-4000-8000-000000000011";
+        let absent_updated_id = "28000000-0000-4000-8000-000000000012";
+        let soft_deleted_id = "28000000-0000-4000-8000-000000000013";
+        Spi::run_with_args(
+            "INSERT INTO public.test_products (id, name)
+             VALUES ($1::uuid, 'inserted'), ($2::uuid, 'first'), ($3::uuid, 'deleted');
+             UPDATE public.test_products SET name = 'final' WHERE id = $2::uuid;
+             UPDATE public.test_products SET deleted_at = now() WHERE id = $3::uuid;
+             TRUNCATE public.test_products",
+            &[
+                absent_inserted_id.into(),
+                absent_updated_id.into(),
+                soft_deleted_id.into(),
+            ],
+        )
+        .expect("write truncated product histories");
+        let truncated_ids = vec![absent_inserted_id, absent_updated_id, soft_deleted_id];
+        let truncated_state = |staged_reset: &str| -> serde_json::Value {
+            Spi::get_one_with_args::<pgrx::JsonB>(
+                "SELECT jsonb_object_agg(input.id, jsonb_build_object(
+                     'staged', (
+                         SELECT jsonb_build_object(
+                             'deleted', staged.deleted,
+                             'fence_id', staged.fence_id::text,
+                             'row_version', staged.row_version::text
+                         )
+                         FROM synchro.sync_stream_reset_row_versions staged
+                         WHERE staged.reset_id = $1::uuid AND staged.record_id = input.id
+                     ),
+                     'live', (
+                         SELECT jsonb_build_object(
+                             'deleted', live.deleted,
+                             'fence_id', live.fence_id::text,
+                             'row_version', live.row_version::text
+                         )
+                         FROM synchro.sync_row_versions live
+                         WHERE live.record_id = input.id
+                     ),
+                     'final_fence', (
+                         SELECT jsonb_build_object(
+                             'fence_id', fence.fence_id::text,
+                             'row_version', fence.row_version::text,
+                             'coverage', fence.coverage
+                         )
+                         FROM synchro.sync_write_fences fence
+                         WHERE COALESCE(fence.new_record_id, fence.old_record_id) = input.id
+                           AND fence.operation = CASE
+                               WHEN input.id = $3 THEN 'insert' ELSE 'update'
+                           END
+                     ),
+                     'captured', EXISTS (
+                         SELECT 1 FROM synchro.sync_captured_rows captured
+                         WHERE captured.record_id = input.id
+                     ) OR EXISTS (
+                         SELECT 1 FROM synchro.sync_stream_reset_captured_rows captured
+                         WHERE captured.reset_id = $1::uuid AND captured.record_id = input.id
+                     )
+                 ))
+                 FROM unnest($2::text[]) input(id)",
+                &[
+                    staged_reset.into(),
+                    truncated_ids.clone().into(),
+                    absent_inserted_id.into(),
+                ],
+            )
+            .expect("load truncated product state")
+            .expect("truncated product state")
+            .0
+        };
+
+        let prepared = prepare_reset_for_test("synchro_reset_candidate");
+        let id = reset_id(&prepared);
+        lock_and_stage_reset(&id, "synchro_reset_candidate");
+        let staged = truncated_state(&id);
+        for absent_id in [absent_inserted_id, absent_updated_id] {
+            let state = &staged[absent_id];
+            assert!(state["staged"].is_null(), "absent row kept a staged version");
+            assert_eq!(state["captured"], json!(false));
+            assert_eq!(state["live"]["deleted"], json!(false));
+            assert_eq!(state["live"]["fence_id"], state["final_fence"]["fence_id"]);
+            assert_eq!(state["live"]["row_version"], state["final_fence"]["row_version"]);
+            assert_eq!(state["final_fence"]["coverage"], json!("pending"));
+        }
+        let soft_deleted = &staged[soft_deleted_id];
+        assert_eq!(soft_deleted["staged"]["deleted"], json!(true));
+        assert_eq!(soft_deleted["staged"], soft_deleted["live"]);
+        assert_eq!(
+            soft_deleted["staged"]["fence_id"],
+            soft_deleted["final_fence"]["fence_id"]
+        );
+        assert_eq!(
+            soft_deleted["staged"]["row_version"],
+            soft_deleted["final_fence"]["row_version"]
+        );
+        assert_eq!(soft_deleted["captured"], json!(false));
+        let history: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'first_fence', (
+                     SELECT fence_id::text FROM synchro.sync_write_fences
+                     WHERE new_record_id = $2 AND operation = 'insert'
+                 ),
+                 'first_version', (
+                     SELECT row_version::text FROM synchro.sync_write_fences
+                     WHERE new_record_id = $2 AND operation = 'insert'
+                 ),
+                 'final_fence', (
+                     SELECT fence_id::text FROM synchro.sync_stream_reset_row_versions
+                     WHERE reset_id = $1::uuid AND record_id = $2
+                 ),
+                 'final_version', (
+                     SELECT row_version::text FROM synchro.sync_stream_reset_row_versions
+                     WHERE reset_id = $1::uuid AND record_id = $2
+                 ),
+                 'covered', (
+                     SELECT count(*) FROM synchro.sync_stream_reset_fence_coverage
+                     WHERE reset_id = $1::uuid
+                 ),
+                 'pending', (
+                     SELECT count(*) FROM synchro.sync_write_fences WHERE coverage = 'pending'
+                 )
+             )",
+            &[id.as_str().into(), updated_id.into()],
+        )
+        .expect("load staged repeated history")
+        .expect("staged repeated history");
+        let first_fence = history.0["first_fence"].as_str().expect("first fence");
+        let first_version = history.0["first_version"].as_str().expect("first version");
+        let final_fence = history.0["final_fence"].as_str().expect("final fence");
+        let final_version = history.0["final_version"].as_str().expect("final version");
+        assert_ne!(first_version, final_version);
+        assert_eq!(history.0["covered"], history.0["pending"]);
+        assert_eq!(history.0["covered"], json!(14));
+
+        let rejected = |change: &str, restore: &str, expected: &str| {
+            let arguments: [pgrx::datum::DatumWithOid; 9] = [
+                id.as_str().into(),
+                updated_id.into(),
+                deleted_id.into(),
+                first_fence.into(),
+                first_version.into(),
+                final_fence.into(),
+                soft_deleted_id.into(),
+                absent_updated_id.into(),
+                absent_inserted_id.into(),
+            ];
+            Spi::run_with_args(change, &arguments).expect("change staged reset");
+            let error = Spi::connect_mut(|client| {
+                crate::stream_reset::activate_stream_reset_for_test(client, &id)
+            })
+            .expect_err("changed reset stage must not activate");
+            assert_eq!(error, expected);
+            Spi::run_with_args(restore, &arguments).expect("restore staged reset");
+        };
+        rejected(
+            "CREATE TEMP TABLE omitted_coverage ON COMMIT DROP AS
+             SELECT * FROM synchro.sync_stream_reset_fence_coverage
+             WHERE reset_id = $1::uuid AND fence_id = $4::uuid;
+             DELETE FROM synchro.sync_stream_reset_fence_coverage
+             WHERE reset_id = $1::uuid AND fence_id = $4::uuid",
+            "INSERT INTO synchro.sync_stream_reset_fence_coverage
+             SELECT * FROM omitted_coverage;
+             DROP TABLE omitted_coverage",
+            "staged fence coverage is incomplete",
+        );
+        rejected(
+            "UPDATE synchro.sync_stream_reset_fence_coverage
+             SET row_version = (
+                 SELECT row_version FROM synchro.sync_stream_reset_row_versions
+                 WHERE reset_id = $1::uuid AND record_id = $2
+             )
+             WHERE reset_id = $1::uuid AND fence_id = $4::uuid",
+            "UPDATE synchro.sync_stream_reset_fence_coverage
+             SET row_version = $5::uuid
+             WHERE reset_id = $1::uuid AND fence_id = $4::uuid",
+            "staged fence coverage is incomplete",
+        );
+        rejected(
+            "UPDATE synchro.sync_stream_reset_row_versions
+             SET fence_id = $4::uuid
+             WHERE reset_id = $1::uuid AND record_id = $2",
+            "UPDATE synchro.sync_stream_reset_row_versions
+             SET fence_id = $6::uuid
+             WHERE reset_id = $1::uuid AND record_id = $2",
+            "staged final source state is invalid",
+        );
+        rejected(
+            "UPDATE synchro.sync_stream_reset_row_versions
+             SET deleted = false
+             WHERE reset_id = $1::uuid AND record_id = $3",
+            "UPDATE synchro.sync_stream_reset_row_versions
+             SET deleted = true
+             WHERE reset_id = $1::uuid AND record_id = $3",
+            "staged final source state is invalid",
+        );
+        rejected(
+            "UPDATE synchro.sync_stream_reset_captured_rows captured
+             SET row_data = jsonb_set(
+                 captured.row_data, ARRAY[field.field_id::text], to_jsonb('second'::text)
+             )
+             FROM synchro.sync_registry_fields field
+             WHERE captured.reset_id = $1::uuid AND captured.record_id = $2
+               AND field.registry_generation = captured.registry_generation
+               AND field.relation_id = captured.relation_id
+               AND field.physical_column = 'title'",
+            "UPDATE synchro.sync_stream_reset_captured_rows captured
+             SET row_data = jsonb_set(
+                 captured.row_data, ARRAY[field.field_id::text], to_jsonb('final'::text)
+             )
+             FROM synchro.sync_registry_fields field
+             WHERE captured.reset_id = $1::uuid AND captured.record_id = $2
+               AND field.registry_generation = captured.registry_generation
+               AND field.relation_id = captured.relation_id
+               AND field.physical_column = 'title'",
+            "staged source projection differs from source",
+        );
+        rejected(
+            "UPDATE synchro.sync_stream_reset_capture_dependency_rows
+             SET row_data = '{\"id\": 1, \"target_id\": 7}'::jsonb
+             WHERE reset_id = $1::uuid AND capture_key = '{\"id\": 1}'::jsonb",
+            "UPDATE synchro.sync_stream_reset_capture_dependency_rows
+             SET row_data = '{\"id\": 1, \"target_id\": 8}'::jsonb
+             WHERE reset_id = $1::uuid AND capture_key = '{\"id\": 1}'::jsonb",
+            "staged capture dependency projection differs from source",
+        );
+        for tombstone in ["$3", "$7"] {
+            rejected(
+                &format!(
+                    "CREATE TEMP TABLE omitted_tombstone ON COMMIT DROP AS
+                     SELECT * FROM synchro.sync_stream_reset_row_versions
+                     WHERE reset_id = $1::uuid AND record_id = {tombstone};
+                     DELETE FROM synchro.sync_stream_reset_row_versions
+                     WHERE reset_id = $1::uuid AND record_id = {tombstone}"
+                ),
+                "INSERT INTO synchro.sync_stream_reset_row_versions
+                 SELECT * FROM omitted_tombstone;
+                 DROP TABLE omitted_tombstone",
+                "staged final source state is invalid",
+            );
+        }
+        rejected(
+            "CREATE TEMP TABLE retained_version ON COMMIT DROP AS
+             SELECT * FROM synchro.sync_row_versions WHERE record_id = $8;
+             UPDATE synchro.sync_row_versions
+             SET row_version = gen_random_uuid()
+             WHERE record_id = $8",
+            "UPDATE synchro.sync_row_versions live
+             SET row_version = retained.row_version, fence_id = retained.fence_id
+             FROM retained_version retained
+             WHERE live.relation_id = retained.relation_id
+               AND live.record_id = retained.record_id;
+             DROP TABLE retained_version",
+            "staged final source state is invalid",
+        );
+        rejected(
+            "CREATE TEMP TABLE retained_version ON COMMIT DROP AS
+             SELECT * FROM synchro.sync_row_versions WHERE record_id = $8;
+             UPDATE synchro.sync_row_versions live
+             SET row_version = other.row_version, fence_id = other.fence_id
+             FROM synchro.sync_row_versions other
+             WHERE live.record_id = $8 AND other.record_id = $9",
+            "UPDATE synchro.sync_row_versions live
+             SET row_version = retained.row_version, fence_id = retained.fence_id
+             FROM retained_version retained
+             WHERE live.relation_id = retained.relation_id
+               AND live.record_id = retained.record_id;
+             DROP TABLE retained_version",
+            "staged final source state is invalid",
+        );
+
+        Spi::connect_mut(|client| {
+            crate::stream_reset::activate_stream_reset_for_test(client, &id)
+        })
+        .expect("activate restored repeated-history reset");
+        let activated = truncated_state(&id);
+        for absent_id in [absent_inserted_id, absent_updated_id] {
+            let state = &activated[absent_id];
+            assert!(state["live"].is_null(), "absent row kept a live version");
+            assert_eq!(state["captured"], json!(false));
+            assert_eq!(state["final_fence"]["coverage"], json!("reset_baseline"));
+            assert_eq!(state["final_fence"], {
+                let mut fence = staged[absent_id]["final_fence"].clone();
+                fence["coverage"] = json!("reset_baseline");
+                fence
+            });
+        }
+        assert_eq!(activated[soft_deleted_id]["live"], staged[soft_deleted_id]["live"]);
+        assert_eq!(activated[soft_deleted_id]["captured"], json!(false));
+        let covered: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'covered', count(*) FILTER (
+                     WHERE fence.coverage = 'reset_baseline' AND fence.reset_id = $1::uuid
+                 ),
+                 'pending', count(*) FILTER (WHERE fence.coverage = 'pending'),
+                 'deleted_tombstone', (
+                     SELECT version.deleted FROM synchro.sync_row_versions version
+                     WHERE version.record_id = $2
+                 )
+             )
+             FROM synchro.sync_write_fences fence",
+            &[id.as_str().into(), deleted_id.into()],
+        )
+        .expect("load activated history coverage")
+        .expect("activated history coverage");
+        assert_eq!(covered.0["covered"], json!(14));
+        assert_eq!(covered.0["pending"], json!(0));
+        assert_eq!(covered.0["deleted_tombstone"], json!(true));
+    }
+
+    #[pg_test]
+    fn stream_reset_rejects_changed_source_version_without_repair() {
+        setup_test_tables();
+        configure_reset_test_slot("synchro_reset_old");
+        let deleted_id = "29000000-0000-4000-8000-000000000001";
+        Spi::run_with_args(
+            "INSERT INTO public.test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'u1', 'tombstone control');
+             DELETE FROM public.test_orders WHERE id = $1::uuid",
+            &[deleted_id.into()],
+        )
+        .expect("write reset tombstone control");
+        let original_generation: String = Spi::get_one(
+            "SELECT stream_generation FROM synchro.sync_runtime_state WHERE singleton",
+        )
+        .expect("load original stream generation")
+        .expect("original stream generation");
+
+        let prepared = prepare_reset_for_test("synchro_reset_candidate");
+        let id = reset_id(&prepared);
+        lock_and_stage_reset(&id, "synchro_reset_candidate");
+        Spi::run_with_args(
+            "UPDATE synchro.sync_row_versions SET deleted = false WHERE record_id = $1",
+            &[deleted_id.into()],
+        )
+        .expect("change live source tombstone after staging");
+
+        let error = Spi::connect_mut(|client| {
+            crate::stream_reset::activate_stream_reset_for_test(client, &id)
+        })
+        .expect_err("changed live source version must not activate");
+        assert_eq!(error, "reset source version is inconsistent");
+        let unchanged: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'live_deleted', version.deleted,
+                 'stream_generation', runtime.stream_generation
+             )
+             FROM synchro.sync_row_versions version
+             CROSS JOIN synchro.sync_runtime_state runtime
+             WHERE version.record_id = $1 AND runtime.singleton",
+            &[deleted_id.into()],
+        )
+        .expect("load rejected reset state")
+        .expect("rejected reset state");
+        assert_eq!(unchanged.0["live_deleted"], json!(false));
+        assert_eq!(unchanged.0["stream_generation"], json!(original_generation));
+
+        Spi::run_with_args(
+            "UPDATE synchro.sync_row_versions SET deleted = true WHERE record_id = $1",
+            &[deleted_id.into()],
+        )
+        .expect("restore live source tombstone");
+        Spi::connect_mut(|client| {
+            crate::stream_reset::activate_stream_reset_for_test(client, &id)
+        })
+        .expect("activate reset with the restored tombstone");
+        let installed: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'deleted', version.deleted,
+                 'staged_match', version.row_version = staged.row_version
+                     AND version.fence_id = staged.fence_id
+             )
+             FROM synchro.sync_row_versions version
+             JOIN synchro.sync_stream_reset_row_versions staged
+               ON staged.reset_id = $2::uuid
+              AND staged.relation_id = version.relation_id
+              AND staged.record_id = version.record_id
+             WHERE version.record_id = $1",
+            &[deleted_id.into(), id.as_str().into()],
+        )
+        .expect("load activated reset tombstone")
+        .expect("activated reset tombstone");
+        assert_eq!(installed.0["deleted"], json!(true));
+        assert_eq!(installed.0["staged_match"], json!(true));
+    }
+
+    #[pg_test]
     fn stream_reset_rejects_fence_added_after_staging() {
         setup_test_tables();
         configure_reset_test_slot("synchro_reset_old");
@@ -786,6 +1196,77 @@
         )
         .expect("restore required projection bootstrap edge");
 
+        Spi::run(&format!(
+            "UPDATE {schema}.{table} SET title = 'after barrier' WHERE id = '{record_id}'"
+        ))
+        .expect("write source row after the projection bootstrap barrier");
+        let later: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'fence_id', version.fence_id::text,
+                 'row_version', version.row_version::text,
+                 'staged_version', staged.row_version::text,
+                 'staged_baseline', staged.baseline_generated
+             )
+             FROM synchro.sync_row_versions version
+             JOIN synchro.sync_stream_reset_row_versions staged
+               ON staged.reset_id = $1::uuid
+              AND staged.relation_id = version.relation_id
+              AND staged.record_id = version.record_id
+             WHERE version.relation_id = $2::uuid AND version.record_id = $3",
+            &[
+                bootstrap_id.as_str().into(),
+                relation_id.as_str().into(),
+                record_id.into(),
+            ],
+        )
+        .expect("load source version after the barrier")
+        .expect("source version after the barrier");
+        let later_fence = later.0["fence_id"].as_str().expect("later fence").to_string();
+        let later_version = later.0["row_version"]
+            .as_str()
+            .expect("later version")
+            .to_string();
+        assert_eq!(later.0["staged_baseline"], json!(true));
+        assert_ne!(later.0["staged_version"], later.0["row_version"]);
+        Spi::run_with_args(
+            "UPDATE synchro.sync_row_versions SET row_version = gen_random_uuid()
+             WHERE relation_id = $1::uuid AND record_id = $2",
+            &[relation_id.as_str().into(), record_id.into()],
+        )
+        .expect("change source version outside its fence");
+        let changed_activation = Spi::connect_mut(|client| {
+            crate::stream_reset::activate_projection_bootstrap_for_test(client, &bootstrap_id)
+        })
+        .expect_err("a source version outside its fence must not activate");
+        assert_eq!(changed_activation, "reset source version is inconsistent");
+        let unrepaired: bool = Spi::get_one_with_args(
+            "SELECT row_version <> ALL(ARRAY[$3::uuid, $4::uuid])
+             FROM synchro.sync_row_versions
+             WHERE relation_id = $1::uuid AND record_id = $2",
+            &[
+                relation_id.as_str().into(),
+                record_id.into(),
+                later_version.as_str().into(),
+                later.0["staged_version"]
+                    .as_str()
+                    .expect("staged version")
+                    .into(),
+            ],
+        )
+        .expect("check rejected source version")
+        .expect("rejected source version");
+        assert!(unrepaired, "activation must not repair a source version");
+        Spi::run_with_args(
+            "UPDATE synchro.sync_row_versions SET row_version = $3::uuid
+             WHERE relation_id = $1::uuid AND record_id = $2",
+            &[
+                relation_id.as_str().into(),
+                record_id.into(),
+                later_version.as_str().into(),
+            ],
+        )
+        .expect("restore source version from its fence");
+
         let activated = Spi::connect_mut(|client| {
             crate::stream_reset::activate_projection_bootstrap_for_test(client, &bootstrap_id)
         })
@@ -829,6 +1310,36 @@
         assert_eq!(state.0["row_title"], "historical");
         assert_eq!(state.0["edge_active"], true);
         assert_eq!(state.0["lifecycle"], "activated");
+        let versions: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'source_version', version.row_version::text,
+                 'source_fence', version.fence_id::text,
+                 'fence_coverage', fence.coverage,
+                 'captured_at_barrier', captured.row_data = staged.row_data
+                     AND captured.row_version = staged.row_version
+             )
+             FROM synchro.sync_row_versions version
+             JOIN synchro.sync_write_fences fence ON fence.fence_id = version.fence_id
+             JOIN synchro.sync_captured_rows captured
+               ON captured.relation_id = version.relation_id
+              AND captured.record_id = version.record_id
+             JOIN synchro.sync_stream_reset_captured_rows staged
+               ON staged.reset_id = $3::uuid
+              AND staged.relation_id = version.relation_id
+              AND staged.record_id = version.record_id
+             WHERE version.relation_id = $1::uuid AND version.record_id = $2",
+            &[
+                relation_id.as_str().into(),
+                record_id.into(),
+                bootstrap_id.as_str().into(),
+            ],
+        )
+        .expect("load activated source version")
+        .expect("activated source version");
+        assert_eq!(versions.0["source_version"], json!(later_version));
+        assert_eq!(versions.0["source_fence"], json!(later_fence));
+        assert_eq!(versions.0["fence_coverage"], "pending");
+        assert_eq!(versions.0["captured_at_barrier"], true);
 
         let cleaned: bool = Spi::get_one_with_args(
             "SELECT synchro.synchro_complete_projection_bootstrap_cleanup($1::uuid)",

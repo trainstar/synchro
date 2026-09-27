@@ -2544,65 +2544,6 @@ fn verify_staging(
                                OR coverage.candidate_slot_name::text <> $3
                                OR coverage.consistent_point <> $4::pg_lsn
                                 OR coverage.target_stream_generation <> $5
-                                OR CASE
-                                    WHEN fence.registration_kind = 'synced'
-                                         AND fence.operation IN ('insert', 'update')
-                                    THEN NOT EXISTS (
-                                        SELECT 1
-                                       FROM synchro.sync_stream_reset_row_versions version
-                                       JOIN synchro.sync_stream_reset_captured_rows captured
-                                         ON captured.reset_id = version.reset_id
-                                        AND captured.relation_id = version.relation_id
-                                        AND captured.record_id = version.record_id
-                                        AND captured.row_version = version.row_version
-                                       WHERE version.reset_id = $1::uuid
-                                         AND version.relation_id = fence.relation_id
-                                         AND version.record_id = COALESCE(fence.new_record_id, fence.old_record_id)
-                                         AND version.row_version = fence.row_version
-                                   )
-                                    WHEN fence.registration_kind = 'synced'
-                                         AND fence.operation = 'delete'
-                                    THEN
-                                        NOT EXISTS (
-                                           SELECT 1
-                                           FROM synchro.sync_stream_reset_row_versions version
-                                           WHERE version.reset_id = $1::uuid
-                                             AND version.relation_id = fence.relation_id
-                                             AND version.record_id = fence.old_record_id
-                                             AND version.row_version = fence.row_version
-                                             AND version.deleted
-                                       )
-                                       OR EXISTS (
-                                           SELECT 1
-                                           FROM synchro.sync_stream_reset_captured_rows captured
-                                           WHERE captured.reset_id = $1::uuid
-                                             AND captured.relation_id = fence.relation_id
-                                              AND captured.record_id = fence.old_record_id
-                                        )
-                                    WHEN fence.registration_kind = 'capture_dependency'
-                                         AND fence.operation IN ('insert', 'update')
-                                    THEN NOT EXISTS (
-                                        SELECT 1
-                                        FROM synchro.sync_stream_reset_capture_dependency_rows captured
-                                        WHERE captured.reset_id = $1::uuid
-                                          AND captured.relation_id = fence.relation_id
-                                          AND captured.capture_key = COALESCE(
-                                              fence.new_capture_key,
-                                              fence.old_capture_key
-                                          )
-                                          AND NOT captured.deleted
-                                    )
-                                    WHEN fence.registration_kind = 'capture_dependency'
-                                         AND fence.operation = 'delete'
-                                    THEN EXISTS (
-                                        SELECT 1
-                                        FROM synchro.sync_stream_reset_capture_dependency_rows captured
-                                        WHERE captured.reset_id = $1::uuid
-                                          AND captured.relation_id = fence.relation_id
-                                          AND captured.capture_key = fence.old_capture_key
-                                    )
-                                    ELSE true
-                                END
                            )
                      ) AS valid",
                 None,
@@ -2620,6 +2561,82 @@ fn verify_staging(
     )?;
     if !valid {
         return Err("staged fence coverage is incomplete".to_string());
+    }
+    // One snapshot holds only the final state of a row. Every earlier fence of
+    // that row stays as coverage, and the final source-owned version must come
+    // from one of those fences. The source comparison above proves that the
+    // staged captured rows equal the snapshot rows, and a captured row requires
+    // a staged version. Thus a missing staged version proves that the snapshot
+    // has no row, for example after TRUNCATE. That is valid only when the
+    // snapshot source version is live and comes from a covered fence of the row.
+    // A deletion version, which a soft-delete update also sets, stays staged. A
+    // capture dependency row has no version, so the source comparison proves
+    // its final state. Issue #198.
+    let final_state_valid = required_bool(
+        &client
+            .select(
+                "WITH touched AS (
+                     SELECT coverage.relation_id,
+                            COALESCE(coverage.new_record_id, coverage.old_record_id) AS record_id,
+                            bool_or(coverage.operation = 'delete') AS deleted_by_history
+                     FROM synchro.sync_stream_reset_fence_coverage coverage
+                     WHERE coverage.reset_id = $1::uuid
+                       AND coverage.registration_kind = 'synced'
+                     GROUP BY coverage.relation_id,
+                              COALESCE(coverage.new_record_id, coverage.old_record_id)
+                 )
+                 SELECT NOT EXISTS (
+                     SELECT 1
+                     FROM touched
+                     LEFT JOIN synchro.sync_stream_reset_row_versions version
+                       ON version.reset_id = $1::uuid
+                      AND version.relation_id = touched.relation_id
+                      AND version.record_id = touched.record_id
+                     LEFT JOIN synchro.sync_row_versions source_version
+                       ON version.record_id IS NULL
+                      AND source_version.relation_id = touched.relation_id
+                      AND source_version.record_id = touched.record_id
+                     LEFT JOIN synchro.sync_stream_reset_fence_coverage final_fence
+                       ON final_fence.reset_id = $1::uuid
+                      AND final_fence.registration_kind = 'synced'
+                      AND final_fence.relation_id = touched.relation_id
+                      AND COALESCE(final_fence.new_record_id, final_fence.old_record_id)
+                          = touched.record_id
+                      AND (
+                          (final_fence.fence_id = version.fence_id
+                           AND final_fence.row_version = version.row_version)
+                          OR (final_fence.fence_id = source_version.fence_id
+                              AND final_fence.row_version = source_version.row_version)
+                      )
+                     LEFT JOIN synchro.sync_stream_reset_captured_rows captured
+                       ON captured.reset_id = $1::uuid
+                      AND captured.relation_id = touched.relation_id
+                      AND captured.record_id = touched.record_id
+                     WHERE final_fence.fence_id IS NULL
+                        OR CASE
+                            WHEN version.record_id IS NULL
+                            THEN source_version.deleted OR touched.deleted_by_history
+                            WHEN version.deleted
+                            THEN version.baseline_generated
+                                 OR (captured.record_id IS NOT NULL
+                                     AND (NOT captured.deleted
+                                          OR captured.row_version <> version.row_version))
+                            ELSE version.baseline_generated
+                                 OR touched.deleted_by_history
+                                 OR captured.record_id IS NULL
+                                 OR captured.deleted
+                                 OR captured.row_version <> version.row_version
+                        END
+                 ) AS valid",
+                None,
+                &[reset.reset_id.as_str().into()],
+            )
+            .map_err(|_| "verifying staged final source state failed".to_string())?
+            .first(),
+        "valid",
+    )?;
+    if !final_state_valid {
+        return Err("staged final source state is invalid".to_string());
     }
     let projection_valid = required_bool(
         &client
@@ -3346,28 +3363,105 @@ fn pending_generation_chain(
 }
 
 fn replace_live_projection(client: &mut SpiClient<'_>, reset: &ResetRecord) -> Result<(), String> {
+    // Source triggers own sync_row_versions. A write outside the covered prefix
+    // keeps its pending fence and its newer version or tombstone. Every other
+    // staged entry must equal its stage. An unstaged entry without a later write
+    // is stale, because the snapshot did not contain its row. The statement
+    // rejects an inconsistent entry before it changes a version. Issue #198.
+    let versions_valid = required_bool(
+        &client
+            .update(
+                "WITH later AS MATERIALIZED (
+                     SELECT fence.fence_id, fence.relation_id, fence.registration_kind,
+                            fence.operation, fence.old_record_id, fence.new_record_id,
+                            fence.row_version
+                     FROM synchro.sync_write_fences fence
+                     WHERE fence.coverage = 'pending'
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM synchro.sync_stream_reset_fence_coverage coverage
+                           WHERE coverage.reset_id = $1::uuid
+                             AND coverage.fence_id = fence.fence_id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM synchro.sync_projection_bootstrap_events event
+                           WHERE event.bootstrap_id = $1::uuid
+                             AND event.fence_id = fence.fence_id
+                       )
+                 ), invalid AS MATERIALIZED (
+                     SELECT 1
+                     FROM synchro.sync_stream_reset_row_versions staged
+                     LEFT JOIN synchro.sync_row_versions live
+                       ON live.relation_id = staged.relation_id
+                      AND live.record_id = staged.record_id
+                     WHERE staged.reset_id = $1::uuid
+                       AND NOT EXISTS (SELECT 1 FROM later WHERE later.fence_id = live.fence_id)
+                       AND CASE
+                           WHEN live.record_id IS NULL THEN NOT staged.baseline_generated
+                           ELSE live.row_version <> staged.row_version
+                                OR live.fence_id IS DISTINCT FROM staged.fence_id
+                                OR live.reset_id IS DISTINCT FROM staged.source_reset_id
+                                OR live.deleted <> staged.deleted
+                       END
+                     UNION ALL
+                     SELECT 1
+                     FROM later
+                     JOIN synchro.sync_row_versions live ON live.fence_id = later.fence_id
+                     WHERE later.registration_kind <> 'synced'
+                        OR live.relation_id <> later.relation_id
+                        OR live.record_id <> COALESCE(later.new_record_id, later.old_record_id)
+                        OR live.row_version <> later.row_version
+                        OR (later.operation = 'delete' AND NOT live.deleted)
+                 ), removed AS (
+                     DELETE FROM synchro.sync_row_versions live
+                     WHERE NOT EXISTS (SELECT 1 FROM invalid)
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM synchro.sync_stream_reset_row_versions staged
+                           WHERE staged.reset_id = $1::uuid
+                             AND staged.relation_id = live.relation_id
+                             AND staged.record_id = live.record_id
+                       )
+                       AND NOT EXISTS (SELECT 1 FROM later WHERE later.fence_id = live.fence_id)
+                 ), installed AS (
+                     INSERT INTO synchro.sync_row_versions (
+                         relation_id, record_id, row_version, fence_id, reset_id, deleted,
+                         updated_at
+                     )
+                     SELECT staged.relation_id, staged.record_id, staged.row_version,
+                            staged.fence_id, staged.source_reset_id, staged.deleted, now()
+                     FROM synchro.sync_stream_reset_row_versions staged
+                     WHERE NOT EXISTS (SELECT 1 FROM invalid)
+                       AND staged.reset_id = $1::uuid
+                       AND staged.baseline_generated
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM synchro.sync_row_versions live
+                           WHERE live.relation_id = staged.relation_id
+                             AND live.record_id = staged.record_id
+                       )
+                 )
+                 SELECT NOT EXISTS (SELECT 1 FROM invalid) AS valid",
+                None,
+                &[reset.reset_id.as_str().into()],
+            )
+            .map_err(|_| "installing reset row versions failed".to_string())?
+            .first(),
+        "valid",
+    )?;
+    if !versions_valid {
+        return Err("reset source version is inconsistent".to_string());
+    }
     for table in [
         "synchro.sync_bucket_edges",
         "synchro.sync_capture_dependency_rows",
         "synchro.sync_captured_rows",
-        "synchro.sync_row_versions",
     ] {
         client
             .update(&format!("DELETE FROM {table}"), None, &[])
             .map_err(|_| "clearing live reset projection failed".to_string())?;
     }
-    client
-        .update(
-            "INSERT INTO synchro.sync_row_versions (
-                 relation_id, record_id, row_version, fence_id, reset_id, deleted, updated_at
-             )
-             SELECT relation_id, record_id, row_version, fence_id, source_reset_id, deleted, now()
-             FROM synchro.sync_stream_reset_row_versions
-             WHERE reset_id = $1::uuid",
-            None,
-            &[reset.reset_id.as_str().into()],
-        )
-        .map_err(|_| "installing reset row versions failed".to_string())?;
     client
         .update(
             "INSERT INTO synchro.sync_captured_rows (

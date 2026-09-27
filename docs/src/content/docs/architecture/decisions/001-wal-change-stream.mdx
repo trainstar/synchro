@@ -109,6 +109,16 @@ WAL-materialized or represented by verified baseline coverage and complete
 projected row/version state. Baseline coverage creates no synthetic WAL event or
 incremental effect; the new generation's baseline is delivered by rebuild.
 
+The projected row/version state is the final state of each row in the imported
+snapshot. It is not a record of intermediate row images. Historical coverage is
+separate from that state. Each visible fence keeps its coverage record. If a row
+has a pending fence in the snapshot, its final source-owned version must come
+from a covered fence of that row. Such a row can be absent from the snapshot
+while its source version is live, for example after `TRUNCATE`. The baseline
+then contains no row or version for that row. The reset invents no event or
+tombstone for it. A deletion version in the snapshot stays staged, including a
+version that a soft-delete update sets.
+
 Activation requires the staged state to be complete and verified, the new slot
 to have no gap through the barrier, and the old stream to remain blocked. One
 operator transaction then installs the staged state, creates the new stream
