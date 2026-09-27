@@ -42,7 +42,7 @@ type authRejection struct {
 type authConfiguration struct {
 	name string
 	// configure returns the Routes configuration. It runs before rotate.
-	configure func(t *testing.T, owner, other string) Config
+	configure func(t *testing.T) Config
 	// rotate runs after Routes returns, before any request.
 	rotate func()
 	// accept presents a valid credential for identity. Nil means the
@@ -96,7 +96,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 	configurations := []authConfiguration{
 		{
 			name: "shared secret with default user claim",
-			configure: func(*testing.T, string, string) Config {
+			configure: func(*testing.T) Config {
 				return Config{JWTSecret: secret}
 			},
 			accept: func(identity string) credential {
@@ -118,7 +118,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 		},
 		{
 			name: "shared secret with configured user claim",
-			configure: func(*testing.T, string, string) Config {
+			configure: func(*testing.T) Config {
 				return Config{JWTSecret: secret, JWTUserClaim: "uid"}
 			},
 			accept: func(identity string) credential {
@@ -133,7 +133,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 		},
 		{
 			name: "key set with RS256",
-			configure: func(t *testing.T, _, _ string) Config {
+			configure: func(t *testing.T) Config {
 				return jwksConfig(t, newJWKSProvider(t, jwkSet(t, rsaJWK("rsa-current", &rsaKey.PublicKey))))
 			},
 			accept: func(identity string) credential {
@@ -153,7 +153,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 		},
 		{
 			name: "key set with ES256",
-			configure: func(t *testing.T, _, _ string) Config {
+			configure: func(t *testing.T) Config {
 				return jwksConfig(t, newJWKSProvider(t, jwkSet(t, ecJWK("ec-current", &ecKey.PublicKey))))
 			},
 			accept: func(identity string) credential {
@@ -174,7 +174,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 			var provider *jwksProvider
 			return authConfiguration{
 				name: "key set rotation",
-				configure: func(t *testing.T, _, _ string) Config {
+				configure: func(t *testing.T) Config {
 					provider = newJWKSProvider(t, jwkSet(t, rsaJWK("rsa-retired", &rsaKey.PublicKey)))
 					return jwksConfig(t, provider)
 				},
@@ -193,7 +193,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 		}(),
 		{
 			name: "key set provider failure",
-			configure: func(t *testing.T, _, _ string) Config {
+			configure: func(t *testing.T) Config {
 				provider := newJWKSProvider(t, nil)
 				return jwksConfig(t, provider)
 			},
@@ -205,7 +205,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 		},
 		{
 			name: "trusted upstream resolver",
-			configure: func(*testing.T, string, string) Config {
+			configure: func(*testing.T) Config {
 				return Config{UserIDResolver: func(r *http.Request) (string, error) {
 					switch outcome := r.Header.Get(upstreamOutcomeHeader); outcome {
 					case "":
@@ -250,7 +250,7 @@ func TestAuthenticationConfigurationsBindExactIdentity(t *testing.T) {
 	for _, configuration := range configurations {
 		t.Run(configuration.name, func(t *testing.T) {
 			pair := users[configuration.name]
-			cfg := configuration.configure(t, pair.owner, pair.other)
+			cfg := configuration.configure(t)
 			cfg.DB = db
 			cfg.MinClientVersion = "1.0.0"
 			server := httptest.NewServer(Routes(cfg))
