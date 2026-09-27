@@ -489,7 +489,7 @@ Logs, metrics labels, traces, readiness output, and quarantine text MUST NOT con
 
 ### Pgrx Installation Authority
 
-pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
+pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership, except for the reviewed update scripts `synchro_pg--<from>--<to>.sql` in `extensions/synchro-pg/sql`. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
 
 ### Extension Migration Baseline
 
