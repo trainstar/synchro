@@ -927,9 +927,18 @@ final class SynchroDatabase: @unchecked Sendable {
             try Self.regenerateCaptureTriggers(db)
         }
         migrator.registerMigration("synchro_v18_atomic_groups") { db in
-            if try db.tableExists("_synchro_pending_changes"),
-               try !db.columns(in: "_synchro_pending_changes").contains(where: { $0.name == "atomic_group_id" }) {
-                try db.execute(sql: "ALTER TABLE _synchro_pending_changes ADD COLUMN atomic_group_id TEXT")
+            if try db.tableExists("_synchro_pending_changes") {
+                let columns = Set(try db.columns(in: "_synchro_pending_changes").map(\.name))
+                if !columns.contains("atomic_group_id") {
+                    try db.execute(sql: "ALTER TABLE _synchro_pending_changes ADD COLUMN atomic_group_id TEXT")
+                }
+                // Capture-order selection follows normalized_mutation_id lineage.
+                if columns.contains("normalized_mutation_id") {
+                    try db.execute(sql: """
+                        CREATE INDEX IF NOT EXISTS idx_synchro_pending_changes_normalized
+                        ON _synchro_pending_changes (normalized_mutation_id)
+                        """)
+                }
             }
             try Self.regenerateCaptureTriggers(db)
         }

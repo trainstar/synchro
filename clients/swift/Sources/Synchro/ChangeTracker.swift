@@ -344,42 +344,30 @@ final class ChangeTracker: @unchecked Sendable {
         }
     }
 
-    /// Selects the next batch candidates in local order.
+    /// Selects the next batch candidates in capture order.
     ///
     /// Ungrouped candidates form a run of at most `limit` entries that stops at the
     /// first grouped entry. A group is selected only as a whole, and only when every
     /// member is sendable. Otherwise the group waits and no candidate is selected.
     func pendingChanges(_ db: GRDB.Database, limit: Int) throws -> [PendingChange] {
         try normalizeUnsealedChains(db)
-        let rows = try Row.fetchAll(
+        let rows = try fetchInCaptureOrder(
             db,
-            sql: """
-                SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
-                       pk_logical_type, operation, base_version, client_version,
-                       authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal, atomic_group_id
-                FROM _synchro_pending_changes
-                WHERE lifecycle_state = 'unsealed'
-                  AND dependency_mutation_id IS NULL
-                  AND (operation = 'insert' OR base_version IS NOT NULL)
-                ORDER BY local_order ASC
-                LIMIT ?
+            where: """
+                candidate.lifecycle_state = 'unsealed'
+                  AND candidate.dependency_mutation_id IS NULL
+                  AND (candidate.operation = 'insert' OR candidate.base_version IS NOT NULL)
                 """,
-            arguments: [limit]
+            arguments: [],
+            limit: limit
         )
         let candidates: [Row]
         if let groupID: String = rows.first?["atomic_group_id"] {
-            candidates = try Row.fetchAll(
+            candidates = try fetchInCaptureOrder(
                 db,
-                sql: """
-                    SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
-                           pk_logical_type, operation, base_version, client_version,
-                           authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                           dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal, atomic_group_id
-                    FROM _synchro_pending_changes
-                    WHERE atomic_group_id = ?
-                      AND lifecycle_state NOT IN ('superseded_before_send', 'cancelled_before_send')
-                    ORDER BY local_order ASC
+                where: """
+                    candidate.atomic_group_id = ?
+                      AND candidate.lifecycle_state NOT IN ('superseded_before_send', 'cancelled_before_send')
                     """,
                 arguments: [groupID]
             )
@@ -832,24 +820,52 @@ final class ChangeTracker: @unchecked Sendable {
         )
     }
 
-    /// Loads the unsealed entries in local order. A group ID limits them to that atomic group.
+    /// Loads the unsealed entries in capture order. A group ID limits them to that atomic group.
     private func loadUnsealedEntries(_ db: GRDB.Database, atomicGroupID: String? = nil) throws -> [PendingChange] {
-        let rows = try Row.fetchAll(
+        let rows = try fetchInCaptureOrder(
             db,
-            sql: """
-                SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
-                       pk_logical_type, operation, base_version, client_version,
-                       authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal, atomic_group_id
-                FROM _synchro_pending_changes
-                WHERE lifecycle_state = 'unsealed' AND (? IS NULL OR atomic_group_id = ?)
-                ORDER BY local_order
-                """,
+            where: "candidate.lifecycle_state = 'unsealed' AND (? IS NULL OR candidate.atomic_group_id = ?)",
             arguments: [atomicGroupID, atomicGroupID]
         )
         return try rows.map { row in
             try PendingChange(row: row, fieldValuesByID: loadFieldValues(db, mutationID: row["mutation_id"]))
         }
+    }
+
+    /// Fetches the ledger entries that match `condition` in capture order.
+    ///
+    /// A normalized mutation takes the local order of its first transitive source.
+    /// Thus normalization does not move a mutation after a later capture of another
+    /// row. The stored local order of the normalized mutation does not change.
+    private func fetchInCaptureOrder(
+        _ db: GRDB.Database,
+        where condition: String,
+        arguments: StatementArguments,
+        limit: Int = -1
+    ) throws -> [Row] {
+        try Row.fetchAll(
+            db,
+            sql: """
+                WITH RECURSIVE lineage(candidate_id, local_order, mutation_id) AS (
+                    SELECT candidate.mutation_id, candidate.local_order, candidate.mutation_id
+                    FROM _synchro_pending_changes candidate
+                    WHERE \(condition)
+                    UNION ALL
+                    SELECT lineage.candidate_id, source.local_order, source.mutation_id
+                    FROM lineage
+                    JOIN _synchro_pending_changes source ON source.normalized_mutation_id = lineage.mutation_id
+                ),
+                capture(candidate_id, capture_order) AS (
+                    SELECT candidate_id, MIN(local_order) FROM lineage GROUP BY candidate_id
+                )
+                SELECT candidate.*
+                FROM capture
+                JOIN _synchro_pending_changes candidate ON candidate.mutation_id = capture.candidate_id
+                ORDER BY capture.capture_order
+                LIMIT ?
+                """,
+            arguments: arguments + [limit]
+        )
     }
 
     private func normalize(_ chain: [PendingChange], db: GRDB.Database) throws {

@@ -454,6 +454,7 @@ final class DatabaseMigrationTests: XCTestCase {
                 try connection.execute(sql: statement)
             }
             try connection.execute(sql: "ALTER TABLE _synchro_pending_changes DROP COLUMN atomic_group_id")
+            try connection.execute(sql: "DROP INDEX idx_synchro_pending_changes_normalized")
             try connection.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'synchro_v18_atomic_groups'")
         }
         _ = try legacy.execute(
@@ -477,6 +478,10 @@ final class DatabaseMigrationTests: XCTestCase {
         XCTAssertEqual(upgraded["mutation_id"] as String?, queued["mutation_id"] as String?)
         XCTAssertEqual(upgraded["lifecycle_state"] as String?, queued["lifecycle_state"] as String?)
         XCTAssertNil(upgraded["atomic_group_id"] as String?)
+        XCTAssertNotNil(try db.queryOne(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_synchro_pending_changes_normalized'",
+            params: nil
+        ))
         XCTAssertEqual(
             try tracker.pendingChanges().first?.fieldValuesByID["ship_address"]?.textValue,
             "queued"

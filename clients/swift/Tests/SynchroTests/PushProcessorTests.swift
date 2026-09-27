@@ -1875,6 +1875,33 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(retried, sealed)
     }
 
+    func testAtomicGroupSealsANormalizedMutationAtItsFirstSourceOrder() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        try db.applicationAtomicWriteTransaction(
+            validate: { connection, groupID in
+                try processor.validateAtomicGroup(connection, groupID: groupID, clientID: "test-device")
+            }
+        ) { transaction in
+            for id in ["parent", "child"] {
+                try transaction.execute(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, 'a', 'u1', '2026-01-01T10:00:00.000Z')",
+                    params: [id]
+                )
+            }
+            try transaction.execute("UPDATE orders SET ship_address = 'b' WHERE id = 'parent'")
+        }
+
+        let request = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [testTable])
+        )
+
+        XCTAssertEqual(request.atomic, true)
+        XCTAssertEqual(request.mutations.map { $0.pk["id"] }, [AnyCodable("parent"), AnyCodable("child")])
+        XCTAssertEqual(request.mutations.map(\.op), [.insert, .insert])
+        XCTAssertEqual(request.mutations.first?.columns?["ship_address"], AnyCodable("b"))
+    }
+
     private func makeMockPushClient(dbPath: String) -> (HttpClient, URLSession) {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [MockURLProtocol.self]

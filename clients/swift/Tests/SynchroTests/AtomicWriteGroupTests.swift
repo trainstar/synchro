@@ -360,6 +360,19 @@ final class AtomicWriteGroupTests: XCTestCase {
         XCTAssertEqual(try tracker.pendingChanges(limit: 1).map(\.recordID), ["u1"])
     }
 
+    func testUngroupedNormalizedMutationKeepsItsFirstSourceOrder() throws {
+        try insertOrder(id: "parent", address: "a")
+        try insertOrder(id: "child", address: "a")
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["b", "parent"])
+
+        let batch = try tracker.pendingChanges(limit: 100)
+
+        XCTAssertEqual(batch.map(\.recordID), ["parent", "child"])
+        XCTAssertEqual(batch.first?.sourceKind, "normalized")
+        XCTAssertEqual(batch.first?.fieldValuesByID["ship_address"]?.textValue, "b")
+        XCTAssertEqual(try tracker.pendingChanges(limit: 1).map(\.recordID), ["parent"])
+    }
+
     func testGroupFirstSelectsTheCompleteGroupAndIgnoresTheBatchSize() throws {
         try atomicWrite { transaction in
             try insertOrder(transaction, id: "g1", address: "a")
