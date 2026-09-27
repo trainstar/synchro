@@ -355,10 +355,13 @@ A failure throws a typed error and rolls back the local transaction.
    only entries with an equal `atomic_group_id`, and NULL equals NULL.
 3. The normalized group has at most 1000 entries. The failure reason is
    `tooManyMutations`.
-4. Each normalized mutation is at most 65,536 octets in the canonical
-   normalized mutation form. The failure reason is `mutationTooLarge`.
-5. The worst-case canonical push request is at most 1,048,576 octets. The
-   failure reason is `requestTooLarge`.
+4. Each normalized mutation is within the mutation limits of "Push limits at sealing":
+   at most 65,536 octets in the canonical normalized mutation form, and at
+   most 256 authored columns. The failure reason is `mutationTooLarge`.
+   Without this rule, one member could get `exceeds_push_limit` alone when
+   the client seals the batch.
+5. The worst-case request body and its RFC 8785 form are each at most
+   1,048,576 octets. The failure reason is `requestTooLarge`.
 
 The worst-case request uses these values:
 
