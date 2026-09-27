@@ -777,6 +777,38 @@ func (p *Platform) Install(ctx context.Context, request InstallRequest) error {
 	return nil
 }
 
+// DatabaseFamily lists the files in application-private database storage that
+// belong to client: the destination, its SQLite sidecars, and any seed
+// installation candidate with its sidecars. It reads the device through adb,
+// so it needs no instrumentation session and changes no file.
+func (p *Platform) DatabaseFamily(ctx context.Context, client Client) ([]string, error) {
+	if err := validateClient(client); err != nil {
+		return nil, err
+	}
+	// Session.adb reads only the adb configuration.
+	output, err := (&Session{config: p.config}).adb(ctx, "shell", "run-as", p.config.ApplicationID,
+		"sh", "-c", "'if [ -d databases ]; then ls -a databases; fi'")
+	if err != nil {
+		return nil, fmt.Errorf("list Kotlin Android database storage: %w", err)
+	}
+	return databaseFamily(output, client.DatabaseKey), nil
+}
+
+// databaseFamily selects the names in one database directory listing that the
+// Kotlin SDK creates for key during open or seed installation.
+func databaseFamily(listing, key string) []string {
+	family := make([]string, 0)
+	for _, name := range strings.Split(listing, "\n") {
+		name = strings.TrimSpace(name)
+		switch {
+		case name == key, name == key+"-journal", name == key+"-wal", name == key+"-shm",
+			strings.HasPrefix(name, "."+key+".seed-"):
+			family = append(family, name)
+		}
+	}
+	return family
+}
+
 func (p *Platform) isInstalled() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
