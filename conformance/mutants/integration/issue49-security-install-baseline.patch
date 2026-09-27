@@ -21,8 +21,8 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchr
  CREATE TABLE IF NOT EXISTS sync_runtime_state (
      singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
      stream_generation TEXT NOT NULL,
-@@ -2453,3 +2457,3 @@
+@@ -2462,3 +2466,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1929
-+-- synchro-pg/src/lib.rs:1933
+--- synchro-pg/src/lib.rs:1930
++-- synchro-pg/src/lib.rs:1934
  -- finalize

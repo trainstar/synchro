@@ -7,7 +7,7 @@ The ordering of items is not stable, it is driven by a dependency graph.
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:39
+-- synchro-pg/src/lib.rs:40
 -- bootstrap
 
 CREATE TABLE IF NOT EXISTS sync_runtime_state (
@@ -1673,7 +1673,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION synchro_capture_fence()
+CREATE OR REPLACE FUNCTION synchro_capture_fence_record()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2451,7 +2451,16 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_table_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1929
+-- synchro-pg/src/capture_fence.rs:15
+-- synchro_pg::capture_fence::synchro_capture_fence
+CREATE FUNCTION "synchro_capture_fence"()
+	RETURNS TRIGGER
+	LANGUAGE c
+	AS 'MODULE_PATHNAME', 'synchro_capture_fence_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/lib.rs:1930
 -- finalize
 
 DO $roles$

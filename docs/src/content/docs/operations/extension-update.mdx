@@ -64,6 +64,16 @@ ORDER BY registry.table_name;
 
 Replace the deferrable key with an immediate key, or remove the registration.
 
+Version 0.3.2 also enforces the write order of each registered row. A nested
+write can change a row before the fence of an earlier write of that row fires.
+The capture fence then fails the source transaction with SQLSTATE `27000`. For
+example, an `AFTER` row trigger that changes its own row fails when its name
+sorts before `synchro_capture_fence`. `COPY ... FREEZE` into a registered table
+fails with SQLSTATE `0A000`. A key change by a later `BEFORE UPDATE` trigger or
+by a partition row move fails with SQLSTATE `23514`.
+
+Review the application triggers on each registered relation before you update.
+
 ## 1. Install the new extension files
 
 Install the new library, the control file, the base script, and every update

@@ -259,17 +259,36 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 
 	recordID := "00000000-0000-4000-8a02-000000000001"
 	changedID := "00000000-0000-4000-8a02-000000000002"
+	triggerID := "00000000-0000-4000-8a02-000000000003"
+	peerID := "00000000-0000-4000-8a02-000000000004"
 	if err := harness.Source().ExecContext(
 		ctx,
-		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'security49-key-guard')",
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'security49-key-guard'), ($2, 'diagnostic-user', 'security49-key-peer')",
 		recordID,
+		peerID,
 	); err != nil {
 		t.Fatalf("create registered key update control: %v", err)
 	}
-	waitForRealWALRecords(t, ctx, harness, "cf_items", recordID)
-	beforeKeyUpdate := observeIssue49WALStages(t, ctx, admin, []string{recordID, changedID})
+	waitForRealWALRecords(t, ctx, harness, "cf_items", recordID, peerID)
+	keyStageIDs := []string{recordID, changedID, peerID, triggerID}
+	beforeKeyUpdate := observeIssue49WALStages(t, ctx, admin, keyStageIDs)
 	keyUpdateErr := harness.Source().ExecContext(ctx, "UPDATE cf_items SET id = $2 WHERE id = $1", recordID, changedID)
-	afterKeyUpdate := observeIssue49WALStages(t, ctx, admin, []string{recordID, changedID})
+	keyConflictErr := harness.Source().ExecContext(ctx, "UPDATE cf_items SET id = $2 WHERE id = $1", recordID, peerID)
+	if _, err := admin.ExecContext(ctx, `CREATE FUNCTION public.cf_change_item_id() RETURNS trigger LANGUAGE plpgsql AS $$
+	BEGIN
+		NEW.id := '00000000-0000-4000-8a02-000000000003';
+		RETURN NEW;
+	END
+	$$;
+	CREATE TRIGGER zz_change_item_id BEFORE UPDATE ON public.cf_items
+	FOR EACH ROW EXECUTE FUNCTION public.cf_change_item_id()`); err != nil {
+		t.Fatalf("create key-changing BEFORE UPDATE trigger: %v", err)
+	}
+	triggerKeyErr := harness.Source().ExecContext(ctx, "UPDATE cf_items SET value = 'security49-trigger-key' WHERE id = $1", recordID)
+	if _, err := admin.ExecContext(ctx, "DROP TRIGGER zz_change_item_id ON public.cf_items"); err != nil {
+		t.Fatalf("drop key-changing BEFORE UPDATE trigger: %v", err)
+	}
+	afterKeyUpdate := observeIssue49WALStages(t, ctx, admin, keyStageIDs)
 
 	if _, err := admin.ExecContext(ctx, "ALTER TABLE public.cf_items REPLICA IDENTITY FULL"); err != nil {
 		t.Fatalf("inject active replica-identity drift: %v", err)
@@ -329,8 +348,13 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 				t.Fatalf("nonconforming registry input %q was accepted", name)
 			}
 		}
-		if keyUpdateErr == nil || beforeKeyUpdate != afterKeyUpdate {
-			t.Fatalf("primary-key update crossed the fence boundary: err=%v before=%#v after=%#v", keyUpdateErr, beforeKeyUpdate, afterKeyUpdate)
+		for name, err := range map[string]error{"update": keyUpdateErr, "conflict": keyConflictErr, "trigger": triggerKeyErr} {
+			if err == nil || !strings.Contains(err.Error(), "(SQLSTATE 23514)") {
+				t.Fatalf("primary-key %s did not fail with SQLSTATE 23514: %v", name, err)
+			}
+		}
+		if beforeKeyUpdate != afterKeyUpdate {
+			t.Fatalf("primary-key update crossed the fence boundary: before=%#v after=%#v", beforeKeyUpdate, afterKeyUpdate)
 		}
 		if replicaDrift["ready"] != false || issue49HealthChecks(t, replicaDrift)["relation_identity"] != "failed" {
 			t.Fatalf("replica-identity drift remained active and ready: %#v", replicaDrift)
