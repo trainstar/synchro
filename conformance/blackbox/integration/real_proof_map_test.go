@@ -119,7 +119,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-COVERAGE-PG-LINUX-X64-001", []string{"TestRealIssue49ResetCoversEveryFenceOperation", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-RESET-COVERAGE-FAULT-LINUX-X64-001", []string{"TestRealIssue49ResetCoversEveryFenceOperation", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
 	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-WAL-FENCE-CORRELATION-PG-LINUX-X64-001", []string{"TestRealIssue49FenceCorrelationAndCapturePending", "TestRealWALCorrelatesTriggerDMLPerRowIdentity", "TestRealCaptureFenceRejectsOutOfOrderRowWrites"}},
-	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", []string{"TestRealReleaseDependencyReassignmentRetainsVersion"}},
+	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-PG-LINUX-X64-001", []string{"TestRealReleaseDependencyReassignmentRetainsVersion", "TestRealSameTableMembershipPropagatesSiblingChanges"}},
 	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-MEMBERSHIP-REASSIGNMENT-FAULT-LINUX-X64-001", []string{"TestRealReleaseDependencyReassignmentRetainsVersion"}},
 	{"SCN-MEMBERSHIP-REASSIGNMENT-001", "OBL-WAL-FENCE-CORRELATION-FAULT-LINUX-X64-001", []string{"TestRealIssue49FenceCorrelationAndCapturePending", "TestRealIssue49FenceCorrelatesOldRecordIdentity", "TestRealIssue49FenceCorrelatesCaptureKeys"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-GENERATION-PG-LINUX-X64-001", []string{"TestRealIssue49MembershipActivationIsStagedAndScoped"}},
@@ -149,6 +149,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealWALRestoresSlotPositionAfterImmediateShutdown": "regression",
 	"TestRealWALRestoresSlotPositionAfterBackendCrash":      "regression",
 	"TestRealWALObservationUsesOneSnapshot":                 "framework",
+	"TestRealWorkerStartupRetainsUnownedConfiguredSlot":     "regression",
 }
 
 func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {

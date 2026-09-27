@@ -211,7 +211,7 @@ Membership and impact functions MUST satisfy the exact registered signatures and
 
 ### Dependency Driven Membership Propagation
 
-Every declared external dependency change MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
+Every declared dependency change, including a same-relation sibling dependency, MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
 
 ### Membership Generation Invalidation
 
