@@ -8,7 +8,10 @@ import com.trainstar.synchro.PendingMutationInspection
 import com.trainstar.synchro.SyncStatus
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -169,7 +172,10 @@ class MainActivity : Activity() {
     private suspend fun synchronize(client: SynchroClient) {
         awaitReady(client)
         try {
-            withTimeout(120_000) { client.syncNow() }
+            // The engine runs apart from this coroutine, so the bound holds even
+            // when a sync never suspends.
+            val sync = CoroutineScope(Dispatchers.IO).async { client.syncNow() }
+            withTimeout(120_000) { sync.await() }
         } catch (failure: TimeoutCancellationException) {
             throw IllegalStateException("sync did not finish within 120 seconds", failure)
         } catch (failure: Exception) {

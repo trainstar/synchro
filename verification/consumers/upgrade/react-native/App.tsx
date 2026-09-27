@@ -99,7 +99,9 @@ async function synchronize(client: SynchroClient) {
       throw error;
     }
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
   }
 }
 
