@@ -2070,6 +2070,79 @@ class SyncEngineTests {
     }
 
     @Test
+    fun testStartupPushesChangeCapturedBeforeResumedPullBackoff() = runTest {
+        val timing = BlockingRetryTiming(1_000L)
+        val connectCalls = AtomicInteger()
+        val failPull = AtomicBoolean(false)
+        val pushedRecordIDs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val (engine, db) = makeIntegrationEnv(
+            maxRetryAttempts = 0,
+            retryTiming = timing,
+        ) { request ->
+            when {
+                request.path!!.endsWith("/sync/connect") -> {
+                    mockResponse(if (connectCalls.incrementAndGet() == 1) connectJSON else connectResumeJSON)
+                }
+                request.path!!.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path!!.endsWith("/sync/pull") -> {
+                    if (failPull.get()) {
+                        MockResponse()
+                            .setResponseCode(503)
+                            .setHeader("Retry-After", "60")
+                            .setBody(RETRYABLE_503_ERROR_JSON)
+                    } else {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                    }
+                }
+                request.path!!.endsWith("/sync/push") -> {
+                    val requestBody = Json.decodeFromString<JsonObject>(request.body.readUtf8())
+                    val mutations = requestBody.getValue("mutations").jsonArray.map { it.jsonObject }
+                    mutations.forEach { mutation ->
+                        pushedRecordIDs += mutation.getValue("pk").jsonObject.getValue("field-id").jsonPrimitive.content
+                    }
+                    val accepted = mutations.map { mutation ->
+                        acceptedPushOutcomeJSON(mutation, "captured-while-stopped")
+                    }
+                    mockResponse(
+                        """{"batch_id":${requestBody["batch_id"]},"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""",
+                    )
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            failPull.set(true)
+            assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is RetryableError)
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
+            assertEquals(RetryOperation.PULLING, requireNotNull(DurableBackoffStore.load(db)).resumeState)
+
+            engine.stop()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("captured-while-stopped", "Stopped Street", "u1", "2026-01-01T10:00:00.000000Z"),
+            )
+            assertTrue(ChangeTracker(db).hasPendingChanges())
+            failPull.set(false)
+
+            engine.start()
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
+            timing.releaseAt(61_000L)
+
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (ChangeTracker(db).hasPendingChanges() && System.nanoTime() < deadline) {
+                Thread.sleep(20)
+            }
+            assertEquals(listOf("captured-while-stopped"), synchronized(pushedRecordIDs) { pushedRecordIDs.toList() })
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+        } finally {
+            timing.releaseAt(61_000L)
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testStopPreservesDurableBackoff() = runTest {
         val timing = BlockingRetryTiming(1_000L)
         val (engine, db) = makeIntegrationEnv(retryTiming = timing) {

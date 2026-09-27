@@ -1344,6 +1344,10 @@ internal class SyncEngine(
                 scheduleDebouncedPush()
             }
         }
+        // The observer reports only later changes. Schedule the changes that exist before the install.
+        if (changeTracker.hasCapturedChanges()) {
+            scheduleDebouncedPush()
+        }
     }
 
     private fun scheduleDebouncedPush() {
