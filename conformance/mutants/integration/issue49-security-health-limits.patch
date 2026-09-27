@@ -1,7 +1,28 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+@@ -2059,7 +2059,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1105
++-- synchro-pg/src/health.rs:1108
+ -- synchro_pg::health::synchro_health_detail
+ CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
+@@ -2271,7 +2271,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1098
++-- synchro-pg/src/health.rs:1101
+ -- synchro_pg::health::synchro_readiness
+ CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -887,13 +887,16 @@ pub(crate) fn load_readiness_status_with_configuration(
+@@ -921,13 +921,16 @@ pub(crate) fn load_readiness_status_with_configuration(
          status.set("worker", HealthCheck::failed("worker_not_configured"));
      }
      if configuration.max_heartbeat_age_seconds <= 0 {
@@ -21,16 +42,3 @@ diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/hea
      }
  
      let Some(worker_login) = configuration.worker_login.as_deref() else {
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -2051,3 +2051,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1098
-+-- synchro-pg/src/health.rs:1101
- -- synchro_pg::health::synchro_health_detail
-@@ -2263,3 +2263,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1091
-+-- synchro-pg/src/health.rs:1094
- -- synchro_pg::health::synchro_readiness

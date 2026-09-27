@@ -1,22 +1,7 @@
-diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
---- a/extensions/synchro-pg/src/lib.rs
-+++ b/extensions/synchro-pg/src/lib.rs
-@@ -1693,10 +1693,7 @@ SECURITY DEFINER
- SET search_path = pg_catalog, synchro
- AS $$
- BEGIN
--    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
--        RAISE EXCEPTION 'registered primary key cannot change'
--            USING ERRCODE = '23514';
--    END IF;
-+    -- Mutant: permit a registered primary-key value update.
-     RETURN NEW;
- END;
- $$;
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -1665,10 +1665,7 @@ SECURITY DEFINER
+@@ -1675,10 +1675,7 @@ SECURITY DEFINER
  SET search_path = pg_catalog, synchro
  AS $$
  BEGIN
@@ -28,8 +13,27 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
      RETURN NEW;
  END;
  $$;
-@@ -2462,3 +2459,3 @@
+@@ -2491,7 +2488,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+ /* </end connected objects> */
+ 
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1930
-+-- synchro-pg/src/lib.rs:1927
+--- synchro-pg/src/lib.rs:1940
++-- synchro-pg/src/lib.rs:1937
  -- finalize
+ 
+ DO $roles$
+diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
+--- a/extensions/synchro-pg/src/lib.rs
++++ b/extensions/synchro-pg/src/lib.rs
+@@ -1704,10 +1704,7 @@ SECURITY DEFINER
+ SET search_path = pg_catalog, synchro
+ AS $$
+ BEGIN
+-    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
+-        RAISE EXCEPTION 'registered primary key cannot change'
+-            USING ERRCODE = '23514';
+-    END IF;
++    -- Mutant: permit a registered primary-key value update.
+     RETURN NEW;
+ END;
+ $$;

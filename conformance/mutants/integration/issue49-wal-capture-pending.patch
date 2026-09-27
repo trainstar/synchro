@@ -1,7 +1,7 @@
 diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
 --- a/extensions/synchro-pg/src/pull.rs
 +++ b/extensions/synchro-pg/src/pull.rs
-@@ -96,13 +96,6 @@ fn synchro_pull(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+@@ -96,13 +96,6 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
          if let Err(error) = validate_schema_ref(client, &request.schema) {
              return error;
          }
@@ -13,12 +13,12 @@ diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.
 -            );
 -        }
  
-         let server_scopes = client_state.bucket_subs;
-         let scope_set_version = client_state.scope_set_version;
+         if request.scope_set_version > client_state.scope_set_version {
+             return protocol_error_response(
 diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/rebuild.rs
 --- a/extensions/synchro-pg/src/rebuild.rs
 +++ b/extensions/synchro-pg/src/rebuild.rs
-@@ -203,13 +203,6 @@ fn synchro_rebuild(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+@@ -203,13 +203,6 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
              if !session_is_current(&session, &request, &client_state, &scope_binding, &boundary) {
                  return rebuild_restart_response(&request.scope);
              }
@@ -32,7 +32,7 @@ diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/re
              let row_ordinal = continuation
                  .as_ref()
                  .map(|continuation| continuation.next_row_ordinal)
-@@ -230,13 +223,6 @@ fn synchro_rebuild(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+@@ -230,13 +223,6 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
          if continuation.is_some() || !client_state.bucket_subs.contains(&request.scope) {
              return invalid_request_response();
          }
