@@ -415,12 +415,14 @@ class AnyCodable(val value: Any?) {
             value == null && other.value == null -> true
             value is Boolean && other.value is Boolean -> value == other.value
             value is Number && other.value is Number -> {
-                // Compare via Double for fractional values, via Long for integers.
-                // Both checks required: toLong truncates fractions, toDouble loses precision on large longs.
-                if (value is Double || value is Float || other.value is Double || other.value is Float) {
-                    value.toDouble() == other.value.toDouble()
+                if (isJsonNumber(value) && isJsonNumber(other.value)) {
+                    // A value with an exact Long equals only the same exact Long. Other JSON numbers
+                    // compare as IEEE Doubles. Float values widen to Double exactly.
+                    val left = exactLong(value)
+                    val right = exactLong(other.value)
+                    if (left != null || right != null) left == right else value.toDouble() == other.value.toDouble()
                 } else {
-                    value.toLong() == other.value.toLong()
+                    value == other.value
                 }
             }
             value is String && other.value is String -> value == other.value
@@ -430,9 +432,31 @@ class AnyCodable(val value: Any?) {
         }
     }
 
-    override fun hashCode(): Int = value?.hashCode() ?: 0
+    override fun hashCode(): Int = when {
+        value is Number && isJsonNumber(value) -> exactLong(value)?.hashCode() ?: value.toDouble().hashCode()
+        else -> value?.hashCode() ?: 0
+    }
 
     override fun toString(): String = "AnyCodable($value)"
+}
+
+// The serializer writes only these Number types as JSON numbers. It writes other Number
+// types as text, so they keep their own equality and hash.
+private fun isJsonNumber(value: Number): Boolean =
+    value is Int || value is Long || value is Float || value is Double
+
+// This Double is exactly 2^63. Long.MAX_VALUE.toDouble() rounds up to it, so the Long range excludes it.
+private const val TWO_POW_63 = 9.223372036854775808E18
+
+// Returns the exact Long for an integral JSON number in the Long range, or null for any other value.
+// Negative zero becomes 0.
+private fun exactLong(value: Number): Long? = when (value) {
+    is Int -> value.toLong()
+    is Long -> value
+    else -> {
+        val real = value.toDouble()
+        if (real >= -TWO_POW_63 && real < TWO_POW_63 && real % 1.0 == 0.0) real.toLong() else null
+    }
 }
 
 object AnyCodableSerializer : KSerializer<AnyCodable> {
