@@ -19,6 +19,28 @@ Release records the exact environment, commands, results, replay information, an
 
 Tooling computes release eligibility from that evidence. Documentation, fixture presence, and the current handwritten test inventory do not certify a release.
 
+## Published Metadata Scope
+
+Each release publishes metadata with a narrow scope. Each item below states what it covers and what it does not cover.
+
+- `SHA256SUMS` lists the SHA-256 digest of each release file except itself.
+- `release-manifest.json` records the source commit, root Git tree, source tags, workflow runs, resolved support environments, and digests of selected dependency manifest and lock files. These fields identify inputs. They do not make a build reproducible, and a rebuild from the same commit can produce different bytes.
+- `sbom.spdx.json` is Syft 1.33.0 SPDX JSON output for the built release components. Release verification requires a SHA-256 file record for each public payload.
+- The SBOM package list contains only what Syft detects in those files, for example Go modules in the Linux executables. It is not a complete inventory of Rust, Maven, npm, Swift, or CocoaPods dependencies.
+- Each package declares its own dependencies in its POM and Gradle module, `package.json`, `Package.swift`, or podspec.
+- GitHub artifact attestations cover each file that `SHA256SUMS` lists. The Release workflow signs them through GitHub OIDC, and the predicate is the release manifest.
+- Maven files have detached `.asc` OpenPGP signatures. Release verification checks only that each signature is well-formed ASCII armor with a signature packet. It does not verify a signature against a signer key.
+- The npm package has an npm provenance attestation from trusted publishing. Publication requires `npm audit signatures` to report no invalid or missing signature for the exact version.
+- The Kotlin POM and Gradle module declare OkHttp and kotlinx-serialization-json as API dependencies, because public signatures expose `OkHttpClient` and `JsonObject`.
+
+To verify an attestation for one downloaded file, run this command:
+
+```sh
+gh attestation verify <file> --repo trainstar/synchro \
+  --signer-workflow trainstar/synchro/.github/workflows/release.yml \
+  --predicate-type https://trainstar.fit/synchro/attestations/release/v1
+```
+
 ## Evidence Standard
 
 Release-critical proofs use independent expected results, real packaged components for happy paths, meaningful negative controls, and replayable fault or randomized cases. Implementation-derived fixtures and tautological assertions do not establish semantic correctness.
