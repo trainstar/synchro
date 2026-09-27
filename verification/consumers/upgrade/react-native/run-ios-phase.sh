@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs one upgrade phase for conformance/upgrade on one iOS simulator. The
-# candidate application installs over the predecessor, which keeps the
-# application data container and its database.
+# candidate application installs over the predecessor as an update, which
+# keeps the application data and its database.
 set -eu
 
 phase=${1:?phase is required}
@@ -18,14 +18,9 @@ test -d "$app"
 if [ "$phase" = predecessor ]; then
   xcrun simctl uninstall "$udid" "$bundle" >/dev/null 2>&1 || true
 fi
+# An update can move the data container to a new path, so the retained
+# database content, not the path, is the proof that the data survived.
 xcrun simctl install "$udid" "$app"
-container=$(xcrun simctl get_app_container "$udid" "$bundle" data)
-if [ "$phase" = predecessor ]; then
-  printf '%s\n' "$container" > "$work/data-container"
-elif [ "$container" != "$(cat "$work/data-container")" ]; then
-  printf '%s\n' "the candidate install replaced the predecessor data container" >&2
-  exit 1
-fi
 
 # The simulator launch service can refuse a request on a freshly booted
 # device, so the launch retries before it fails.
