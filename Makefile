@@ -95,6 +95,10 @@
 	test-kotlin \
 	test-kotlin-integration \
 	test-kotlin-jvm-integration \
+	test-swift-upgrade \
+	test-kotlin-upgrade \
+	test-rn-upgrade-ios \
+	test-rn-upgrade-android \
 	test-rn-unit \
 	test-rn-android-parity \
 	test-rn-ios-parity \
@@ -267,6 +271,14 @@ RELEASE_BUILD_RUN_ID ?= $(GITHUB_RUN_ID)
 RELEASE_BUILD_RUN_ATTEMPT ?= $(GITHUB_RUN_ATTEMPT)
 RELEASE_STAGED_ARTIFACTS ?= 0
 CLIENT_ARTIFACTS_PREPARED ?= 0
+# The published release that native upgrade tests install first.
+UPGRADE_PREDECESSOR_VERSION ?= 0.3.1
+# The commit of the published v0.3.1 tag. A moved tag fails the Swift upgrade build.
+UPGRADE_PREDECESSOR_SWIFT_REVISION ?= 234d18d0f8f1751927ca58544863688ebc2fb70a
+UPGRADE_WORK_DIR ?= $(CURDIR)/.ignore/upgrade
+# React Native builds this address into its bundle, so the port is fixed.
+UPGRADE_CONTROL_ADDRESS ?= 127.0.0.1:8095
+UPGRADE_ANDROID_PACKAGE := com.trainstar.synchro.upgrade
 RELEASE_INVENTORY := $(CURDIR)/conformance/artifacts/inventory.json
 RELEASE_SUPPORT_MATRIX := $(CURDIR)/conformance/support-matrix.json
 
@@ -351,6 +363,10 @@ help:
 	@echo "  test-kotlin-instrumentation - Run Android instrumentation on the selected device"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-kotlin-jvm-integration - Run only the Kotlin JVM integration tests against the local adapter"
+	@echo "  test-swift-upgrade    - Upgrade Swift intent from the published predecessor to the candidate package"
+	@echo "  test-kotlin-upgrade   - Upgrade Kotlin intent from the published predecessor APK on KOTLIN_ANDROID_SERIAL"
+	@echo "  test-rn-upgrade-ios   - Upgrade React Native intent from the published predecessor on the booted simulator"
+	@echo "  test-rn-upgrade-android - Upgrade React Native intent from the published predecessor on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
@@ -1141,6 +1157,143 @@ test-kotlin-jvm-integration:
 		exit "$$parser_status"
 
 test-kotlin-integration: test-kotlin
+
+# TEST_ENV and UPGRADE_ENV carry the database URL and JWT secret, so Make
+# does not echo the commands that use them.
+UPGRADE_ENV = \
+	SYNCHRO_UPGRADE_DATABASE_URL="$(ADAPTER_TEST_URL)" \
+	SYNCHRO_TEST_URL="$(SYNCHRO_TEST_URL)" \
+	SYNCHRO_TEST_JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
+	SYNCHRO_UPGRADE_CONTROL_ADDRESS="$(UPGRADE_CONTROL_ADDRESS)" \
+	SYNCHRO_UPGRADE_PREDECESSOR_VERSION="$(UPGRADE_PREDECESSOR_VERSION)" \
+	SYNCHRO_UPGRADE_CANDIDATE_VERSION="$(CURRENT_VERSION)"
+UPGRADE_TEST = GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+	-test TestNativePackageUpgrade \
+	-expect target_pass \
+	-- go test -tags nativeupgrade -json ./upgrade -count=1 -timeout=60m -run '^TestNativePackageUpgrade$$'
+
+# The published predecessor creates retained intent. The candidate artifact
+# then opens the same database file and synchronizes it.
+test-swift-upgrade: conformance-mod-download client-consumer-apple-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/swift"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work/data"; \
+		for side in predecessor candidate; do \
+			mkdir -p "$$work/$$side"; \
+			cp -R verification/consumers/upgrade/swift/Package.swift verification/consumers/upgrade/swift/Sources "$$work/$$side/"; \
+		done; \
+		$(SWIFTPM_GIT_ENV) SYNCHRO_UPGRADE_SWIFT_RELEASE="$(UPGRADE_PREDECESSOR_VERSION)" \
+			swift build --package-path "$$work/predecessor" --scratch-path "$$work/predecessor/.build" --product SynchroUpgrade; \
+		grep -F '"$(UPGRADE_PREDECESSOR_SWIFT_REVISION)"' "$$work/predecessor/Package.resolved" >/dev/null || \
+			{ echo "Swift predecessor did not resolve the published $(UPGRADE_PREDECESSOR_VERSION) tag" >&2; exit 1; }; \
+		echo "Swift predecessor resolved Synchro $(UPGRADE_PREDECESSOR_VERSION) at $(UPGRADE_PREDECESSOR_SWIFT_REVISION)"; \
+		$(SWIFTPM_GIT_ENV) SYNCHRO_SWIFT_PACKAGE_PATH="$(abspath $(CLIENT_ARTIFACT_DIR))/apple/Synchro" \
+			swift build --package-path "$$work/candidate" --scratch-path "$$work/candidate/.build" --product SynchroUpgrade; \
+		if grep -F trainstar/synchro "$$work/candidate/Package.resolved" >/dev/null 2>&1; then \
+			echo "Swift candidate resolved a published Synchro package" >&2; exit 1; \
+		fi; \
+		cd conformance; \
+		SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/swift/run-phase.sh" \
+		SYNCHRO_UPGRADE_SWIFT_PREDECESSOR="$$work/predecessor/.build/debug/SynchroUpgrade" \
+		SYNCHRO_UPGRADE_SWIFT_CANDIDATE="$$work/candidate/.build/debug/SynchroUpgrade" \
+		SYNCHRO_UPGRADE_DATA_DIR="$$work/data" \
+		$(UPGRADE_ENV) $(UPGRADE_TEST)
+
+# The candidate APK replaces the predecessor APK on one device, so Android
+# keeps the application's database as it does for a store update.
+test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
+	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/kotlin"; \
+		rm -rf "$$work"; \
+		for side in predecessor candidate; do \
+			case "$$side" in \
+				predecessor) repository=central; version="$(UPGRADE_PREDECESSOR_VERSION)"; code=1 ;; \
+				candidate) repository="$(abspath $(CLIENT_ARTIFACT_DIR))/maven"; version="$(CURRENT_VERSION)"; code=2 ;; \
+			esac; \
+			mkdir -p "$$work/$$side"; \
+			cp -R verification/consumers/upgrade/kotlin/. "$$work/$$side/"; \
+			SYNCHRO_UPGRADE_MAVEN_REPOSITORY="$$repository" \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+			JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+			clients/kotlin/gradlew --project-dir "$$work/$$side" --no-daemon \
+				-PsynchroVersion="$$version" -PupgradeVersionCode="$$code" \
+				:app:assembleDebug :app:dependencyInsight --dependency fit.trainstar:synchro \
+				--configuration debugRuntimeClasspath > "$$work/$$side.log"; \
+			grep -F "fit.trainstar:synchro:$$version" "$$work/$$side.log" >/dev/null || \
+				{ cat "$$work/$$side.log" >&2; echo "Kotlin $$side did not resolve Synchro $$version" >&2; exit 1; }; \
+			echo "Kotlin $$side resolved fit.trainstar:synchro:$$version from $$repository"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/run-android-phase.sh" \
+			SYNCHRO_UPGRADE_ANDROID_PACKAGE="$(UPGRADE_ANDROID_PACKAGE)" \
+			SYNCHRO_UPGRADE_ANDROID_ACTIVITY=.MainActivity \
+			SYNCHRO_UPGRADE_PREDECESSOR_APK="$$work/predecessor/app/build/outputs/apk/debug/app-debug.apk" \
+			SYNCHRO_UPGRADE_CANDIDATE_APK="$$work/candidate/app/build/outputs/apk/debug/app-debug.apk" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		"$(ANDROID_HOME)/platform-tools/adb" -s "$(KOTLIN_ANDROID_SERIAL)" uninstall "$(UPGRADE_ANDROID_PACKAGE)" >/dev/null 2>&1 || true; \
+		exit "$$status"
+
+# React Native reaches the native SDKs through the published bridge package.
+test-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifact client-consumer-rn-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
+	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/rn-android"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work"; \
+		control_url="http://$(UPGRADE_CONTROL_ADDRESS)/upgrade"; \
+		for side in predecessor candidate; do \
+			if [ "$$side" = predecessor ]; then version="$(UPGRADE_PREDECESSOR_VERSION)"; else version="$(CURRENT_VERSION)"; fi; \
+			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+				sh verification/consumers/upgrade/react-native/build-app.sh android "$$work" "$$side" "$$version" "$$control_url"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/run-android-phase.sh" \
+			SYNCHRO_UPGRADE_ANDROID_PACKAGE=com.synchroupgrade \
+			SYNCHRO_UPGRADE_ANDROID_ACTIVITY=.MainActivity \
+			SYNCHRO_UPGRADE_PREDECESSOR_APK="$$work/predecessor.apk" \
+			SYNCHRO_UPGRADE_CANDIDATE_APK="$$work/candidate.apk" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		"$(ANDROID_HOME)/platform-tools/adb" -s "$(KOTLIN_ANDROID_SERIAL)" uninstall com.synchroupgrade >/dev/null 2>&1 || true; \
+		exit "$$status"
+
+test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact client-consumer-rn-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/rn-ios"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work"; \
+		udid="$${IOS_SIMULATOR_UDID:-$$(xcrun simctl list devices booted -j | ruby -rjson -e 'device = JSON.parse(STDIN.read).fetch("devices").values.flatten.find { |item| item["state"] == "Booted" }; abort "no booted iOS simulator" unless device; puts device.fetch("udid")')}"; \
+		control_url="http://$(UPGRADE_CONTROL_ADDRESS)/upgrade"; \
+		for side in predecessor candidate; do \
+			if [ "$$side" = predecessor ]; then version="$(UPGRADE_PREDECESSOR_VERSION)"; else version="$(CURRENT_VERSION)"; fi; \
+			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
+				sh verification/consumers/upgrade/react-native/build-app.sh ios "$$work" "$$side" "$$version" "$$control_url"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/react-native/run-ios-phase.sh" \
+			SYNCHRO_UPGRADE_IOS_SIMULATOR="$$udid" \
+			SYNCHRO_UPGRADE_IOS_BUNDLE=dev.synchro.upgrade \
+			SYNCHRO_UPGRADE_WORK_DIR="$$work" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		xcrun simctl uninstall "$$udid" dev.synchro.upgrade >/dev/null 2>&1 || true; \
+		exit "$$status"
 
 test-rn-unit:
 	rm -f clients/react-native/example/artifacts/unit-test-results.json
