@@ -1189,6 +1189,7 @@ test-swift-upgrade: conformance-mod-download client-consumer-apple-artifact
 			swift build --package-path "$$work/predecessor" --scratch-path "$$work/predecessor/.build" --product SynchroUpgrade; \
 		grep -F '"$(UPGRADE_PREDECESSOR_SWIFT_REVISION)"' "$$work/predecessor/Package.resolved" >/dev/null || \
 			{ echo "Swift predecessor did not resolve the published $(UPGRADE_PREDECESSOR_VERSION) tag" >&2; exit 1; }; \
+		echo "Swift predecessor resolved Synchro $(UPGRADE_PREDECESSOR_VERSION) at $(UPGRADE_PREDECESSOR_SWIFT_REVISION)"; \
 		$(SWIFTPM_GIT_ENV) SYNCHRO_SWIFT_PACKAGE_PATH="$(abspath $(CLIENT_ARTIFACT_DIR))/apple/Synchro" \
 			swift build --package-path "$$work/candidate" --scratch-path "$$work/candidate/.build" --product SynchroUpgrade; \
 		if grep -F trainstar/synchro "$$work/candidate/Package.resolved" >/dev/null 2>&1; then \
@@ -1227,6 +1228,7 @@ test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
 				--configuration debugRuntimeClasspath > "$$work/$$side.log"; \
 			grep -F "fit.trainstar:synchro:$$version" "$$work/$$side.log" >/dev/null || \
 				{ cat "$$work/$$side.log" >&2; echo "Kotlin $$side did not resolve Synchro $$version" >&2; exit 1; }; \
+			echo "Kotlin $$side resolved fit.trainstar:synchro:$$version from $$repository"; \
 		done; \
 		status=0; \
 		(cd conformance && \

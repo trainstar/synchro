@@ -62,6 +62,8 @@ if [ "$installed" != "$version" ]; then
   printf '%s\n' "installed React Native package is $installed, want $version" >&2
   exit 1
 fi
+resolved=$(node -p "require('./package-lock.json').packages['node_modules/@trainstar/synchro-react-native'].resolved")
+printf '%s\n' "React Native $side installed @trainstar/synchro-react-native $installed from $resolved"
 printf "export const controlURL = '%s';\nexport const packageVersion = '%s';\n" "$control_url" "$installed" > upgradeControl.ts
 npx tsc --noEmit
 
@@ -100,6 +102,7 @@ GRADLE
       printf '%s\n' "React Native Android $side did not resolve Synchro $version" >&2
       exit 1
     fi
+    printf '%s\n' "React Native Android $side resolved fit.trainstar:synchro:$version"
     cp android/app/build/outputs/apk/debug/app-debug.apk "$work/$side.apk"
     ;;
   ios)
@@ -122,6 +125,8 @@ RUBY
       printf '%s\n' "React Native iOS $side did not install Synchro $version" >&2
       exit 1
     fi
+    printf '%s\n' "React Native iOS $side installed:"
+    sed -n '/^CHECKOUT OPTIONS:/,/^$/p; /^  - Synchro (/p' ios/Podfile.lock
     # A Debug build waits for a packager, so the application builds Release
     # and runs its embedded bundle.
     FORCE_BUNDLING=1 xcodebuild -quiet \
