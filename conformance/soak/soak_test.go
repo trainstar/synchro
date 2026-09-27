@@ -246,6 +246,64 @@ func TestRunRejectsIncompleteCaptureBeforeCheckers(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidInvocationWithoutOpeningJournal(t *testing.T) {
+	plan, err := Generate(5, Config{OperationCount: MinimumCoverageOperations}, testCatalog(t))
+	if err != nil {
+		t.Fatalf("generate plan: %v", err)
+	}
+	path := journalPath(t, "prior-journal")
+	if _, err := Run(context.Background(), plan, stableHarness{}, path); err != nil {
+		t.Fatalf("run prior plan: %v", err)
+	}
+	prior, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read prior journal: %v", err)
+	}
+	mismatched := plan
+	mismatched.Operations = plan.Operations[:len(plan.Operations)-1]
+	invalid := []struct {
+		name    string
+		ctx     context.Context
+		plan    Plan
+		harness Harness
+	}{
+		{name: "nil context", plan: plan, harness: stableHarness{}},
+		{name: "nil harness", ctx: context.Background(), plan: plan},
+		{name: "empty plan", ctx: context.Background(), plan: Plan{Config: plan.Config, CatalogIdentity: plan.CatalogIdentity}, harness: stableHarness{}},
+		{name: "operation count mismatch", ctx: context.Background(), plan: mismatched, harness: stableHarness{}},
+	}
+	descriptors := openDescriptorCount(t)
+	for repeat := 0; repeat < 8; repeat++ {
+		for _, test := range invalid {
+			if _, err := Run(test.ctx, test.plan, test.harness, path); err == nil {
+				t.Fatalf("%s: invalid soak invocation succeeded", test.name)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("%s: read prior journal: %v", test.name, err)
+			}
+			if !bytes.Equal(prior, after) {
+				t.Fatalf("%s: invalid soak invocation changed the prior journal", test.name)
+			}
+		}
+		if _, err := Run(context.Background(), plan, emptyCaptureHarness{}, journalPath(t, "failed-run-"+strconv.Itoa(repeat))); !errors.Is(err, ErrCaptureIncomplete) {
+			t.Fatalf("failed run error = %v, want ErrCaptureIncomplete", err)
+		}
+	}
+	if got := openDescriptorCount(t); got != descriptors {
+		t.Fatalf("open descriptors after rejected soak runs = %d, want %d", got, descriptors)
+	}
+}
+
+func openDescriptorCount(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Fatalf("list open descriptors: %v", err)
+	}
+	return len(entries)
+}
+
 func TestRunRejectsNoopExchangeBeforeCheckers(t *testing.T) {
 	plan, err := Generate(8, Config{OperationCount: MinimumCoverageOperations}, testCatalog(t))
 	if err != nil {
