@@ -1,0 +1,26 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
+index d23af00..8bd558b 100644
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
+@@ -1699,7 +1699,7 @@ DECLARE
+     v_message JSONB;
+ BEGIN
+     IF TG_NARGS <> 5 THEN
+-        RAISE EXCEPTION 'capture fence trigger arguments are invalid'
++        RAISE EXCEPTION 'capture fence trigger arguments are corrupt'
+             USING ERRCODE = '22023';
+     END IF;
+     v_registration_kind := TG_ARGV[1];
+diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
+index 1941c5e..1a5007f 100644
+--- a/extensions/synchro-pg/src/lib.rs
++++ b/extensions/synchro-pg/src/lib.rs
+@@ -1727,7 +1727,7 @@ DECLARE
+     v_message JSONB;
+ BEGIN
+     IF TG_NARGS <> 5 THEN
+-        RAISE EXCEPTION 'capture fence trigger arguments are invalid'
++        RAISE EXCEPTION 'capture fence trigger arguments are corrupt'
+             USING ERRCODE = '22023';
+     END IF;
+     v_registration_kind := TG_ARGV[1];

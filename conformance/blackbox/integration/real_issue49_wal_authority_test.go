@@ -553,15 +553,14 @@ func TestRealIssue49DatabaseAuthorityAndInstallation(t *testing.T) {
 		WHERE extension.extname = 'synchro_pg'`).Scan(&serverMajor, &extensionVersion, &extensionSchema); err != nil {
 		t.Fatalf("observe clean extension installation: %v", err)
 	}
-	var otherVersions, updatePaths int
+	var otherVersions int
 	if err := admin.QueryRowContext(ctx, `
 		SELECT count(*) FROM pg_catalog.pg_available_extension_versions
 		WHERE name = 'synchro_pg' AND version <> $1`, release.Version).Scan(&otherVersions); err != nil {
 		t.Fatalf("observe extension migration versions: %v", err)
 	}
-	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM pg_catalog.pg_extension_update_paths('synchro_pg')").Scan(&updatePaths); err != nil {
-		t.Fatalf("observe extension update paths: %v", err)
-	}
+	updatePaths := readExtensionUpdatePaths(t, ctx, admin)
+	baselineVersion := readUpdateBaselineVersion(t)
 
 	var restrictedGroups int
 	if err := admin.QueryRowContext(ctx, `
@@ -656,8 +655,11 @@ func TestRealIssue49DatabaseAuthorityAndInstallation(t *testing.T) {
 	trackedSQL, artifactSQL := loadIssue49InstallSQL(t, environment.ExtensionArtifact)
 
 	t.Run("assertion", func(t *testing.T) {
-		if serverMajor != 18 || extensionVersion != release.Version || extensionSchema != "synchro" || otherVersions != 0 || updatePaths != 0 {
-			t.Fatalf("clean PostgreSQL 18 installation has migration drift: major=%d version=%q schema=%q other=%d paths=%d", serverMajor, extensionVersion, extensionSchema, otherVersions, updatePaths)
+		if serverMajor != 18 || extensionVersion != release.Version || extensionSchema != "synchro" || otherVersions != 0 {
+			t.Fatalf("clean PostgreSQL 18 installation has migration drift: major=%d version=%q schema=%q other=%d", serverMajor, extensionVersion, extensionSchema, otherVersions)
+		}
+		if violation := extensionUpdatePathViolation(updatePaths, baselineVersion, release.Version); violation != "" {
+			t.Fatalf("extension update path is invalid: %s", violation)
 		}
 		if restrictedGroups != 6 || !workerBoundary || !soleWorker || !workerHBA {
 			t.Fatalf("database role split is invalid: groups=%d worker=%t sole=%t hba=%t", restrictedGroups, workerBoundary, soleWorker, workerHBA)

@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
 const (
@@ -61,6 +62,7 @@ var diagnosticSchemaSQL string
 var diagnosticRegistrationSQL string
 
 var diagnosticUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var extensionVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 var adapterStartupMutex sync.Mutex
 
 var diagnosticSourceTables = []string{
@@ -74,6 +76,7 @@ var diagnosticSourceTables = []string{
 	"cf_schema_queue",
 	"cf_decode_trap",
 	"cf_late_registration",
+	"cf_generated_items",
 }
 
 var diagnosticLegacyInternalTables = []string{
@@ -99,6 +102,11 @@ type HarnessConfig struct {
 	ProcessLogBytes                     int
 	AllowInitialCaptureReadinessFailure bool
 	SkipAdapter                         bool
+	// UpdateBaselineExtensionArtifact and UpdateBaselineExtensionVersion select
+	// an extension bundle of an earlier version. Provision installs this bundle.
+	// UpdateExtension then updates the extension to the environment bundle.
+	UpdateBaselineExtensionArtifact string
+	UpdateBaselineExtensionVersion  string
 }
 
 // HarnessNames are the nonsecret isolated PostgreSQL object names.
@@ -137,6 +145,10 @@ type Harness struct {
 	publicationCreated bool
 	sourceReady        bool
 	restartCount       int
+	extensionUpdated   bool
+	// extensionUpdateCompleted is true after UpdateExtension returns without error.
+	extensionUpdateCompleted bool
+	cleanExtension           bool
 
 	closeMu      sync.Mutex
 	closeDone    chan struct{}
@@ -594,7 +606,7 @@ func Provision(ctx context.Context, config HarnessConfig) (_ *Harness, returnedE
 	} else if err := harness.grantRunRoles(ctx); err != nil {
 		return nil, err
 	}
-	if !config.SkipAdapter {
+	if !config.SkipAdapter && config.UpdateBaselineExtensionArtifact == "" {
 		if err := harness.startAdapter(ctx); err != nil {
 			return nil, err
 		}
@@ -629,6 +641,21 @@ func normalizeHarnessConfig(config HarnessConfig) (HarnessConfig, error) {
 	}
 	if config.StartupTimeout <= 0 || config.ShutdownTimeout <= 0 || config.ProcessLogBytes < 1 || config.ProcessLogBytes > maximumProcessLogBytes || !validListenAddress(config.ListenAddress) {
 		return HarnessConfig{}, errors.New("harness configuration is invalid")
+	}
+	if (config.UpdateBaselineExtensionArtifact == "") != (config.UpdateBaselineExtensionVersion == "") {
+		return HarnessConfig{}, errors.New("harness update baseline configuration is invalid")
+	}
+	if config.UpdateBaselineExtensionArtifact != "" {
+		if config.Environment.AttachDatabaseURL != "" ||
+			!extensionVersionPattern.MatchString(config.UpdateBaselineExtensionVersion) ||
+			config.UpdateBaselineExtensionVersion == release.Version {
+			return HarnessConfig{}, errors.New("harness update baseline configuration is invalid")
+		}
+		artifact, err := filepath.Abs(config.UpdateBaselineExtensionArtifact)
+		if err != nil {
+			return HarnessConfig{}, errors.New("harness update baseline configuration is invalid")
+		}
+		config.UpdateBaselineExtensionArtifact = artifact
 	}
 	if config.TempParent != "" {
 		parent, err := filepath.Abs(config.TempParent)
@@ -766,25 +793,43 @@ func allocateLoopbackPort() (int, error) {
 	return address.Port, nil
 }
 
+// installExtension installs the update baseline bundle in baseline mode and
+// the environment bundle otherwise.
 func (h *Harness) installExtension(ctx context.Context) error {
-	bundle, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
+	if h.config.UpdateBaselineExtensionArtifact != "" {
+		return h.installExtensionBundle(ctx, h.config.UpdateBaselineExtensionArtifact, h.config.UpdateBaselineExtensionVersion, nil)
+	}
+	return h.installEnvironmentExtension(ctx)
+}
+
+func (h *Harness) installEnvironmentExtension(ctx context.Context) error {
+	return h.installExtensionBundle(ctx, h.env.ExtensionArtifact, release.Version, &h.env.extension)
+}
+
+// installExtensionBundle installs one verified bundle. It appends its records
+// to h.installed, so that restore also undoes an earlier installation. When
+// expected is not nil, the bundle identity must equal expected.
+func (h *Harness) installExtensionBundle(ctx context.Context, artifact, extensionVersion string, expected *extensionBundle) error {
+	bundle, err := verifyExtensionBundleForPostgreSQLVersion(artifact, h.env.postgresVersion, extensionVersion)
 	if err != nil {
 		return err
 	}
-	if !sameExtensionBundleIdentity(h.env.extension, bundle) {
+	if expected != nil && !sameExtensionBundleIdentity(*expected, bundle) {
 		return errors.New("extension bundle identity changed after environment load")
 	}
 	roots, err := h.extensionDestinationRoots(ctx)
 	if err != nil {
 		return err
 	}
-	backupRoot := filepath.Join(h.runRoot, "extension-backups")
-	if err := os.Mkdir(backupRoot, 0o700); err != nil {
-		return errors.New("create extension backup directory failed")
+	if h.installed == nil {
+		backupRoot := filepath.Join(h.runRoot, "extension-backups")
+		if err := os.Mkdir(backupRoot, 0o700); err != nil {
+			return errors.New("create extension backup directory failed")
+		}
+		h.installed = &installedExtension{backupRoot: backupRoot}
 	}
-	installed := &installedExtension{backupRoot: backupRoot}
-	h.installed = installed
-	for index, file := range bundle.files {
+	installed := h.installed
+	for _, file := range bundle.files {
 		source, err := safeBundleSourcePath(bundle.root, file.Path)
 		if err != nil {
 			return errors.New("extension bundle changed during installation")
@@ -802,7 +847,7 @@ func (h *Harness) installExtension(ctx context.Context) error {
 			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 				return errors.New("extension destination is unsafe")
 			}
-			backup := filepath.Join(backupRoot, fmt.Sprintf("%03d.original", index))
+			backup := filepath.Join(installed.backupRoot, fmt.Sprintf("%03d.original", len(installed.files)))
 			digest, err := copyVerifiedFile(destination, backup, "", info.Mode().Perm())
 			if err != nil {
 				return errors.New("back up installed extension file failed")
@@ -824,7 +869,7 @@ func (h *Harness) installExtension(ctx context.Context) error {
 			return errors.New("install extension file failed")
 		}
 	}
-	verifiedAfterInstall, err := verifyExtensionBundleForPostgreSQLVersion(h.env.ExtensionArtifact, h.env.postgresVersion)
+	verifiedAfterInstall, err := verifyExtensionBundleForPostgreSQLVersion(artifact, h.env.postgresVersion, extensionVersion)
 	if err != nil || !sameExtensionBundleIdentity(bundle, verifiedAfterInstall) {
 		return errors.New("extension bundle identity changed during installation")
 	}
@@ -1520,12 +1565,16 @@ func (h *Harness) restartPostgres(ctx context.Context) error {
 	if h.attached {
 		return h.restartAttachedPostgres(ctx)
 	}
+	return h.restartOwnedPostgres(ctx, syscall.SIGINT)
+}
+
+func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Signal) error {
 	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
 	defer cancel()
 	if h.postgres == nil {
 		return errors.New("PostgreSQL process is unavailable")
 	}
-	if err := h.postgres.StopPostmasterFast(stopContext, h.config.ShutdownTimeout); err != nil {
+	if err := h.postgres.StopPostmaster(stopContext, h.config.ShutdownTimeout, shutdown); err != nil {
 		return err
 	}
 	h.postgres = nil
@@ -2225,6 +2274,18 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 		return errors.New("isolated PostgreSQL restart is unavailable")
 	}
 	return h.restartPostgres(ctx)
+}
+
+// CrashRestartPostgres simulates a PostgreSQL crash with an immediate shutdown
+// and starts the isolated postmaster again for a process-fault test.
+func (h *Harness) CrashRestartPostgres(ctx context.Context) error {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return errors.New("isolated PostgreSQL restart is unavailable")
+	}
+	if h.attached {
+		return errors.New("isolated PostgreSQL crash restart requires an owned postmaster")
+	}
+	return h.restartOwnedPostgres(ctx, syscall.SIGQUIT)
 }
 
 // ReinstallExtension replaces the extension atomically without restarting the postmaster.
@@ -3109,6 +3170,7 @@ BEGIN
 			       expected.atttypmod,
 			       pg_catalog.format_type(expected.atttypid, expected.atttypmod) AS type_name,
 			       expected.attnotnull,
+			       expected.attgenerated <> '' AS generated,
 			       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
 			FROM pg_catalog.pg_attribute AS expected
 			LEFT JOIN pg_catalog.pg_attrdef AS default_value
@@ -3147,7 +3209,10 @@ BEGIN
 				);
 			END IF;
 
-			IF authored_column.default_expression IS NULL THEN
+			IF authored_column.generated THEN
+				-- PostgreSQL rejects a default change on a generated column.
+				NULL;
+			ELSIF authored_column.default_expression IS NULL THEN
 				EXECUTE pg_catalog.format(
 					'ALTER TABLE public.%I ALTER COLUMN %I DROP DEFAULT',
 					source_table, authored_column.attname
@@ -4237,6 +4302,39 @@ func (executor *OperatorExecutor) RegisterLateSourceTable(ctx context.Context) e
         'single_scope',
         'id', 'updated_at', 'deleted_at', 'enabled'
     )`)
+}
+
+// RegisterGeneratedSourceTableWithoutGeneratedColumns registers the fixed
+// generated-column table and excludes all of its generated columns.
+func (executor *OperatorExecutor) RegisterGeneratedSourceTableWithoutGeneratedColumns(ctx context.Context) error {
+	return executor.exec(ctx, `SELECT synchro.synchro_register_table(
+		'public.cf_generated_items',
+		'public.cf_generated_items_membership',
+		'single_scope',
+		'id', 'updated_at', 'deleted_at', 'enabled',
+		ARRAY['value_length', 'search_vector', 'value_upper']
+	)`)
+}
+
+// RegisterGeneratedSourceTableWithStoredColumn registers the fixed
+// generated-column table with value_length synced. It excludes search_vector
+// and the virtual value_upper column.
+func (executor *OperatorExecutor) RegisterGeneratedSourceTableWithStoredColumn(ctx context.Context) error {
+	return executor.exec(ctx, `SELECT synchro.synchro_register_table(
+		'public.cf_generated_items',
+		'public.cf_generated_items_membership',
+		'single_scope',
+		'id', 'updated_at', 'deleted_at', 'enabled',
+		ARRAY['search_vector', 'value_upper']
+	)`)
+}
+
+// PublishStoredGeneratedColumns makes the isolated publication send stored generated columns.
+func (executor *OperatorExecutor) PublishStoredGeneratedColumns(ctx context.Context) error {
+	if executor == nil || executor.harness == nil {
+		return errors.New("operator executor is unavailable")
+	}
+	return executor.exec(ctx, "ALTER PUBLICATION "+quoteIdentifier(executor.harness.names.Publication)+" SET (publish_generated_columns = stored)")
 }
 
 // PendingLateSourceRegistryGeneration returns the validated pending generation for the fixed late table.
@@ -6793,9 +6891,11 @@ func (process *ownedProcess) Stop(ctx context.Context, timeout time.Duration) er
 	return waitForOwnedProcess(ctx, process.done)
 }
 
-// StopPostmasterFast requests PostgreSQL fast shutdown without signaling its
-// child backends directly. This preserves durable replication-slot state.
-func (process *ownedProcess) StopPostmasterFast(ctx context.Context, timeout time.Duration) error {
+// StopPostmaster sends signal only to the postmaster and waits for its process
+// group to exit. SIGINT requests fast shutdown, which writes a shutdown
+// checkpoint. SIGQUIT requests immediate shutdown, which simulates a crash and
+// writes no shutdown checkpoint.
+func (process *ownedProcess) StopPostmaster(ctx context.Context, timeout time.Duration, signal syscall.Signal) error {
 	if process == nil || process.command == nil || process.command.Process == nil {
 		return nil
 	}
@@ -6812,11 +6912,11 @@ func (process *ownedProcess) StopPostmasterFast(ctx context.Context, timeout tim
 		process.cancel()
 		return waitForOwnedProcess(ctx, process.done)
 	}
-	if err := process.command.Process.Signal(syscall.SIGINT); err != nil {
-		return errors.New("request PostgreSQL fast shutdown failed")
+	if err := process.command.Process.Signal(signal); err != nil {
+		return errors.New("request PostgreSQL shutdown failed")
 	}
 	if !process.waitForGroupExit(ctx, pid, timeout) {
-		return errors.New("bounded PostgreSQL fast shutdown wait expired")
+		return errors.New("bounded PostgreSQL shutdown wait expired")
 	}
 	process.cancel()
 	return waitForOwnedProcess(ctx, process.done)

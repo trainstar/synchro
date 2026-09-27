@@ -214,6 +214,9 @@ public enum LocalMutationStatus: String, Codable, Sendable, Equatable {
     case pending
     case sealed
     case serverRejected = "server_rejected"
+    /// The mutation has more authored columns or normalized octets than the server accepts.
+    /// The client did not send it and does not retry it.
+    case exceedsPushLimit = "exceeds_push_limit"
     case supersededBeforeSend = "superseded_before_send"
     case cancelledBeforeSend = "cancelled_before_send"
     case blockedByPredecessor = "blocked_by_predecessor"

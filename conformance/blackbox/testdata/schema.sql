@@ -102,3 +102,16 @@ CREATE TABLE cf_late_registration (
 );
 
 CREATE INDEX cf_late_registration_owner_id_idx ON cf_late_registration (owner_id);
+
+CREATE TABLE cf_generated_items (
+    id UUID PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    value TEXT NOT NULL,
+    value_length INTEGER GENERATED ALWAYS AS (length(value)) STORED,
+    search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', value)) STORED,
+    value_upper TEXT GENERATED ALWAYS AS (upper(value)) VIRTUAL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ
+);
+
+CREATE INDEX cf_generated_items_owner_id_idx ON cf_generated_items (owner_id);

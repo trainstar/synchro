@@ -42,3 +42,28 @@ func TestRunRejectsMissingAndUnknownCommands(t *testing.T) {
 		t.Fatalf("unknown command must print usage, stderr was %q", stderr.String())
 	}
 }
+
+func TestRunPrintsUpdateBaselineArtifact(t *testing.T) {
+	root, err := releaseversion.FindRepoRoot(".")
+	if err != nil {
+		t.Fatalf("find repository root: %v", err)
+	}
+	baseline, err := releaseversion.ReadUpdateBaseline(root)
+	if err != nil {
+		t.Fatalf("read update baseline: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"update-baseline-artifact"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run update-baseline-artifact: %v", err)
+	}
+	if want := baseline.ArtifactURL + " " + baseline.ArtifactSHA256 + "\n"; stdout.String() != want {
+		t.Fatalf("update-baseline-artifact wrote %q, want %q", stdout.String(), want)
+	}
+	stdout.Reset()
+	if err := run([]string{"update-baseline-artifact", "extra"}, &stdout, &stderr); err == nil {
+		t.Fatal("update-baseline-artifact with an argument must fail")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("update-baseline-artifact with an argument wrote %q", stdout.String())
+	}
+}

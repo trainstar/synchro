@@ -606,16 +606,6 @@ pub(crate) fn canonicalize_synced_row_data(
                         |error| format!("field {:?} JSON is not UTF-8: {error}", field.field_id),
                     )?);
                 }
-            } else if field.portable_type == "float" {
-                let canonical = serde_json_canonicalizer::to_vec(value).map_err(|error| {
-                    format!(
-                        "field {:?} float is not canonicalizable: {error}",
-                        field.field_id
-                    )
-                })?;
-                *value = serde_json::from_slice(&canonical).map_err(|error| {
-                    format!("field {:?} float is invalid: {error}", field.field_id)
-                })?;
             }
         }
         Ok(())
@@ -742,7 +732,7 @@ pub(crate) fn synced_row_digest_with_schema_hash(
     let row = CanonicalRow::from_json(
         serde_json::to_string(&primary_key_json)
             .map_err(|error| format!("encoding primary key: {error}"))?,
-        &serde_json::to_string(&canonical)
+        &serde_json_canonicalizer::to_string(&canonical)
             .map_err(|error| format!("encoding wire row: {error}"))?,
     )
     .map_err(|error| format!("canonical row is invalid: {error}"))?;

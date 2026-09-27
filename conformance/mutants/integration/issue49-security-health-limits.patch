@@ -21,16 +21,16 @@ diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/hea
      }
  
      let Some(worker_login) = configuration.worker_login.as_deref() else {
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.1.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
 @@ -2051,3 +2051,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1065
-+-- synchro-pg/src/health.rs:1068
+--- synchro-pg/src/health.rs:1098
++-- synchro-pg/src/health.rs:1101
  -- synchro_pg::health::synchro_health_detail
 @@ -2263,3 +2263,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1058
-+-- synchro-pg/src/health.rs:1061
+--- synchro-pg/src/health.rs:1091
++-- synchro-pg/src/health.rs:1094
  -- synchro_pg::health::synchro_readiness

@@ -2193,6 +2193,270 @@
         );
     }
 
+    fn create_generated_column_fixture() {
+        Spi::run(
+            "CREATE TABLE public.test_generated_items (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL,
+                 value_length INTEGER GENERATED ALWAYS AS (length(value)) STORED,
+                 value_upper TEXT GENERATED ALWAYS AS (upper(value)) VIRTUAL,
+                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                 deleted_at TIMESTAMPTZ
+             )",
+        )
+        .expect("create generated column fixture");
+    }
+
+    fn set_test_publication_generated_columns(mode: &str) {
+        Spi::run(&format!(
+            "ALTER PUBLICATION synchro_pub SET (publish_generated_columns = {mode})"
+        ))
+        .expect("set test publication generated column mode");
+    }
+
+    fn generated_fixture_registration(exclude_columns: &str) -> String {
+        format!(
+            "tests.register_test_table(
+                 'test_generated_items',
+                 $$SELECT 'global'::text$$,
+                 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'enabled',
+                 {exclude_columns}
+             )"
+        )
+    }
+
+    fn expect_registration_rejected(registration: &str) {
+        Spi::run(&format!(
+            "DO $test$
+             DECLARE
+                 rejected boolean := false;
+             BEGIN
+                 BEGIN
+                     PERFORM {registration};
+                 EXCEPTION WHEN OTHERS THEN
+                     rejected := true;
+                 END;
+                 IF NOT rejected THEN
+                     RAISE EXCEPTION 'registration unexpectedly succeeded';
+                 END IF;
+             END
+             $test$"
+        ))
+        .expect("expect registration rejection");
+    }
+
+    fn generated_fixture_registry_count() -> i64 {
+        Spi::get_one::<i64>(
+            "SELECT count(*)
+             FROM synchro.sync_registry
+             WHERE physical_relation_oid = 'public.test_generated_items'::pg_catalog.regclass",
+        )
+        .expect("generated fixture registry count query")
+        .expect("generated fixture registry count")
+    }
+
+    fn generated_fixture_field_writability() -> Value {
+        Spi::get_one::<pgrx::JsonB>(
+            "SELECT COALESCE(
+                 jsonb_object_agg(field.physical_column::text, field.writable),
+                 '{}'::jsonb
+             )
+             FROM synchro.sync_registry registry
+             JOIN synchro.sync_registry_fields field
+               ON field.registry_generation = registry.registry_generation
+              AND field.relation_id = registry.relation_id
+             WHERE registry.physical_relation_oid =
+                 'public.test_generated_items'::pg_catalog.regclass",
+        )
+        .expect("generated fixture field query")
+        .expect("generated fixture fields")
+        .0
+    }
+
+    #[pg_test]
+    fn test_register_table_rejects_synced_virtual_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("stored");
+        create_generated_column_fixture();
+
+        expect_registration_rejected(&generated_fixture_registration(
+            "'{}'::text[]",
+        ));
+        assert_eq!(generated_fixture_registry_count(), 0);
+
+        Spi::run(&format!(
+            "SELECT {}",
+            generated_fixture_registration("ARRAY['value_upper']")
+        ))
+        .expect("register fixture without the virtual generated column");
+        assert_eq!(generated_fixture_registry_count(), 1);
+    }
+
+    #[pg_test]
+    fn test_register_table_rejects_unpublished_stored_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("none");
+        create_generated_column_fixture();
+
+        let registration = generated_fixture_registration("ARRAY['value_upper']");
+        expect_registration_rejected(&registration);
+        assert_eq!(generated_fixture_registry_count(), 0);
+
+        set_test_publication_generated_columns("stored");
+        Spi::run(&format!("SELECT {registration}"))
+            .expect("register stored generated column after publication change");
+        assert_eq!(generated_fixture_registry_count(), 1);
+    }
+
+    #[pg_test]
+    fn test_register_table_accepts_excluded_generated_columns() {
+        setup_test_tables();
+        set_test_publication_generated_columns("none");
+        create_generated_column_fixture();
+
+        Spi::run(&format!(
+            "SELECT {}",
+            generated_fixture_registration("ARRAY['value_length', 'value_upper']")
+        ))
+        .expect("register fixture with excluded generated columns");
+
+        assert_eq!(
+            generated_fixture_field_writability(),
+            json!({
+                "id": false,
+                "value": true,
+                "updated_at": false,
+                "deleted_at": false
+            })
+        );
+    }
+
+    #[pg_test]
+    fn test_register_table_accepts_published_stored_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("stored");
+        create_generated_column_fixture();
+
+        Spi::run(&format!(
+            "SELECT {}",
+            generated_fixture_registration("ARRAY['value_upper']")
+        ))
+        .expect("register fixture with a published stored generated column");
+
+        assert_eq!(
+            generated_fixture_field_writability(),
+            json!({
+                "id": false,
+                "value": true,
+                "value_length": false,
+                "updated_at": false,
+                "deleted_at": false
+            })
+        );
+    }
+
+    #[pg_test]
+    fn test_capture_dependency_rejects_unpublished_generated_column() {
+        setup_test_tables();
+        set_test_publication_generated_columns("none");
+        create_generated_column_fixture();
+        Spi::run(
+            "GRANT SELECT ON TABLE public.test_generated_items TO synchro_owner;
+             ALTER TABLE public.test_generated_items ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY test_generated_items_owner_policy
+                 ON public.test_generated_items
+                 AS PERMISSIVE FOR ALL TO synchro_owner
+                 USING (true) WITH CHECK (true)",
+        )
+        .expect("prepare generated capture dependency fixture");
+
+        expect_registration_rejected(
+            "synchro.synchro_register_capture_dependency(
+                 'public.test_generated_items', ARRAY['id'], ARRAY['value_length']
+             )",
+        );
+        assert_eq!(generated_fixture_registry_count(), 0);
+
+        Spi::run(
+            "SELECT synchro.synchro_register_capture_dependency(
+                 'public.test_generated_items', ARRAY['id'], ARRAY['value']
+             )",
+        )
+        .expect("register capture dependency without generated columns");
+        assert_eq!(generated_fixture_registry_count(), 1);
+    }
+
+    const ORDERS_COLUMN_LIST_MEMBER: &str =
+        "test_orders (id, user_id, title, updated_at, deleted_at)";
+    const ORDERS_ROW_FILTER_MEMBER: &str = "test_orders WHERE (id IS NOT NULL)";
+    const PUBLICATION_FILTER_FIXTURE_REGISTRATION: &str = "tests.register_test_table(
+             'test_publication_filter_items',
+             $$SELECT 'global'::text$$,
+             'single_scope',
+             'id', 'updated_at', 'deleted_at', 'enabled'
+         )";
+
+    fn replace_orders_publication_member(member: &str) {
+        Spi::run(&format!(
+            "ALTER PUBLICATION synchro_pub DROP TABLE test_orders;
+             ALTER PUBLICATION synchro_pub ADD TABLE {member}"
+        ))
+        .expect("replace test_orders publication member");
+    }
+
+    fn publication_filter_fixture_registry_count() -> i64 {
+        Spi::get_one::<i64>(
+            "SELECT count(*)
+             FROM synchro.sync_registry
+             WHERE physical_relation_oid =
+                 'public.test_publication_filter_items'::pg_catalog.regclass",
+        )
+        .expect("publication filter fixture registry count query")
+        .expect("publication filter fixture registry count")
+    }
+
+    fn filtered_publication_member_rejects_registration(member: &str) {
+        setup_test_tables();
+        Spi::run(&format!(
+            "CREATE TABLE public.test_publication_filter_items (
+                 id UUID PRIMARY KEY,
+                 value TEXT NOT NULL,
+                 note TEXT NOT NULL DEFAULT '',
+                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                 deleted_at TIMESTAMPTZ
+             );
+             ALTER PUBLICATION synchro_pub ADD TABLE {member}"
+        ))
+        .expect("create filtered publication member fixture");
+
+        expect_registration_rejected(PUBLICATION_FILTER_FIXTURE_REGISTRATION);
+        assert_eq!(publication_filter_fixture_registry_count(), 0);
+
+        Spi::run(
+            "ALTER PUBLICATION synchro_pub DROP TABLE public.test_publication_filter_items;
+             ALTER PUBLICATION synchro_pub ADD TABLE public.test_publication_filter_items",
+        )
+        .expect("make the fixture an exact publication member");
+        Spi::run(&format!("SELECT {PUBLICATION_FILTER_FIXTURE_REGISTRATION}"))
+            .expect("register exact publication member");
+        assert_eq!(publication_filter_fixture_registry_count(), 1);
+    }
+
+    #[pg_test]
+    fn test_register_table_rejects_publication_member_column_list() {
+        filtered_publication_member_rejects_registration(
+            "public.test_publication_filter_items (id, value, updated_at, deleted_at)",
+        );
+    }
+
+    #[pg_test]
+    fn test_register_table_rejects_publication_member_row_filter() {
+        filtered_publication_member_rejects_registration(
+            "public.test_publication_filter_items WHERE (id IS NOT NULL)",
+        );
+    }
+
     #[pg_test]
     fn test_unregister_table_for_all_publication() {
         setup_test_tables();
@@ -2358,6 +2622,19 @@
         let tables = manifest.0["tables"].as_array().unwrap();
         assert!(!tables.iter().any(|table| table["name"] == "test_orders"));
         assert!(tables.iter().any(|table| table["name"] == "test_products"));
+    }
+
+    #[pg_test]
+    fn test_unregister_keeps_filtered_publication_member() {
+        setup_test_tables();
+        replace_orders_publication_member(ORDERS_ROW_FILTER_MEMBER);
+        Spi::run("SELECT synchro_unregister_table('test_orders')").unwrap();
+
+        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
+        assert!(
+            result.is_err(),
+            "activation must not remove a filtered publication member"
+        );
     }
 
     #[pg_test]
@@ -3900,6 +4177,20 @@
         let active = active_orders_generation();
         Spi::run("ALTER TABLE test_orders ADD COLUMN rogue TEXT").unwrap();
         loaded_orders_registration_validates(active).expect("unstaged drift must abort");
+    }
+
+    #[pg_test]
+    fn test_loaded_registration_rejects_filtered_publication_member() {
+        setup_test_tables();
+        let active = active_orders_generation();
+        loaded_orders_registration_validates(active).expect("exact member validation");
+        replace_orders_publication_member(ORDERS_COLUMN_LIST_MEMBER);
+
+        let result = std::panic::catch_unwind(|| loaded_orders_registration_validates(active));
+        assert!(
+            !matches!(result, Ok(Ok(()))),
+            "loaded registration must reject a filtered publication member"
+        );
     }
 
     // Issue #43: membership activation clears affected rebuild state while

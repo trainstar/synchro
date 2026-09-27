@@ -160,16 +160,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         );
     }
 
-    let request_bytes = match serde_json::to_vec(&p_request.0) {
-        Ok(bytes) if bytes.len() <= MAX_PUSH_REQUEST_BYTES => bytes,
-        _ => {
-            return push_protocol_error(
-                ProtocolErrorCode::InvalidRequest,
-                "invalid push request",
-                false,
-            )
-        }
-    };
     let sealed_request = match canonical_json_bytes(&request) {
         Ok(bytes) if bytes.len() <= MAX_PUSH_REQUEST_BYTES => bytes,
         _ => {
@@ -180,7 +170,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             )
         }
     };
-    let _ = request_bytes;
 
     // Fingerprints are computed before loading mutable registry, client, policy, or row state.
     let fingerprints = match compute_fingerprints(p_user_id, &request, sealed_request) {
@@ -432,9 +421,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         let response = build_push_response(&request, server_time, &evaluated);
         let response_bytes = canonical_push_response_bytes(&response)
             .unwrap_or_else(|_| pgrx::error!("canonicalizing push response failed"));
-        if response_bytes.len() > MAX_PUSH_REQUEST_BYTES {
-            pgrx::error!("push response exceeds the configured byte limit")
-        }
 
         let mut mutation_ledgers = Vec::new();
         for (ordinal, evaluation) in evaluated.iter().enumerate() {
@@ -2005,7 +1991,13 @@ fn validate_wire_value(field: &FieldRegistration, value: &serde_json::Value) -> 
         field.decimal_scale.map(|value| value as u32),
     )
     .map_err(|error| error.to_string())?;
-    let raw = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    // The float wire text is the RFC 8785 form of the binary64 value. Other types keep the parsed text.
+    let raw = if portable == PortableType::Float {
+        serde_json_canonicalizer::to_string(value)
+    } else {
+        serde_json::to_string(value)
+    }
+    .map_err(|error| error.to_string())?;
     encode_typed_value(&spec, &raw)
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -2059,7 +2051,7 @@ fn row_checksum(
             .unwrap_or_else(|_| pgrx::error!("encoding integer row identity failed")),
         _ => pgrx::error!("unsupported row primary-key type"),
     };
-    let row_json = serde_json::to_string(row)
+    let row_json = serde_json_canonicalizer::to_string(row)
         .unwrap_or_else(|_| pgrx::error!("encoding authoritative row failed"));
     let pk_json = serde_json::to_string(&primary_key_json)
         .unwrap_or_else(|_| pgrx::error!("encoding authoritative primary key failed"));

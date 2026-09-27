@@ -1,0 +1,16 @@
+diff --git a/extensions/synchro-pg/src/registry.rs b/extensions/synchro-pg/src/registry.rs
+--- a/extensions/synchro-pg/src/registry.rs
++++ b/extensions/synchro-pg/src/registry.rs
+@@ -2662,9 +2662,9 @@ fn primary_key_from_rows(
+     if !first.is_not_partial || !first.has_no_expressions {
+         pgrx::error!("registered relation primary key must be a plain non-partial key");
+     }
+-    if !first.is_immediate {
+-        pgrx::error!("registered relation primary key must not be deferrable");
+-    }
++    // Mutant: the registry accepts a deferrable primary key.
++    let _ = first.is_immediate;
++
+     if first.replica_identity != "d" {
+         pgrx::error!("registered relation requires REPLICA IDENTITY DEFAULT");
+     }

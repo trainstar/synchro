@@ -475,6 +475,115 @@
     }
 
     #[pg_test]
+    fn unpublished_generated_field_fails_publication_readiness() {
+        Spi::run(
+            "DROP ROLE IF EXISTS synchro_generated_health_worker;
+             CREATE ROLE synchro_generated_health_worker
+                 LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+             GRANT synchro_worker TO synchro_generated_health_worker;
+             DROP PUBLICATION IF EXISTS synchro_pub",
+        )
+        .expect("provision generated column health test identity");
+        setup_test_tables();
+        set_test_publication_generated_columns("stored");
+        create_generated_column_fixture();
+        Spi::run(&format!(
+            "SELECT {}",
+            generated_fixture_registration("ARRAY['value_upper']")
+        ))
+        .expect("register published stored generated field");
+        activate_pending_registry_for_test();
+
+        let database: String = Spi::get_one("SELECT current_database()::text")
+            .expect("load generated column health test database")
+            .expect("generated column health test database");
+        let mut configuration = crate::health::ReadinessConfiguration::configured();
+        configuration.database = Some(database);
+        configuration.worker_login = Some("synchro_generated_health_worker".to_string());
+
+        let published_detail =
+            crate::health::load_readiness_status_with_configuration(configuration.clone())
+                .detail();
+        set_test_publication_generated_columns("none");
+        let unpublished_detail =
+            crate::health::load_readiness_status_with_configuration(configuration).detail();
+
+        Spi::run(
+            "REVOKE synchro_worker FROM synchro_generated_health_worker;
+             DROP ROLE synchro_generated_health_worker",
+        )
+        .expect("remove generated column health test identity");
+
+        assert_eq!(
+            published_detail["checks"]["publication"]["state"].as_str(),
+            Some("ok")
+        );
+        assert_eq!(
+            unpublished_detail["checks"]["publication"]["state"].as_str(),
+            Some("failed")
+        );
+        assert_eq!(
+            unpublished_detail["checks"]["publication"]["reason"].as_str(),
+            Some("publication_mismatch")
+        );
+    }
+
+    fn filtered_publication_member_fails_publication_readiness(member: &str) {
+        Spi::run(
+            "DROP ROLE IF EXISTS synchro_filter_health_worker;
+             CREATE ROLE synchro_filter_health_worker
+                 LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+             GRANT synchro_worker TO synchro_filter_health_worker;
+             DROP PUBLICATION IF EXISTS synchro_pub",
+        )
+        .expect("provision publication filter health test identity");
+        setup_test_tables();
+
+        let database: String = Spi::get_one("SELECT current_database()::text")
+            .expect("load publication filter health test database")
+            .expect("publication filter health test database");
+        let mut configuration = crate::health::ReadinessConfiguration::configured();
+        configuration.database = Some(database);
+        configuration.worker_login = Some("synchro_filter_health_worker".to_string());
+
+        let exact_detail =
+            crate::health::load_readiness_status_with_configuration(configuration.clone())
+                .detail();
+        replace_orders_publication_member(member);
+        let filtered_detail =
+            crate::health::load_readiness_status_with_configuration(configuration).detail();
+
+        Spi::run(
+            "REVOKE synchro_worker FROM synchro_filter_health_worker;
+             DROP ROLE synchro_filter_health_worker",
+        )
+        .expect("remove publication filter health test identity");
+
+        assert_eq!(
+            exact_detail["checks"]["publication"]["state"].as_str(),
+            Some("ok")
+        );
+        assert_eq!(
+            filtered_detail["checks"]["publication"]["state"].as_str(),
+            Some("failed")
+        );
+        assert_eq!(
+            filtered_detail["checks"]["publication"]["reason"].as_str(),
+            Some("publication_mismatch")
+        );
+    }
+
+    #[pg_test]
+    fn publication_member_column_list_fails_publication_readiness() {
+        filtered_publication_member_fails_publication_readiness(ORDERS_COLUMN_LIST_MEMBER);
+    }
+
+    #[pg_test]
+    fn publication_member_row_filter_fails_publication_readiness() {
+        filtered_publication_member_fails_publication_readiness(ORDERS_ROW_FILTER_MEMBER);
+    }
+
+    #[pg_test]
     fn public_readiness_is_generic_and_fail_closed() {
         let readiness: pgrx::JsonB = Spi::get_one("SELECT synchro.synchro_readiness()")
             .expect("query public readiness")

@@ -43,6 +43,7 @@
 	conformance-seed-artifact \
 	conformance-pg18-extension-artifact \
 	conformance-pg18-extension-test-artifact \
+	conformance-update-baseline-extension-artifact \
 	release-stage-server \
 	release-stage-packages \
 	release-stage \
@@ -195,6 +196,7 @@ BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
+CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18-update-baseline
 ADAPTER_TEST_URL ?=
 REPLICATION_URL = $(ADAPTER_TEST_URL)
 override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
@@ -533,9 +535,9 @@ test-blackbox-mutation-control:
 	case "$$test_name" in \
 		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder|TestRealS02DivergentPullPaginationIsStarvationFree|\
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
-		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
-		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
-		TestRealIssue49RemainingSemantics) ;; \
+		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm|TestRealRegistryRejectsDeferrablePrimaryKey|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
+		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
+		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac; \
 	case "$$assertion" in assertion|assertion\#[0-9][0-9]) ;; *) echo "MUTATION_CONTROL_TEST does not name a supported assertion" >&2; exit 1 ;; esac; \
@@ -664,6 +666,7 @@ conformance-pg18-extension-artifact: override CONFORMANCE_PG18_EXTENSION_ARTIFAC
 conformance-pg18-extension-test-artifact: override CONFORMANCE_PG18_EXTENSION_ARTIFACT_POLICY := runtime
 conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 	@set -eu; \
+		export LC_ALL=C; \
 		test -n "$(PGRX_PG_CONFIG)" || { echo "PGRX_PG_CONFIG is required" >&2; exit 1; }; \
 		postgresql_version="$$($(PGRX_PG_CONFIG) --version | awk '{print $$2}')"; \
 		case "$(CONFORMANCE_PG18_EXTENSION_ARTIFACT_POLICY)" in \
@@ -692,6 +695,25 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		perl -0pi -e 's/\n+\z/\n/' "$$sql"; \
 		cmp -s extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql "$$sql" || { echo "packaged PostgreSQL SQL differs from the tracked artifact. Run make generate-pg-sql" >&2; exit 1; }; \
 		cmp -s extensions/synchro-pg/synchro_pg.control "$$control" || { echo "packaged PostgreSQL control file differs from the tracked artifact" >&2; exit 1; }; \
+		update_records=""; \
+		for tracked in extensions/synchro-pg/sql/synchro_pg--*--*.sql; do \
+			test -e "$$tracked" || continue; \
+			name="$${tracked##*/}"; \
+			update="$$out$$sharedir/extension/$$name"; \
+			test -f "$$update" && cmp -s "$$tracked" "$$update" || { echo "packaged PostgreSQL update SQL differs from the tracked artifact: $$name" >&2; exit 1; }; \
+			update_path="$${update#"$$out"/}"; \
+			update_hash="$$(shasum -a 256 "$$update" | cut -d ' ' -f 1)"; \
+			test -n "$$update_hash"; \
+			update_records="$$update_records$$(printf ',\n    {"path": "%s", "destination": "sharedir/extension/%s", "sha256": "%s"}' "$$update_path" "$$name" "$$update_hash")"; \
+		done; \
+		for packaged in "$$out$$sharedir"/extension/synchro_pg--*.sql; do \
+			name="$${packaged##*/}"; \
+			case "$$name" in \
+				"synchro_pg--$(CURRENT_VERSION).sql") ;; \
+				synchro_pg--*--*.sql) test -f "extensions/synchro-pg/sql/$$name" || { echo "pgrx package contains an untracked extension SQL file: $$name" >&2; exit 1; } ;; \
+				*) echo "pgrx package contains an untracked extension SQL file: $$name" >&2; exit 1 ;; \
+			esac; \
+		done; \
 		library_path="$${library#"$$out"/}"; \
 		control_path="$${control#"$$out"/}"; \
 		sql_path="$${sql#"$$out"/}"; \
@@ -706,7 +728,7 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 			'  "files": [' \
 			"    {\"path\": \"$$library_path\", \"destination\": \"pkglibdir/synchro_pg.$$suffix\", \"sha256\": \"$$library_hash\"}," \
 			"    {\"path\": \"$$control_path\", \"destination\": \"sharedir/extension/synchro_pg.control\", \"sha256\": \"$$control_hash\"}," \
-			"    {\"path\": \"$$sql_path\", \"destination\": \"sharedir/extension/synchro_pg--$(CURRENT_VERSION).sql\", \"sha256\": \"$$sql_hash\"}" \
+			"    {\"path\": \"$$sql_path\", \"destination\": \"sharedir/extension/synchro_pg--$(CURRENT_VERSION).sql\", \"sha256\": \"$$sql_hash\"}$$update_records" \
 			'  ]' \
 			'}' > "$$out/artifact-manifest.json.tmp"; \
 		mv "$$out/artifact-manifest.json.tmp" "$$out/artifact-manifest.json"; \
@@ -716,6 +738,31 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		mv "$$out/artifact-manifest.json.sha256.tmp" "$$out/artifact-manifest.json.sha256"; \
 		mv "$$out" "$$final"; \
 		rmdir "$$lock"; \
+		trap - EXIT HUP INT TERM
+
+conformance-update-baseline-extension-artifact:
+	@set -eu; \
+		export LC_ALL=C; \
+		final="$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)"; \
+		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
+		artifact="$$(cd api/go && GOWORK=off go run ./cmd/synchro-version update-baseline-artifact)"; \
+		set -- $$artifact; \
+		test "$$#" -eq 2 || { echo "update baseline artifact must have one URL and one SHA-256 digest" >&2; exit 1; }; \
+		url="$$1"; \
+		digest="$$2"; \
+		work="$$final.tmp.$$$$"; \
+		mkdir -p "$$(dirname "$$final")"; \
+		cleanup() { rm -rf "$$work"; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		mkdir "$$work" "$$work/extract"; \
+		curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$$work/archive.tar.gz" "$$url"; \
+		test "$$(shasum -a 256 "$$work/archive.tar.gz" | cut -d ' ' -f 1)" = "$$digest" || { echo "update baseline archive SHA-256 differs from the pinned digest" >&2; exit 1; }; \
+		tar -xzf "$$work/archive.tar.gz" -C "$$work/extract"; \
+		manifest="$$work/extract/extension/artifact-manifest.json"; \
+		test -f "$$manifest" && test -f "$$manifest.sha256" || { echo "update baseline archive omitted the extension manifest or its digest" >&2; exit 1; }; \
+		test "$$(shasum -a 256 "$$manifest" | cut -d ' ' -f 1)" = "$$(cat "$$manifest.sha256")" || { echo "update baseline extension manifest differs from its digest" >&2; exit 1; }; \
+		mv "$$work/extract/extension" "$$final"; \
+		rm -rf "$$work"; \
 		trap - EXIT HUP INT TERM
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
@@ -1892,12 +1939,28 @@ ext-seed:
 test-rust-core:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult rust -dir ../extensions -- cargo test -p synchro-core
 
+# The targeted gate examines the Phase 4 protocol semantics and their helpers.
+# extensions/.cargo/mutants.toml holds the exclusions for every run.
+RUST_MUTANTS_TARGET_SCOPE = \
+	--file 'synchro-core/src/change.rs' \
+	--file 'synchro-core/src/checksum.rs' \
+	--file 'synchro-core/src/contract.rs' \
+	--file 'synchro-core/src/edge_diff.rs' \
+	--file 'synchro-core/src/fingerprint.rs' \
+	--file 'synchro-core/src/version.rs' \
+	--re '^synchro-core/src/change\.rs:.*ChangeOperation::(wire_name|parse_wire|from_i16|to_i16)' \
+	--re '^synchro-core/src/checksum\.rs:.*(Sha256Digest::|SchemaHash::|PortableType::|FieldSpec::new|CanonicalField::new|CanonicalTable::(new|field|primary_key_field)\b|RowField::new|CanonicalRow::(new|from_json)|RowIdentity::|ScopeDigestEntry::new|ChecksumObject::|Serialize for ChecksumObject|Deserialize.*ChecksumObject|encode_typed_value|row_identity|row_digest|scope_digest|encode_row_body|ordered_scope_entries|typed_payload|decode_json_string|canonicalize_json|parse_json_value|validate_json_document|StrictJson|validate_i_json|validate_i_json_string|is_unicode_noncharacter|is_canonical_integer|is_canonical_decimal|validate_decimal_bounds|validate_datetime|validate_date|validate_time|decode_base64url|base64url_value|validate_row_identity|consume_exact|consume_nonempty_text|consume_blob|consume_fixed|require_nonempty_text|append_u32|append_u64|append_blob|append_text|sha256_digest|decode_lower_sha256|decode_lower_hex|lower_hex_value|encode_lower_hex)' \
+	--re '^synchro-core/src/contract\.rs:.*(From<crate::change::ChangeOperation>|TryFrom<Operation>|SchemaAction::requires_|SchemaAction::is_compatible|MutationRejectionCode::is_|SchemaRef::is_fresh_sentinel|::validate|normalize_portable_type_name|is_canonical_portable_type_name|requests_rebuild|is_final_page|context_only|is_positive_safe_integer|validate_|is_lower_sha256|require_nonempty|is_canonical_utc_microsecond|is_semver|valid_semver_|deserialize_|StrictJsonValue)' \
+	--re '^synchro-core/src/edge_diff\.rs:.*(diff_bucket_sets|diff_scope_sets|build_edge_diff_entries|dedup_buckets|dedup_scope_ids)' \
+	--re '^synchro-core/src/fingerprint\.rs:.*(normalized_mutation|normalized_batch|batch_fingerprint|mutation_fingerprint|canonical_normalized_batch|canonical_normalized_mutation|schema_reference_value|operation_name|validate_authenticated_user_id|validate_client_id|canonicalize|validate_i_json|is_i_json_string|is_unicode_noncharacter|sha256_digest)' \
+	--re '^synchro-core/src/version\.rs:.*(Semver::parse|Semver::less_than|Semver::cmp_precedence|split_build|parse_core|parse_identifiers|compare_numbers|compare_prerelease|check_version)'
+
 test-rust-mutants:
 	@command -v cargo-mutants >/dev/null || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
 	@test "$$(cargo mutants --version)" = "cargo-mutants 27.1.0" || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
 	cd extensions && SYNCHRO_REPO_ROOT="$(CURDIR)" cargo mutants \
 		-p synchro-core \
-		--config .cargo/mutants.toml \
+		$(RUST_MUTANTS_TARGET_SCOPE) \
 		--baseline run \
 		--jobs 4 \
 		--timeout 120 \
@@ -1908,7 +1971,6 @@ test-rust-mutants-broad:
 	@test "$$(cargo mutants --version)" = "cargo-mutants 27.1.0" || (echo "cargo-mutants 27.1.0 is required" >&2; exit 1)
 	cd extensions && SYNCHRO_REPO_ROOT="$(CURDIR)" cargo mutants \
 		-p synchro-core \
-		--no-config \
 		--baseline run \
 		--jobs 4 \
 		--timeout 120 \

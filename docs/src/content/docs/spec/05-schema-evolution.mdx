@@ -116,7 +116,9 @@ in the projection and are not writable.
 A Protocol version 3 registration has exactly one primary-key column. The
 column is non-null, is the sole member of the relation's declared primary-key
 constraint, is part of the synced projection, and has portable type `string`,
-`int`, or `int64`.
+`int`, or `int64`. Its column type is one of the built-in key types in Primary
+key and replica identity contract in
+[ADR 004](/synchro/architecture/decisions/004-membership-schema-and-retention/).
 
 The only accepted PostgreSQL replica identity is `DEFAULT` backed by that
 validated primary key. `FULL`, `NOTHING`, and `USING INDEX` are invalid.
@@ -129,7 +131,7 @@ The registry rejects all of the following:
 - an expression key
 - a partial key
 - a non-primary unique index offered as a key
-- a primary key with a portable type other than `string`, `int`, or `int64`
+- a primary-key column type that is not a built-in key type
 - a replica identity other than `DEFAULT` backed by the validated primary key
 
 The primary-key field ID and its declared portable type define every typed row

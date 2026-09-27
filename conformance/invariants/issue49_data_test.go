@@ -18,7 +18,7 @@ func TestIssue49SynchroOwnedRowCRUD(t *testing.T) {
 
 func TestIssue49MutationOutcomeConservation(t *testing.T) {
 	observation := issue49MutationConservation{
-		Captured: []string{"m-pending", "m-accepted", "m-rejected", "m-superseded", "m-cancelled", "m-blocked"},
+		Captured: []string{"m-pending", "m-accepted", "m-rejected", "m-superseded", "m-cancelled", "m-blocked", "m-oversize"},
 		Queue: []issue49Mutation{
 			{ID: "m-pending", State: "pending", Durable: true, Inspectable: true},
 			{ID: "m-accepted", State: "accepted", Durable: true, Inspectable: true},
@@ -26,6 +26,7 @@ func TestIssue49MutationOutcomeConservation(t *testing.T) {
 			{ID: "m-superseded", State: "superseded_before_send", Durable: true, Inspectable: true},
 			{ID: "m-cancelled", State: "cancelled_before_send", Durable: true, Inspectable: true},
 			{ID: "m-blocked", State: "blocked_by_predecessor", PredecessorID: "m-pending", Durable: true, Inspectable: true},
+			{ID: "m-oversize", State: "exceeds_push_limit", Durable: true, Inspectable: true},
 		},
 		Outcomes: []issue49MutationOutcome{
 			{MutationID: "m-accepted", Kind: "accepted", Durable: true, Inspectable: true},
@@ -33,6 +34,7 @@ func TestIssue49MutationOutcomeConservation(t *testing.T) {
 			{MutationID: "m-superseded", Kind: "superseded_before_send", Durable: true, Inspectable: true},
 			{MutationID: "m-cancelled", Kind: "cancelled_before_send", Durable: true, Inspectable: true},
 			{MutationID: "m-blocked", Kind: "blocked_by_predecessor", Durable: true, Inspectable: true},
+			{MutationID: "m-oversize", Kind: "exceeds_push_limit", Durable: true, Inspectable: true},
 		},
 	}
 	mutant := observation

@@ -1,7 +1,7 @@
 {
   "$schema": "./schemas/support-matrix.schema.json",
   "schema_version": 1,
-  "release": "0.3.1",
+  "release": "0.3.2",
   "current_track_policy": {
     "selector": "current-stable",
     "resolve_at": "release-candidate-start",

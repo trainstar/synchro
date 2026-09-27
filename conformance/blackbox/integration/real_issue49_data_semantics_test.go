@@ -1013,50 +1013,24 @@ func TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner(t *tes
 	})
 }
 
-func TestRealIssue49FirstPushResponseFailureRollsBackEveryDurableEffect(t *testing.T) {
+func TestRealIssue49FirstPushLateFailureRollsBackEveryDurableEffect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	harness, token := provisionRealProofHarness(t, ctx)
 	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-atomicity-client")
 	table := requireRealTable(t, client, "cf_items")
 	ownerField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id")
-	const mutationCount = 17
-	const requestLimit = 1 << 20
-	recordIDs := make([]string, 0, mutationCount)
-	mutations := make([]map[string]any, 0, mutationCount)
-	for index := 1; index <= mutationCount; index++ {
-		recordID := fmt.Sprintf("00000000-0000-4000-8d05-%012x", index)
-		mutationID := fmt.Sprintf("00000000-0000-4000-8d06-%012x", index)
-		recordIDs = append(recordIDs, recordID)
-		mutations = append(mutations, phase4InsertMutation(client, table, ownerField, mutationID, recordID, ""))
+	recordIDs := []string{
+		"00000000-0000-4000-8d05-000000000001",
+		"00000000-0000-4000-8d05-000000000002",
 	}
-	payload := phase4PushPayload(client, "00000000-0000-4000-8d05-000000000000", mutations)
-	emptyBody, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("encode empty atomic response-failure request: %v", err)
+	mutations := []map[string]any{
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000001", recordIDs[0], "atomic-written"),
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000002", recordIDs[1], "atomic-suppressed"),
 	}
-	available := requestLimit - len(emptyBody) - 1
-	if available <= mutationCount {
-		t.Fatal("response-failure request has no bounded payload capacity")
-	}
-	perMutation := available / mutationCount
-	remainder := available % mutationCount
-	for index, mutation := range mutations {
-		length := perMutation
-		if index < remainder {
-			length++
-		}
-		columns := mutation["columns"].(map[string]any)
-		columns[table.ValueField] = strings.Repeat("x", length)
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("encode bounded response-failure request: %v", err)
-	}
-	if len(body) != requestLimit-1 {
-		t.Fatalf("response-failure request size = %d, want %d", len(body), requestLimit-1)
-	}
+	suppressIssue49ItemInsert(t, ctx, harness, recordIDs[1])
 
+	payload := phase4PushPayload(client, "00000000-0000-4000-8d05-000000000000", mutations)
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", payload)
 	requireRealProtocolError(t, status, response, http.StatusInternalServerError, "sync_integrity_failure")
 

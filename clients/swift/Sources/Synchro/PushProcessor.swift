@@ -113,49 +113,45 @@ final class PushProcessor: @unchecked Sendable {
         return PushOutcome(response: response, conflicts: reconciliation.0 + reconciliation.1.conflicts)
     }
 
-    private func buildMutations(
+    private func buildMutation(
         _ db: GRDB.Database,
-        from pending: [PendingChange],
-        schemaVersion: Int64,
-        schemaHash: String,
+        from change: PendingChange,
+        requestSchema: SchemaRef,
         syncedTables: [LocalSchemaTable],
         historicalSchemas: inout [HistoricalSchemaKey: [LocalSchemaTable]]
-    ) throws -> [Mutation] {
-        let requestSchema = SchemaRef(version: schemaVersion, hash: schemaHash)
-        return try pending.map { change in
-            guard let tableID = change.tableID,
-                  let pkFieldID = change.pkFieldID,
-                  let pkLogicalType = change.pkLogicalType else {
-                throw SynchroError.invalidResponse(message: "mutation ledger lacks immutable schema identity")
-            }
-            let authoredVersion = change.authoredSchemaVersion ?? schemaVersion
-            let authoredHash = change.authoredSchemaHash ?? schemaHash
-            guard authoredVersion > 0, !authoredHash.isEmpty else {
-                throw SynchroError.invalidResponse(message: "mutation ledger lacks authored schema identity")
-            }
-            let authoredSchema = SchemaRef(version: authoredVersion, hash: authoredHash)
-            let schema = try historicalTable(
-                db,
-                tableID: tableID,
-                schema: authoredSchema,
-                sealedSchema: authoredSchema == requestSchema ? requestSchema : nil,
-                sealedTables: authoredSchema == requestSchema ? syncedTables : nil,
-                cache: &historicalSchemas
-            )
-            let columns: [String: AnyCodable]? = change.operation == "delete"
-                ? nil
-                : Dictionary(uniqueKeysWithValues: change.fieldValuesByID.values.map { ($0.fieldID, $0.wireValue) })
-            return Mutation(
-                mutationID: change.mutationID,
-                table: tableID,
-                op: try mutationOperation(for: change.operation),
-                pk: [pkFieldID: AnyCodable(try primaryKeyValue(change.recordID, logicalType: pkLogicalType, tableName: schema.tableName))],
-                authoredSchema: authoredSchema,
-                baseVersion: change.operation == "insert" ? nil : change.baseUpdatedAt,
-                clientVersion: change.clientUpdatedAt,
-                columns: columns
-            )
+    ) throws -> Mutation {
+        guard let tableID = change.tableID,
+              let pkFieldID = change.pkFieldID,
+              let pkLogicalType = change.pkLogicalType else {
+            throw SynchroError.invalidResponse(message: "mutation ledger lacks immutable schema identity")
         }
+        let authoredVersion = change.authoredSchemaVersion ?? requestSchema.version
+        let authoredHash = change.authoredSchemaHash ?? requestSchema.hash
+        guard authoredVersion > 0, !authoredHash.isEmpty else {
+            throw SynchroError.invalidResponse(message: "mutation ledger lacks authored schema identity")
+        }
+        let authoredSchema = SchemaRef(version: authoredVersion, hash: authoredHash)
+        let schema = try historicalTable(
+            db,
+            tableID: tableID,
+            schema: authoredSchema,
+            sealedSchema: authoredSchema == requestSchema ? requestSchema : nil,
+            sealedTables: authoredSchema == requestSchema ? syncedTables : nil,
+            cache: &historicalSchemas
+        )
+        let columns: [String: AnyCodable]? = change.operation == "delete"
+            ? nil
+            : Dictionary(uniqueKeysWithValues: change.fieldValuesByID.values.map { ($0.fieldID, $0.wireValue) })
+        return Mutation(
+            mutationID: change.mutationID,
+            table: tableID,
+            op: try mutationOperation(for: change.operation),
+            pk: [pkFieldID: AnyCodable(try primaryKeyValue(change.recordID, logicalType: pkLogicalType, tableName: schema.tableName))],
+            authoredSchema: authoredSchema,
+            baseVersion: change.operation == "insert" ? nil : change.baseUpdatedAt,
+            clientVersion: change.clientUpdatedAt,
+            columns: columns
+        )
     }
 
     private func mutationOperation(for operation: String) throws -> Operation {
@@ -314,22 +310,50 @@ final class PushProcessor: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "durable push retry batch is unavailable")
             }
 
-            let pending = try changeTracker.pendingChanges(db, limit: batchSize)
-            guard !pending.isEmpty else { return nil }
-            let mutations = try buildMutations(
-                db,
-                from: pending,
-                schemaVersion: schemaVersion,
+            let requestSchema = SchemaRef(version: schemaVersion, hash: schemaHash)
+            let batchID = UUID().uuidString.lowercased()
+            let envelope = try PushLimits.envelopeReserve(
+                clientID: clientID,
+                batchID: batchID,
                 schemaHash: schemaHash,
-                syncedTables: syncedTables,
-                historicalSchemas: &historicalSchemas
+                encoder: encoder
             )
-            guard !mutations.isEmpty else { return nil }
+            var pending: [PendingChange] = []
+            var mutations: [Mutation] = []
+            // A pass that selects nothing moved each candidate out of the
+            // unsealed state, so the next pass reads the next candidates.
+            while pending.isEmpty {
+                let candidates = try changeTracker.pendingChanges(db, limit: batchSize)
+                guard !candidates.isEmpty else { return nil }
+                var requestOctets = envelope
+                for candidate in candidates {
+                    let mutation = try buildMutation(
+                        db,
+                        from: candidate,
+                        requestSchema: requestSchema,
+                        syncedTables: syncedTables,
+                        historicalSchemas: &historicalSchemas
+                    )
+                    let measure = try PushLimits.measure(mutation, encoder: encoder)
+                    if measure.exceedsMutationLimits {
+                        try changeTracker.markExceedsPushLimit(db, mutationID: candidate.mutationID)
+                        try changeTracker.blockDependents(db, predecessorID: candidate.mutationID)
+                        continue
+                    }
+                    let nextOctets = requestOctets.appending(measure.element, afterElement: !pending.isEmpty)
+                    if !pending.isEmpty && !nextOctets.fitsRequestLimit {
+                        break
+                    }
+                    requestOctets = nextOctets
+                    pending.append(candidate)
+                    mutations.append(mutation)
+                }
+            }
             let request = PushRequest(
                 clientID: clientID,
                 clientGeneration: clientGeneration,
-                batchID: UUID().uuidString.lowercased(),
-                schema: SchemaRef(version: schemaVersion, hash: schemaHash),
+                batchID: batchID,
+                schema: requestSchema,
                 mutations: mutations
             )
             let requestJSON = try encodeString(request)

@@ -260,16 +260,16 @@ final class ChangeTracker: @unchecked Sendable {
     }
 
     func inspectPendingMutations() throws -> [PendingMutationInspection] {
-        try inspectMutations(includeRejected: false)
+        try inspectMutations(includeTerminal: false)
     }
 
     func inspectRetainedMutations() throws -> [PendingMutationInspection] {
-        try inspectMutations(includeRejected: true)
+        try inspectMutations(includeTerminal: true)
     }
 
-    private func inspectMutations(includeRejected: Bool) throws -> [PendingMutationInspection] {
+    private func inspectMutations(includeTerminal: Bool) throws -> [PendingMutationInspection] {
         try database.readTransaction { db in
-            let rejectedState = includeRejected ? ", 'rejected'" : ""
+            let terminalStates = includeTerminal ? ", 'rejected', 'exceeds_push_limit'" : ""
             let rows = try Row.fetchAll(
                 db,
                 sql: """
@@ -280,7 +280,7 @@ final class ChangeTracker: @unchecked Sendable {
                     FROM _synchro_pending_changes
                     WHERE lifecycle_state IN (
                         'unsealed', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
-                        'superseded_before_send', 'cancelled_before_send'\(rejectedState)
+                        'superseded_before_send', 'cancelled_before_send'\(terminalStates)
                     )
                     ORDER BY local_order
                     """
@@ -483,6 +483,24 @@ final class ChangeTracker: @unchecked Sendable {
         }
     }
 
+    /// Moves an unsealed mutation that the server cannot accept to the local terminal state.
+    ///
+    /// The server rejects a mutation with more than the per-mutation limits.
+    /// The client does not send this mutation and does not keep a rejected outcome for it.
+    func markExceedsPushLimit(_ db: GRDB.Database, mutationID: String) throws {
+        try db.execute(
+            sql: """
+                UPDATE _synchro_pending_changes
+                SET lifecycle_state = 'exceeds_push_limit', updated_at = ?
+                WHERE mutation_id = ? AND lifecycle_state = 'unsealed'
+                """,
+            arguments: [SynchroDateCoding.now(), mutationID]
+        )
+        guard db.changesCount == 1 else {
+            throw SynchroError.invalidResponse(message: "oversize mutation identity is not mutable")
+        }
+    }
+
     func successors(_ db: GRDB.Database, predecessorID: String) throws -> [PendingChange] {
         let rows = try Row.fetchAll(
             db,
@@ -492,7 +510,7 @@ final class ChangeTracker: @unchecked Sendable {
                        authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
                        dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
                 FROM _synchro_pending_changes
-                WHERE dependency_mutation_id = ? AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+                WHERE dependency_mutation_id = ? AND lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
                 ORDER BY local_order
                 """,
             arguments: [predecessorID]
@@ -525,17 +543,17 @@ final class ChangeTracker: @unchecked Sendable {
                     SELECT mutation_id
                     FROM _synchro_pending_changes
                     WHERE dependency_mutation_id = ?
-                      AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+                      AND lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
                     UNION ALL
                     SELECT child.mutation_id
                     FROM _synchro_pending_changes child
                     JOIN descendants parent ON child.dependency_mutation_id = parent.mutation_id
-                    WHERE child.lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+                    WHERE child.lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
                 )
                 UPDATE _synchro_pending_changes
                 SET lifecycle_state = 'blocked_by_predecessor', updated_at = ?
                 WHERE mutation_id IN (SELECT mutation_id FROM descendants)
-                  AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+                  AND lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
                 """,
             arguments: [predecessorID, SynchroDateCoding.now()]
         )
@@ -555,7 +573,7 @@ final class ChangeTracker: @unchecked Sendable {
                 FROM _synchro_pending_changes
                 WHERE table_id = ? AND pk_field_id = ? AND pk_logical_type = ? AND record_id = ?
                   AND local_order > ?
-                  AND lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')
+                  AND lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
                 ORDER BY local_order
                 """,
             arguments: [
@@ -631,7 +649,7 @@ final class ChangeTracker: @unchecked Sendable {
             try normalizeUnsealedChains(db)
             return try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')"
+                sql: "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')"
             ) ?? 0
         }
     }
@@ -829,6 +847,7 @@ final class ChangeTracker: @unchecked Sendable {
         case "unsealed": return .pending
         case "sealed": return .sealed
         case "rejected": return .serverRejected
+        case "exceeds_push_limit": return .exceedsPushLimit
         case "superseded_before_send": return .supersededBeforeSend
         case "cancelled_before_send": return .cancelledBeforeSend
         case "legacy_blocked", "blocked_by_predecessor": return .blockedByPredecessor

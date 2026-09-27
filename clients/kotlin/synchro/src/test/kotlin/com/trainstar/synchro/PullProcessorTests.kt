@@ -1281,6 +1281,7 @@ class PullProcessorTests {
             "blocked_by_predecessor",
             "legacy_blocked",
             "rejected_terminal",
+            "exceeds_push_limit",
         )
 
         protectedStates.forEach { state ->

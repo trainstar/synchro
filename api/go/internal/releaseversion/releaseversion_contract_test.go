@@ -24,6 +24,7 @@ func TestNextVersionPassesSupportPolicyAndRequirementsSchema(t *testing.T) {
 		}
 		writeFixtureFile(t, root, path, string(data))
 	}
+	writeUpdateScript(t, root, "0.1.0", "0.4.0")
 	if err := Set(root, "0.4.0"); err != nil {
 		t.Fatal(err)
 	}

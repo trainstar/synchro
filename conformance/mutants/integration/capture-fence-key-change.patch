@@ -1,0 +1,51 @@
+diff --git a/extensions/synchro-pg/src/capture_fence.rs b/extensions/synchro-pg/src/capture_fence.rs
+--- a/extensions/synchro-pg/src/capture_fence.rs
++++ b/extensions/synchro-pg/src/capture_fence.rs
+@@ -197,13 +197,13 @@ fn insert_write(data: &pg_sys::TriggerData, relation_name: &str, key_attnum: i16
+ fn update_write(data: &pg_sys::TriggerData, key_attnum: i16) -> Write {
+     let old_key = registered_key_text(data, data.tg_trigtuple, key_attnum);
+     let new_key = registered_key_text(data, data.tg_newtuple, key_attnum);
+-    if old_key != new_key {
+-        ereport!(
+-            ERROR,
+-            PgSqlErrorCode::ERRCODE_CHECK_VIOLATION,
+-            "registered primary key cannot change"
+-        );
+-    }
++    // Mutant: the fence accepts a changed registered key.
++    let _ = (old_key, new_key);
++    // ereport!(
++    //     ERROR,
++    //     PgSqlErrorCode::ERRCODE_CHECK_VIOLATION,
++    //     "registered primary key cannot change"
++    // );
+     let old = read_tuple_header(data.tg_relation, data.tg_trigtuple);
+     let output = read_tuple_header(data.tg_relation, data.tg_newtuple);
+     let output_key = output_tuple_key(data.tg_relation, &output);
+@@ -223,16 +223,16 @@ fn delete_write(data: &pg_sys::TriggerData, relation_name: &str, key_attnum: i16
+         registered_key_text(data, data.tg_trigtuple, key_attnum),
+     );
+     let old = read_tuple_header(data.tg_relation, data.tg_trigtuple);
+-    let (next_block, next_offset) = item_pointer_get_both(old.header.t_ctid);
+-    if next_block == pg_sys::InvalidBlockNumber
+-        && u32::from(next_offset) == pg_sys::MovedPartitionsOffsetNumber
+-    {
+-        ereport!(
+-            ERROR,
+-            PgSqlErrorCode::ERRCODE_CHECK_VIOLATION,
+-            "registered primary key cannot change"
+-        );
+-    }
++    // Mutant: the fence accepts a partition row move.
++    // if next_block == pg_sys::InvalidBlockNumber
++    //     && u32::from(next_offset) == pg_sys::MovedPartitionsOffsetNumber
++    // {
++    //     ereport!(
++    //         ERROR,
++    //         PgSqlErrorCode::ERRCODE_CHECK_VIOLATION,
++    //         "registered primary key cannot change"
++    //     );
++    // }
+     let update_xid = heap_tuple_header_get_update_xid(&old.header);
+     // SAFETY: TransactionIdIsCurrentTransactionId reads only transaction state.
+     if !unsafe { pg_sys::TransactionIdIsCurrentTransactionId(update_xid) } {
