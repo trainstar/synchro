@@ -187,6 +187,9 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
+# AGP selects connected devices through ANDROID_SERIAL. Without one serial it
+# uses every online device, so a device gate requires exactly one serial.
+REQUIRE_ONE_ANDROID_SERIAL = case "$(KOTLIN_ANDROID_SERIAL)" in ''|*[[:space:],]*) echo "Set KOTLIN_ANDROID_SERIAL to exactly one booted Android device." >&2; exit 1 ;; esac
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
 PGRX_PG ?= pg18
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
@@ -198,7 +201,6 @@ INTEGRATION_MUTANT_ID ?=
 SOAK_SEED ?= 1
 SOAK_DURATION ?= 1s
 TESTRESULT_TEST_NAME ?=
-BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
@@ -245,9 +247,28 @@ RN_CONSUMER_SEED ?= clients/react-native/example/verification/seed.db
 RN_ANDROID_SEED_ASSET ?= clients/react-native/example/android/app/src/main/assets/seed.db
 CLIENT_INTEGRATION_SEED ?= $(CURDIR)/.ignore/client-integration/seed.db
 REFRESH_RN_SEED_OUTPUT ?= $(CURDIR)/clients/react-native/example/seed.db
-GO_TEST_ARGS ?= -v -count=1 -p 1
-GO_TEST_PKGS ?= ./...
-GRADLE_TEST_ARGS ?= --rerun-tasks
+# A required gate runs its declared selection. A result stream cannot show that
+# a caller selector omitted tests, so a required gate rejects a changed selector.
+# PARTIAL=1 permits the selector and labels the run as partial diagnostic output.
+PARTIAL ?=
+DECLARED_GO_TEST_ARGS := -v -count=1 -p 1
+DECLARED_GO_TEST_PKGS := ./...
+DECLARED_GRADLE_TEST_ARGS := --rerun-tasks
+DECLARED_BLACKBOX_TEST_COUNT := 1
+DECLARED_SWIFT_TEST_ARGS :=
+DECLARED_DETOX_ARGS :=
+GO_TEST_ARGS ?= $(DECLARED_GO_TEST_ARGS)
+GO_TEST_PKGS ?= $(DECLARED_GO_TEST_PKGS)
+GRADLE_TEST_ARGS ?= $(DECLARED_GRADLE_TEST_ARGS)
+BLACKBOX_TEST_COUNT ?= $(DECLARED_BLACKBOX_TEST_COUNT)
+SWIFT_TEST_ARGS ?= $(DECLARED_SWIFT_TEST_ARGS)
+DETOX_ARGS ?= $(DECLARED_DETOX_ARGS)
+changed_selectors = $(strip $(foreach name,$(1),$(if $(subst x$(DECLARED_$(name)),,x$($(name)))$(subst x$($(name)),,x$(DECLARED_$(name))),$(name))))
+declared_selection = @case "$(PARTIAL)" in \
+	'') test -z "$(call changed_selectors,$(1))" || { echo "$@ is a required gate. The caller changed $(call changed_selectors,$(1)) from its declared selection. Set PARTIAL=1 for a partial diagnostic run." >&2; exit 1; } ;; \
+	1) echo "PARTIAL: $@ runs a diagnostic selection. Its result is not required-gate evidence." >&2 ;; \
+	*) echo "PARTIAL must be empty or 1" >&2; exit 1 ;; \
+	esac
 CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
@@ -346,7 +367,7 @@ help:
 	@echo "  test-integration-mutant - Run one manifest mutant with INTEGRATION_MUTANT_ID"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
-	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
+	@echo "  test-adapter          - Run Go adapter integration tests (PARTIAL=1 permits GO_TEST_PKGS or GO_TEST_ARGS)"
 	@echo "  benchmark-adapter     - Run Go adapter tests and benchmarks (override GO_TEST_PKGS to focus)"
 	@echo "                         Set ADAPTER_TEST_URL to the one test PostgreSQL database URL"
 	@echo "  local-postgres-start  - Start an isolated PostgreSQL 18 through the Go provisioner"
@@ -360,7 +381,7 @@ help:
 	@echo "  test-swift            - Run Swift integration tests against the local adapter"
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
 	@echo "  test-kotlin-scenarios - Run the direct Kotlin correctness scenarios"
-	@echo "  test-kotlin-instrumentation - Run Android instrumentation on the selected device"
+	@echo "  test-kotlin-instrumentation - Run Android instrumentation on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-kotlin-jvm-integration - Run only the Kotlin JVM integration tests against the local adapter"
 	@echo "  test-swift-upgrade    - Upgrade Swift intent from the published predecessor to the candidate package"
@@ -405,7 +426,7 @@ help:
 	@echo "  test-consumer-swift   - Run the packaged Swift consumer"
 	@echo "  test-consumer-swift-ios - Run the packaged Swift consumer on an iOS simulator"
 	@echo "  test-consumer-kotlin  - Build the packaged Kotlin app and instrumentation APK"
-	@echo "  test-consumer-kotlin-device - Run the packaged Kotlin consumer on a connected Android device"
+	@echo "  test-consumer-kotlin-device - Run the packaged Kotlin consumer on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-consumer-rn-ios  - Build an isolated RN iOS consumer from packaged artifacts"
 	@echo "  test-consumer-rn-android - Build an isolated RN Android consumer from packaged artifacts"
 	@echo "  test-client-platforms - Run one packaged client support cell (SUPPORT_CELL_ID required)"
@@ -486,7 +507,7 @@ test-integration-mutant-manifest: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./mutants -count=1
 
 test-conformance-imports:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./internal/importguard -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1
 
 test-conformance-contract:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/jsonstrict ./internal/schemavalidator ./internal/contract -count=1
@@ -792,6 +813,7 @@ conformance-update-baseline-extension-artifact:
 		trap - EXIT HUP INT TERM
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
+	$(call declared_selection,GO_TEST_ARGS BLACKBOX_TEST_COUNT)
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
@@ -993,6 +1015,7 @@ build-kotlin-conformance-app:
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :conformance-app:assembleDebug :conformance-app:assembleDebugAndroidTest
 
 test-swift-unit:
+	$(call declared_selection,SWIFT_TEST_ARGS)
 	rm -rf clients/swift/.build/test-results/unit.xcresult
 	mkdir -p clients/swift/.build/test-results
 	@status=0; \
@@ -1001,6 +1024,7 @@ test-swift-unit:
 		exit "$$status"
 
 test-client-schema-identity: conformance-mod-download
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@set -e; \
 		status=0; \
@@ -1041,6 +1065,7 @@ test-swift-warm-connect: conformance-mod-download build-swift-native-runner
 			-run '^TestRealSwiftWarmConnect$$' -args --provision --install
 
 test-swift-scenarios: conformance-mod-download build-swift-native-runner build-seed
+	$(call declared_selection,GO_TEST_ARGS)
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		runner_dir="$$(cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --show-bin-path)"; \
@@ -1058,6 +1083,7 @@ test-swift: test-swift-warm-connect test-swift-scenarios
 
 .PHONY: test-swift-integration
 test-swift-integration:
+	$(call declared_selection,SWIFT_TEST_ARGS)
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
@@ -1083,6 +1109,7 @@ test-swift-integration:
 		exit "$$status"
 
 test-kotlin-unit:
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results
@@ -1093,7 +1120,7 @@ test-kotlin-unit:
 
 test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
-	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		application_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/debug/conformance-app-debug.apk"; \
@@ -1112,8 +1139,9 @@ test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 			-run '^TestRealKotlinWarmConnect$$' -args --provision --install
 
 test-kotlin-scenarios: conformance-mod-download build-kotlin-conformance-app build-seed
+	$(call declared_selection,GO_TEST_ARGS)
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
-	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		application_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/debug/conformance-app-debug.apk"; \
@@ -1132,10 +1160,11 @@ test-kotlin-scenarios: conformance-mod-download build-kotlin-conformance-app bui
 			-run '^TestRealKotlinScenarios$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-kotlin-instrumentation: build-kotlin-conformance-app
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
-	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	rm -rf clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.injected.device.serial="$(KOTLIN_ANDROID_SERIAL)" -Pandroid.testInstrumentationRunnerArguments.notClass=com.trainstar.synchro.conformance.NativeSessionInstrumentationTest :conformance-app:connectedDebugAndroidTest
+	cd clients/kotlin && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.testInstrumentationRunnerArguments.notClass=com.trainstar.synchro.conformance.NativeSessionInstrumentationTest :conformance-app:connectedDebugAndroidTest
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
 
 test-kotlin: test-kotlin-warm-connect test-kotlin-scenarios
@@ -1143,6 +1172,7 @@ test-kotlin: test-kotlin-warm-connect test-kotlin-scenarios
 
 # TEST_ENV carries the database URL and JWT secret, so Make does not echo the Gradle command.
 test-kotlin-jvm-integration:
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	# Repeat preparation to prove that the integration fixture is idempotent.
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
@@ -1711,6 +1741,7 @@ test-rn-e2e-ios-run: test-rn-e2e-ios-smoke
 
 .PHONY: test-rn-e2e-ios-smoke
 test-rn-e2e-ios-smoke:
+	$(call declared_selection,DETOX_ARGS)
 	rm -f clients/react-native/example/artifacts/ios-test-results.json
 	mkdir -p clients/react-native/example/artifacts
 	cd clients/react-native/example && \
@@ -1764,6 +1795,7 @@ android-emulator-prepare:
 
 .PHONY: test-rn-e2e-android-smoke
 test-rn-e2e-android-smoke: android-emulator-prepare
+	$(call declared_selection,DETOX_ARGS)
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -f clients/react-native/example/artifacts/android-test-results.json
@@ -1790,6 +1822,7 @@ test-rn-e2e-android-run: test-rn-e2e-android-smoke
 
 .PHONY: test-rn-scenarios-ios test-rn-scenarios-android
 test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
+	$(call declared_selection,GO_TEST_ARGS)
 	@set -eu; \
 		case "$@" in \
 			test-rn-scenarios-ios) platform=IOS; configuration=ios.sim.debug ;; \
@@ -1976,12 +2009,16 @@ test-consumer-kotlin: client-consumer-kotlin-artifact
 test-consumer-kotlin-device: client-consumer-kotlin-artifact
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
+	rm -rf verification/consumers/kotlin/app/build/outputs/androidTest-results/connected
 	SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$(abspath $(CLIENT_ARTIFACT_DIR))/maven" \
+		ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
 		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
 		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
 		clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
 			-PsynchroVersion="$(CURRENT_VERSION)" \
 			:app:connectedDebugAndroidTest
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../verification/consumers/kotlin/app/build/outputs/androidTest-results/connected
 
 test-consumer-kotlin-device-smoke: test-consumer-kotlin
 	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
@@ -2016,6 +2053,7 @@ test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-
 
 test-client-platforms:
 	@test -n "$(SUPPORT_CELL_ID)" || (echo "SUPPORT_CELL_ID is required" >&2; exit 1)
+	@case "$(SUPPORT_CELL_ID)" in SUP-PG-*) echo "$(SUPPORT_CELL_ID) is a server cell. Run make release-run-support-cell SUPPORT_CELL_ID=$(SUPPORT_CELL_ID)." >&2; exit 1 ;; esac
 	@mkdir -p "$(PACKAGED_SMOKE_CELL_DIR)" "$(PACKAGED_SMOKE_TMP_ROOT)"
 	@python3 verification/packaged_smoke.py begin-cell \
 		--repo-root "$(CURDIR)" \
@@ -2028,11 +2066,6 @@ test-client-platforms:
 		export PACKAGED_SMOKE_CELL_ID="$(SUPPORT_CELL_ID)"; \
 		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
 		case "$(SUPPORT_CELL_ID)" in \
-		SUP-PG-LINUX-X64-001) \
-			test "$$(uname -s)" = "Linux" && test "$$(uname -m)" = "x86_64" || { echo "linux-x64 is required" >&2; exit 1; }; \
-			test -f "$${SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT:?SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT is required}/artifact-manifest.json"; \
-			export PACKAGED_SMOKE_EXTRA_ARTIFACT="$$SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT/artifact-manifest.json"; \
-			$(MAKE) test-consumer-kotlin-device-smoke ;; \
 		SUP-IOS-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
@@ -2248,6 +2281,7 @@ local-postgres-stop:
 		fi
 
 test-adapter:
+	$(call declared_selection,GO_TEST_ARGS GO_TEST_PKGS)
 	@echo "Running adapter integration tests..."
 	@set -e; \
 	status=0; \

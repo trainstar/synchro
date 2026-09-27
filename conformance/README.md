@@ -74,7 +74,9 @@ Smoke result observers use the existing Jest test budget.
 Native waits, readiness checks, and controller handoffs keep their own bounds.
 
 Use `make test-swift-integration` to run XCTest without repeating the scenario corpus.
-`SWIFT_TEST_ARGS` selects diagnostic XCTest cases in `test-swift-unit` and `test-swift-integration`. Required CI leaves it empty.
+Each required Make gate runs its declared selection and rejects a changed selector.
+`PARTIAL=1` permits `GO_TEST_ARGS`, `GO_TEST_PKGS`, `SWIFT_TEST_ARGS`, `GRADLE_TEST_ARGS`, `DETOX_ARGS`, or `BLACKBOX_TEST_COUNT`.
+A `PARTIAL=1` run is diagnostic output, not required-gate evidence.
 `test-swift-unit`, `test-swift-integration`, and `test-kotlin-unit` parse structured results even when their runners fail.
 
 The Swift retained-schema retry control measures actual SQLite reads across mixed-table mutations.
@@ -161,7 +163,9 @@ Fixture presence, decoder tests, and implementation-derived expected values are 
 
 The specification, authored requirements, support matrix, and scenarios define expected behavior. They do not report an outcome.
 
-Use structured results for required gates. Skipped, filtered, and zero-test results fail the gate.
+Required gates run their declared Make selection and use structured results.
+The result parser rejects failed, skipped, and zero-test results.
+It cannot detect a nonempty subset, so each required Make gate rejects a changed selector.
 
 Soak wire records preserve the original request and response from each exchange.
 Cursor issuance and later acknowledgment use separate exchange identities.

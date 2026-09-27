@@ -19,8 +19,9 @@ This document does not define another release procedure or add release gates.
 - Record a replay seed for randomized execution.
 - Add a minimized scenario for each production defect.
 - Use meaningful negative controls where silent failure is a material risk.
-- Reject skipped, filtered, zero-test, and unexplained retry-only results.
+- Reject failed, skipped, zero-test, and unexplained retry-only results.
 - Use structured result parsing for required gates.
+- Run each required gate with its declared Make selection. A `PARTIAL=1` diagnostic run is not required evidence.
 
 ## Package Smoke
 

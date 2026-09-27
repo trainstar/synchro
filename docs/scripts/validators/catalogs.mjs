@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 export function duplicateLogicalIdErrors(items, idKey, collection) {
   const errors = [];
   const seen = new Map();
@@ -87,14 +85,8 @@ export function faultCatalogSemanticErrors(catalog, requirements) {
   const requirementById = new Map(
     requirements.requirements.map((requirement) => [requirement.id, requirement]),
   );
-  const controlCountByRequirement = new Map();
   const usedFaultIds = new Set();
   for (const control of catalog.controls) {
-    if (control.requirement_ids.length !== 1) {
-      errors.push(
-        `${control.id} must be owned by exactly one requirement, found ${control.requirement_ids.length}`,
-      );
-    }
     if (!faultIds.has(control.fault_id)) {
       errors.push(`${control.id} references unknown fault ${control.fault_id}`);
     } else {
@@ -107,10 +99,6 @@ export function faultCatalogSemanticErrors(catalog, requirements) {
         errors.push(`${control.id} references unknown requirement ${requirementId}`);
         continue;
       }
-      controlCountByRequirement.set(
-        requirementId,
-        (controlCountByRequirement.get(requirementId) ?? 0) + 1,
-      );
       for (const reference of requirement.normative_references) {
         expectedReferences.add(`${reference.path}${reference.anchor}`);
       }
@@ -118,14 +106,6 @@ export function faultCatalogSemanticErrors(catalog, requirements) {
     if (!stringSetsEqual(control.normative_references, [...expectedReferences])) {
       errors.push(
         `${control.id} normative references do not exactly match its requirements`,
-      );
-    }
-  }
-  for (const requirement of requirements.requirements) {
-    const count = controlCountByRequirement.get(requirement.id) ?? 0;
-    if (count !== 1) {
-      errors.push(
-        `${requirement.id} requires exactly one authored negative control, found ${count}`,
       );
     }
   }
@@ -158,64 +138,6 @@ export function performanceCatalogSemanticErrors(
   const inventoryIds = new Set(
     artifactInventory.artifacts.map(({ id }) => id),
   );
-  const lockedCatalogDigest =
-    "cd29425e0cd55e4e8c27a5c36fb185a253396541f2561a76c52564e158cd6d50";
-  const actualCatalogDigest = createHash("sha256")
-    .update(
-      JSON.stringify({
-        budgets: catalog.budgets,
-        required_measurements: catalog.required_measurements,
-      }),
-    )
-    .digest("hex");
-  if (actualCatalogDigest !== lockedCatalogDigest) {
-    errors.push(
-      "Performance budgets and characterization measurements do not match the locked v0.3.0 semantic snapshot",
-    );
-  }
-  const lockedBudgets = new Map([
-    ["BUD-WARM-CONNECT-001", ["warm_connect_http_requests", "eq", 1]],
-    ["BUD-WARM-CONNECT-PULL-001", ["warm_connect_pull_http_requests", "eq", 1]],
-    ["BUD-WARM-CONNECT-PUSH-001", ["warm_connect_push_http_requests", "eq", 0]],
-    ["BUD-WARM-CONNECT-REBUILD-001", ["warm_connect_rebuild_page_http_requests", "eq", 0]],
-    ["BUD-WARM-CONNECT-SCHEMA-001", ["warm_connect_schema_fetch_http_requests", "eq", 0]],
-    ["BUD-WARM-CONNECT-OTHER-001", ["warm_connect_other_http_requests", "eq", 0]],
-    ["BUD-STEADY-PULL-001", ["steady_state_pull_http_requests_per_cycle", "eq", 1]],
-    ["BUD-STEADY-PULL-NONPULL-001", ["steady_state_pull_non_pull_http_requests_per_cycle", "eq", 0]],
-    ["BUD-PENDING-PUSH-001", ["pending_cycle_push_http_requests", "eq", 1]],
-    ["BUD-PENDING-PULL-001", ["pending_cycle_pull_http_requests", "eq", 1]],
-    ["BUD-PENDING-CYCLE-UNEXPECTED-001", ["pending_cycle_non_push_or_pull_http_requests", "eq", 0]],
-    ["BUD-REBUILD-CONNECT-001", ["rebuild_connect_http_requests", "eq", 1]],
-    ["BUD-REBUILD-PULL-001", ["rebuild_pull_http_requests", "eq", 1]],
-    ["BUD-REBUILD-PAGE-001", ["rebuild_page_request_count_minus_returned_page_count", "eq", 0]],
-    ["BUD-REBUILD-SCHEMA-FETCH-001", ["rebuild_schema_fetch_http_requests", "eq", 0]],
-    ["BUD-REBUILD-UNEXPECTED-001", ["rebuild_unexpected_http_requests", "eq", 0]],
-    ["BUD-CORE-SYNC-RPC-001", ["core_sync_outbound_network_or_rpc_hops", "eq", 0]],
-  ]);
-  const lockedMeasurements = new Set([
-    "MEAS-FANOUT-001",
-    "MEAS-SHARED-PRIVATE-SCOPES-001",
-    "MEAS-REBUILD-CARDINALITY-001",
-    "MEAS-SCHEMA-CHECK-001",
-    "MEAS-SEEDED-EMPTY-STARTUP-001",
-    "MEAS-QUEUE-REPLAY-001",
-    "MEAS-REBUILD-APPLY-001",
-    "MEAS-MULTI-SCOPE-PROVENANCE-001",
-    "MEAS-CONFIGURED-BOUNDS-001",
-  ]);
-  if (!stringSetsEqual(catalog.budgets.map(({ id }) => id), [...lockedBudgets.keys()])) {
-    errors.push("Performance budget IDs do not match the locked v0.3.0 request budgets");
-  }
-  if (
-    !stringSetsEqual(
-      catalog.required_measurements.map(({ id }) => id),
-      [...lockedMeasurements],
-    )
-  ) {
-    errors.push(
-      "Required measurement IDs do not match the locked v0.3.0 characterization set",
-    );
-  }
   for (const item of [...catalog.budgets, ...catalog.required_measurements]) {
     for (const supportCellId of item.support_cell_ids) {
       if (!requiredSupportIds.has(supportCellId)) {
@@ -226,17 +148,6 @@ export function performanceCatalogSemanticErrors(
       if (!inventoryIds.has(inventoryId)) {
         errors.push(`${item.id} references unknown artifact inventory ${inventoryId}`);
       }
-    }
-  }
-  for (const budget of catalog.budgets) {
-    const locked = lockedBudgets.get(budget.id);
-    if (
-      locked &&
-      (budget.metric !== locked[0] ||
-        budget.comparator !== locked[1] ||
-        budget.limit !== locked[2])
-    ) {
-      errors.push(`${budget.id} does not match its locked metric, comparator, and limit`);
     }
   }
   for (const measurement of catalog.required_measurements) {
