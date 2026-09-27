@@ -2288,6 +2288,167 @@ func (h *Harness) CrashRestartPostgres(ctx context.Context) error {
 	return h.restartOwnedPostgres(ctx, syscall.SIGQUIT)
 }
 
+// CrashWALWorkerBackend ends the WAL worker backend of the owned postmaster
+// with SIGKILL for a process-fault test. PostgreSQL then runs crash recovery.
+// It requires an owned postmaster on Linux with pidfd support. It returns the
+// process ID of the ended worker.
+func (h *Harness) CrashWALWorkerBackend(ctx context.Context) (int, error) {
+	return h.crashWALWorkerBackend(ctx, backendCrashSystem{
+		localProcesses: openLocalProcessView,
+		observeWorker:  h.observeOwnedWALWorker,
+		ownerAlive:     ownedProcessAlive,
+	})
+}
+
+// backendCrashSystem is the database and kernel boundary of an owned backend
+// crash. Tests replace it to observe each guard without a real signal.
+type backendCrashSystem struct {
+	localProcesses func() (localProcessView, error)
+	observeWorker  func(context.Context) (walWorkerObservation, error)
+	ownerAlive     func(*ownedProcess) error
+}
+
+// localProcessView reads local kernel process state. A handle from open
+// refers to one process instance. A later process that reuses the numeric
+// process ID cannot receive a signal through that handle.
+type localProcessView struct {
+	pidNamespace string
+	open         func(pid int) (stableProcessHandle, error)
+	identity     func(pid int) (localProcessIdentity, error)
+}
+
+type stableProcessHandle interface {
+	kill() error
+	close() error
+}
+
+type localProcessIdentity struct {
+	parent       int
+	pidNamespace string
+}
+
+type walWorkerObservation struct {
+	database      string
+	dataDirectory string
+	workers       int
+	pid           int
+}
+
+func (h *Harness) crashWALWorkerBackend(ctx context.Context, system backendCrashSystem) (pid int, returnedErr error) {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return 0, errors.New("owned WAL worker backend crash is unavailable")
+	}
+	if h.attached {
+		return 0, errors.New("WAL worker backend crash requires an owned postmaster")
+	}
+	postmaster := h.postgres
+	if postmaster == nil || postmaster.command == nil || postmaster.command.Process == nil || postmaster.Exited() {
+		return 0, errors.New("owned PostgreSQL postmaster is unavailable")
+	}
+	processes, err := system.localProcesses()
+	if err != nil {
+		return 0, err
+	}
+	pid, err = h.ownedWALWorkerPID(ctx, system.observeWorker)
+	if err != nil {
+		return 0, err
+	}
+	handle, err := processes.open(pid)
+	if err != nil {
+		return 0, errors.New("open WAL worker backend process handle failed")
+	}
+	defer func() {
+		if err := handle.close(); err != nil {
+			returnedErr = errors.Join(returnedErr, errors.New("close WAL worker backend process handle failed"))
+		}
+	}()
+	if err := h.verifyOwnedWALWorkerBackend(ctx, system, processes, postmaster, pid); err != nil {
+		return 0, err
+	}
+	// The kernel delivers this signal only while the handle process is alive.
+	// That process then held pid during each verification read.
+	if err := handle.kill(); err != nil {
+		return 0, errors.New("send WAL worker backend SIGKILL failed")
+	}
+	return pid, nil
+}
+
+func (h *Harness) verifyOwnedWALWorkerBackend(
+	ctx context.Context,
+	system backendCrashSystem,
+	processes localProcessView,
+	postmaster *ownedProcess,
+	pid int,
+) error {
+	identity, err := processes.identity(pid)
+	if err != nil {
+		return errors.New("read WAL worker backend process identity failed")
+	}
+	if identity.parent != postmaster.command.Process.Pid {
+		return errors.New("WAL worker backend is not a child of the owned postmaster")
+	}
+	if identity.pidNamespace == "" || identity.pidNamespace != processes.pidNamespace {
+		return errors.New("WAL worker backend is outside the harness process namespace")
+	}
+	current, err := h.ownedWALWorkerPID(ctx, system.observeWorker)
+	if err != nil {
+		return err
+	}
+	if current != pid {
+		return errors.New("WAL worker backend changed during target verification")
+	}
+	// If the postmaster is alive now, it held its process ID during the identity read.
+	if err := system.ownerAlive(postmaster); err != nil {
+		return errors.New("owned PostgreSQL postmaster exited during target verification")
+	}
+	return nil
+}
+
+func (h *Harness) ownedWALWorkerPID(ctx context.Context, observe func(context.Context) (walWorkerObservation, error)) (int, error) {
+	observation, err := observe(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if h.dataDir == "" || observation.database != h.names.Database ||
+		filepath.Clean(observation.dataDirectory) != filepath.Clean(h.dataDir) {
+		return 0, errors.New("PostgreSQL does not serve the owned database and data directory")
+	}
+	if observation.workers != 1 || observation.pid <= 0 {
+		return 0, errors.New("unique WAL worker backend is unavailable")
+	}
+	return observation.pid, nil
+}
+
+func (h *Harness) observeOwnedWALWorker(ctx context.Context) (walWorkerObservation, error) {
+	observationContext, cancel := context.WithTimeout(ctx, environmentCommandTimeout)
+	defer cancel()
+	database, err := h.openDatabase(observationContext, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return walWorkerObservation{}, errors.New("open WAL worker backend observation connection failed")
+	}
+	defer database.Close()
+	var observation walWorkerObservation
+	if err := database.QueryRowContext(observationContext, `
+		SELECT current_database(), current_setting('data_directory'), count(*), COALESCE(min(pid), 0)
+		FROM pg_catalog.pg_stat_activity
+		WHERE datname = current_database()
+		  AND backend_type = 'synchro WAL consumer'`).Scan(
+		&observation.database,
+		&observation.dataDirectory,
+		&observation.workers,
+		&observation.pid,
+	); err != nil {
+		return walWorkerObservation{}, errors.New("read WAL worker backend observation failed")
+	}
+	return observation, nil
+}
+
+// ownedProcessAlive delivers no signal. On Linux, os.Process orders it with
+// Wait, so success proves that the child is not reaped.
+func ownedProcessAlive(process *ownedProcess) error {
+	return process.command.Process.Signal(syscall.Signal(0))
+}
+
 // ReinstallExtension replaces the extension atomically without restarting the postmaster.
 func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReinstallResult, returnedErr error) {
 	if h == nil || ctx == nil || !h.sourceReady {

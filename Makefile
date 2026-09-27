@@ -466,7 +466,7 @@ test-integration-mutant-manifest: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./mutants -count=1
 
 test-conformance-imports:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./internal/importguard -count=1
 
 test-conformance-contract:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/jsonstrict ./internal/schemavalidator ./internal/contract -count=1
@@ -508,6 +508,12 @@ test-local-postgres:
 
 test-blackbox-harness:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox -count=1
+
+# The Linux vet builds the pidfd implementation on every host. It does not execute it.
+.PHONY: test-owned-crash-safety
+test-owned-crash-safety: conformance-mod-download
+	cd conformance && GOFLAGS= GOWORK=off GOOS=linux GOARCH=amd64 go vet ./blackbox
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./blackbox -run '^TestOwnedBackendCrash' -count=1
 
 .PHONY: test-soak-controls
 test-soak-controls:

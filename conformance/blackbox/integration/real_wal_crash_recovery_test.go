@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"syscall"
 	"testing"
 	"time"
 
@@ -100,14 +99,11 @@ func insertRealWALCrashRow(t *testing.T, ctx context.Context, harness *blackbox.
 
 func crashRealWALWorkerBackend(t *testing.T, ctx context.Context, harness *blackbox.Harness, admin *sql.DB) {
 	t.Helper()
-	var workerCount, priorPID int
-	if err := admin.QueryRowContext(ctx, realWALWorkerActivityQuery).Scan(&workerCount, &priorPID); err != nil || workerCount != 1 || priorPID <= 0 {
-		t.Fatalf("unique WAL worker is unavailable before the backend crash: count=%d pid=%d err=%v", workerCount, priorPID, err)
+	priorPID, err := harness.CrashWALWorkerBackend(ctx)
+	if err != nil {
+		t.Fatalf("crash owned WAL worker backend: %v; %s", err, harness.FailureDiagnostics())
 	}
-	if err := syscall.Kill(priorPID, syscall.SIGKILL); err != nil {
-		t.Fatalf("kill WAL worker backend %d: %v", priorPID, err)
-	}
-	var workerPID int
+	var workerCount, workerPID int
 	var lastErr error
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
