@@ -80,6 +80,10 @@ func provisionRealDatasetHarness(t *testing.T, ctx context.Context) *blackbox.Ha
 			t.Errorf("close real dataset harness: %v", err)
 		}
 	})
+	// Only the dataset scopes remain assigned to dataset users.
+	if err := harness.Operator().UnregisterDefaultSharedScope(ctx); err != nil {
+		t.Fatalf("unregister the diagnostic shared scope: %v", err)
+	}
 	return harness
 }
 
