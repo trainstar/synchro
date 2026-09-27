@@ -141,8 +141,13 @@ fn canonical_normalized_batch(
         mutations.push(normalized);
     }
 
+    let tag = if request.atomic == Some(true) {
+        "atomic-batch-v1"
+    } else {
+        "batch-v1"
+    };
     let batch = Value::Array(vec![
-        Value::String("batch-v1".into()),
+        Value::String(tag.into()),
         Value::String(authenticated_user_id.into()),
         Value::String(request.client_id.clone()),
         Value::String(request.client_generation.to_string()),
@@ -240,7 +245,7 @@ fn validate_client_id(value: &str) -> Result<(), FingerprintError> {
     Ok(())
 }
 
-fn canonicalize(value: &Value) -> Result<Vec<u8>, FingerprintError> {
+pub(crate) fn canonicalize(value: &Value) -> Result<Vec<u8>, FingerprintError> {
     let mut values_and_names = 0;
     validate_i_json(value, 0, &mut values_and_names)?;
     serde_json_canonicalizer::to_vec(value)
@@ -576,8 +581,13 @@ mod tests {
                 "request_schema",
                 "mutations",
             ],
-            &[],
+            &["atomic"],
         )?;
+        let atomic = match batch_object.get("atomic") {
+            Some(Value::Bool(value)) => Some(*value),
+            Some(_) => return Err("atomic is not a boolean".into()),
+            None => None,
+        };
         let mutations = batch_object
             .get("mutations")
             .and_then(Value::as_array)
@@ -596,6 +606,7 @@ mod tests {
                     .ok_or_else(|| "request_schema is missing".to_owned())?,
             )?,
             mutations,
+            atomic,
         })
     }
 
@@ -860,6 +871,7 @@ mod tests {
                 hash: HASH.into(),
             },
             mutations,
+            atomic: None,
         }
     }
 
