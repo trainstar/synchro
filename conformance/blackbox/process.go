@@ -107,6 +107,18 @@ type HarnessConfig struct {
 	// UpdateExtension then updates the extension to the environment bundle.
 	UpdateBaselineExtensionArtifact string
 	UpdateBaselineExtensionVersion  string
+	// SourceSetup adds one more independent source schema and registration.
+	SourceSetup *SourceSetup
+}
+
+// SourceSetup is an independent source schema that provisioning applies after
+// the diagnostic registration. Tables receive the same run-role grants as the
+// diagnostic source tables.
+type SourceSetup struct {
+	Name            string
+	SchemaSQL       string
+	RegistrationSQL string
+	Tables          []string
 }
 
 // HarnessNames are the nonsecret isolated PostgreSQL object names.
@@ -1858,12 +1870,21 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 	if err != nil {
 		return false, err
 	}
+	setup := h.config.SourceSetup
 	if existing {
+		if setup != nil {
+			return false, errors.New("additional source setup requires a new source schema")
+		}
 		h.sourceReady = true
 		return true, nil
 	}
 	if err := h.executeSourceScript(ctx, "schema.sql", diagnosticSchemaSQL); err != nil {
 		return false, err
+	}
+	if setup != nil {
+		if err := h.executeSourceScript(ctx, setup.Name+" schema", setup.SchemaSQL); err != nil {
+			return false, err
+		}
 	}
 	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
 		return false, err
@@ -1871,8 +1892,22 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 	if err := h.executeSourceScript(ctx, "register-diagnostic.sql", diagnosticRegistrationSQL); err != nil {
 		return false, err
 	}
+	if setup != nil {
+		if err := h.executeSourceScript(ctx, setup.Name+" registration", setup.RegistrationSQL); err != nil {
+			return false, err
+		}
+	}
 	h.sourceReady = true
 	return false, nil
+}
+
+// sourceTables lists the diagnostic tables and any additional setup tables.
+func (h *Harness) sourceTables() []string {
+	tables := append([]string(nil), diagnosticSourceTables...)
+	if h.config.SourceSetup != nil {
+		tables = append(tables, h.config.SourceSetup.Tables...)
+	}
+	return tables
 }
 
 func (h *Harness) diagnosticSourceSchemaExists(ctx context.Context) (bool, error) {
@@ -1906,7 +1941,7 @@ func (h *Harness) grantWorkerReplicationSourceAccess(ctx context.Context) error 
 	if _, err := database.ExecContext(ctx, "GRANT USAGE ON SCHEMA public TO "+quoteIdentifier(h.worker.Username)); err != nil {
 		return errors.New("grant worker replication schema access failed")
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		if _, err := database.ExecContext(
 			ctx,
 			"GRANT SELECT ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.worker.Username),
@@ -1974,7 +2009,7 @@ func (h *Harness) grantRunRoles(ctx context.Context) error {
 	if _, err := database.ExecContext(ctx, "GRANT USAGE ON SCHEMA public TO "+quoteIdentifier(h.sourceRole)); err != nil {
 		return errors.New("grant source schema access failed")
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		if _, err := database.ExecContext(ctx, "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.sourceRole)); err != nil {
 			return errors.New("grant source-table access failed")
 		}
@@ -2058,7 +2093,7 @@ func (h *Harness) verifyRunRoleSeparation(ctx context.Context, database *sql.DB)
 	).Scan(&adapterDebug); err != nil || adapterDebug {
 		return errors.New("isolated adapter can execute operator debug")
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		var sourceWrite, observerRead, observerWrite, adapterAccess, workerRead, workerWrite bool
 		if err := database.QueryRowContext(ctx, "SELECT has_table_privilege($1, $2, 'INSERT,UPDATE,DELETE')", h.sourceRole, "public."+table).Scan(&sourceWrite); err != nil || !sourceWrite {
 			return errors.New("source role lacks source-table write access")
@@ -2079,7 +2114,7 @@ func (h *Harness) verifyRunRoleSeparation(ctx context.Context, database *sql.DB)
 			return errors.New("worker replication login can write source tables")
 		}
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		var operatorAccess bool
 		if err := database.QueryRowContext(ctx, "SELECT has_table_privilege($1, $2, 'SELECT,INSERT,UPDATE,DELETE')", h.env.Operator.Username, "public."+table).Scan(&operatorAccess); err != nil || operatorAccess {
 			return errors.New("operator role can access source tables directly")
@@ -5825,7 +5860,7 @@ func (executor *OperatorExecutor) ObserveMembershipBuckets(ctx context.Context, 
 		return nil, errors.New("operator executor is unavailable")
 	}
 	validTable := false
-	for _, candidate := range diagnosticSourceTables {
+	for _, candidate := range executor.harness.sourceTables() {
 		if tableName == candidate {
 			validTable = true
 			break
