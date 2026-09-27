@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import copy
 import base64
+import fcntl
 import hashlib
 import hmac
 import json
 import os
+import shutil
+import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -548,6 +552,136 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "process replacement"):
                 packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]))
 
+
+
+FAKE_SWIFT = """#!/bin/sh
+case "$1" in
+  package) printf '{}' ;;
+  build)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --scratch-path ]; then scratch=$2; fi
+      shift
+    done
+    mkdir -p "$scratch/debug"
+    cp "$FAKE_CONSUMER" "$scratch/debug/SynchroConsumer"
+    chmod +x "$scratch/debug/SynchroConsumer"
+    ;;
+  *) exit 64 ;;
+esac
+"""
+
+# The fake consumer holds an exclusive lock for its whole life. A free lock
+# after the script returns proves that no consumer survived, without a
+# process ID that the operating system could reuse.
+FAKE_CONSUMER = """#!/usr/bin/env python3
+import fcntl, json, os, time
+lock = open(os.environ["FAKE_CONSUMER_LOCK"] + "." + os.environ["SYNCHRO_PACKAGED_SMOKE_PHASE"], "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+open(lock.name + ".started", "w").close()
+phase = os.environ["SYNCHRO_PACKAGED_SMOKE_PHASE"]
+if os.environ["FAKE_CONSUMER_HANG"] != phase:
+    with open(os.environ["SYNCHRO_PACKAGED_SMOKE_PHASE_RESULT"], "w") as result:
+        json.dump({"phase": phase, "pid": os.getpid()}, result)
+    if phase == "resume":
+        raise SystemExit(0)
+while True:
+    time.sleep(60)
+"""
+
+FAKE_SMOKE_TOOL = """import json, sys
+arguments = sys.argv[2:]
+output = arguments[arguments.index("--output") + 1]
+if sys.argv[1] == "complete-cell":
+    initial = json.load(open(arguments[arguments.index("--initial") + 1]))
+    if int(arguments[arguments.index("--killed-pid") + 1]) != initial["pid"]:
+        raise SystemExit("killed pid differs from the initial consumer")
+with open(output, "w") as target:
+    json.dump({"command": sys.argv[1]}, target)
+"""
+
+
+class SwiftConsumerLifecycleTests(unittest.TestCase):
+    phase_seconds = 2
+    script_bound_seconds = 30
+
+    def run_consumer(self, hang: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+        directory = Path(tempfile.mkdtemp(prefix="swift-consumer-lifecycle."))
+        self.addCleanup(shutil.rmtree, directory, True)
+        root = directory / "repo"
+        (root / "verification").mkdir(parents=True)
+        (root / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+        (root / "verification" / "packaged_smoke.py").write_text(FAKE_SMOKE_TOOL, encoding="utf-8")
+        artifacts = directory / "artifacts"
+        (artifacts / "apple" / "Synchro").mkdir(parents=True)
+        (artifacts / "apple" / "Synchro" / "Package.swift").write_text("", encoding="utf-8")
+        (artifacts / "apple" / "synchro-spm-0.0.0.tar.gz").write_bytes(b"")
+        bin_directory = directory / "bin"
+        bin_directory.mkdir()
+        (bin_directory / "swift").write_text(FAKE_SWIFT, encoding="utf-8")
+        (bin_directory / "swift").chmod(0o755)
+        consumer = directory / "consumer.py"
+        consumer.write_text(FAKE_CONSUMER, encoding="utf-8")
+        environment = {
+            **os.environ,
+            "PATH": f"{bin_directory}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_CONSUMER": str(consumer),
+            "FAKE_CONSUMER_LOCK": str(directory / "consumer.lock"),
+            "FAKE_CONSUMER_HANG": hang,
+            "PACKAGED_SMOKE_TMP_ROOT": str(directory / "tmp"),
+            "PACKAGED_SMOKE_PHASE_SECONDS": str(self.phase_seconds),
+            "PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES": "unused",
+        }
+        command = [
+            "sh",
+            str(REPO_ROOT / "verification" / "consumers" / "swift" / "test-consumer.sh"),
+            str(root),
+            str(artifacts),
+            "cell",
+            str(directory / "cell.json"),
+        ]
+        # The script leads its own process group, and that group stays owned
+        # until communicate reaps the script, so the timeout path can stop it.
+        process = subprocess.Popen(
+            command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=self.script_bound_seconds)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            self.fail("Swift consumer script did not return within its bound")
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), directory
+
+    def assert_no_consumer_survives(self, directory: Path, phases: tuple[str, ...]) -> None:
+        for phase in phases:
+            lock_path = directory / f"consumer.lock.{phase}"
+            self.assertTrue(Path(f"{lock_path}.started").exists(), f"{phase} consumer did not start")
+            with open(lock_path, "w") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    self.fail(f"{phase} consumer survived the script")
+        self.assertEqual(list((directory / "tmp").iterdir()), [])
+
+    def test_killed_initial_phase_and_resume_complete_the_cell(self) -> None:
+        result, directory = self.run_consumer(hang="none")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((directory / "cell.json").read_text(encoding="utf-8")), {"command": "complete-cell"})
+        self.assert_no_consumer_survives(directory, ("initial", "resume"))
+
+    def test_hung_initial_phase_fails_without_a_surviving_consumer(self) -> None:
+        result, directory = self.run_consumer(hang="initial")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("initial phase did not become ready", result.stderr)
+        self.assertFalse((directory / "cell.json").exists())
+        self.assert_no_consumer_survives(directory, ("initial",))
+
+    def test_hung_resume_phase_fails_without_a_surviving_consumer(self) -> None:
+        result, directory = self.run_consumer(hang="resume")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resume phase did not pass", result.stderr)
+        self.assertFalse((directory / "cell.json").exists())
+        self.assert_no_consumer_survives(directory, ("initial", "resume"))
 
 if __name__ == "__main__":
     unittest.main()
