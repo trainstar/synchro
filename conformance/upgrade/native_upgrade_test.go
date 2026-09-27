@@ -529,63 +529,67 @@ func TestNativePackageUpgrade(t *testing.T) {
 	}
 	waitForServerEffects(ctx, t, database, map[string]int{"customers/" + data.c3: 2})
 
-	candidateSteps := []step{
-		{Op: "open", Database: "synchro-upgrade.db", ClientID: data.clientID},
-		{Op: "observe", Name: "retained"},
-		data.upgradedWrite(),
-		{Op: "observe", Name: "written"},
-		{Op: "start"},
-		{Op: "sync"},
-		{Op: "observe", Name: "final"},
-		{Op: "stop"},
-		{Op: "close"},
-		{Op: "open", Database: "synchro-fresh.db", ClientID: data.freshClientID},
-		{Op: "create_local_table"},
-		{Op: "start"},
-		{Op: "sync"},
-		{Op: "observe", Name: "fresh"},
-		{Op: "stop"},
-		{Op: "close"},
-	}
-	candidate := control.run(ctx, t, env, phaseConfig{
-		Phase: "candidate", ServerURL: env.appServerURL, Token: token, AppVersion: appVersion,
-		Snapshots: snapshots, Steps: candidateSteps,
+	// The predecessor state above is the fixture. The assertion covers the
+	// candidate package and the resulting server state.
+	t.Run("assertion", func(t *testing.T) {
+		candidateSteps := []step{
+			{Op: "open", Database: "synchro-upgrade.db", ClientID: data.clientID},
+			{Op: "observe", Name: "retained"},
+			data.upgradedWrite(),
+			{Op: "observe", Name: "written"},
+			{Op: "start"},
+			{Op: "sync"},
+			{Op: "observe", Name: "final"},
+			{Op: "stop"},
+			{Op: "close"},
+			{Op: "open", Database: "synchro-fresh.db", ClientID: data.freshClientID},
+			{Op: "create_local_table"},
+			{Op: "start"},
+			{Op: "sync"},
+			{Op: "observe", Name: "fresh"},
+			{Op: "stop"},
+			{Op: "close"},
+		}
+		candidate := control.run(ctx, t, env, phaseConfig{
+			Phase: "candidate", ServerURL: env.appServerURL, Token: token, AppVersion: appVersion,
+			Snapshots: snapshots, Steps: candidateSteps,
+		})
+		if candidate.Package != env.candidate {
+			t.Fatalf("candidate application reported package %q, want %q", candidate.Package, env.candidate)
+		}
+
+		// The upgraded package reads the predecessor's exact queued intent.
+		retained := candidate.observation(t, "retained")
+		if diff := compareJSON(offline.Pending, retained.Pending); diff != "" {
+			t.Fatalf("candidate changed retained predecessor intent: %s", diff)
+		}
+		requireRows(t, "candidate retained", retained, data.offlineClientRows())
+		if retained.PendingCount != len(data.offlineIntent()) || retained.RejectedCount != 0 {
+			t.Fatalf("candidate retained pending=%d rejected=%d, want %d and 0", retained.PendingCount, retained.RejectedCount, len(data.offlineIntent()))
+		}
+
+		written := candidate.observation(t, "written")
+		requireIntent(t, "candidate written", written.Pending, append(data.offlineIntent(), data.upgradedIntent()), schema)
+		if diff := compareJSON(offline.Pending, written.Pending[:len(offline.Pending)]); diff != "" {
+			t.Fatalf("candidate write changed retained predecessor intent: %s", diff)
+		}
+		if last := written.Pending[len(written.Pending)-1]; last.LocalOrder <= offline.Pending[len(offline.Pending)-1].LocalOrder {
+			t.Fatalf("candidate intent local order %d does not follow retained order %d", last.LocalOrder, offline.Pending[len(offline.Pending)-1].LocalOrder)
+		}
+
+		final := candidate.observation(t, "final")
+		if final.PendingCount != 0 || len(final.Pending) != 0 || final.RejectedCount != 0 {
+			t.Fatalf("candidate final pending=%d rejected=%d, want 0 and 0", final.PendingCount, final.RejectedCount)
+		}
+		requireRows(t, "candidate final", final, data.finalClientRows())
+
+		fresh := candidate.observation(t, "fresh")
+		if diff := compareJSON(fresh.Snapshots["triggers"], final.Snapshots["triggers"]); diff != "" {
+			t.Fatalf("upgraded capture triggers differ from a fresh candidate install: %s", diff)
+		}
+
+		requireServerRows(ctx, t, database, data)
 	})
-	if candidate.Package != env.candidate {
-		t.Fatalf("candidate application reported package %q, want %q", candidate.Package, env.candidate)
-	}
-
-	// The upgraded package reads the predecessor's exact queued intent.
-	retained := candidate.observation(t, "retained")
-	if diff := compareJSON(offline.Pending, retained.Pending); diff != "" {
-		t.Fatalf("candidate changed retained predecessor intent: %s", diff)
-	}
-	requireRows(t, "candidate retained", retained, data.offlineClientRows())
-	if retained.PendingCount != len(data.offlineIntent()) || retained.RejectedCount != 0 {
-		t.Fatalf("candidate retained pending=%d rejected=%d, want %d and 0", retained.PendingCount, retained.RejectedCount, len(data.offlineIntent()))
-	}
-
-	written := candidate.observation(t, "written")
-	requireIntent(t, "candidate written", written.Pending, append(data.offlineIntent(), data.upgradedIntent()), schema)
-	if diff := compareJSON(offline.Pending, written.Pending[:len(offline.Pending)]); diff != "" {
-		t.Fatalf("candidate write changed retained predecessor intent: %s", diff)
-	}
-	if last := written.Pending[len(written.Pending)-1]; last.LocalOrder <= offline.Pending[len(offline.Pending)-1].LocalOrder {
-		t.Fatalf("candidate intent local order %d does not follow retained order %d", last.LocalOrder, offline.Pending[len(offline.Pending)-1].LocalOrder)
-	}
-
-	final := candidate.observation(t, "final")
-	if final.PendingCount != 0 || len(final.Pending) != 0 || final.RejectedCount != 0 {
-		t.Fatalf("candidate final pending=%d rejected=%d, want 0 and 0", final.PendingCount, final.RejectedCount)
-	}
-	requireRows(t, "candidate final", final, data.finalClientRows())
-
-	fresh := candidate.observation(t, "fresh")
-	if diff := compareJSON(fresh.Snapshots["triggers"], final.Snapshots["triggers"]); diff != "" {
-		t.Fatalf("upgraded capture triggers differ from a fresh candidate install: %s", diff)
-	}
-
-	requireServerRows(ctx, t, database, data)
 }
 
 // seedEffects names each authored source row and its minimum number of
