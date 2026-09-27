@@ -70,16 +70,36 @@ func TestRunnerClientCallResultRejectsIncompleteResult(t *testing.T) {
 }
 
 func TestValidateRunnerResponseRejectsMalformedRebuildReceipt(t *testing.T) {
-	validReceipt := `"rebuild_id_fingerprint":"rebuild-fingerprint","page_count":2,"returned_record_count":0,"request_chain_expected":[],"request_chain_observed":[],"record_identities_hex":[],"received_row_checksums":[],"computed_row_checksums":[]`
-	for _, receipt := range []string{
-		`"page_count":2,"returned_record_count":0,"request_chain_expected":[],"request_chain_observed":[],"record_identities_hex":[],"received_row_checksums":[],"computed_row_checksums":[]`,
-		validReceipt + `,"unknown":true`,
-	} {
-		data := `{"schema_version":1,"outcome":"passed","result":{"rebuild_receipts":[{` + receipt + `}],"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`
-		if _, err := validateRunnerResponse([]byte(data)); err == nil {
-			t.Fatal("accepted malformed rebuild receipt proof")
-		}
+	members := []string{
+		`"rebuild_id_fingerprint":"` + strings.Repeat("e", 64) + `"`,
+		`"page_count":2`,
+		`"returned_record_count":101`,
+		`"request_chain_expected":["first","second"]`,
+		`"request_chain_observed":["first","second"]`,
+		`"records_in_canonical_order":true`,
+		`"row_checksums_valid":true`,
 	}
+	response := func(receipt []string) []byte {
+		return []byte(`{"schema_version":1,"outcome":"passed","result":{"rebuild_receipts":[{` + strings.Join(receipt, ",") + `}],"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`)
+	}
+	result, err := validateRunnerResponse(response(members))
+	if err != nil || len(result.RebuildReceipts) != 1 || result.RebuildReceipts[0].ReturnedRecordCount != 101 {
+		t.Fatalf("valid rebuild receipt rejected: result=%#v err=%v", result.RebuildReceipts, err)
+	}
+	for index := range members {
+		name := strings.Trim(strings.SplitN(members[index], ":", 2)[0], `"`)
+		t.Run("missing "+name, func(t *testing.T) {
+			receipt := append(append([]string(nil), members[:index]...), members[index+1:]...)
+			if _, err := validateRunnerResponse(response(receipt)); err == nil {
+				t.Fatal("accepted a rebuild receipt without a required member")
+			}
+		})
+	}
+	t.Run("unknown member", func(t *testing.T) {
+		if _, err := validateRunnerResponse(response(append(append([]string(nil), members...), `"unknown":true`))); err == nil {
+			t.Fatal("accepted a rebuild receipt with an unknown member")
+		}
+	})
 }
 
 func TestValidateRunnerResponseAcceptsPassedResult(t *testing.T) {
