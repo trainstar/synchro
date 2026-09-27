@@ -2,6 +2,48 @@
   "vector_set_id": "VSET-CANONICAL-001",
   "vectors": [
     {
+      "vector_id": "VEC-BATCH-ATOMIC-001",
+      "kind": "batch_fingerprint",
+      "valid": true,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "batch_json": "{\"client_id\":\"client-canonical\",\"client_generation\":7,\"batch_id\":\"00000000-0000-4000-8000-000000000010\",\"request_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"atomic\":true,\"mutations\":[{\"mutation_id\":\"00000000-0000-4000-8000-000000000001\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-insert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"insert\",\"client_version\":\"2024-02-29T12:34:56.123456Z\",\"columns\":[{\"field_id\":\"fld_text\",\"value\":\"z\"},{\"field_id\":\"fld_bool\",\"value\":true}]},{\"mutation_id\":\"00000000-0000-4000-8000-000000000003\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-delete\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"delete\",\"base_version\":\"server-version-002\",\"client_version\":\"2024-02-29T12:34:58.123456Z\"}]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": "73796e6368726f3a76333a707573682d62617463682d66696e6765727072696e743a7631005b2261746f6d69632d62617463682d7631222c22757365722d63616e6f6e6963616c222c22636c69656e742d63616e6f6e6963616c222c2237222c2230303030303030302d303030302d343030302d383030302d303030303030303030303130222c5b2231222c2261393732383062373136666530663861393535336261376333623331623030646430336637633761616366306666303161373033643733313832663364663331225d2c5b5b226d75746174696f6e2d7631222c2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c2274626c5f7265636f726473222c5b22666c645f6964222c226d75742d696e73657274225d2c5b2231222c2261393732383062373136666530663861393535336261376333623331623030646430336637633761616366306666303161373033643733313832663364663331225d2c22696e73657274222c5b305d2c22323032342d30322d32395431323a33343a35362e3132333435365a222c5b312c5b5b22666c645f626f6f6c222c747275655d2c5b22666c645f74657874222c227a225d5d5d5d2c5b226d75746174696f6e2d7631222c2230303030303030302d303030302d343030302d383030302d303030303030303030303033222c2274626c5f7265636f726473222c5b22666c645f6964222c226d75742d64656c657465225d2c5b2231222c2261393732383062373136666530663861393535336261376333623331623030646430336637633761616366306666303161373033643733313832663364663331225d2c2264656c657465222c5b312c227365727665722d76657273696f6e2d303032225d2c22323032342d30322d32395431323a33343a35382e3132333435365a222c5b305d5d5d5d",
+        "expected_bytes_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138",
+        "expected_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138"
+      }
+    },
+    {
+      "vector_id": "VEC-BATCH-ATOMIC-DUPLICATE-ROW-001",
+      "kind": "batch_fingerprint",
+      "valid": false,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "batch_json": "{\"client_id\":\"client-canonical\",\"client_generation\":7,\"batch_id\":\"00000000-0000-4000-8000-000000000010\",\"request_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"atomic\":true,\"mutations\":[{\"mutation_id\":\"00000000-0000-4000-8000-000000000001\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-insert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"insert\",\"client_version\":\"2024-02-29T12:34:56.123456Z\",\"columns\":[{\"field_id\":\"fld_text\",\"value\":\"z\"},{\"field_id\":\"fld_bool\",\"value\":true}]},{\"mutation_id\":\"00000000-0000-4000-8000-000000000003\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut\\u002dinsert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"delete\",\"base_version\":\"server-version-002\",\"client_version\":\"2024-02-29T12:34:58.123456Z\"}]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": null,
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      }
+    },
+    {
+      "vector_id": "VEC-BATCH-ATOMIC-FALSE-001",
+      "kind": "batch_fingerprint",
+      "valid": false,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "batch_json": "{\"client_id\":\"client-canonical\",\"client_generation\":7,\"batch_id\":\"00000000-0000-4000-8000-000000000010\",\"request_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"atomic\":false,\"mutations\":[{\"mutation_id\":\"00000000-0000-4000-8000-000000000001\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-insert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"insert\",\"client_version\":\"2024-02-29T12:34:56.123456Z\",\"columns\":[{\"field_id\":\"fld_text\",\"value\":\"z\"},{\"field_id\":\"fld_bool\",\"value\":true}]},{\"mutation_id\":\"00000000-0000-4000-8000-000000000003\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-delete\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"delete\",\"base_version\":\"server-version-002\",\"client_version\":\"2024-02-29T12:34:58.123456Z\"}]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": null,
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      }
+    },
+    {
       "vector_id": "VEC-BATCH-DUPLICATE-MUTATION-001",
       "kind": "batch_fingerprint",
       "valid": false,
@@ -2039,8 +2081,23 @@
   ],
   "aggregate": {
     "algorithm": "sha-256",
-    "vector_count": 123,
+    "vector_count": 126,
     "vector_hashes": [
+      {
+        "vector_id": "VEC-BATCH-ATOMIC-001",
+        "expected_bytes_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138",
+        "expected_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138"
+      },
+      {
+        "vector_id": "VEC-BATCH-ATOMIC-DUPLICATE-ROW-001",
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      },
+      {
+        "vector_id": "VEC-BATCH-ATOMIC-FALSE-001",
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      },
       {
         "vector_id": "VEC-BATCH-DUPLICATE-MUTATION-001",
         "expected_bytes_sha256": null,
@@ -2657,6 +2714,6 @@
         "expected_sha256": null
       }
     ],
-    "sha256": "68a7c888c317ad64dde088e89873db8079d5fc7ba0f89ab4ec6b575ec1c01cb5"
+    "sha256": "c8c0b46ae5002ef3d6797161c7ec6a90b90cd2bc341ce378b3847ad2dd23ade9"
   }
 }

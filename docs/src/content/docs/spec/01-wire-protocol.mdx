@@ -132,7 +132,7 @@ NaN, infinities, noncanonical integer strings, imprecise decimal conversion, dup
 
 ### Opaque values
 
-`server_version` is a nonempty server-generated equality token. Clients store and return it only as a compare-and-swap precondition. Clients and adapters MUST NOT parse, sort, increment, generate, or infer time or stream order from it.
+`server_version` is a server-generated equality token of 1 through 64 octets. Each octet is printable ASCII from `0x20` through `0x7E` other than `"` and `\`, so its canonical JSON string is its length plus 2 octets. Clients store and return it only as a compare-and-swap precondition. Clients use the length bound only to compute a worst-case request size. Clients and adapters MUST NOT parse, sort, increment, generate, or infer time or stream order from it.
 
 Incremental cursors and rebuild continuation values are opaque server-issued strings. Clients MUST persist and return them unchanged to the endpoint and scope that issued them. Clients MUST NOT decode, compare, edit, synthesize, or derive a row key or checkpoint from them. ADR 003 defines their authenticated server-side bindings and construction. Those internals are not part of client behavior.
 
@@ -360,6 +360,7 @@ Protocol version 3 has no `fetch` schema action and no schema-fetch step in the 
 ### Scope assignment and generation rules
 
 - The server is the sole authority for assigned scope IDs.
+- Connect and pull compute the authoritative assignment with the same rule. ADR 004 defines the sources, including the registered assignment function.
 - `scope_set_version` changes whenever the authoritative assignment set changes.
 - A response with no assignment change has empty `scopes.add` and `scopes.remove` arrays. Schema cursor replacement remains a separate `scope_cursor_updates` delta and does not advance `scope_set_version`.
 - A new or invalidated assignment has a null cursor and requires rebuild.
@@ -399,7 +400,7 @@ durable state until they can normalize them or obtain the predecessor's server
 version. `depends_on_mutation_id`, local supersession, and local cancellation
 states are not push wire members.
 
-The push envelope contains exactly `client_id`, `client_generation`, `batch_id`, `schema`, and a nonempty `mutations` array. First execution requires the exact current generation and schema. Exact replay uses the sealed values stored with the completed batch.
+The push envelope contains exactly `client_id`, `client_generation`, `batch_id`, `schema`, a nonempty `mutations` array, and an optional `atomic` member. The Atomic batches section defines `atomic`. First execution requires the exact current generation and schema. Exact replay uses the sealed values stored with the completed batch.
 
 ### Request example
 
@@ -667,7 +668,7 @@ HTTP 200 push success has only these per-mutation statuses:
 | --- | --- | --- | --- |
 | `applied` | `accepted` | No `code` | Insert and update require full `server_row`, matching `row_checksum`, and new `server_version`. Delete requires new `server_version`; it includes a full tombstone row and matching checksum for a source tombstone and omits both for a fence-only delete. |
 | `conflict` | `rejected` | `version_conflict`, `row_already_exists`, `row_deleted`, `row_not_found` | `message` plus current authoritative state. A live row or source tombstone includes row, matching checksum, and version. A fence-only delete includes version without row or checksum. True absence includes neither. |
-| `rejected_terminal` | `rejected` | `schema_incompatible`, `table_not_synced`, `policy_rejected`, `validation_failed` | `message`; no `server_row` or `server_version`. `schema_incompatible` also requires `retryable: false`, authored and current schema references, and sorted `incompatible_field_ids`. |
+| `rejected_terminal` | `rejected` | `schema_incompatible`, `table_not_synced`, `policy_rejected`, `validation_failed`, `atomic_batch_rejected` | `message`; no `server_row` or `server_version`. `schema_incompatible` also requires `retryable: false`, authored and current schema references, and sorted `incompatible_field_ids`. |
 
 Every row in this table also requires `outcome_schema`. A first execution uses
 the current request schema. Exact batch replay and a completed mutation reused
@@ -684,6 +685,7 @@ Terminal codes have one meaning:
 - `table_not_synced`: the target has never been a synced table in this contract.
 - `policy_rejected`: deterministic authenticated write policy denies the mutation.
 - `validation_failed`: a known current field is non-writable, a value is invalid, or a current domain constraint fails.
+- `atomic_batch_rejected`: another mutation in the same atomic batch did not apply. Only an atomic batch response contains this code.
 
 The complete conflict matrix after structural, schema, policy, and value validation is:
 
@@ -699,6 +701,22 @@ Insert atomically reserves an absent row identity. Update and delete lock the au
 When multiple terminal semantic rules apply, classification order is `schema_incompatible`, `table_not_synced`, `policy_rejected`, then `validation_failed`. Conflict evaluation occurs only after those checks pass.
 
 No per-mutation retryable status or code exists. Operational uncertainty is always a whole-request 429 or 503 response with no `accepted` or `rejected` arrays.
+
+### Atomic batches
+
+A request with `atomic: true` applies all of its mutations or none of them. The value `false` is invalid, so each meaning has one encoding. An atomic request has the ordinary push limits. The adapter and extension return `400 invalid_request` before ledger allocation, policy execution, or source DML when an atomic request has either of these defects:
+
+- Two mutations have the same `table` and the same canonical `pk`.
+- A `mutation_id` already has a ledger row from a different batch.
+
+The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the response is an ordinary all-applied response. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
+
+- The failing mutation keeps its evaluated status and code.
+- A failing `conflict` carries the committed row state that the server reads after the rollback.
+- Every other mutation has `rejected_terminal`, code `atomic_batch_rejected`, and message `atomic batch rejected`. It has no `server_row`, `row_checksum`, `server_version`, or `retryable`, and its `outcome_schema` is the request `schema`.
+- `accepted` is empty, and `rejected` contains every outcome in request order.
+
+Every validator of an atomic response requires one of two forms. Either every mutation is in `accepted` with `applied`, or `accepted` is empty and exactly one outcome has a code other than `atomic_batch_rejected`. A non-atomic response never contains `atomic_batch_rejected`. Exact replay of a completed atomic batch returns its stored response.
 
 ### Immutable identity and exact replay
 
@@ -901,6 +919,8 @@ This delayed acknowledgement makes response loss safe. Selection, response const
 - A row leaving an existing scope is a normal scoped `delete`.
 - The same row in multiple scopes has independent provenance and independent outcomes.
 - A membership contract change invalidates only affected scope generations and lists those scopes in `rebuild`.
+
+Pull reconciles the authoritative assignment after every request validation passes and before it builds `scope_updates`. A changed set advances `scope_set_version` by exactly one, and the same response reports the change. An unchanged set and a failed pull write no assignment state. Rebuild does not reconcile assignment.
 
 The client applies assignment updates, changes, cursor deltas, and terminal integrity results as one local metadata transition.
 

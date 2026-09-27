@@ -2,6 +2,11 @@
   "schema_version": 1,
   "scenarios": [
     {
+      "scenario_id": "SCN-ATOMIC-GROUP-001",
+      "path": "conformance/scenarios/server/atomic-group-001.json",
+      "sha256": "7b56df35db96c0266a5fc749d3f0c8aa833d10ea2eb6a85a6e05553d1c942642"
+    },
+    {
       "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
       "path": "conformance/scenarios/server/membership-reassignment-001.json",
       "sha256": "17ad0f9fb18f8384d99bd365eb856d3aab83b061832489a023d5f9775bd03e39"
@@ -110,6 +115,16 @@
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
       "sha256": "0e01484c2baf851af13fc54f5076b01e14c0c51cc1cc9b371f4fb36067143c78"
+    },
+    {
+      "scenario_id": "SCN-SCOPE-ASSIGNMENT-BOUND-001",
+      "path": "conformance/scenarios/server/scope-assignment-bound-001.json",
+      "sha256": "3b38bac693dc47a83c5a684973a3f57d597ce93ab190e9a80d7c490cd4f90937"
+    },
+    {
+      "scenario_id": "SCN-SCOPE-ASSIGNMENT-PULL-001",
+      "path": "conformance/scenarios/server/scope-assignment-pull-001.json",
+      "sha256": "9350db991883bd9a57153a16fbcccdecfe7ebb10192d910bb87da0941a7e8708"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",

@@ -81,6 +81,7 @@ type NormalizedBatch struct {
 	ClientGeneration    uint64
 	BatchID             string
 	RequestSchema       SchemaReference
+	Atomic              bool
 	Mutations           []NormalizedMutation
 }
 

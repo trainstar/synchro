@@ -322,6 +322,86 @@ sealed batch unchanged and retries it after the prescribed delay. A request
 level `schema_mismatch` also retains the sealed batch unchanged. A new batch
 identity is required for a reconciled request schema.
 
+## Atomic write groups
+
+`atomicWriteTransaction` runs an application write transaction whose synced
+mutations the server applies all together or not at all.
+
+| Surface | API |
+| --- | --- |
+| Swift | `func atomicWriteTransaction<T>(_ block: (ApplicationTransaction) throws -> T) throws -> T` on `SynchroClient` |
+| Kotlin | `fun <T> atomicWriteTransaction(block: (ApplicationTransaction) -> T): T` on `SynchroClient` |
+| React Native | `atomicWriteTransaction<T>(fn)` on `SynchroClient`, backed by the TurboModule method `beginAtomicWriteTransaction(): Promise<string>` |
+
+The API opens the transaction through the same path as `writeTransaction`, so
+nesting behavior is identical to `writeTransaction`.
+
+The client captures a group with these rules:
+
+- At transaction start, the client writes a new lowercase UUID to
+  `_synchro_meta` with key `atomic_group_id`.
+- Each capture trigger copies that value into the nullable `atomic_group_id`
+  column of `_synchro_pending_changes`.
+- Before commit, the client deletes the `_synchro_meta` key. A rollback
+  removes it.
+- A group that captures no rows commits as an ordinary empty write.
+
+Before commit, the client validates the group with these rules in this order.
+A failure throws a typed error and rolls back the local transaction.
+
+1. No `delete` entry for a row is followed by a later entry for the same row
+   in the group. The failure reason is `deleteFollowedByWrite`.
+2. The client runs chain normalization on the group rows only. A chain merges
+   only entries with an equal `atomic_group_id`, and NULL equals NULL.
+3. The normalized group has at most 1000 entries. The failure reason is
+   `tooManyMutations`.
+4. Each normalized mutation is at most 65,536 octets in the canonical
+   normalized mutation form. The failure reason is `mutationTooLarge`.
+5. The worst-case canonical push request is at most 1,048,576 octets. The
+   failure reason is `requestTooLarge`.
+
+The worst-case request uses these values:
+
+| Member | Value used for measurement |
+| --- | --- |
+| `client_id` | The real client ID |
+| `client_generation` | `9007199254740991` |
+| `batch_id` | A 36-octet UUID |
+| `schema.version` | `9007199254740991` |
+| `schema.hash` | A 64-octet lowercase hexadecimal string |
+| `atomic` | `true` |
+| `base_version`, when known | The real value |
+| `base_version`, when unknown | A 64-octet placeholder string |
+
+The typed error is `SynchroError.atomicGroupInvalid(reason:
+AtomicGroupInvalidReason)` in Swift and `SynchroError.AtomicGroupInvalid(reason:
+AtomicGroupInvalidReason)` in Kotlin. In React Native, the rejected promise has
+code `atomic_group_invalid`. `AtomicGroupInvalidReason` has exactly the four
+reasons named above.
+
+The batch selector applies these rules:
+
+- It reads eligible entries in local order.
+- If the first eligible entry has no group, the batch is the leading run of
+  eligible entries with no group, up to the batch size. The run stops at the
+  first grouped entry.
+- If the first eligible entry has a group, the batch is the complete
+  normalized group with `atomic: true`. The selector selects it only if every
+  member is unsealed, has no unresolved dependency, and is an insert or has a
+  base version. Otherwise it selects no batch, and the group waits.
+- An atomic batch ignores the configured batch size.
+- When the blocking rule marks one unsent group member
+  `blocked_by_predecessor`, the same local transaction marks every unsent
+  member of that group `blocked_by_predecessor`.
+- The sealed request includes `atomic`, so each retry sends identical content.
+
+A failed group uses the ordinary outcome paths. The client adds no revert path.
+An `atomic_batch_rejected` outcome follows the terminal path, so the local row
+stays and `inspectRejectedMutations` reports the mutation. A failing conflict
+follows the conflict path. It applies `server_row` and reapplies later local
+intent. After a failed group with a conflict, local state therefore holds the
+server row for the conflicting member and local values for every other member.
+
 ## Exact-ID reconciliation
 
 ### Outcome partition
@@ -374,7 +454,8 @@ authoritative row state and returns `conflict` with one of the server-defined
 codes, including `version_conflict`, `row_already_exists`, `row_deleted`, or
 `row_not_found` as applicable. A terminal semantic rejection uses
 `rejected_terminal` and a terminal code such as `policy_rejected`,
-`validation_failed`, `table_not_synced`, or `schema_incompatible`.
+`validation_failed`, `table_not_synced`, `schema_incompatible`, or
+`atomic_batch_rejected`.
 
 When an outcome includes a canonical row or tombstone, matching checksum, and
 server version, the client verifies and applies that state in the same
@@ -925,6 +1006,8 @@ semantics:
 - `query(sql, parameters)` for local reads
 - `execute(sql, parameters)` for local writes
 - `transaction(...)` for application-local transactions
+- `atomicWriteTransaction(...)` for an application transaction whose synced
+  mutations the server applies all together or not at all
 - `startSync()` to arm the client-owned lifecycle
 - `stopSync()` to stop network work without clearing durable state
 - `syncNow()` to request an immediate cycle through the native scheduler

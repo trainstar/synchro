@@ -25,7 +25,7 @@
       "id": "SYNC-VERSION-001",
       "title": "Opaque server versions",
       "category": "protocol",
-      "statement": "Clients preserve server_version as an opaque optimistic-precondition and reconciliation token without sorting, incrementing, or parsing it.",
+      "statement": "Clients preserve server_version as an opaque optimistic-precondition and reconciliation token without sorting, incrementing, or parsing it, and use its bound of 1 through 64 printable ASCII octets only to compute a worst-case request size.",
       "required_proof_types": ["native-e2e"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-server-version-invariant" }]
@@ -1001,6 +1001,42 @@
       "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#schema-cursor-continuity" }]
+    },
+    {
+      "id": "SYNC-SCOPE-007",
+      "title": "Pull reconciles scope assignment",
+      "category": "scope",
+      "statement": "Pull computes the authoritative scope set with the connect rule after request validation, reports a changed set in the same response with scope_set_version advanced by exactly one, and writes no assignment state for an unchanged set or a failed pull.",
+      "required_proof_types": ["server-black-box"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#pull-time-scope-reconciliation" }]
+    },
+    {
+      "id": "SYNC-SCOPE-008",
+      "title": "Assignment function contract",
+      "category": "scope",
+      "statement": "At most one registered assignment function contributes scopes, registration rejects every rule violation, and an evaluation with a changed definition, an invalid result, or more results than max_scopes fails the connect or pull with sync_integrity_failure and no assignment change.",
+      "required_proof_types": ["server-black-box"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-scope-assignment-function" }]
+    },
+    {
+      "id": "SYNC-ATOMICITY-002",
+      "title": "Atomic mutation group",
+      "category": "data-correctness",
+      "statement": "An atomic push commits every mutation or none, and a failed group returns the failing outcome from committed state with atomic_batch_rejected for every other mutation and no accepted outcome.",
+      "required_proof_types": ["server-black-box", "fault-injection"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-mutation-group" }]
+    },
+    {
+      "id": "SYNC-QUEUE-005",
+      "title": "Atomic group capture and selection",
+      "category": "local-metadata",
+      "statement": "Every mutation captured in one atomic write transaction carries one group identity, an invalid group rolls back at local commit, and a group is sent only as one complete atomic batch with no other mutation.",
+      "required_proof_types": ["native-e2e"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-group-capture-and-selection" }]
     }
   ]
 }
