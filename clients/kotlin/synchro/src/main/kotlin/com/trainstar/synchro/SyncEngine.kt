@@ -1355,7 +1355,9 @@ internal class SyncEngine(
                 if (!beginOperation()) return@launch
                 try {
                     delay((config.pushDebounce * 1000).toLong())
-                    if (!isActive || !isApplicationForeground()) return@launch
+                    if (!isActive || !isApplicationForeground() || !claimDebounceJob(coroutineContext.job)) {
+                        return@launch
+                    }
                     runSyncCycleWithRetry(retryWakeupGeneration = generation)
                 } catch (e: CancellationException) {
                     throw e
@@ -1366,6 +1368,13 @@ internal class SyncEngine(
                 }
             }
         }
+    }
+
+    // A claimed job runs its cycle to the end. A later write or background event cannot cancel it.
+    private fun claimDebounceJob(job: Job): Boolean = synchronized(lifecycleLock) {
+        if (debounceJob !== job) return false
+        debounceJob = null
+        true
     }
 
     // MARK: - Error Handling
