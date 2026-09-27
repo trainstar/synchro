@@ -150,7 +150,6 @@ type QueueReplayCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -281,9 +280,6 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 	identity, err := queueReplayClientIdentity(config.Scenario)
 	if err != nil {
 		return nil, err
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native queue-replay coordinator auth token is required")

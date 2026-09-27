@@ -429,10 +429,10 @@ func pushResponseLossWireExpectation(scenario scenarios.Scenario, id scenarios.S
 
 // PushResponseLossCoordinatorConfig configures one authenticated RN response-loss sidecar.
 type PushResponseLossCoordinatorConfig struct {
-	Scenario                                             scenarios.Scenario
-	Harness                                              *blackbox.Harness
-	Controller                                           *blackbox.NativeController
-	Platform, ServerURL, AuthToken, AppVersion, Database string
+	Scenario                                 scenarios.Scenario
+	Harness                                  *blackbox.Harness
+	Controller                               *blackbox.NativeController
+	Platform, ServerURL, AuthToken, Database string
 }
 
 // PushResponseLossCoordinator is the command sidecar for one RN response-loss run.
@@ -512,9 +512,6 @@ func NewPushResponseLossCoordinator(config PushResponseLossCoordinatorConfig) (*
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native push-response-loss coordinator auth token is required")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {

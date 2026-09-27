@@ -47,7 +47,6 @@ type RetentionReconnectCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -465,9 +464,6 @@ func NewRetentionReconnectCoordinator(config RetentionReconnectCoordinatorConfig
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native retention-reconnect coordinator auth token is required")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {

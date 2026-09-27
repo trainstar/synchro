@@ -62,7 +62,6 @@ type ForgedCursorCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -443,9 +442,6 @@ func NewForgedCursorCoordinator(config ForgedCursorCoordinatorConfig) (*ForgedCu
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native forged-cursor auth token is empty and harness is unavailable")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {

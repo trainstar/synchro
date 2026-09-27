@@ -956,7 +956,7 @@ func TestQueueReplayRejectsAnInvalidReplayPull(t *testing.T) {
 
 func TestNewQueueReplayCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewQueueReplayCoordinator(QueueReplayCoordinatorConfig{
-		Scenario: loadQueueReplayAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadQueueReplayAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android queue-replay coordinator was rejected: %v", err)

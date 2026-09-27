@@ -57,7 +57,6 @@ type SchemaQueuedMutationCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -257,9 +256,6 @@ func NewSchemaQueuedMutationCoordinator(config SchemaQueuedMutationCoordinatorCo
 	identity, err := schemaQueuedMutationClientIdentity(config.Scenario)
 	if err != nil {
 		return nil, err
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native schema-queued-mutation auth token is required")

@@ -273,7 +273,6 @@ type PendingCycleCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -389,9 +388,6 @@ func NewPendingCycleCoordinator(config PendingCycleCoordinatorConfig) (*PendingC
 	identity, err := extractPendingCycleClientIdentity(config.Scenario)
 	if err != nil {
 		return nil, err
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native pending-cycle coordinator auth token is required")
@@ -2049,28 +2045,6 @@ func extractPendingCycleClientIdentity(scenario scenarios.Scenario) (pendingCycl
 		}
 	}
 	return pendingCycleClientIdentity{userID: payload.AuthenticatedUserID, clientID: payload.ClientID}, nil
-}
-
-func pendingCyclePullScopeCount(operation scenarios.Operation) (int, error) {
-	var payload struct {
-		Scopes []json.RawMessage `json:"scopes"`
-	}
-	if err := json.Unmarshal(operation.Payload, &payload); err != nil || len(payload.Scopes) == 0 {
-		return 0, errors.New("React Native pending-cycle pull scopes are invalid")
-	}
-	return len(payload.Scopes), nil
-}
-
-func validatePendingCycleCapture(scenario scenarios.Scenario, capture finalCapture) error {
-	if len(capture.ClientState) == 0 || len(capture.Pending) == 0 || len(capture.Rejected) == 0 || len(capture.Status) == 0 || len(capture.Provenance) == 0 || len(capture.Trace) == 0 {
-		return errors.New("React Native pending-cycle capture is incomplete")
-	}
-	for _, step := range scenario.Steps {
-		if step.ExpectedOutcome.Disposition != "success" {
-			return errors.New("React Native pending-cycle authored outcome is not successful")
-		}
-	}
-	return nil
 }
 
 // pendingCycleAuthoredObservations returns the accepted push and retry pull.

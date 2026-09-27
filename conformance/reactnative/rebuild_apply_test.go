@@ -49,7 +49,7 @@ func TestValidateRebuildApplyScenarioRejectsContractChanges(t *testing.T) {
 
 func TestNewRebuildApplyCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewRebuildApplyCoordinator(RebuildApplyCoordinatorConfig{
-		Scenario: loadRebuildApplyAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadRebuildApplyAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android rebuild-apply coordinator was rejected: %v", err)

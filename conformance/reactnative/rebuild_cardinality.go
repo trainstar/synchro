@@ -68,7 +68,6 @@ type RebuildCardinalityCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // RebuildCardinalityCoordinatorResult contains final server and identity evidence.

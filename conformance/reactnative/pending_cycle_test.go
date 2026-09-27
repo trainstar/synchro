@@ -292,11 +292,10 @@ func TestPendingCycleCleanupDistinguishesObservedBackoffFromAnActiveRetry(t *tes
 
 func TestNewPendingCycleCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewPendingCycleCoordinator(PendingCycleCoordinatorConfig{
-		Scenario:   loadPendingCycleAuthoredScenario(t),
-		Platform:   "android",
-		ServerURL:  "http://127.0.0.1:8080",
-		AuthToken:  "unit-token",
-		AppVersion: "0.3.0",
+		Scenario:  loadPendingCycleAuthoredScenario(t),
+		Platform:  "android",
+		ServerURL: "http://127.0.0.1:8080",
+		AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android pending-cycle coordinator was rejected: %v", err)
@@ -319,11 +318,10 @@ func TestNewPendingCycleCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.
 
 func TestNewPendingCycleCoordinatorRejectsUnknownPlatform(t *testing.T) {
 	coordinator, err := NewPendingCycleCoordinator(PendingCycleCoordinatorConfig{
-		Scenario:   loadPendingCycleAuthoredScenario(t),
-		Platform:   "windows",
-		ServerURL:  "http://127.0.0.1:8080",
-		AuthToken:  "unit-token",
-		AppVersion: "0.3.0",
+		Scenario:  loadPendingCycleAuthoredScenario(t),
+		Platform:  "windows",
+		ServerURL: "http://127.0.0.1:8080",
+		AuthToken: "unit-token",
 	})
 	if err == nil || coordinator != nil {
 		t.Fatal("unknown-platform pending-cycle coordinator was accepted")

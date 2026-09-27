@@ -39,7 +39,6 @@ type RebuildApplyCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // RebuildApplyCoordinatorResult contains final server and identity evidence.
@@ -177,9 +176,6 @@ func NewRebuildApplyCoordinator(config RebuildApplyCoordinatorConfig) (*RebuildA
 	}
 	if config.Platform != "ios" && config.Platform != "android" {
 		return nil, errors.New("React Native rebuild-apply coordinator platform must be ios or android")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native rebuild-apply coordinator auth token is required")
