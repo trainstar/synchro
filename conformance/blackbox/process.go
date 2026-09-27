@@ -2399,6 +2399,9 @@ func (h *Harness) verifyOwnedWALWorkerBackend(
 	}
 	// If the postmaster is alive now, it held its process ID during the identity read.
 	if err := system.ownerAlive(postmaster); err != nil {
+		if errors.Is(err, errRetainedProcessIdentityUnavailable) {
+			return errors.New("owned PostgreSQL postmaster identity is unavailable")
+		}
 		return errors.New("owned PostgreSQL postmaster exited during target verification")
 	}
 	return nil
@@ -2443,10 +2446,17 @@ func (h *Harness) observeOwnedWALWorker(ctx context.Context) (walWorkerObservati
 	return observation, nil
 }
 
-// ownedProcessAlive delivers no signal. On Linux, os.Process orders it with
-// Wait, so success proves that the child is not reaped.
+var errRetainedProcessIdentityUnavailable = errors.New("retained owned process identity is unavailable")
+
+// ownedProcessAlive delivers no signal. The retained identity was opened before
+// Wait could reap the child, so success proves that the original child is not reaped.
 func ownedProcessAlive(process *ownedProcess) error {
-	return process.command.Process.Signal(syscall.Signal(0))
+	if process == nil {
+		return errRetainedProcessIdentityUnavailable
+	}
+	process.mu.Lock()
+	defer process.mu.Unlock()
+	return process.identity.alive()
 }
 
 // ReinstallExtension replaces the extension atomically without restarting the postmaster.
@@ -6940,6 +6950,9 @@ type ownedProcess struct {
 	waitErr error
 	stopMu  sync.Mutex
 	log     *boundedLog
+
+	// identity is used and closed only while mu is held.
+	identity retainedProcessIdentity
 }
 
 func startOwnedProcess(executable string, arguments, environment []string, logLimit int, redactions [][]byte) (*ownedProcess, error) {
@@ -6957,9 +6970,15 @@ func startOwnedProcess(executable string, arguments, environment []string, logLi
 		return nil, err
 	}
 	process := &ownedProcess{command: command, cancel: cancel, done: make(chan struct{}), log: log}
+	// Only the Wait call below can reap the child, so the identity opened here
+	// names this child until Wait returns.
+	process.identity = openRetainedProcessIdentity(command.Process.Pid)
 	go func() {
 		err := command.Wait()
 		process.mu.Lock()
+		if closeErr := process.identity.close(); closeErr != nil {
+			err = errors.Join(err, errors.New("close retained owned process identity failed"))
+		}
 		process.waitErr = err
 		process.mu.Unlock()
 		close(process.done)

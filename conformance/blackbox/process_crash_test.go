@@ -64,6 +64,9 @@ type crashFixtureSystem struct {
 	afterOpen    func(*crashFixtureHandle)
 	handles      []*crashFixtureHandle
 	observeCalls int
+	viewCalls    int
+	// ownerCheck replaces the injected owner result when it is set.
+	ownerCheck func(*ownedProcess) error
 }
 
 func newCrashFixture() (*Harness, *crashFixtureSystem) {
@@ -105,6 +108,7 @@ func crashFixtureObservation(harness *Harness, pid int) walWorkerObservation {
 func (fixture *crashFixtureSystem) system() backendCrashSystem {
 	return backendCrashSystem{
 		localProcesses: func() (localProcessView, error) {
+			fixture.viewCalls++
 			if fixture.viewErr != nil {
 				return localProcessView{}, fixture.viewErr
 			}
@@ -115,7 +119,10 @@ func (fixture *crashFixtureSystem) system() backendCrashSystem {
 			index := min(fixture.observeCalls, len(fixture.observations)) - 1
 			return fixture.observations[index], nil
 		},
-		ownerAlive: func(*ownedProcess) error {
+		ownerAlive: func(owner *ownedProcess) error {
+			if fixture.ownerCheck != nil {
+				return fixture.ownerCheck(owner)
+			}
 			return fixture.ownerErr
 		},
 	}
@@ -189,6 +196,9 @@ func TestOwnedBackendCrashSignalsOnlyTheOwnedWALWorker(t *testing.T) {
 	if len(fixture.handles) != 1 || fixture.handles[0].process != worker {
 		t.Fatalf("backend crash opened %d handles, want one handle for the WAL worker", len(fixture.handles))
 	}
+	if fixture.viewCalls != 1 {
+		t.Fatalf("backend crash opened the local process view %d times, want once", fixture.viewCalls)
+	}
 	fixture.requireHandlesClosed(t)
 }
 
@@ -198,20 +208,22 @@ func TestOwnedBackendCrashRejectsUnownedTargetsWithoutSignal(t *testing.T) {
 		missingContext bool
 		// beforeLookup requires rejection before any database lookup or handle.
 		beforeLookup bool
-		mutate       func(*Harness, *crashFixtureSystem)
+		// beforeProcessView requires rejection before the local process view opens.
+		beforeProcessView bool
+		mutate            func(*Harness, *crashFixtureSystem)
 	}{
-		{name: "missing context", missingContext: true, beforeLookup: true},
-		{name: "source not ready", beforeLookup: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
+		{name: "missing context", missingContext: true, beforeLookup: true, beforeProcessView: true},
+		{name: "source not ready", beforeLookup: true, beforeProcessView: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
 			h.sourceReady = false
 		}},
-		{name: "attached remote database", beforeLookup: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
+		{name: "attached remote database", beforeLookup: true, beforeProcessView: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
 			h.attached = true
 			h.attachHost = "database.example.invalid"
 		}},
-		{name: "missing owner", beforeLookup: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
+		{name: "missing owner", beforeLookup: true, beforeProcessView: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
 			h.postgres = nil
 		}},
-		{name: "exited owner", beforeLookup: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
+		{name: "exited owner", beforeLookup: true, beforeProcessView: true, mutate: func(h *Harness, _ *crashFixtureSystem) {
 			close(h.postgres.done)
 		}},
 		{name: "unsupported stable identity", beforeLookup: true, mutate: func(_ *Harness, f *crashFixtureSystem) {
@@ -253,6 +265,9 @@ func TestOwnedBackendCrashRejectsUnownedTargetsWithoutSignal(t *testing.T) {
 		{name: "owner exited during verification", mutate: func(_ *Harness, f *crashFixtureSystem) {
 			f.ownerErr = os.ErrProcessDone
 		}},
+		{name: "owner identity unavailable", mutate: func(_ *Harness, f *crashFixtureSystem) {
+			f.ownerCheck = ownedProcessAlive
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -274,6 +289,9 @@ func TestOwnedBackendCrashRejectsUnownedTargetsWithoutSignal(t *testing.T) {
 			fixture.requireHandlesClosed(t)
 			if test.beforeLookup && (fixture.observeCalls != 0 || len(fixture.handles) != 0) {
 				t.Fatalf("rejection ran %d database lookups and opened %d handles", fixture.observeCalls, len(fixture.handles))
+			}
+			if test.beforeProcessView && fixture.viewCalls != 0 {
+				t.Fatalf("rejection opened the local process view %d times", fixture.viewCalls)
 			}
 		})
 	}
@@ -341,5 +359,40 @@ func TestOwnedBackendCrashLocalProcessViewMatchesPlatform(t *testing.T) {
 	}
 	if err := handle.close(); err != nil {
 		t.Fatalf("close own pidfd: %v", err)
+	}
+}
+
+func TestOwnedBackendCrashZeroOwnerIdentityIsUnavailable(t *testing.T) {
+	var owner ownedProcess
+	if err := ownedProcessAlive(&owner); !errors.Is(err, errRetainedProcessIdentityUnavailable) {
+		t.Fatalf("zero owned process check = %v, want unavailable identity", err)
+	}
+	if err := owner.identity.close(); err != nil {
+		t.Fatalf("close zero owned process identity: %v", err)
+	}
+	if err := ownedProcessAlive(nil); !errors.Is(err, errRetainedProcessIdentityUnavailable) {
+		t.Fatalf("missing owned process check = %v, want unavailable identity", err)
+	}
+}
+
+func TestOwnedBackendCrashRetainedIdentityMatchesPlatform(t *testing.T) {
+	identity := openRetainedProcessIdentity(os.Getpid())
+	if runtime.GOOS != "linux" {
+		if err := identity.alive(); !errors.Is(err, errRetainedProcessIdentityUnavailable) {
+			t.Fatalf("retained identity outside Linux = %v, want unavailable", err)
+		}
+		return
+	}
+	if err := identity.alive(); err != nil {
+		t.Fatalf("check retained identity of this process: %v", err)
+	}
+	if err := identity.close(); err != nil {
+		t.Fatalf("close retained identity: %v", err)
+	}
+	if err := identity.alive(); !errors.Is(err, errRetainedProcessIdentityUnavailable) {
+		t.Fatalf("closed retained identity = %v, want unavailable", err)
+	}
+	if err := identity.close(); err != nil {
+		t.Fatalf("close retained identity again: %v", err)
 	}
 }
