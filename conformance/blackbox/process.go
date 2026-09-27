@@ -141,7 +141,7 @@ type Harness struct {
 
 	databaseCreated    bool
 	rolesCreated       bool
-	slotCreated        bool
+	slotsOwned         bool
 	publicationCreated bool
 	sourceReady        bool
 	restartCount       int
@@ -1514,11 +1514,9 @@ func (h *Harness) installExtensionTopology(ctx context.Context) error {
 	if err := h.grantExtensionRolesOnDatabase(ctx, database); err != nil {
 		return err
 	}
-	var slotName string
-	if err := database.QueryRowContext(ctx, "SELECT slot_name FROM pg_create_logical_replication_slot($1, 'pgoutput')", h.names.ReplicationSlot).Scan(&slotName); err != nil || slotName != h.names.ReplicationSlot {
-		return errors.New("create isolated replication slot failed")
-	}
-	h.slotCreated = true
+	// The worker creates and binds the configured slot. A slot that exists before
+	// the first binding has no ownership evidence, so the worker refuses it.
+	h.slotsOwned = true
 	var publicationExists bool
 	if err := database.QueryRowContext(
 		ctx,
@@ -6501,7 +6499,7 @@ func (h *Harness) stopAdapter(ctx context.Context) error {
 
 func (h *Harness) dropRunTopology(ctx context.Context) error {
 	if h.postgres == nil || h.postgres.Exited() {
-		if h.databaseCreated || h.rolesCreated || h.slotCreated || h.publicationCreated {
+		if h.databaseCreated || h.rolesCreated || h.slotsOwned || h.publicationCreated {
 			return errors.New("PostgreSQL stopped before topology cleanup")
 		}
 		return nil
@@ -6517,7 +6515,7 @@ func (h *Harness) dropRunTopology(ctx context.Context) error {
 			failures = append(failures, err)
 		}
 	}
-	if h.slotCreated {
+	if h.slotsOwned {
 		if err := runCleanupStage(ctx, h.config.ShutdownTimeout, h.dropReplicationSlot); err != nil {
 			failures = append(failures, err)
 		}
@@ -6668,7 +6666,7 @@ func (h *Harness) dropReplicationSlot(ctx context.Context) error {
 	}); err != nil {
 		return errors.New("drop isolated replication slot failed")
 	}
-	h.slotCreated = false
+	h.slotsOwned = false
 	return nil
 }
 
