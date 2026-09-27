@@ -728,6 +728,9 @@ func (c *PushResponseLossCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	// An exchange holds mu while it waits for a proxy barrier, so release every
+	// barrier before acquiring mu.
+	c.recordProxyFailure(errors.New("React Native push-response-loss coordinator closed"))
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -735,7 +738,6 @@ func (c *PushResponseLossCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	c.recordProxyFailure(errors.New("React Native push-response-loss coordinator closed"))
 	shutdownErr := c.server.Shutdown(ctx)
 	listenErr := c.listener.Close()
 	if shutdownErr != nil {

@@ -724,6 +724,10 @@ func (c *RetentionReconnectCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	// An exchange holds mu while it waits for a proxy barrier, so release every
+	// barrier before acquiring mu.
+	c.recordProxyFailure(errors.New("React Native retention-reconnect coordinator closed"))
+	c.releaseFault()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -731,7 +735,6 @@ func (c *RetentionReconnectCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	c.releaseFault()
 	shutdownErr := c.server.Shutdown(ctx)
 	listenerErr := c.listener.Close()
 	if shutdownErr != nil {

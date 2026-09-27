@@ -317,6 +317,11 @@ type PendingCycleCoordinator struct {
 	retryPullRecorded       bool
 	materializationSignaled bool
 
+	// closing ends every barrier wait. An exchange holds mu while it waits, so
+	// Close must end those waits before it can acquire mu.
+	closing     chan struct{}
+	closingOnce sync.Once
+
 	mu        sync.Mutex
 	prepared  bool
 	closed    bool
@@ -433,7 +438,8 @@ func NewPendingCycleCoordinator(config PendingCycleCoordinatorConfig) (*PendingC
 		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
 		nextSeq: 1, captures: make(map[pendingCycleStage]finalCapture), states: make(map[pendingCycleStage]scenarios.PendingCycleNativeState),
 		initialPushDone: make(chan struct{}), capturePendingDone: make(chan struct{}), retryPullDone: make(chan struct{}), materializationDone: make(chan struct{}),
-		server: &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
+		closing: make(chan struct{}),
+		server:  &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
 	}
 	coordinator.server.Handler = coordinator
 	return coordinator, nil
@@ -613,6 +619,7 @@ func (c *PendingCycleCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	c.closingOnce.Do(func() { close(c.closing) })
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -1773,6 +1780,8 @@ func pendingCycleValidateHTTPWire(scenario scenarios.Scenario, stepID scenarios.
 	return nil
 }
 
+var errPendingCycleClosed = errors.New("React Native pending-cycle coordinator closed")
+
 func (c *PendingCycleCoordinator) waitForInitialPush(ctx context.Context) error {
 	if c == nil || ctx == nil || c.initialPushDone == nil {
 		return errCoordinatorUnavailable
@@ -1780,6 +1789,8 @@ func (c *PendingCycleCoordinator) waitForInitialPush(ctx context.Context) error 
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native pending-cycle accepted push: %w", ctx.Err())
+	case <-c.closing:
+		return errPendingCycleClosed
 	case <-c.initialPushDone:
 	}
 	c.proxyMu.Lock()
@@ -1798,6 +1809,8 @@ func (c *PendingCycleCoordinator) waitForCapturePending(ctx context.Context) err
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native pending-cycle capture-pending pull: %w", ctx.Err())
+	case <-c.closing:
+		return errPendingCycleClosed
 	case <-c.capturePendingDone:
 	}
 	return c.capturePendingResponseError()
@@ -1810,6 +1823,8 @@ func (c *PendingCycleCoordinator) waitForRetryPull(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native pending-cycle retry pull: %w", ctx.Err())
+	case <-c.closing:
+		return errPendingCycleClosed
 	case <-c.retryPullDone:
 	}
 	return c.retryPullResponseError()
