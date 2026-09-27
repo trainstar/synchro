@@ -948,20 +948,16 @@ func TestRealIssue49PortableSeedScopeContinuationAndTokenBindings(t *testing.T) 
 	if err != nil {
 		t.Fatalf("acquire held-compaction connect connection: %v", err)
 	}
-	defer contender.Close()
 	type heldConnect struct {
 		response string
 		err      error
 	}
 	connectDone := make(chan heldConnect, 1)
+	contenderOpen := false
 	connectStarted := false
 	joined := false
 	contenderCtx, contenderCancel := context.WithTimeout(ctx, time.Minute)
 	defer contenderCancel()
-	if _, err := contender.ExecContext(ctx, "BEGIN ISOLATION LEVEL READ COMMITTED"); err != nil {
-		t.Fatalf("begin held-compaction connect: %v", err)
-	}
-	contenderOpen := true
 	defer func() {
 		// Release A before B is canceled and joined, so B can finish on every failure path.
 		releaseCompactor()
@@ -974,11 +970,21 @@ func TestRealIssue49PortableSeedScopeContinuationAndTokenBindings(t *testing.T) 
 				t.Errorf("held-compaction connect did not stop during cleanup")
 			}
 		}
-		// A running query still owns the connection, so rollback waits for the join.
-		if contenderOpen && (joined || !connectStarted) {
+		// A query that did not join still owns the connection, so rollback and Close could block.
+		if connectStarted && !joined {
+			return
+		}
+		if contenderOpen {
 			rollbackIssue49Transaction(t, contender, "held-compaction connect")
 		}
+		if err := contender.Close(); err != nil {
+			t.Errorf("close held-compaction connect connection: %v", err)
+		}
 	}()
+	if _, err := contender.ExecContext(ctx, "BEGIN ISOLATION LEVEL READ COMMITTED"); err != nil {
+		t.Fatalf("begin held-compaction connect: %v", err)
+	}
+	contenderOpen = true
 	var contenderPID int64
 	var contenderIsolation string
 	if err := contender.QueryRowContext(ctx, "SELECT pg_backend_pid(), current_setting('transaction_isolation')").Scan(&contenderPID, &contenderIsolation); err != nil {
@@ -1155,21 +1161,32 @@ func requireIssue49PortabilityCycleKeepsAdoptedFloor(
 	if err != nil {
 		t.Fatalf("acquire portability-cycle export connection: %v", err)
 	}
-	defer export.Close()
-	if _, err := export.ExecContext(ctx, "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE"); err != nil {
-		t.Fatalf("begin portability-cycle export: %v", err)
-	}
-	exportOpen := true
+	exportOpen, exportReleased := false, false
 	defer func() {
+		if exportReleased {
+			return
+		}
 		if exportOpen {
 			rollbackIssue49Transaction(t, export, "portability-cycle export")
 		}
+		if err := export.Close(); err != nil {
+			t.Errorf("close portability-cycle export connection: %v", err)
+		}
 	}()
+	if _, err := export.ExecContext(ctx, "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE"); err != nil {
+		t.Fatalf("begin portability-cycle export: %v", err)
+	}
+	exportOpen = true
 	manifest := issue49QueryJSONObject(t, ctx, export, "SELECT synchro.synchro_portable_seed_manifest(1)")
 	if _, err := export.ExecContext(ctx, "COMMIT"); err != nil {
 		t.Fatalf("commit portability-cycle export: %v", err)
 	}
 	exportOpen = false
+	// The manifest is local data now, so the export connection returns before the gates start.
+	exportReleased = true
+	if err := export.Close(); err != nil {
+		t.Fatalf("return the committed portability-cycle export connection: %v", err)
+	}
 	exported, _ := manifest["portable_scopes"].([]any)
 	receipts := map[string]any{}
 	for _, raw := range exported {
