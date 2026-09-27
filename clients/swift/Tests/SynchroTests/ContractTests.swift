@@ -269,6 +269,90 @@ final class ContractTests: XCTestCase {
         XCTAssertThrowsError(try rejectedResponse(terminal, request: request).validate(for: request))
     }
 
+    func testAtomicPushResponseHasOneOfTheTwoAtomicForms() throws {
+        let request = makeAtomicPushRequest(atomic: true)
+        let (first, second, third) = (request.mutations[0], request.mutations[1], request.mutations[2])
+        func response(accepted: [AcceptedMutation] = [], rejected: [RejectedMutation] = []) -> PushResponse {
+            PushResponse(batchID: request.batchID, serverTime: "2026-01-01T00:00:00.000000Z", accepted: accepted, rejected: rejected)
+        }
+
+        try response(accepted: [applied(first), applied(second), applied(third)]).validate(for: request)
+        try response(rejected: [groupRejected(first, request), conflict(second, request), groupRejected(third, request)])
+            .validate(for: request)
+        try response(rejected: [policyRejected(first, request), groupRejected(second, request), groupRejected(third, request)])
+            .validate(for: request)
+
+        XCTAssertThrowsError(try response(
+            accepted: [applied(first)],
+            rejected: [conflict(second, request), groupRejected(third, request)]
+        ).validate(for: request))
+        XCTAssertThrowsError(try response(
+            accepted: [applied(first), applied(second)],
+            rejected: [conflict(third, request)]
+        ).validate(for: request))
+        XCTAssertThrowsError(try response(
+            rejected: [groupRejected(first, request), groupRejected(second, request), groupRejected(third, request)]
+        ).validate(for: request))
+        XCTAssertThrowsError(try response(
+            rejected: [conflict(first, request), policyRejected(second, request), groupRejected(third, request)]
+        ).validate(for: request))
+        var retryable = groupRejected(first, request)
+        retryable.retryable = false
+        XCTAssertThrowsError(try response(
+            rejected: [retryable, conflict(second, request), groupRejected(third, request)]
+        ).validate(for: request))
+        var otherSchema = groupRejected(first, request)
+        otherSchema.outcomeSchema = SchemaRef(version: 2, hash: protocolTestSchemaHash)
+        XCTAssertThrowsError(try response(
+            rejected: [otherSchema, conflict(second, request), groupRejected(third, request)]
+        ).validate(for: request))
+        var groupConflict = groupRejected(first, request)
+        groupConflict.status = .conflict
+        XCTAssertThrowsError(try response(
+            rejected: [groupConflict, conflict(second, request), groupRejected(third, request)]
+        ).validate(for: request))
+    }
+
+    func testNonAtomicPushResponseNeverContainsAtomicBatchRejected() throws {
+        let request = makeAtomicPushRequest(atomic: nil)
+        let (first, second, third) = (request.mutations[0], request.mutations[1], request.mutations[2])
+        func response(rejected: [RejectedMutation]) -> PushResponse {
+            PushResponse(batchID: request.batchID, serverTime: "2026-01-01T00:00:00.000000Z", accepted: [], rejected: rejected)
+        }
+
+        try response(rejected: [conflict(first, request), policyRejected(second, request), policyRejected(third, request)])
+            .validate(for: request)
+        XCTAssertThrowsError(try response(
+            rejected: [conflict(first, request), groupRejected(second, request), groupRejected(third, request)]
+        ).validate(for: request))
+    }
+
+    func testAtomicMemberIsEncodedOnlyWhenTrue() throws {
+        let encoder = JSONEncoder.synchroEncoder()
+        let ordinary = try encoder.encode(makeAtomicPushRequest(atomic: nil))
+        let atomic = try encoder.encode(makeAtomicPushRequest(atomic: true))
+        let ordinaryObject = try XCTUnwrap(JSONSerialization.jsonObject(with: ordinary) as? [String: Any])
+
+        XCTAssertEqual(
+            Set(ordinaryObject.keys),
+            ["batch_id", "client_generation", "client_id", "mutations", "schema"]
+        )
+        XCTAssertEqual(
+            String(decoding: atomic, as: UTF8.self).replacingOccurrences(of: #""atomic":true,"#, with: ""),
+            String(decoding: ordinary, as: UTF8.self)
+        )
+        XCTAssertNotEqual(atomic, ordinary)
+
+        // A historical authored schema keeps the request valid with no synced tables.
+        var request = makeAtomicPushRequest(atomic: true)
+        request.schema = SchemaRef(version: 2, hash: protocolTestSchemaHash)
+        try request.validate(syncedTables: [])
+        request.atomic = nil
+        try request.validate(syncedTables: [])
+        request.atomic = false
+        XCTAssertThrowsError(try request.validate(syncedTables: []))
+    }
+
     func testSchemaIncompatibleDeleteAllowsEmptyFieldIDs() throws {
         let deleteRequest = makePushRequest(operation: .delete)
         let deleteMutation = deleteRequest.mutations[0]
@@ -608,6 +692,76 @@ final class ContractTests: XCTestCase {
             schema: schema,
             mutations: [mutation]
         )
+    }
+
+    private func makeAtomicPushRequest(atomic: Bool?) -> PushRequest {
+        let schema = SchemaRef(version: 1, hash: protocolTestSchemaHash)
+        return PushRequest(
+            clientID: "client-1",
+            clientGeneration: 1,
+            batchID: "00000000-0000-5000-8000-000000000009",
+            schema: schema,
+            atomic: atomic,
+            mutations: (1...3).map { index in
+                Mutation(
+                    mutationID: "00000000-0000-5000-8000-00000000000\(index)",
+                    table: "table-orders",
+                    op: .update,
+                    pk: ["field-id": AnyCodable("r\(index)")],
+                    authoredSchema: schema,
+                    baseVersion: "base-version",
+                    clientVersion: "2026-01-01T00:00:00.000000Z",
+                    columns: ["field-title": AnyCodable("Title")]
+                )
+            }
+        )
+    }
+
+    private func applied(_ mutation: Mutation) -> AcceptedMutation {
+        AcceptedMutation(
+            mutationID: mutation.mutationID,
+            table: mutation.table,
+            pk: mutation.pk,
+            outcomeSchema: mutation.authoredSchema,
+            status: .applied,
+            serverRow: ["field-id": mutation.pk["field-id"]!, "field-title": AnyCodable("Title")],
+            rowChecksum: validChecksum,
+            serverVersion: "server-version"
+        )
+    }
+
+    private func rejected(
+        _ mutation: Mutation,
+        _ request: PushRequest,
+        status: MutationStatus,
+        code: MutationRejectionCode,
+        message: String
+    ) -> RejectedMutation {
+        RejectedMutation(
+            mutationID: mutation.mutationID,
+            table: mutation.table,
+            pk: mutation.pk,
+            outcomeSchema: request.schema,
+            status: status,
+            code: code,
+            message: message,
+            retryable: nil,
+            serverRow: nil,
+            rowChecksum: nil,
+            serverVersion: nil
+        )
+    }
+
+    private func conflict(_ mutation: Mutation, _ request: PushRequest) -> RejectedMutation {
+        rejected(mutation, request, status: .conflict, code: .versionConflict, message: "conflict")
+    }
+
+    private func policyRejected(_ mutation: Mutation, _ request: PushRequest) -> RejectedMutation {
+        rejected(mutation, request, status: .rejectedTerminal, code: .policyRejected, message: "policy rejected")
+    }
+
+    private func groupRejected(_ mutation: Mutation, _ request: PushRequest) -> RejectedMutation {
+        rejected(mutation, request, status: .rejectedTerminal, code: .atomicBatchRejected, message: "atomic batch rejected")
     }
 
     private func rejectedResponse(_ outcome: RejectedMutation, request: PushRequest) -> PushResponse {

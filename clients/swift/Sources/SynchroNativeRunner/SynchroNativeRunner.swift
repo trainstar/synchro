@@ -1564,6 +1564,8 @@ private func rawCallErrorCategory(_ error: Error) -> String {
         return "already_started"
     case .notStarted:
         return "not_started"
+    case .atomicGroupInvalid:
+        return "atomic_group_invalid"
     }
 }
 

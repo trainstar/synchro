@@ -199,6 +199,15 @@ final class SynchroDatabase: @unchecked Sendable {
         return result
     }
 
+    func applicationAtomicWriteTransaction<T>(
+        validate: (GRDB.Database, String) throws -> Void,
+        _ block: (ApplicationTransaction) throws -> T
+    ) throws -> T {
+        let result = try applicationDatabase.atomicWrite(validate: validate, block)
+        notifyDatabaseChange()
+        return result
+    }
+
     func updateApplicationSyncedTables(_ tables: [LocalSchemaTable]) {
         applicationPolicy.updateSyncedTables(tables)
         applicationDatabase.updateSyncedWritableColumns(tables)
@@ -643,6 +652,7 @@ final class SynchroDatabase: @unchecked Sendable {
                     normalized_mutation_id TEXT,
                     sealed_batch_id TEXT,
                     sealed_ordinal INTEGER,
+                    atomic_group_id TEXT,
                     accepted_json TEXT,
                     rejected_json TEXT,
                     created_at TEXT NOT NULL,
@@ -914,6 +924,13 @@ final class SynchroDatabase: @unchecked Sendable {
         }
         // Earlier capture triggers use exceeds_push_limit mutations as same-row dependencies.
         migrator.registerMigration("synchro_v17_push_limit_capture_dependency") { db in
+            try Self.regenerateCaptureTriggers(db)
+        }
+        migrator.registerMigration("synchro_v18_atomic_groups") { db in
+            if try db.tableExists("_synchro_pending_changes"),
+               try !db.columns(in: "_synchro_pending_changes").contains(where: { $0.name == "atomic_group_id" }) {
+                try db.execute(sql: "ALTER TABLE _synchro_pending_changes ADD COLUMN atomic_group_id TEXT")
+            }
             try Self.regenerateCaptureTriggers(db)
         }
         try migrator.migrate(dbPool)
