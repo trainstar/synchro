@@ -94,6 +94,13 @@ func newDatasetRuntime(t *testing.T, ctx context.Context, harness *blackbox.Harn
 	}
 }
 
+// with returns a runtime that reports failures to t.
+func (runtime *datasetRuntime) with(t *testing.T) *datasetRuntime {
+	copied := *runtime
+	copied.t = t
+	return &copied
+}
+
 // post sends one protocol request. It returns the status and the raw body.
 func (runtime *datasetRuntime) post(token, path string, payload any) (int, []byte, error) {
 	body, err := json.Marshal(payload)

@@ -44,24 +44,31 @@ func TestRealDatasetAuthoredFlow(t *testing.T) {
 
 	requireDatasetCheckpoint(t, runtime, clients, dataset.AuthoredInitial)
 
+	// Each subtest reports its own failure, so a failed incremental read does
+	// not hide the later rebuild evidence.
 	for _, step := range dataset.AuthoredHistory {
 		runtime.applyTransaction([]dataset.Statement{{SQL: step.SQL}})
 		runtime.applyAssignments(step.Grants, step.Revokes)
 		runtime.waitMaterialized(time.Minute)
-		// Every client reads each history step incrementally.
+		t.Run("incremental/"+step.Name, func(t *testing.T) {
+			stepRuntime := runtime.with(t)
+			for _, user := range dataset.AuthoredUsers {
+				stepRuntime.reconnect(clients[user])
+				stepRuntime.pull(clients[user])
+			}
+		})
+	}
+	t.Run("rebuild-final", func(t *testing.T) {
+		finalRuntime := runtime.with(t)
+		fresh := make(map[string]*datasetClient, len(dataset.AuthoredUsers))
 		for _, user := range dataset.AuthoredUsers {
-			t.Logf("history step %s: %s reconnects and pulls", step.Name, user)
-			runtime.reconnect(clients[user])
-			runtime.pull(clients[user])
+			fresh[user] = finalRuntime.connect(user, "dataset-rebuild-"+user)
 		}
-	}
-	requireDatasetCheckpoint(t, runtime, clients, dataset.AuthoredFinal)
-
-	fresh := make(map[string]*datasetClient, len(dataset.AuthoredUsers))
-	for _, user := range dataset.AuthoredUsers {
-		fresh[user] = runtime.connect(user, "dataset-rebuild-"+user)
-	}
-	requireDatasetCheckpoint(t, runtime, fresh, dataset.AuthoredFinal)
+		requireDatasetCheckpoint(t, finalRuntime, fresh, dataset.AuthoredFinal)
+	})
+	t.Run("incremental-final", func(t *testing.T) {
+		requireDatasetCheckpoint(t, runtime.with(t), clients, dataset.AuthoredFinal)
+	})
 }
 
 // requireDatasetManifest checks the synced fields and portable types that the
