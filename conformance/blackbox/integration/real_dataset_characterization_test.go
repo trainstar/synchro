@@ -108,6 +108,10 @@ type characterizationResult struct {
 }
 
 func TestRealDatasetCharacterization(t *testing.T) {
+	t.Run("assertion", runDatasetCharacterization)
+}
+
+func runDatasetCharacterization(t *testing.T) {
 	seed, err := strconv.ParseUint(os.Getenv("DATASET_SEED"), 10, 64)
 	if err != nil {
 		t.Fatalf("DATASET_SEED is invalid: %v", err)
