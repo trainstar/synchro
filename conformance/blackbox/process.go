@@ -3521,64 +3521,6 @@ func (executor *OperatorExecutor) InjectRegisteredTruncate(ctx context.Context) 
 	return executor.exec(ctx, "TRUNCATE TABLE public.cf_items")
 }
 
-// InjectDecoderMetadataChange commits one source transaction while the
-// initialized decoder is blocked from refreshing its relation metadata.
-func (executor *OperatorExecutor) InjectDecoderMetadataChange(ctx context.Context, recordID string) (returnedErr error) {
-	if executor == nil || executor.harness == nil || !executor.harness.sourceReady ||
-		ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
-		return errors.New("decoder metadata control is invalid")
-	}
-	gate, err := executor.harness.acquireWALWorkerGate(ctx)
-	if err != nil {
-		return errors.New("fence WAL worker for decoder metadata control failed")
-	}
-	defer func() {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		returnedErr = errors.Join(returnedErr, gate.release(cleanupContext))
-	}()
-	// Let the queued worker refresh registry metadata before the fault changes it.
-	for {
-		var before, after int64
-		const activeGeneration = "SELECT generation FROM synchro.sync_registry_generations WHERE state = 'active'"
-		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&before); err != nil {
-			return errors.New("read decoder registry generation before worker poll failed")
-		}
-		if err := gate.release(ctx); err != nil {
-			return errors.New("release decoder initialization gate failed")
-		}
-		gate, err = executor.harness.acquireWALWorkerGate(ctx)
-		if err != nil {
-			return errors.New("reacquire decoder initialization gate failed")
-		}
-		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&after); err != nil {
-			return errors.New("read decoder registry generation after worker poll failed")
-		}
-		if before == after {
-			break
-		}
-	}
-	transaction, err := gate.connection.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.New("begin decoder metadata control failed")
-	}
-	defer transaction.Rollback()
-	if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_items ALTER COLUMN value TYPE varchar(256)"); err != nil {
-		return errors.New("alter decoder metadata control relation failed")
-	}
-	if _, err := transaction.ExecContext(
-		ctx,
-		"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'decode-repair-source')",
-		recordID,
-	); err != nil {
-		return errors.New("insert decoder metadata control row failed")
-	}
-	if err := transaction.Commit(); err != nil {
-		return errors.New("commit decoder metadata control failed")
-	}
-	return nil
-}
-
 // RetryWALPoison requests the production same-position retry path.
 func (executor *OperatorExecutor) RetryWALPoison(ctx context.Context) (bool, error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil {

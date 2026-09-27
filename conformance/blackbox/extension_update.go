@@ -24,8 +24,24 @@ type ExtensionCatalogObservation struct {
 }
 
 // UpdateExtension installs the environment bundle over the update baseline
-// bundle, restarts PostgreSQL, and runs the documented update statement.
+// bundle, restarts PostgreSQL, runs the documented update statement, and then
+// requires capture readiness.
 func (h *Harness) UpdateExtension(ctx context.Context) (ExtensionUpdateResult, error) {
+	result, err := h.ApplyExtensionUpdate(ctx)
+	if err != nil {
+		return ExtensionUpdateResult{}, err
+	}
+	if err := h.FinishExtensionUpdate(ctx); err != nil {
+		return ExtensionUpdateResult{}, err
+	}
+	return result, nil
+}
+
+// ApplyExtensionUpdate installs the environment bundle over the update
+// baseline bundle, restarts PostgreSQL, and runs the documented update
+// statement. It does not require capture readiness, so a caller can observe
+// retained predecessor state before FinishExtensionUpdate.
+func (h *Harness) ApplyExtensionUpdate(ctx context.Context) (ExtensionUpdateResult, error) {
 	if h == nil || ctx == nil || !h.sourceReady || h.config.UpdateBaselineExtensionArtifact == "" ||
 		h.attached || h.extensionUpdated || h.adapter != nil {
 		return ExtensionUpdateResult{}, errors.New("isolated extension update is unavailable")
@@ -67,19 +83,32 @@ func (h *Harness) UpdateExtension(ctx context.Context) (ExtensionUpdateResult, e
 	if result.VersionAfterUpdate, err = readExtensionVersion(ctx, database); err != nil {
 		return ExtensionUpdateResult{}, err
 	}
+	return result, nil
+}
+
+// FinishExtensionUpdate waits for the WAL worker and capture readiness after
+// ApplyExtensionUpdate, then starts the adapter.
+func (h *Harness) FinishExtensionUpdate(ctx context.Context) error {
+	if h == nil || ctx == nil || !h.sourceReady || !h.extensionUpdated ||
+		h.extensionUpdateCompleted || h.adapter != nil {
+		return errors.New("isolated extension update completion is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("isolated extension update completion context expired")
+	}
 	if err := h.waitForWorker(ctx); err != nil {
-		return ExtensionUpdateResult{}, err
+		return err
 	}
 	if err := h.verifyCaptureReadiness(ctx); err != nil {
-		return ExtensionUpdateResult{}, err
+		return err
 	}
 	if !h.config.SkipAdapter {
 		if err := h.startAdapter(ctx); err != nil {
-			return ExtensionUpdateResult{}, err
+			return err
 		}
 	}
 	h.extensionUpdateCompleted = true
-	return result, nil
+	return nil
 }
 
 func readExtensionVersion(ctx context.Context, database *sql.DB) (string, error) {

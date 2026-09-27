@@ -3034,15 +3034,13 @@ fn update_candidate_staged_counts(
 fn preload_relations(
     client: &SpiClient<'_>,
     registry: &[TableRegistration],
-) -> Result<Vec<(RelationKey, u8, Vec<ColumnInfo>)>, String> {
+) -> Result<Vec<(RelationKey, Vec<ColumnInfo>)>, String> {
     let mut relations = Vec::with_capacity(registry.len());
     for registration in registry {
         let rows = client
             .select(
                 "SELECT a.attname::text AS name,
-                        (a.attnum = ANY(i.indkey)) AS is_key,
-                        a.atttypid::bigint AS type_oid,
-                        a.atttypmod AS type_modifier
+                        (a.attnum = ANY(i.indkey)) AS is_key
                  FROM pg_catalog.pg_attribute a
                  JOIN pg_catalog.pg_index i
                    ON i.indrelid = a.attrelid AND i.indisprimary
@@ -3071,21 +3069,7 @@ fn preload_relations(
                 .get_by_name::<bool, &str>("is_key")
                 .map_err(|_| "loading relation metadata failed".to_string())?
                 .unwrap_or(false);
-            let type_oid = row
-                .get_by_name::<i64, &str>("type_oid")
-                .map_err(|_| "loading relation metadata failed".to_string())?
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or_else(|| "relation metadata is incomplete".to_string())?;
-            let type_modifier = row
-                .get_by_name::<i32, &str>("type_modifier")
-                .map_err(|_| "loading relation metadata failed".to_string())?
-                .ok_or_else(|| "relation metadata is incomplete".to_string())?;
-            columns.push(ColumnInfo {
-                name,
-                is_key,
-                type_oid,
-                type_modifier,
-            });
+            columns.push(ColumnInfo { name, is_key });
         }
         if columns.is_empty() {
             return Err("relation metadata is incomplete".to_string());
@@ -3096,7 +3080,6 @@ fn preload_relations(
                 &registration.physical_relation,
                 registration.physical_relation_oid,
             ),
-            b'd',
             columns,
         ));
     }
