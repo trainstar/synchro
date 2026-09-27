@@ -1228,6 +1228,8 @@ const security49UnexpectedFunctionAuthoritySQL = `
 		('synchro_operator', 'synchro_unregister_shared_scope'),
 		('synchro_operator', 'synchro_grant_user_scope'),
 		('synchro_operator', 'synchro_revoke_user_scope'),
+		('synchro_operator', 'synchro_register_assignment_function'),
+		('synchro_operator', 'synchro_unregister_assignment_function'),
 		('synchro_operator', 'synchro_backfill_bucket_edges'),
 		('synchro_operator', 'synchro_compact'),
 		('synchro_operator', 'synchro_inject_client_retention_expiry'),

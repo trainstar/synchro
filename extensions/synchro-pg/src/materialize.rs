@@ -1279,7 +1279,7 @@ fn stage_table_edges(
     Ok((record_count, edge_count, batch_count))
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

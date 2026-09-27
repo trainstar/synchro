@@ -638,6 +638,16 @@ CREATE TABLE IF NOT EXISTS sync_user_scopes (
     PRIMARY KEY (user_id, scope_id)
 );
 
+CREATE TABLE IF NOT EXISTS sync_assignment_function (
+    singleton BOOLEAN PRIMARY KEY CHECK (singleton),
+    function_oid OID NOT NULL,
+    function_schema TEXT NOT NULL,
+    function_name TEXT NOT NULL,
+    max_scopes INTEGER NOT NULL CHECK (max_scopes BETWEEN 1 AND 1000),
+    definition_sha256 TEXT NOT NULL CHECK (definition_sha256 ~ '^[0-9a-f]{64}$'),
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS sync_scope_state (
     scope_id TEXT PRIMARY KEY,
     stream_generation TEXT NOT NULL,
@@ -2037,7 +2047,7 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:212
+-- synchro-pg/src/portable_seed.rs:215
 -- synchro_pg::portable_seed::synchro_grant_user_scope
 CREATE  FUNCTION "synchro_grant_user_scope"(
 	"p_user_id" TEXT, /* &str */
@@ -2049,7 +2059,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1098
+-- synchro-pg/src/health.rs:1105
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2092,7 +2102,7 @@ AS 'MODULE_PATHNAME', 'synchro_mark_stream_reset_snapshot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:328
+-- synchro-pg/src/portable_seed.rs:508
 -- synchro_pg::portable_seed::synchro_portable_seed_manifest
 CREATE  FUNCTION "synchro_portable_seed_manifest"(
 	"p_page_limit" INT DEFAULT 1000 /* i32 */
@@ -2103,7 +2113,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:501
+-- synchro-pg/src/portable_seed.rs:681
 -- synchro_pg::portable_seed::synchro_portable_seed_scope
 CREATE  FUNCTION "synchro_portable_seed_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2261,7 +2271,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1091
+-- synchro-pg/src/health.rs:1098
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2279,6 +2289,18 @@ CREATE  FUNCTION "synchro_rebuild"(
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/portable_seed.rs:293
+-- synchro_pg::portable_seed::synchro_register_assignment_function
+CREATE  FUNCTION "synchro_register_assignment_function"(
+	"p_function" TEXT, /* &str */
+	"p_max_scopes" INT DEFAULT 1000 /* i32 */
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
@@ -2310,7 +2332,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_membership_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:137
+-- synchro-pg/src/portable_seed.rs:141
 -- synchro_pg::portable_seed::synchro_register_shared_scope
 CREATE  FUNCTION "synchro_register_shared_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2363,7 +2385,7 @@ AS 'MODULE_PATHNAME', 'synchro_retry_wal_poison_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:244
+-- synchro-pg/src/portable_seed.rs:247
 -- synchro_pg::portable_seed::synchro_revoke_user_scope
 CREATE  FUNCTION "synchro_revoke_user_scope"(
 	"p_user_id" TEXT, /* &str */
@@ -2429,7 +2451,16 @@ AS 'MODULE_PATHNAME', 'synchro_tables_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:287
+-- synchro-pg/src/portable_seed.rs:329
+-- synchro_pg::portable_seed::synchro_unregister_assignment_function
+CREATE  FUNCTION "synchro_unregister_assignment_function"() RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_unregister_assignment_function_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/portable_seed.rs:467
 -- synchro_pg::portable_seed::synchro_unregister_shared_scope
 CREATE  FUNCTION "synchro_unregister_shared_scope"(
 	"p_scope_id" TEXT /* &str */
@@ -2460,7 +2491,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1930
+-- synchro-pg/src/lib.rs:1940
 -- finalize
 
 DO $roles$
@@ -2604,7 +2635,8 @@ BEGIN
                  'synchro_register_membership_dependency',
                  'synchro_unregister_table', 'synchro_register_shared_scope',
                  'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
-                 'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
+                 'synchro_revoke_user_scope', 'synchro_register_assignment_function',
+                 'synchro_unregister_assignment_function', 'synchro_backfill_bucket_edges',
                   'synchro_compact', 'synchro_inject_client_retention_expiry',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',

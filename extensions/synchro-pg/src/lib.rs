@@ -667,6 +667,16 @@ CREATE TABLE IF NOT EXISTS sync_user_scopes (
     PRIMARY KEY (user_id, scope_id)
 );
 
+CREATE TABLE IF NOT EXISTS sync_assignment_function (
+    singleton BOOLEAN PRIMARY KEY CHECK (singleton),
+    function_oid OID NOT NULL,
+    function_schema TEXT NOT NULL,
+    function_name TEXT NOT NULL,
+    max_scopes INTEGER NOT NULL CHECK (max_scopes BETWEEN 1 AND 1000),
+    definition_sha256 TEXT NOT NULL CHECK (definition_sha256 ~ '^[0-9a-f]{64}$'),
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS sync_scope_state (
     scope_id TEXT PRIMARY KEY,
     stream_generation TEXT NOT NULL,
@@ -2070,7 +2080,8 @@ BEGIN
                  'synchro_register_membership_dependency',
                  'synchro_unregister_table', 'synchro_register_shared_scope',
                  'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
-                 'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
+                 'synchro_revoke_user_scope', 'synchro_register_assignment_function',
+                 'synchro_unregister_assignment_function', 'synchro_backfill_bucket_edges',
                   'synchro_compact', 'synchro_inject_client_retention_expiry',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
@@ -2324,6 +2335,7 @@ mod tests {
     include!("pg_tests/retention.rs");
     include!("pg_tests/authorization.rs");
     include!("pg_tests/portable_seed.rs");
+    include!("pg_tests/assignment.rs");
     include!("pg_tests/health.rs");
     include!("pg_tests/stream_reset.rs");
     include!("pg_tests/capture_fence_order.rs");

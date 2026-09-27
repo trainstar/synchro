@@ -1605,6 +1605,7 @@ var issue49HealthCheckNames = []string{
 	"heartbeat",
 	"wal_byte_lag",
 	"wal_time_lag",
+	"assignment_function",
 }
 
 func openIssue49Admin(t *testing.T, ctx context.Context, harness *blackbox.Harness) *sql.DB {
