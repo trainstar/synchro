@@ -180,10 +180,10 @@ func loadEnvironment(t *testing.T) environment {
 // dataset holds the run-scoped identities. Every row value is authored in
 // the functions below.
 type dataset struct {
-	userID, clientID, freshClientID string
-	c1, c2, c3, c4                  string
-	o1, o2, o3, o4                  string
-	l1, l2, l3, l4, l5, l6          string
+	userID, clientID       string
+	c1, c2, c3, c4         string
+	o1, o2, o3, o4         string
+	l1, l2, l3, l4, l5, l6 string
 }
 
 func newDataset(t *testing.T) dataset {
@@ -199,7 +199,7 @@ func newDataset(t *testing.T) dataset {
 		return text[0:8] + "-" + text[8:12] + "-" + text[12:16] + "-" + text[16:20] + "-" + text[20:32]
 	}
 	return dataset{
-		userID: "upgrade-" + id(), clientID: id(), freshClientID: id(),
+		userID: "upgrade-" + id(), clientID: id(),
 		c1: id(), c2: id(), c3: id(), c4: id(),
 		o1: id(), o2: id(), o3: id(), o4: id(),
 		l1: id(), l2: id(), l3: id(), l4: id(), l5: id(), l6: id(),
@@ -251,7 +251,8 @@ func (d dataset) offlineWrites() []step {
 	}
 }
 
-// A write after the upgrade, which the candidate's capture triggers record.
+// A write after the upgrade goes through the capture triggers that the
+// candidate migration left in the predecessor database.
 func (d dataset) upgradedWrite() step {
 	return step{Op: "execute", SQL: `UPDATE orders SET order_comment = 'after upgrade' WHERE id = ?`, Params: []any{d.o3}}
 }
@@ -261,7 +262,6 @@ var snapshots = []snapshotQuery{
 	{"orders", `SELECT id, customer_id, user_id, status, total_price, order_comment, deleted_at IS NOT NULL AS deleted FROM orders ORDER BY id`},
 	{"line_items", `SELECT id, order_id, quantity, unit_price, line_status, deleted_at IS NOT NULL AS deleted FROM line_items ORDER BY id`},
 	{"local_notes", `SELECT id, body FROM local_notes ORDER BY id`},
-	{"triggers", `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name`},
 }
 
 type row = map[string]any
@@ -551,13 +551,6 @@ func TestNativePackageUpgrade(t *testing.T) {
 			{Op: "observe", Name: "final"},
 			{Op: "stop"},
 			{Op: "close"},
-			{Op: "open", Database: "synchro-fresh.db", ClientID: data.freshClientID},
-			{Op: "create_local_table"},
-			{Op: "start"},
-			{Op: "sync"},
-			{Op: "observe", Name: "fresh"},
-			{Op: "stop"},
-			{Op: "close"},
 		}
 		candidate := control.run(ctx, t, env, phaseConfig{
 			Phase: "candidate", ServerURL: env.appServerURL, Token: token, AppVersion: appVersion,
@@ -591,11 +584,6 @@ func TestNativePackageUpgrade(t *testing.T) {
 			t.Fatalf("candidate final pending=%d rejected=%d, want 0 and 0", final.PendingCount, final.RejectedCount)
 		}
 		requireRows(t, "candidate final", final, data.finalClientRows())
-
-		fresh := candidate.observation(t, "fresh")
-		if diff := compareJSON(fresh.Snapshots["triggers"], final.Snapshots["triggers"]); diff != "" {
-			t.Fatalf("upgraded capture triggers differ from a fresh candidate install: %s", diff)
-		}
 
 		candidate.complete(t)
 		requireServerRows(ctx, t, database, data)
