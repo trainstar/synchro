@@ -731,6 +731,11 @@
         )
         .unwrap();
         assert_eq!(in_pub, Some(true));
+        // A partitioned table needs root identity, and a new publication has no other subscriber.
+        let via_root: Option<bool> =
+            Spi::get_one("SELECT pubviaroot FROM pg_publication WHERE pubname = 'synchro_pub'")
+                .unwrap();
+        assert_eq!(via_root, Some(true));
     }
 
     #[pg_test]

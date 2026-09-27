@@ -229,6 +229,16 @@ SELECT
               ON member.prpubid = publication.oid
         )
         AND NOT EXISTS (
+            SELECT registry.physical_relation_oid
+            FROM active_registry
+            JOIN synchro.sync_registry registry
+              ON registry.registry_generation = active_registry.generation
+            EXCEPT
+            SELECT published.relid
+            FROM configured_publication publication
+            CROSS JOIN LATERAL pg_catalog.pg_get_publication_tables(publication.pubname::text) published
+        )
+        AND NOT EXISTS (
             SELECT member.prrelid
             FROM configured_publication publication
             JOIN pg_catalog.pg_publication_rel member
