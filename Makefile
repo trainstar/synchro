@@ -241,6 +241,8 @@ RN_PINNED_SEED ?= clients/react-native/example/seed.db
 RN_CONSUMER_SEED ?= clients/react-native/example/verification/seed.db
 RN_ANDROID_SEED_ASSET ?= clients/react-native/example/android/app/src/main/assets/seed.db
 CLIENT_INTEGRATION_SEED ?= $(CURDIR)/.ignore/client-integration/seed.db
+# CLIENT_DATASET=1 also prepares the synthetic training dataset (conformance/dataset).
+CLIENT_DATASET ?= 0
 REFRESH_RN_SEED_OUTPUT ?= $(CURDIR)/clients/react-native/example/seed.db
 GO_TEST_ARGS ?= -v -count=1 -p 1
 GO_TEST_PKGS ?= ./...
@@ -2169,7 +2171,7 @@ synchrod-pg-test-start synchrod-pg-test-serve: build build-seed verify-rn-seed
 		status=$$?; test "$$status" -eq 3 || exit "$$status"; \
 	fi; \
 	echo "Preparing client integration database..."; \
-	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..); \
+	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root .. $(if $(filter 1,$(CLIENT_DATASET)),--dataset)); \
 	if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
 		seed_output="$(REFRESH_RN_SEED_OUTPUT)"; \
 		echo "Refreshing client seed database..."; \
