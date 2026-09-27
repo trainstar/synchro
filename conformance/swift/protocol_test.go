@@ -3,6 +3,7 @@ package swift
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -364,38 +365,91 @@ func TestValidateRunnerCommandAcceptsPushBatchSizeForOpenOnly(t *testing.T) {
 }
 
 func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
-	errorCode := "retry_later"
-	complete := true
 	fingerprint := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	first := &transportObservationSnapshot{
-		Observations: []transportObservation{{
-			Sequence:                   1,
-			OperationClass:             "pull",
-			StatusCode:                 503,
-			ErrorCode:                  &errorCode,
-			Retryable:                  true,
-			DurationNanoseconds:        1,
-			CursorFingerprints:         []string{fingerprint},
-			CursorFingerprintsComplete: &complete,
-		}},
-		SequenceCheckpoint: 1,
+	scopeFingerprint := strings.Repeat("b", 64)
+	// Each call returns new values, so a mutation of one snapshot cannot change another.
+	accepted := func() *transportObservationSnapshot {
+		errorCode := "retry_later"
+		complete := true
+		clientGeneration := int64(1)
+		limit := 100
+		requestScopeFingerprint := scopeFingerprint
+		rebuildIDFingerprint := strings.Repeat("c", 64)
+		cursorPresent := false
+		responseBodySHA256 := strings.Repeat("d", 64)
+		return &transportObservationSnapshot{
+			Observations: []transportObservation{{
+				Sequence:                   1,
+				OperationClass:             "pull",
+				StatusCode:                 503,
+				ErrorCode:                  &errorCode,
+				Retryable:                  true,
+				DurationNanoseconds:        1,
+				CursorFingerprints:         []string{fingerprint},
+				CursorFingerprintsComplete: &complete,
+			}, {
+				Sequence:            2,
+				OperationClass:      "rebuild",
+				StatusCode:          200,
+				DurationNanoseconds: 1,
+				RequestFacts: &transportRequestFacts{
+					ClientGeneration:     &clientGeneration,
+					SchemaVersion:        1,
+					SchemaHash:           strings.Repeat("e", 64),
+					Limit:                &limit,
+					ScopeFingerprint:     &requestScopeFingerprint,
+					RebuildIDFingerprint: &rebuildIDFingerprint,
+					CursorPresent:        &cursorPresent,
+				},
+				RebuildResponseFacts: &transportRebuildResponseFacts{
+					RecordCount:        1,
+					HasMore:            true,
+					HasCursor:          true,
+					ScopeFingerprint:   scopeFingerprint,
+					ResponseBodySHA256: &responseBodySHA256,
+				},
+			}},
+			SequenceCheckpoint: 2,
+		}
 	}
+	if err := validateTransportObservation(accepted().Observations[1]); err != nil {
+		t.Fatalf("rebuild observation fixture is invalid: %v", err)
+	}
+	requireRetained := func(boundary string, process *runnerProcess) {
+		t.Helper()
+		stored, err := process.transportObservationsAfter(0)
+		if err != nil {
+			t.Fatalf("%s: read retained history: %v", boundary, err)
+		}
+		if want := accepted().Observations; !reflect.DeepEqual(stored, want) {
+			got, _ := json.Marshal(stored)
+			expected, _ := json.Marshal(want)
+			t.Errorf("%s changed retained history:\n got %s\nwant %s", boundary, got, expected)
+		}
+	}
+
+	input := accepted()
 	process := &runnerProcess{}
-	if err := process.acceptTransportObservations(first); err != nil {
-		t.Fatalf("accept observation: %v", err)
+	if err := process.acceptTransportObservations(input); err != nil {
+		t.Fatalf("accept observations: %v", err)
 	}
-	*first.Observations[0].ErrorCode = "changed"
-	first.Observations[0].CursorFingerprints[0] = "changed"
-	observations, err := process.transportObservationsAfter(0)
-	if err != nil {
-		t.Fatalf("read observation: %v", err)
+	*input.Observations[0].ErrorCode = "changed"
+	input.Observations[0].CursorFingerprints[0] = "changed"
+	*input.Observations[1].RequestFacts.ScopeFingerprint = "changed"
+	*input.Observations[1].RebuildResponseFacts.ResponseBodySHA256 = "changed"
+	requireRetained("accepted input mutation", process)
+
+	process = &runnerProcess{}
+	if err := process.acceptTransportObservations(accepted()); err != nil {
+		t.Fatalf("accept observations: %v", err)
 	}
-	if observations[0].ErrorCode == nil || *observations[0].ErrorCode != "retry_later" || observations[0].CursorFingerprints[0] != fingerprint {
-		t.Fatal("stored transport observation was mutable")
+	returned, err := process.transportObservationsAfter(0)
+	if err != nil || len(returned) != 2 {
+		t.Fatalf("read observations: %v, %d", err, len(returned))
 	}
-	observations[0].CursorFingerprints[0] = "returned mutation"
-	stored, err := process.transportObservationsAfter(0)
-	if err != nil || stored[0].CursorFingerprints[0] != fingerprint {
-		t.Fatal("returned transport observation changed stored state")
-	}
+	*returned[0].ErrorCode = "returned mutation"
+	returned[0].CursorFingerprints[0] = "returned mutation"
+	*returned[1].RequestFacts.ScopeFingerprint = "returned mutation"
+	*returned[1].RebuildResponseFacts.ResponseBodySHA256 = "returned mutation"
+	requireRetained("returned observation mutation", process)
 }

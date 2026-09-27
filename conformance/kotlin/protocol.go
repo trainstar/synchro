@@ -1126,6 +1126,7 @@ func cloneObservation(value TransportObservation) TransportObservation {
 	if value.RebuildResponseFacts != nil {
 		response := *value.RebuildResponseFacts
 		response.FinalScopeCursorFingerprint = clonePointer(response.FinalScopeCursorFingerprint)
+		response.ResponseBodySHA256 = clonePointer(response.ResponseBodySHA256)
 		copy.RebuildResponseFacts = &response
 	}
 	if value.PullResponseFacts != nil {
@@ -1140,6 +1141,7 @@ func cloneObservation(value TransportObservation) TransportObservation {
 		facts.ScopeSetVersion = clonePointer(facts.ScopeSetVersion)
 		facts.ScopeCount = clonePointer(facts.ScopeCount)
 		facts.Limit = clonePointer(facts.Limit)
+		facts.ScopeFingerprint = clonePointer(facts.ScopeFingerprint)
 		facts.RebuildIDFingerprint = clonePointer(facts.RebuildIDFingerprint)
 		facts.CursorFingerprint = clonePointer(facts.CursorFingerprint)
 		facts.CursorPresent = clonePointer(facts.CursorPresent)

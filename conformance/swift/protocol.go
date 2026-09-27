@@ -1371,6 +1371,7 @@ func cloneTransportObservation(value transportObservation) transportObservation 
 		facts.ScopeSetVersion = cloneOptionalInt64(value.RequestFacts.ScopeSetVersion)
 		facts.ScopeCount = cloneOptionalInt(value.RequestFacts.ScopeCount)
 		facts.Limit = cloneOptionalInt(value.RequestFacts.Limit)
+		facts.ScopeFingerprint = cloneOptionalString(value.RequestFacts.ScopeFingerprint)
 		facts.RebuildIDFingerprint = cloneOptionalString(value.RequestFacts.RebuildIDFingerprint)
 		facts.CursorFingerprint = cloneOptionalString(value.RequestFacts.CursorFingerprint)
 		facts.CursorPresent = cloneOptionalBool(value.RequestFacts.CursorPresent)
@@ -1380,6 +1381,7 @@ func cloneTransportObservation(value transportObservation) transportObservation 
 	if value.RebuildResponseFacts != nil {
 		facts := *value.RebuildResponseFacts
 		facts.FinalScopeCursorFingerprint = cloneOptionalString(value.RebuildResponseFacts.FinalScopeCursorFingerprint)
+		facts.ResponseBodySHA256 = cloneOptionalString(value.RebuildResponseFacts.ResponseBodySHA256)
 		copy.RebuildResponseFacts = &facts
 	}
 	if value.PullResponseFacts != nil {

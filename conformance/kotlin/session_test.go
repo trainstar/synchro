@@ -266,6 +266,72 @@ func TestSessionRejectsChangedOrBackwardCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSessionRetainsImmutableRebuildObservationFacts(t *testing.T) {
+	scopeFingerprint := strings.Repeat("b", 64)
+	// Each call returns new values, so a mutation of one result cannot change another.
+	accepted := func() []TransportObservation {
+		return []TransportObservation{{
+			Sequence:            1,
+			OperationClass:      "rebuild",
+			StatusCode:          200,
+			Retryable:           pointer(false),
+			DurationNanoseconds: 1,
+			RequestFacts: &TransportRequestFacts{
+				ClientGeneration:     pointer(int64(1)),
+				SchemaVersion:        1,
+				SchemaHash:           testDigest,
+				Limit:                pointer(100),
+				ScopeFingerprint:     pointer(scopeFingerprint),
+				RebuildIDFingerprint: pointer(strings.Repeat("c", 64)),
+				CursorPresent:        pointer(false),
+			},
+			RebuildResponseFacts: &TransportRebuildResponseFacts{
+				RecordCount:        1,
+				HasMore:            true,
+				HasCursor:          true,
+				ScopeFingerprint:   scopeFingerprint,
+				ResponseBodySHA256: pointer(strings.Repeat("d", 64)),
+			},
+		}}
+	}
+	if err := validateTransportSnapshot(testResult(accepted()).TransportObservations); err != nil {
+		t.Fatalf("rebuild observation fixture is invalid: %v", err)
+	}
+	requireRetained := func(boundary string, session *Session) {
+		t.Helper()
+		stored, err := session.ObservationsAfter(0)
+		if err != nil {
+			t.Fatalf("%s: read retained history: %v", boundary, err)
+		}
+		if want := accepted(); !reflect.DeepEqual(stored, want) {
+			got, _ := json.Marshal(stored)
+			expected, _ := json.Marshal(want)
+			t.Errorf("%s changed retained history:\n got %s\nwant %s", boundary, got, expected)
+		}
+	}
+
+	input := testResult(accepted())
+	session := &Session{}
+	if err := session.acceptResult(input); err != nil {
+		t.Fatalf("accept observations: %v", err)
+	}
+	*input.TransportObservations.Observations[0].RequestFacts.ScopeFingerprint = "changed"
+	*input.TransportObservations.Observations[0].RebuildResponseFacts.ResponseBodySHA256 = "changed"
+	requireRetained("accepted input mutation", session)
+
+	session = &Session{}
+	if err := session.acceptResult(testResult(accepted())); err != nil {
+		t.Fatalf("accept observations: %v", err)
+	}
+	returned, err := session.ObservationsAfter(0)
+	if err != nil || len(returned) != 1 {
+		t.Fatalf("read observations: %v, %d", err, len(returned))
+	}
+	*returned[0].RequestFacts.ScopeFingerprint = "returned mutation"
+	*returned[0].RebuildResponseFacts.ResponseBodySHA256 = "returned mutation"
+	requireRetained("returned observation mutation", session)
+}
+
 func TestBoundedOutputAndResponseLimit(t *testing.T) {
 	writer := &boundedWriter{maximum: 4}
 	if count, err := writer.Write([]byte("abcdef")); err != nil || count != 6 {
