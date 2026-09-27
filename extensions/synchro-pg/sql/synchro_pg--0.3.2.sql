@@ -1993,7 +1993,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_stream_reset_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:129
+-- synchro-pg/src/client.rs:131
 -- synchro_pg::client::synchro_connect
 CREATE  FUNCTION "synchro_connect"(
 	"p_user_id" TEXT, /* &str */
@@ -2005,7 +2005,7 @@ AS 'MODULE_PATHNAME', 'synchro_connect_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:59
+-- synchro-pg/src/client.rs:61
 -- synchro_pg::client::synchro_contract_info
 CREATE  FUNCTION "synchro_contract_info"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT

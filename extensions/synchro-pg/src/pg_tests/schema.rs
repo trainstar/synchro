@@ -3316,6 +3316,310 @@
         assert_eq!(checkpoints_after, checkpoints_before);
     }
 
+    /// Reads the connect-owned rows and the push replay ledger of one client.
+    fn connect_durable_state(user_id: &str, client_id: &str) -> Value {
+        let state: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'client', (
+                     SELECT to_jsonb(client) FROM sync_clients AS client
+                     WHERE client.user_id = $1 AND client.client_id = $2
+                 ),
+                 'history', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(history)
+                                ORDER BY history.client_generation,
+                                         history.scope_set_version,
+                                         history.scope_id), '[]'::jsonb)
+                     FROM sync_client_scope_history AS history
+                     WHERE history.user_id = $1 AND history.client_id = $2
+                 ),
+                 'checkpoints', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(checkpoint)
+                                ORDER BY checkpoint.bucket_id), '[]'::jsonb)
+                     FROM sync_client_checkpoints AS checkpoint
+                     WHERE checkpoint.user_id = $1 AND checkpoint.client_id = $2
+                 ),
+                 'push_batches', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(batch)
+                                ORDER BY batch.batch_id), '[]'::jsonb)
+                     FROM sync_push_batches AS batch
+                     WHERE batch.user_id = $1 AND batch.client_id = $2
+                 ),
+                 'push_mutations', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(mutation)
+                                ORDER BY mutation.mutation_id), '[]'::jsonb)
+                     FROM sync_push_mutations AS mutation
+                     WHERE mutation.user_id = $1 AND mutation.client_id = $2
+                 )
+             )",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap();
+        state.expect("durable connect state").0
+    }
+
+    #[pg_test]
+    fn test_connect_rejected_first_connect_claims_no_client_state() {
+        fn first_connect(
+            client_id: &str,
+            schema: &(i64, String),
+            scope_set_version: i64,
+            cursor: Value,
+        ) -> Value {
+            connect_client(
+                "first-user",
+                json!({
+                    "client_id": client_id,
+                    "platform": "ios",
+                    "app_version": "1.0.0",
+                    "protocol_version": 3,
+                    "schema": { "version": schema.0, "hash": schema.1 },
+                    "scope_set_version": scope_set_version,
+                    "known_scopes": { "user:first-user": { "cursor": cursor } }
+                }),
+            )
+        }
+
+        setup_test_tables();
+        let initial_schema = latest_schema_ref();
+        stage_orders_transition(false, true);
+        activate_pending_registry_for_test();
+        let current_schema = latest_schema_ref();
+        let no_client_state = json!({
+            "client": null,
+            "history": [],
+            "checkpoints": [],
+            "push_batches": [],
+            "push_mutations": []
+        });
+
+        // The prospective first connect has scope set version 1.
+        let too_high = first_connect("first-too-high", &current_schema, 2, Value::Null);
+        assert_eq!(too_high["error"]["code"], "invalid_request");
+        assert_eq!(
+            connect_durable_state("first-user", "first-too-high"),
+            no_client_state
+        );
+
+        // The schema change makes connect parse the presented cursor.
+        let forged_cursor = first_connect(
+            "first-forged-cursor",
+            &initial_schema,
+            1,
+            json!("forged-cursor"),
+        );
+        assert_eq!(forged_cursor["error"]["code"], "invalid_request");
+        assert_eq!(
+            connect_durable_state("first-user", "first-forged-cursor"),
+            no_client_state
+        );
+
+        // A premature claim would reject these corrected first connects.
+        let retried = first_connect("first-too-high", &current_schema, 1, Value::Null);
+        assert!(retried.get("error").is_none(), "{retried}");
+        assert_eq!(retried["client_generation"], 1);
+        assert_eq!(retried["scope_set_version"], 1);
+        let retried_cursor = first_connect("first-forged-cursor", &initial_schema, 1, Value::Null);
+        assert!(retried_cursor.get("error").is_none(), "{retried_cursor}");
+        assert_eq!(retried_cursor["schema"]["action"], "replace");
+        assert_eq!(
+            retried_cursor["scope_cursor_updates"],
+            json!({ "user:first-user": null })
+        );
+    }
+
+    #[pg_test]
+    fn test_connect_rejections_preserve_existing_client_state() {
+        fn existing_connect(
+            schema: &(i64, String),
+            platform: &str,
+            app_version: &str,
+            scope_set_version: i64,
+            known_scopes: &[&str],
+        ) -> Value {
+            let known_scopes: serde_json::Map<String, Value> = known_scopes
+                .iter()
+                .map(|scope| (scope.to_string(), json!({ "cursor": null })))
+                .collect();
+            connect_client(
+                "atomic-user",
+                json!({
+                    "client_id": "atomic-client",
+                    "client_generation": 1,
+                    "platform": platform,
+                    "app_version": app_version,
+                    "protocol_version": 3,
+                    "schema": { "version": schema.0, "hash": schema.1 },
+                    "scope_set_version": scope_set_version,
+                    "known_scopes": known_scopes
+                }),
+            )
+        }
+        fn history_rows(state: &Value, generation: i64) -> Vec<Value> {
+            state["history"]
+                .as_array()
+                .expect("history rows")
+                .iter()
+                .filter(|row| row["client_generation"] == generation)
+                .cloned()
+                .collect()
+        }
+
+        setup_test_tables();
+        let user_id = "atomic-user";
+        let client_id = "atomic-client";
+        let identity = "user:atomic-user";
+        register_client(user_id, client_id);
+        Spi::run_with_args(
+            "SELECT synchro_grant_user_scope($1, $2)",
+            &[user_id.into(), "team:alpha".into()],
+        )
+        .unwrap();
+        let schema = latest_schema_ref();
+        let assigned = existing_connect(&schema, "test", "1.0.0", 1, &[identity]);
+        assert_eq!(assigned["scope_set_version"], 2, "{assigned}");
+        assert_eq!(assigned["scopes"]["add"][0]["id"], "team:alpha");
+
+        let record_id = "40000000-0000-4000-8000-000000000001";
+        let pushed = push_client(
+            user_id,
+            client_id,
+            "atomic-replay",
+            vec![push_mutation(
+                (user_id, client_id),
+                "atomic-replay",
+                "test_orders",
+                "insert",
+                record_id,
+                None,
+                Some(&[("user_id", json!(user_id)), ("title", json!("atomic"))]),
+            )],
+        );
+        assert_eq!(pushed.json["accepted"][0]["status"], "applied");
+        Spi::run_with_args(
+            "UPDATE sync_client_checkpoints
+             SET position_kind = 'effect', commit_lsn = '0/10',
+                 event_ordinal = 1, effect_ordinal = 0
+             WHERE user_id = $1 AND client_id = $2 AND bucket_id = $3",
+            &[user_id.into(), client_id.into(), identity.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "UPDATE sync_clients
+             SET generation_created_at = now() - interval '2 days',
+                 last_acknowledged_at = now() - interval '1 day',
+                 updated_at = now() - interval '1 day'
+             WHERE user_id = $1 AND client_id = $2",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap();
+        // The server assignment change makes the prospective scope set version 3.
+        Spi::run_with_args(
+            "SELECT synchro_revoke_user_scope($1, $2)",
+            &[user_id.into(), "team:alpha".into()],
+        )
+        .unwrap();
+
+        let before = connect_durable_state(user_id, client_id);
+        assert_eq!(before["client"]["client_generation"], 1);
+        assert_eq!(before["client"]["scope_set_version"], 2);
+        assert_eq!(before["client"]["bucket_subs"], json!(["team:alpha", identity]));
+        assert_eq!(before["client"]["platform"], "test");
+        assert_eq!(before["history"].as_array().map(Vec::len), Some(2));
+        assert_eq!(before["checkpoints"][1]["bucket_id"], identity);
+        assert_eq!(before["checkpoints"][1]["position_kind"], "effect");
+        assert_eq!(before["push_batches"].as_array().map(Vec::len), Some(1));
+        assert_eq!(before["push_mutations"].as_array().map(Vec::len), Some(1));
+
+        let too_high = existing_connect(&schema, "android", "2.0.0", 4, &[identity, "team:alpha"]);
+        assert_eq!(too_high["error"]["code"], "invalid_request");
+        assert_eq!(connect_durable_state(user_id, client_id), before);
+
+        let forged = existing_connect(
+            &schema,
+            "android",
+            "2.0.0",
+            2,
+            &[identity, "team:alpha", "team:forged"],
+        );
+        assert_eq!(forged["error"]["code"], "invalid_request");
+        assert_eq!(connect_durable_state(user_id, client_id), before);
+
+        Spi::run_with_args(
+            "UPDATE sync_clients
+             SET generation_created_at = now() - interval '40 days',
+                 last_acknowledged_at = now() - interval '35 days',
+                 generation_expires_at = now() - interval '1 day'
+             WHERE user_id = $1 AND client_id = $2",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap();
+        let expired = connect_durable_state(user_id, client_id);
+
+        let forged_after_expiry =
+            existing_connect(&schema, "android", "2.0.0", 2, &[identity, "team:forged"]);
+        assert_eq!(forged_after_expiry["error"]["code"], "invalid_request");
+        assert_eq!(connect_durable_state(user_id, client_id), expired);
+
+        // The expired generation's history classifies the revoked scope for removal.
+        let renewed = existing_connect(&schema, "test", "1.0.0", 2, &[identity, "team:alpha"]);
+        assert!(renewed.get("error").is_none(), "{renewed}");
+        assert_eq!(renewed["client_generation"], 2);
+        assert_eq!(renewed["scope_set_version"], 3);
+        assert_eq!(renewed["scopes"]["add"], json!([]));
+        assert_eq!(renewed["scopes"]["remove"], json!(["team:alpha"]));
+        assert_eq!(renewed["scope_cursor_updates"], json!({ identity: null }));
+
+        let after = connect_durable_state(user_id, client_id);
+        assert_eq!(after["client"]["client_generation"], 2);
+        assert_eq!(after["client"]["scope_set_version"], 3);
+        assert_eq!(after["client"]["bucket_subs"], json!([identity]));
+        assert_eq!(after["client"]["generation_expires_at"], Value::Null);
+        assert_eq!(after["client"]["last_acknowledged_at"], Value::Null);
+        assert_ne!(
+            after["client"]["generation_created_at"],
+            expired["client"]["generation_created_at"]
+        );
+        assert_eq!(
+            after["client"]["accepted_write_epoch"],
+            expired["client"]["accepted_write_epoch"]
+        );
+        assert_eq!(history_rows(&after, 1), history_rows(&expired, 1));
+        let renewed_history: Vec<Value> = history_rows(&after, 2)
+            .iter()
+            .map(|row| {
+                json!({
+                    "scope_id": row["scope_id"],
+                    "scope_set_version": row["scope_set_version"],
+                    "assigned": row["assigned"],
+                    "assignment_source": row["assignment_source"]
+                })
+            })
+            .collect();
+        assert_eq!(
+            renewed_history,
+            vec![json!({
+                "scope_id": identity,
+                "scope_set_version": 3,
+                "assigned": true,
+                "assignment_source": "identity"
+            })]
+        );
+        let renewed_checkpoints: Vec<Value> = after["checkpoints"]
+            .as_array()
+            .expect("renewed checkpoints")
+            .iter()
+            .map(|row| {
+                json!({ "bucket_id": row["bucket_id"], "position_kind": row["position_kind"] })
+            })
+            .collect();
+        assert_eq!(
+            renewed_checkpoints,
+            vec![json!({ "bucket_id": identity, "position_kind": "generation_start" })]
+        );
+        assert_eq!(after["push_batches"], expired["push_batches"]);
+        assert_eq!(after["push_mutations"], expired["push_mutations"]);
+    }
+
     #[pg_test]
     fn test_connect_serializes_with_pull_generation_renewal() {
         run_connect_generation_renewal_race(false);

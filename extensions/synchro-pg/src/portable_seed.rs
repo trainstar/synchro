@@ -1275,6 +1275,9 @@ fn validate_seed_receipts_inner(
         .select(
             "SELECT shared.scope_id, state.stream_generation,
                     state.membership_generation, state.retention_generation,
+                    state.floor_position_kind,
+                    state.floor_commit_lsn::text AS floor_commit_lsn,
+                    state.floor_event_ordinal, state.floor_effect_ordinal,
                     progress.registry_generation
              FROM sync_shared_scopes shared
              JOIN sync_scope_state state ON state.scope_id = shared.scope_id
@@ -1334,6 +1337,26 @@ fn validate_seed_receipts_inner(
             return Ok(None);
         };
         if position > materialized.position {
+            return Ok(None);
+        }
+        let floor_commit_lsn = row
+            .get_by_name::<String, &str>("floor_commit_lsn")
+            .map_err(|error| format!("reading portable seed floor commit LSN: {error}"))?;
+        let floor_event_ordinal = row
+            .get_by_name::<i64, &str>("floor_event_ordinal")
+            .map_err(|error| format!("reading portable seed floor event ordinal: {error}"))?;
+        let floor_effect_ordinal = row
+            .get_by_name::<i32, &str>("floor_effect_ordinal")
+            .map_err(|error| format!("reading portable seed floor effect ordinal: {error}"))?;
+        let floor = StreamPosition::from_sql_parts(
+            &required_text(&row, "floor_position_kind", "")?,
+            floor_commit_lsn.as_deref(),
+            floor_event_ordinal,
+            floor_effect_ordinal,
+        )?;
+        // Effects between this position and the retention floor are compacted,
+        // so the receipt cannot continue and the scope rebuilds.
+        if position < floor {
             return Ok(None);
         }
         positions.insert(scope_id, position);
