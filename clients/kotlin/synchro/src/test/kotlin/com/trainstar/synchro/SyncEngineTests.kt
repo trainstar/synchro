@@ -231,9 +231,10 @@ class SyncEngineTests {
         var startDuringStoppedPublication: Throwable? = null
         val callback = engine.onStatusChange { status ->
             if (status is SyncStatus.Stopped) {
-                startDuringStoppedPublication = runCatching {
-                    runBlocking { engine.start() }
-                }.exceptionOrNull()
+                // D-03 rejects an inline start, so an independent start observes the stop barrier.
+                startDuringStoppedPublication = CompletableFuture.supplyAsync {
+                    runCatching { runBlocking { engine.start() } }.exceptionOrNull()
+                }.get(5, TimeUnit.SECONDS)
             }
         }
         try {
