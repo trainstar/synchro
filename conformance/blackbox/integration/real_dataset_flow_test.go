@@ -127,12 +127,18 @@ func requireDatasetCheckpoint(t *testing.T, runtime *datasetRuntime, clients map
 			}
 		}
 	}
+	converged := true
 	for _, user := range dataset.AuthoredUsers {
 		assigned := runtime.assignedScopes(user)
 		if !slices.Equal(assigned, checkpoint.Assigned[user]) {
 			t.Fatalf("source assignment for %s = %v, hand-written %v", user, assigned, checkpoint.Assigned[user])
 		}
-		runtime.converge(clients[user], expected, time.Minute)
+		converged = t.Run(user, func(t *testing.T) {
+			runtime.with(t).converge(clients[user], expected, time.Minute)
+		}) && converged
+	}
+	if !converged {
+		t.FailNow()
 	}
 	for _, value := range checkpoint.Values {
 		key := value.Table + "/" + value.ID

@@ -388,10 +388,13 @@ func (runtime *datasetRuntime) pull(client *datasetClient) int {
 			Rebuild []string `json:"rebuild"`
 			HasMore bool     `json:"has_more"`
 		}
-		runtime.sync(client.Token, "/sync/pull", map[string]any{
+		status, data, err := runtime.post(client.Token, "/sync/pull", map[string]any{
 			"client_id": client.ID, "client_generation": client.Generation, "schema": json.RawMessage(client.Schema),
 			"scope_set_version": client.ScopeSetVersion, "scopes": scopes, "limit": 1000,
-		}, &response)
+		})
+		if err != nil || status != http.StatusOK || decodeDataset(data, &response) != nil {
+			runtime.t.Fatalf("dataset pull for %s status=%d err=%v body=%.400s", client.ID, status, err, data)
+		}
 		for _, change := range response.Changes {
 			client.store(change.Scope, change, runtime.t)
 		}
