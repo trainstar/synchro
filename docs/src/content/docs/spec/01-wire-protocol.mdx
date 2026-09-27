@@ -1148,7 +1148,7 @@ When more than one condition is present, the server uses this order:
 2. Apply protocol and required-runtime compatibility gates. Failure is `426 upgrade_required`.
 3. Parse and structurally validate the exact endpoint object. Connect uses `invalid_schema_reference` for its malformed schema reference; other structural failures use `invalid_request`.
 4. Reject irreversible client retirement with `409 client_retired`.
-5. For push only, perform completed batch and mutation replay lookup. Equal fingerprints replay exactly; unequal fingerprints return `409 idempotency_conflict`.
+5. For push only, perform completed batch and mutation replay lookup. Equal fingerprints replay exactly; unequal fingerprints return `409 idempotency_conflict`. An atomic request whose mutation has an equal fingerprint in a different batch returns `400 invalid_request`.
 6. Apply the current client-generation gate, then the current-schema gate for first execution. Connect renews an expired generation and performs its schema-action dispatch instead.
 7. For pull, validate incremental cursors. Authentic stale state becomes HTTP 200 rebuild dispatch; malformed, forged, or misbound state becomes `400 invalid_request`. For rebuild, authentic stale state becomes `409 rebuild_restart_required`; malformed, forged, or misbound state becomes `400 invalid_request`.
 8. Apply admission control. Failure is `429 retry_later`.
