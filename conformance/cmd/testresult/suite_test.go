@@ -340,6 +340,12 @@ func TestValidateSuiteResultBenchmarks(t *testing.T) {
 		return `{"Action":"output","Package":"example/bench"` + scope + `,"Output":"` + output + `\n"}`
 	}
 	measuredA := result("BenchmarkX/a", `BenchmarkX/a-8   \t      10\t     105.0 ns/op`)
+	// Only the initial cpu label is removed, so the duplicate rule cannot reject the late label.
+	cpuLabel := result("", `cpu: Test CPU`)
+	lateCPU := strings.Replace(benchmarkStream(measuredA, cpuLabel), cpuLabel+"\n", "", 1)
+	if strings.Count(lateCPU, cpuLabel) != 1 {
+		t.Fatalf("late cpu fixture has %d cpu labels, want 1", strings.Count(lateCPU, cpuLabel))
+	}
 
 	summary, err := validateSuiteResult(strings.NewReader(benchmarkStream(
 		// -cpu=1,8 with b.Log in b. Go scopes only the first result of a
@@ -469,16 +475,14 @@ func TestValidateSuiteResultBenchmarks(t *testing.T) {
 		},
 		{
 			name:  "metadata after the first benchmark",
-			input: benchmarkStream(measuredA, result("", `goos: linux`)),
+			input: lateCPU,
 			want:  "invalid benchmark metadata",
 		},
 		{
 			name: "metadata for another package",
-			input: eventStream(
-				`{"Action":"start","Package":"example/bench"}`,
-				`{"Action":"run","Package":"example/bench","Test":"TestUnit"}`,
-				`{"Action":"pass","Package":"example/bench","Test":"TestUnit"}`,
-				`{"Action":"output","Package":"example/bench","Output":"pkg: example/other\n"}`,
+			input: strings.Replace(
+				benchmarkStream(measuredA),
+				`"Output":"pkg: example/bench\n"`, `"Output":"pkg: example/other\n"`, 1,
 			),
 			want: "invalid benchmark metadata",
 		},
