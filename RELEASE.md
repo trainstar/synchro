@@ -173,7 +173,7 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 | Gate | Outcome |
 | --- | --- |
 | Candidate | Required source CI passes for the exact commit. |
-| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on all seven required support cells. |
+| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on every required support cell. |
 | Publish | One approval authorizes dependency-ordered publication. |
 | Public | Public bytes match the sealed payloads, and clean consumers resolve and build from public coordinates. |
 
@@ -238,19 +238,18 @@ The manifest records candidate environment resolution in `release-manifest.json`
 
 1. Verify the selected `master` commit and Candidate CI result.
 2. Build, seal, hash, and verify each distribution once.
-3. Run clean package installation and lifecycle checks.
-4. Complete every Package-gate cell.
-5. Wait for the protected `release` environment approval.
-6. Recheck the approved candidate and sealed identity.
-7. Attest the sealed files with the exact sealed release manifest.
-8. Verify the Central credentials and the npm trusted publisher for each unpublished registry.
-9. Create immutable `v<version>` and `api/go/v<version>` tags.
-10. Publish GitHub assets without marking them latest.
-11. Verify source and asset access.
-12. Publish Maven and verify public consumption.
-13. Publish npm directly under `latest` through trusted OIDC.
-14. Verify the exact public npm bytes, provenance, and clean React Native builds.
-15. Mark GitHub latest after all public checks pass.
+3. Run the clean package installation and lifecycle check on every required support cell.
+4. Wait for the protected `release` environment approval.
+5. Recheck the approved candidate and sealed identity.
+6. Attest the sealed files with the exact sealed release manifest.
+7. Verify the Central credentials and the npm trusted publisher for each unpublished registry.
+8. Create immutable `v<version>` and `api/go/v<version>` tags.
+9. Publish GitHub assets without marking them latest.
+10. Verify source and asset access.
+11. Publish Maven and verify public consumption.
+12. Publish npm directly under `latest` through trusted OIDC.
+13. Verify the exact public npm bytes, provenance, and clean React Native builds.
+14. Mark GitHub latest after all public checks pass.
 
 ## Success Evidence
 
