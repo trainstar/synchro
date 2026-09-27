@@ -2071,25 +2071,46 @@ class SyncEngineTests {
 
     @Test
     fun testStartupPushesChangeCapturedBeforeResumedPullBackoff() = runTest {
+        assertStartupPushesChangeCapturedBeforeResumedBackoff(RetryOperation.PULLING)
+    }
+
+    @Test
+    fun testStartupPushesChangeCapturedBeforeResumedRebuildBackoff() = runTest {
+        assertStartupPushesChangeCapturedBeforeResumedBackoff(RetryOperation.REBUILDING)
+    }
+
+    // The large debounce proves that the start itself pushes the captured change.
+    private suspend fun assertStartupPushesChangeCapturedBeforeResumedBackoff(resumeState: String) {
         val timing = BlockingRetryTiming(1_000L)
         val connectCalls = AtomicInteger()
-        val failPull = AtomicBoolean(false)
+        val failResumedOperation = AtomicBoolean(false)
         val pushedRecordIDs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val retryable503 = {
+            MockResponse()
+                .setResponseCode(503)
+                .setHeader("Retry-After", "60")
+                .setBody(RETRYABLE_503_ERROR_JSON)
+        }
         val (engine, db) = makeIntegrationEnv(
             maxRetryAttempts = 0,
+            pushDebounce = 3_600.0,
+            syncInterval = 3_600.0,
             retryTiming = timing,
         ) { request ->
             when {
                 request.path!!.endsWith("/sync/connect") -> {
                     mockResponse(if (connectCalls.incrementAndGet() == 1) connectJSON else connectResumeJSON)
                 }
-                request.path!!.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path!!.endsWith("/sync/rebuild") -> {
+                    if (resumeState == RetryOperation.REBUILDING && failResumedOperation.get()) {
+                        retryable503()
+                    } else {
+                        mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                    }
+                }
                 request.path!!.endsWith("/sync/pull") -> {
-                    if (failPull.get()) {
-                        MockResponse()
-                            .setResponseCode(503)
-                            .setHeader("Retry-After", "60")
-                            .setBody(RETRYABLE_503_ERROR_JSON)
+                    if (resumeState == RetryOperation.PULLING && failResumedOperation.get()) {
+                        retryable503()
                     } else {
                         mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                     }
@@ -2113,10 +2134,13 @@ class SyncEngineTests {
 
         try {
             engine.start()
-            failPull.set(true)
+            if (resumeState == RetryOperation.REBUILDING) {
+                db.execute("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL WHERE scope_id = ?", arrayOf(scopeID))
+            }
+            failResumedOperation.set(true)
             assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is RetryableError)
             timing.awaitNextSleep(2, TimeUnit.SECONDS)
-            assertEquals(RetryOperation.PULLING, requireNotNull(DurableBackoffStore.load(db)).resumeState)
+            assertEquals(resumeState, requireNotNull(DurableBackoffStore.load(db)).resumeState)
 
             engine.stop()
             db.execute(
@@ -2124,18 +2148,17 @@ class SyncEngineTests {
                 arrayOf("captured-while-stopped", "Stopped Street", "u1", "2026-01-01T10:00:00.000000Z"),
             )
             assertTrue(ChangeTracker(db).hasPendingChanges())
-            failPull.set(false)
+            failResumedOperation.set(false)
 
-            engine.start()
+            val initialSyncCompleted = CountDownLatch(1)
+            engine.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.countDown() }))
             timing.awaitNextSleep(2, TimeUnit.SECONDS)
             timing.releaseAt(61_000L)
 
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (ChangeTracker(db).hasPendingChanges() && System.nanoTime() < deadline) {
-                Thread.sleep(20)
-            }
+            assertTrue(initialSyncCompleted.await(5, TimeUnit.SECONDS))
             assertEquals(listOf("captured-while-stopped"), synchronized(pushedRecordIDs) { pushedRecordIDs.toList() })
             assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertNull(DurableBackoffStore.load(db))
         } finally {
             timing.releaseAt(61_000L)
             engine.stop()

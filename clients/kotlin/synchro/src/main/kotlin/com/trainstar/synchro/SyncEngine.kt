@@ -739,6 +739,9 @@ internal class SyncEngine(
                 val rebuilds = runPullLoop(replayRequestJSON = backoff.workIdentity)
                 completeRequestedRebuilds(rebuilds)
                 transitionTo(SyncStatus.Ready)
+                if (changeTracker.hasPendingChanges()) {
+                    runSyncCycle()
+                }
             }
             RetryOperation.REBUILDING -> {
                 val request = decodeBackoffRequest<RebuildRequest>(backoff.workIdentity)
@@ -746,6 +749,9 @@ internal class SyncEngine(
                 rebuildScope(request.scope, replayRequestJSON = backoff.workIdentity)
                 schemaManager.completeMigrationIfReady()
                 transitionTo(SyncStatus.Ready)
+                if (changeTracker.hasPendingChanges()) {
+                    runSyncCycle()
+                }
             }
             else -> throw SynchroError.InvalidResponse("durable backoff resume state is invalid")
         }
