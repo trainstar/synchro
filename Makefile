@@ -859,32 +859,9 @@ release-verify:
 
 release-consumer-artifacts: release-verify
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
-	@set -eu; \
-		release="$(abspath $(RELEASE_DIR))"; \
-		final="$(abspath $(RELEASE_CONSUMER_DIR))"; \
-		manifest_hash="$$(shasum -a 256 "$$release/release-manifest.json" | cut -d ' ' -f 1)"; \
-		if [ -d "$$final" ]; then \
-			test "$$(cat "$$final/.release-manifest.sha256")" = "$$manifest_hash"; \
-			exit 0; \
-		fi; \
-		stage="$$final.tmp.$$$$"; \
-		trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
-		test ! -e "$$final" || { echo "release consumer artifact path is not a directory: $$final" >&2; exit 1; }; \
-		mkdir -p "$$stage/apple/Synchro" "$$stage/maven" "$$stage/npm"; \
-		git archive --format=tar HEAD Package.swift Synchro.podspec LICENSE clients/swift/Sources \
-			| tar -xf - -C "$$stage/apple/Synchro"; \
-		test ! -e "$$stage/apple/Synchro/Package.resolved"; \
-		find "$$stage/apple/Synchro" -exec touch -t 202601010000 {} +; \
-		COPYFILE_DISABLE=1 tar -cf - -C "$$stage/apple" Synchro | gzip -n > "$$stage/apple/synchro-spm-$(VERSION).tar.gz"; \
-		python3 -m zipfile -e "$$release/artifacts/synchro-maven-$(VERSION).zip" "$$stage/maven"; \
-		cp "$$release/artifacts/trainstar-synchro-react-native-$(VERSION).tgz" "$$stage/npm/"; \
-		git clone --bare --quiet . "$$stage/source.git"; \
-		git --git-dir="$$stage/source.git" tag -f "v$(VERSION)" "$$(git rev-parse HEAD)"; \
-		git --git-dir="$$stage/source.git" tag -f "api/go/v$(VERSION)" "$$(git rev-parse HEAD)"; \
-		printf '%s\n' "$$manifest_hash" > "$$stage/.release-manifest.sha256"; \
-		mkdir -p "$$(dirname "$$final")"; \
-		mv "$$stage" "$$final"; \
-		trap - EXIT HUP INT TERM
+	@python3 scripts/release-artifacts.py consumer-inputs --release-dir "$(abspath $(RELEASE_DIR))" --version "$(VERSION)" \
+		--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
+		--repo-root "$(CURDIR)" --output "$(abspath $(RELEASE_CONSUMER_DIR))"
 
 release-run-support-cell:
 	@test -n "$(SUPPORT_CELL_ID)" || { echo "SUPPORT_CELL_ID is required" >&2; exit 1; }
