@@ -207,7 +207,7 @@ fn synchro_register_shared_scope(p_scope_id: &str, p_portable: default!(bool, "f
 }
 
 /// Grants one scope to one user. A granted scope is the only assignment a user
-/// can gain and lose. Connect reconciles the change on the user's next connect,
+/// can gain and lose. The user's next pull or connect reconciles the change,
 /// so this records the grant and nothing else.
 #[pg_extern]
 fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
@@ -239,8 +239,8 @@ fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
     });
 }
 
-/// Revokes one granted scope from one user. Connect reconciles the change on
-/// the user's next connect and leaves the scope's own state for other users.
+/// Revokes one granted scope from one user. The user's next pull or connect
+/// reconciles the change and leaves the scope's own state for other users.
 #[pg_extern]
 fn synchro_revoke_user_scope(p_user_id: &str, p_scope_id: &str) {
     validate_revoked_scope_identity(p_user_id, p_scope_id);

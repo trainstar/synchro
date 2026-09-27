@@ -964,11 +964,191 @@
                 (scope_id, json!({ "cursor": cursor }))
             })
             .collect::<serde_json::Map<String, Value>>();
+        let before = client_scope_state("u1", "c1");
         let resp = pull_client("u1", "c1", 1, Value::Object(scopes), 100);
 
+        assert_eq!(resp["scope_set_version"].as_i64(), Some(1), "{resp}");
         assert_eq!(resp["scope_updates"]["add"].as_array().unwrap().len(), 0);
         assert_eq!(resp["scope_updates"]["remove"].as_array().unwrap().len(), 0);
         assert!(resp["scope_cursors"]["user:u1"].as_str().is_some());
+        assert_eq!(client_scope_state("u1", "c1"), before);
+    }
+
+    /// Returns the durable scope state of one client. The row locator changes
+    /// on each update, and `now()` does not change inside one test transaction.
+    fn client_scope_state(user_id: &str, client_id: &str) -> Value {
+        Spi::get_one_with_args::<pgrx::JsonB>(
+            "SELECT jsonb_build_object(
+                 'client', (
+                     SELECT jsonb_build_object(
+                         'row', ctid::text,
+                         'updated_at', updated_at,
+                         'scope_set_version', scope_set_version,
+                         'bucket_subs', bucket_subs
+                     )
+                     FROM sync_clients
+                     WHERE user_id = $1 AND client_id = $2
+                 ),
+                 'history', (
+                     SELECT jsonb_agg(to_jsonb(history)
+                                      ORDER BY history.scope_id, history.scope_set_version)
+                     FROM sync_client_scope_history history
+                     WHERE history.user_id = $1 AND history.client_id = $2
+                 ),
+                 'checkpoints', (
+                     SELECT jsonb_agg(to_jsonb(checkpoint) ORDER BY checkpoint.bucket_id)
+                     FROM sync_client_checkpoints checkpoint
+                     WHERE checkpoint.user_id = $1 AND checkpoint.client_id = $2
+                 )
+             )",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap()
+        .expect("client scope state")
+        .0
+    }
+
+    fn granted_scope_state(user_id: &str, client_id: &str, scope_id: &str) -> Value {
+        Spi::get_one_with_args::<pgrx::JsonB>(
+            "SELECT jsonb_build_object(
+                 'bucket_subs', (
+                     SELECT to_jsonb(bucket_subs) FROM sync_clients
+                     WHERE user_id = $1 AND client_id = $2
+                 ),
+                 'scope_set_version', (
+                     SELECT scope_set_version FROM sync_clients
+                     WHERE user_id = $1 AND client_id = $2
+                 ),
+                 'scope_state', EXISTS (
+                     SELECT 1 FROM sync_scope_state WHERE scope_id = $3
+                 ),
+                 'checkpoint', (
+                     SELECT position_kind FROM sync_client_checkpoints
+                     WHERE user_id = $1 AND client_id = $2 AND bucket_id = $3
+                 ),
+                 'history', (
+                     SELECT jsonb_agg(
+                         jsonb_build_object(
+                             'scope_set_version', scope_set_version,
+                             'assigned', assigned
+                         )
+                         ORDER BY scope_set_version
+                     )
+                     FROM sync_client_scope_history
+                     WHERE user_id = $1 AND client_id = $2 AND scope_id = $3
+                 )
+             )",
+            &[user_id.into(), client_id.into(), scope_id.into()],
+        )
+        .unwrap()
+        .expect("granted scope state")
+        .0
+    }
+
+    #[pg_test]
+    fn test_pull_reconciles_scope_granted_after_connect() {
+        setup_test_tables();
+        register_client("u1", "c1");
+        Spi::run_with_args(
+            "SELECT synchro_grant_user_scope($1, $2)",
+            &["u1".into(), "team:alpha".into()],
+        )
+        .unwrap();
+
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
+            100,
+        );
+
+        assert!(resp.get("error").is_none(), "{resp}");
+        assert_eq!(resp["scope_set_version"].as_i64(), Some(2), "{resp}");
+        assert_eq!(
+            resp["scope_updates"],
+            json!({ "add": [{ "id": "team:alpha", "cursor": null }], "remove": [] })
+        );
+        assert_eq!(
+            granted_scope_state("u1", "c1", "team:alpha"),
+            json!({
+                "bucket_subs": ["team:alpha", "user:u1"],
+                "scope_set_version": 2,
+                "scope_state": true,
+                "checkpoint": "generation_start",
+                "history": [{ "scope_set_version": 2, "assigned": true }]
+            })
+        );
+    }
+
+    #[pg_test]
+    fn test_pull_reconciles_scope_revoked_after_connect() {
+        setup_test_tables();
+        Spi::run_with_args(
+            "SELECT synchro_grant_user_scope($1, $2)",
+            &["u1".into(), "team:alpha".into()],
+        )
+        .unwrap();
+        register_client("u1", "c1");
+        Spi::run_with_args(
+            "SELECT synchro_revoke_user_scope($1, $2)",
+            &["u1".into(), "team:alpha".into()],
+        )
+        .unwrap();
+
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({
+                "team:alpha": scope_cursor_ref("u1", "c1", "team:alpha", 0),
+                "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0)
+            }),
+            100,
+        );
+
+        assert!(resp.get("error").is_none(), "{resp}");
+        assert_eq!(resp["scope_set_version"].as_i64(), Some(2), "{resp}");
+        assert_eq!(
+            resp["scope_updates"],
+            json!({ "add": [], "remove": ["team:alpha"] })
+        );
+        assert_eq!(
+            granted_scope_state("u1", "c1", "team:alpha"),
+            json!({
+                "bucket_subs": ["user:u1"],
+                "scope_set_version": 2,
+                "scope_state": true,
+                "checkpoint": "generation_start",
+                "history": [
+                    { "scope_set_version": 1, "assigned": true },
+                    { "scope_set_version": 2, "assigned": false }
+                ]
+            })
+        );
+    }
+
+    #[pg_test]
+    fn test_invalid_pull_does_not_reconcile_scopes() {
+        setup_test_tables();
+        register_client("u1", "c1");
+        Spi::run_with_args(
+            "SELECT synchro_grant_user_scope($1, $2)",
+            &["u1".into(), "team:alpha".into()],
+        )
+        .unwrap();
+        let before = client_scope_state("u1", "c1");
+
+        let resp = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": { "cursor": "synchro.v1.invalid" } }),
+            100,
+        );
+
+        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"), "{resp}");
+        assert_eq!(client_scope_state("u1", "c1"), before);
     }
 
     #[pg_test]
