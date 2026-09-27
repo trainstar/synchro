@@ -1,7 +1,7 @@
 {
   "$schema": "./schemas/requirements-v2.schema.json",
   "schema_version": 2,
-  "release": "0.3.1",
+  "release": "0.3.2",
   "requirements": [
     {
       "id": "SYNC-TIME-001",
@@ -448,7 +448,7 @@
       "id": "SYNC-REGISTRY-002",
       "title": "Registered key and replica identity",
       "category": "schema",
-      "statement": "An active registered relation has exactly one non-null declared primary-key column of portable type string, int, or int64 and REPLICA IDENTITY DEFAULT backed by that key; nonconforming registration or later drift cannot remain active, and any key-value update fails before fence or row effects.",
+      "statement": "An active registered relation has exactly one non-null, immediate (not deferrable) declared primary-key column of a built-in key type with one text form in every session (portable type string, int, or int64) and REPLICA IDENTITY DEFAULT backed by that key; nonconforming registration or later drift cannot remain active, and any key-value update, including a key change by a later BEFORE UPDATE trigger or a partition row move, fails with SQLSTATE 23514 before fence or row effects.",
       "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-key-and-replica-identity" }]
@@ -799,7 +799,7 @@
       "id": "SYNC-INSTALL-002",
       "title": "Extension migration baseline",
       "category": "schema",
-      "statement": "Version 0.3.1, the first published Protocol 3 release, is the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks, with no in-place update from pre-0.3.0 state or the unpublished 0.3.0 candidate and no IF NOT EXISTS migration logic.",
+      "statement": "Version 0.3.1, the first published Protocol 3 release, is the first supported extension migration baseline, proven by a clean PostgreSQL 18 install and non-superuser role checks. Each later version is reachable from 0.3.1 through one chain of update scripts, and a 0.3.1 installation updated through the chain has the same extension objects as a clean installation of the current version. No in-place update exists from pre-0.3.0 state or the unpublished 0.3.0 candidate, and no IF NOT EXISTS migration logic is used.",
       "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#extension-migration-baseline" }]
@@ -907,7 +907,7 @@
       "id": "SYNC-WAL-009",
       "title": "One-to-one version fence correlation",
       "category": "change-capture",
-      "statement": "Every actual registered row operation emits exactly one row-level AFTER fence correlated by registration kind, fence ID, DML ordinal, relation, operation, keys, and version; ON CONFLICT emits only its final actual operation, synced and capture-dependency identities remain distinct, any mismatch blocks capture, and uncovered accepted fences make pull and rebuild return capture_pending without progress.",
+      "statement": "Every actual registered row operation emits exactly one row-level AFTER fence correlated by registration kind, fence ID, DML ordinal, relation, operation, keys, and version; ON CONFLICT emits only its final actual operation, synced and capture-dependency identities remain distinct, the fences of one row identity fire in write order or the earlier fence fails the source transaction with SQLSTATE 27000, any mismatch blocks capture, and uncovered accepted fences make pull and rebuild return capture_pending without progress.",
       "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#one-to-one-version-fence-correlation" }]

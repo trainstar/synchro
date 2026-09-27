@@ -1,0 +1,127 @@
+---
+title: Extension Update
+description: Update the synchro_pg PostgreSQL extension from the 0.3.1 baseline to a later version.
+---
+
+This procedure updates an installed `synchro_pg` extension to a new version.
+
+The supported update path starts at the `0.3.1` baseline.
+A state before `0.3.1` has no update path.
+For that state, use the export, clean installation, and rebuild path of
+[ADR 005](/synchro/architecture/decisions/005-integrity-authorization-and-seeds/).
+
+You need:
+
+- the extension archive of the new version;
+- a PostgreSQL superuser.
+
+## Before you update to 0.3.2
+
+Version 0.3.2 accepts only the registered key types in
+[ADR 004](/synchro/architecture/decisions/004-membership-schema-and-retention/).
+Each registry change validates every registration. After the update, a
+registration with another key type makes each registry change fail.
+
+Find each such registration before you update:
+
+```sql
+SELECT registry.table_name, registry.pk_type
+FROM synchro.sync_registry AS registry
+JOIN synchro.sync_registry_generations AS generation
+  ON generation.generation = registry.registry_generation
+JOIN pg_catalog.pg_attribute AS attribute
+  ON attribute.attrelid = registry.physical_relation_oid
+ AND attribute.attname = registry.pk_column
+WHERE generation.state = 'active'
+  AND attribute.atttypid NOT IN (
+    'smallint'::regtype, 'integer'::regtype, 'bigint'::regtype,
+    'text'::regtype, 'character varying'::regtype, 'character'::regtype,
+    'uuid'::regtype, 'inet'::regtype, 'cidr'::regtype,
+    'macaddr'::regtype, 'macaddr8'::regtype,
+    'int4range'::regtype, 'int8range'::regtype, 'numrange'::regtype,
+    'int4multirange'::regtype, 'int8multirange'::regtype, 'nummultirange'::regtype
+  )
+ORDER BY registry.table_name;
+```
+
+Remove each registration that the query returns.
+
+Version 0.3.2 also rejects a deferrable primary key. PostgreSQL uses only an
+immediate key as the replica identity. Find each such registration:
+
+```sql
+SELECT registry.table_name
+FROM synchro.sync_registry AS registry
+JOIN synchro.sync_registry_generations AS generation
+  ON generation.generation = registry.registry_generation
+JOIN pg_catalog.pg_index AS primary_index
+  ON primary_index.indrelid = registry.physical_relation_oid
+ AND primary_index.indisprimary
+WHERE generation.state = 'active'
+  AND NOT primary_index.indimmediate
+ORDER BY registry.table_name;
+```
+
+Replace the deferrable key with an immediate key, or remove the registration.
+
+Version 0.3.2 also enforces the write order of each registered row. A nested
+write can change a row before the fence of an earlier write of that row fires.
+The capture fence then fails the source transaction with SQLSTATE `27000`. For
+example, an `AFTER` row trigger that changes its own row fails when its name
+sorts before `synchro_capture_fence`. `COPY ... FREEZE` into a registered table
+fails with SQLSTATE `0A000`. A key change by a later `BEFORE UPDATE` trigger or
+by a partition row move fails with SQLSTATE `23514`.
+
+Review the application triggers on each registered relation before you update.
+
+## 1. Install the new extension files
+
+Install the new library, the control file, the base script, and every update
+script from the new archive. Use the commands in the extension artifact step of
+[server setup](/synchro/getting-started/server-setup/).
+
+## 2. Restart PostgreSQL
+
+`shared_preload_libraries` loads the library only when the postmaster starts.
+The server uses the new library only after the restart.
+Run the update only after the restart.
+
+For the server setup cluster, use this command:
+
+```sh
+sudo pg_ctlcluster 18 synchro_tutorial restart
+```
+
+Between the restart and the update, readiness fails closed and the adapter
+refuses to start. This occurs because the installed extension objects still
+have the old version and the old build fingerprint.
+
+## 3. Update the extension
+
+Connect as a superuser to the database that `synchro.database` names.
+Run the update:
+
+```sql
+ALTER EXTENSION synchro_pg UPDATE;
+```
+
+PostgreSQL runs the update scripts from the installed version to the
+`default_version` of the new control file.
+
+## 4. Verify the update
+
+Examine the installed extension version:
+
+```sql
+SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'synchro_pg';
+```
+
+The result must be the new version.
+
+Examine readiness:
+
+```sql
+SELECT synchro.synchro_readiness();
+```
+
+The result must be `{"ready": true}`.

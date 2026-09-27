@@ -92,7 +92,9 @@ class ReleaseArtifactsTests(unittest.TestCase):
             "destination_template": f"destination-{suffix.lower()}:{{version}}",
         }
 
-    def make_extension(self, source: Path, output: Path, unsafe: bool = False) -> None:
+    def make_extension(
+        self, source: Path, output: Path, unsafe: bool = False, update_scripts: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         library = source / "lib/synchro_pg.so"
         control = source / "share/extension/synchro_pg.control"
         sql = source / f"share/extension/synchro_pg--{VERSION}.sql"
@@ -104,6 +106,10 @@ class ReleaseArtifactsTests(unittest.TestCase):
             {"path": "share/extension/synchro_pg.control", "destination": "sharedir/extension/synchro_pg.control", "sha256": release_artifacts.file_sha256(control)},
             {"path": f"share/extension/synchro_pg--{VERSION}.sql", "destination": f"sharedir/extension/synchro_pg--{VERSION}.sql", "sha256": release_artifacts.file_sha256(sql)},
         ]
+        for relative, destination in update_scripts:
+            path = source / relative
+            path.write_bytes(f"-- update {relative}\n".encode())
+            records.append({"path": relative, "destination": destination, "sha256": release_artifacts.file_sha256(path)})
         manifest = source / "artifact-manifest.json"
         manifest.write_text(json.dumps({"format": "synchro-pg18-extension-bundle-v1", "postgresql_major": 18, "postgresql_version": "18.3", "files": records}), encoding="utf-8")
         (source / "artifact-manifest.json.sha256").write_text(release_artifacts.file_sha256(manifest) + "\n", encoding="ascii")
@@ -470,6 +476,56 @@ class ReleaseArtifactsTests(unittest.TestCase):
             arguments = self.make_fixture(Path(directory), unsafe_extension=True)
             with self.assertRaisesRegex(release_artifacts.ReleaseError, "unsafe path"):
                 release_artifacts.stage_release(**arguments)
+
+    def test_extension_archive_accepts_update_script(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "extension.tar.gz"
+            self.make_extension(root / "source", archive, update_scripts=(
+                (f"share/extension/synchro_pg--1.2.2--{VERSION}.sql", f"sharedir/extension/synchro_pg--1.2.2--{VERSION}.sql"),
+            ))
+            release_artifacts.validate_extension_archive(archive, VERSION)
+
+    def test_extension_archive_rejects_unexpected_update_destination(self) -> None:
+        for destination in (
+            f"sharedir/extension/synchro_pg--1.2.2--{VERSION}.sql.bak",
+            f"sharedir/extension/synchro_pg--1.2--{VERSION}.sql",
+            f"sharedir/extension/synchro_pg--1.2.x--{VERSION}.sql",
+            "sharedir/extension/synchro_pg--1.2.2.sql",
+            f"pkglibdir/synchro_pg--1.2.2--{VERSION}.sql",
+        ):
+            with self.subTest(destination=destination), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "extension.tar.gz"
+                self.make_extension(root / "source", archive, update_scripts=(
+                    (f"share/extension/synchro_pg--1.2.2--{VERSION}.sql", destination),
+                ))
+                with self.assertRaisesRegex(release_artifacts.ReleaseError, "content set does not match"):
+                    release_artifacts.validate_extension_archive(archive, VERSION)
+
+    def test_extension_archive_rejects_duplicate_destination(self) -> None:
+        update = f"sharedir/extension/synchro_pg--1.2.2--{VERSION}.sql"
+        for update_scripts in (
+            (("share/extension/copy.sql", f"sharedir/extension/synchro_pg--{VERSION}.sql"),),
+            (("share/extension/first.sql", update), ("share/extension/second.sql", update)),
+        ):
+            with self.subTest(update_scripts=update_scripts), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "extension.tar.gz"
+                self.make_extension(root / "source", archive, update_scripts=update_scripts)
+                with self.assertRaisesRegex(release_artifacts.ReleaseError, "duplicate destination"):
+                    release_artifacts.validate_extension_archive(archive, VERSION)
+
+    def test_extension_archive_rejects_update_script_without_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            self.make_extension(source, root / "valid.tar.gz")
+            (source / f"share/extension/synchro_pg--1.2.2--{VERSION}.sql").write_bytes(b"-- update\n")
+            archive = root / "extension.tar.gz"
+            release_artifacts.archive_extension(source, archive)
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "content set does not match"):
+                release_artifacts.validate_extension_archive(archive, VERSION)
 
     def test_stage_rejects_incomplete_canonical_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

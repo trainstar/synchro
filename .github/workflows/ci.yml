@@ -52,6 +52,8 @@ jobs:
             extensions -> target
 
       - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: download
 
       - name: Validate contract and metadata
         run: |
@@ -157,6 +159,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
 
       - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: download
 
       - name: Archive PostgreSQL 18 pgrx runtime
         run: tar -C "$HOME" -cf "$RUNNER_TEMP/pgrx-pg18-linux.tar" .pgrx
@@ -199,23 +203,10 @@ jobs:
             ${{ github.workspace }}/.pgrx-target
           key: candidate-cargo-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('extensions/Cargo.lock') }}-pg${{ env.POSTGRESQL_VERSION }}-pgrx${{ env.PGRX_VERSION }}
 
-      - name: Install PostgreSQL extension build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bison build-essential clang flex libclang-dev libreadline-dev libssl-dev libxml2-dev libxml2-utils libxslt-dev pkg-config xsltproc zlib1g-dev
-
-      - name: Install exact cargo-pgrx
-        run: cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
-
-      - name: Install certified PostgreSQL 18.3
-        run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt noble-pgdg-archive main" | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
-          sudo apt-get update
-          sudo apt-get install -y --allow-downgrades postgresql-18=18.3-1.pgdg24.04+1 postgresql-client-18=18.3-1.pgdg24.04+1 postgresql-server-dev-18=18.3-1.pgdg24.04+1
-          sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
-          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+      - uses: ./.github/actions/setup-pgrx-pg18
+        with:
+          runtime-source: certified
+          pgrx-version: ${{ env.PGRX_VERSION }}
 
       - uses: ./.github/actions/setup-conformance-pg18
         with:
@@ -236,6 +227,11 @@ jobs:
           export ADAPTER_TEST_URL
           make test-adapter
           make local-postgres-stop
+
+      - name: Fetch extension update baseline
+        run: |
+          make conformance-update-baseline-extension-artifact
+          echo "SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-baseline" >> "$GITHUB_ENV"
 
       - name: Run real server black box with deterministic stateful seed
         run: make test-blackbox

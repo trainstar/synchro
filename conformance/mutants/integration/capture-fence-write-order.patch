@@ -1,0 +1,24 @@
+diff --git a/extensions/synchro-pg/src/capture_fence.rs b/extensions/synchro-pg/src/capture_fence.rs
+--- a/extensions/synchro-pg/src/capture_fence.rs
++++ b/extensions/synchro-pg/src/capture_fence.rs
+@@ -426,13 +426,13 @@ fn check_write_order(check: &OrderCheck) {
+         // SAFETY: TransactionIdIsCurrentTransactionId reads only transaction state.
+         unsafe { pg_sys::TransactionIdIsCurrentTransactionId(xid) }
+     });
+-    if later_write_is_current {
+-        ereport!(
+-            ERROR,
+-            PgSqlErrorCode::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
+-            "a later write changed the registered row before its capture fence fired"
+-        );
+-    }
++    // Mutant: the order check accepts a later write of the same row identity.
++    let _ = later_write_is_current;
++    // ereport!(
++    //     ERROR,
++    //     PgSqlErrorCode::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
++    //     "a later write changed the registered row before its capture fence fired"
++    // );
+ }
+ 
+ fn later_write_xids(check: &OrderCheck) -> Option<Vec<pg_sys::TransactionId>> {

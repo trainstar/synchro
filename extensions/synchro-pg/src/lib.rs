@@ -6,6 +6,7 @@ use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 mod bgworker;
 mod bucketing;
 mod build_fingerprint;
+mod capture_fence;
 mod client;
 mod compaction;
 mod cursor_token;
@@ -1701,7 +1702,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION synchro_capture_fence()
+CREATE OR REPLACE FUNCTION synchro_capture_fence_record()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2323,6 +2324,7 @@ mod tests {
     include!("pg_tests/portable_seed.rs");
     include!("pg_tests/health.rs");
     include!("pg_tests/stream_reset.rs");
+    include!("pg_tests/capture_fence_order.rs");
 
     // -----------------------------------------------------------------------
     // Shared test setup

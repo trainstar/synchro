@@ -189,6 +189,7 @@ SELECT
                 AND primary_attribute.attnum = ANY(primary_index.indkey)
                WHERE primary_index.indrelid = registry.physical_relation_oid
                  AND primary_index.indisprimary
+                 AND primary_index.indimmediate
                  AND primary_index.indnkeyatts = 1
                  AND primary_index.indexprs IS NULL
                  AND primary_index.indpred IS NULL
@@ -237,6 +238,38 @@ SELECT
             FROM active_registry
             JOIN synchro.sync_registry registry
               ON registry.registry_generation = active_registry.generation
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM configured_publication publication
+            JOIN pg_catalog.pg_publication_rel member
+              ON member.prpubid = publication.oid
+            WHERE member.prattrs IS NOT NULL
+               OR member.prqual IS NOT NULL
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM active_registry
+            JOIN synchro.sync_registry registry
+              ON registry.registry_generation = active_registry.generation
+            JOIN pg_catalog.pg_attribute attribute
+              ON attribute.attrelid = registry.physical_relation_oid
+             AND attribute.attnum > 0
+             AND NOT attribute.attisdropped
+             AND attribute.attgenerated <> ''
+            CROSS JOIN configured_publication publication
+            WHERE (attribute.attgenerated = 'v' OR publication.pubgencols <> 's')
+              AND attribute.attname IN (
+                  SELECT field.physical_column
+                  FROM synchro.sync_registry_fields field
+                  WHERE field.registry_generation = registry.registry_generation
+                    AND field.relation_id = registry.relation_id
+                  UNION ALL
+                  SELECT field.physical_column
+                  FROM synchro.sync_capture_dependency_fields field
+                  WHERE field.registry_generation = registry.registry_generation
+                    AND field.relation_id = registry.relation_id
+              )
         )
     ) AS publication_valid,
     NOT EXISTS (

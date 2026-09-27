@@ -209,21 +209,6 @@ impl FieldSpec {
     pub const fn portable_type(&self) -> PortableType {
         self.portable_type
     }
-
-    /// Reports whether SQL null is valid for this field.
-    pub const fn nullable(&self) -> bool {
-        self.nullable
-    }
-
-    /// Returns the decimal precision when the type is decimal.
-    pub const fn precision(&self) -> Option<u32> {
-        self.precision
-    }
-
-    /// Returns the decimal scale when the type is decimal.
-    pub const fn scale(&self) -> Option<u32> {
-        self.scale
-    }
 }
 
 /// One immutable field ID and its protocol field specification.
@@ -239,11 +224,6 @@ impl CanonicalField {
         let field_id = field_id.into();
         require_nonempty_text(&field_id, "field_id")?;
         Ok(Self { field_id, spec })
-    }
-
-    /// Returns the immutable logical field ID.
-    pub fn field_id(&self) -> &str {
-        &self.field_id
     }
 
     /// Returns the field specification.
@@ -307,21 +287,6 @@ impl CanonicalTable {
         })
     }
 
-    /// Returns the immutable logical table ID.
-    pub fn table_id(&self) -> &str {
-        &self.table_id
-    }
-
-    /// Returns the immutable logical primary-key field ID.
-    pub fn primary_key_field_id(&self) -> &str {
-        &self.primary_key_field_id
-    }
-
-    /// Returns the complete synchronized field set.
-    pub fn fields(&self) -> &[CanonicalField] {
-        &self.fields
-    }
-
     fn field(&self, field_id: &str) -> Option<&CanonicalField> {
         self.fields.iter().find(|field| field.field_id == field_id)
     }
@@ -353,16 +318,6 @@ impl RowField {
             field_id,
             value_json,
         })
-    }
-
-    /// Returns the immutable logical field ID.
-    pub fn field_id(&self) -> &str {
-        &self.field_id
-    }
-
-    /// Returns the raw canonical wire JSON value.
-    pub fn value_json(&self) -> &str {
-        &self.value_json
     }
 }
 
@@ -414,11 +369,6 @@ impl CanonicalRow {
     /// Returns the separate primary-key wire JSON value.
     pub fn primary_key_json(&self) -> &str {
         &self.primary_key_json
-    }
-
-    /// Returns the complete row fields.
-    pub fn fields(&self) -> &[RowField] {
-        &self.fields
     }
 }
 

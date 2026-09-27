@@ -187,6 +187,7 @@ struct CatalogPrimaryKey {
     key_count: i32,
     is_not_partial: bool,
     has_no_expressions: bool,
+    is_immediate: bool,
     key_attnum: i32,
     replica_identity: String,
 }
@@ -727,6 +728,7 @@ fn synchro_register_table(
                 install_capture_triggers(client, &registration)
             }),
         )?;
+        validate_registered_columns_are_published(client, &registration)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -955,6 +957,7 @@ fn synchro_register_capture_dependency(
                 install_capture_triggers(client, &registration)
             }),
         )?;
+        validate_registered_columns_are_published(client, &registration)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -2590,6 +2593,7 @@ fn load_and_validate_primary_key(
                 i.indnkeyatts::integer AS key_count,
                 (i.indpred IS NULL) AS is_not_partial,
                 (i.indexprs IS NULL) AS has_no_expressions,
+                i.indimmediate AS is_immediate,
                 key.attnum::integer AS key_attnum,
                 c.relreplident::text AS replica_identity
          FROM pg_catalog.pg_class c
@@ -2635,6 +2639,9 @@ fn catalog_primary_key_from_row(
         has_no_expressions: row
             .get_by_name::<bool, &str>("has_no_expressions")?
             .unwrap_or(false),
+        is_immediate: row
+            .get_by_name::<bool, &str>("is_immediate")?
+            .unwrap_or(false),
         key_attnum: row.get_by_name::<i32, &str>("key_attnum")?.unwrap_or(0),
         replica_identity: row
             .get_by_name::<String, &str>("replica_identity")?
@@ -2655,6 +2662,9 @@ fn primary_key_from_rows(
     if !first.is_not_partial || !first.has_no_expressions {
         pgrx::error!("registered relation primary key must be a plain non-partial key");
     }
+    if !first.is_immediate {
+        pgrx::error!("registered relation primary key must not be deferrable");
+    }
     if first.replica_identity != "d" {
         pgrx::error!("registered relation requires REPLICA IDENTITY DEFAULT");
     }
@@ -2671,12 +2681,13 @@ fn primary_key_from_rows(
             first.column
         );
     }
-    let portable_type = primary_key_portable_type(&first.sql_type).unwrap_or_else(|| {
-        pgrx::error!(
-            "registered relation primary key type {:?} is not portable",
-            first.sql_type
-        )
-    });
+    let portable_type =
+        primary_key_portable_type(first.type_oid, &first.sql_type).unwrap_or_else(|| {
+            pgrx::error!(
+                "registered relation primary key type {:?} is not portable",
+                first.sql_type
+            )
+        });
     Ok(PrimaryKey {
         column: first.column.clone(),
         sql_type: first.sql_type.clone(),
@@ -2698,7 +2709,33 @@ fn primary_key_from_catalog(
     primary_key_from_rows(rows, requested_column)
 }
 
-fn primary_key_portable_type(sql_type: &str) -> Option<String> {
+/// Fences, the WAL worker, and clients identify a row by the text form of its
+/// key. The output function of each of these built-in types reads no
+/// configuration parameter, and equal text means an equal key.
+const REGISTERED_KEY_TYPE_OIDS: [pg_sys::Oid; 17] = [
+    pg_sys::INT2OID,
+    pg_sys::INT4OID,
+    pg_sys::INT8OID,
+    pg_sys::TEXTOID,
+    pg_sys::VARCHAROID,
+    pg_sys::BPCHAROID,
+    pg_sys::UUIDOID,
+    pg_sys::INETOID,
+    pg_sys::CIDROID,
+    pg_sys::MACADDROID,
+    pg_sys::MACADDR8OID,
+    pg_sys::INT4RANGEOID,
+    pg_sys::INT8RANGEOID,
+    pg_sys::NUMRANGEOID,
+    pg_sys::INT4MULTIRANGEOID,
+    pg_sys::INT8MULTIRANGEOID,
+    pg_sys::NUMMULTIRANGEOID,
+];
+
+fn primary_key_portable_type(type_oid: u32, sql_type: &str) -> Option<String> {
+    if !REGISTERED_KEY_TYPE_OIDS.contains(&pg_sys::Oid::from(type_oid)) {
+        return None;
+    }
     normalize_portable_type_name(sql_type)
         .filter(|portable| matches!(*portable, "string" | "int" | "int64"))
         .map(str::to_string)
@@ -3646,13 +3683,81 @@ fn ensure_publication_membership(
         return Ok(());
     }
 
-    if !publication_contains_relation(client, &publication, relation.oid)? {
-        let add_sql = format!(
-            "ALTER PUBLICATION {} ADD TABLE {}",
-            crate::pull::pg_quote_ident(&publication),
-            qualified_relation_name(&relation.schema, &relation.relation),
-        );
-        client.update(&add_sql, None, &[])?;
+    match publication_membership(client, &publication, relation.oid)? {
+        PublicationMembership::Absent => {
+            let add_sql = format!(
+                "ALTER PUBLICATION {} ADD TABLE {}",
+                crate::pull::pg_quote_ident(&publication),
+                qualified_relation_name(&relation.schema, &relation.relation),
+            );
+            client.update(&add_sql, None, &[])?;
+            Ok(())
+        }
+        PublicationMembership::Exact => Ok(()),
+        PublicationMembership::Filtered => {
+            pgrx::error!("configured publication member must not use a column list or a row filter")
+        }
+    }
+}
+
+/// Rejects a registered column that pgoutput does not send for the configured publication.
+fn validate_registered_columns_are_published(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+) -> Result<(), spi::Error> {
+    let publication = configured_publication_name();
+    let columns = registration
+        .fields
+        .iter()
+        .map(|field| field.physical_column.clone())
+        .chain(
+            registration
+                .capture_fields
+                .iter()
+                .map(|field| field.physical_column.clone()),
+        )
+        .collect::<Vec<_>>();
+    let rows = client.select(
+        "SELECT attribute.attname::text AS column_name,
+                attribute.attgenerated::text AS generated,
+                publication.pubgencols::text AS published_generated
+         FROM pg_catalog.pg_attribute attribute
+         LEFT JOIN pg_catalog.pg_publication publication
+           ON publication.pubname = $3
+         WHERE attribute.attrelid = $1::oid
+           AND attribute.attnum > 0
+           AND NOT attribute.attisdropped
+           AND attribute.attgenerated <> ''
+           AND attribute.attname::text = ANY($2::text[])
+         ORDER BY attribute.attnum",
+        None,
+        &[
+            i64::from(registration.physical_relation_oid).into(),
+            columns.into(),
+            publication.as_str().into(),
+        ],
+    )?;
+    for row in rows {
+        let column = row
+            .get_by_name::<String, &str>("column_name")?
+            .unwrap_or_default();
+        let generated = row
+            .get_by_name::<String, &str>("generated")?
+            .unwrap_or_default();
+        if generated == "v" {
+            pgrx::error!(
+                "registered column {:?} is a virtual generated column",
+                column
+            );
+        }
+        let published_generated = row.get_by_name::<String, &str>("published_generated")?;
+        if published_generated.as_deref() != Some("s") {
+            pgrx::error!(
+                "registered column {:?} is a stored generated column that publication {:?} does not publish",
+                column,
+                publication
+            );
+        }
     }
     Ok(())
 }
@@ -3664,7 +3769,8 @@ fn remove_capture_configuration(
     let publication = configured_publication_name();
     if !publication_exists(client, &publication)?
         || publication_is_for_all_tables(client, &publication)?
-        || !publication_contains_relation(client, &publication, registration.physical_relation_oid)?
+        || publication_membership(client, &publication, registration.physical_relation_oid)?
+            != PublicationMembership::Exact
     {
         pgrx::error!("registered relation is not an exact publication member");
     }
@@ -3897,25 +4003,33 @@ pub(crate) fn publication_is_for_all_tables(
         .unwrap_or(false))
 }
 
-pub(crate) fn publication_contains_relation(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationMembership {
+    Absent,
+    Exact,
+    Filtered,
+}
+
+fn publication_membership(
     client: &SpiClient<'_>,
     publication: &str,
     relation_oid: u32,
-) -> Result<bool, spi::Error> {
-    Ok(client
-        .select(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_catalog.pg_publication p
-                 JOIN pg_catalog.pg_publication_rel pr ON pr.prpubid = p.oid
-                 WHERE p.pubname = $1 AND pr.prrelid = $2::oid
-             ) AS contains_relation",
-            None,
-            &[publication.into(), i64::from(relation_oid).into()],
-        )?
-        .first()
-        .get_by_name("contains_relation")?
-        .unwrap_or(false))
+) -> Result<PublicationMembership, spi::Error> {
+    let rows = client.select(
+        "SELECT pr.prattrs IS NULL AND pr.prqual IS NULL AS exact
+         FROM pg_catalog.pg_publication p
+         JOIN pg_catalog.pg_publication_rel pr ON pr.prpubid = p.oid
+         WHERE p.pubname = $1 AND pr.prrelid = $2::oid",
+        None,
+        &[publication.into(), i64::from(relation_oid).into()],
+    )?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(PublicationMembership::Absent);
+    };
+    Ok(match row.get_by_name::<bool, &str>("exact")? {
+        Some(true) => PublicationMembership::Exact,
+        Some(false) | None => PublicationMembership::Filtered,
+    })
 }
 
 pub(crate) fn qualified_relation_name(schema: &str, relation: &str) -> String {
@@ -4211,6 +4325,7 @@ fn load_catalog_for_registrations(
                 index.indnkeyatts::integer AS key_count,
                 (index.indpred IS NULL) AS is_not_partial,
                 (index.indexprs IS NULL) AS has_no_expressions,
+                index.indimmediate AS is_immediate,
                 key.attnum::integer AS key_attnum,
                 relation.relreplident::text AS replica_identity
          FROM synchro.sync_registry registry
@@ -4474,6 +4589,8 @@ fn load_catalog_for_registrations(
           JOIN pg_catalog.pg_publication_rel publication_relation
             ON publication_relation.prpubid = publication.oid
            AND publication_relation.prrelid = registry.physical_relation_oid
+           AND publication_relation.prattrs IS NULL
+           AND publication_relation.prqual IS NULL
            WHERE registry.registry_generation = $1
              AND registry.physical_relation_oid = ANY($3::oid[])",
         None,
