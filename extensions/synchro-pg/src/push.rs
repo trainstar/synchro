@@ -1550,7 +1550,7 @@ fn validate_policy_columns(
 ) -> Result<serde_json::Map<String, serde_json::Value>, ()> {
     let columns = value.as_object().ok_or(())?;
     match operation {
-        Operation::Insert | Operation::Update if columns.is_empty() => return Err(()),
+        Operation::Update if columns.is_empty() => return Err(()),
         Operation::Delete if !columns.is_empty() => return Err(()),
         Operation::Upsert => return Err(()),
         _ => {}
@@ -2240,9 +2240,6 @@ fn push_insert(
         .unwrap_or_else(|| pgrx::error!("push insert payload is not an object"));
     let mut columns = object.keys().cloned().collect::<Vec<_>>();
     columns.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    if columns.is_empty() {
-        pgrx::error!("push insert has no writable fields")
-    }
     let col_list = std::iter::once(pg_quote_ident(&table_reg.pk_column))
         .chain(columns.iter().map(|column| pg_quote_ident(column)))
         .collect::<Vec<_>>()

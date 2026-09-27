@@ -181,22 +181,60 @@ class AuthoredCaptureTests {
         }
     }
 
+    /** D-01: an insert that authors only its key is a key-only create with no authored field. */
     @Test
-    fun insertWithoutAnAuthoredWritableFieldAborts() {
+    fun keyOnlyInsertCapturesAnInsertWithNoAuthoredField() {
         val databaseName = databaseName()
         val client = clientWithSchema(databaseName)
         try {
-            assertThrows(RuntimeException::class.java) {
-                client.authoredWriteTransaction(
-                    tableName = authoredTable.tableName,
-                    operation = Operation.INSERT,
-                    columnNames = listOf("id"),
-                ) { transaction ->
-                    transaction.execute(
-                        "INSERT INTO authored_rows (id, updated_at) VALUES (?, ?)",
-                        arrayOf("row-1", "2026-01-01T00:00:00.000000Z"),
-                    )
+            client.authoredWriteTransaction(
+                tableName = authoredTable.tableName,
+                operation = Operation.INSERT,
+                columnNames = listOf("id"),
+            ) { transaction ->
+                transaction.execute(
+                    "INSERT INTO authored_rows (id, updated_at) VALUES (?, ?)",
+                    arrayOf("row-1", "2026-01-01T00:00:00.000000Z"),
+                )
+            }
+
+            assertEquals(
+                listOf(mapOf("body" to null, "default_value" to "default", "support_value" to "")),
+                query(databaseName, "SELECT body, default_value, support_value FROM authored_rows WHERE id = 'row-1'"),
+            )
+            assertLedger(
+                databaseName,
+                expectedOperations = listOf("insert"),
+                expectedFields = listOf(emptyList()),
+            )
+        } finally {
+            client.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    /** An insert without its own capture context did not come through the SDK, so it aborts. */
+    @Test
+    fun insertWithoutItsOwnCaptureContextAborts() {
+        val databaseName = databaseName()
+        clientWithSchema(databaseName).close()
+        try {
+            val database = SynchroDatabase.open(context, databaseName)
+            try {
+                val failure = assertThrows(RuntimeException::class.java) {
+                    database.writeTransaction { db ->
+                        db.execSQL(
+                            "INSERT INTO authored_rows (id, body, updated_at) VALUES (?, ?, ?)",
+                            arrayOf("row-1", "unauthored", "2026-01-01T00:00:00.000000Z"),
+                        )
+                    }
                 }
+                assertTrue(
+                    failure.toString(),
+                    failure.toString().contains("synced insert has no authored capture context"),
+                )
+            } finally {
+                database.close()
             }
 
             assertTrue(query(databaseName, "SELECT id FROM authored_rows").isEmpty())
@@ -206,7 +244,6 @@ class AuthoredCaptureTests {
                 expectedFields = emptyList(),
             )
         } finally {
-            client.close()
             context.deleteDatabase(databaseName)
         }
     }

@@ -856,7 +856,7 @@ internal class PushProcessor(
             }
             recordID(mutation.pk.getValue(table.primaryKeyFieldID), primaryKey.logicalType)
             when (mutation.op) {
-                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns.isNullOrEmpty()) {
+                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns == null) {
                     throw SynchroError.InvalidResponse("stored insert has an invalid shape")
                 }
                 Operation.UPDATE -> if (mutation.baseVersion.isNullOrEmpty() || mutation.columns.isNullOrEmpty()) {
@@ -1252,7 +1252,7 @@ internal class PushProcessor(
             val values = when (intent.operation) {
                 "insert", "update" -> {
                     val authored = changeTracker.valuesForMutation(db, intent.mutationID)
-                    if (authored.isEmpty()) return null
+                    if (intent.operation == "update" && authored.isEmpty()) return null
                     authored.map { value ->
                         val column = columnsByID[value.fieldID] ?: return null
                         if (column.logicalType != value.logicalType) return null

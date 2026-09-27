@@ -259,24 +259,42 @@ final class AuthoredCaptureTests: XCTestCase {
         )
     }
 
-    func testInsertWithoutAnAuthoredWritableFieldAborts() throws {
+    /// D-01: an insert that authors only its key is a key-only create. The
+    /// row keeps its local defaults, and the insert captures no authored field.
+    func testKeyOnlyInsertCapturesAnInsertWithNoAuthoredField() throws {
         let db = try makeEnvironment()
-        XCTAssertThrowsError(
-            try db.applicationAuthoredWriteTransaction(
-                tableName: "authored_rows",
-                operation: "insert",
-                columnNames: ["id"]
-            ) { transaction in
-                try transaction.execute(
-                    "INSERT INTO authored_rows (id, updated_at) VALUES (?, ?)",
-                    params: ["row-1", "2026-01-01T00:00:00.000000Z"]
-                )
-            }
-        )
-        let rows = try db.readTransaction { connection in
-            try Int.fetchOne(connection, sql: "SELECT COUNT(*) FROM authored_rows")
+        defer { closeAndRemove(db) }
+        try db.applicationAuthoredWriteTransaction(
+            tableName: "authored_rows",
+            operation: "insert",
+            columnNames: ["id"]
+        ) { transaction in
+            try transaction.execute(
+                "INSERT INTO authored_rows (id, updated_at) VALUES (?, ?)",
+                params: ["row-1", "2026-01-01T00:00:00.000000Z"]
+            )
         }
-        XCTAssertEqual(rows, 0)
+        XCTAssertEqual(try storedRow(db, id: "row-1"), [nil, "default", ""])
+        try assertLedger(db, expectedOperations: ["insert"], expectedFields: [[]])
+    }
+
+    /// An insert without its own capture context did not come through the SDK.
+    /// Its authored fields are unknown, so it aborts before any row or intent.
+    func testInsertWithoutItsOwnCaptureContextAborts() throws {
+        let db = try makeEnvironment()
+        defer { closeAndRemove(db) }
+        XCTAssertThrowsError(try db.writeTransaction { connection in
+            try connection.execute(
+                sql: "INSERT INTO authored_rows (id, body, updated_at) VALUES (?, ?, ?)",
+                arguments: ["row-1", "unauthored", "2026-01-01T00:00:00.000000Z"]
+            )
+        }) { error in
+            XCTAssertTrue(
+                String(describing: error).contains("synced insert has no authored capture context"),
+                "\(error)"
+            )
+        }
+        XCTAssertNil(try storedRow(db, id: "row-1"))
         try assertLedger(db, expectedOperations: [], expectedFields: [])
     }
 
