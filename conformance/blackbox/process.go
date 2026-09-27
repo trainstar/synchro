@@ -2460,6 +2460,9 @@ func ownedProcessAlive(process *ownedProcess) error {
 }
 
 // ReinstallExtension replaces the extension atomically without restarting the postmaster.
+// The drop removes the runtime binding that is the only ownership evidence for the
+// worker slot. The harness reads that binding first and then removes the released slot
+// as the operator, because a worker never removes a slot that it cannot prove it owns.
 func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReinstallResult, returnedErr error) {
 	if h == nil || ctx == nil || !h.sourceReady {
 		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall is unavailable")
@@ -2488,6 +2491,15 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 	if err != nil {
 		return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
 	}
+	var boundSlot sql.NullString
+	if err := tx.QueryRowContext(ctx, "SELECT active_slot_name::text FROM synchro.sync_runtime_state WHERE singleton").Scan(&boundSlot); err != nil {
+		_ = tx.Rollback()
+		return ExtensionReinstallResult{}, errors.New("read bound worker slot before extension reinstall failed")
+	}
+	if boundSlot.Valid && boundSlot.String != h.names.ReplicationSlot {
+		_ = tx.Rollback()
+		return ExtensionReinstallResult{}, errors.New("bound worker slot is not the isolated replication slot")
+	}
 	if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE"); err != nil {
 		_ = tx.Rollback()
 		return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
@@ -2515,7 +2527,53 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 	if err := gate.connection.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&result.ReinstallLSN); err != nil || result.ReinstallLSN == "" {
 		return ExtensionReinstallResult{}, errors.New("read extension reinstall WAL position failed")
 	}
+	// The prior worker releases its slot only after it passes the gate and exits.
+	if err := gate.release(ctx); err != nil {
+		return ExtensionReinstallResult{}, fmt.Errorf("release WAL worker gate after extension reinstall: %w", err)
+	}
+	if boundSlot.Valid {
+		if err := h.dropReleasedWorkerSlot(ctx, boundSlot.String); err != nil {
+			return ExtensionReinstallResult{}, err
+		}
+	}
 	return result, nil
+}
+
+func (h *Harness) dropReleasedWorkerSlot(ctx context.Context, slot string) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("open released worker slot connection failed")
+	}
+	defer database.Close()
+	for {
+		var active sql.NullBool
+		err := database.QueryRowContext(ctx, "SELECT active FROM pg_catalog.pg_replication_slots WHERE slot_name = $1", slot).Scan(&active)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return errors.New("observe released worker slot failed")
+		}
+		if active.Valid && !active.Bool {
+			_, err := database.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", slot)
+			var postgresError *pgconn.PgError
+			if err == nil || errors.As(err, &postgresError) && postgresError.Code == "42704" {
+				return nil
+			}
+			if !errors.As(err, &postgresError) || postgresError.Code != "55006" {
+				return errors.New("drop released worker slot failed")
+			}
+		}
+		timer := time.NewTimer(processPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("wait for released worker slot failed")
+		case <-timer.C:
+		}
+	}
 }
 
 func (h *Harness) acquireWALWorkerGate(ctx context.Context) (*walWorkerGate, error) {
