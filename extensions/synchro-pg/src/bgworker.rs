@@ -3862,6 +3862,68 @@ fn parse_fence_messages(transaction: &WalTransaction) -> Result<Vec<FenceMessage
     Ok(fences)
 }
 
+fn fence_names_relation(fence: &FenceMessage, relation: &RelationKey) -> bool {
+    fence.physical_schema == relation.namespace
+        && fence.physical_relation == relation.name
+        && fence.physical_relation_oid == relation.oid
+}
+
+/// With publish_via_partition_root, pgoutput publishes a partition row change
+/// under the partitioned table, but the capture fence runs on the partition.
+/// This returns each (partition, partitioned table) pair in which the fence
+/// names a current partition of the published relation.
+fn partition_fence_relations<'a>(
+    client: &SpiClient<'_>,
+    pairs: impl Iterator<Item = (&'a FenceMessage, &'a RelationKey)>,
+) -> Result<HashSet<(u32, u32)>, String> {
+    let input = pairs
+        .filter(|(fence, relation)| !fence_names_relation(fence, relation))
+        .map(|(fence, relation)| {
+            serde_json::json!({
+                "fence_oid": i64::from(fence.physical_relation_oid),
+                "fence_schema": fence.physical_schema,
+                "fence_relation": fence.physical_relation,
+                "event_oid": i64::from(relation.oid),
+            })
+        })
+        .collect::<Vec<_>>();
+    if input.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let rows = client
+        .select(
+            "SELECT input.fence_oid, input.event_oid
+             FROM jsonb_to_recordset($1::jsonb) AS input(
+                 fence_oid bigint, fence_schema text, fence_relation text, event_oid bigint
+             )
+             JOIN pg_catalog.pg_class partition ON partition.oid = input.fence_oid::oid
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = partition.relnamespace
+             WHERE partition.relispartition
+               AND namespace.nspname::text = input.fence_schema
+               AND partition.relname::text = input.fence_relation
+               AND input.event_oid::oid IN (
+                   SELECT ancestor.relid
+                   FROM pg_catalog.pg_partition_ancestors(partition.oid) AS ancestor
+                   WHERE ancestor.relid <> partition.oid
+               )",
+            None,
+            &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+        )
+        .map_err(|_| "loading partition fence relations failed".to_string())?;
+    let mut partitions = HashSet::new();
+    for row in rows {
+        let oid = |name: &str| {
+            row.get_by_name::<i64, &str>(name)
+                .ok()
+                .flatten()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| "partition fence relation is invalid".to_string())
+        };
+        partitions.insert((oid("fence_oid")?, oid("event_oid")?));
+    }
+    Ok(partitions)
+}
+
 fn correlate_events<'a>(
     client: &SpiClient<'_>,
     transaction: &'a WalTransaction,
@@ -4029,6 +4091,14 @@ fn correlate_events<'a>(
         log!("synchro WAL fence row identity correlation failed");
         return Err(failure("fence_correlation_failed", transaction.commit_lsn));
     };
+    let partition_fences = partition_fence_relations(
+        client,
+        applicable_events
+            .iter()
+            .zip(&fence_indexes)
+            .map(|((event, _), fence_index)| (applicable_fences[*fence_index], &event.relation)),
+    )
+    .map_err(|_| failure("fence_correlation_failed", transaction.commit_lsn))?;
 
     for (((event, registration), keys), fence_index) in applicable_events
         .into_iter()
@@ -4044,9 +4114,8 @@ fn correlate_events<'a>(
                 != registration
                     .is_synced()
                     .then_some(registration.table_id.as_str())
-            || fence.physical_schema != event.relation.namespace
-            || fence.physical_relation != event.relation.name
-            || fence.physical_relation_oid != event.relation.oid
+            || !(fence_names_relation(fence, &event.relation)
+                || partition_fences.contains(&(fence.physical_relation_oid, event.relation.oid)))
             || fence.operation != operation_name
             || fence.old_record_id != old_record_id
             || fence.new_record_id != new_record_id
