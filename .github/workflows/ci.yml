@@ -22,7 +22,6 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GRADLE_TEST_ARGS: ''
       GOWORK: 'off'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -55,19 +54,19 @@ jobs:
         with:
           runtime-source: download
 
-      - name: Validate contract and metadata
+      - name: Validate contract, documentation, and metadata
         run: |
-          make verify-contract
+          make docs-build
           make test-version-contract version-check release-npm-dry-run
 
       - name: Build portable sources
         run: make build-check build-seed build-conformance
 
       - name: Run conformance checks
-        run: make lint-conformance test-conformance test-integration-mutant-manifest
+        run: make lint-conformance test-conformance test-integration-mutant-manifest test-local-postgres
 
       - name: Run release and recovery controls
-        run: make test-release-artifacts test-release-publish test-server-consumer-helper test-packaged-smoke-structure
+        run: make test-release-artifacts test-release-publish test-server-consumer-helper test-packaged-smoke-structure test-ci-process-lifecycle
 
       - name: Run source lint checks
         run: make lint-go lint-rust-core lint-rust-pg check-pg-sql lint-rn PGRX_TARGET_DIR="$GITHUB_WORKSPACE/extensions/target"
@@ -81,7 +80,7 @@ jobs:
           echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: Run unit and client build checks
-        run: make test-rust-core test-rn-unit build-kotlin-library test-kotlin-unit
+        run: make test-rust-core test-rn-unit test-kotlin-unit
 
   pull-request-swift:
     name: pull-request Swift unit
@@ -212,8 +211,8 @@ jobs:
         with:
           expected-postgresql-version: ${{ env.POSTGRESQL_VERSION }}
 
-      - name: Run extension and SQL checks
-        run: make test-rust-pg check-pg-sql
+      - name: Run extension checks
+        run: make test-rust-pg
 
       - name: Run curated core mutants
         run: |
@@ -244,6 +243,9 @@ jobs:
     if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
     needs: candidate-reuse
     runs-on: macos-15
+    env:
+      ANDROID_HOME: /Users/runner/Library/Android/sdk
+      ANDROID_SDK_ROOT: /Users/runner/Library/Android/sdk
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -259,6 +261,15 @@ jobs:
           runtime-source: brew
 
       - uses: ./.github/actions/setup-conformance-pg18
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Export Android Java home
+        run: echo "ANDROID_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
 
       - name: Ensure CocoaPods is available
         run: command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
@@ -282,7 +293,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run Swift checks against local PostgreSQL
-        run: make test-swift test-consumer-swift
+        run: make test-swift-unit test-swift test-client-schema-identity test-consumer-swift
 
       - name: Stop local fixture
         if: always()
@@ -299,7 +310,6 @@ jobs:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       KOTLIN_ANDROID_SERIAL: emulator-5554
-      GRADLE_TEST_ARGS: ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -363,10 +373,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            make test-kotlin-instrumentation
-            make test-kotlin
-            make test-consumer-kotlin-device
+          script: make test-kotlin-instrumentation test-kotlin test-consumer-kotlin-device
 
       - name: Build Kotlin source consumer
         run: make test-consumer-kotlin
@@ -444,7 +451,6 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GRADLE_TEST_ARGS: ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -533,23 +539,6 @@ jobs:
             make test-rn-e2e-android-run
             make test-consumer-rn-android
 
-  candidate-docs:
-    name: candidate docs
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: candidate-reuse
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: docs/package-lock.json
-
-      - name: Build documentation
-        run: make docs-build
-
   pull-request:
     name: pull-request
     if: ${{ always() && github.event_name == 'pull_request' }}
@@ -581,7 +570,6 @@ jobs:
       - candidate-kotlin
       - candidate-rn-ios
       - candidate-rn-android
-      - candidate-docs
     runs-on: ubuntu-24.04
     steps:
       - name: Require every candidate dependency
@@ -598,4 +586,3 @@ jobs:
           test "${{ needs.candidate-kotlin.result }}" = "$suite"
           test "${{ needs.candidate-rn-ios.result }}" = "$suite"
           test "${{ needs.candidate-rn-android.result }}" = "$suite"
-          test "${{ needs.candidate-docs.result }}" = "$suite"
