@@ -38,6 +38,24 @@ ALTER FUNCTION synchro.synchro_unregister_assignment_function() OWNER TO synchro
 REVOKE EXECUTE ON FUNCTION synchro.synchro_unregister_assignment_function() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION synchro.synchro_unregister_assignment_function() TO synchro_operator;
 
+ALTER TABLE synchro.sync_push_mutations DROP CONSTRAINT sync_push_mutations_check;
+ALTER TABLE synchro.sync_push_mutations ADD CONSTRAINT sync_push_mutations_outcome_code_check CHECK (
+        (outcome_status = 'applied' AND rejection_code IS NULL)
+        OR
+        (outcome_status = 'conflict'
+         AND rejection_code IS NOT NULL
+         AND rejection_code IN (
+             'version_conflict', 'row_already_exists', 'row_deleted', 'row_not_found'
+         ))
+        OR
+        (outcome_status = 'rejected_terminal'
+         AND rejection_code IS NOT NULL
+         AND rejection_code IN (
+             'schema_incompatible', 'table_not_synced', 'policy_rejected', 'validation_failed',
+             'atomic_batch_rejected'
+         ))
+    );
+
 UPDATE synchro.sync_extension_build
 SET installed_fingerprint = synchro.synchro_build_fingerprint(),
     installed_at = pg_catalog.now()

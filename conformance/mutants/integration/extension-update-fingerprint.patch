@@ -13,10 +13,10 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1--0.3.2.sql b/extensions
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
-@@ -37,8 +37,3 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_assignment_function_wrapper';
- ALTER FUNCTION synchro.synchro_unregister_assignment_function() OWNER TO synchro_owner;
- REVOKE EXECUTE ON FUNCTION synchro.synchro_unregister_assignment_function() FROM PUBLIC;
- GRANT EXECUTE ON FUNCTION synchro.synchro_unregister_assignment_function() TO synchro_operator;
+@@ -55,8 +55,3 @@ ALTER TABLE synchro.sync_push_mutations ADD CONSTRAINT sync_push_mutations_outco
+              'atomic_batch_rejected'
+          ))
+     );
 -
 -UPDATE synchro.sync_extension_build
 -SET installed_fingerprint = synchro.synchro_build_fingerprint(),

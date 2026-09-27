@@ -506,7 +506,7 @@ CREATE TABLE IF NOT EXISTS sync_push_mutations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (user_id, client_id, mutation_id),
-    CHECK (
+    CONSTRAINT sync_push_mutations_outcome_code_check CHECK (
         (outcome_status = 'applied' AND rejection_code IS NULL)
         OR
         (outcome_status = 'conflict'
@@ -518,7 +518,8 @@ CREATE TABLE IF NOT EXISTS sync_push_mutations (
         (outcome_status = 'rejected_terminal'
          AND rejection_code IS NOT NULL
          AND rejection_code IN (
-             'schema_incompatible', 'table_not_synced', 'policy_rejected', 'validation_failed'
+             'schema_incompatible', 'table_not_synced', 'policy_rejected', 'validation_failed',
+             'atomic_batch_rejected'
          ))
     )
 );
@@ -2491,7 +2492,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1940
+-- synchro-pg/src/lib.rs:1941
 -- finalize
 
 DO $roles$

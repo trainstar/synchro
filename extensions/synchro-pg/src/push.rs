@@ -293,6 +293,14 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
                 );
             }
         }
+        // Exact batch replay returned above, so every stored mutation belongs to another batch.
+        if request.atomic == Some(true) && !stored_mutations.is_empty() {
+            return push_protocol_error(
+                ProtocolErrorCode::InvalidRequest,
+                "atomic push request reuses a mutation from another batch",
+                false,
+            );
+        }
 
         let generation = match check_client_generation(
             client,
@@ -395,20 +403,26 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             .unwrap_or_else(|_| pgrx::error!("claiming push batch ledger failed"));
 
         let server_time = canonical_server_time();
-        let mut evaluated = Vec::with_capacity(request.mutations.len());
-        let mut accepted_write = false;
-        for mutation in &request.mutations {
-            if let Some(stored) = stored_mutations.get(&mutation.mutation_id) {
-                evaluated.push(replayed_mutation(mutation, stored));
-                continue;
-            }
+        let evaluated = if request.atomic == Some(true) {
+            evaluate_atomic_group(client, p_user_id, &request, &evaluation_context)
+        } else {
+            let mut evaluated = Vec::with_capacity(request.mutations.len());
+            for mutation in &request.mutations {
+                if let Some(stored) = stored_mutations.get(&mutation.mutation_id) {
+                    evaluated.push(replayed_mutation(mutation, stored));
+                    continue;
+                }
 
-            let evaluation = evaluate_mutation(client, p_user_id, mutation, &evaluation_context);
-            if evaluation.new_write {
-                accepted_write = true;
+                evaluated.push(evaluate_mutation(
+                    client,
+                    p_user_id,
+                    mutation,
+                    &evaluation_context,
+                ));
             }
-            evaluated.push(evaluation);
-        }
+            evaluated
+        };
+        let accepted_write = evaluated.iter().any(|evaluation| evaluation.new_write);
 
         if accepted_write {
             increment_accepted_write_epoch(client, p_user_id, &request.client_id);
@@ -1142,6 +1156,17 @@ fn fields_compatible(
                     >= authored.precision.unwrap() - authored.scale.unwrap()))
 }
 
+fn mutation_primary_key(mutation: &Mutation) -> (String, serde_json::Value) {
+    let Some((field_id, value)) = mutation
+        .pk
+        .as_object()
+        .and_then(|object| object.iter().next())
+    else {
+        return (String::new(), serde_json::Value::Null);
+    };
+    (field_id.clone(), value.clone())
+}
+
 fn evaluate_mutation(
     client: &mut SpiClient<'_>,
     user_id: &str,
@@ -1154,18 +1179,7 @@ fn evaluate_mutation(
     let registry = context.registry;
     let ever_synced_tables = context.ever_synced_tables;
     let has_write_protect = context.has_write_protect;
-    let pk_field_id = mutation
-        .pk
-        .as_object()
-        .and_then(|object| object.keys().next())
-        .cloned()
-        .unwrap_or_default();
-    let pk_value = mutation
-        .pk
-        .as_object()
-        .and_then(|object| object.values().next())
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let (pk_field_id, pk_value) = mutation_primary_key(mutation);
     let outcome_schema = submitted_schema.clone();
     let authored_tables = authored_tables.get(&mutation.authored_schema);
     let authored_table = authored_tables.and_then(|tables| tables.get(&mutation.table).copied());
@@ -1844,6 +1858,137 @@ fn replayed_mutation(mutation: &Mutation, stored: &StoredMutation) -> EvaluatedM
             .unwrap_or(serde_json::Value::Null),
         row_identity: None,
     }
+}
+
+/// Evaluates an atomic group in request order and keeps its writes only when every mutation applies.
+fn evaluate_atomic_group(
+    client: &mut SpiClient<'_>,
+    user_id: &str,
+    request: &PushRequest,
+    context: &EvaluationContext<'_>,
+) -> Vec<EvaluatedMutation> {
+    let evaluated = run_in_subtransaction(|| {
+        let mut evaluated = Vec::with_capacity(request.mutations.len());
+        for mutation in &request.mutations {
+            let evaluation = evaluate_mutation(client, user_id, mutation, context);
+            let applied = evaluation.accepted;
+            evaluated.push(evaluation);
+            if !applied {
+                return (evaluated, false);
+            }
+        }
+        (evaluated, true)
+    });
+    let Some(failure) = evaluated.last().filter(|evaluation| !evaluation.accepted) else {
+        return evaluated;
+    };
+    let failing_index = evaluated.len() - 1;
+    let failure = if failure.outcome["status"] == "conflict" {
+        reread_group_conflict(client, failure, context)
+    } else {
+        failure.clone()
+    };
+    request
+        .mutations
+        .iter()
+        .enumerate()
+        .map(|(index, mutation)| {
+            if index == failing_index {
+                failure.clone()
+            } else {
+                atomic_group_rejection(mutation, context)
+            }
+        })
+        .collect()
+}
+
+/// Runs `body` in one internal subtransaction. `body` returns its value and whether to keep its writes.
+fn run_in_subtransaction<T>(body: impl FnOnce() -> (T, bool)) -> T {
+    // SAFETY: This is the PL/pgSQL exec_stmt_block sequence. It saves the memory context and
+    // resource owner, begins an internal subtransaction, runs the body in the outer memory context,
+    // then releases or rolls back the subtransaction and restores both. The catch is required
+    // because an error that escapes an open internal subtransaction leaves an autocommit session in
+    // a failed subtransaction, and a catching caller would then roll back the wrong subtransaction.
+    // The catch keeps the error data stack, because pgrx rethrows a PostgreSQL error from it.
+    unsafe {
+        let outer_context = pg_sys::CurrentMemoryContext;
+        let outer_owner = pg_sys::CurrentResourceOwner;
+        pg_sys::BeginInternalSubTransaction(std::ptr::null());
+        // pgrx runs SPI read-only while the current subtransaction has no transaction ID. A
+        // read-only statement cannot lock rows and does not see earlier writes of the calling function.
+        pg_sys::GetCurrentTransactionId();
+        pg_sys::MemoryContextSwitchTo(outer_context);
+        let (value, commit) = PgTryBuilder::new(std::panic::AssertUnwindSafe(body))
+            .catch_others(|error| {
+                pg_sys::RollbackAndReleaseCurrentSubTransaction();
+                pg_sys::MemoryContextSwitchTo(outer_context);
+                pg_sys::CurrentResourceOwner = outer_owner;
+                error.rethrow()
+            })
+            .execute();
+        if commit {
+            pg_sys::ReleaseCurrentSubTransaction();
+        } else {
+            pg_sys::RollbackAndReleaseCurrentSubTransaction();
+        }
+        pg_sys::MemoryContextSwitchTo(outer_context);
+        pg_sys::CurrentResourceOwner = outer_owner;
+        value
+    }
+}
+
+/// Rebuilds a failing group conflict from the committed row state after the rollback.
+fn reread_group_conflict(
+    client: &SpiClient<'_>,
+    failure: &EvaluatedMutation,
+    context: &EvaluationContext<'_>,
+) -> EvaluatedMutation {
+    let table_reg = context
+        .registry
+        .get(&failure.table_id)
+        .unwrap_or_else(|| pgrx::error!("atomic group conflict table is not registered"));
+    let wire_record_id = wire_record_id(table_reg, &failure.primary_key_value)
+        .unwrap_or_else(|_| pgrx::error!("atomic group conflict primary key is invalid"));
+    let record_id = canonicalize_record_id(client, &wire_record_id, table_reg)
+        .unwrap_or_else(|| pgrx::error!("atomic group conflict primary key is not canonical"));
+    let existing = load_existing_record(client, &record_id, table_reg);
+    let outcome_text = |member: &str| {
+        failure.outcome[member]
+            .as_str()
+            .unwrap_or_else(|| pgrx::error!("atomic group conflict outcome is incomplete"))
+    };
+    conflict_evaluation(
+        &failure.mutation,
+        failure.outcome_schema.clone(),
+        outcome_text("code"),
+        outcome_text("message"),
+        client,
+        ConflictTarget {
+            existing: existing.as_ref(),
+            table: table_reg,
+            record_id: &record_id,
+            row_identity: failure.row_identity.clone(),
+        },
+    )
+}
+
+fn atomic_group_rejection(
+    mutation: &Mutation,
+    context: &EvaluationContext<'_>,
+) -> EvaluatedMutation {
+    let (pk_field_id, pk_value) = mutation_primary_key(mutation);
+    let target = match context.registry.get(&mutation.table) {
+        Some(table_reg) => registered_target(table_reg, &pk_field_id, &pk_value, None),
+        None => unresolved_target(mutation, &pk_field_id, &pk_value),
+    };
+    terminal_evaluation(
+        mutation,
+        context.submitted_schema.clone(),
+        "atomic_batch_rejected",
+        "atomic batch rejected",
+        target,
+        None,
+    )
 }
 
 fn build_push_response(

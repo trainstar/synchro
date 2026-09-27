@@ -50,6 +50,7 @@ var (
 		"batch_id",
 		"schema",
 		"mutations",
+		"atomic",
 	}
 	rebuildRequestMembers = []string{
 		"client_id",
