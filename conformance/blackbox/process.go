@@ -77,6 +77,7 @@ var diagnosticSourceTables = []string{
 	"cf_decode_trap",
 	"cf_late_registration",
 	"cf_generated_items",
+	"cf_source_filled_items",
 }
 
 var diagnosticLegacyInternalTables = []string{
@@ -4313,6 +4314,17 @@ func (executor *OperatorExecutor) RegisterGeneratedSourceTableWithoutGeneratedCo
 		'single_scope',
 		'id', 'updated_at', 'deleted_at', 'enabled',
 		ARRAY['value_length', 'search_vector', 'value_upper']
+	)`)
+}
+
+// RegisterSourceFilledItems registers the fixture table and excludes the source-filled slug.
+func (executor *OperatorExecutor) RegisterSourceFilledItems(ctx context.Context) error {
+	return executor.exec(ctx, `SELECT synchro.synchro_register_table(
+		'public.cf_source_filled_items',
+		'public.cf_source_filled_items_membership',
+		'single_scope',
+		'id', 'updated_at', 'deleted_at', 'enabled',
+		ARRAY['slug']
 	)`)
 }
 
