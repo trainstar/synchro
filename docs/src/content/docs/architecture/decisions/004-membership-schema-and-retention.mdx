@@ -247,6 +247,12 @@ impact_function(p_old_row jsonb, p_new_row jsonb)
 | `pk_type` | One of `string`, `int`, or `int64`. |
 | `pk_value` | The typed primary-key value of a row that must have membership reevaluated. |
 
+A membership function can read sibling rows from its own projection.
+That function needs a self-impact declaration, whose dependency and target are the same relation.
+The impact function returns the sibling rows that the old or new row image can affect.
+The worker reevaluates those rows from the final projections of the source transaction.
+Without that declaration, a membership function reads only its supplied row from its own projection.
+
 Scope assignment uses three implemented sources:
 
 - `user:{canonical_user_id}` is assigned by default.

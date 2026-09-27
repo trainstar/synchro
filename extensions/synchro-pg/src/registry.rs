@@ -1016,6 +1016,9 @@ fn synchro_unregister_table(p_table_name: &str) {
 /// Declare the bounded impact rule from a captured dependency relation to a
 /// synced target relation.
 ///
+/// The dependency and the target can be the same relation. That self-impact
+/// declaration names the sibling rows whose membership a row change affects.
+///
 /// The declaration is copied with the complete registry generation. The worker
 /// evaluates this function after it applies all source projections for a WAL
 /// transaction.
@@ -1053,9 +1056,6 @@ fn synchro_register_membership_dependency(
             &registrations,
             p_target_table_name,
         )?;
-        if dependency.relation_id == target.relation_id {
-            pgrx::error!("membership dependency cannot target itself");
-        }
         if !target.is_synced() {
             pgrx::error!("membership dependency target must be a synced relation");
         }
@@ -5103,27 +5103,29 @@ fn validate_generation_function_projections(
             {
                 pgrx::error!("membership function reads an undeclared projection field");
             }
-            if source.relation_id != target.relation_id {
-                let dependency = dependencies
-                    .iter()
-                    .find(|dependency| {
-                        dependency.dependency_relation_id == source.relation_id
-                            && dependency.target_relation_id == target.relation_id
-                    })
-                    .unwrap_or_else(|| {
-                        pgrx::error!("membership function has no declared impact dependency")
-                    });
-                let declared: std::collections::HashSet<&str> = dependency
-                    .dependency_columns
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                if columns
-                    .iter()
-                    .any(|column| !declared.contains(column.as_str()))
-                {
-                    pgrx::error!("membership function dependency fields are incomplete");
-                }
+            // Catalog dependencies cannot show which rows a read selects. Without a
+            // self-impact declaration, the contract limits an own-projection read to
+            // the supplied row. A declaration must cover every column that it reads.
+            let dependency = dependencies.iter().find(|dependency| {
+                dependency.dependency_relation_id == source.relation_id
+                    && dependency.target_relation_id == target.relation_id
+            });
+            if source.relation_id == target.relation_id && dependency.is_none() {
+                continue;
+            }
+            let dependency = dependency.unwrap_or_else(|| {
+                pgrx::error!("membership function has no declared impact dependency")
+            });
+            let declared: std::collections::HashSet<&str> = dependency
+                .dependency_columns
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if columns
+                .iter()
+                .any(|column| !declared.contains(column.as_str()))
+            {
+                pgrx::error!("membership function dependency fields are incomplete");
             }
         }
     }
@@ -5365,8 +5367,7 @@ fn load_membership_dependencies_from_catalog(
         else {
             pgrx::error!("membership dependency target relation is not registered");
         };
-        if dependency_relation_id == target_relation_id
-            || dependency_registration_kind != dependency_registration.registration_kind
+        if dependency_registration_kind != dependency_registration.registration_kind
             || !target_registration.is_synced()
             || target_table_id != target_registration.table_id
             || dependency_columns.is_empty()
