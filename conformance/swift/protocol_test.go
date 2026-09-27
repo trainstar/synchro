@@ -189,6 +189,14 @@ func asConnect(parts runnerResponseParts) {
 	}
 }
 
+// asConnectFailure turns the valid observation into a retryable connect failure.
+func asConnectFailure(parts runnerResponseParts, status int) {
+	asConnect(parts)
+	parts.observation["status_code"] = status
+	parts.observation["error_code"] = "temporary_unavailable"
+	parts.observation["retryable"] = true
+}
+
 func TestValidateRunnerResponseRejectsInvalidShapes(t *testing.T) {
 	if _, err := validateRunnerResponse([]byte(validPullRunnerResponse)); err != nil {
 		t.Fatalf("valid runner response rejected: %v", err)
@@ -226,6 +234,9 @@ func TestValidateRunnerResponseValidatesRawTransportObservations(t *testing.T) {
 	if _, err := validateRunnerResponse(runnerResponseWith(t, asConnect)); err != nil {
 		t.Fatalf("valid connect transport observation rejected: %v", err)
 	}
+	if _, err := validateRunnerResponse(runnerResponseWith(t, func(parts runnerResponseParts) { asConnectFailure(parts, 503) })); err != nil {
+		t.Fatalf("valid connect transport failure rejected: %v", err)
+	}
 	for _, test := range []struct {
 		name   string
 		change func(parts runnerResponseParts)
@@ -238,16 +249,15 @@ func TestValidateRunnerResponseValidatesRawTransportObservations(t *testing.T) {
 		}},
 		{name: "unknown class", change: func(parts runnerResponseParts) {
 			asConnect(parts)
+			delete(parts.observation, "request_facts")
 			parts.observation["operation_class"] = "unknown"
 		}},
 		{name: "zero duration", change: func(parts runnerResponseParts) {
 			asConnect(parts)
 			parts.observation["duration_nanoseconds"] = 0
 		}},
-		{name: "status out of bounds", change: func(parts runnerResponseParts) {
-			asConnect(parts)
-			parts.observation["status_code"] = 99
-		}},
+		{name: "status below bounds", change: func(parts runnerResponseParts) { asConnectFailure(parts, 99) }},
+		{name: "status above bounds", change: func(parts runnerResponseParts) { asConnectFailure(parts, 600) }},
 		{name: "cursor on connect", change: func(parts runnerResponseParts) {
 			asConnect(parts)
 			parts.observation["cursor_fingerprints"] = []any{strings.Repeat("a", 64)}
