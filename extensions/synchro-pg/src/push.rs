@@ -141,12 +141,13 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         );
     }
 
+    // Parser errors can quote submitted values, so the response keeps only the class.
     let request: PushRequest = match serde_json::from_value(p_request.0.clone()) {
         Ok(request) => request,
-        Err(error) => {
+        Err(_) => {
             return push_protocol_error(
                 ProtocolErrorCode::InvalidRequest,
-                format!("invalid push request: {error}"),
+                "invalid push request",
                 false,
             )
         }
