@@ -183,6 +183,9 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
+RN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
+RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
+RN_IOS_BUILD_ARGS ?=
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
 PGRX_PG ?= pg18
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
@@ -355,6 +358,9 @@ help:
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
 	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
+	@echo "  test-rn-bridge-transactions - Run the native bridge transaction tests on iOS and one Android device"
+	@echo "  build-rn-bridge-transactions-android - Build the Android bridge transaction test APK without a device"
+	@echo "  build-rn-bridge-transactions-ios - Build the iOS bridge transaction test target for the host simulator architecture"
 	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
 	@echo "  rn-ios-build          - Build the iOS conformance app without starting a server"
 	@echo "  rn-ios-bundle         - Rebundle JavaScript-only changes in an existing iOS test app"
@@ -1160,6 +1166,47 @@ test-rn-native-parity:
 	@$(MAKE) test-rn-android-parity
 	@$(MAKE) test-rn-ios-parity
 
+.PHONY: test-rn-bridge-transactions test-rn-bridge-transactions-ios test-rn-bridge-transactions-android build-rn-bridge-transactions-android build-rn-bridge-transactions-ios
+test-rn-bridge-transactions:
+	@$(MAKE) --no-print-directory test-rn-bridge-transactions-ios
+	@$(MAKE) --no-print-directory test-rn-bridge-transactions-android
+
+# CocoaPods adds the SynchroReactNative test spec to the pod scheme. The gate runs its whole test target.
+test-rn-bridge-transactions-ios: rn-ios-pods
+	rm -rf clients/react-native/example/ios/build/bridge-transactions.xcresult
+	@status=0; \
+		(cd clients/react-native/example && xcodebuild test -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination '$(RN_IOS_TEST_DESTINATION)' -derivedDataPath ios/build/bridge-transactions -resultBundlePath ios/build/bridge-transactions.xcresult -only-testing:SynchroReactNative-Unit-Tests) || status=$$?; \
+		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/react-native/example/ios/build/bridge-transactions.xcresult) || status=$$?; \
+		exit "$$status"
+
+# Compiles the whole bridge test target for the host simulator architecture. It selects, boots, and tests
+# nothing. It is a host-architecture test build, not universal release evidence.
+# RN_IOS_BUILD_ARGS passes extra build-only xcodebuild arguments, for example '-jobs 2' on a shared host.
+build-rn-bridge-transactions-ios: rn-ios-pods
+	cd clients/react-native/example && xcodebuild build-for-testing -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/bridge-transactions ARCHS="$$(uname -m)" $(RN_IOS_BUILD_ARGS)
+
+# Pass GRADLE_TEST_ARGS='--rerun-tasks -Dmaven.repo.local=<owned path>' so release-kotlin-local
+# publishes and this build resolves the Kotlin SDK in one owned Maven local repository.
+# AGP selects connected devices only from ANDROID_SERIAL or --serial. It splits ANDROID_SERIAL at commas.
+test-rn-bridge-transactions-android: release-kotlin-local
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	@test -n "$(RN_ANDROID_SERIAL)" || (echo "Set RN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@case "$(RN_ANDROID_SERIAL)" in *[,[:space:]]*) echo "Set RN_ANDROID_SERIAL to exactly one device serial."; exit 1;; esac
+	rm -rf clients/react-native/android/build/outputs/androidTest-results/connected
+	@status=0; \
+		(cd clients/react-native/example/android && ANDROID_SERIAL="$(RN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
+		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/react-native/android/build/outputs/androidTest-results/connected) || status=$$?; \
+		exit "$$status"
+
+# Compiles the bridge test APK only. It installs and runs nothing. Pass the same owned
+# -Dmaven.repo.local through GRADLE_TEST_ARGS as for test-rn-bridge-transactions-android.
+build-rn-bridge-transactions-android: release-kotlin-local
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	@test -d clients/react-native/example/node_modules/@react-native/gradle-plugin || (echo "React Native dependencies are missing. Run yarn install --immutable in clients/react-native."; exit 1)
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:assembleDebugAndroidTest
+
 test-rn-warm-connect-control: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 		-test TestWarmConnectScopeAuthorityNegativeControl \
@@ -1666,7 +1713,7 @@ release-pods-check: version-check
 release-kotlin-local: version-check
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew :synchro:publishToMavenLocal
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :synchro:publishToMavenLocal
 	@echo "Published to mavenLocal."
 
 release-npm-dry-run: version-check
