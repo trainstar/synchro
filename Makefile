@@ -251,6 +251,8 @@ SWIFTPM_GIT_ENV := GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_C
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
+# Installed-client cells check server rows through ADAPTER_TEST_URL with this client.
+PACKAGED_SMOKE_PSQL ?= $(if $(PGRX_PG_BIN_DIR),$(PGRX_PG_BIN_DIR)psql,psql)
 RELEASE_DIR ?=
 RELEASE_SERVER_DIR ?= $(CURDIR)/dist/release-components/server
 RELEASE_PACKAGE_DIR ?= $(CURDIR)/dist/release-components/packages
@@ -1763,7 +1765,7 @@ test-consumer-swift-smoke: client-consumer-apple-artifact
 			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)"
 
 test-consumer-swift-ios: client-consumer-apple-artifact
-	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
 
 test-consumer-kotlin: client-consumer-kotlin-artifact
@@ -1808,7 +1810,7 @@ test-consumer-kotlin-device: client-consumer-kotlin-artifact
 			:app:connectedDebugAndroidTest
 
 test-consumer-kotlin-device-smoke: test-consumer-kotlin
-	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		ANDROID_HOME="$(ANDROID_HOME)" KOTLIN_ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
 		sh verification/consumers/kotlin/test-consumer-device.sh \
 			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
@@ -1825,14 +1827,14 @@ test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-art
 		sh verification/consumers/react-native/test-consumer.sh android "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)" build-only
 
 test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-artifact
-	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
 		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
 
 test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-artifact client-consumer-rn-artifact
-	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \

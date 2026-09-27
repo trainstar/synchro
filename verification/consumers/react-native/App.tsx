@@ -66,12 +66,33 @@ async function syncAndWaitForScheduledPullRetry() {
 
 type SmokePhase = 'initial' | 'resume';
 
+const AUTHORED_CUSTOMER_NAME = 'Packaged Consumer';
+
+interface ObservedRows {
+  customer_name: string;
+  ship_address: string;
+}
+
 interface AppPhaseResult {
   schema_version: 1;
   phase: SmokePhase;
   status: 'passed' | 'failed';
   pending_change_count: number | null;
+  observed: ObservedRows | null;
   error: string | null;
+}
+
+async function observe(): Promise<ObservedRows> {
+  const customer = await client.queryOne('SELECT name FROM customers WHERE id = ?', [
+    packagedSmokeConfig.customer_id,
+  ]);
+  const order = await client.queryOne('SELECT ship_address FROM orders WHERE id = ?', [
+    packagedSmokeConfig.order_id,
+  ]);
+  if (typeof customer?.name !== 'string' || typeof order?.ship_address !== 'string') {
+    throw new Error('packaged rows are missing from the local query path');
+  }
+  return { customer_name: customer.name, ship_address: order.ship_address };
 }
 
 async function reportPhaseResult(result: AppPhaseResult) {
@@ -91,6 +112,7 @@ async function reportPhaseResult(result: AppPhaseResult) {
 async function runPackagedSmokePhase(): Promise<AppPhaseResult> {
   let phase: SmokePhase = packagedSmokeConfig.phase;
   let pendingChangeCount: number | null = null;
+  let observed: ObservedRows | null = null;
   try {
     await client.initialize();
     const pendingAtLaunch = await client.pendingChangeCount();
@@ -105,10 +127,21 @@ async function runPackagedSmokePhase(): Promise<AppPhaseResult> {
         throw new Error('durable packaged row was not restored');
       }
       await startAndWaitForScheduledPullRetry();
-      await syncAndWaitForScheduledPullRetry();
+      // The harness authors a remote customer name while this process is
+      // dead. Only ordinary synchronization can deliver it to the local query path.
+      const deadline = Date.now() + 90000;
       pendingChangeCount = await client.pendingChangeCount();
-      if (pendingChangeCount !== 0) {
-        throw new Error('durable packaged work was not drained');
+      observed = await observe();
+      while (pendingChangeCount !== 0 || observed.customer_name === AUTHORED_CUSTOMER_NAME) {
+        if (Date.now() >= deadline) {
+          throw new Error('resumed client did not converge within 90 seconds');
+        }
+        await syncAndWaitForScheduledPullRetry();
+        pendingChangeCount = await client.pendingChangeCount();
+        observed = await observe();
+        if (pendingChangeCount !== 0 || observed.customer_name === AUTHORED_CUSTOMER_NAME) {
+          await new Promise<void>(resolve => setTimeout(resolve, 500));
+        }
       }
       await client.stop();
       await client.close();
@@ -124,7 +157,7 @@ async function runPackagedSmokePhase(): Promise<AppPhaseResult> {
         [
           packagedSmokeConfig.customer_id,
           packagedSmokeConfig.user_id,
-          'Packaged Consumer',
+          AUTHORED_CUSTOMER_NAME,
           timestamp,
           timestamp,
         ]
@@ -164,12 +197,14 @@ async function runPackagedSmokePhase(): Promise<AppPhaseResult> {
       if (pendingChangeCount !== 1) {
         throw new Error('durable packaged work was not queued');
       }
+      observed = await observe();
     }
     return {
       schema_version: 1,
       phase,
       status: 'passed',
       pending_change_count: pendingChangeCount,
+      observed,
       error: null,
     };
   } catch (error) {
@@ -178,6 +213,7 @@ async function runPackagedSmokePhase(): Promise<AppPhaseResult> {
       phase,
       status: 'failed',
       pending_change_count: pendingChangeCount,
+      observed: null,
       error: (error instanceof Error ? error.message : String(error)).slice(0, 512),
     };
   }

@@ -35,6 +35,12 @@ APP_RESULT_PATH = "/result"
 APP_RESULT_MAX_BYTES = 4096
 APP_RESULT_MAX_ERROR_LENGTH = 512
 APP_RESULT_READ_TIMEOUT_SECONDS = 5.0
+# The installed consumer authors these values. The harness authors the remote customer name.
+AUTHORED_CUSTOMER_NAME = "Packaged Consumer"
+INITIAL_SHIP_ADDRESS = {"street": "Packaged Initial"}
+DURABLE_SHIP_ADDRESS = {"street": "Packaged Durable"}
+# The server consumer uploads this customer insert only after the adapter restarts.
+SERVER_OFFLINE_WRITE = {"customer_id": "00000000-0000-4000-8000-000000000118", "customer_name": "Packaged server offline"}
 
 
 class EvidenceError(ValueError):
@@ -176,6 +182,7 @@ def validate_app_result(value: object, expected_phase: str | None = None) -> dic
         "phase",
         "status",
         "pending_change_count",
+        "observed",
         "error",
     }
     if set(value) != expected_keys:
@@ -202,6 +209,7 @@ def validate_app_result(value: object, expected_phase: str | None = None) -> dic
     if status == "passed":
         if pending_count is None or error is not None:
             raise EvidenceError("passed application phase result is incomplete")
+        validate_observed(value.get("observed"), f"{phase} application")
     elif (
         not isinstance(error, str)
         or not error
@@ -209,6 +217,24 @@ def validate_app_result(value: object, expected_phase: str | None = None) -> dic
     ):
         raise EvidenceError("failed application phase result has invalid error detail")
     return value
+
+
+def validate_observed(value: object, label: str) -> dict[str, str]:
+    """Validate the rows that the consumer read through its public query path."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"customer_name", "ship_address"}
+        or not all(isinstance(item, str) for item in value.values())
+    ):
+        raise EvidenceError(f"{label} observed rows are invalid")
+    return value
+
+
+def json_value(text: str, label: str) -> object:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise EvidenceError(f"{label} is not JSON") from error
 
 
 def app_result_path(results_dir: Path, phase: str) -> Path:
@@ -384,6 +410,7 @@ def await_app_result(
             "status": "passed",
             "pid": required_integer(pid, f"{phase} pid", 1),
             "pending_change_count": pending_count,
+            "observed": result["observed"],
         },
     )
 
@@ -392,7 +419,7 @@ def validate_phase(path: Path, expected_phase: str) -> dict[str, object]:
     value = load_json(path, f"{expected_phase} phase result")
     if not isinstance(value, dict):
         raise EvidenceError(f"{expected_phase} phase result must be an object")
-    expected_keys = {"schema_version", "phase", "status", "pid", "pending_change_count"}
+    expected_keys = {"schema_version", "phase", "status", "pid", "pending_change_count", "observed"}
     if set(value) != expected_keys:
         raise EvidenceError(f"{expected_phase} phase result has invalid members")
     if value.get("schema_version") != 1 or value.get("phase") != expected_phase:
@@ -401,7 +428,122 @@ def validate_phase(path: Path, expected_phase: str) -> dict[str, object]:
         raise EvidenceError(f"{expected_phase} phase did not pass")
     required_integer(value.get("pid"), f"{expected_phase} pid", 1)
     required_integer(value.get("pending_change_count"), f"{expected_phase} pending count")
+    validate_observed(value.get("observed"), f"{expected_phase} phase")
     return value
+
+
+def psql_rows(sql: str, variables: dict[str, str]) -> list[str]:
+    database_url = os.environ.get("ADAPTER_TEST_URL", "").strip()
+    if not database_url:
+        raise EvidenceError("ADAPTER_TEST_URL is required for independent server checks")
+    command = [os.environ.get("PACKAGED_SMOKE_PSQL", "").strip() or "psql", "--dbname", database_url, "-XAtq", "-v", "ON_ERROR_STOP=1"]
+    for name, item in variables.items():
+        command.extend(["-v", f"{name}={item}"])
+    try:
+        result = subprocess.run(command, input=sql, text=True, capture_output=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvidenceError(f"independent server query did not run: {error}") from error
+    if result.returncode != 0:
+        raise EvidenceError("independent server query failed")
+    return result.stdout.splitlines()
+
+
+def server_rows(config: dict[str, object]) -> dict[str, object]:
+    rows = psql_rows(
+        """SELECT json_build_object(
+  'customer_name', customer.name,
+  'customer_user_id', customer.user_id,
+  'order_user_id', orders.user_id,
+  'ship_address', orders.ship_address)
+FROM public.orders orders
+JOIN public.customers customer ON customer.id = orders.customer_id
+WHERE orders.id = :'order_id'::uuid AND customer.id = :'customer_id'::uuid
+  AND orders.deleted_at IS NULL AND customer.deleted_at IS NULL;
+""",
+        {"order_id": str(config["order_id"]), "customer_id": str(config["customer_id"])},
+    )
+    if len(rows) != 1:
+        raise EvidenceError("server does not hold exactly one consumer order and customer")
+    value = json_value(rows[0], "server row state")
+    if not isinstance(value, dict):
+        raise EvidenceError("server row state is invalid")
+    return value
+
+
+def load_config(path: Path) -> dict[str, object]:
+    value = load_json(path, "packaged smoke config")
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise EvidenceError("packaged smoke config is invalid")
+    return value
+
+
+def author_remote_value(config_path: Path, output: Path) -> None:
+    config = load_config(config_path)
+    expected = {
+        "customer_name": AUTHORED_CUSTOMER_NAME,
+        "customer_user_id": config["user_id"],
+        "order_user_id": config["user_id"],
+        "ship_address": INITIAL_SHIP_ADDRESS,
+    }
+    # The durable offline write must still be absent, or the resume cannot prove its own upload.
+    if server_rows(config) != expected:
+        raise EvidenceError("server does not hold exactly the initial upload before resume")
+    remote_name = f"Server authored {uuid.uuid4()} \u00e9\u4e16"
+    rows = psql_rows(
+        """UPDATE public.customers SET name = :'remote_name', updated_at = clock_timestamp()
+WHERE id = :'customer_id'::uuid AND name = :'authored_name'
+RETURNING name;
+""",
+        {"remote_name": remote_name, "customer_id": str(config["customer_id"]), "authored_name": AUTHORED_CUSTOMER_NAME},
+    )
+    if rows != [remote_name]:
+        raise EvidenceError("server did not author exactly one remote value")
+    write_json(output, {"schema_version": 1, "customer_name": remote_name})
+
+
+def load_remote_value(path: Path) -> str:
+    value = load_json(path, "remote value record")
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "customer_name"}
+        or value.get("schema_version") != 1
+        or not isinstance(value.get("customer_name"), str)
+        or not value["customer_name"].startswith("Server authored ")
+    ):
+        raise EvidenceError("remote value record is invalid")
+    return value["customer_name"]
+
+
+def verify_server_state(config_path: Path, remote_path: Path, output: Path) -> None:
+    config = load_config(config_path)
+    remote_name = load_remote_value(remote_path)
+    actual = server_rows(config)
+    expected = {
+        "customer_name": remote_name,
+        "customer_user_id": config["user_id"],
+        "order_user_id": config["user_id"],
+        "ship_address": DURABLE_SHIP_ADDRESS,
+    }
+    if actual != expected:
+        raise EvidenceError("server does not hold exactly the resumed upload and the remote value")
+    write_json(output, server_verification(remote_name, {"order_ship_address": DURABLE_SHIP_ADDRESS}))
+
+
+def server_verification(remote_name: str, resumed_write: dict[str, object]) -> dict[str, object]:
+    return {"schema_version": 1, "status": "passed", "remote_customer_name": remote_name, "resumed_write": resumed_write}
+
+
+def validate_server_verification(path: Path, remote_name: str, resumed_write: dict[str, object]) -> None:
+    if load_json(path, "server verification") != server_verification(remote_name, resumed_write):
+        raise EvidenceError("server verification does not confirm the resumed upload and remote value")
+
+
+def require_observed(phase: dict[str, object], label: str, customer_name: str) -> None:
+    observed = validate_observed(phase["observed"], label)
+    if observed["customer_name"] != customer_name:
+        raise EvidenceError(f"{label} consumer did not read the expected customer name")
+    if json_value(observed["ship_address"], f"{label} ship address") != DURABLE_SHIP_ADDRESS:
+        raise EvidenceError(f"{label} consumer did not read the durable ship address")
 
 
 def complete_cell(
@@ -413,11 +555,17 @@ def complete_cell(
     killed_pid: int,
     artifacts: list[Path],
     expected_hashes: list[str],
+    remote_path: Path,
+    server_path: Path,
 ) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
     initial = validate_phase(initial_path, "initial")
     resume = validate_phase(resume_path, "resume")
+    remote_name = load_remote_value(remote_path)
+    require_observed(initial, "initial", AUTHORED_CUSTOMER_NAME)
+    require_observed(resume, "resume", remote_name)
+    validate_server_verification(server_path, remote_name, {"order_ship_address": DURABLE_SHIP_ADDRESS})
     initial_pid = required_integer(initial["pid"], "initial pid", 1)
     resume_pid = required_integer(resume["pid"], "resume pid", 1)
     if killed_pid != initial_pid:
@@ -451,6 +599,8 @@ def complete_cell(
                 "resume_pid": resume_pid,
                 "durable_pending_before_kill": pending_before,
                 "durable_pending_after_resume": pending_after,
+                "remote_value_applied": True,
+                "server_resumed_write_verified": True,
             },
         },
     )
@@ -460,7 +610,7 @@ def validate_server_phase(path: Path, expected_phase: str) -> dict[str, object]:
     value = load_json(path, f"server {expected_phase} phase result")
     expected = {"schema_version", "phase", "status", "adapter_pid", "push_digest"}
     if expected_phase == "resume":
-        expected.add("replay_equal")
+        expected.update({"replay_equal", "observed_customer_name"})
     if not isinstance(value, dict) or set(value) != expected:
         raise EvidenceError(f"server {expected_phase} phase result has invalid members")
     if value.get("schema_version") != 1 or value.get("phase") != expected_phase or value.get("status") != "passed":
@@ -473,11 +623,15 @@ def validate_server_phase(path: Path, expected_phase: str) -> dict[str, object]:
     return value
 
 
-def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path, killed_pid: int, artifacts: list[Path], expected_hashes: list[str]) -> None:
+def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path, killed_pid: int, artifacts: list[Path], expected_hashes: list[str], remote_path: Path, server_path: Path) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
     initial = validate_server_phase(initial_path, "initial")
     resume = validate_server_phase(resume_path, "resume")
+    remote_name = load_remote_value(remote_path)
+    if resume["observed_customer_name"] != remote_name:
+        raise EvidenceError("resumed server consumer did not pull the remote value")
+    validate_server_verification(server_path, remote_name, SERVER_OFFLINE_WRITE)
     initial_pid = required_integer(initial["adapter_pid"], "server initial adapter pid", 1)
     resume_pid = required_integer(resume["adapter_pid"], "server resume adapter pid", 1)
     if killed_pid != initial_pid or resume_pid == initial_pid:
@@ -503,6 +657,8 @@ def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_pa
                 "resume_pid": resume_pid,
                 "push_digest": initial["push_digest"],
                 "replay_equal": True,
+                "remote_value_applied": True,
+                "server_resumed_write_verified": True,
             },
         },
     )
@@ -580,8 +736,9 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
             raise EvidenceError(f"cell {expected_cell} process lifecycle is missing")
         kind = lifecycle.get("kind", "client")
         common_keys = {"initial_pid", "kill_signal", "resume_pid"}
-        client_keys = common_keys | {"durable_pending_before_kill", "durable_pending_after_resume"}
-        server_keys = common_keys | {"kind", "push_digest", "replay_equal"}
+        convergence_keys = {"remote_value_applied", "server_resumed_write_verified"}
+        client_keys = common_keys | convergence_keys | {"durable_pending_before_kill", "durable_pending_after_resume"}
+        server_keys = common_keys | convergence_keys | {"kind", "push_digest", "replay_equal"}
         lifecycle_keys = set(lifecycle)
         if lifecycle_keys != client_keys and lifecycle_keys != server_keys:
             raise EvidenceError(f"cell {expected_cell} process lifecycle has invalid members")
@@ -589,6 +746,8 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
         resume_pid = required_integer(lifecycle.get("resume_pid"), "resume pid", 1)
         if lifecycle.get("kill_signal") != 9 or initial_pid == resume_pid:
             raise EvidenceError(f"cell {expected_cell} process kill proof is invalid")
+        if lifecycle.get("remote_value_applied") is not True or lifecycle.get("server_resumed_write_verified") is not True:
+            raise EvidenceError(f"cell {expected_cell} did not prove bidirectional convergence")
         if kind == "server":
             if (
                 not isinstance(lifecycle.get("push_digest"), str)
@@ -969,6 +1128,17 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument("--killed-pid", type=int, required=True)
     complete.add_argument("--artifact", action="append", type=Path, default=[])
     complete.add_argument("--expected-artifact-hash", action="append", default=[])
+    complete.add_argument("--remote", type=Path, required=True)
+    complete.add_argument("--server-verification", type=Path, required=True)
+
+    author = subparsers.add_parser("author-remote")
+    author.add_argument("--config", type=Path, required=True)
+    author.add_argument("--output", type=Path, required=True)
+
+    verify_server = subparsers.add_parser("verify-server")
+    verify_server.add_argument("--config", type=Path, required=True)
+    verify_server.add_argument("--remote", type=Path, required=True)
+    verify_server.add_argument("--output", type=Path, required=True)
 
     server_complete = subparsers.add_parser("complete-server-cell")
     for argument in ("--repo-root", "--cell", "--output", "--initial", "--resume"):
@@ -976,6 +1146,8 @@ def parse_args() -> argparse.Namespace:
     server_complete.add_argument("--killed-pid", type=int, required=True)
     server_complete.add_argument("--artifact", action="append", type=Path, default=[])
     server_complete.add_argument("--expected-artifact-hash", action="append", default=[])
+    server_complete.add_argument("--remote", type=Path, required=True)
+    server_complete.add_argument("--server-verification", type=Path, required=True)
 
     collect = subparsers.add_parser("collect")
     collect.add_argument("--repo-root", type=Path, required=True)
@@ -1039,9 +1211,15 @@ def main() -> int:
                 args.killed_pid,
                 [path.resolve() for path in args.artifact],
                 args.expected_artifact_hash,
+                args.remote.resolve(),
+                args.server_verification.resolve(),
             )
+        elif args.command == "author-remote":
+            author_remote_value(args.config.resolve(), args.output.resolve())
+        elif args.command == "verify-server":
+            verify_server_state(args.config.resolve(), args.remote.resolve(), args.output.resolve())
         elif args.command == "complete-server-cell":
-            complete_server_cell(args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(), args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact], args.expected_artifact_hash)
+            complete_server_cell(args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(), args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact], args.expected_artifact_hash, args.remote.resolve(), args.server_verification.resolve())
         elif args.command == "collect":
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
         elif args.command == "verify-summary":

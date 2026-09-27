@@ -83,7 +83,7 @@ class MainActivity : Activity() {
                 arrayOf(
                     config.getString("customer_id"),
                     config.getString("user_id"),
-                    "Packaged Consumer",
+                    AUTHORED_CUSTOMER_NAME,
                     timestamp,
                     timestamp,
                 ),
@@ -109,7 +109,7 @@ class MainActivity : Activity() {
             )
             val pending = client.pendingChangeCount()
             check(pending == 1)
-            writePhaseResult(phase, pending)
+            writePhaseResult(phase, pending, observe(client, config))
             return
         }
 
@@ -125,14 +125,37 @@ class MainActivity : Activity() {
         // syncNow before the engine publishes connectionReady throws, so the
         // resume waits for the public Ready status first.
         awaitReadyStatus(client)
-        runAndWaitForScheduledPullRetry(client) {
-            client.syncNow()
+        // The harness authors a remote customer name while this process is dead.
+        // Only ordinary synchronization can deliver it to the local query path.
+        val deadline = System.nanoTime() + 90_000_000_000L
+        var pendingAfterResume = client.pendingChangeCount()
+        var observed = observe(client, config)
+        while (pendingAfterResume != 0 || observed.getString("customer_name") == AUTHORED_CUSTOMER_NAME) {
+            check(System.nanoTime() < deadline) { "resumed client did not converge within 90 seconds" }
+            runAndWaitForScheduledPullRetry(client) {
+                client.syncNow()
+            }
+            pendingAfterResume = client.pendingChangeCount()
+            observed = observe(client, config)
+            if (pendingAfterResume != 0 || observed.getString("customer_name") == AUTHORED_CUSTOMER_NAME) {
+                delay(500)
+            }
         }
-        val pendingAfterResume = client.pendingChangeCount()
-        check(pendingAfterResume == 0)
         client.stop()
         client.close()
-        writePhaseResult(phase, pendingAfterResume)
+        writePhaseResult(phase, pendingAfterResume, observed)
+    }
+
+    private fun observe(client: SynchroClient, config: JSONObject): JSONObject {
+        val customerName = client.queryOne(
+            "SELECT name FROM customers WHERE id = ?",
+            arrayOf(config.getString("customer_id")),
+        )?.get("name") as String
+        val shipAddress = client.queryOne(
+            "SELECT ship_address FROM orders WHERE id = ?",
+            arrayOf(config.getString("order_id")),
+        )?.get("ship_address") as String
+        return JSONObject().put("customer_name", customerName).put("ship_address", shipAddress)
     }
 
     private suspend fun runAndWaitForScheduledPullRetry(
@@ -179,16 +202,21 @@ class MainActivity : Activity() {
         error("sync engine did not reach Ready within 60 seconds")
     }
 
-    private fun writePhaseResult(phase: String, pendingCount: Int) {
+    private fun writePhaseResult(phase: String, pendingCount: Int, observed: JSONObject) {
         val result = JSONObject()
             .put("schema_version", 1)
             .put("phase", phase)
             .put("status", "passed")
             .put("pid", android.os.Process.myPid())
             .put("pending_change_count", pendingCount)
+            .put("observed", observed)
         val destination = File(filesDir, "$phase-result.json")
         val temporary = File(filesDir, ".$phase-result.json.tmp")
         temporary.writeText(result.toString())
         check(temporary.renameTo(destination))
+    }
+
+    private companion object {
+        const val AUTHORED_CUSTOMER_NAME = "Packaged Consumer"
     }
 }
