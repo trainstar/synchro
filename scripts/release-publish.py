@@ -327,6 +327,8 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
         next_operation = "publish-maven"
     elif npm_status == "absent":
         next_operation = "publish-npm"
+    elif npm_status == "published-candidate":
+        next_operation = "promote-npm"
     else:
         next_operation = "promote-github"
     return {
@@ -349,27 +351,34 @@ def classify_maven(identity: dict[str, Any], maven: Any) -> str:
 def classify_npm(identity: dict[str, Any], npm: Any) -> str:
     if not isinstance(npm, dict) or set(npm) != {"sha256", "dist_tags", "provenance"} or not isinstance(npm["dist_tags"], dict):
         raise PublicationError("npm state is invalid")
+    version = identity["version"]
     npm_hash = npm["sha256"]
     if npm_hash is not None and npm_hash != identity["npm"]["sha256"]:
         raise PublicationError("npm package bytes differ")
     if not isinstance(npm["provenance"], bool):
         raise PublicationError("npm provenance state is invalid")
-    for name, version in npm["dist_tags"].items():
-        if not isinstance(name, str) or not isinstance(version, str):
+    for name, tagged in npm["dist_tags"].items():
+        if not isinstance(name, str) or not isinstance(tagged, str):
             raise PublicationError("npm dist-tag state is invalid")
-        if name in {"candidate", "latest"} and version == identity["version"] and npm_hash is None:
+        if tagged == version and npm_hash is None:
             raise PublicationError("npm dist-tag points to a missing package")
-    if npm["dist_tags"].get("candidate") == identity["version"]:
-        raise PublicationError("npm candidate dist-tag is obsolete")
     if npm_hash is None:
         if npm["provenance"]:
             raise PublicationError("npm provenance points to a missing package")
         return "absent"
     if not npm["provenance"]:
         raise PublicationError("npm package provenance is missing")
-    if npm["dist_tags"].get("latest") != identity["version"]:
-        raise PublicationError("npm package exists but is not published under latest")
-    return "published-latest"
+    latest = npm["dist_tags"].get("latest")
+    if latest == version:
+        return "published-latest"
+    # Promotion must never move the default tag backward or over a version this release did not observe.
+    if latest is not None and (not VERSION.fullmatch(latest) or version_key(latest) > version_key(version)):
+        raise PublicationError(f"npm latest points to competing version {latest} and needs explicit resolution")
+    return "published-candidate"
+
+
+def version_key(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
 
 
 def rate_limit_wait(headers: Any, now: float) -> float | None:
