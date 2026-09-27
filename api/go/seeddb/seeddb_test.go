@@ -1457,8 +1457,11 @@ func requireRolledBackExport(t *testing.T, events []string) {
 // pool. It must run outside the failed read-only export transaction.
 func requireCleanExportConnection(t *testing.T, db *sql.DB) {
 	t.Helper()
+	// A connection that Generate never released would block this checkout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	var readOnly string
-	if err := db.QueryRowContext(context.Background(), "SELECT current_setting('transaction_read_only')").Scan(&readOnly); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')").Scan(&readOnly); err != nil {
 		t.Fatalf("reuse export connection: %v", err)
 	}
 	if readOnly != "off" {
