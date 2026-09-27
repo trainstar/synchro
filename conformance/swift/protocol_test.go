@@ -369,8 +369,12 @@ func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
 	scopeFingerprint := strings.Repeat("b", 64)
 	// Each call returns new values, so a mutation of one snapshot cannot change another.
 	accepted := func() *transportObservationSnapshot {
-		errorCode := "retry_later"
+		errorCode := "temporary_unavailable"
 		complete := true
+		pullClientGeneration := int64(1)
+		scopeSetVersion := int64(1)
+		scopeCount := 1
+		pullLimit := 100
 		clientGeneration := int64(1)
 		limit := 100
 		requestScopeFingerprint := scopeFingerprint
@@ -379,12 +383,20 @@ func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
 		responseBodySHA256 := strings.Repeat("d", 64)
 		return &transportObservationSnapshot{
 			Observations: []transportObservation{{
-				Sequence:                   1,
-				OperationClass:             "pull",
-				StatusCode:                 503,
-				ErrorCode:                  &errorCode,
-				Retryable:                  true,
-				DurationNanoseconds:        1,
+				Sequence:            1,
+				OperationClass:      "pull",
+				StatusCode:          503,
+				ErrorCode:           &errorCode,
+				Retryable:           true,
+				DurationNanoseconds: 1,
+				RequestFacts: &transportRequestFacts{
+					ClientGeneration: &pullClientGeneration,
+					SchemaVersion:    1,
+					SchemaHash:       strings.Repeat("e", 64),
+					ScopeSetVersion:  &scopeSetVersion,
+					ScopeCount:       &scopeCount,
+					Limit:            &pullLimit,
+				},
 				CursorFingerprints:         []string{fingerprint},
 				CursorFingerprintsComplete: &complete,
 			}, {
@@ -412,8 +424,8 @@ func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
 			SequenceCheckpoint: 2,
 		}
 	}
-	if err := validateTransportObservation(accepted().Observations[1]); err != nil {
-		t.Fatalf("rebuild observation fixture is invalid: %v", err)
+	if err := validateTransportObservationSnapshot(accepted()); err != nil {
+		t.Fatalf("accepted history fixture is invalid: %v", err)
 	}
 	requireRetained := func(boundary string, process *runnerProcess) {
 		t.Helper()
