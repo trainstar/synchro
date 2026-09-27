@@ -38,6 +38,7 @@
 	record-r1-benchmark \
 	test-r1-benchmark \
 	_run-r1-benchmark \
+	characterize-dataset \
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-seed-artifact \
@@ -312,6 +313,7 @@ help:
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
 	@echo "  record-r1-benchmark   - Record one R1 benchmark candidate"
 	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
+	@echo "  characterize-dataset  - Record complete-work samples for DATASET_SEED and DATASET_SIZE"
 	@echo "  release-stage-server  - Build Linux x64 server release components"
 	@echo "  release-stage-packages - Build signed Maven and npm release components"
 	@echo "  release-stage         - Assemble and seal already built release components"
@@ -624,6 +626,22 @@ _run-r1-benchmark:
 			-expect target_pass \
 			-- go test -tags r1benchmark -json ./blackbox/integration -count=1 -timeout=20m \
 			-run '^TestRealR1PerformanceBenchmark$$' -args --provision --install
+
+# Characterize complete correct work for one seeded dataset. The run records
+# samples and has no numerical pass or fail rule (D-06). It uses the black-box
+# SYNCHRO_CONFORMANCE_* environment of test-blackbox.
+characterize-dataset: conformance-mod-download
+	@case "$(DATASET_SEED)" in ''|*[!0-9]*) echo "DATASET_SEED must be an unsigned integer" >&2; exit 1 ;; esac
+	@case "$(DATASET_SIZE)" in s|m|l) ;; *) echo "DATASET_SIZE must be s, m, or l" >&2; exit 1 ;; esac
+	@test -n "$(DATASET_CHARACTERIZATION_RESULT)" || { echo "DATASET_CHARACTERIZATION_RESULT is required" >&2; exit 1; }
+	@result="$(abspath $(DATASET_CHARACTERIZATION_RESULT))"; repo="$(CURDIR)"; \
+		case "$$result" in "$$repo"|"$$repo"/*) echo "DATASET_CHARACTERIZATION_RESULT must be outside the repository" >&2; exit 1 ;; esac
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "dataset characterization requires a clean worktree" >&2; exit 1; }
+	cd conformance && DATASET_REVISION="$$(git rev-parse --verify HEAD)" DATASET_SEED="$(DATASET_SEED)" DATASET_SIZE="$(DATASET_SIZE)" \
+		DATASET_CHARACTERIZATION_RESULT="$(abspath $(DATASET_CHARACTERIZATION_RESULT))" \
+		GOFLAGS= GOWORK=off go run ./cmd/testresult exact -test TestRealDatasetCharacterization -expect target_pass \
+		-- go test -tags datasetcharacterization -json ./blackbox/integration -count=1 -timeout=120m \
+		-run '^TestRealDatasetCharacterization$$' -args --provision --install
 
 parse-testresult:
 	@test -n "$(TESTRESULT_TEST_NAME)" || { echo "TESTRESULT_TEST_NAME is required" >&2; exit 1; }

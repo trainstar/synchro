@@ -42,6 +42,7 @@ type datasetClient struct {
 	Tables          map[string]*datasetTable
 	ByID            map[string]*datasetTable
 	Rows            map[string]map[string]map[string]json.RawMessage
+	Versions        map[string]string
 }
 
 type datasetRuntime struct {
@@ -50,6 +51,8 @@ type datasetRuntime struct {
 	harness *blackbox.Harness
 	admin   *sql.DB
 	http    *http.Client
+	// maxPending is the largest pending fence count that waitMaterialized saw.
+	maxPending int
 }
 
 func provisionRealDatasetHarness(t *testing.T, ctx context.Context) *blackbox.Harness {
@@ -182,7 +185,7 @@ func (runtime *datasetRuntime) connect(user, clientID string) *datasetClient {
 	runtime.t.Helper()
 	client := &datasetClient{
 		User: user, Token: runtime.token(user), ID: clientID, Cursors: map[string]*string{},
-		Rows: map[string]map[string]map[string]json.RawMessage{},
+		Rows: map[string]map[string]map[string]json.RawMessage{}, Versions: map[string]string{},
 	}
 	var response datasetConnectResponse
 	runtime.sync(client.Token, "/sync/connect", map[string]any{
@@ -301,6 +304,7 @@ func (client *datasetClient) store(scope string, record datasetRecord, t *testin
 		row[name] = value
 	}
 	client.Rows[scope][key] = row
+	client.Versions[key] = record.ServerVersion
 }
 
 // rebuildTimings records the first page and complete rebuild durations.
@@ -475,6 +479,7 @@ func (runtime *datasetRuntime) waitMaterialized(timeout time.Duration) time.Dura
 		if poison.Valid {
 			runtime.t.Fatalf("dataset source work poisoned the stream: %s", poison.String)
 		}
+		runtime.maxPending = max(runtime.maxPending, pending)
 		if pending == 0 {
 			return time.Since(started)
 		}
@@ -576,27 +581,34 @@ func (client *datasetClient) mismatch(expected expectedState, assigned []string)
 		if client.Cursors[scope] == nil {
 			return fmt.Sprintf("%s scope %s has no cursor", client.User, scope)
 		}
-		got := client.Rows[scope]
-		want := expected.scopes[scope]
-		for key := range want {
-			if _, ok := got[key]; !ok {
-				return fmt.Sprintf("%s scope %s lacks %s", client.User, scope, key)
-			}
+		if difference := expected.scopeMismatch(scope, client.Rows[scope]); difference != "" {
+			return client.User + " " + difference
 		}
-		for key, row := range got {
-			if !want[key] {
-				return fmt.Sprintf("%s scope %s has unexpected %s", client.User, scope, key)
-			}
-			source := expected.rows[key]
-			tableName := key[:strings.Index(key, "/")]
-			table, _ := dataset.LookupTable(tableName)
-			if len(row) != len(table.Columns) {
-				return fmt.Sprintf("%s scope %s row %s has %d fields, want %d", client.User, scope, key, len(row), len(table.Columns))
-			}
-			for _, column := range table.Columns {
-				if err := dataset.CompareWire(column.Type, row[column.Name], source[column.Name]); err != nil {
-					return fmt.Sprintf("%s scope %s row %s field %s: %v", client.User, scope, key, column.Name, err)
-				}
+	}
+	return ""
+}
+
+// scopeMismatch compares the received rows of one scope with the expected rows.
+func (expected expectedState) scopeMismatch(scope string, got map[string]map[string]json.RawMessage) string {
+	want := expected.scopes[scope]
+	for key := range want {
+		if _, ok := got[key]; !ok {
+			return fmt.Sprintf("scope %s lacks %s", scope, key)
+		}
+	}
+	for key, row := range got {
+		if !want[key] {
+			return fmt.Sprintf("scope %s has unexpected %s", scope, key)
+		}
+		source := expected.rows[key]
+		tableName := key[:strings.Index(key, "/")]
+		table, _ := dataset.LookupTable(tableName)
+		if len(row) != len(table.Columns) {
+			return fmt.Sprintf("scope %s row %s has %d fields, want %d", scope, key, len(row), len(table.Columns))
+		}
+		for _, column := range table.Columns {
+			if err := dataset.CompareWire(column.Type, row[column.Name], source[column.Name]); err != nil {
+				return fmt.Sprintf("scope %s row %s field %s: %v", scope, key, column.Name, err)
 			}
 		}
 	}
