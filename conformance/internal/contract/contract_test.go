@@ -775,41 +775,6 @@ func writeFixtureFile(t *testing.T, root, relativePath string, data []byte) {
 	}
 }
 
-func mutateRequirementReferencePath(t *testing.T, root, path string) {
-	t.Helper()
-	requirementsPath := filepath.Join(root, "conformance", "requirements.json")
-	data, err := os.ReadFile(requirementsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document map[string]any
-	if err := json.Unmarshal(data, &document); err != nil {
-		t.Fatal(err)
-	}
-	requirements, ok := document["requirements"].([]any)
-	if !ok || len(requirements) == 0 {
-		t.Fatal("fixture requirements did not decode as a nonempty array")
-	}
-	requirement, ok := requirements[0].(map[string]any)
-	if !ok {
-		t.Fatal("fixture first requirement did not decode as an object")
-	}
-	references, ok := requirement["normative_references"].([]any)
-	if !ok || len(references) == 0 {
-		t.Fatal("fixture first requirement has no normative reference")
-	}
-	reference, ok := references[0].(map[string]any)
-	if !ok {
-		t.Fatal("fixture first normative reference did not decode as an object")
-	}
-	reference["path"] = path
-	encoded, err := json.Marshal(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeFixtureFile(t, root, "conformance/requirements.json", encoded)
-}
-
 func requireErrorContains(t *testing.T, err error, want string) {
 	t.Helper()
 	if err == nil {

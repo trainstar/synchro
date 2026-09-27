@@ -1168,22 +1168,6 @@ func provisionedHBAConfiguration(database string, roles []string) string {
 	}, "\n")
 }
 
-func workerHBAConfiguration(database, worker string) string {
-	database = quoteHBAName(database)
-	worker = quoteHBAName(worker)
-	return strings.Join([]string{
-		"# Synchro conformance authentication boundary",
-		"local " + database + " " + worker + " scram-sha-256",
-		"local all " + worker + " reject",
-		"local all all trust",
-		"host " + database + " " + worker + " 127.0.0.1/32 scram-sha-256",
-		"host all " + worker + " 127.0.0.1/32 reject",
-		"host all all 127.0.0.1/32 scram-sha-256",
-		"host all all ::1/128 scram-sha-256",
-		"",
-	}, "\n")
-}
-
 func quoteHBAName(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
