@@ -122,6 +122,8 @@ make synchrod-pg-test-serve
 ```
 
 It prepares the disposable integration schema before listening on port 8091.
+Add `CLIENT_DATASET=1` to also prepare the synthetic training dataset in `conformance/dataset` and its authored seed.
+That dataset registers the shared `catalog` scope, so every user in that database receives it.
 Do not run another adapter owner on that port.
 The helper rejects an occupied port rather than terminating its owner.
 

@@ -5884,7 +5884,7 @@ func (executor *OperatorExecutor) ObserveMembershipBuckets(ctx context.Context, 
 		return nil, errors.New("operator executor is unavailable")
 	}
 	validTable := false
-	for _, candidate := range executor.harness.sourceTables() {
+	for _, candidate := range diagnosticSourceTables {
 		if tableName == candidate {
 			validTable = true
 			break

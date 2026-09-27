@@ -249,6 +249,7 @@ Reject missing jobs, skipped work, failed work, stale results, incomplete record
 Correctness checks currently enforce contract, integration, scenario, fault, zero-skip, seeded-stateful, and package-smoke behavior.
 
 Synchro has no numeric performance guarantee. Performance budgets remain deferred.
+`make characterize-dataset` records complete-work samples for a seeded dataset without a performance verdict.
 
 ## Failure And Recovery
 
