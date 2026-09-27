@@ -272,6 +272,90 @@ class IntegrationTests {
         }
     }
 
+    /**
+     * A connect that the extension rejects must leave local durable state and
+     * queued intent unchanged. The client contract requires a 400 response to
+     * preserve unresolved local state. Only the lifecycle and failure record changes.
+     */
+    @OptIn(SynchroProofApi::class)
+    @Test
+    fun testRejectedConnectPreservesLocalStateAndQueuedIntent() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val customerID = UUID.randomUUID().toString()
+        val config = makeConfig(userID = userID)
+        val unassignedScope = "user:${UUID.randomUUID()}"
+
+        val writer = SynchroClient(config, context)
+        val beforeRejection: List<String>
+        val connectedGeneration: Any?
+        Closeable(writer::close).use {
+            writer.start()
+            writer.stop()
+            writer.executeBatch(listOf(insertCustomer(userID, customerID, "queued before rejection")))
+            assertEquals(listOf(customerID), writer.inspectPendingMutations().map { it.recordID })
+            val database = database(writer)
+            connectedGeneration = localMeta(database, "client_generation")
+            // A scope that the server never assigned makes the extension reject connect
+            // after it has loaded the prior client state.
+            database.writeTransaction { db ->
+                db.execSQL("INSERT INTO _synchro_scopes (scope_id) VALUES (?)", arrayOf(unassignedScope))
+            }
+            beforeRejection = localDurableState(database)
+        }
+
+        val collector = TransportObservationCollector()
+        val rejected = SynchroClient(config.withTransportObservationCollector(collector), context)
+        Closeable(rejected::close).use {
+            try {
+                rejected.start()
+                fail("connect with an unassigned scope started")
+            } catch (_: SynchroError) {
+            }
+            assertEquals(
+                listOf("CONNECT 400 invalid_request"),
+                collector.snapshot().observations.map { "${it.operationClass} ${it.statusCode} ${it.errorCode}" },
+            )
+            assertTrue(rejected.getSyncStatus() is SyncStatus.Error)
+            assertEquals(beforeRejection, localDurableState(database(rejected)))
+        }
+
+        val resumed = SynchroClient(config, context)
+        val reader = SynchroClient(makeConfig(userID = userID), context)
+        Closeable(resumed::close).use {
+            Closeable(reader::close).use {
+                database(resumed).writeTransaction { db ->
+                    db.execSQL("DELETE FROM _synchro_scopes WHERE scope_id = ?", arrayOf(unassignedScope))
+                }
+                resumed.retry()
+                waitForCondition(timeoutMs = 30_000) {
+                    resumed.syncNow()
+                    resumed.pendingChangeCount() == 0
+                }
+                assertEquals(connectedGeneration, localMeta(database(resumed), "client_generation"))
+                reader.start()
+                waitForCondition(timeoutMs = 30_000) {
+                    reader.syncNow()
+                    reader.query("SELECT id, name FROM customers WHERE user_id = ?", arrayOf(userID))
+                        .associate { it["id"] as String to it["name"] as String } == mapOf(customerID to "queued before rejection")
+                }
+            }
+        }
+    }
+
+    private fun localMeta(database: SynchroDatabase, key: String): Any? =
+        database.queryOne("SELECT value FROM _synchro_meta WHERE key = ?", arrayOf(key))?.get("value")
+
+    /** Every local row except the lifecycle and failure record, in a stable order. */
+    private fun localDurableState(database: SynchroDatabase): List<String> =
+        database.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name <> '_synchro_client_state' ORDER BY name",
+        ).flatMap { table ->
+            val name = table.getValue("name") as String
+            val row = database.query("SELECT name FROM pragma_table_info(?) ORDER BY cid", arrayOf(name))
+                .joinToString(" || '|' || ") { column -> "quote(\"${column.getValue("name")}\")" }
+            database.query("SELECT $row AS value FROM \"$name\"").map { "$name ${it.getValue("value")}" }.sorted()
+        }
+
     @Test
     fun testAuthFailure() = runBlocking {
         val config = makeBadTokenConfig()
