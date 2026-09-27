@@ -791,7 +791,7 @@ func (p *Platform) DatabaseFamily(ctx context.Context, client Client) ([]string,
 	if err != nil {
 		return nil, fmt.Errorf("list Kotlin Android database storage: %w", err)
 	}
-	return databaseFamily(output, client.DatabaseKey), nil
+	return databaseFamily(output, androidDatabaseName(client.DatabaseKey)), nil
 }
 
 // databaseFamily selects the names in one database directory listing that the
