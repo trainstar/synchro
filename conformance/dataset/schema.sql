@@ -23,10 +23,12 @@ CREATE TABLE organization_members (
     joined_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    deleted_at TIMESTAMPTZ,
-    UNIQUE (organization_id, user_id)
+    deleted_at TIMESTAMPTZ
 );
 
+-- A deleted row identity is permanent, so a returning member gets a new row.
+CREATE UNIQUE INDEX organization_members_live_idx ON organization_members (organization_id, user_id)
+    WHERE deleted_at IS NULL;
 CREATE INDEX organization_members_user_id_idx ON organization_members (user_id);
 
 CREATE TABLE equipment (

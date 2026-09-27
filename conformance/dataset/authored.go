@@ -67,6 +67,9 @@ var (
 	SetB1Squat1 = authoredID(9, 7)
 	SetC1Bench1 = authoredID(9, 8)
 	SetA1Bench2 = authoredID(9, 9)
+	// SetA1Squat2Again replaces the hard-deleted SetA1Squat2. A deleted row
+	// identity is permanent, so a re-created set has a new identity.
+	SetA1Squat2Again = authoredID(9, 10)
 
 	MediaAlice = authoredID(10, 1)
 	MediaBob   = authoredID(10, 2)
@@ -238,7 +241,7 @@ VALUES ('%s', '%s', 'dana', '2026-03-05T09:00:00Z')`, MemberDanaB, OrgB),
 	{
 		Name: "re-create-set",
 		SQL: fmt.Sprintf(`INSERT INTO exercise_sets (id, workout_exercise_id, owner_id, set_index, reps, weight_kg, rpe, note)
-VALUES ('%s', '%s', 'alice', 2, 3, 110, 9, 're-created')`, SetA1Squat2, EntryA1Squat),
+VALUES ('%s', '%s', 'alice', 2, 3, 110, 9, 're-created')`, SetA1Squat2Again, EntryA1Squat),
 	},
 	{
 		Name: "multi-row-weight-update",
@@ -383,7 +386,7 @@ var AuthoredFinal = Checkpoint{
 			"programs", ids(ProgramAliceShared),
 			"workouts", ids(WorkoutA1, WorkoutA2),
 			"workout_exercises", ids(EntryA1Squat, EntryA1Bench, EntryA2Press),
-			"exercise_sets", ids(SetA1Squat1, SetA1Squat2, SetA1Squat3, SetA1Bench1, SetA2Press1, SetA1Bench2),
+			"exercise_sets", ids(SetA1Squat1, SetA1Squat2Again, SetA1Squat3, SetA1Bench1, SetA2Press1, SetA1Bench2),
 		),
 		"org:" + OrgB: scopeRows(
 			"organizations", ids(OrgB),
@@ -398,7 +401,7 @@ var AuthoredFinal = Checkpoint{
 			"programs", ids(ProgramAliceShared, ProgramAlicePrivate),
 			"workouts", ids(WorkoutA1, WorkoutA2, WorkoutA3),
 			"workout_exercises", ids(EntryA1Squat, EntryA1Bench, EntryA2Press, EntryA3Squat),
-			"exercise_sets", ids(SetA1Squat1, SetA1Squat2, SetA1Squat3, SetA1Bench1, SetA2Press1, SetA3Squat1, SetA1Bench2),
+			"exercise_sets", ids(SetA1Squat1, SetA1Squat2Again, SetA1Squat3, SetA1Bench1, SetA2Press1, SetA3Squat1, SetA1Bench2),
 			"workout_media", ids(MediaAlice),
 		),
 		"user:" + Bob: scopeRows(
@@ -419,10 +422,10 @@ var AuthoredFinal = Checkpoint{
 		// 5*102.5 + 3*112.5 + 5*107.75 + 8*60 + 10*62.5
 		{"workouts", WorkoutA1, "total_volume_kg", `"2493.75"`},
 		{"exercise_sets", SetA1Squat1, "weight_kg", `"102.5"`},
-		{"exercise_sets", SetA1Squat2, "reps", `3`},
-		{"exercise_sets", SetA1Squat2, "weight_kg", `"112.5"`},
-		{"exercise_sets", SetA1Squat2, "note", `"re-created"`},
-		{"exercise_sets", SetA1Squat2, "duration_ms", `null`},
+		{"exercise_sets", SetA1Squat2Again, "reps", `3`},
+		{"exercise_sets", SetA1Squat2Again, "weight_kg", `"112.5"`},
+		{"exercise_sets", SetA1Squat2Again, "note", `"re-created"`},
+		{"exercise_sets", SetA1Squat2Again, "duration_ms", `null`},
 		{"exercise_sets", SetA1Squat3, "weight_kg", `"107.75"`},
 		{"exercises", BackSquat, "name", `"Back Squat (High Bar)"`},
 		{"exercises", BackSquat, "search_text", `"back squat (high bar) quadriceps glutes"`},

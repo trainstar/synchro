@@ -412,10 +412,14 @@ func (g *generator) historyOperation() {
 		}
 	case "hard-delete-re-create-set":
 		if current := g.liveSet(); current != nil {
+			current.dead = true
 			g.history("hard-delete-set", 3, []Statement{{SQL: "DELETE FROM exercise_sets WHERE id = $1", Args: []any{current.id}}}, nil, nil)
+			// A deleted row identity is permanent. The re-created set gets a new one.
+			replacement := &set{id: g.random.UUID(), entry: current.entry, owner: current.owner}
+			g.sets = append(g.sets, replacement)
 			g.history("re-create-set", 3, []Statement{{
 				SQL:  "INSERT INTO exercise_sets (id, workout_exercise_id, owner_id, set_index, reps, weight_kg, note) VALUES ($1, $2, $3, 1, $4, $5, 're-created')",
-				Args: []any{current.id, current.entry, current.owner, g.random.IntN(20), g.random.Weight()},
+				Args: []any{replacement.id, current.entry, current.owner, g.random.IntN(20), g.random.Weight()},
 			}}, nil, nil)
 		}
 	case "flip-program-visibility":
