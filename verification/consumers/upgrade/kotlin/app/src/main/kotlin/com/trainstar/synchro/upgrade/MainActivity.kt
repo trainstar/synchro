@@ -24,15 +24,17 @@ class MainActivity : Activity() {
         Thread {
             runBlocking {
                 val config = JSONObject(request("$controlURL/config", null))
+                // Observations collect in order, so a failed step still reports the earlier ones.
+                val observations = JSONArray()
                 val result = JSONObject()
                     .put("phase", config.getString("phase"))
                     .put("package_version", BuildConfig.SYNCHRO_VERSION)
                     .put("error", "")
-                    .put("observations", JSONArray())
+                    .put("observations", observations)
                 try {
-                    result.put("observations", run(config))
+                    run(config, observations)
                 } catch (failure: Throwable) {
-                    result.put("error", failure.toString())
+                    result.put("error", generateSequence(failure) { it.cause }.joinToString(" <- "))
                 }
                 request("$controlURL/result", result.toString())
             }
@@ -57,10 +59,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private suspend fun run(config: JSONObject): JSONArray {
+    private suspend fun run(config: JSONObject, observations: JSONArray) {
         val snapshots = config.getJSONArray("snapshots")
         val steps = config.getJSONArray("steps")
-        val observations = JSONArray()
         var client: SynchroClient? = null
         for (index in 0 until steps.length()) {
             val step = steps.getJSONObject(index)
@@ -105,7 +106,6 @@ class MainActivity : Activity() {
                 throw IllegalStateException("step $index $operation failed", failure)
             }
         }
-        return observations
     }
 
     private fun observe(client: SynchroClient, name: String, snapshots: JSONArray): JSONObject {

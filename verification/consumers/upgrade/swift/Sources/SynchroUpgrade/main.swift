@@ -102,7 +102,10 @@ func synchronize(_ client: SynchroClient) async throws {
     }
 }
 
-func run(_ config: [String: Any]) async throws -> [[String: Any]] {
+// Observations collect in order, so a failed step still reports the earlier ones.
+var observations: [[String: Any]] = []
+
+func run(_ config: [String: Any]) async throws {
     guard let serverText = config["server_url"] as? String, let serverURL = URL(string: serverText),
           let token = config["token"] as? String,
           let appVersion = config["app_version"] as? String,
@@ -112,7 +115,6 @@ func run(_ config: [String: Any]) async throws -> [[String: Any]] {
         throw UpgradeFailure(description: "phase configuration is invalid")
     }
     var client: SynchroClient?
-    var observations: [[String: Any]] = []
     func current() throws -> SynchroClient {
         guard let client else { throw UpgradeFailure(description: "no database is open") }
         return client
@@ -173,20 +175,20 @@ func run(_ config: [String: Any]) async throws -> [[String: Any]] {
             throw UpgradeFailure(description: "step \(index) \(operation) failed: \(error)")
         }
     }
-    return observations
 }
 
 let phaseConfig = try JSONSerialization.jsonObject(with: try await request("config")) as? [String: Any] ?? [:]
-var result: [String: Any] = [
+var failure = ""
+do {
+    try await run(phaseConfig)
+} catch {
+    failure = String(describing: error)
+}
+let result: [String: Any] = [
     "phase": phaseConfig["phase"] as? String ?? "",
     "package_version": packageVersion,
-    "error": "",
-    "observations": [[String: Any]](),
+    "error": failure,
+    "observations": observations,
 ]
-do {
-    result["observations"] = try await run(phaseConfig)
-} catch {
-    result["error"] = String(describing: error)
-}
 _ = try await request("result", body: try JSONSerialization.data(withJSONObject: result))
-exit(result["error"] as? String == "" ? EXIT_SUCCESS : EXIT_FAILURE)
+exit(failure.isEmpty ? EXIT_SUCCESS : EXIT_FAILURE)

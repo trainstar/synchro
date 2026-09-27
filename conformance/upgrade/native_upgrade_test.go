@@ -119,8 +119,16 @@ func (r phaseResult) observation(t *testing.T, name string) observation {
 			return value
 		}
 	}
-	t.Fatalf("%s phase reported no %q observation", r.Phase, name)
+	t.Fatalf("%s phase reported no %q observation: %s", r.Phase, name, r.Error)
 	return observation{}
+}
+
+// complete fails when the application stopped before its last step.
+func (r phaseResult) complete(t *testing.T) {
+	t.Helper()
+	if r.Error != "" {
+		t.Fatalf("%s application failed: %s", r.Phase, r.Error)
+	}
 }
 
 type environment struct {
@@ -522,6 +530,7 @@ func TestNativePackageUpgrade(t *testing.T) {
 	if offline.PendingCount != len(data.offlineIntent()) || offline.RejectedCount != 0 {
 		t.Fatalf("predecessor offline pending=%d rejected=%d, want %d and 0", offline.PendingCount, offline.RejectedCount, len(data.offlineIntent()))
 	}
+	predecessor.complete(t)
 
 	progress := data.remoteProgress()
 	if _, err := database.ExecContext(ctx, progress.sql, progress.args...); err != nil {
@@ -588,6 +597,7 @@ func TestNativePackageUpgrade(t *testing.T) {
 			t.Fatalf("upgraded capture triggers differ from a fresh candidate install: %s", diff)
 		}
 
+		candidate.complete(t)
 		requireServerRows(ctx, t, database, data)
 	})
 }
@@ -882,7 +892,9 @@ func startControl(t *testing.T, address string) *control {
 
 // run publishes one phase configuration and runs the platform runner. The
 // runner installs the phase's package build, launches it, and returns after
-// the application has reported or failed.
+// the application has reported. A failed application reports the
+// observations that it completed, so the caller checks those first and
+// then requires complete.
 func (c *control) run(ctx context.Context, t *testing.T, env environment, config phaseConfig) phaseResult {
 	t.Helper()
 	encoded, err := json.Marshal(config)
@@ -927,19 +939,14 @@ func (c *control) run(ctx context.Context, t *testing.T, env environment, config
 			t.Fatalf("%s runner exited without a result: %v\n%s", config.Phase, runnerErr, output.String())
 		}
 	}
-	t.Logf("%s runner output:\n%s", config.Phase, output.String())
-
 	var result phaseResult
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
 		t.Fatalf("decode %s result: %v\n%s", config.Phase, err, body)
 	}
-	if result.Error != "" {
-		t.Fatalf("%s application failed: %s", config.Phase, result.Error)
-	}
-	if runnerErr != nil {
-		t.Fatalf("%s runner failed: %v", config.Phase, runnerErr)
+	if runnerErr != nil && result.Error == "" {
+		t.Fatalf("%s runner failed: %v\n%s", config.Phase, runnerErr, output.String())
 	}
 	if result.Phase != config.Phase {
 		t.Fatalf("result phase is %q, want %q", result.Phase, config.Phase)
