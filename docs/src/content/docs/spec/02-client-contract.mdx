@@ -304,6 +304,10 @@ outcome.
 
 The client applies these checks only when it seals a new batch. A loaded
 sealed batch keeps its exact stored bytes and is sent before any new batch.
+A client release without these checks could seal a batch above a request or
+mutation limit. The server rejects each send of that batch with
+`400 invalid_request`, because the client does not change sealed bytes. This
+release defines no recovery for such a batch.
 
 If the reserved envelope of a new batch alone exceeds a request limit, the
 client seals no new batch. It records a nonretryable `invalid_request` blocking
