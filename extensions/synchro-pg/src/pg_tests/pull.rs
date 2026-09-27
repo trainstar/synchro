@@ -995,7 +995,7 @@
         .unwrap();
         let resp = resp.unwrap().0;
 
-        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"));
+        assert_eq!(resp["error"]["code"].as_str(), Some("auth_required"));
         assert_eq!(resp["error"]["retryable"].as_bool(), Some(false));
     }
 
