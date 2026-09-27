@@ -382,6 +382,9 @@ mutations, and each normalized mutation is at most 65,536 octets with at most
 `400 invalid_request` before ledger allocation, fingerprinting, policy
 execution, or source DML. Limits are never clamped.
 
+The push response has no octet limit. Each outcome can echo a full
+authoritative row, so a response can be larger than its request.
+
 The wire contains only mutations with a legal operation-specific precondition.
 Native clients keep insert successors and other pre-wire dependencies in local
 durable state until they can normalize them or obtain the predecessor's server

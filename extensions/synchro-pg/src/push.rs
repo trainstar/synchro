@@ -432,9 +432,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         let response = build_push_response(&request, server_time, &evaluated);
         let response_bytes = canonical_push_response_bytes(&response)
             .unwrap_or_else(|_| pgrx::error!("canonicalizing push response failed"));
-        if response_bytes.len() > MAX_PUSH_REQUEST_BYTES {
-            pgrx::error!("push response exceeds the configured byte limit")
-        }
 
         let mut mutation_ledgers = Vec::new();
         for (ordinal, evaluation) in evaluated.iter().enumerate() {
