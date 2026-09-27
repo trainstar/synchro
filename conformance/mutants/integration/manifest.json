@@ -79,6 +79,8 @@
     {"id":"extension-update-fingerprint","patch":"conformance/mutants/integration/extension-update-fingerprint.patch","requirement_id":"SYNC-INSTALL-002","control_id":"CTRL-INSTALL-002","test_target":"TestRealExtensionUpdateFromBaseline","assertion_subtest":"assertion"},
     {"id":"extension-update-object-drift","patch":"conformance/mutants/integration/extension-update-object-drift.patch","requirement_id":"SYNC-INSTALL-002","control_id":"CTRL-INSTALL-002","test_target":"TestRealExtensionUpdateFromBaseline","assertion_subtest":"assertion"},
     {"id":"scope-assignment-pull-reconciliation","patch":"conformance/mutants/integration/scope-assignment-pull-reconciliation.patch","requirement_id":"SYNC-SCOPE-007","control_id":"CTRL-SCOPE-007","test_target":"TestRealScopeAssignmentPullReconciliation","assertion_subtest":"assertion"},
-    {"id":"scope-assignment-result-bound","patch":"conformance/mutants/integration/scope-assignment-result-bound.patch","requirement_id":"SYNC-SCOPE-008","control_id":"CTRL-SCOPE-008","test_target":"TestRealScopeAssignmentBoundFailsClosed","assertion_subtest":"assertion"}
+    {"id":"scope-assignment-result-bound","patch":"conformance/mutants/integration/scope-assignment-result-bound.patch","requirement_id":"SYNC-SCOPE-008","control_id":"CTRL-SCOPE-008","test_target":"TestRealScopeAssignmentBoundFailsClosed","assertion_subtest":"assertion"},
+    {"id":"atomic-group-rollback","patch":"conformance/mutants/integration/atomic-group-rollback.patch","requirement_id":"SYNC-ATOMICITY-002","control_id":"CTRL-ATOMICITY-002","test_target":"TestRealAtomicGroupAppliesAllOrNone","assertion_subtest":"assertion"},
+    {"id":"atomic-group-conflict-reread","patch":"conformance/mutants/integration/atomic-group-conflict-reread.patch","requirement_id":"SYNC-ATOMICITY-002","control_id":"CTRL-ATOMICITY-002","test_target":"TestRealAtomicGroupAppliesAllOrNone","assertion_subtest":"assertion#01"}
   ]
 }

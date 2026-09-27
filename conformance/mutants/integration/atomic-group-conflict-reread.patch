@@ -1,0 +1,16 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1980,11 +1980,7 @@ fn evaluate_atomic_group(
+         return evaluated;
+     };
+     let failing_index = evaluated.len() - 1;
+-    let failure = if failure.outcome["status"] == "conflict" {
+-        reread_group_conflict(client, failure, context)
+-    } else {
+-        failure.clone()
+-    };
++    let failure = failure.clone();
+     request
+         .mutations
+         .iter()

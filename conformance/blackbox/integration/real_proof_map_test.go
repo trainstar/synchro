@@ -129,6 +129,8 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001", []string{"TestRealS05SelectiveRebuildPreservesCheckpoints"}},
 	{"SCN-SCOPE-ASSIGNMENT-PULL-001", "OBL-SCOPE-ASSIGNMENT-PULL-PG-LINUX-X64-001", []string{"TestRealScopeAssignmentPullReconciliation"}},
 	{"SCN-SCOPE-ASSIGNMENT-BOUND-001", "OBL-SCOPE-ASSIGNMENT-BOUND-PG-LINUX-X64-001", []string{"TestRealScopeAssignmentBoundFailsClosed"}},
+	{"SCN-ATOMIC-GROUP-001", "OBL-ATOMIC-GROUP-PG-LINUX-X64-001", []string{"TestRealAtomicGroupAppliesAllOrNone"}},
+	{"SCN-ATOMIC-GROUP-001", "OBL-ATOMIC-GROUP-FAULT-LINUX-X64-001", []string{"TestRealAtomicGroupAppliesAllOrNone"}},
 }
 
 var nonScenarioRealTests = map[string]string{
