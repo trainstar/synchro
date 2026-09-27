@@ -120,6 +120,8 @@ make test-integration-mutants
 
 The gate copies the current worktree into isolated temporary directories. It applies seven critical production-source mutations for cursor advancement, WAL acknowledgment, mutation conservation, checksum correctness, scope isolation, progress order, and pull deduplication.
 
+Each copy gets new file modification times. So Cargo builds each workspace crate from the source of that mutant. The mutants share only the compiled third-party crates.
+
 Each mutant must compile and fail its approved focused PostgreSQL 18 test. A surviving mutant, stale patch, build failure, or harness failure fails the gate.
 
 Pull-request source checks run `make test-integration-mutant-manifest` before the full Candidate mutation gate.

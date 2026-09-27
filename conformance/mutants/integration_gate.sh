@@ -53,7 +53,11 @@ copy_worktree() {
 			perl -0ne 'chomp; print "$_\0" if -e $_ || -l $_' |
 			tar --null -T - -cf "$archive"
 	)
-	tar -C "$destination" -xf "$archive"
+	# All categories share one Cargo target directory. Cargo finds a stale path
+	# crate from source modification times. The -m flag gives each copied file
+	# the extraction time, so Cargo rebuilds each workspace crate from this copy
+	# and does not reuse the build of an earlier mutant.
+	tar -m -C "$destination" -xf "$archive"
 	rm -f "$archive"
 }
 
