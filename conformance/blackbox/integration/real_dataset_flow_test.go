@@ -48,9 +48,12 @@ func TestRealDatasetAuthoredFlow(t *testing.T) {
 		runtime.applyTransaction([]dataset.Statement{{SQL: step.SQL}})
 		runtime.applyAssignments(step.Grants, step.Revokes)
 		runtime.waitMaterialized(time.Minute)
-	}
-	for _, user := range dataset.AuthoredUsers {
-		runtime.reconnect(clients[user])
+		// Every client reads each history step incrementally.
+		for _, user := range dataset.AuthoredUsers {
+			t.Logf("history step %s: %s reconnects and pulls", step.Name, user)
+			runtime.reconnect(clients[user])
+			runtime.pull(clients[user])
+		}
 	}
 	requireDatasetCheckpoint(t, runtime, clients, dataset.AuthoredFinal)
 
