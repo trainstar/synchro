@@ -138,11 +138,14 @@ export function runValidatorSelfTests() {
   );
   requireSelfTest(
     performanceCatalogSemanticErrors(
-      { budgets: [], required_measurements: [] },
-      { cells: [] },
+      {
+        budgets: [{ id: "BUD-ONE-001", support_cell_ids: ["SUP-EXCLUDED"], artifact_inventory_ids: [] }],
+        required_measurements: [],
+      },
+      { cells: [{ id: "SUP-EXCLUDED", policy: "excluded" }] },
       { artifacts: [] },
-    ).some((error) => error.includes("semantic snapshot")),
-    "performance catalog validation accepted an unlocked catalog",
+    ).some((error) => error.includes("unknown or excluded support cell")),
+    "performance catalog validation accepted an excluded support cell",
   );
   requireSelfTest(
     supportPolicyErrors(
