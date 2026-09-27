@@ -985,6 +985,9 @@ final class SyncEngine: @unchecked Sendable {
                 try schemaManager.finishAppliedMigrationIfPossible()
             }
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            if try changeTracker.hasPendingChanges() {
+                try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
+            }
 
         case .rebuilding:
             let requestBody = Data(backoff.workIdentity.utf8)
@@ -999,6 +1002,9 @@ final class SyncEngine: @unchecked Sendable {
                 try schemaManager.finishAppliedMigrationIfPossible()
             }
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            if try changeTracker.hasPendingChanges() {
+                try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
+            }
         }
     }
 
@@ -1633,6 +1639,11 @@ final class SyncEngine: @unchecked Sendable {
         }
         if !installed {
             observer.cancel()
+            return
+        }
+        // The observer reports only later changes. Schedule the changes that exist before the install.
+        if (try? changeTracker.hasUnsealedChanges()) == true {
+            scheduleDebouncedPush(generation: generation)
         }
     }
 

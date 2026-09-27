@@ -1504,9 +1504,109 @@ final class SyncEngineTests: XCTestCase {
         })
     }
 
-    func testRecoveredPullBackoffReplaysBeforePendingPush() async throws {
+    // The large debounce proves that the start itself pushes the captured change.
+    func testStartupReplaysPullBackoffThenPushesCapturedChange() async throws {
         let dbPath = tempDBPath()
         let clientID = "recovered-pull-device"
+        let requestJSON = try persistRecoveredPullBackoffWithCapturedChange(dbPath: dbPath, clientID: clientID)
+
+        let callLog = OSAllocatedUnfairLock(initialState: [String]())
+        let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        let replayedRequestJSON = OSAllocatedUnfairLock<String?>(initialState: nil)
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                callLog.withLock { $0.append("connect") }
+                return try self.mockResponse(json: self.connectResumeJSON)
+            } else if path.hasSuffix("/sync/push") {
+                callLog.withLock { $0.append("push") }
+                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+            } else if path.hasSuffix("/sync/rebuild") {
+                callLog.withLock { $0.append("rebuild") }
+                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected rebuild"])
+            } else if path.hasSuffix("/sync/pull") {
+                let isReplay = callLog.withLock { log -> Bool in
+                    log.append("pull")
+                    return log == ["connect", "pull"]
+                }
+                if isReplay {
+                    replayedRequestJSON.withLock { $0 = String(data: request.bodyData()!, encoding: .utf8) }
+                }
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, recoveredDatabase) = try makeIntegrationEnv(
+            dbPath: dbPath,
+            clientID: clientID,
+            pushDebounce: 3_600,
+            syncInterval: 3_600
+        )
+        addTeardownBlock {
+            await engine.stop()
+            try? recoveredDatabase.close()
+        }
+        try await engine.start()
+
+        XCTAssertEqual(callLog.withLock { $0 }, ["connect", "pull", "push", "pull"])
+        XCTAssertEqual(replayedRequestJSON.withLock { $0 }, requestJSON)
+        XCTAssertEqual(pushedRecordIDs.withLock { $0 }, ["w1"])
+        XCTAssertTrue(try ChangeTracker(database: recoveredDatabase).inspectPendingMutations().isEmpty)
+        XCTAssertNil(try recoveredDatabase.readTransaction { db in
+            try SynchroMeta.getBackoffRecord(db)
+        })
+    }
+
+    func testStartupSchedulesChangeCapturedBeforeThePendingObserverStarts() async throws {
+        let dbPath = tempDBPath()
+        let clientID = "captured-before-observer-device"
+        _ = try persistRecoveredPullBackoffWithCapturedChange(dbPath: dbPath, clientID: clientID)
+        let (engine, recoveredDatabase) = try makeIntegrationEnv(
+            dbPath: dbPath,
+            clientID: clientID,
+            pushDebounce: 0.05,
+            syncInterval: 3_600
+        )
+        addTeardownBlock {
+            await engine.stop()
+            try? recoveredDatabase.close()
+        }
+        let pullCount = OSAllocatedUnfairLock(initialState: 0)
+        let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectResumeJSON)
+            } else if path.hasSuffix("/sync/push") {
+                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+            } else if path.hasSuffix("/sync/pull") {
+                // The pull after the startup push is the last startup step before the observer install.
+                if pullCount.withLock({ count -> Int in count += 1; return count }) == 2 {
+                    _ = try recoveredDatabase.execute(
+                        "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                        params: ["w2", "during startup", "u1", "2026-01-01T11:00:00.000Z"]
+                    )
+                }
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        try await engine.start()
+
+        let tracker = ChangeTracker(database: recoveredDatabase)
+        // A write transaction notifies the pending observer and restarts the debounce, so the wait only reads.
+        let deadline = Date().addingTimeInterval(5)
+        while try !tracker.inspectPendingMutations().isEmpty, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(pushedRecordIDs.withLock { $0 }, ["w1", "w2"])
+        XCTAssertTrue(try tracker.inspectPendingMutations().isEmpty)
+    }
+
+    /// Stores a captured change and a due durable pull backoff, as a stopped engine leaves them.
+    private func persistRecoveredPullBackoffWithCapturedChange(dbPath: String, clientID: String) throws -> String {
         let database = try SynchroDatabase(path: dbPath)
         let schemaManager = SchemaManager(database: database)
         try schemaManager.reconcileLocalSchema(
@@ -1550,43 +1650,11 @@ final class SyncEngineTests: XCTestCase {
             )
         }
         try database.close()
-
-        var callLog: [String] = []
-        var replayedRequestJSON: String?
-        MockURLProtocol.requestHandler = { request in
-            let path = request.url!.path
-            if path.hasSuffix("/sync/connect") {
-                callLog.append("connect")
-                return try self.mockResponse(json: self.connectResumeJSON)
-            } else if path.hasSuffix("/sync/push") {
-                callLog.append("push")
-                return try self.mockResponse(statusCode: 500, json: ["error": "push ran before pull replay"])
-            } else if path.hasSuffix("/sync/rebuild") {
-                callLog.append("rebuild")
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected rebuild"])
-            } else if path.hasSuffix("/sync/pull") {
-                callLog.append("pull")
-                replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
-            }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
-        }
-
-        let (engine, recoveredDatabase) = try makeIntegrationEnv(dbPath: dbPath, clientID: clientID)
-        addTeardownBlock {
-            await engine.stop()
-            try? recoveredDatabase.close()
-        }
-        try await engine.start()
-
-        XCTAssertEqual(callLog, ["connect", "pull"])
-        XCTAssertEqual(replayedRequestJSON, requestJSON)
-        XCTAssertNil(try recoveredDatabase.readTransaction { db in
-            try SynchroMeta.getBackoffRecord(db)
-        })
+        return requestJSON
     }
 
-    func testRecoveredRebuildBackoffReplaysBeforePendingPush() async throws {
+    // The large debounce proves that the start itself pushes the captured change.
+    func testStartupReplaysRebuildBackoffThenPushesCapturedChange() async throws {
         let dbPath = tempDBPath()
         let clientID = "recovered-rebuild-device"
         let database = try SynchroDatabase(path: dbPath)
@@ -1643,36 +1711,44 @@ final class SyncEngineTests: XCTestCase {
         }
         try database.close()
 
-        var callLog: [String] = []
-        var replayedRequestJSON: String?
+        let callLog = OSAllocatedUnfairLock(initialState: [String]())
+        let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        let replayedRequestJSON = OSAllocatedUnfairLock<String?>(initialState: nil)
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                callLog.append("connect")
+                callLog.withLock { $0.append("connect") }
                 return try self.mockResponse(json: self.connectResumeJSON)
             } else if path.hasSuffix("/sync/push") {
-                callLog.append("push")
-                return try self.mockResponse(statusCode: 500, json: ["error": "push ran before rebuild replay"])
+                callLog.withLock { $0.append("push") }
+                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
             } else if path.hasSuffix("/sync/rebuild") {
-                callLog.append("rebuild")
-                replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
+                callLog.withLock { $0.append("rebuild") }
+                replayedRequestJSON.withLock { $0 = String(data: request.bodyData()!, encoding: .utf8) }
                 return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_2"))
             } else if path.hasSuffix("/sync/pull") {
-                callLog.append("pull")
+                callLog.withLock { $0.append("pull") }
                 return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_3"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, recoveredDatabase) = try makeIntegrationEnv(dbPath: dbPath, clientID: clientID)
+        let (engine, recoveredDatabase) = try makeIntegrationEnv(
+            dbPath: dbPath,
+            clientID: clientID,
+            pushDebounce: 3_600,
+            syncInterval: 3_600
+        )
         addTeardownBlock {
             await engine.stop()
             try? recoveredDatabase.close()
         }
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "rebuild", "pull"])
-        XCTAssertEqual(replayedRequestJSON, requestJSON)
+        XCTAssertEqual(callLog.withLock { $0 }, ["connect", "rebuild", "pull", "push", "pull"])
+        XCTAssertEqual(replayedRequestJSON.withLock { $0 }, requestJSON)
+        XCTAssertEqual(pushedRecordIDs.withLock { $0 }, ["w1"])
+        XCTAssertTrue(try ChangeTracker(database: recoveredDatabase).inspectPendingMutations().isEmpty)
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         })
@@ -3580,6 +3656,31 @@ final class SyncEngineTests: XCTestCase {
             scopeID: scopeID,
             entries: records.map { (identity: $0.identity, digest: $0.checksum) }
         )
+    }
+
+    /// Accepts every pushed mutation and records its primary key.
+    private func acceptingPushResponse(
+        _ request: URLRequest,
+        pushedRecordIDs: OSAllocatedUnfairLock<[String]>
+    ) throws -> (HTTPURLResponse, Data) {
+        let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+        let mutations = body["mutations"] as! [[String: Any]]
+        pushedRecordIDs.withLock { recordIDs in
+            recordIDs += mutations.map { ($0["pk"] as! [String: Any])["field-id"] as! String }
+        }
+        let accepted = try mutations.map {
+            try acceptedPushOutcome(
+                mutation: $0,
+                updatedAt: "2026-01-01T14:00:00.000000Z",
+                serverVersion: "2026-01-01T14:00:00.000000Z"
+            )
+        }
+        return try mockResponse(json: [
+            "batch_id": body["batch_id"]!,
+            "server_time": "2026-01-01T14:00:00.000Z",
+            "accepted": accepted,
+            "rejected": [] as [Any],
+        ])
     }
 
     private func acceptedPushOutcome(
