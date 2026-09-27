@@ -43,7 +43,7 @@ func (h *Harness) UpdateExtension(ctx context.Context) (ExtensionUpdateResult, e
 // retained predecessor state before FinishExtensionUpdate.
 func (h *Harness) ApplyExtensionUpdate(ctx context.Context) (ExtensionUpdateResult, error) {
 	if h == nil || ctx == nil || !h.sourceReady || h.config.UpdateBaselineExtensionArtifact == "" ||
-		h.attached || h.extensionUpdated || h.adapter != nil {
+		h.attached || h.extensionUpdated || h.adapter != nil || h.closeRequested() {
 		return ExtensionUpdateResult{}, errors.New("isolated extension update is unavailable")
 	}
 	if err := ctx.Err(); err != nil {
@@ -90,7 +90,7 @@ func (h *Harness) ApplyExtensionUpdate(ctx context.Context) (ExtensionUpdateResu
 // ApplyExtensionUpdate, then starts the adapter.
 func (h *Harness) FinishExtensionUpdate(ctx context.Context) error {
 	if h == nil || ctx == nil || !h.sourceReady || !h.extensionUpdated ||
-		h.extensionUpdateCompleted || h.adapter != nil {
+		h.extensionUpdateCompleted || h.adapter != nil || h.closeRequested() {
 		return errors.New("isolated extension update completion is unavailable")
 	}
 	if err := ctx.Err(); err != nil {
@@ -109,6 +109,14 @@ func (h *Harness) FinishExtensionUpdate(ctx context.Context) error {
 	}
 	h.extensionUpdateCompleted = true
 	return nil
+}
+
+// closeRequested reports whether Close has started. Close does not clear the
+// update state, so each update phase must check it before it does work.
+func (h *Harness) closeRequested() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	return h.closeStarted
 }
 
 func readExtensionVersion(ctx context.Context, database *sql.DB) (string, error) {
