@@ -82,9 +82,12 @@ class PushProcessorTests {
     private suspend fun sealWithRetryableFailure(
         processor: PushProcessor,
         server: MockWebServer,
+        batchSize: Int = 100,
     ) {
         try {
-            processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable))
+            processor.processPush(
+                http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable), batchSize = batchSize,
+            )
             fail("expected retryable push failure")
         } catch (_: RetryableError) {
         }
@@ -244,8 +247,82 @@ class PushProcessorTests {
         }
     }
 
+    private val clients = mutableListOf<SynchroClient>()
+
+    private fun clientFor(database: SynchroDatabase): SynchroClient = SynchroClient(
+        SynchroConfig(
+            dbPath = database.path,
+            serverURL = "http://localhost:8080",
+            authProvider = { "test-token" },
+            clientID = "device-1",
+            appVersion = "1.0.0",
+        ),
+        ApplicationProvider.getApplicationContext(),
+    ).also { clients += it }
+
+    private fun ApplicationTransaction.insertOrder(id: String, title: String) {
+        execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            arrayOf(id, title, "2026-01-01T00:00:00.000000Z"),
+        )
+    }
+
+    private fun atomicGroupFailure(client: SynchroClient, block: (ApplicationTransaction) -> Unit): AtomicGroupInvalidReason? =
+        (runCatching { client.atomicWriteTransaction(block) }.exceptionOrNull() as? SynchroError.AtomicGroupInvalid)?.reason
+
+    /** Accepts every mutation with its authored title and records each request body. */
+    private fun acceptingDispatcher(bodies: MutableList<String>): Dispatcher = object : Dispatcher() {
+        override fun dispatch(request: RecordedRequest): MockResponse {
+            val body = request.body.readUtf8()
+            bodies += body
+            val sealed = pushJSON.decodeFromString<PushRequest>(body)
+            val accepted = sealed.mutations.map { mutation ->
+                acceptedFor(
+                    mutation.mutationID,
+                    mutation.pk.getValue("id").jsonPrimitive.content,
+                    mutation.columns?.get("title")?.jsonPrimitive?.content.orEmpty(),
+                    "sv-${mutation.mutationID}",
+                )
+            }
+            return MockResponse().setBody(
+                wireJSON.encodeToString(
+                    PushResponse(sealed.batchID, "2026-01-01T01:00:00.000000Z", accepted, emptyList()),
+                ),
+            )
+        }
+    }
+
+    private suspend fun pushUntilEmpty(processor: PushProcessor, server: MockWebServer, batchSize: Int) {
+        var pushes = 0
+        while (
+            processor.processPush(
+                http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable), batchSize = batchSize,
+            ) != null
+        ) {
+            pushes += 1
+            assertTrue(pushes <= 10)
+        }
+    }
+
+    private fun wideTable(columnCount: Int): LocalSchemaTable = SchemaTable(
+        tableName = "wide",
+        updatedAtColumn = "updated_at",
+        deletedAtColumn = "deleted_at",
+        primaryKey = listOf("id"),
+        columns = listOf(SchemaColumn("id", logicalType = "string", nullable = false, isPrimaryKey = true)) +
+            (0 until columnCount).map { SchemaColumn("c$it", logicalType = "string") } +
+            listOf(
+                SchemaColumn("updated_at", logicalType = "datetime", nullable = false),
+                SchemaColumn("deleted_at", logicalType = "datetime"),
+            ),
+    ).localSchema
+
     @After
-    fun tearDown() = databases.closeAll()
+    fun tearDown() {
+        clients.forEach { it.close() }
+        clients.clear()
+        databases.closeAll()
+    }
 
     @Test
     fun sealingUsesCapturedValuesNotTheMutableApplicationRow() = runTest {
@@ -1341,7 +1418,7 @@ class PushProcessorTests {
         val score = 1e20
         val probe = sealedEmptyTitleInsert(score)
         val element = PushLimits.mutation(pushJSON, probe.mutations.single())
-        val reserved = PushLimits.reservedEnvelope(pushJSON, probe.clientID, probe.batchID, probe.schema.hash)
+        val reserved = PushLimits.reservedEnvelope(pushJSON, probe.clientID, probe.batchID, probe.schema.hash, atomic = false)
         assertEquals(reserved.body, reserved.canonical)
         assertTrue(element.canonical > element.body)
         // The body measure fits bodyFit rows in one request, but the canonical measure fits one row fewer.
@@ -1460,18 +1537,7 @@ class PushProcessorTests {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val database = databases.create(context)
         val fields = (0..PushLimits.MAX_AUTHORED_COLUMNS).map { "c$it" }
-        val wide = SchemaTable(
-            tableName = "wide",
-            updatedAtColumn = "updated_at",
-            deletedAtColumn = "deleted_at",
-            primaryKey = listOf("id"),
-            columns = listOf(SchemaColumn("id", logicalType = "string", nullable = false, isPrimaryKey = true)) +
-                fields.map { SchemaColumn(it, logicalType = "string") } +
-                listOf(
-                    SchemaColumn("updated_at", logicalType = "datetime", nullable = false),
-                    SchemaColumn("deleted_at", logicalType = "datetime"),
-                ),
-        ).localSchema
+        val wide = wideTable(fields.size)
         val hash = "2".repeat(64)
         installTestSchema(database, 1, hash, listOf(wide))
         val processor = PushProcessor(database, ChangeTracker(database))
@@ -1635,5 +1701,369 @@ class PushProcessorTests {
         } finally {
             server.shutdown()
         }
+    }
+
+    @Test
+    fun atomicGroupSharesOneIdentifierThroughNestingAndRollsBackOnFailure() {
+        val (database, tracker, _) = environment()
+        val client = clientFor(database)
+
+        assertEquals("empty", client.atomicWriteTransaction { "empty" })
+        client.atomicWriteTransaction { outer ->
+            outer.insertOrder("a1", "outer")
+            client.atomicWriteTransaction { inner -> inner.insertOrder("a2", "inner") }
+            outer.insertOrder("a3", "outer")
+        }
+        assertThrows(IllegalStateException::class.java) {
+            client.atomicWriteTransaction { transaction ->
+                transaction.insertOrder("b1", "discarded")
+                throw IllegalStateException("application failure")
+            }
+        }
+
+        val groups = database.query("SELECT DISTINCT atomic_group_id FROM _synchro_pending_changes")
+            .map { it["atomic_group_id"] as String? }
+        assertEquals(1, groups.size)
+        assertEquals(groups.single(), UUID.fromString(groups.single()).toString())
+        assertEquals(3, tracker.pendingChangeCount())
+        assertNull(database.queryOne("SELECT 1 FROM orders WHERE id = 'b1'"))
+        assertNull(database.queryOne("SELECT 1 FROM _synchro_meta WHERE key = 'atomic_group_id'"))
+        insertOrder(database, "n1", "ungrouped")
+        assertNull(database.queryOne("SELECT atomic_group_id FROM _synchro_pending_changes WHERE record_id = 'n1'")!!["atomic_group_id"])
+    }
+
+    @Test
+    fun atomicGroupRejectsAWriteAfterADeleteOfTheSameRow() {
+        val (database, tracker, _) = environment()
+        val client = clientFor(database)
+
+        val failure = atomicGroupFailure(client) { transaction ->
+            transaction.insertOrder("o1", "first")
+            transaction.execute("DELETE FROM orders WHERE id = ?", arrayOf("o1"))
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("after delete", "o1"))
+        }
+
+        assertEquals(AtomicGroupInvalidReason.DELETE_FOLLOWED_BY_WRITE, failure)
+        assertTrue(database.query("SELECT 1 FROM orders").isEmpty())
+        assertTrue(database.query("SELECT 1 FROM _synchro_pending_changes").isEmpty())
+        assertNull(database.queryOne("SELECT 1 FROM _synchro_meta WHERE key = 'atomic_group_id'"))
+
+        client.atomicWriteTransaction { transaction ->
+            transaction.insertOrder("o1", "first")
+            transaction.execute("DELETE FROM orders WHERE id = ?", arrayOf("o1"))
+        }
+        assertEquals(
+            listOf("cancelled_before_send", "cancelled_before_send"),
+            database.query("SELECT lifecycle_state FROM _synchro_pending_changes ORDER BY local_order")
+                .map { it.getValue("lifecycle_state") },
+        )
+        assertFalse(tracker.hasPendingChanges())
+    }
+
+    @Test
+    fun atomicGroupMutationCountLimitAppliesToTheNormalizedGroup() {
+        val (database, tracker, _) = environment()
+        val client = clientFor(database)
+
+        assertEquals(
+            AtomicGroupInvalidReason.TOO_MANY_MUTATIONS,
+            atomicGroupFailure(client) { transaction ->
+                repeat(MAX_ATOMIC_GROUP_MUTATIONS + 1) { transaction.insertOrder("x$it", "over") }
+            },
+        )
+        assertEquals(0, tracker.pendingChangeCount())
+
+        client.atomicWriteTransaction { transaction ->
+            repeat(MAX_ATOMIC_GROUP_MUTATIONS) { transaction.insertOrder("g$it", "at limit") }
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("merged", "g0"))
+        }
+        assertEquals(MAX_ATOMIC_GROUP_MUTATIONS + 1, database.query("SELECT 1 FROM _synchro_pending_changes WHERE source_kind = 'capture'").size)
+        assertEquals(MAX_ATOMIC_GROUP_MUTATIONS, tracker.pendingChangeCount())
+    }
+
+    @Test
+    fun atomicGroupNormalizedMutationLimitIsInclusive() = runTest {
+        val overhead = PushLimits.mutation(pushJSON, sealedEmptyTitleInsert().mutations.single()).normalized
+        val atLimit = PushLimits.MAX_NORMALIZED_MUTATION_OCTETS - overhead
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+
+        assertEquals(
+            AtomicGroupInvalidReason.MUTATION_TOO_LARGE,
+            atomicGroupFailure(client) { it.insertOrder("o2", "b".repeat(atLimit + 1)) },
+        )
+        client.atomicWriteTransaction { it.insertOrder("o1", "a".repeat(atLimit)) }
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            sealWithRetryableFailure(processor, server)
+            val request = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+
+            assertEquals(true, request.atomic)
+            assertEquals(listOf(ledgerID(database, "o1")), request.mutations.map { it.mutationID })
+            assertEquals(
+                PushLimits.MAX_NORMALIZED_MUTATION_OCTETS,
+                PushLimits.mutation(pushJSON, request.mutations.single()).normalized,
+            )
+            assertNull(database.queryOne("SELECT 1 FROM orders WHERE id = 'o2'"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun atomicGroupAuthoredColumnLimitIsInclusive() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val database = databases.create(context)
+        val fields = (0..PushLimits.MAX_AUTHORED_COLUMNS).map { "c$it" }
+        installTestSchema(database, 1, "2".repeat(64), listOf(wideTable(fields.size)))
+        val client = clientFor(database)
+        fun insertWide(transaction: ApplicationTransaction, id: String, columns: List<String>) {
+            transaction.execute(
+                "INSERT INTO wide (id, ${columns.joinToString()}, updated_at) VALUES (?, ${columns.joinToString { "?" }}, ?)",
+                arrayOf(id, *columns.toTypedArray(), "2026-01-01T00:00:00.000000Z"),
+            )
+        }
+
+        assertEquals(
+            AtomicGroupInvalidReason.MUTATION_TOO_LARGE,
+            atomicGroupFailure(client) { insertWide(it, "w1", fields) },
+        )
+        client.atomicWriteTransaction { insertWide(it, "w2", fields.dropLast(1)) }
+
+        assertEquals(
+            listOf("w2"),
+            database.query("SELECT record_id FROM _synchro_pending_changes").map { it.getValue("record_id") },
+        )
+    }
+
+    @Test
+    fun atomicGroupRequestLimitMeasuresTheWorstCaseRequestInclusively() = runTest {
+        val element = PushLimits.mutation(pushJSON, sealedEmptyTitleInsert().mutations.single())
+        // The worst case uses the real client ID, a 36-octet batch ID, and a 64-octet schema hash.
+        val envelope = PushLimits.reservedEnvelope(pushJSON, "device-1", UUID.randomUUID().toString(), "f".repeat(64), atomic = true)
+        assertEquals(element.body, element.canonical)
+        assertEquals(envelope.body, envelope.canonical)
+        val title = 60_000
+        val fullRows = 17
+        val lastTitle = (
+            PushLimits.MAX_REQUEST_OCTETS - envelope.body - fullRows * (element.body + title + 1L) - element.body
+        ).toInt()
+        val ids = (0 until fullRows).map { "${'a' + it / 10}${it % 10}" }
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        fun group(last: Int) = atomicGroupFailure(client) { transaction ->
+            ids.forEach { transaction.insertOrder(it, "x".repeat(title)) }
+            transaction.insertOrder("zz", "y".repeat(last))
+        }
+
+        assertEquals(AtomicGroupInvalidReason.REQUEST_TOO_LARGE, group(lastTitle + 1))
+        assertTrue(database.query("SELECT 1 FROM _synchro_pending_changes").isEmpty())
+        assertNull(group(lastTitle))
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            sealWithRetryableFailure(processor, server, batchSize = 1)
+            val body = server.takeRequest().body.readUtf8()
+            val request = pushJSON.decodeFromString<PushRequest>(body)
+
+            assertEquals(true, request.atomic)
+            assertEquals(ids + "zz", request.mutations.map { it.pk.getValue("id").jsonPrimitive.content })
+            assertTrue(octets(body) <= PushLimits.MAX_REQUEST_OCTETS)
+            assertTrue(canonicalOctets(body) <= PushLimits.MAX_REQUEST_OCTETS)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun sealingStopsAnUngroupedRunAtAGroupAndSealsTheWholeGroupAboveTheBatchSize() = runTest {
+        val (database, tracker, processor) = environment()
+        val client = clientFor(database)
+        insertOrder(database, "n1", "before")
+        client.atomicWriteTransaction { transaction ->
+            listOf("g1", "g2", "g3").forEach { transaction.insertOrder(it, "grouped") }
+        }
+        insertOrder(database, "n2", "after")
+        val bodies = mutableListOf<String>()
+        val server = MockWebServer()
+        server.dispatcher = acceptingDispatcher(bodies)
+        server.start()
+        try {
+            pushUntilEmpty(processor, server, batchSize = 2)
+
+            val requests = bodies.map { pushJSON.decodeFromString<PushRequest>(it) }
+            assertEquals(
+                listOf(listOf("n1"), listOf("g1", "g2", "g3"), listOf("n2")),
+                requests.map { request -> request.mutations.map { it.pk.getValue("id").jsonPrimitive.content } },
+            )
+            assertEquals(listOf(null, true, null), requests.map { it.atomic })
+            assertFalse(bodies[0].contains("\"atomic\""))
+            assertFalse(bodies[2].contains("\"atomic\""))
+            assertFalse(tracker.hasPendingChanges())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun normalizationMergesOnlyEntriesOfTheSameGroup() = runTest {
+        val (database, tracker, processor) = environment()
+        val client = clientFor(database)
+        insertOrder(database, "o1", "before")
+        client.atomicWriteTransaction { transaction ->
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("group one", "o1"))
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("group two", "o1"))
+        }
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("after", "o1"))
+        val bodies = mutableListOf<String>()
+        val server = MockWebServer()
+        server.dispatcher = acceptingDispatcher(bodies)
+        server.start()
+        try {
+            pushUntilEmpty(processor, server, batchSize = 100)
+
+            val requests = bodies.map { pushJSON.decodeFromString<PushRequest>(it) }
+            assertEquals(
+                listOf(Operation.INSERT to "before", Operation.UPDATE to "group two", Operation.UPDATE to "after"),
+                requests.map { request ->
+                    request.mutations.single().let { it.op to it.columns!!.getValue("title").jsonPrimitive.content }
+                },
+            )
+            assertEquals(listOf(null, true, null), requests.map { it.atomic })
+            assertFalse(tracker.hasPendingChanges())
+            assertEquals("after", database.queryOne("SELECT title FROM orders WHERE id = 'o1'")!!["title"])
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun groupWaitsWhileOneMemberHasNoBaseVersion() = runTest {
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        database.writeSyncLockedTransaction { db ->
+            db.execSQL(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf("unversioned", "server", "2026-01-01T00:00:00.000000Z"),
+            )
+        }
+        client.atomicWriteTransaction { transaction ->
+            transaction.insertOrder("g1", "grouped")
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("local", "unversioned"))
+        }
+        val server = MockWebServer()
+        server.start()
+        try {
+            assertNull(processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable)))
+
+            assertEquals(0, server.requestCount)
+            assertEquals(
+                listOf("captured", "captured"),
+                database.query("SELECT lifecycle_state FROM _synchro_pending_changes ORDER BY local_order")
+                    .map { it.getValue("lifecycle_state") },
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun oversizeUngroupedMutationBeforeAGroupLeavesTheQueueAndTheGroupSeals() = runTest {
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        insertOrder(database, "o1", "x".repeat(PushLimits.MAX_NORMALIZED_MUTATION_OCTETS))
+        client.atomicWriteTransaction { transaction ->
+            transaction.insertOrder("g1", "grouped")
+            transaction.insertOrder("g2", "grouped")
+        }
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            sealWithRetryableFailure(processor, server)
+            val request = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+
+            assertEquals(true, request.atomic)
+            assertEquals(listOf(ledgerID(database, "g1"), ledgerID(database, "g2")), request.mutations.map { it.mutationID })
+            assertEquals("exceeds_push_limit", lifecycleState(database, ledgerID(database, "o1")))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun blockingOneUnsentGroupMemberBlocksTheWholeGroupAndItsDependents() = runTest {
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        insertOrder(database, "o1", "x".repeat(PushLimits.MAX_NORMALIZED_MUTATION_OCTETS))
+        client.atomicWriteTransaction { transaction ->
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("grouped", "o1"))
+            transaction.insertOrder("o2", "grouped")
+        }
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("later", "o2"))
+        val server = MockWebServer()
+        server.start()
+        try {
+            assertNull(processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable)))
+
+            assertEquals(0, server.requestCount)
+            assertEquals("exceeds_push_limit", lifecycleState(database, ledgerID(database, "o1")))
+            assertEquals(
+                listOf("blocked_by_predecessor", "blocked_by_predecessor", "blocked_by_predecessor"),
+                listOf(
+                    ledgerID(database, "o1", "update"),
+                    ledgerID(database, "o2"),
+                    ledgerID(database, "o2", "update"),
+                ).map { lifecycleState(database, it) },
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun renewedAtomicBatchStaysAtomic() = runTest {
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        client.atomicWriteTransaction { transaction ->
+            transaction.insertOrder("g1", "grouped")
+            transaction.insertOrder("g2", "grouped")
+        }
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(409).setBody(
+                """
+                {"error":{"code":"client_generation_expired","message":"generation expired","retryable":false,"current_client_generation":2}}
+                """.trimIndent(),
+            ),
+        )
+        server.start()
+        try {
+            assertTrue(
+                runCatching {
+                    processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable))
+                }.exceptionOrNull() is PushRenewalRequiredException,
+            )
+            val original = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+            assertTrue(processor.renewRequiredBatches("device-1", 2, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable)))
+            val successor = pushJSON.decodeFromString<PushRequest>(
+                database.queryOne("SELECT request_json FROM _synchro_push_batches WHERE state = 'pending'")!!
+                    .getValue("request_json") as String,
+            )
+
+            assertEquals(true, original.atomic)
+            assertEquals(true, successor.atomic)
+            assertEquals(2, successor.clientGeneration)
+            assertEquals(original.mutations.map { it.mutationID }, successor.mutations.map { it.mutationID })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    private companion object {
+        const val MAX_ATOMIC_GROUP_MUTATIONS = 1_000
     }
 }
