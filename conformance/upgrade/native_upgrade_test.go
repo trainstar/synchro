@@ -758,15 +758,24 @@ func sortRows(rows []row) {
 	sort.Slice(rows, func(i, j int) bool { return rows[i]["id"].(string) < rows[j]["id"].(string) })
 }
 
-func canonical(t *testing.T, raw json.RawMessage) string {
-	t.Helper()
+// canonicalJSON decodes numbers exactly and encodes objects with sorted keys.
+func canonicalJSON(raw []byte) (string, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
+		return "", err
+	}
+	return mustJSON(value), nil
+}
+
+func canonical(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	value, err := canonicalJSON(raw)
+	if err != nil {
 		t.Fatalf("decode JSON value %s: %v", raw, err)
 	}
-	return mustJSON(value)
+	return value
 }
 
 func mustJSON(value any) string {
@@ -777,34 +786,24 @@ func mustJSON(value any) string {
 	return string(encoded)
 }
 
-// compareJSON compares two values by their decoded JSON form. It returns an
-// empty string when they are equal.
+// compareJSON compares two lists by their canonical JSON form and returns an
+// empty string when they are equal. An absent list equals an empty list.
 func compareJSON(expected, actual any) string {
-	normalize := func(value any) (any, string) {
-		encoded, err := json.Marshal(value)
+	normalize := func(value any) string {
+		raw, err := json.Marshal(value)
 		if err != nil {
-			return nil, ""
+			return fmt.Sprintf("<unencodable: %v>", err)
 		}
-		decoder := json.NewDecoder(bytes.NewReader(encoded))
-		decoder.UseNumber()
-		var decoded any
-		if err := decoder.Decode(&decoded); err != nil {
-			return nil, ""
+		if string(raw) == "null" {
+			return "[]"
 		}
-		normalized, _ := json.Marshal(decoded)
-		return decoded, string(normalized)
+		text, err := canonicalJSON(raw)
+		if err != nil {
+			return fmt.Sprintf("<undecodable: %v>", err)
+		}
+		return text
 	}
-	if expected == nil {
-		expected = []any{}
-	}
-	_, left := normalize(expected)
-	_, right := normalize(actual)
-	if value := reflect.ValueOf(actual); !value.IsValid() || (value.Kind() == reflect.Slice && value.Len() == 0) {
-		right = "[]"
-	}
-	if value := reflect.ValueOf(expected); value.Kind() == reflect.Slice && value.Len() == 0 {
-		left = "[]"
-	}
+	left, right := normalize(expected), normalize(actual)
 	if left == right {
 		return ""
 	}
