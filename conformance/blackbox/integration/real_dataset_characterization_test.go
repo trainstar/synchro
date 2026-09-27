@@ -307,10 +307,12 @@ func characterizationPushSets(run *datasetRuntime, client *datasetClient, sets [
 		if version == "" {
 			run.t.Fatalf("characterization client %s has no version for set %s", client.User, id)
 		}
+		// The wire decimal has no insignificant zeros.
+		weight := strings.TrimSuffix(strings.TrimRight(random.Weight(), "0"), ".")
+		weightJSON, _ := json.Marshal(weight)
+		noteJSON, _ := json.Marshal(random.Paragraph(0, 80))
 		mutations = append(mutations, client.mutation(run.t, "exercise_sets", id, "update", version, map[string]string{
-			"reps":      strconv.Itoa(random.IntN(20)),
-			"weight_kg": strconv.Quote(random.Weight()),
-			"note":      strconv.Quote(random.Paragraph(0, 80)),
+			"reps": strconv.Itoa(random.IntN(20)), "weight_kg": string(weightJSON), "note": string(noteJSON),
 		}))
 	}
 	accepted, rejected, elapsed := run.push(client, mutations)
