@@ -221,6 +221,11 @@ chain into a new linked wire mutation:
 - update plus updates becomes one update from the original known server base;
 - update plus delete becomes one delete from that original base.
 
+A normalized mutation takes the durable local order of its first source.
+Thus normalization does not move a mutation after a later capture of another
+row. For example, a parent insert stays before a child insert that the
+application captured after it.
+
 Original records become durable inspectable `superseded_before_send` or
 `cancelled_before_send` outcomes linked to the normalized mutation or
 cancellation. A delete plus update is not normalized because protocol version 3
