@@ -280,6 +280,65 @@ final class IntegrationTests: XCTestCase {
         }
     }
 
+    func testLocalTriggerUpdatePropagatesToWarmPeer() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let customerID = UUID().uuidString.lowercased()
+        let orderID = UUID().uuidString.lowercased()
+        let beforeTrigger = #"{"street":"Before Trigger"}"#
+        let triggerValue = #"{"street":"Trigger Ave"}"#
+        let shipAddress: (SynchroClient) throws -> String? = { client in
+            try client.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: [orderID])?["ship_address"] as String?
+        }
+        let clientA = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await clientA.stop()
+            try await clientA.close()
+        }
+        let clientB = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await clientB.stop()
+            try await clientB.close()
+        }
+
+        try await clientA.start()
+        try seedOrder(clientA, userID: userID, customerID: customerID, orderID: orderID, shipAddress: beforeTrigger, updatedAt: "2026-01-05T00:00:00.000Z")
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(clientA)
+            return try clientA.pendingChangeCount() == 0
+        }
+
+        try await clientB.start()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(clientB)
+            return try shipAddress(clientB) == beforeTrigger
+        }
+        XCTAssertEqual(try shipAddress(clientB), beforeTrigger)
+
+        _ = try clientA.execute("CREATE TABLE local_address_commands (id TEXT PRIMARY KEY, ship_address TEXT NOT NULL)")
+        _ = try clientA.execute("""
+            CREATE TRIGGER local_address_apply AFTER UPDATE OF ship_address ON local_address_commands
+            BEGIN
+                UPDATE orders SET ship_address = NEW.ship_address, updated_at = '2026-01-06T00:00:00.000Z' WHERE id = NEW.id;
+            END
+            """)
+        _ = try clientA.execute("INSERT INTO local_address_commands (id, ship_address) VALUES (?, ?)", params: [orderID, "queued"])
+        _ = try clientA.execute(
+            "UPDATE local_address_commands SET ship_address = ? WHERE id = ?",
+            params: [triggerValue, orderID]
+        )
+        XCTAssertEqual(try shipAddress(clientA), triggerValue)
+
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(clientA)
+            return try clientA.pendingChangeCount() == 0
+        }
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(clientB)
+            return try shipAddress(clientB) == triggerValue
+        }
+        XCTAssertEqual(try shipAddress(clientB), triggerValue)
+    }
+
     func testConcurrentSyncNowCallersEachCompleteTheirOwnCycleAgainstExtension() async throws {
         let collector = TransportObservationCollector()
         let config = makeConfig(
