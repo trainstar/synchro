@@ -43,13 +43,15 @@ async function runAndWaitForScheduledPullRetry(
     if (status.status !== 'backoff' || status.operation !== 'pulling') {
       throw error;
     }
+    // The same 30 second bound as the Swift and Kotlin consumers. A capture_pending
+    // retry waits at least its 5 second Retry-After, and a loaded host can need more than one.
     const retryCompleted = await waitForCondition(async () => {
       const current = await client.getSyncStatus();
       if (current.status === 'error' || current.status === 'stopped') {
         throw error;
       }
       return current.status === 'ready';
-    });
+    }, 30000);
     if (!retryCompleted) {
       throw new Error('scheduled pull retry did not return to ready state');
     }

@@ -51,6 +51,8 @@ The final support gate derives semantic obligations and packaged checks from the
 
 Each non-excluded support cell requires packaged connect, push, pull, process-kill, and resume checks. The package installation step must use the release artifact under test.
 
+Each installed client writes a change offline, is killed, and resumes. While the client is dead, the harness writes a new remote value on the server. The cell passes only when the client reads that value through its public query path and PostgreSQL holds the exact resumed write. An empty queue alone does not pass a cell, because rejection or deletion also empties a queue.
+
 The Makefile reads the generated packaged summary from `dist/verification/packaged-smoke-summary.json`. Missing summary data blocks the gate.
 
 Security evidence may be access-controlled while a finding is unresolved. Public reports describe scope and disposition without publishing exploit instructions.
