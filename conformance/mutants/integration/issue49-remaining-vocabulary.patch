@@ -21,22 +21,14 @@ diff --git a/extensions/synchro-core/src/contract.rs b/extensions/synchro-core/s
 diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
 --- a/extensions/synchro-pg/src/push.rs
 +++ b/extensions/synchro-pg/src/push.rs
-@@ -1429,12 +1429,12 @@ fn evaluate_mutation(
-         );
-     };
- 
+@@ -1358,5 +1358,5 @@ fn evaluate_mutation(
 -    let dml_data = if matches!(mutation.op, Operation::Insert | Operation::Update) {
 +    let dml_data = if matches!(mutation.op, Operation::Insert | Operation::Upsert | Operation::Update) {
          build_dml_data(table_reg, &policy_columns)
      } else {
          serde_json::Value::Object(serde_json::Map::new())
      };
--    if mutation.op == Operation::Insert
-+    if matches!(mutation.op, Operation::Insert | Operation::Upsert)
-         && !has_required_insert_columns(required_insert_columns, table_reg, &dml_data)
-     {
-         return validation_evaluation(
-@@ -1468,7 +1468,7 @@ fn evaluate_mutation(
+@@ -1383,7 +1383,7 @@ fn evaluate_mutation(
      }
  
      match mutation.op {
@@ -45,7 +37,7 @@ diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.
              if let Some(existing) = existing.as_ref() {
                  return conflict_evaluation(
                      mutation,
-@@ -1607,6 +1607,5 @@ fn evaluate_mutation(
+@@ -1520,6 +1520,5 @@ fn evaluate_mutation(
                  ),
              }
          }
