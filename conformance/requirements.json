@@ -1,7 +1,7 @@
 {
   "$schema": "./schemas/requirements-v2.schema.json",
   "schema_version": 2,
-  "release": "0.3.3",
+  "release": "0.3.2",
   "requirements": [
     {
       "id": "SYNC-TIME-001",
