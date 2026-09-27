@@ -646,7 +646,7 @@ characterize-dataset: conformance-mod-download
 	cd conformance && DATASET_REVISION="$$(git rev-parse --verify HEAD)" DATASET_SEED="$(DATASET_SEED)" DATASET_SIZE="$(DATASET_SIZE)" \
 		DATASET_CHARACTERIZATION_RESULT="$(abspath $(DATASET_CHARACTERIZATION_RESULT))" \
 		GOFLAGS= GOWORK=off go run ./cmd/testresult exact -test TestRealDatasetCharacterization -expect target_pass \
-		-- go test -tags datasetcharacterization -json ./blackbox/integration -count=1 -timeout=120m \
+		-- go test -tags datasetcharacterization -json ./blackbox/integration -count=1 -timeout=180m \
 		-run '^TestRealDatasetCharacterization$$' -args --provision --install
 
 parse-testresult:

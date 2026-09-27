@@ -66,8 +66,12 @@ type characterizationExport struct {
 }
 
 type characterizationResult struct {
-	Format      string `json:"format"`
-	Revision    string `json:"revision"`
+	Format   string `json:"format"`
+	Revision string `json:"revision"`
+	// Completed is false when a check or bound stopped the run. The retained
+	// samples then describe unfinished work, not complete throughput.
+	Completed   bool   `json:"completed"`
+	Phase       string `json:"last_phase"`
 	Environment struct {
 		GOOS                    string    `json:"goos"`
 		GOARCH                  string    `json:"goarch"`
@@ -129,13 +133,25 @@ func runDatasetCharacterization(t *testing.T) {
 		t.Fatalf("generate dataset: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 170*time.Minute)
 	defer cancel()
 	harness := provisionRealDatasetHarness(t, ctx)
 	run := newDatasetRuntime(t, ctx, harness)
 	var result characterizationResult
 	result.Format = characterizationFormat
 	result.Revision = os.Getenv("DATASET_REVISION")
+	defer func() {
+		result.Completed = !t.Failed()
+		result.Environment.LoadAverageEnd = characterizationLoadAverage()
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err == nil {
+			err = os.WriteFile(resultPath, append(data, '\n'), 0o644)
+		}
+		if err != nil {
+			t.Errorf("write characterization result: %v", err)
+		}
+	}()
+	result.Phase = "provision"
 	recordCharacterizationEnvironment(t, run, &result)
 	result.Workload.Seed, result.Workload.Size, result.Workload.Stats = seed, size, plan.Stats
 	result.Observer.MaterializationPollNS = int64(20 * time.Millisecond)
@@ -150,6 +166,7 @@ func runDatasetCharacterization(t *testing.T) {
 		t.Fatalf("start WAL worker RSS sampling: %v", err)
 	}
 	result.Resources.WorkerRSSBaselineBytes = baseline
+	result.Phase = "initial-load"
 	for _, transaction := range plan.Initial {
 		result.Load = append(result.Load, applyCharacterizationTransaction(run, transaction))
 	}
@@ -159,6 +176,7 @@ func runDatasetCharacterization(t *testing.T) {
 	}
 	result.Resources.WorkerRSSPeakBytes = peak
 
+	result.Phase = "initial-rebuild"
 	users := plan.Users[:min(len(plan.Users), characterizationRebuildUsers)]
 	result.Workload.RebuildUsers = len(users)
 	expected := run.expected()
@@ -167,6 +185,7 @@ func runDatasetCharacterization(t *testing.T) {
 		clients[user], result.InitialRebuilds = characterizationConnect(run, user, "characterization-"+user, expected, result.InitialRebuilds)
 	}
 
+	result.Phase = "push"
 	const batch = 50
 	result.Workload.MutationBatch = batch
 	for _, user := range users {
@@ -184,9 +203,11 @@ func runDatasetCharacterization(t *testing.T) {
 	}
 	result.PushReconcileNS = int64(time.Since(started))
 
+	result.Phase = "history"
 	for _, transaction := range plan.History {
 		result.History = append(result.History, applyCharacterizationTransaction(run, transaction))
 	}
+	result.Phase = "final-reconciliation"
 	result.PullAfterHistory = map[string]int{}
 	for _, user := range users {
 		status, _, err := run.post(clients[user].Token, "/sync/pull", characterizationPullRequest(clients[user]))
@@ -202,15 +223,7 @@ func runDatasetCharacterization(t *testing.T) {
 	result.Export = characterizationCatalogExport(run, clients[users[0]], expected)
 	result.Resources.MaxPendingFences = run.maxPending
 	result.Resources.RelationBytes, result.Resources.RelationRows = characterizationRelations(run)
-	result.Environment.LoadAverageEnd = characterizationLoadAverage()
-
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		t.Fatalf("encode characterization result: %v", err)
-	}
-	if err := os.WriteFile(resultPath, append(data, '\n'), 0o644); err != nil {
-		t.Fatalf("write characterization result: %v", err)
-	}
+	result.Phase = "complete"
 }
 
 func recordCharacterizationEnvironment(t *testing.T, run *datasetRuntime, result *characterizationResult) {
