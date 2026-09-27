@@ -253,7 +253,9 @@ class SynchroModuleTransactionTest {
     }
 
     private fun openExternalConnection(): ExternalConnection {
-        val path = settle("get path") { module.getPath(it) }.resolvedValue() as String
+        val name = settle("get path") { module.getPath(it) }.resolvedValue() as String
+        // SQLiteOpenHelper resolves a bare database name in the app database directory.
+        val path = context.getDatabasePath(name).absolutePath
         return ExternalConnection(path).also(gates::addLast).also { it.open() }
     }
 
