@@ -110,8 +110,8 @@ func TestRealSameTableMembershipPropagatesSiblingChanges(t *testing.T) {
 			t.Fatalf("insert team document: %v", err)
 		}
 	}
-	alice := newSameTableClient(t, ctx, harness, "team-alice", "00000000-0000-4000-8215-0000000000a")
-	bob := newSameTableClient(t, ctx, harness, "team-bob", "00000000-0000-4000-8215-0000000000b")
+	alice := newSameTableClient(t, ctx, harness, "team-alice", "00000000-0000-4000-8215-000000000a")
+	bob := newSameTableClient(t, ctx, harness, "team-bob", "00000000-0000-4000-8215-000000000b")
 
 	aliceOne := "00000000-0000-4000-8215-000000000011"
 	aliceTwo := "00000000-0000-4000-8215-000000000012"
