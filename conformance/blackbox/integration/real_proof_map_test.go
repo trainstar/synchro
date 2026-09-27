@@ -127,6 +127,8 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-PG-LINUX-X64-001", []string{"TestRealIssue49MembershipActivationIsStagedAndScoped"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-FAULT-LINUX-X64-001", []string{"TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001", []string{"TestRealS05SelectiveRebuildPreservesCheckpoints"}},
+	{"SCN-SCOPE-ASSIGNMENT-PULL-001", "OBL-SCOPE-ASSIGNMENT-PULL-PG-LINUX-X64-001", []string{"TestRealScopeAssignmentPullReconciliation"}},
+	{"SCN-SCOPE-ASSIGNMENT-BOUND-001", "OBL-SCOPE-ASSIGNMENT-BOUND-PG-LINUX-X64-001", []string{"TestRealScopeAssignmentBoundFailsClosed"}},
 }
 
 var nonScenarioRealTests = map[string]string{
