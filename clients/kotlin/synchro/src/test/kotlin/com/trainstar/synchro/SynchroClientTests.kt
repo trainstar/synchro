@@ -573,7 +573,8 @@ class SynchroClientTests {
                 if (!heldStart.complete(context.job to block)) Dispatchers.Default.dispatch(context, block)
             }
         }
-        // The start runs on this thread, so its completion handlers return before this call returns.
+        // The start runs on this thread. The cycle completes before this call returns only
+        // when every child of the cycle is already complete.
         fun releaseHeldStart() {
             val start = heldStart.getNow(null) ?: return
             if (heldStartReleased.compareAndSet(false, true)) start.second.run()
@@ -603,13 +604,10 @@ class SynchroClientTests {
         val cycle = requireNotNull(heldStart.getNow(null)) { "syncNow must dispatch its cycle start" }.first
         val cycleCancelled = CountDownLatch(1)
         // A child of the cycle observes its cancellation without starting the cycle body.
-        CoroutineScope(cycle + Dispatchers.Unconfined).launch(start = CoroutineStart.UNDISPATCHED) {
-            try {
-                awaitCancellation()
-            } finally {
-                cycleCancelled.countDown()
-            }
-        }
+        // Its completion handler runs after the child detaches, so the cycle cannot wait for it.
+        CoroutineScope(cycle + Dispatchers.Unconfined)
+            .launch(start = CoroutineStart.UNDISPATCHED) { awaitCancellation() }
+            .invokeOnCompletion { cycleCancelled.countDown() }
 
         val closing = ownedClient.startClose()
         assertTrue("close must cancel the cycle before its body starts", cycleCancelled.await(5, TimeUnit.SECONDS))
