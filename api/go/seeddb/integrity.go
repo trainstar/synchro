@@ -20,6 +20,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/trainstar/synchro/api/go/internal/jsonnumber"
 )
 
 var (
@@ -1009,21 +1011,14 @@ func canonicalFloatNumber(value string) (string, error) {
 }
 
 func canonicalJSONNumberWithSafeInteger(value string, safeInteger bool) (string, error) {
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsInf(parsed, 0) || math.IsNaN(parsed) {
-		return "", errors.New("JSON number is outside finite binary64")
+	parsed, encoded, err := jsonnumber.Canonical(value)
+	if err != nil {
+		return "", err
 	}
 	if safeInteger && math.Trunc(parsed) == parsed && math.Abs(parsed) > maxSafeJSONInteger {
 		return "", errors.New("JSON integer is outside the safe range")
 	}
-	if parsed == 0 {
-		return "0", nil
-	}
-	encoded, err := json.Marshal(parsed)
-	if err != nil {
-		return "", fmt.Errorf("canonicalizing JSON number: %w", err)
-	}
-	return string(encoded), nil
+	return encoded, nil
 }
 
 func appendCanonicalJSONString(output *[]byte, value string) {

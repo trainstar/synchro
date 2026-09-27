@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/trainstar/synchro/api/go/internal/jsonnumber"
 	_ "modernc.org/sqlite"
 )
 
@@ -406,6 +407,12 @@ func loadPortableSeedPage(
 		limit,
 	).Scan(&raw); err != nil {
 		return portableSeedPage{}, fmt.Errorf("loading portable seed page: %w", err)
+	}
+	// PostgreSQL prints JSONB numbers as numeric text, for example 1e-7 as
+	// 0.0000001. Float verification requires the RFC 8785 spelling.
+	raw, err := jsonnumber.CanonicalizeTokens(raw)
+	if err != nil {
+		return portableSeedPage{}, fmt.Errorf("decoding portable seed page: %w", err)
 	}
 
 	var page portableSeedPage

@@ -53,6 +53,13 @@ The adapter either validates the bearer credential or trusts an upstream compone
 
 The adapter is a thin boundary. It authenticates, applies transport and protocol gates, invokes the canonical extension function for the endpoint, and forwards the canonical status and JSON result. It MUST NOT implement mutation conflict rules, scope evaluation, cursor interpretation, checksum calculation, rebuild pagination, or schema lineage decisions. Endpoint work uses one canonical extension call rather than adapter-side database orchestration.
 
+PostgreSQL prints JSONB numbers as numeric text. For example, it prints `1e-7` as `0.0000001` and `1e21` as `1000000000000000000000`.
+The adapter checks each successful connect, pull, rebuild, schema, and tables result.
+It replaces each number token that differs from the RFC 8785 text of its binary64 value.
+All other bytes stay unchanged. `Content-Length` counts the bytes that the adapter sends.
+The push result is the stored canonical response text, so the adapter returns those bytes unchanged.
+A result that is not exactly one complete UTF-8 JSON value, or that contains a number outside finite binary64, produces a nonretryable `500 sync_integrity_failure` response.
+
 Credentials, cursor values, rebuild continuation values, request bodies, row values, and authenticated identity values MUST NOT be written to operational logs.
 
 ## Common JSON rules

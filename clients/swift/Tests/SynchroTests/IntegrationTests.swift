@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 import Foundation
 #if canImport(CommonCrypto)
 import CommonCrypto
@@ -576,6 +577,120 @@ final class IntegrationTests: XCTestCase {
         try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
             try await self.syncAndWaitForScheduledRetry(reader)
             return try self.customerNames(reader, userID: userID) == expected
+        }
+    }
+
+    func testRealFloatWireValuesSurviveRebuildPullAndLaterWork() async throws {
+        let cases = try floatWireCases()
+        let userID = UUID().uuidString.lowercased()
+        let token = signTestJWT(userID: userID)
+        let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock { await self.stopAndClose(writer) }
+        let collector = TransportObservationCollector(capacity: 4096)
+        // A page limit below the row count requires rebuild continuation.
+        let reader = try SynchroClient(config: SynchroConfig(
+            dbPath: tempDBPath(),
+            serverURL: serverURL,
+            authProvider: { token },
+            clientID: UUID().uuidString.lowercased(),
+            appVersion: "1.0.0",
+            syncInterval: 999,
+            maxRetryAttempts: 1,
+            pullPageSize: 4,
+            transportObservationCollector: collector
+        ))
+        addTeardownBlock { await self.stopAndClose(reader) }
+        let ids = cases.map { _ in UUID().uuidString.lowercased() }
+
+        try await writer.start()
+        _ = try writer.executeBatch(try zip(ids, cases).map { id, testCase in
+            SQLStatement(
+                sql: "INSERT INTO type_zoo (id, user_id, col_text, col_double, created_at, updated_at) VALUES (?, ?, 'float-wire', ?, ?, ?)",
+                params: [id, userID, try XCTUnwrap(Double(testCase.source)), "2026-01-09T00:00:00.000Z", "2026-01-09T00:00:00.000Z"]
+            )
+        })
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncFloatWire(writer)
+            return try writer.pendingChangeCount() == 0
+        }
+        try await reader.start()
+        try await waitForFloatWireRows(reader, userID: userID, ids: ids, cases: cases, text: "float-wire")
+        let scopeFingerprint = SHA256.hash(data: Data("user:\(userID)".utf8)).map { String(format: "%02x", $0) }.joined()
+        let snapshot = collector.snapshot()
+        XCTAssertFalse(snapshot.overflowed)
+        let pages = snapshot.observations.compactMap(\.rebuildResponseFacts).filter { $0.scopeFingerprint == scopeFingerprint }
+        XCTAssertGreaterThan(pages.count, 1)
+        XCTAssertEqual(pages.map(\.recordCount).reduce(0, +), ids.count)
+        XCTAssertTrue(pages.dropLast().allSatisfy { $0.hasMore && $0.hasCursor })
+        XCTAssertEqual(pages.last?.hasMore, false)
+
+        _ = try writer.executeBatch(ids.map { id in
+            SQLStatement(
+                sql: "UPDATE type_zoo SET col_text = 'float-wire-later', updated_at = ? WHERE id = ?",
+                params: ["2026-01-10T00:00:00.000Z", id]
+            )
+        })
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncFloatWire(writer)
+            return try writer.pendingChangeCount() == 0
+        }
+        try await waitForFloatWireRows(reader, userID: userID, ids: ids, cases: cases, text: "float-wire-later")
+    }
+
+    /// A rejected response can stop the engine, so a later call reports only cancellation.
+    /// The recorded blocking failure keeps the original cause visible.
+    private func syncFloatWire(_ client: SynchroClient) async throws {
+        do {
+            try await syncAndWaitForScheduledRetry(client)
+        } catch {
+            XCTFail("float wire sync failed: \(error), blocking failure: \(String(describing: try client.getBlockingFailure()))")
+            throw error
+        }
+    }
+
+    /// One shared source binary64 value and its RFC 8785 text.
+    private struct FloatWireCase: Decodable {
+        let source: String
+        let canonical: String
+    }
+
+    private func floatWireCases() throws -> [FloatWireCase] {
+        struct Document: Decodable {
+            let version: Int
+            let cases: [FloatWireCase]
+        }
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<8 {
+            let candidate = directory.appendingPathComponent("conformance/protocol/float-wire-boundaries-v1.json")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                let document = try JSONDecoder().decode(Document.self, from: Data(contentsOf: candidate))
+                XCTAssertEqual(document.version, 1)
+                XCTAssertFalse(document.cases.isEmpty)
+                return document.cases
+            }
+            directory.deleteLastPathComponent()
+        }
+        throw NSError(domain: "IntegrationTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "shared float wire cases not found"])
+    }
+
+    /// Syncs until every row has the wanted text, then compares each stored value with its canonical binary64.
+    private func waitForFloatWireRows(
+        _ client: SynchroClient,
+        userID: String,
+        ids: [String],
+        cases: [FloatWireCase],
+        text: String
+    ) async throws {
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncFloatWire(client)
+            let rows = try client.query("SELECT col_text FROM type_zoo WHERE user_id = ?", params: [userID])
+            return rows.count == ids.count && rows.allSatisfy { ($0["col_text"] as String?) == text }
+        }
+        for (id, testCase) in zip(ids, cases) {
+            let row = try XCTUnwrap(client.queryOne("SELECT col_double FROM type_zoo WHERE id = ?", params: [id]))
+            let value: Double = try XCTUnwrap(row["col_double"])
+            let expected = try XCTUnwrap(Double(testCase.canonical))
+            XCTAssertEqual(value.bitPattern, expected.bitPattern, "\(testCase.source) must arrive as \(testCase.canonical)")
         }
     }
 

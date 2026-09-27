@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -207,6 +208,11 @@ func registerSeedTestTable(t *testing.T, db *sql.DB, tableName string) (string, 
 }
 
 func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID string) (string, string) {
+	return registerSeedTestTableWithColumns(t, db, tableName, scopeID, "")
+}
+
+// registerSeedTestTableWithColumns adds extraColumns to the fixed table. Each column definition ends with a comma.
+func registerSeedTestTableWithColumns(t *testing.T, db *sql.DB, tableName, scopeID, extraColumns string) (string, string) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -219,10 +225,11 @@ func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID 
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			title TEXT NOT NULL,
+			%s
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			deleted_at TIMESTAMPTZ
 		)
-	`, quotePGIdent(actualTableName))
+	`, quotePGIdent(actualTableName), extraColumns)
 	if _, err := db.ExecContext(ctx, createSQL); err != nil {
 		t.Fatalf("creating test table: %v", err)
 	}
@@ -1061,6 +1068,87 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 	if diff := cmp.Diff(clientCompatibleMigrationIdentifiers, identifiers); diff != "" {
 		t.Fatalf("unexpected grdb migration identifiers (-want +got):\n%s", diff)
+	}
+}
+
+func TestGenerateExtractsSharedFloatWireValues(t *testing.T) {
+	data, err := os.ReadFile("../../../conformance/protocol/float-wire-boundaries-v1.json")
+	if err != nil {
+		t.Fatalf("reading shared float wire cases: %v", err)
+	}
+	var document struct {
+		Version int `json:"version"`
+		Cases   []struct {
+			Source    string `json:"source"`
+			Canonical string `json:"canonical"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil || document.Version != 1 || len(document.Cases) == 0 {
+		t.Fatalf("decoding shared float wire cases: version=%d cases=%d err=%v", document.Version, len(document.Cases), err)
+	}
+
+	db := testPostgres(t)
+	tableName, scopeID := registerSeedTestTableWithColumns(t, db, "test_seed_float_wire", "seed-float-wire", "measure DOUBLE PRECISION NOT NULL,")
+	registerSharedScope(t, db, scopeID, true)
+	ctx := context.Background()
+	for index, testCase := range document.Cases {
+		source, err := strconv.ParseFloat(testCase.Source, 64)
+		if err != nil {
+			t.Fatalf("parsing float wire source %q: %v", testCase.Source, err)
+		}
+		if _, err := db.ExecContext(
+			ctx,
+			fmt.Sprintf("INSERT INTO %s (id, user_id, title, measure) VALUES ($1, 'user-1', 'float row', $2)", quotePGIdent(tableName)),
+			fmt.Sprintf("float-wire-%d", index),
+			source,
+		); err != nil {
+			t.Fatalf("inserting float wire row %d: %v", index, err)
+		}
+	}
+	for index := range document.Cases {
+		if !waitForPortableEdge(ctx, db, tableName, fmt.Sprintf("float-wire-%d", index), scopeID) {
+			t.Fatalf("float wire row %d did not become WAL-materialized", index)
+		}
+	}
+
+	// Generate verifies each extracted row digest and the scope digest before publication.
+	outputPath := filepath.Join(t.TempDir(), "float-wire-seed.db")
+	if err := Generate(ctx, db, GenerateOptions{OutputPath: outputPath}); err != nil {
+		t.Fatalf("generating float wire seed: %v", err)
+	}
+	sqliteDB, err := sql.Open("sqlite", outputPath)
+	if err != nil {
+		t.Fatalf("opening float wire seed: %v", err)
+	}
+	defer sqliteDB.Close()
+	for index, testCase := range document.Cases {
+		want, err := strconv.ParseFloat(testCase.Canonical, 64)
+		if err != nil {
+			t.Fatalf("parsing canonical float wire text %q: %v", testCase.Canonical, err)
+		}
+		var measure float64
+		var storage string
+		if err := sqliteDB.QueryRow(
+			fmt.Sprintf("SELECT measure, typeof(measure) FROM %s WHERE id = ?", quoteIdentifier(tableName)),
+			fmt.Sprintf("float-wire-%d", index),
+		).Scan(&measure, &storage); err != nil {
+			t.Fatalf("reading seeded float wire row %d: %v", index, err)
+		}
+		if math.Float64bits(measure) != math.Float64bits(want) || storage != "real" {
+			t.Fatalf("seeded float wire row %d = %v (%016x, %s), want %s (%016x, real)",
+				index, measure, math.Float64bits(measure), storage, testCase.Canonical, math.Float64bits(want))
+		}
+	}
+	var scopeRows int
+	if err := sqliteDB.QueryRow(
+		"SELECT count(*) FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ?",
+		scopeID,
+		tableName,
+	).Scan(&scopeRows); err != nil {
+		t.Fatalf("reading seeded float wire scope rows: %v", err)
+	}
+	if scopeRows != len(document.Cases) {
+		t.Fatalf("seeded float wire scope rows = %d, want %d", scopeRows, len(document.Cases))
 	}
 }
 

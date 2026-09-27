@@ -71,6 +71,7 @@
 	test-rust-pg \
 	test-rust-pg-all \
 	test-adapter \
+	benchmark-adapter \
 	local-postgres-start \
 	local-postgres-stop \
 	build-local-postgres \
@@ -93,6 +94,7 @@
 	test-kotlin-instrumentation \
 	test-kotlin \
 	test-kotlin-integration \
+	test-kotlin-jvm-integration \
 	test-rn-unit \
 	test-rn-android-parity \
 	test-rn-ios-parity \
@@ -333,6 +335,7 @@ help:
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
 	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
+	@echo "  benchmark-adapter     - Run Go adapter tests and benchmarks (override GO_TEST_PKGS to focus)"
 	@echo "                         Set ADAPTER_TEST_URL to the one test PostgreSQL database URL"
 	@echo "  local-postgres-start  - Start an isolated PostgreSQL 18 through the Go provisioner"
 	@echo "  local-postgres-stop   - Stop the isolated PostgreSQL 18 provisioner"
@@ -347,6 +350,7 @@ help:
 	@echo "  test-kotlin-scenarios - Run the direct Kotlin correctness scenarios"
 	@echo "  test-kotlin-instrumentation - Run Android instrumentation on the selected device"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
+	@echo "  test-kotlin-jvm-integration - Run only the Kotlin JVM integration tests against the local adapter"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
@@ -1119,14 +1123,22 @@ test-kotlin-instrumentation: build-kotlin-conformance-app
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
 
 test-kotlin: test-kotlin-warm-connect test-kotlin-scenarios
+	@$(MAKE) --no-print-directory test-kotlin-jvm-integration
+
+# TEST_ENV carries the database URL and JWT secret, so Make does not echo the Gradle command.
+test-kotlin-jvm-integration:
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	# Repeat preparation to prove that the integration fixture is idempotent.
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) SYNCHRO_TEST_SEED_PATH="$(CLIENT_INTEGRATION_SEED)" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:test
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
+	@echo 'cd clients/kotlin && ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:test'
+	@gradle_status=0; parser_status=0; \
+		(cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) SYNCHRO_TEST_SEED_PATH="$(CLIENT_INTEGRATION_SEED)" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:test) || gradle_status=$$?; \
+		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results) || parser_status=$$?; \
+		if [ "$$gradle_status" -ne 0 ]; then exit "$$gradle_status"; fi; \
+		exit "$$parser_status"
 
 test-kotlin-integration: test-kotlin
 
@@ -2087,6 +2099,18 @@ test-adapter:
 	@set -e; \
 	status=0; \
 	if (cd conformance && GOFLAGS= GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go run ./cmd/testresult suite -dir ../api/go -- go test -json $(GO_TEST_ARGS) $(GO_TEST_PKGS)); then \
+		status=0; \
+	else \
+		status=$$?; \
+	fi; \
+	exit $$status
+
+# The -benchmarks parser mode requires passing ordinary tests and complete benchmark results.
+benchmark-adapter:
+	@echo "Running adapter tests and benchmarks..."
+	@set -e; \
+	status=0; \
+	if (cd conformance && GOFLAGS= GOWORK=off TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" go run ./cmd/testresult suite -benchmarks -dir ../api/go -- go test -json -bench . -benchmem $(GO_TEST_ARGS) $(GO_TEST_PKGS)); then \
 		status=0; \
 	else \
 		status=$$?; \

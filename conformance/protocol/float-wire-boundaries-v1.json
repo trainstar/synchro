@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "cases": [
+    { "source": "5.0", "canonical": "5" },
+    { "source": "-0.0", "canonical": "0" },
+    { "source": "0.000001", "canonical": "0.000001" },
+    { "source": "0.0000015", "canonical": "0.0000015" },
+    { "source": "18446744073709552000.0", "canonical": "18446744073709552000" },
+    { "source": "1e20", "canonical": "100000000000000000000" },
+    { "source": "1e-7", "canonical": "1e-7" },
+    { "source": "1.5", "canonical": "1.5" },
+    { "source": "1e21", "canonical": "1e+21" }
+  ]
+}

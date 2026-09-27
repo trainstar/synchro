@@ -2,12 +2,18 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.trainstar.synchro.inspection.SynchroProofApi
+import com.trainstar.synchro.inspection.TransportObservationCollector
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -17,6 +23,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.Closeable
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.security.MessageDigest
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -153,6 +163,43 @@ class IntegrationTests {
             arrayOf(recordID),
         )?.get("lifecycle_state")
 
+    /** Each shared source binary64 text and its RFC 8785 text. */
+    private fun floatWireCases(): List<Pair<String, String>> {
+        val path = generateSequence(Paths.get("").toAbsolutePath().normalize()) { it.parent }
+            .take(8)
+            .map { it.resolve("conformance/protocol/float-wire-boundaries-v1.json") }
+            .first { Files.exists(it) }
+        val document = Json.parseToJsonElement(String(Files.readAllBytes(path), Charsets.UTF_8)).jsonObject
+        assertEquals(1, document.getValue("version").jsonPrimitive.int)
+        return document.getValue("cases").jsonArray.map { element ->
+            val case = element.jsonObject
+            case.getValue("source").jsonPrimitive.content to case.getValue("canonical").jsonPrimitive.content
+        }.also { assertTrue(it.isNotEmpty()) }
+    }
+
+    /** Syncs until every row has the wanted text, then compares each stored value with its canonical binary64. */
+    private suspend fun waitForFloatWireRows(
+        client: SynchroClient,
+        userID: String,
+        ids: List<String>,
+        cases: List<Pair<String, String>>,
+        text: String,
+    ) {
+        waitForCondition(timeoutMs = 30_000) {
+            client.syncNow()
+            val rows = client.query("SELECT col_text FROM type_zoo WHERE user_id = ?", arrayOf(userID))
+            rows.size == ids.size && rows.all { it["col_text"] == text }
+        }
+        ids.zip(cases).forEach { (id, case) ->
+            val value = client.queryOne("SELECT col_double FROM type_zoo WHERE id = ?", arrayOf(id))?.get("col_double") as Double
+            assertEquals(
+                "${case.first} must arrive as ${case.second}",
+                case.second.toDouble().toRawBits(),
+                value.toRawBits(),
+            )
+        }
+    }
+
     private suspend fun waitForCondition(timeoutMs: Long = 5000, intervalMs: Long = 250, condition: suspend () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (true) {
@@ -163,6 +210,65 @@ class IntegrationTests {
                 fail("timed out waiting for sync condition")
             }
             delay(intervalMs)
+        }
+    }
+
+    @OptIn(SynchroProofApi::class)
+    @Test
+    fun testRealFloatWireValuesSurviveRebuildPullAndLaterWork() = runBlocking {
+        val cases = floatWireCases()
+        val userID = UUID.randomUUID().toString()
+        val ids = cases.map { UUID.randomUUID().toString() }
+        val collector = TransportObservationCollector(capacity = 4096)
+        // close() shuts each engine down. use attempts every close and keeps the first failure.
+        val writer = SynchroClient(makeConfig(userID = userID), context)
+        Closeable(writer::close).use {
+            // A page limit below the row count requires rebuild continuation.
+            val reader = SynchroClient(
+                makeConfig(userID = userID).copy(pullPageSize = 4).withTransportObservationCollector(collector),
+                context,
+            )
+            Closeable(reader::close).use {
+                writer.start()
+                writer.executeBatch(
+                    ids.zip(cases).map { (id, case) ->
+                        SQLStatement(
+                            "INSERT INTO type_zoo (id, user_id, col_text, col_double, created_at, updated_at) VALUES (?, ?, 'float-wire', ?, ?, ?)",
+                            arrayOf(id, userID, case.first.toDouble(), "2026-01-09T00:00:00.000Z", "2026-01-09T00:00:00.000Z"),
+                        )
+                    },
+                )
+                waitForCondition(timeoutMs = 30_000) {
+                    writer.syncNow()
+                    writer.pendingChangeCount() == 0
+                }
+                reader.start()
+                waitForFloatWireRows(reader, userID, ids, cases, "float-wire")
+                val scopeFingerprint = MessageDigest.getInstance("SHA-256")
+                    .digest("user:$userID".toByteArray(Charsets.UTF_8))
+                    .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+                val snapshot = collector.snapshot()
+                assertFalse(snapshot.overflowed)
+                val pages = snapshot.observations.mapNotNull { it.rebuildResponseFacts }.filter { it.scopeFingerprint == scopeFingerprint }
+                assertTrue(pages.size > 1)
+                assertEquals(ids.size, pages.sumOf { it.recordCount })
+                assertTrue(pages.dropLast(1).all { it.hasMore && it.hasCursor })
+                assertFalse(pages.last().hasMore)
+
+                writer.executeBatch(
+                    ids.map { id ->
+                        SQLStatement(
+                            "UPDATE type_zoo SET col_text = 'float-wire-later', updated_at = ? WHERE id = ?",
+                            arrayOf("2026-01-10T00:00:00.000Z", id),
+                        )
+                    },
+                )
+                waitForCondition(timeoutMs = 30_000) {
+                    writer.syncNow()
+                    writer.pendingChangeCount() == 0
+                }
+                waitForFloatWireRows(reader, userID, ids, cases, "float-wire-later")
+            }
         }
     }
 

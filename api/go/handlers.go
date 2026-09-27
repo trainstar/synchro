@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/trainstar/synchro/api/go/internal/jsonnumber"
 )
 
 const (
@@ -57,7 +59,7 @@ func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeRawJSON(w, http.StatusOK, resp)
+	writeJSONBResponse(w, resp)
 }
 
 // servePull handles POST /sync/pull.
@@ -97,7 +99,7 @@ func (h *Handler) servePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeRawJSON(w, http.StatusOK, resp)
+	writeJSONBResponse(w, resp)
 }
 
 // servePush handles POST /sync/push.
@@ -138,6 +140,8 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The push result is the stored canonical response TEXT, and a replay
+	// must return exactly those bytes.
 	writeRawJSON(w, http.StatusOK, resp)
 }
 
@@ -178,7 +182,7 @@ func (h *Handler) serveRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeRawJSON(w, http.StatusOK, resp)
+	writeJSONBResponse(w, resp)
 }
 
 // serveSchema handles GET /sync/schema.
@@ -193,7 +197,7 @@ func (h *Handler) serveSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeRawJSON(w, http.StatusOK, raw)
+	writeJSONBResponse(w, raw)
 }
 
 // serveTables handles GET /sync/tables.
@@ -208,11 +212,11 @@ func (h *Handler) serveTables(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeRawJSON(w, http.StatusOK, raw)
+	writeJSONBResponse(w, raw)
 }
 
-// queryJSONB executes a SQL function that returns JSONB and scans the raw bytes.
-// Zero intermediate marshaling on the response path.
+// queryJSONB executes one extension function call and scans its result as raw bytes.
+// Every route result is JSONB except push, which returns its stored response as TEXT.
 func (h *Handler) queryJSONB(ctx context.Context, query string, args ...any) ([]byte, error) {
 	queryTimeout := h.queryTimeout
 	if queryTimeout <= 0 {
@@ -230,6 +234,20 @@ func (h *Handler) queryJSONB(ctx context.Context, query string, args ...any) ([]
 		return nil, err
 	}
 	return raw, nil
+}
+
+// writeJSONBResponse writes a successful JSONB function result.
+// PostgreSQL prints JSONB numbers as numeric text, for example 1e-7 as 0.0000001.
+// Native clients accept only RFC 8785 number text, so the writer replaces each
+// number token that differs and keeps every other byte.
+func writeJSONBResponse(w http.ResponseWriter, raw []byte) {
+	body, err := jsonnumber.CanonicalizeTokens(raw)
+	if err != nil {
+		log.Printf("[synchro] JSONB response rejected: %v", err)
+		writeProtocolError(w, http.StatusInternalServerError, "sync_integrity_failure", "sync operation failed", false)
+		return
+	}
+	writeRawJSON(w, http.StatusOK, body)
 }
 
 // writeRawJSON writes pre-encoded JSON bytes as an HTTP response.

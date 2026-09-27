@@ -77,6 +77,24 @@ func TestCanonicalJSONOrdersKeysByUTF16(t *testing.T) {
 	}
 }
 
+func TestSeedJSONNumbersKeepSafeIntegerCheckSeparateFromFloats(t *testing.T) {
+	for _, text := range []string{"9007199254740992", "-9007199254740992", "1e21"} {
+		if _, err := canonicalJSONNumber(text); err == nil {
+			t.Fatalf("seed JSON number accepted unsafe integer %q", text)
+		}
+	}
+	for text, want := range map[string]string{"9007199254740991": "9007199254740991", "-0": "0", "0.0000001": "1e-7"} {
+		if got, err := canonicalJSONNumber(text); err != nil || got != want {
+			t.Fatalf("seed JSON number %q = %q, %v; want %q", text, got, err, want)
+		}
+	}
+	for text, want := range map[string]string{"9007199254740992": "9007199254740992", "1e21": "1e+21"} {
+		if got, err := canonicalFloatNumber(text); err != nil || got != want {
+			t.Fatalf("seed float %q = %q, %v; want %q", text, got, err, want)
+		}
+	}
+}
+
 func TestChecksumObjectRejectsMissingStructuredChecksum(t *testing.T) {
 	if err := (checksumObject{}).validate(); err == nil {
 		t.Fatal("empty structured checksum was accepted")
