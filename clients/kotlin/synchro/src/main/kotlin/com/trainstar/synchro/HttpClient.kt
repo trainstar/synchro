@@ -663,7 +663,9 @@ private suspend fun OkHttpClient.suspendEnqueue(request: Request): Response {
 
             override fun onResponse(call: Call, response: Response) {
                 if (continuation.isActive) {
-                    continuation.resume(response)
+                    // The caller can be canceled after this resume and before it runs. It then
+                    // never reads the response, so cancellation closes it and releases the exchange.
+                    continuation.resume(response) { response.close() }
                 } else {
                     response.close()
                 }
