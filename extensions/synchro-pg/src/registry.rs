@@ -2598,7 +2598,8 @@ fn load_and_validate_primary_key(
                 c.relreplident::text AS replica_identity
          FROM pg_catalog.pg_class c
          JOIN pg_catalog.pg_index i ON i.indrelid = c.oid AND i.indisprimary
-         JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality) ON true
+         JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+           ON key.ordinality <= i.indnkeyatts
          LEFT JOIN pg_catalog.pg_attribute a
            ON a.attrelid = c.oid AND a.attnum = key.attnum AND NOT a.attisdropped
          WHERE c.oid = $1::oid
@@ -4333,7 +4334,8 @@ fn load_catalog_for_registrations(
            ON relation.oid = registry.physical_relation_oid
          JOIN pg_catalog.pg_index index
            ON index.indrelid = relation.oid AND index.indisprimary
-         JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality) ON true
+         JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+           ON key.ordinality <= index.indnkeyatts
          LEFT JOIN pg_catalog.pg_attribute attribute
            ON attribute.attrelid = relation.oid
           AND attribute.attnum = key.attnum

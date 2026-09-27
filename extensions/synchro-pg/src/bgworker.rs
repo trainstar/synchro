@@ -3040,7 +3040,7 @@ fn preload_relations(
         let rows = client
             .select(
                 "SELECT a.attname::text AS name,
-                        (a.attnum = ANY(i.indkey)) AS is_key,
+                        (a.attnum = ANY((i.indkey::int2[])[0:i.indnkeyatts - 1])) AS is_key,
                         a.atttypid::bigint AS type_oid,
                         a.atttypmod AS type_modifier
                  FROM pg_catalog.pg_attribute a
@@ -7091,7 +7091,6 @@ fn registered_id(image: &TupleImage, column: &str) -> Result<String, String> {
     match image.get(column) {
         Some(TupleValue::Text(bytes)) => std::str::from_utf8(bytes)
             .ok()
-            .filter(|value| !value.is_empty())
             .map(String::from)
             .ok_or_else(|| "registered identity is invalid".to_string()),
         Some(TupleValue::Binary(_)) => Err("binary registered identity is unsupported".to_string()),
