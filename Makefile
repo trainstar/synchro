@@ -39,6 +39,7 @@
 	test-r1-benchmark \
 	_run-r1-benchmark \
 	characterize-dataset \
+	test-conformance-dataset \
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-seed-artifact \
@@ -500,6 +501,9 @@ test-conformance-faults:
 test-invariants:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./invariants -count=1
 
+test-conformance-dataset:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./dataset -count=1
+
 test-conformance-invariants: test-invariants
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./soak -count=1
 
@@ -798,7 +802,7 @@ conformance-update-baseline-extension-artifact:
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios test-conformance-dataset check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
 release-stage-server: version-check
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
