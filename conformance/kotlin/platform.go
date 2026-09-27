@@ -2024,7 +2024,7 @@ func restartCaptureExceedsDetailBounds(capture Result) bool {
 		*capture.ProvenanceCount > maximumRecords ||
 		*capture.RowMetadataCount > maximumRecords ||
 		*capture.RebuildAttemptCount > maximumRecords ||
-		*capture.RebuildReceiptCount > maximumRecords
+		!presentJSON(capture.RebuildReceiptProofs)
 }
 
 func restartInvariantClientObservation(client Client, capture Result, restartBoundary bool) (invariants.ClientObservation, error) {
@@ -2838,8 +2838,9 @@ func validateCapturedClientState(result Result) error {
 		(*result.ScopeRowCount <= maximumRecords) != presentJSON(result.ScopeRows) ||
 		(*result.RowMetadataCount <= maximumRecords) != presentJSON(result.RowMetadata) ||
 		(*result.RebuildAttemptCount <= maximumRecords) != presentJSON(result.RebuildAttempts) ||
-		(*result.RebuildReceiptCount <= maximumRecords) != presentJSON(result.RebuildReceipts) ||
-		(*result.RebuildReceiptCount <= maximumRecords) != presentJSON(result.RebuildReceiptProofs) {
+		// Receipt details are bounded by (scope, rebuild) group. The count is in pages.
+		presentJSON(result.RebuildReceipts) != presentJSON(result.RebuildReceiptProofs) ||
+		(!presentJSON(result.RebuildReceiptProofs) && *result.RebuildReceiptCount <= maximumRecords) {
 		return errors.New("Kotlin Android capture detail bounds are inconsistent")
 	}
 	if *result.ScopeRowCount <= maximumRecords {
@@ -2887,7 +2888,7 @@ func validateCapturedClientState(result Result) error {
 			return errors.New("Kotlin Android rebuild-attempt count does not match detail")
 		}
 	}
-	if *result.RebuildReceiptCount <= maximumRecords {
+	if presentJSON(result.RebuildReceiptProofs) {
 		proofs, err := androidRebuildReceiptProofs(result.RebuildReceiptProofs)
 		if err != nil {
 			return err

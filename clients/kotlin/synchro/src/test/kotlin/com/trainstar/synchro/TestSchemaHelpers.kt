@@ -386,3 +386,8 @@ fun makeChangeRecord(
 
 fun protocolEmptyScopeChecksum(scopeID: String): ChecksumObject =
     Integrity.scopeDigest(PROTOCOL_TEST_SCHEMA_HASH, scopeID, emptyList())
+
+/** Returns the current records. A legacy record fails the calling test. */
+internal fun List<RetainedMutationInspection>.currentRecords(): List<PendingMutationInspection> = map {
+    (it as? RetainedMutationInspection.Current)?.mutation ?: error("unexpected legacy mutation")
+}

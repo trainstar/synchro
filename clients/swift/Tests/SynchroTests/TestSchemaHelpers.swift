@@ -326,3 +326,15 @@ func protocolEmptyScopeChecksum(scopeID: String) -> ChecksumObject {
         entries: []
     )
 }
+
+struct UnexpectedLegacyMutation: Error {}
+
+extension Array where Element == RetainedMutationInspection {
+    /// Returns the current records. A legacy import fails the calling test.
+    func currentRecords() throws -> [PendingMutationInspection] {
+        try map { value in
+            guard let current = value.current else { throw UnexpectedLegacyMutation() }
+            return current
+        }
+    }
+}

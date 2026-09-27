@@ -1,6 +1,12 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "facade": "SynchroInspection",
+  "references": [
+    "ApplicationReadTransaction",
+    "RejectedMutationInspection",
+    "RetainedMutationInspection",
+    "SyncFailure"
+  ],
   "operations": [
     {
       "name": "currentSchema",
@@ -31,6 +37,25 @@
         { "name": "maximumRecords", "type": { "name": "int", "nullable": false } }
       ],
       "result": { "name": "ClientStateCaptureInspection", "nullable": false }
+    },
+    {
+      "name": "captureSnapshot",
+      "parameters": [
+        { "name": "maximumRecords", "type": { "name": "int", "nullable": false } },
+        {
+          "name": "readApplicationRows",
+          "type": {
+            "name": "function",
+            "nullable": false,
+            "parameters": [
+              { "name": "ClientStateCaptureInspection", "nullable": false },
+              { "name": "ApplicationReadTransaction", "nullable": false }
+            ],
+            "result": { "name": "void", "nullable": false }
+          }
+        }
+      ],
+      "result": { "name": "ClientStateSnapshotInspection", "nullable": false }
     },
     {
       "name": "rowMetadata",
@@ -149,6 +174,30 @@
         { "name": "rebuildAttemptCount", "type": { "name": "int", "nullable": false } },
         { "name": "rebuildReceiptCount", "type": { "name": "int", "nullable": false } },
         { "name": "provenanceMaintenanceWorkCursor", "type": { "name": "int64", "nullable": false } }
+      ]
+    },
+    {
+      "name": "ClientStateSnapshotInspection",
+      "fields": [
+        { "name": "capture", "type": { "name": "ClientStateCaptureInspection", "nullable": false } },
+        { "name": "pendingChangeCount", "type": { "name": "int", "nullable": false } },
+        {
+          "name": "retainedMutations",
+          "type": {
+            "name": "array",
+            "nullable": true,
+            "element": { "name": "RetainedMutationInspection", "nullable": false }
+          }
+        },
+        {
+          "name": "rejectedMutations",
+          "type": {
+            "name": "array",
+            "nullable": true,
+            "element": { "name": "RejectedMutationInspection", "nullable": false }
+          }
+        },
+        { "name": "blockingFailure", "type": { "name": "SyncFailure", "nullable": true } }
       ]
     },
     {
