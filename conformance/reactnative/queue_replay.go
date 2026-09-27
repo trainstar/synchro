@@ -150,7 +150,6 @@ type QueueReplayCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -170,6 +169,11 @@ type QueueReplayCoordinator struct {
 	userID     string
 	clientID   string
 	clientKey  string
+
+	// closing ends every barrier wait. An exchange holds mu while it waits, so
+	// Close must end those waits before it can acquire mu.
+	closing     chan struct{}
+	closingOnce sync.Once
 
 	mu           sync.Mutex
 	proxyMu      sync.Mutex
@@ -263,6 +267,8 @@ type queueReplayTerminalPull struct {
 	err        error
 }
 
+var errQueueReplayClosed = errors.New("React Native queue-replay coordinator closed")
+
 // NewQueueReplayCoordinator creates an authenticated host-loopback listener.
 func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueReplayCoordinator, error) {
 	if err := ValidateQueueReplayScenario(config.Scenario); err != nil {
@@ -274,9 +280,6 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 	identity, err := queueReplayClientIdentity(config.Scenario)
 	if err != nil {
 		return nil, err
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native queue-replay coordinator auth token is required")
@@ -320,8 +323,8 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
 		successorClientKey: identity.clientID + "-successor-proof", successorClientID: identity.clientID + "-successor-proof", successorDatabase: successorDatabase,
-		nextSeq: 1,
-		server:  &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
+		nextSeq: 1, closing: make(chan struct{}),
+		server: &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
 	}
 	coordinator.server.Handler = coordinator
 	return coordinator, nil
@@ -469,6 +472,7 @@ func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	c.closingOnce.Do(func() { close(c.closing) })
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -476,7 +480,6 @@ func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	_ = c.releaseResponseLossPush()
 	shutdownErr := c.server.Shutdown(ctx)
 	listenErr := c.listener.Close()
 	if shutdownErr != nil {
@@ -618,7 +621,10 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 			// cancellation while the client still reads. The hold waits for
 			// the coordinated release only, and the drop below reaches a
 			// connected client or fails silently on a gone one.
-			<-responseLoss.release
+			select {
+			case <-responseLoss.release:
+			case <-c.closing:
+			}
 			if err := c.dropProxyResponse(writer); err != nil {
 				c.recordResponseLossProxyFailure(responseLoss, err)
 			}
@@ -674,6 +680,8 @@ func (c *QueueReplayCoordinator) waitForReplayPull(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native queue-replay terminal replay pull: %w", ctx.Err())
+	case <-c.closing:
+		return errQueueReplayClosed
 	case <-barrier.served:
 	}
 	c.proxyMu.Lock()
@@ -753,6 +761,9 @@ func (c *QueueReplayCoordinator) waitForResponseLossPush(ctx context.Context) er
 	case <-ctx.Done():
 		c.recordResponseLossProxyFailure(fault, ctx.Err())
 		return fmt.Errorf("wait for React Native queue-replay response-loss push: %w", ctx.Err())
+	case <-c.closing:
+		c.recordResponseLossProxyFailure(fault, errQueueReplayClosed)
+		return errQueueReplayClosed
 	case <-fault.committed:
 	}
 	c.proxyMu.Lock()

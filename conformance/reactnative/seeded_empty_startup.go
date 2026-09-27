@@ -33,7 +33,6 @@ type SeededEmptyStartupCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 

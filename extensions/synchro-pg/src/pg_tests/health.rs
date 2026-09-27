@@ -103,9 +103,8 @@
             configuration.clone(),
         )
         .detail();
-        let default_limits_accepted = ["heartbeat", "wal_byte_lag", "wal_time_lag"]
-            .into_iter()
-            .all(|check| default_detail["checks"][check]["reason"].as_str() != Some("invalid_limit"));
+        // Every rejection below starts from this complete healthy state.
+        let default_ready = default_detail["ready"].as_bool() == Some(true);
 
         Spi::run(
             "ALTER TABLE public.test_orders DISABLE TRIGGER synchro_capture_fence",
@@ -313,7 +312,7 @@
         .expect("remove health test identity");
 
         assert!(guc_defaults_visible);
-        assert!(default_limits_accepted);
+        assert!(default_ready, "default health baseline is not ready: {default_detail}");
         assert!(disabled_trigger_rejected);
         assert!(extra_publication_relation_rejected);
         assert!(stale_heartbeat_rejected);

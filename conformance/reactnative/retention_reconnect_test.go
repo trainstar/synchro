@@ -107,7 +107,7 @@ func TestNewRetentionReconnectCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	defer upstream.Close()
 
 	coordinator, err := NewRetentionReconnectCoordinator(RetentionReconnectCoordinatorConfig{
-		Scenario: loadRetentionReconnectAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadRetentionReconnectAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create retention-reconnect coordinator: %v", err)
