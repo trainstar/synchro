@@ -3034,6 +3034,83 @@ class SyncEngineTests {
     }
 
     @Test
+    fun oversizedPushEnvelopeRecordsLocalInvalidRequestAndKeepsEveryAction() = runTest {
+        val pushCount = AtomicInteger()
+        // Only the client identity varies. The complete empty reserved envelope is one octet above the limit.
+        val emptyEnvelope = Json.encodeToString(
+            PushRequest(
+                clientID = "",
+                clientGeneration = 9_007_199_254_740_991L,
+                batchID = UUID.randomUUID().toString(),
+                schema = SchemaRef(9_007_199_254_740_991L, PROTOCOL_TEST_SCHEMA_HASH),
+                mutations = emptyList(),
+            ),
+        )
+        val clientID = "c".repeat(1_048_577 - emptyEnvelope.toByteArray(Charsets.UTF_8).size)
+        val (engine, db) = makeIntegrationEnv(clientID = clientID, pushDebounce = 60.0) { request ->
+            when {
+                request.path.orEmpty().endsWith("/sync/connect") -> mockResponse(connectJSON)
+                request.path.orEmpty().endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path.orEmpty().endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                request.path.orEmpty().endsWith("/sync/push") -> {
+                    pushCount.incrementAndGet()
+                    mockResponse("""{"error":"unexpected push"}""", 500)
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            // With no pending mutation, the client sends no push request and records no failure.
+            engine.syncNow()
+            assertNull(db.readTransaction { SynchroMeta.getClientState(it) }.failure)
+            assertEquals(0, pushCount.get())
+
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "first", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("second", "w1"))
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w2", "unrelated", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val actionsBefore = durableActionRows(db)
+            assertEquals(3, actionsBefore.first().size)
+
+            val thrown = runCatching { engine.syncNow() }.exceptionOrNull()
+            assertTrue("syncNow result: $thrown", thrown is SynchroError.BlockingFailure)
+            val failure = (thrown as SynchroError.BlockingFailure).failure
+            assertEquals(SyncOperationKind.PUSHING, failure.operation)
+            assertEquals(SyncFailureCode.INVALID_REQUEST, failure.code)
+            assertFalse(failure.retryable)
+            assertEquals(SyncRecoveryAction.NONE, failure.recoveryAction)
+            assertTrue(failure.metadata.isEmpty())
+
+            assertEquals(SyncStatus.Error(failure), engine.getSyncStatus())
+            val durable = db.readTransaction { SynchroMeta.getClientState(it) }
+            assertEquals(SyncLifecycleState.ERROR, durable.lifecycleState)
+            assertEquals(failure, durable.failure)
+            assertEquals(0, pushCount.get())
+            assertEquals(actionsBefore, durableActionRows(db))
+        } finally {
+            engine.stop()
+        }
+    }
+
+    /** Returns every durable action, authored value, sealed batch, and batch member row in key order. */
+    private fun durableActionRows(db: SynchroDatabase): List<List<Map<String, Any?>>> = listOf(
+        "SELECT * FROM _synchro_pending_changes ORDER BY mutation_id",
+        "SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id",
+        "SELECT * FROM _synchro_push_batches ORDER BY batch_id",
+        "SELECT * FROM _synchro_push_batch_members ORDER BY batch_id, ordinal",
+    ).map { sql ->
+        // A blob has no value equality, so compare its octets.
+        db.query(sql).map { row -> row.mapValues { (_, value) -> if (value is ByteArray) value.toList() else value } }
+    }
+
+    @Test
     fun nonRetryableSyncNowFailureTerminatesLifecycleAndAllowsRetry() = runTest {
         var connectCallCount = 0
         var pullCallCount = 0

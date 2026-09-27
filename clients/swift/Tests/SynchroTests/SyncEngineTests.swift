@@ -2707,6 +2707,84 @@ final class SyncEngineTests: XCTestCase {
         }
     }
 
+    func testOversizedPushEnvelopeRecordsLocalInvalidRequestAndKeepsEveryAction() async throws {
+        let pushCount = OSAllocatedUnfairLock(initialState: 0)
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            switch path {
+            case _ where path.hasSuffix("/sync/connect"):
+                return try self.mockResponse(json: self.connectJSON)
+            case _ where path.hasSuffix("/sync/rebuild"):
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            case _ where path.hasSuffix("/sync/pull"):
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            case _ where path.hasSuffix("/sync/push"):
+                pushCount.withLock { $0 += 1 }
+                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected push"])
+            default:
+                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            }
+        }
+        // Only the client identity varies. The complete empty reserved envelope is one octet above the limit.
+        let emptyEnvelope = try JSONEncoder.synchroEncoder().encode(PushRequest(
+            clientID: "",
+            clientGeneration: 9_007_199_254_740_991,
+            batchID: UUID().uuidString.lowercased(),
+            schema: SchemaRef(version: 9_007_199_254_740_991, hash: protocolTestSchemaHash),
+            mutations: []
+        ))
+        let clientID = String(repeating: "c", count: 1_048_577 - emptyEnvelope.count)
+        let (engine, db) = try makeIntegrationEnv(clientID: clientID, pushDebounce: 60)
+        let databasePath = db.path
+        addTeardownBlock {
+            await engine.stop()
+            try db.close()
+            for suffix in ["", "-journal", "-wal", "-shm"] where FileManager.default.fileExists(atPath: databasePath + suffix) {
+                try FileManager.default.removeItem(atPath: databasePath + suffix)
+            }
+        }
+
+        try await engine.start()
+        // With no pending mutation, the client sends no push request and records no failure.
+        try await engine.syncNow()
+        XCTAssertNil(try engine.getBlockingFailure())
+        XCTAssertEqual(pushCount.withLock { $0 }, 0)
+
+        // Each cycle normalizes the queue in its own committed step before it seals.
+        // Independent inserts keep that step a no-op. PushProcessorTests proves that the
+        // failed seal transaction keeps a dependency chain.
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "first", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w2", "unrelated", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+        let actionsBefore = try durableActionRows(db)
+        XCTAssertEqual(actionsBefore[0].count, 2)
+
+        do {
+            try await engine.syncNow()
+            XCTFail("expected the local envelope failure")
+        } catch let SynchroError.blocked(failure) {
+            XCTAssertEqual(failure.operation, .pushing)
+            XCTAssertEqual(failure.code, .invalidRequest)
+            XCTAssertFalse(failure.retryable)
+            XCTAssertEqual(failure.recoveryAction, .none)
+        }
+
+        XCTAssertEqual(engine.getSyncStatus(), .error)
+        let persisted = try XCTUnwrap(engine.getBlockingFailure())
+        XCTAssertEqual(persisted.operation, .pushing)
+        XCTAssertEqual(persisted.code, .invalidRequest)
+        XCTAssertFalse(persisted.retryable)
+        XCTAssertEqual(persisted.recoveryAction, .none)
+        XCTAssertTrue(persisted.metadata.isEmpty)
+        XCTAssertEqual(pushCount.withLock { $0 }, 0)
+        XCTAssertEqual(try durableActionRows(db), actionsBefore)
+    }
+
     func testMalformedDurableFailureBecomesPublicErrorState() async throws {
         let requestCount = OSAllocatedUnfairLock(initialState: 0)
         MockURLProtocol.requestHandler = { request in

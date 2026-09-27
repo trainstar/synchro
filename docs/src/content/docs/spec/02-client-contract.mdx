@@ -290,15 +290,29 @@ The client measures the batch envelope with the protocol maximum for
 generation renewal or schema reconciliation also stays within the limits.
 
 The client selects pending mutations in durable local order. It stops before
-the first mutation that causes the batch to exceed a request limit. That
+the first mutation that causes a nonempty batch to exceed a request limit. That
 mutation starts the next batch.
 
-The client does not seal or send a mutation that exceeds a mutation limit. The
+The client does not seal or send a mutation that exceeds a mutation limit. It
+also does not seal or send a mutation that exceeds a request limit alone in an
+empty batch with the reserved envelope. The
 mutation gets the durable local state `exceeds_push_limit`. It keeps its
 authored content and stays inspectable. Its same-row dependents become
 `blocked_by_predecessor`. The client then continues with the next pending
 mutations. `exceeds_push_limit` is not a push operation and is not a server
 outcome.
+
+The client applies these checks only when it seals a new batch. A loaded
+sealed batch keeps its exact stored bytes and is sent before any new batch.
+
+If the reserved envelope of a new batch alone exceeds a request limit, the
+client seals no new batch. It records a nonretryable `invalid_request` blocking
+failure with the recovery action `none`. The failed seal transaction preserves
+each pending mutation's state, authored content, and dependencies. It does not
+undo queue normalization that committed before sealing. This local configuration failure has no
+HTTP status and is not a server outcome. It does not change, discard, or block
+the replay of an existing sealed batch. A client with no pending mutation seals
+no new batch and records no failure.
 
 ### Exact replay
 

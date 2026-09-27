@@ -305,10 +305,10 @@ enum class LocalMutationStatus {
     SERVER_REJECTED,
 
     /**
-     * The mutation is larger than a server push limit, so the client does not
-     * send it. The client retains the mutation. The mutation leaves the pending set but
-     * stays inspectable, so an application can report it and recover the
-     * authored values.
+     * The mutation is larger than a server push limit, or an empty request with the
+     * reserved envelope cannot hold it, so the client does not send it. The client
+     * retains the mutation. The mutation leaves the pending set but stays
+     * inspectable, so an application can report it and recover the authored values.
      */
     EXCEEDS_PUSH_LIMIT,
 }

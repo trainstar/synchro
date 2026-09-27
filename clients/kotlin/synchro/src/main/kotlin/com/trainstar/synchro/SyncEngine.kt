@@ -1431,13 +1431,15 @@ internal class SyncEngine(
     }
 
     private fun recordBlockingFailure(error: Exception) {
-        if (error is CancellationException || error is SynchroError.BlockingFailure) return
+        if (error is CancellationException) return
         val current = synchronized(lifecycleLock) { currentStatus.state }
         if (current in setOf(SyncLifecycleState.STOPPED, SyncLifecycleState.ERROR)) return
         transitionTo(SyncStatus.Error(failureFor(error, operationForState(current))))
     }
 
     private fun failureFor(error: Exception, operation: SyncOperationKind): SyncFailure = when (error) {
+        // A local check can raise a typed failure that is not yet recorded.
+        is SynchroError.BlockingFailure -> error.failure
         is SynchroError.UpgradeRequired -> SyncFailure(
             operation = SyncOperationKind.CONNECTING,
             code = SyncFailureCode.UPGRADE_REQUIRED,

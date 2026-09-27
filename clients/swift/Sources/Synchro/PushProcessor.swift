@@ -325,6 +325,18 @@ final class PushProcessor: @unchecked Sendable {
             while pending.isEmpty {
                 let candidates = try changeTracker.pendingChanges(db, limit: batchSize)
                 guard !candidates.isEmpty else { return nil }
+                // An envelope above a request limit is a configuration failure, not an
+                // oversized action. The error rolls back this transaction, so every
+                // action keeps its state.
+                guard envelope.fitsRequestLimit else {
+                    throw SynchroError.blocked(SyncFailure(
+                        operation: .pushing,
+                        code: .invalidRequest,
+                        retryable: false,
+                        message: "The push request envelope exceeds the request limit.",
+                        recoveryAction: .none
+                    ))
+                }
                 var requestOctets = envelope
                 for candidate in candidates {
                     let mutation = try buildMutation(
@@ -335,13 +347,15 @@ final class PushProcessor: @unchecked Sendable {
                         historicalSchemas: &historicalSchemas
                     )
                     let measure = try PushLimits.measure(mutation, encoder: encoder)
-                    if measure.exceedsMutationLimits {
+                    let nextOctets = requestOctets.appending(measure.element, afterElement: !pending.isEmpty)
+                    // A mutation that exceeds a request measure alone in an empty request
+                    // cannot fit with this reserved envelope.
+                    if measure.exceedsMutationLimits || (pending.isEmpty && !nextOctets.fitsRequestLimit) {
                         try changeTracker.markExceedsPushLimit(db, mutationID: candidate.mutationID)
                         try changeTracker.blockDependents(db, predecessorID: candidate.mutationID)
                         continue
                     }
-                    let nextOctets = requestOctets.appending(measure.element, afterElement: !pending.isEmpty)
-                    if !pending.isEmpty && !nextOctets.fitsRequestLimit {
+                    if !nextOctets.fitsRequestLimit {
                         break
                     }
                     requestOctets = nextOctets

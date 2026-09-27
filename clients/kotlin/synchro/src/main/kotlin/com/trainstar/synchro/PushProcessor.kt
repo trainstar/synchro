@@ -600,6 +600,7 @@ internal class PushProcessor(
     /**
      * Selects the next eligible mutations in local order that one request can hold.
      * A mutation that is larger than a per-mutation limit gets the push limit state.
+     * A mutation that an empty request with the reserved envelope cannot hold gets it too.
      * The result is empty only when there is no eligible mutation.
      */
     private fun selectWithinPushLimits(
@@ -610,6 +611,20 @@ internal class PushProcessor(
         while (true) {
             val candidates = eligibleForSealing(db, batchSize)
             if (candidates.isEmpty()) return emptyList()
+            // An envelope above a request limit is a configuration failure, not an
+            // oversized action. The exception rolls back this transaction, so every
+            // action keeps its state.
+            if (!envelope.withinLimit) {
+                throw SynchroError.BlockingFailure(
+                    SyncFailure(
+                        operation = SyncOperationKind.PUSHING,
+                        code = SyncFailureCode.INVALID_REQUEST,
+                        retryable = false,
+                        message = "The push request envelope exceeds the request limit.",
+                        recoveryAction = SyncRecoveryAction.NONE,
+                    ),
+                )
+            }
             val selection = mutableListOf<Pair<PendingChange, Mutation>>()
             var size = envelope
             for (candidate in candidates) {
@@ -619,12 +634,12 @@ internal class PushProcessor(
                 } catch (_: IllegalArgumentException) {
                     throw SynchroError.InvalidResponse("stored mutation has an invalid portable value")
                 }
-                if (!mutationSize.withinLimits) {
+                val next = size.adding(mutationSize)
+                if (!mutationSize.withinLimits || (selection.isEmpty() && !next.withinLimit)) {
                     markExceedsPushLimit(db, candidate.mutationID)
                     continue
                 }
-                val next = size.adding(mutationSize)
-                if (selection.isNotEmpty() && !next.withinLimit) break
+                if (!next.withinLimit) break
                 selection += candidate to mutation
                 size = next
             }
