@@ -114,7 +114,7 @@
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "path": "conformance/scenarios/server/wal-decode-failure-001.json",
-      "sha256": "45f13488d09e0d1979175112f6fe5f1c935540ebeb9a500afa875b6c6e8a44fa"
+      "sha256": "842459403855281eebaffbc605e83757baf71a3e10b57a95e51bb873093a431e"
     },
     {
       "scenario_id": "SCN-WAL-ORDER-001",
