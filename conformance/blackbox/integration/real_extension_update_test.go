@@ -169,8 +169,10 @@ func TestRealExtensionUpdateRepairsRetainedDecoderPoison(t *testing.T) {
 	beforeAcknowledgement := observeIssue49BlockedAcknowledgement(t, ctx, openIssue49Admin(t, ctx, harness), before.CommitLSN)
 
 	t.Run("assertion", func(t *testing.T) {
-		if before.FailureClass != "decode_failed" || before.CommitLSN == "" || !before.AcknowledgementBlocked ||
-			before.LaterRecordMaterialized || !before.LaterFencePending || !before.WorkerBlocked {
+		if before.FailureClass != "decode_failed" || before.CommitLSN == "" ||
+			before.RelationID != "" || before.RelationIDMatchesRegistry || !before.AcknowledgementBlocked ||
+			before.LaterRecordMaterialized || !before.LaterFencePending || !before.WorkerBlocked ||
+			!before.ReadinessBlocked || !before.PoisonCheckFailed {
 			t.Fatalf("baseline decoder did not persist a blocking decode poison: %#v", before)
 		}
 		if !beforeAcknowledgement.SlotMatchesProgress || !beforeAcknowledgement.ProgressBeforePoison ||
