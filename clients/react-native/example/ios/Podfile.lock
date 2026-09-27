@@ -2453,9 +2453,9 @@ PODS:
     - React-utils (= 0.83.0)
     - SocketRocket
   - SocketRocket (0.7.1)
-  - Synchro (0.3.2):
+  - Synchro (0.4.0):
     - GRDB.swift (~> 7.0)
-  - SynchroReactNative (0.3.2):
+  - SynchroReactNative (0.4.0):
     - boost
     - DoubleConversion
     - fast_float
@@ -2482,7 +2482,7 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - SocketRocket
-    - Synchro (= 0.3.2)
+    - Synchro (= 0.4.0)
     - Yoga
   - Yoga (0.0.0)
 
