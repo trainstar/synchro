@@ -21,6 +21,15 @@ func TestRealSameTableMembershipPropagatesSiblingChanges(t *testing.T) {
 	harness, _ := provisionRealProofHarness(t, ctx)
 	admin := openIssue49Admin(t, ctx, harness)
 
+	// An empty relation changes no scope, so the rule transition declares one authoritative scope.
+	if _, err := admin.ExecContext(ctx, `
+		INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
+		SELECT 'user:team-bootstrap', stream_generation
+		FROM synchro.sync_runtime_state
+		WHERE singleton`,
+	); err != nil {
+		t.Fatalf("create membership transition scope: %v", err)
+	}
 	if _, err := admin.ExecContext(ctx, `
 		CREATE FUNCTION public.cf_document_notes_team_membership(p_id uuid)
 		RETURNS SETOF text
@@ -40,7 +49,8 @@ func TestRealSameTableMembershipPropagatesSiblingChanges(t *testing.T) {
 			'public.cf_document_notes',
 			'public.cf_document_notes_team_membership',
 			'multi_scope',
-			'id', 'updated_at', 'deleted_at', 'enabled'
+			'id', 'updated_at', 'deleted_at', 'enabled',
+			p_affected_scopes => ARRAY['user:team-bootstrap']::text[]
 		)`,
 	); err != nil {
 		t.Fatalf("register sibling-dependent membership function: %v", err)
