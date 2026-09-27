@@ -71,7 +71,7 @@ Synchro MUST define and execute create, update, and delete synchronization for e
 
 ### No Silent Mutation Loss
 
-Every captured local mutation MUST remain durably pending or reach exactly one durable accepted, server-rejected, `superseded_before_send`, `cancelled_before_send`, or `blocked_by_predecessor` outcome. The three local outcomes MUST remain inspectable and linked to the normalized or predecessor intent. Removing intent without one of those states or explicit client policy is a violation of the queue and outcome rules in [ADR 002] and [ADR 004].
+Every captured local mutation MUST remain durably pending or reach exactly one durable accepted, server-rejected, `superseded_before_send`, `cancelled_before_send`, `blocked_by_predecessor`, or `exceeds_push_limit` outcome. The four local outcomes MUST remain inspectable. `superseded_before_send`, `cancelled_before_send`, and `blocked_by_predecessor` MUST also remain linked to the normalized or predecessor intent. Removing intent without one of those states or explicit client policy is a violation of the queue and outcome rules in [ADR 002] and [ADR 004].
 
 ### Canonical Server Outcome
 

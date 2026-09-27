@@ -1094,7 +1094,7 @@ func validProcessID(value string) bool {
 
 func validRetainedMutationStatus(status string) bool {
 	switch status {
-	case "pending", "sealed", "server_rejected", "superseded_before_send", "cancelled_before_send", "blocked_by_predecessor":
+	case "pending", "sealed", "server_rejected", "exceeds_push_limit", "superseded_before_send", "cancelled_before_send", "blocked_by_predecessor":
 		return true
 	default:
 		return false

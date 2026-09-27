@@ -584,6 +584,39 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.inspectRetainedMutations).toHaveBeenCalledTimes(1);
     });
 
+    it('maps retained mutation inspection JSON with a push limit status', async () => {
+      const retained = {
+        mutationID: 'mutation-3',
+        localOrder: 9,
+        tableID: 'table-1',
+        tableName: 'items',
+        recordID: 'record-3',
+        primaryKeyFieldID: 'field-id',
+        primaryKeyLogicalType: 'uuid',
+        operation: 'insert',
+        authoredSchema: { version: 3, hash: 'c'.repeat(64) },
+        baseVersion: null,
+        clientVersion: 'client-v1',
+        status: 'exceeds_push_limit',
+        sourceKind: 'local_write',
+        dependsOnMutationID: null,
+        normalizedMutationID: null,
+        sealedBatchID: null,
+        sealedOrdinal: null,
+        authoredFields: [
+          { fieldID: 'field-name', logicalType: 'string', value: 'oversize' },
+        ],
+      };
+      mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(
+        JSON.stringify([retained])
+      );
+
+      await expect(makeClient().inspectRetainedMutations()).resolves.toEqual([
+        retained,
+      ]);
+      expect(mockNativeModule.inspectRetainedMutations).toHaveBeenCalledTimes(1);
+    });
+
     it('maps rejected mutation inspection JSON without parsing retained JSON', async () => {
       const mutationJSON = '{ "operation": "update", "value": 1 }';
       const rejectionJSON = '{ "code": "version_conflict" }';

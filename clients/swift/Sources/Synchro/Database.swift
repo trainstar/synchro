@@ -910,19 +910,28 @@ final class SynchroDatabase: @unchecked Sendable {
                 """)
         }
         migrator.registerMigration("synchro_v16_capture_storage_validation") { db in
-            guard let encoded = try SynchroMeta.get(db, key: .localSchema) else { return }
-            let tables = try JSONDecoder().decode([LocalSchemaTable].self, from: Data(encoded.utf8))
-            guard !tables.isEmpty else { return }
-            guard try SynchroMeta.getInt64(db, key: .schemaVersion) > 0,
-                  let hash = try SynchroMeta.get(db, key: .schemaHash), !hash.isEmpty else {
-                throw SynchroError.invalidResponse(message: "capture upgrade requires verified schema metadata")
-            }
-            for table in tables {
-                for trigger in SQLiteSchema.generateCDCTriggers(table: table) {
-                    try db.execute(sql: trigger)
-                }
-            }
+            try Self.regenerateCaptureTriggers(db)
+        }
+        // Earlier capture triggers use exceeds_push_limit mutations as same-row dependencies.
+        migrator.registerMigration("synchro_v17_push_limit_capture_dependency") { db in
+            try Self.regenerateCaptureTriggers(db)
         }
         try migrator.migrate(dbPool)
+    }
+
+    /// Replaces the capture triggers of each table in the stored local schema.
+    private static func regenerateCaptureTriggers(_ db: GRDB.Database) throws {
+        guard let encoded = try SynchroMeta.get(db, key: .localSchema) else { return }
+        let tables = try JSONDecoder().decode([LocalSchemaTable].self, from: Data(encoded.utf8))
+        guard !tables.isEmpty else { return }
+        guard try SynchroMeta.getInt64(db, key: .schemaVersion) > 0,
+              let hash = try SynchroMeta.get(db, key: .schemaHash), !hash.isEmpty else {
+            throw SynchroError.invalidResponse(message: "capture upgrade requires verified schema metadata")
+        }
+        for table in tables {
+            for trigger in SQLiteSchema.generateCDCTriggers(table: table) {
+                try db.execute(sql: trigger)
+            }
+        }
     }
 }

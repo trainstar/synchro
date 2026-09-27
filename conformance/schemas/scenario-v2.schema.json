@@ -851,7 +851,7 @@
         "client_version": { "type": "string", "minLength": 1 },
         "authored_columns": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/fieldFact" } },
         "local_order": { "type": "integer", "minimum": 1 },
-        "status": { "type": "string", "enum": ["pending", "sealed", "accepted", "server_rejected", "superseded_before_send", "cancelled_before_send", "blocked_by_predecessor"] }
+        "status": { "type": "string", "enum": ["pending", "sealed", "accepted", "server_rejected", "exceeds_push_limit", "superseded_before_send", "cancelled_before_send", "blocked_by_predecessor"] }
       }
     },
     "fieldFact": {

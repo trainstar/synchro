@@ -142,14 +142,20 @@ internal class PushProcessor(
         )?.let { return@writeTransaction it }
 
         normalizeUnsealedChains(db)
-        val candidates = eligibleForSealing(db, batchSize)
-        if (candidates.isEmpty()) return@writeTransaction null
-        val mutations = candidates.map { buildMutation(db, it) }
+        val batchID = UUID.randomUUID().toString()
+        val selection = selectWithinPushLimits(
+            db,
+            batchSize,
+            PushLimits.reservedEnvelope(json, clientID, batchID, schemaHash),
+        )
+        if (selection.isEmpty()) return@writeTransaction null
+        val candidates = selection.map { it.first }
+        val mutations = selection.map { it.second }
         validateNewMutations(db, mutations, SchemaRef(schemaVersion, schemaHash), syncedTables)
         val request = PushRequest(
             clientID = clientID,
             clientGeneration = clientGeneration,
-            batchID = UUID.randomUUID().toString(),
+            batchID = batchID,
             schema = SchemaRef(schemaVersion, schemaHash),
             mutations = mutations,
         )
@@ -589,6 +595,55 @@ internal class PushProcessor(
             changeTracker.changeByID(db, id)
                 ?: throw SynchroError.InvalidResponse("selected ledger mutation disappeared")
         }
+    }
+
+    /**
+     * Selects the next eligible mutations in local order that one request can hold.
+     * A mutation that is larger than a per-mutation limit gets the push limit state.
+     * The result is empty only when there is no eligible mutation.
+     */
+    private fun selectWithinPushLimits(
+        db: SQLiteDatabase,
+        batchSize: Int,
+        envelope: PushLimits.RequestSize,
+    ): List<Pair<PendingChange, Mutation>> {
+        while (true) {
+            val candidates = eligibleForSealing(db, batchSize)
+            if (candidates.isEmpty()) return emptyList()
+            val selection = mutableListOf<Pair<PendingChange, Mutation>>()
+            var size = envelope
+            for (candidate in candidates) {
+                val mutation = buildMutation(db, candidate)
+                val mutationSize = try {
+                    PushLimits.mutation(json, mutation)
+                } catch (_: IllegalArgumentException) {
+                    throw SynchroError.InvalidResponse("stored mutation has an invalid portable value")
+                }
+                if (!mutationSize.withinLimits) {
+                    markExceedsPushLimit(db, candidate.mutationID)
+                    continue
+                }
+                val next = size.adding(mutationSize)
+                if (selection.isNotEmpty() && !next.withinLimit) break
+                selection += candidate to mutation
+                size = next
+            }
+            if (selection.isNotEmpty()) return selection
+        }
+    }
+
+    private fun markExceedsPushLimit(db: SQLiteDatabase, mutationID: String) {
+        db.execSQL(
+            """
+            UPDATE _synchro_pending_changes
+            SET lifecycle_state = 'exceeds_push_limit',
+                updated_at = substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z'
+            WHERE mutation_id = ? AND lifecycle_state = 'captured'
+            """.trimIndent(),
+            arrayOf(mutationID),
+        )
+        requireExactlyOneChange(db, "push limit state was not durable")
+        blockUnsealedDependents(db, mutationID)
     }
 
     /** Normalization creates a new immutable record and never edits a source intent. */

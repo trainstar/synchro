@@ -160,16 +160,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         );
     }
 
-    let request_bytes = match serde_json::to_vec(&p_request.0) {
-        Ok(bytes) if bytes.len() <= MAX_PUSH_REQUEST_BYTES => bytes,
-        _ => {
-            return push_protocol_error(
-                ProtocolErrorCode::InvalidRequest,
-                "invalid push request",
-                false,
-            )
-        }
-    };
     let sealed_request = match canonical_json_bytes(&request) {
         Ok(bytes) if bytes.len() <= MAX_PUSH_REQUEST_BYTES => bytes,
         _ => {
@@ -180,7 +170,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             )
         }
     };
-    let _ = request_bytes;
 
     // Fingerprints are computed before loading mutable registry, client, policy, or row state.
     let fingerprints = match compute_fingerprints(p_user_id, &request, sealed_request) {

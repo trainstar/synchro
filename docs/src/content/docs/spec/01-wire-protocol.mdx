@@ -376,11 +376,19 @@ For an assigned portable scope with a valid receipt under the selected schema an
 
 Push submits one nonempty, ordered, immutable batch. Push operations are exactly `insert`, `update`, and `delete`. `upsert` is a pull operation and is invalid in a push request. Protocol version 3 has no resurrection operation.
 
-The decoded push JSON body is at most 1,048,576 octets, contains `1..1000`
-mutations, and each normalized mutation is at most 65,536 octets with at most
-256 authored columns. The adapter and extension reject an exceeded limit with
-`400 invalid_request` before ledger allocation, fingerprinting, policy
-execution, or source DML. Limits are never clamped.
+A push request has these limits:
+
+- The adapter accepts a decoded push JSON body of at most 1,048,576 octets.
+- The extension accepts an RFC 8785 form of the parsed request of at most
+  1,048,576 octets.
+- The request contains `1..1000` mutations.
+- The RFC 8785 form of each normalized mutation in ADR 002 is at most 65,536
+  octets.
+- Each mutation contains at most 256 authored columns.
+
+The adapter and extension reject an exceeded limit with `400 invalid_request`
+before ledger allocation, fingerprinting, policy execution, or source DML.
+Limits are never clamped.
 
 The push response has no octet limit. Each outcome can echo a full
 authoritative row, so a response can be larger than its request.

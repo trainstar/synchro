@@ -173,7 +173,8 @@ export type LocalMutationStatus =
   | 'superseded_before_send'
   | 'cancelled_before_send'
   | 'blocked_by_predecessor'
-  | 'server_rejected';
+  | 'server_rejected'
+  | 'exceeds_push_limit';
 
 export type MutationStatus = 'applied' | 'conflict' | 'rejected_terminal';
 

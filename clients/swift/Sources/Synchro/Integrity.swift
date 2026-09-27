@@ -452,7 +452,7 @@ package enum Integrity {
         return try canonicalJSONValue(value)
     }
 
-    private static func canonicalJSONValue(_ value: Any) throws -> Data {
+    static func canonicalJSONValue(_ value: Any) throws -> Data {
         switch value {
         case is NSNull:
             return Data("null".utf8)

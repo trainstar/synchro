@@ -64,15 +64,16 @@ internal data class LedgerValue(
 internal class ChangeTracker(private val database: SynchroDatabase) {
 
     internal fun inspectPendingMutations(): List<PendingMutationInspection> =
-        inspectMutations(includeServerRejected = false)
+        inspectMutations(includeTerminal = false)
 
     /**
      * Returns every mutation the client retains, including one the server
-     * rejected. A rejected mutation leaves the pending set, so a caller that
-     * needs the complete retained ledger reads this instead.
+     * rejected and one that is larger than a push limit. These mutations leave the
+     * pending set, so a caller that needs the complete retained ledger reads
+     * this instead.
      */
     internal fun inspectRetainedMutations(): List<PendingMutationInspection> =
-        inspectMutations(includeServerRejected = true)
+        inspectMutations(includeTerminal = true)
 
     internal fun retainedMutationCount(): Int = database.readTransaction { db ->
         db.rawQuery(
@@ -81,7 +82,8 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
             FROM _synchro_pending_changes
             WHERE lifecycle_state IN (
                 'captured', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
-                'superseded_before_send', 'cancelled_before_send', 'rejected_terminal'
+                'superseded_before_send', 'cancelled_before_send', 'rejected_terminal',
+                'exceeds_push_limit'
             )
             """.trimIndent(),
             null,
@@ -91,9 +93,9 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
         }
     }
 
-    private fun inspectMutations(includeServerRejected: Boolean): List<PendingMutationInspection> =
+    private fun inspectMutations(includeTerminal: Boolean): List<PendingMutationInspection> =
         database.readTransaction { db ->
-            val rejectedState = if (includeServerRejected) ", 'rejected_terminal'" else ""
+            val terminalStates = if (includeTerminal) ", 'rejected_terminal', 'exceeds_push_limit'" else ""
             queryChanges(
                 db,
                 """
@@ -101,7 +103,7 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
                 FROM _synchro_pending_changes
                 WHERE lifecycle_state IN (
                     'captured', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
-                    'superseded_before_send', 'cancelled_before_send'$rejectedState
+                    'superseded_before_send', 'cancelled_before_send'$terminalStates
                 )
                 ORDER BY local_order
                 """.trimIndent(),
@@ -331,6 +333,7 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
         "cancelled_before_send" -> LocalMutationStatus.CANCELLED_BEFORE_SEND
         "legacy_blocked", "blocked_by_predecessor" -> LocalMutationStatus.BLOCKED_BY_PREDECESSOR
         "rejected_terminal" -> LocalMutationStatus.SERVER_REJECTED
+        "exceeds_push_limit" -> LocalMutationStatus.EXCEEDS_PUSH_LIMIT
         else -> throw SynchroError.InvalidResponse("stored mutation has an invalid inspectable status")
     }
 

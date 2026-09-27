@@ -2316,6 +2316,7 @@ mod tests {
     include!("pg_tests/pull.rs");
     include!("pg_tests/rebuild.rs");
     include!("pg_tests/push_idempotency.rs");
+    include!("pg_tests/push_limits.rs");
     include!("pg_tests/float_wire.rs");
     include!("pg_tests/conflicts.rs");
     include!("pg_tests/membership.rs");

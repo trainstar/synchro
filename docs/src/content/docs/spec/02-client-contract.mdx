@@ -229,8 +229,9 @@ has no resurrection.
 When a predecessor is already sealed or transmitted, a later update or delete
 without a usable server version remains a durable dependent intent and is not
 sent. If the predecessor is accepted, the client creates a new normal mutation
-using the returned opaque version. If the predecessor conflicts or is rejected,
-the dependent intent becomes inspectable `blocked_by_predecessor`. These local
+using the returned opaque version. If the predecessor conflicts, is rejected,
+or exceeds a push limit, the dependent intent becomes inspectable
+`blocked_by_predecessor`. These local
 states are never encoded as push operations and never fabricate a base version.
 
 ## Sealed immutable batches
@@ -273,6 +274,31 @@ sent again after a first-execution generation rejection. A mutation
 whose authored content, table, fields, operation, base version, or schema
 identity changes receives a new mutation UUID and remains linked to the
 original intent for inspection.
+
+### Push limits at sealing
+
+The client applies the push limits of the wire protocol when it seals a batch.
+It measures these values:
+
+- the UTF-8 octets of the exact request body that it stores and sends
+- the octets of the RFC 8785 form of that body
+- the octets of the RFC 8785 form of each normalized mutation in ADR 002
+- the authored column count of each mutation
+
+The client measures the batch envelope with the protocol maximum for
+`client_generation` and `schema.version`. Thus a successor batch after
+generation renewal or schema reconciliation also stays within the limits.
+
+The client selects pending mutations in durable local order. It stops before
+the first mutation that causes the batch to exceed a request limit. That
+mutation starts the next batch.
+
+The client does not seal or send a mutation that exceeds a mutation limit. The
+mutation gets the durable local state `exceeds_push_limit`. It keeps its
+authored content and stays inspectable. Its same-row dependents become
+`blocked_by_predecessor`. The client then continues with the next pending
+mutations. `exceeds_push_limit` is not a push operation and is not a server
+outcome.
 
 ### Exact replay
 
@@ -906,6 +932,8 @@ semantics:
 - `observeSyncStatus(...)` for typed state changes
 - `observeSyncEvents(...)` for typed sync events
 - `inspectPendingMutations()` for durable unresolved queue records
+- `inspectRetainedMutations()` for all durable queue records, which include
+  local terminal states such as `exceeds_push_limit`
 - `inspectRejectedMutations()` for durable terminal outcomes and authored data
 - an explicit policy operation to clear retained rejected records
 
