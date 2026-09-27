@@ -3343,7 +3343,7 @@ class SyncEngineTests {
                 },
             )
 
-            engine.syncNow()
+            val firstCycle = runCatching { engine.syncNow() }
             registrations.forEach(Cancellable::cancel)
 
             // Push precedes pull, and each callback runs in the synchronous order of its transition.
@@ -3362,6 +3362,7 @@ class SyncEngineTests {
                 },
                 reentry.toList(),
             )
+            assertTrue("the cycle must finish: ${firstCycle.exceptionOrNull()}", firstCycle.isSuccess)
             // The rejected calls sent no request, kept the engine ready, and kept the cycle result.
             val paths = List(server!!.requestCount) { server!!.takeRequest(0, TimeUnit.SECONDS)?.path }
             assertEquals(listOf("/sync/push", "/sync/pull"), paths.drop(requestsBeforeCycle))
@@ -3388,7 +3389,8 @@ class SyncEngineTests {
             assertEquals(SyncStatus.Stopped, engine.getSyncStatus())
             assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is SynchroError.NotStarted)
         } finally {
-            engine.stop()
+            // Real time bounds cleanup, so a missing guard reports its assertion and not a hang.
+            withContext(Dispatchers.Default) { withTimeoutOrNull(10.seconds) { engine.stop() } }
         }
     }
 
