@@ -585,7 +585,10 @@ final class IntegrationTests: XCTestCase {
         let userID = UUID().uuidString.lowercased()
         let token = signTestJWT(userID: userID)
         let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
-        addTeardownBlock { await self.stopAndClose(writer) }
+        addTeardownBlock {
+            await writer.stop()
+            try await writer.close()
+        }
         let collector = TransportObservationCollector(capacity: 4096)
         // A page limit below the row count requires rebuild continuation.
         let reader = try SynchroClient(config: SynchroConfig(
@@ -599,7 +602,10 @@ final class IntegrationTests: XCTestCase {
             pullPageSize: 4,
             transportObservationCollector: collector
         ))
-        addTeardownBlock { await self.stopAndClose(reader) }
+        addTeardownBlock {
+            await reader.stop()
+            try await reader.close()
+        }
         let ids = cases.map { _ in UUID().uuidString.lowercased() }
 
         try await writer.start()
