@@ -7,13 +7,19 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type suiteSummary struct {
-	Packages int
-	Tests    int
+	Packages   int
+	Tests      int
+	Benchmarks int
+	Results    int
 }
 
 type suitePackageState struct {
@@ -21,20 +27,27 @@ type suitePackageState struct {
 	final       string
 	noTestFiles bool
 	tests       map[string]*suiteTestState
+	labels      map[string]bool
+	benchmark   string
+	partialTest string
+	partial     string
 }
 
 type suiteTestState struct {
-	running bool
-	runs    int
-	passes  int
-	failed  bool
-	skipped bool
+	running   bool
+	runs      int
+	passes    int
+	failed    bool
+	skipped   bool
+	benchmark bool
+	results   int
 }
 
 func runSuite(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("suite", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	directory := flags.String("dir", "", "working directory for the test command")
+	benchmarks := flags.Bool("benchmarks", false, "also require complete Go benchmark results")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -45,7 +58,7 @@ func runSuite(args []string, stdout, stderr io.Writer) int {
 	}
 
 	output, commandErr := runTestCommand(commandArgs, *directory, stdout, stderr)
-	summary, resultErr := validateSuiteResult(bytes.NewReader(output))
+	summary, resultErr := validateSuiteResult(bytes.NewReader(output), *benchmarks)
 	if commandErr != nil {
 		fmt.Fprintf(stderr, "testresult: test command failed: %v\n", commandErr)
 	}
@@ -56,6 +69,10 @@ func runSuite(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if *benchmarks {
+		fmt.Fprintf(stderr, "testresult: %d tests passed and %d benchmarks reported %d results in %d packages\n", summary.Tests, summary.Benchmarks, summary.Results, summary.Packages)
+		return 0
+	}
 	fmt.Fprintf(stderr, "testresult: %d tests passed in %d packages\n", summary.Tests, summary.Packages)
 	return 0
 }
@@ -105,7 +122,7 @@ func runTestCommand(args []string, directory string, stdout, stderr io.Writer) (
 	return output.Bytes(), err
 }
 
-func validateSuiteResult(input io.Reader) (suiteSummary, error) {
+func validateSuiteResult(input io.Reader, benchmarks bool) (suiteSummary, error) {
 	if input == nil {
 		return suiteSummary{}, errors.New("test output is missing")
 	}
@@ -123,7 +140,7 @@ func validateSuiteResult(input io.Reader) (suiteSummary, error) {
 			return suiteSummary{}, errors.New("test output is malformed")
 		}
 		eventCount++
-		if err := acceptSuiteEvent(packages, event); err != nil {
+		if err := acceptSuiteEvent(packages, event, benchmarks); err != nil {
 			return suiteSummary{}, err
 		}
 	}
@@ -145,10 +162,30 @@ func validateSuiteResult(input io.Reader) (suiteSummary, error) {
 		if state.final == "skip" {
 			return suiteSummary{}, fmt.Errorf("package %s skipped", packageName)
 		}
-		if len(state.tests) == 0 {
-			return suiteSummary{}, fmt.Errorf("package %s executed zero tests", packageName)
-		}
+		tests := 0
 		for testName, test := range state.tests {
+			if test.benchmark {
+				leaf := true
+				for otherName := range state.tests {
+					if strings.HasPrefix(otherName, testName+"/") {
+						leaf = false
+						break
+					}
+				}
+				switch {
+				case test.skipped:
+					return suiteSummary{}, fmt.Errorf("benchmark %s in package %s skipped", testName, packageName)
+				case test.failed:
+					return suiteSummary{}, fmt.Errorf("benchmark %s in package %s failed", testName, packageName)
+				case leaf && test.results == 0:
+					return suiteSummary{}, fmt.Errorf("benchmark %s in package %s reported no result", testName, packageName)
+				case leaf:
+					summary.Benchmarks++
+					summary.Results += test.results
+				}
+				continue
+			}
+			tests++
 			switch {
 			case test.skipped:
 				return suiteSummary{}, fmt.Errorf("test %s in package %s skipped", testName, packageName)
@@ -160,20 +197,26 @@ func validateSuiteResult(input io.Reader) (suiteSummary, error) {
 				summary.Tests += test.passes
 			}
 		}
+		if tests == 0 {
+			return suiteSummary{}, fmt.Errorf("package %s executed zero tests", packageName)
+		}
 	}
 	if summary.Tests == 0 {
 		return suiteSummary{}, errors.New("test command executed zero tests")
 	}
+	if benchmarks && summary.Benchmarks == 0 {
+		return suiteSummary{}, errors.New("test command reported zero benchmark results")
+	}
 	return summary, nil
 }
 
-func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) error {
+func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent, benchmarks bool) error {
 	if event.Package == "" || event.Action == "" {
 		return errors.New("test output contains an unscoped event")
 	}
 	state, exists := packages[event.Package]
 	if !exists {
-		state = &suitePackageState{tests: make(map[string]*suiteTestState)}
+		state = &suitePackageState{tests: make(map[string]*suiteTestState), labels: make(map[string]bool)}
 		packages[event.Package] = state
 	}
 
@@ -186,6 +229,21 @@ func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) e
 	}
 	if !state.started || state.final != "" {
 		return fmt.Errorf("package %s has an event outside its run", event.Package)
+	}
+	// test2json can emit a benchmark result name before the rest of its line.
+	rawTest := event.Test
+	if state.partial != "" {
+		if event.Action != "output" || event.Test != state.partialTest {
+			return fmt.Errorf("package %s has an incomplete benchmark result", event.Package)
+		}
+		event.Output = state.partial + event.Output
+		state.partial = ""
+	}
+	// A benchmark repetition reports its final and log lines with the
+	// processor suffix of its result name.
+	if benchmarks && event.Action != "run" && event.Test != "" && !suiteTestRunning(state, event.Test) &&
+		state.benchmark != "" && benchmarkNameMatches(event.Test, state.benchmark) {
+		event.Test = state.benchmark
 	}
 
 	switch event.Action {
@@ -203,6 +261,10 @@ func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) e
 		}
 		test.running = true
 		test.runs++
+		if topLevel, _, _ := strings.Cut(event.Test, "/"); benchmarks && isGoBenchmarkName(topLevel) {
+			test.benchmark = true
+			state.benchmark = event.Test
+		}
 	case "pause", "cont", "bench":
 		if !suiteTestRunning(state, event.Test) {
 			return fmt.Errorf("test %s in package %s has an invalid %s event", event.Test, event.Package, event.Action)
@@ -211,6 +273,54 @@ func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) e
 		if event.Output == "testing: warning: no tests to run\n" ||
 			(event.Test == "" && strings.Contains(event.Output, "[no tests to run]")) {
 			return fmt.Errorf("package %s executed zero matching tests", event.Package)
+		}
+		if benchmarks && (event.Test == "" || state.tests[event.Test] != nil && state.tests[event.Test].benchmark) {
+			line, complete := strings.CutSuffix(event.Output, "\n")
+			name, _, found := strings.Cut(line, "\t")
+			name = strings.TrimRight(name, " ")
+			if found && isGoBenchmarkName(name) {
+				if !complete {
+					state.partialTest, state.partial = rawTest, event.Output
+					return nil
+				}
+				// Go attributes only the first result of a benchmark to its
+				// run. Later -count and -cpu results are package output.
+				if (event.Test != "" && event.Test != state.benchmark) || !suiteTestRunning(state, state.benchmark) {
+					return fmt.Errorf("package %s has a benchmark result outside its run", event.Package)
+				}
+				if !benchmarkNameMatches(name, state.benchmark) {
+					return fmt.Errorf("benchmark %s in package %s reported a result for %s", state.benchmark, event.Package, name)
+				}
+				fields := strings.Split(line, "\t")
+				iterations, err := strconv.ParseInt(strings.TrimSpace(fields[1]), 10, 64)
+				valid := err == nil && iterations > 0 && len(fields) > 2
+				for _, field := range fields[2:] {
+					metric := strings.Fields(field)
+					if len(metric) != 2 {
+						valid = false
+						break
+					}
+					value, err := strconv.ParseFloat(metric[0], 64)
+					if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+						valid = false
+						break
+					}
+				}
+				if !valid {
+					return fmt.Errorf("benchmark %s in package %s reported a malformed result", state.benchmark, event.Package)
+				}
+				state.tests[state.benchmark].results++
+				return nil
+			}
+			if key, value, found := strings.Cut(line, ": "); event.Test == "" && complete && found &&
+				(key == "goos" || key == "goarch" || key == "pkg" || key == "cpu") {
+				if state.labels[key] || state.benchmark != "" || strings.TrimSpace(value) == "" ||
+					(key == "pkg" && value != event.Package) {
+					return fmt.Errorf("package %s has invalid benchmark metadata", event.Package)
+				}
+				state.labels[key] = true
+				return nil
+			}
 		}
 		if event.Test == "" {
 			if testName, ok := suiteSubtestSummary(event.Output); ok {
@@ -228,17 +338,17 @@ func acceptSuiteEvent(packages map[string]*suitePackageState, event testEvent) e
 	case "pass", "fail", "skip":
 		if event.Test == "" {
 			for _, test := range state.tests {
-				if test.running {
+				if test.running && !test.benchmark {
 					return fmt.Errorf("package %s finished before its tests", event.Package)
 				}
 			}
 			state.final = event.Action
 			return nil
 		}
-		if !suiteTestRunning(state, event.Test) {
+		test := state.tests[event.Test]
+		if !suiteTestRunning(state, event.Test) || (test.benchmark && event.Action == "pass") {
 			return fmt.Errorf("test %s in package %s has an invalid final event", event.Test, event.Package)
 		}
-		test := state.tests[event.Test]
 		test.running = false
 		switch event.Action {
 		case "pass":
@@ -269,7 +379,7 @@ func suiteSubtestSummary(output string) (string, bool) {
 }
 
 func isSuitePackageOutput(output, packageName string) bool {
-	if output == "PASS\n" || output == "FAIL\n" || strings.Contains(output, "testing: warning: no tests to run") || strings.Contains(output, "[no test files]") || strings.Contains(output, "[no tests to run]") {
+	if output == "PASS\n" || output == "FAIL\n" || strings.Contains(output, "testing: warning: no tests to run") || strings.Contains(output, "[no test files]") {
 		return true
 	}
 	line := strings.TrimSuffix(output, "\n")
@@ -283,4 +393,19 @@ func isSuitePackageOutput(output, packageName string) bool {
 func suiteTestRunning(state *suitePackageState, testName string) bool {
 	test := state.tests[testName]
 	return testName != "" && test != nil && test.running
+}
+
+// isGoBenchmarkName applies the benchmark name rule of cmd/test2json.
+func isGoBenchmarkName(name string) bool {
+	rest, found := strings.CutPrefix(name, "Benchmark")
+	first, _ := utf8.DecodeRuneInString(rest)
+	return found && (rest == "" || !unicode.IsLower(first))
+}
+
+// benchmarkNameMatches reports whether a result names the benchmark, with the
+// "-N" suffix that Go adds when GOMAXPROCS is not 1.
+func benchmarkNameMatches(reported, name string) bool {
+	procs, found := strings.CutPrefix(reported, name+"-")
+	value, err := strconv.Atoi(procs)
+	return reported == name || (found && err == nil && value > 1 && strconv.Itoa(value) == procs)
 }
