@@ -622,27 +622,11 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	if state.RebuildReceiptCount != wantPages {
 		return rebuildApplyCountError(clientID, "receipt pages", state.RebuildReceiptCount, wantPages)
 	}
-	var receiptPages uint64
-	for _, receipt := range proof.RebuildReceiptProofs {
-		if receipt.PageCount == 0 {
-			return rebuildApplyCountError(clientID, "terminal receipt page group", receipt.PageCount, 1)
-		}
-		if receiptPages > wantPages || receipt.PageCount > wantPages-receiptPages {
-			return rebuildApplyCountError(clientID, "terminal receipt pages", receiptPages+receipt.PageCount, wantPages)
-		}
-		receiptPages += receipt.PageCount
+	if err := validateFreshRebuildCompletion(proof, state, capture.Events, wantPages, workload.RecordCount); err != nil {
+		return fmt.Errorf("React Native rebuild-apply client %s: %w", clientID, err)
 	}
-	for _, count := range []struct {
-		name     string
-		observed uint64
-		expected uint64
-	}{
-		{"terminal receipt pages", receiptPages, wantPages},
-		{"terminal receipt attempts", uint64(len(proof.RebuildReceiptProofs)), *expected.RebuildAttemptCount},
-	} {
-		if count.observed != count.expected {
-			return rebuildApplyCountError(clientID, count.name, count.observed, count.expected)
-		}
+	if attempts := uint64(len(proof.RebuildReceiptProofs)); attempts != *expected.RebuildAttemptCount {
+		return rebuildApplyCountError(clientID, "terminal receipt attempts", attempts, *expected.RebuildAttemptCount)
 	}
 	rebuildAttempts, err := rebuildAttemptFactCount(state.RebuildAttempts, proof.RebuildReceiptProofs)
 	if err != nil {
@@ -650,9 +634,6 @@ func (c *RebuildApplyCoordinator) validateCapture(capture finalCapture) error {
 	}
 	if rebuildAttempts != *expected.RebuildAttemptCount {
 		return rebuildApplyCountError(clientID, "rebuild attempt facts", rebuildAttempts, *expected.RebuildAttemptCount)
-	}
-	if len(capture.Events) == 0 {
-		return errors.New("React Native rebuild-apply durable evidence is incomplete")
 	}
 	trace, err := captureTraceFromRaw(capture.Trace)
 	if err != nil {
