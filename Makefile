@@ -28,6 +28,7 @@
 	test-invariants \
 	test-conformance-invariants \
 	soak \
+	soak-replay \
 	test-local-postgres \
 	test-blackbox-harness \
 	test-blackbox-components \
@@ -199,7 +200,12 @@ MUTATION_CONTROL_TEST ?=
 MUTATION_CONTROL_EXPECT ?= target_pass
 INTEGRATION_MUTANT_ID ?=
 SOAK_SEED ?= 1
-SOAK_DURATION ?= 1s
+# SOAK_OPERATIONS is the explicit seeded-stress operation budget.
+SOAK_OPERATIONS ?= 7
+SOAK_TIMEOUT ?= 35m
+# Each run creates a new seed directory here for its journals and failure wire bodies.
+SOAK_ARTIFACT_DIR ?= $(CURDIR)/.ignore/soak-evidence
+SOAK_REPLAY_JOURNAL ?=
 TESTRESULT_TEST_NAME ?=
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
@@ -340,7 +346,8 @@ help:
 	@echo "  test-conformance-scenarios - Test strict scenario loading and catalog generation"
 	@echo "  test-vectors          - Test canonical protocol 3 vectors"
 	@echo "  test-conformance-invariants - Test the invariant engine and soak driver"
-	@echo "  soak                  - Run the bounded seeded desktop soak"
+	@echo "  soak                  - Run bounded seeded stress: SOAK_SEED, SOAK_OPERATIONS, SOAK_ARTIFACT_DIR"
+	@echo "  soak-replay           - Replay one retained soak journal: SOAK_REPLAY_JOURNAL"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  test-blackbox-configured-bounds - Run the real configured-limit measurement proof"
@@ -541,9 +548,20 @@ test-conformance-invariants: test-invariants
 soak:
 	@$(WARM_CONNECT_ENV) \
 		test -n "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" || { echo "the black-box environment is required for soak: set WARM_CONNECT_ENV_FILE or export SYNCHRO_CONFORMANCE_* variables" >&2; exit 1; }; \
+		mkdir -p "$(abspath $(SOAK_ARTIFACT_DIR))"; \
 		cd conformance && GOFLAGS= GOWORK=off \
-			SOAK_SEED="$(SOAK_SEED)" SOAK_DURATION="$(SOAK_DURATION)" \
-			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=35m \
+			SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
+			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=$(SOAK_TIMEOUT) \
+			-run '^TestSoak$$' -args --provision --install
+
+# Replay reads only the retained journal and rebuilds its harness in a new cluster.
+soak-replay:
+	@test -f "$(SOAK_REPLAY_JOURNAL)" || { echo "SOAK_REPLAY_JOURNAL must name a retained soak journal" >&2; exit 1; }
+	@$(WARM_CONNECT_ENV) \
+		test -n "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" || { echo "the black-box environment is required for soak-replay: set WARM_CONNECT_ENV_FILE or export SYNCHRO_CONFORMANCE_* variables" >&2; exit 1; }; \
+		cd conformance && GOFLAGS= GOWORK=off \
+			SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL="$(abspath $(SOAK_REPLAY_JOURNAL))" \
+			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=$(SOAK_TIMEOUT) \
 			-run '^TestSoak$$' -args --provision --install
 
 test-local-postgres:
@@ -816,7 +834,8 @@ conformance-update-baseline-extension-artifact:
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	$(call declared_selection,GO_TEST_ARGS BLACKBOX_TEST_COUNT)
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
+	cd conformance && GOFLAGS= GOWORK=off SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
+		go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 

@@ -27,14 +27,18 @@ const (
 	SurfaceCursorAcknowledgements ObservationSurface = "cursor-acknowledgements"
 	SurfaceServerRowIdentities    ObservationSurface = "server-row-identities"
 	SurfaceFaultActivation        ObservationSurface = "fault-activation"
+	SurfaceSourceState            ObservationSurface = "source-state"
 )
 
+// Every operation ends at a quiescent point, so every capture carries complete
+// source state.
 var baseObservationSurfaces = []ObservationSurface{
 	SurfaceManifest,
 	SurfaceServerState,
 	SurfaceOperator,
 	SurfaceClients,
 	SurfaceWireExchanges,
+	SurfaceSourceState,
 }
 
 func requiredObservationSurfaces(kind OperationKind) []ObservationSurface {
@@ -150,6 +154,8 @@ func captureHasSurface(capture ObservationCapture, surface ObservationSurface) b
 		return len(capture.CursorAcknowledgements) != 0
 	case SurfaceServerRowIdentities:
 		return capture.ServerRowIdentities != nil
+	case SurfaceSourceState:
+		return capture.SourceState != nil
 	case SurfaceFaultActivation:
 		return capture.FaultActivation != nil
 	default:

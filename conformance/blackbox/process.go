@@ -1970,6 +1970,14 @@ func (h *Harness) grantRunRoles(ctx context.Context) error {
 		if _, err := database.ExecContext(ctx, "GRANT SELECT ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.env.Observer.Username)); err != nil {
 			return errors.New("grant observer source-table access failed")
 		}
+		// Row security is enabled on every source table, so the SELECT grant
+		// alone returns no rows to the observer.
+		if _, err := database.ExecContext(ctx,
+			"CREATE POLICY synchro_conformance_observer ON public."+quoteIdentifier(table)+
+				" AS PERMISSIVE FOR SELECT TO "+quoteIdentifier(h.env.Observer.Username)+" USING (true)",
+		); err != nil {
+			return errors.New("create observer source-table row security policy failed")
+		}
 	}
 	if err := h.verifyRunRoleSeparation(ctx, database); err != nil {
 		return err
