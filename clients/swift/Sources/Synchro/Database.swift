@@ -913,6 +913,7 @@ final class SynchroDatabase: @unchecked Sendable {
             try Self.regenerateCaptureTriggers(db)
         }
         // Earlier capture triggers use exceeds_push_limit mutations as same-row dependencies.
+        // Their UPDATE capture also requires a context, which ordinary UPDATE statements no longer install. Issue #219.
         migrator.registerMigration("synchro_v17_push_limit_capture_dependency") { db in
             try Self.regenerateCaptureTriggers(db)
         }

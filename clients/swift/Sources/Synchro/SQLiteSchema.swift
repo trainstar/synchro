@@ -200,8 +200,15 @@ enum SQLiteSchema {
                 )
                 """.replacingOccurrences(of: "\n", with: " ")
         }
+        // Ordinary UPDATE statements install no context, so a trigger-driven
+        // change is captured too. Any context row, including an empty mask or a
+        // mask for another table, keeps the authored mask in force. Issue #219.
+        let noCaptureContext = "NOT EXISTS (SELECT 1 FROM _synchro_capture_context)"
+        func updateCaptures(_ column: LocalSchemaColumn) -> String {
+            "(\(changedExpression(column)) AND (\(noCaptureContext) OR \(intentHas(column.name))))"
+        }
         let updateHasWritableChange = writableColumns
-            .map { "((\(intentHas($0.name))) AND \(changedExpression($0)))" }
+            .map(updateCaptures)
             .joined(separator: " OR ")
         let updateIsDelete = !deletedAtCol.isEmpty
             ? "(NEW.\(quotedDeletedAt) IS NOT NULL AND OLD.\(quotedDeletedAt) IS NULL)"
@@ -358,7 +365,7 @@ enum SQLiteSchema {
                     baseVersion: "CASE WHEN \(dependencyExpression(recordReference: "NEW.\(quotedPK)")) IS NOT NULL THEN NULL ELSE (SELECT server_version FROM _synchro_row_versions WHERE table_name = \(sqlLiteral(name)) AND record_id = CAST(NEW.\(quotedPK) AS TEXT)) END",
                     recordReference: "NEW.\(quotedPK)"
                 ))
-                \(writableColumns.map { valueInsert($0, changed: "(\(intentHas($0.name))) AND \(changedExpression($0))") }.joined())
+                \(writableColumns.map { valueInsert($0, changed: updateCaptures($0)) }.joined())
             END
             """)
 
