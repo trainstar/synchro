@@ -963,18 +963,7 @@ final class SyncEngine: @unchecked Sendable {
                 lifecycleGeneration: lifecycleGeneration
             )
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            if !(try scopeIDsNeedingRebuild()).isEmpty {
-                try transition(to: .rebuilding, lifecycleGeneration: lifecycleGeneration)
-                try await rebuildAssignedScopesNeedingCursor()
-                try schemaManager.finishAppliedMigrationIfPossible()
-                try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            }
-            try transition(to: .pulling, lifecycleGeneration: lifecycleGeneration)
-            try await runPullLoop(lifecycleGeneration: lifecycleGeneration)
-            if getSyncStatus() == .rebuilding {
-                try schemaManager.finishAppliedMigrationIfPossible()
-            }
-            try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
 
         case .pulling:
             try await runPullLoop(

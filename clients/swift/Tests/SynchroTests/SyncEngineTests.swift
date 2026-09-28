@@ -1929,6 +1929,106 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(sealedBatch?["request_json"] as String?, failedPushRequest)
     }
 
+    // A pending intent that no push can send still makes a normal cycle enter its push stage.
+    func testResumedPushBackoffRunsTheNormalCycleAfterTheReplay() async throws {
+        let dbPath = tempDBPath()
+        let failPush = OSAllocatedUnfairLock(initialState: true)
+        let resumeConnect = OSAllocatedUnfairLock(initialState: false)
+        let callLog = OSAllocatedUnfairLock(initialState: [String]())
+        let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                callLog.withLock { $0.append("connect") }
+                return try self.mockResponse(
+                    json: resumeConnect.withLock { $0 } ? self.connectResumeJSON : self.connectJSON
+                )
+            } else if path.hasSuffix("/sync/rebuild") {
+                callLog.withLock { $0.append("rebuild") }
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            } else if path.hasSuffix("/sync/push") {
+                callLog.withLock { $0.append("push") }
+                if failPush.withLock({ $0 }) {
+                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
+                    let response = HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 503,
+                        httpVersion: nil,
+                        headerFields: ["Retry-After": "60"]
+                    )!
+                    return (response, data)
+                }
+                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+            } else if path.hasSuffix("/sync/pull") {
+                callLog.withLock { $0.append("pull") }
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (failingEngine, failingDatabase) = try makeIntegrationEnv(dbPath: dbPath, maxRetryAttempts: 0)
+        try await failingEngine.start()
+        _ = try failingDatabase.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+        do {
+            try await failingEngine.syncNow()
+            XCTFail("Expected retryable push failure")
+        } catch is RetryableError {
+        }
+        await failingEngine.stop()
+        _ = try failingDatabase.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w2", "456 Oak Ave", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+        try failingDatabase.writeTransaction { db in
+            try db.execute(sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'legacy_blocked' WHERE record_id = 'w2'")
+            let backoff = try XCTUnwrap(try SynchroMeta.getBackoffRecord(db))
+            XCTAssertEqual(backoff.resumeState, .pushing)
+            try SynchroMeta.upsertBackoffRecord(db, record: LocalBackoffRecord(
+                resumeState: backoff.resumeState,
+                workIdentity: backoff.workIdentity,
+                retryClassification: backoff.retryClassification,
+                attemptCount: backoff.attemptCount,
+                nextRetryAtMS: Int64(Date().timeIntervalSince1970 * 1_000) - 1
+            ))
+        }
+        try failingDatabase.close()
+        failPush.withLock { $0 = false }
+        resumeConnect.withLock { $0 = true }
+        callLog.withLock { $0 = [] }
+
+        let (engine, database) = try makeIntegrationEnv(dbPath: dbPath, pushDebounce: 3_600, syncInterval: 3_600)
+        addTeardownBlock {
+            await engine.stop()
+            try? database.close()
+        }
+        let statuses = OSAllocatedUnfairLock(initialState: [SyncStatus]())
+        let statusObserver = engine.onStatusChange { status in
+            statuses.withLock { $0.append(status) }
+        }
+        defer { statusObserver.cancel() }
+        try await engine.start()
+        let resumedCalls = callLog.withLock { $0 }
+        let resumedStatuses = statuses.withLock { $0 }
+
+        callLog.withLock { $0 = [] }
+        statuses.withLock { $0 = [] }
+        try await engine.syncNow()
+        let normalCycleCalls = callLog.withLock { $0 }
+        let normalCycleStatuses = statuses.withLock { $0 }
+
+        XCTAssertEqual(pushedRecordIDs.withLock { $0 }, ["w1"])
+        XCTAssertEqual(normalCycleStatuses, [.pushing, .ready, .pulling, .ready])
+        XCTAssertEqual(normalCycleCalls, ["pull"])
+        let replayStart = try XCTUnwrap(resumedStatuses.firstIndex(of: .pushing))
+        let replayEnd = try XCTUnwrap(resumedStatuses[replayStart...].firstIndex(of: .ready))
+        XCTAssertEqual(Array(resumedStatuses[..<replayStart]), [.connecting, .ready])
+        XCTAssertEqual(Array(resumedStatuses[(replayEnd + 1)...]), normalCycleStatuses)
+        XCTAssertEqual(resumedCalls, ["connect", "push"] + normalCycleCalls)
+    }
+
     func testRebuildBackoffStoresExactRequestJSON() async throws {
         var rebuildRequestBody: String?
 
