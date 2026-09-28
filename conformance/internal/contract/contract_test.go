@@ -27,11 +27,11 @@ func TestLoadRealAuthoredCatalogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load authored catalogs: %v", err)
 	}
-	if got := len(bundle.Requirements.Requirements); got != 111 {
-		t.Fatalf("requirement count = %d, want 111", got)
+	if got := len(bundle.Requirements.Requirements); got != 115 {
+		t.Fatalf("requirement count = %d, want 115", got)
 	}
-	if got := len(bundle.Faults.Controls); got != 111 {
-		t.Fatalf("control count = %d, want 111", got)
+	if got := len(bundle.Faults.Controls); got != 115 {
+		t.Fatalf("control count = %d, want 115", got)
 	}
 }
 
@@ -110,7 +110,7 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 
 		bundle = newBundle(t)
 		bundle.Requirements.Requirements = bundle.Requirements.Requirements[1:]
-		requireErrorContains(t, bundle.Validate(), "exactly 111 records")
+		requireErrorContains(t, bundle.Validate(), "exactly 115 records")
 
 		bundle = newBundle(t)
 		bundle.Faults.Controls = append(bundle.Faults.Controls, bundle.Faults.Controls[0])
@@ -118,7 +118,7 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 
 		bundle = newBundle(t)
 		bundle.Faults.Controls = bundle.Faults.Controls[1:]
-		requireErrorContains(t, bundle.Validate(), "controls must contain exactly 111")
+		requireErrorContains(t, bundle.Validate(), "controls must contain exactly 115")
 	})
 
 	t.Run("invariant references require canonical H3 anchors", func(t *testing.T) {
@@ -729,6 +729,7 @@ func completeSnapshotFixture(t *testing.T) string {
 		writeFixtureFile(t, root, path, data)
 	}
 	for _, path := range []string{
+		"conformance/scenarios/server/atomic-group-001.json",
 		"conformance/scenarios/server/membership-reassignment-001.json",
 		"conformance/scenarios/server/pull-divergent-checkpoints-001.json",
 		"conformance/scenarios/server/pull-hydration-failure-001.json",
@@ -737,6 +738,8 @@ func completeSnapshotFixture(t *testing.T) string {
 		"conformance/scenarios/server/registry-reload-001.json",
 		"conformance/scenarios/server/retention-reconnect-001.json",
 		"conformance/scenarios/server/schema-queued-mutation-001.json",
+		"conformance/scenarios/server/scope-assignment-bound-001.json",
+		"conformance/scenarios/server/scope-assignment-pull-001.json",
 		"conformance/scenarios/server/wal-decode-failure-001.json",
 		"conformance/scenarios/server/wal-order-001.json",
 		"conformance/scenarios/performance/configured-bounds-001.json",

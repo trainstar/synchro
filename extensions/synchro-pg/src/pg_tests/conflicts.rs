@@ -689,6 +689,35 @@
     }
 
     #[pg_test]
+    fn test_push_unknown_non_uuid_table_is_not_synced() {
+        setup_test_tables();
+        let user_id = "u1";
+        let client_id = "c1";
+        register_client(user_id, client_id);
+        let mut mutation = push_mutation(
+            (user_id, client_id),
+            "non-uuid-table",
+            "test_orders",
+            "insert",
+            "80000000-0000-4000-8000-000000000008",
+            None,
+            Some(&[("user_id", json!(user_id))]),
+        );
+        mutation["table"] = json!("tbl_unknown");
+
+        let response = push_client(user_id, client_id, "non-uuid-table", vec![mutation]);
+
+        assert_eq!(response.json["accepted"], json!([]));
+        assert_eq!(
+            response.json["rejected"][0]["mutation_id"],
+            json!(mutation_id(user_id, client_id, "non-uuid-table"))
+        );
+        assert_eq!(response.json["rejected"][0]["table"], "tbl_unknown");
+        assert_eq!(response.json["rejected"][0]["status"], "rejected_terminal");
+        assert_eq!(response.json["rejected"][0]["code"], "table_not_synced");
+    }
+
+    #[pg_test]
     fn test_push_conflict_ledger_persists_its_conflict_code() {
         setup_test_tables();
         let user_id = "u1";
@@ -1159,19 +1188,23 @@
         setup_test_tables();
         let user_id = "policy-user";
         let client_id = "c1";
+        let repaired_id = "e0000000-0000-4000-8000-000000000004";
         let record_id = "e0000000-0000-4000-8000-000000000003";
         register_client(user_id, client_id);
         Spi::run(
-            "CREATE FUNCTION synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
+            "CREATE FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
              RETURNS JSONB
              LANGUAGE sql
              IMMUTABLE
              STRICT
+             SECURITY INVOKER
+             SET search_path = pg_catalog, synchro
              AS $policy$
                  SELECT COALESCE(
                      jsonb_object_agg(
                          key,
                          CASE WHEN jsonb_typeof(value) = 'number'
+                                   OR value = to_jsonb('authored'::text)
                               THEN to_jsonb('repaired'::text)
                               ELSE value
                          END
@@ -1179,7 +1212,11 @@
                      '{}'::jsonb
                  )
                  FROM jsonb_each($4)
-             $policy$",
+             $policy$;
+             REVOKE EXECUTE ON FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
+                 FROM PUBLIC;
+             GRANT EXECUTE ON FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
+                 TO synchro_owner",
         )
         .unwrap();
 
@@ -1187,16 +1224,34 @@
             user_id,
             client_id,
             "policy-invalid-authored",
-            vec![push_mutation(
-                (user_id, client_id),
-                "policy-invalid-authored",
-                "test_orders",
-                "insert",
-                record_id,
-                None,
-                Some(&[("user_id", json!(user_id)), ("title", json!(42))]),
-            )],
+            vec![
+                push_mutation(
+                    (user_id, client_id),
+                    "policy-valid-authored",
+                    "test_orders",
+                    "insert",
+                    repaired_id,
+                    None,
+                    Some(&[("user_id", json!(user_id)), ("title", json!("authored"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "policy-invalid-authored",
+                    "test_orders",
+                    "insert",
+                    record_id,
+                    None,
+                    Some(&[("user_id", json!(user_id)), ("title", json!(42))]),
+                ),
+            ],
         );
+        assert_eq!(response.json["accepted"][0]["status"], "applied");
+        let repaired_title: Option<String> = Spi::get_one_with_args(
+            "SELECT title FROM test_orders WHERE id = $1::uuid",
+            &[repaired_id.into()],
+        )
+        .unwrap();
+        assert_eq!(repaired_title.as_deref(), Some("repaired"));
         assert_eq!(response.json["rejected"][0]["status"], "rejected_terminal");
         assert_eq!(response.json["rejected"][0]["code"], "validation_failed");
         let source_count: Option<i64> = Spi::get_one_with_args(
@@ -1205,7 +1260,7 @@
         )
         .unwrap();
         assert_eq!(source_count, Some(0));
-        Spi::run("DROP FUNCTION synchro_write_protect(TEXT, TEXT, TEXT, JSONB)").unwrap();
+        Spi::run("DROP FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)").unwrap();
     }
 
     #[pg_test]

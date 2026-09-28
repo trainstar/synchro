@@ -38,7 +38,9 @@ pub(crate) fn resolve_dependency_impacts(
         let sql = dependency_impact_query(&dependency.impact_function, result_limit);
         let old_value = old_row.cloned().map(pgrx::JsonB);
         let new_value = new_row.cloned().map(pgrx::JsonB);
-        let rows = client.select(&sql, None, &[old_value.into(), new_value.into()])?;
+        let rows = evaluate_as_function_owner(&dependency.impact_function, || {
+            client.select(&sql, None, &[old_value.into(), new_value.into()])
+        })?;
         let mut record_ids = Vec::new();
         let mut seen = HashSet::new();
         let mut row_count = 0usize;
@@ -74,6 +76,60 @@ pub(crate) fn resolve_dependency_impacts(
         record_ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         Ok(record_ids)
     })
+}
+
+/// Runs one SPI evaluation of a registered function as the function owner in
+/// a security-restricted operation. PostgreSQL uses the same model for index
+/// expressions, ANALYZE, and REFRESH MATERIALIZED VIEW. Thus the function body
+/// never runs with the privileges of `synchro_owner` or `synchro_worker`. The
+/// evaluation must reference only the function and its inputs.
+pub(crate) fn evaluate_as_function_owner<T>(
+    function: &RegisteredFunction,
+    evaluation: impl FnOnce() -> Result<T, spi::Error>,
+) -> Result<T, spi::Error> {
+    let owner = function_owner(function.oid);
+    let mut saved_user = pg_sys::InvalidOid;
+    let mut saved_context = 0;
+    // SAFETY: These calls only save and replace the backend user identity and
+    // GUC nest level. The finally block below restores both on every exit path.
+    let nest_level = unsafe {
+        pg_sys::GetUserIdAndSecContext(&mut saved_user, &mut saved_context);
+        pg_sys::SetUserIdAndSecContext(
+            owner,
+            saved_context | pg_sys::SECURITY_RESTRICTED_OPERATION as i32,
+        );
+        pg_sys::NewGUCNestLevel()
+    };
+    PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: The GUC nest level opened above scopes this search path.
+        unsafe { pg_sys::RestrictSearchPath() };
+        evaluation()
+    }))
+    .finally(move || unsafe {
+        pg_sys::AtEOXact_GUC(false, nest_level);
+        pg_sys::SetUserIdAndSecContext(saved_user, saved_context);
+    })
+    .execute()
+}
+
+fn function_owner(function_oid: u32) -> pg_sys::Oid {
+    // SAFETY: The PROCOID cache takes one function OID key.
+    let entry = unsafe {
+        pg_sys::SearchSysCache1(
+            pg_sys::SysCacheIdentifier::PROCOID as i32,
+            pg_sys::Oid::from(function_oid).into(),
+        )
+    };
+    if entry.is_null() {
+        pgrx::error!("registered function is missing");
+    }
+    // SAFETY: A PROCOID cache entry holds one pg_proc row, and this code
+    // releases the entry once.
+    unsafe {
+        let owner = (*pg_sys::GETSTRUCT(entry).cast::<pg_sys::FormData_pg_proc>()).proowner;
+        pg_sys::ReleaseSysCache(entry);
+        owner
+    }
 }
 
 // Return scope errors so the caller can abort materialization before it persists poison.

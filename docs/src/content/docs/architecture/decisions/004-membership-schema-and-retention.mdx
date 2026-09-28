@@ -248,18 +248,86 @@ impact_function(p_old_row jsonb, p_new_row jsonb)
 | `pk_type` | One of `string`, `int`, or `int64`. |
 | `pk_value` | The typed primary-key value of a row that must have membership reevaluated. |
 
-Scope assignment uses three implemented sources:
+### Scope assignment
+
+Scope assignment uses four sources:
 
 - `user:{canonical_user_id}` is assigned by default.
 - A registered shared scope is assigned to every active client.
 - `synchro_grant_user_scope(user_id, scope_id)` assigns one scope to one
   canonical user. `synchro_revoke_user_scope(user_id, scope_id)` removes
   that explicit assignment. A user can also revoke its default private scope.
+- The registered assignment function returns scopes for one canonical user
+  from application data.
 
-Connect reconciles grants and revocations on the user's next connect. A changed
-assignment advances `scope_set_version`. Added scopes start with a null cursor
-and require rebuild. Removed scopes require provenance cleanup. A client cannot
-invent a scope ID or grant itself a scope.
+Connect and pull compute the authoritative set with the same rule. The set is
+the union of the four sources. Duplicates are removed, and the set uses the
+existing scope ID order. A changed set advances `scope_set_version` by exactly
+one. An unchanged set writes no assignment state. An added scope gets a
+`generation_start` checkpoint and a null cursor and requires rebuild. A removed
+scope keeps its client checkpoint row and requires provenance cleanup. A client
+cannot invent a scope ID or grant itself a scope.
+
+Pull reconciles the set after every request validation passes and before it
+builds `scope_updates`. The same response reports the change through
+`scope_updates` and `scope_set_version`. A pull that fails validation writes no
+assignment state. Rebuild does not reconcile. It keeps its stored-scope check
+and returns `409 rebuild_restart_required` for a scope that is no longer
+assigned.
+
+An operator registers one assignment function with
+`synchro_register_assignment_function(p_function text, p_max_scopes integer
+DEFAULT 1000)` and removes it with `synchro_unregister_assignment_function()`.
+Only `synchro_operator` can execute both functions. A second registration
+replaces the first in the same transaction. `p_max_scopes` is an integer from 1
+through 1000. The registration actor is the outer session user.
+
+```text
+assignment_function(p_user_id text)
+  RETURNS SETOF text
+```
+
+Registration rejects a function unless every rule below is true:
+
+- It is a plain `LANGUAGE sql` function with a parsed SQL-standard body.
+- It has exactly one `text` argument, no argument default, and no variadic
+  argument. The argument is the canonical user ID.
+- It returns `SETOF text`.
+- It is `STABLE` and not `SECURITY DEFINER`.
+- Its `search_path` setting is exactly `pg_catalog, synchro`.
+- The registration actor owns it.
+- `synchro_owner` has EXECUTE on it, and PUBLIC does not.
+- It calls no function outside `pg_catalog`.
+- It depends on no relation in schema `synchro`.
+- The function owner has SELECT on each relation it depends on and USAGE on
+  the schema of that relation.
+
+These rules are the membership function rules with two differences. The
+function reads application relations directly, because assignment has no
+dependency propagation. The EXECUTE rule names `synchro_owner`, because connect
+and pull run as that role.
+
+Connect and pull evaluate the function as its owner in a security-restricted
+operation. PostgreSQL uses the same model for index expressions, `ANALYZE`, and
+`REFRESH MATERIALIZED VIEW`. The function body never runs with the privileges
+of `synchro_owner`. Thus a body that reads a relation through
+`pg_catalog.query_to_xml`, an operator, or a view can read only the relations
+that its owner can read. The call and dependency rules alone cannot see these
+reads.
+
+The registry stores the function OID, schema, name, `max_scopes`, and the
+SHA-256 of `pg_get_functiondef` in UTF-8. The server computes the definition
+with `search_path` set to `pg_catalog, synchro`, because the text of
+`pg_get_functiondef` depends on `search_path`. Registration computes the hash
+before and after it checks the rules. It rejects the function when the two
+hashes differ, so the stored hash identifies the checked definition. Connect
+and pull call the function once with the canonical user ID. Before the call,
+the server confirms that the OID exists and that the definition hash is
+unchanged. Each result must be
+non-null, must be nonempty after trim, and must not start with `user:`. More
+than `max_scopes` distinct results is a failure. A failure aborts the connect
+or pull transaction and returns `500 sync_integrity_failure`. Health reports a
+missing function or a changed definition hash as a failed check.
 
 ### Function restrictions
 
@@ -311,6 +379,23 @@ If an impact function, membership function, dependency lookup, or bound check
 fails, Synchro records a durable `scope_evaluation_failed` capture state and
 blocks capture. It never treats an evaluation failure as an empty scope set or
 an empty impact set.
+
+The worker evaluates each membership and impact function as its owner in a
+security-restricted operation, with the same model as the assignment function.
+Thus the owner must have SELECT on each relation that the function depends on
+and USAGE on the schema of that relation. Registration rejects a function that
+breaks this rule. A later privilege change fails evaluation.
+`synchro_prepare_projection_view` grants SELECT on the view to the relation
+owner. `synchro_operator` membership gives USAGE on schema
+`synchro_projection`. A repeated call succeeds only when the stored view has
+the same physical relation, view name, and projected columns. Any other match
+on the relation or the view name fails with `projection view identity is
+immutable` and grants nothing. A projection view binds to the relation OID,
+so a later relation with the same name cannot supply rows to the view.
+A projection view returns rows only to a role that can read its source
+relation, and otherwise raises an error. Thus registration also rejects a
+function whose owner cannot read the source relation of a projection view that
+the function reads.
 
 ## Registry and Membership Generations
 

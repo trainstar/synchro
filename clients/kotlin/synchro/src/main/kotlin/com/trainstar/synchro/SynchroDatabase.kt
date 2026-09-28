@@ -189,6 +189,9 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         if (oldVersion < 14) {
             createPendingProtocolIdentityIndex(db)
         }
+        if (oldVersion < 15) {
+            migratePendingAtomicGroup(db)
+        }
     }
 
     private fun createScopeTables(db: SQLiteDatabase) {
@@ -319,6 +322,15 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
                 "ALTER TABLE _synchro_pending_changes ADD COLUMN local_revision INTEGER NOT NULL DEFAULT 0"
             )
         }
+    }
+
+    private fun migratePendingAtomicGroup(db: SQLiteDatabase) {
+        if (!hasTable(db, "_synchro_pending_changes")) return
+        if (!hasColumn(db, "_synchro_pending_changes", "atomic_group_id")) {
+            db.execSQL("ALTER TABLE _synchro_pending_changes ADD COLUMN atomic_group_id TEXT")
+        }
+        createPendingNormalizationIndex(db)
+        restoreCaptureTriggers(db)
     }
 
     private fun migrateClientStateFailureMetadata(db: SQLiteDatabase) {
@@ -534,6 +546,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
                 lifecycle_state TEXT NOT NULL,
                 source_kind TEXT NOT NULL,
                 depends_on_mutation_id TEXT,
+                atomic_group_id TEXT,
                 normalized_mutation_id TEXT,
                 sealed_batch_id TEXT,
                 sealed_ordinal INTEGER,
@@ -597,6 +610,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             "CREATE INDEX IF NOT EXISTS idx_synchro_pending_row_order ON _synchro_pending_changes (table_name, record_id, local_order)"
         )
         createPendingProtocolIdentityIndex(db)
+        createPendingNormalizationIndex(db)
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS idx_synchro_pending_dependency ON _synchro_pending_changes (depends_on_mutation_id, lifecycle_state)"
         )
@@ -613,6 +627,12 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS idx_synchro_pending_protocol_row_order " +
                 "ON _synchro_pending_changes (table_id, pk_field_id, pk_logical_type, record_id, local_order)"
+        )
+    }
+
+    private fun createPendingNormalizationIndex(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_synchro_pending_normalized ON _synchro_pending_changes (normalized_mutation_id)"
         )
     }
 
@@ -811,7 +831,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         @JvmSynthetic
         internal fun open(context: Context, dbPath: String): SynchroDatabase = SynchroDatabase(context, dbPath)
 
-        internal const val DATABASE_VERSION: Int = 14
+        internal const val DATABASE_VERSION: Int = 15
 
         /** SQLite creates the UUID in the same application-write transaction as capture. */
         const val SQLITE_UUID: String =

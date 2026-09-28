@@ -697,6 +697,7 @@ impl Default for ReadinessStatus {
             "heartbeat",
             "wal_byte_lag",
             "wal_time_lag",
+            "assignment_function",
         ] {
             checks.insert(name, HealthCheck::unknown("health_query_unavailable"));
         }
@@ -969,9 +970,11 @@ pub(crate) fn load_readiness_status_with_configuration(
             &configuration,
             login.worker_login_oid.unwrap_or_default(),
         )?;
-        Ok::<_, String>((login, raw))
+        let assignment_current = crate::portable_seed::assignment_function_is_current(client)
+            .map_err(|_| "loading assignment function state failed".to_string())?;
+        Ok::<_, String>((login, raw, assignment_current))
     });
-    let Ok((login, raw)) = loaded else {
+    let Ok((login, raw, assignment_current)) = loaded else {
         return status;
     };
 
@@ -1023,6 +1026,10 @@ pub(crate) fn load_readiness_status_with_configuration(
         known_check(raw.replication_slot_valid, "replication_slot_invalid"),
     );
     status.set("poison", known_check(raw.poison_clear, "blocking_poison"));
+    status.set(
+        "assignment_function",
+        known_check(assignment_current, "assignment_function_drifted"),
+    );
     status.set(
         "stream_reset",
         known_check(raw.stream_reset_clear, "stream_reset_incomplete"),

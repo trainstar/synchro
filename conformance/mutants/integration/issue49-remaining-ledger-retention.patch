@@ -1,3 +1,50 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+@@ -549,11 +549,7 @@ BEGIN
+        AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
+         RETURN NEW;
+     END IF;
+-    IF TG_OP = 'DELETE'
+-       AND EXISTS (
+-           SELECT 1 FROM sync_client_retirements
+-           WHERE user_id = OLD.user_id AND client_id = OLD.client_id
+-       ) THEN
++    IF TG_OP = 'DELETE' THEN
+         RETURN OLD;
+     END IF;
+     RAISE EXCEPTION 'push ledger rows are immutable outside client retirement'
+@@ -566,11 +562,7 @@ RETURNS trigger
+ LANGUAGE plpgsql
+ AS $$
+ BEGIN
+-    IF TG_OP = 'DELETE'
+-       AND EXISTS (
+-           SELECT 1 FROM sync_client_retirements
+-           WHERE user_id = OLD.user_id AND client_id = OLD.client_id
+-       ) THEN
++    IF TG_OP = 'DELETE' THEN
+         RETURN OLD;
+     END IF;
+     IF TG_OP = 'DELETE'
+@@ -2088,7 +2080,7 @@ AS 'MODULE_PATHNAME', 'synchro_health_detail_wrapper';
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/compaction.rs:81
++-- synchro-pg/src/compaction.rs:91
+ -- synchro_pg::compaction::synchro_inject_client_retention_expiry
+ CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
+ 	"p_user_id" TEXT, /* core::option::Option<&str> */
+@@ -2511,7 +2503,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/lib.rs:1960
++-- synchro-pg/src/lib.rs:1952
+ -- finalize
+ 
+ DO $roles$
 diff --git a/extensions/synchro-pg/src/compaction.rs b/extensions/synchro-pg/src/compaction.rs
 --- a/extensions/synchro-pg/src/compaction.rs
 +++ b/extensions/synchro-pg/src/compaction.rs
@@ -21,7 +68,7 @@ diff --git a/extensions/synchro-pg/src/compaction.rs b/extensions/synchro-pg/src
 diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
 --- a/extensions/synchro-pg/src/lib.rs
 +++ b/extensions/synchro-pg/src/lib.rs
-@@ -576,11 +576,7 @@ BEGIN
+@@ -578,11 +578,7 @@ BEGIN
         AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
          RETURN NEW;
      END IF;
@@ -34,7 +81,7 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
          RETURN OLD;
      END IF;
      RAISE EXCEPTION 'push ledger rows are immutable outside client retirement'
-@@ -593,11 +589,7 @@ RETURNS trigger
+@@ -595,11 +591,7 @@ RETURNS trigger
  LANGUAGE plpgsql
  AS $$
  BEGIN
@@ -47,43 +94,3 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
          RETURN OLD;
      END IF;
      IF TG_OP = 'DELETE'
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-@@ -548,11 +548,7 @@ BEGIN
-        AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
-         RETURN NEW;
-     END IF;
--    IF TG_OP = 'DELETE'
--       AND EXISTS (
--           SELECT 1 FROM sync_client_retirements
--           WHERE user_id = OLD.user_id AND client_id = OLD.client_id
--       ) THEN
-+    IF TG_OP = 'DELETE' THEN
-         RETURN OLD;
-     END IF;
-     RAISE EXCEPTION 'push ledger rows are immutable outside client retirement'
-@@ -565,11 +561,7 @@ RETURNS trigger
- LANGUAGE plpgsql
- AS $$
- BEGIN
--    IF TG_OP = 'DELETE'
--       AND EXISTS (
--           SELECT 1 FROM sync_client_retirements
--           WHERE user_id = OLD.user_id AND client_id = OLD.client_id
--       ) THEN
-+    IF TG_OP = 'DELETE' THEN
-         RETURN OLD;
-     END IF;
-     IF TG_OP = 'DELETE'
-@@ -2060,4 +2052,4 @@
- /* <begin connected objects> */
---- synchro-pg/src/compaction.rs:81
-+-- synchro-pg/src/compaction.rs:91
- -- synchro_pg::compaction::synchro_inject_client_retention_expiry
- CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
-@@ -2462,3 +2454,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1930
-+-- synchro-pg/src/lib.rs:1922
- -- finalize

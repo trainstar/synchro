@@ -324,7 +324,9 @@ fn synchro_prepare_projection_view(
 
         let existing = client
             .select(
-                "SELECT view_name::text AS view_name, projected_columns::text[] AS projected_columns
+                "SELECT physical_relation_oid::bigint AS physical_relation_oid,
+                        view_name::text AS view_name,
+                        projected_columns::text[] AS projected_columns
                  FROM synchro.sync_projection_views
                  WHERE physical_relation_oid = $1::oid OR view_name = $2::name",
                 None,
@@ -332,15 +334,29 @@ fn synchro_prepare_projection_view(
             )?
             .next();
         if let Some(existing) = existing {
+            let existing_oid = existing
+                .get_by_name::<i64, &str>("physical_relation_oid")?
+                .unwrap_or_default();
             let existing_name = existing
                 .get_by_name::<String, &str>("view_name")?
                 .unwrap_or_default();
             let existing_columns = existing
                 .get_by_name::<Vec<String>, &str>("projected_columns")?
                 .unwrap_or_default();
-            if existing_name != *view_name || existing_columns != projected_columns {
+            if existing_oid != i64::from(physical.oid)
+                || existing_name != *view_name
+                || existing_columns != projected_columns
+            {
                 pgrx::error!("projection view identity is immutable");
             }
+            grant_projection_view_to_relation_owner(
+                client,
+                &format!(
+                    "synchro_projection.{}",
+                    crate::pull::pg_quote_ident(view_name)
+                ),
+                actor,
+            )?;
             return Ok::<_, spi::Error>(pgrx::JsonB(serde_json::json!({
                 "view": format!("synchro_projection.{view_name}"),
                 "physical_schema": physical.schema,
@@ -364,8 +380,6 @@ fn synchro_prepare_projection_view(
                 crate::pull::pg_quote_ident(column),
             ));
         }
-        let schema_literal = quote_literal(client, &physical.schema)?;
-        let relation_literal = quote_literal(client, &physical.relation)?;
         let qualified_view = format!(
             "synchro_projection.{}",
             crate::pull::pg_quote_ident(view_name),
@@ -375,9 +389,10 @@ fn synchro_prepare_projection_view(
                 "CREATE VIEW {qualified_view} WITH (security_barrier = true) AS \
                  SELECT projection.record_id, projection.capture_key, projection.deleted, {} \
                  FROM synchro.sync_current_projections projection \
-                 WHERE projection.physical_schema = {schema_literal} \
-                   AND projection.physical_relation = {relation_literal}",
+                 WHERE projection.physical_relation_oid = {oid}::oid \
+                 AND synchro.synchro_assert_projection_reader({oid}::oid)",
                 expressions.join(", "),
+                oid = i64::from(physical.oid),
             ),
             None,
             &[],
@@ -397,6 +412,7 @@ fn synchro_prepare_projection_view(
             None,
             &[],
         )?;
+        grant_projection_view_to_relation_owner(client, &qualified_view, actor)?;
         client.update(
             "INSERT INTO synchro.sync_projection_views (
                  physical_relation_oid, physical_schema, physical_relation,
@@ -423,6 +439,30 @@ fn synchro_prepare_projection_view(
         })))
     })
     .unwrap_or_else(|error| pgrx::error!("preparing projection view: {error}"))
+}
+
+/// The extension evaluates membership and impact functions as their owner,
+/// and registration requires that owner to be the relation owner.
+fn grant_projection_view_to_relation_owner(
+    client: &mut SpiClient<'_>,
+    qualified_view: &str,
+    relation_owner: pg_sys::Oid,
+) -> Result<(), spi::Error> {
+    let owner = client
+        .select(
+            "SELECT pg_catalog.quote_ident(pg_catalog.pg_get_userbyid($1::oid)) AS owner",
+            None,
+            &[i64::from(relation_owner.to_u32()).into()],
+        )?
+        .first()
+        .get_by_name::<String, &str>("owner")?
+        .unwrap_or_else(|| pgrx::error!("projection view owner is missing"));
+    client.update(
+        &format!("GRANT SELECT ON {qualified_view} TO {owner}"),
+        None,
+        &[],
+    )?;
+    Ok(())
 }
 
 /// Register a table for synchronization.
@@ -1462,7 +1502,7 @@ fn quote_literal(client: &SpiClient<'_>, value: &str) -> Result<String, spi::Err
     Ok(literal)
 }
 
-fn registered_function_fingerprint(
+pub(crate) fn registered_function_fingerprint(
     client: &SpiClient<'_>,
     function_oid: u32,
 ) -> Result<Vec<u8>, spi::Error> {
@@ -1708,6 +1748,43 @@ fn resolve_membership_function(
     identity: &str,
     primary_key_type_oid: u32,
 ) -> Result<RegisteredFunction, spi::Error> {
+    let function = resolve_scope_function(client, identity, primary_key_type_oid, "membership")?;
+    validate_function_execute_acl(client, &function, &["synchro_owner", "synchro_worker"])?;
+    validate_registered_function_dependencies(client, &function)?;
+    Ok(function)
+}
+
+/// Resolves the registered assignment function and applies every assignment
+/// function rule. Assignment has no dependency propagation, so the function
+/// reads application relations directly. Connect and pull evaluate it as its
+/// owner.
+pub(crate) fn resolve_assignment_function(
+    client: &SpiClient<'_>,
+    actor: pg_sys::Oid,
+    identity: &str,
+) -> Result<(RegisteredFunction, Vec<u8>), spi::Error> {
+    let text_type_oid = pg_sys::TEXTOID.to_u32();
+    let function = resolve_scope_function(client, identity, text_type_oid, "assignment")?;
+    let fingerprint_before = registered_function_fingerprint(client, function.oid)?;
+    validate_actor_owns_function(client, actor, function.oid)?;
+    validate_function_execute_acl(client, &function, &["synchro_owner"])?;
+    validate_function_calls_only_pg_catalog(client, &function)?;
+    validate_assignment_function_relations(client, &function)?;
+    let fingerprint_after = registered_function_fingerprint(client, function.oid)?;
+    if fingerprint_before != fingerprint_after {
+        pgrx::error!("assignment function changed during registration");
+    }
+    Ok((function, fingerprint_after))
+}
+
+/// Resolves a deterministic SQL function that maps one argument to a set of
+/// scope IDs.
+fn resolve_scope_function(
+    client: &SpiClient<'_>,
+    identity: &str,
+    argument_type_oid: u32,
+    role: &str,
+) -> Result<RegisteredFunction, spi::Error> {
     let (schema, name) = parse_qualified_function(client, identity)?;
     let rows = client.select(
         "SELECT p.oid::bigint AS function_oid,
@@ -1735,12 +1812,12 @@ fn resolve_membership_function(
         &[
             schema.as_str().into(),
             name.as_str().into(),
-            i64::from(primary_key_type_oid).into(),
+            i64::from(argument_type_oid).into(),
         ],
     )?;
     let rows: Vec<_> = rows.into_iter().collect();
     if rows.len() != 1 {
-        pgrx::error!("membership function signature is invalid");
+        pgrx::error!("{} function signature is invalid", role);
     }
     let row = &rows[0];
     let returns_set = row
@@ -1772,12 +1849,9 @@ fn resolve_membership_function(
         || !parsed_body
         || !fixed_path
     {
-        pgrx::error!("membership function does not meet the deterministic contract");
+        pgrx::error!("{} function does not meet the deterministic contract", role);
     }
-    let function = registered_function_from_row(row)?;
-    validate_registered_function_acl(client, &function)?;
-    validate_registered_function_dependencies(client, &function)?;
-    Ok(function)
+    registered_function_from_row(row)
 }
 
 fn resolve_impact_function(
@@ -1850,7 +1924,7 @@ fn resolve_impact_function(
         pgrx::error!("impact function does not meet the deterministic contract");
     }
     let function = registered_function_from_row(row)?;
-    validate_registered_function_acl(client, &function)?;
+    validate_function_execute_acl(client, &function, &["synchro_owner", "synchro_worker"])?;
     validate_registered_function_dependencies(client, &function)?;
     Ok(function)
 }
@@ -1859,38 +1933,95 @@ fn validate_registered_function_dependencies(
     client: &SpiClient<'_>,
     function: &RegisteredFunction,
 ) -> Result<(), spi::Error> {
+    let row = client
+        .select(
+            "WITH dependency AS (
+                 SELECT relation.oid AS relation_oid,
+                        namespace.oid AS schema_oid,
+                        namespace.nspname,
+                        projection.view_oid,
+                        projection.physical_relation_oid
+                 FROM pg_catalog.pg_depend dependency
+                 JOIN pg_catalog.pg_class relation
+                   ON dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                  AND relation.oid = dependency.refobjid
+                 JOIN pg_catalog.pg_namespace namespace
+                   ON namespace.oid = relation.relnamespace
+                 LEFT JOIN synchro.sync_projection_views projection
+                   ON projection.view_oid = relation.oid
+                 WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
+                   AND dependency.objid = $1::oid
+                   AND dependency.deptype = 'n'
+             ), function_owner AS (
+                 SELECT proowner FROM pg_catalog.pg_proc WHERE oid = $1::oid
+             )
+             SELECT NOT EXISTS (
+                        SELECT 1
+                        FROM dependency
+                        WHERE dependency.nspname NOT IN ('pg_catalog', 'information_schema')
+                          AND dependency.view_oid IS NULL
+                    ) AS declared,
+                    EXISTS (SELECT 1 FROM function_owner)
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM dependency
+                        CROSS JOIN function_owner
+                        WHERE NOT pg_catalog.has_table_privilege(
+                                  function_owner.proowner, dependency.relation_oid, 'SELECT'
+                              )
+                           OR NOT pg_catalog.has_schema_privilege(
+                                  function_owner.proowner, dependency.schema_oid, 'USAGE'
+                              )
+                    ) AS readable,
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM dependency
+                        CROSS JOIN function_owner
+                        WHERE dependency.physical_relation_oid IS NOT NULL
+                          AND pg_catalog.has_table_privilege(
+                                  function_owner.proowner,
+                                  dependency.physical_relation_oid,
+                                  'SELECT'
+                              ) IS NOT TRUE
+                    ) AS source_readable",
+            None,
+            &[i64::from(function.oid).into()],
+        )?
+        .first();
+    if !row.get_by_name::<bool, &str>("declared")?.unwrap_or(false) {
+        pgrx::error!("registered function reads an undeclared projection dependency");
+    }
+    if !row.get_by_name::<bool, &str>("readable")?.unwrap_or(false) {
+        pgrx::error!("registered function owner cannot read a function relation");
+    }
+    if !row
+        .get_by_name::<bool, &str>("source_readable")?
+        .unwrap_or(false)
+    {
+        pgrx::error!("registered function owner cannot read a projection view source relation");
+    }
+    validate_function_calls_only_pg_catalog(client, function)
+}
+
+fn validate_function_calls_only_pg_catalog(
+    client: &SpiClient<'_>,
+    function: &RegisteredFunction,
+) -> Result<(), spi::Error> {
     let valid = client
         .select(
-            "SELECT
-                 NOT EXISTS (
-                     SELECT 1
-                     FROM pg_catalog.pg_depend dependency
-                     JOIN pg_catalog.pg_class relation
-                       ON dependency.refclassid = 'pg_catalog.pg_class'::regclass
-                      AND relation.oid = dependency.refobjid
-                     JOIN pg_catalog.pg_namespace namespace
-                       ON namespace.oid = relation.relnamespace
-                     LEFT JOIN synchro.sync_projection_views projection
-                       ON projection.view_oid = relation.oid
-                     WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
-                       AND dependency.objid = $1::oid
-                       AND dependency.deptype = 'n'
-                       AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
-                       AND projection.view_oid IS NULL
-                 )
-                 AND NOT EXISTS (
-                     SELECT 1
-                     FROM pg_catalog.pg_depend dependency
-                     JOIN pg_catalog.pg_proc called
-                       ON dependency.refclassid = 'pg_catalog.pg_proc'::regclass
-                      AND called.oid = dependency.refobjid
-                     JOIN pg_catalog.pg_namespace namespace
-                       ON namespace.oid = called.pronamespace
-                     WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
-                       AND dependency.objid = $1::oid
-                       AND dependency.deptype = 'n'
-                       AND namespace.nspname <> 'pg_catalog'
-                 ) AS valid",
+            "SELECT NOT EXISTS (
+                 SELECT 1
+                 FROM pg_catalog.pg_depend dependency
+                 JOIN pg_catalog.pg_proc called
+                   ON dependency.refclassid = 'pg_catalog.pg_proc'::regclass
+                  AND called.oid = dependency.refobjid
+                 JOIN pg_catalog.pg_namespace namespace
+                   ON namespace.oid = called.pronamespace
+                 WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
+                   AND dependency.objid = $1::oid
+                   AND dependency.deptype = 'n'
+                   AND namespace.nspname <> 'pg_catalog'
+             ) AS valid",
             None,
             &[i64::from(function.oid).into()],
         )?
@@ -1898,20 +2029,78 @@ fn validate_registered_function_dependencies(
         .get_by_name::<bool, &str>("valid")?
         .unwrap_or(false);
     if !valid {
-        pgrx::error!("registered function reads an undeclared projection dependency");
+        pgrx::error!("registered function calls a function outside pg_catalog");
     }
     Ok(())
 }
 
-fn validate_registered_function_acl(
+fn validate_assignment_function_relations(
     client: &SpiClient<'_>,
     function: &RegisteredFunction,
 ) -> Result<(), spi::Error> {
+    let row = client
+        .select(
+            "WITH relation AS (
+                 SELECT relation.oid AS relation_oid,
+                        namespace.oid AS schema_oid,
+                        namespace.nspname
+                 FROM pg_catalog.pg_depend dependency
+                 JOIN pg_catalog.pg_class relation
+                   ON dependency.refclassid = 'pg_catalog.pg_class'::regclass
+                  AND relation.oid = dependency.refobjid
+                 JOIN pg_catalog.pg_namespace namespace
+                   ON namespace.oid = relation.relnamespace
+                 WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
+                   AND dependency.objid = $1::oid
+                   AND dependency.deptype = 'n'
+             ), function_owner AS (
+                 SELECT proowner FROM pg_catalog.pg_proc WHERE oid = $1::oid
+             )
+             SELECT NOT EXISTS (
+                        SELECT 1 FROM relation WHERE relation.nspname = 'synchro'
+                    ) AS outside_synchro,
+                    EXISTS (SELECT 1 FROM function_owner)
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM relation
+                        CROSS JOIN function_owner
+                        WHERE NOT pg_catalog.has_table_privilege(
+                                  function_owner.proowner, relation.relation_oid, 'SELECT'
+                              )
+                           OR NOT pg_catalog.has_schema_privilege(
+                                  function_owner.proowner, relation.schema_oid, 'USAGE'
+                              )
+                    ) AS readable",
+            None,
+            &[i64::from(function.oid).into()],
+        )?
+        .first();
+    if !row
+        .get_by_name::<bool, &str>("outside_synchro")?
+        .unwrap_or(false)
+    {
+        pgrx::error!("assignment function reads a synchro relation");
+    }
+    if !row.get_by_name::<bool, &str>("readable")?.unwrap_or(false) {
+        pgrx::error!("assignment function owner cannot read a function relation");
+    }
+    Ok(())
+}
+
+/// Confirms that every named role can execute the function and that PUBLIC
+/// cannot.
+fn validate_function_execute_acl(
+    client: &SpiClient<'_>,
+    function: &RegisteredFunction,
+    roles: &[&str],
+) -> Result<(), spi::Error> {
+    let roles: Vec<String> = roles.iter().map(|role| role.to_string()).collect();
     let valid: bool = client
         .select(
-            "WITH roles AS (
-                 SELECT (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner') AS owner_oid,
-                        (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_worker') AS worker_oid
+            "WITH required AS (
+                 SELECT role.oid AS role_oid
+                 FROM unnest($2::text[]) AS required(role_name)
+                 LEFT JOIN pg_catalog.pg_roles role ON role.rolname = required.role_name
              ), function_acl AS (
                  SELECT procedure.proacl,
                         procedure.proowner,
@@ -1920,41 +2109,35 @@ fn validate_registered_function_acl(
                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
                  WHERE procedure.oid = $1::oid
              )
-             SELECT EXISTS (
-                 SELECT 1
-                 FROM function_acl
-                 CROSS JOIN roles
-                 WHERE roles.owner_oid IS NOT NULL
-                   AND roles.worker_oid IS NOT NULL
-                   AND pg_catalog.has_schema_privilege(roles.owner_oid, function_acl.schema_oid, 'USAGE')
-                   AND pg_catalog.has_schema_privilege(roles.worker_oid, function_acl.schema_oid, 'USAGE')
-                   AND EXISTS (
-                       SELECT 1
-                       FROM pg_catalog.aclexplode(
-                            COALESCE(function_acl.proacl, pg_catalog.acldefault('f', function_acl.proowner))
-                       ) AS acl(grantor, grantee, privilege_type, is_grantable)
-                       WHERE acl.grantee = roles.owner_oid
-                         AND acl.privilege_type = 'EXECUTE'
-                   )
-                   AND EXISTS (
-                       SELECT 1
-                       FROM pg_catalog.aclexplode(
-                            COALESCE(function_acl.proacl, pg_catalog.acldefault('f', function_acl.proowner))
-                       ) AS acl(grantor, grantee, privilege_type, is_grantable)
-                       WHERE acl.grantee = roles.worker_oid
-                         AND acl.privilege_type = 'EXECUTE'
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM pg_catalog.aclexplode(
-                            COALESCE(function_acl.proacl, pg_catalog.acldefault('f', function_acl.proowner))
-                       ) AS acl(grantor, grantee, privilege_type, is_grantable)
-                       WHERE acl.grantee = 0
-                         AND acl.privilege_type = 'EXECUTE'
-                   )
-             ) AS valid",
+             SELECT EXISTS (SELECT 1 FROM function_acl)
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM function_acl
+                    CROSS JOIN required
+                    WHERE required.role_oid IS NULL
+                       OR NOT pg_catalog.has_schema_privilege(
+                              required.role_oid, function_acl.schema_oid, 'USAGE'
+                          )
+                       OR NOT EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.aclexplode(
+                                COALESCE(function_acl.proacl, pg_catalog.acldefault('f', function_acl.proowner))
+                           ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                           WHERE acl.grantee = required.role_oid
+                             AND acl.privilege_type = 'EXECUTE'
+                       )
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM function_acl
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(
+                         COALESCE(function_acl.proacl, pg_catalog.acldefault('f', function_acl.proowner))
+                    ) AS acl(grantor, grantee, privilege_type, is_grantable)
+                    WHERE acl.grantee = 0
+                      AND acl.privilege_type = 'EXECUTE'
+                ) AS valid",
             None,
-            &[i64::from(function.oid).into()],
+            &[i64::from(function.oid).into(), roles.into()],
         )?
         .first()
         .get_by_name("valid")?
@@ -2221,7 +2404,7 @@ fn validate_actor_owns_function(
         .get_by_name("owns")?
         .unwrap_or(false);
     if !owns {
-        pgrx::error!("registration actor does not own the membership function");
+        pgrx::error!("registration actor does not own the registered function");
     }
     Ok(())
 }

@@ -141,6 +141,11 @@
     [self.impl beginWriteTransaction:resolve reject:reject];
 }
 
+- (void)beginAtomicWriteTransaction:(RCTPromiseResolveBlock)resolve
+                             reject:(RCTPromiseRejectBlock)reject {
+    [self.impl beginAtomicWriteTransaction:resolve reject:reject];
+}
+
 - (void)beginReadTransaction:(RCTPromiseResolveBlock)resolve
                       reject:(RCTPromiseRejectBlock)reject {
     [self.impl beginReadTransaction:resolve reject:reject];
@@ -390,6 +395,8 @@ RCT_EXTERN_METHOD(executeBatch:(NSArray *)statements
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(beginWriteTransaction:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(beginAtomicWriteTransaction:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(beginReadTransaction:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)

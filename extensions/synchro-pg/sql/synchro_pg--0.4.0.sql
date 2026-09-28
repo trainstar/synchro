@@ -506,7 +506,7 @@ CREATE TABLE IF NOT EXISTS sync_push_mutations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (user_id, client_id, mutation_id),
-    CHECK (
+    CONSTRAINT sync_push_mutations_outcome_code_check CHECK (
         (outcome_status = 'applied' AND rejection_code IS NULL)
         OR
         (outcome_status = 'conflict'
@@ -518,7 +518,8 @@ CREATE TABLE IF NOT EXISTS sync_push_mutations (
         (outcome_status = 'rejected_terminal'
          AND rejection_code IS NOT NULL
          AND rejection_code IN (
-             'schema_incompatible', 'table_not_synced', 'policy_rejected', 'validation_failed'
+             'schema_incompatible', 'table_not_synced', 'policy_rejected', 'validation_failed',
+             'atomic_batch_rejected'
          ))
     )
 );
@@ -636,6 +637,16 @@ CREATE TABLE IF NOT EXISTS sync_user_scopes (
     assigned BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, scope_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_assignment_function (
+    singleton BOOLEAN PRIMARY KEY CHECK (singleton),
+    function_oid OID NOT NULL,
+    function_schema TEXT NOT NULL,
+    function_name TEXT NOT NULL,
+    max_scopes INTEGER NOT NULL CHECK (max_scopes BETWEEN 1 AND 1000),
+    definition_sha256 TEXT NOT NULL CHECK (definition_sha256 ~ '^[0-9a-f]{64}$'),
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS sync_scope_state (
@@ -1372,7 +1383,8 @@ SELECT registry.registry_generation,
        captured.record_id,
        captured.capture_key,
        captured.row_data,
-       captured.deleted
+       captured.deleted,
+       registry.physical_relation_oid
 FROM sync_wal_progress progress
 CROSS JOIN reset_context context
 JOIN sync_registry registry
@@ -1380,6 +1392,24 @@ JOIN sync_registry registry
 JOIN projections captured
   ON captured.relation_id = registry.relation_id
 WHERE progress.singleton;
+
+-- Each reader runs this check as itself, so a projection view returns rows
+-- only to a role that can read the source relation.
+CREATE FUNCTION synchro_assert_projection_reader(p_relation OID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    IF pg_catalog.has_table_privilege(p_relation, 'SELECT') IS NOT TRUE THEN
+        RAISE EXCEPTION 'projection view reader cannot read the source relation'
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN true;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS sync_wal_poison (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -2037,7 +2067,7 @@ AS 'MODULE_PATHNAME', 'synchro_emit_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:212
+-- synchro-pg/src/portable_seed.rs:215
 -- synchro_pg::portable_seed::synchro_grant_user_scope
 CREATE  FUNCTION "synchro_grant_user_scope"(
 	"p_user_id" TEXT, /* &str */
@@ -2049,7 +2079,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1128
+-- synchro-pg/src/health.rs:1135
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2092,7 +2122,7 @@ AS 'MODULE_PATHNAME', 'synchro_mark_stream_reset_snapshot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:328
+-- synchro-pg/src/portable_seed.rs:510
 -- synchro_pg::portable_seed::synchro_portable_seed_manifest
 CREATE  FUNCTION "synchro_portable_seed_manifest"(
 	"p_page_limit" INT DEFAULT 1000 /* i32 */
@@ -2103,7 +2133,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:501
+-- synchro-pg/src/portable_seed.rs:683
 -- synchro_pg::portable_seed::synchro_portable_seed_scope
 CREATE  FUNCTION "synchro_portable_seed_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2249,7 +2279,7 @@ AS 'MODULE_PATHNAME', 'synchro_pull_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/push.rs:131
+-- synchro-pg/src/push.rs:132
 -- synchro_pg::push::synchro_push
 CREATE  FUNCTION "synchro_push"(
 	"p_user_id" TEXT, /* &str */
@@ -2261,7 +2291,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1121
+-- synchro-pg/src/health.rs:1128
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2282,7 +2312,19 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:750
+-- synchro-pg/src/portable_seed.rs:293
+-- synchro_pg::portable_seed::synchro_register_assignment_function
+CREATE  FUNCTION "synchro_register_assignment_function"(
+	"p_function" TEXT, /* &str */
+	"p_max_scopes" INT DEFAULT 1000 /* i32 */
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/registry.rs:790
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2295,7 +2337,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1027
+-- synchro-pg/src/registry.rs:1067
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2310,7 +2352,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_membership_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:137
+-- synchro-pg/src/portable_seed.rs:141
 -- synchro_pg::portable_seed::synchro_register_shared_scope
 CREATE  FUNCTION "synchro_register_shared_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2322,7 +2364,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:432
+-- synchro-pg/src/registry.rs:472
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2363,7 +2405,7 @@ AS 'MODULE_PATHNAME', 'synchro_retry_wal_poison_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:244
+-- synchro-pg/src/portable_seed.rs:247
 -- synchro_pg::portable_seed::synchro_revoke_user_scope
 CREATE  FUNCTION "synchro_revoke_user_scope"(
 	"p_user_id" TEXT, /* &str */
@@ -2429,7 +2471,16 @@ AS 'MODULE_PATHNAME', 'synchro_tables_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:287
+-- synchro-pg/src/portable_seed.rs:329
+-- synchro_pg::portable_seed::synchro_unregister_assignment_function
+CREATE  FUNCTION "synchro_unregister_assignment_function"() RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'synchro_unregister_assignment_function_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- synchro-pg/src/portable_seed.rs:469
 -- synchro_pg::portable_seed::synchro_unregister_shared_scope
 CREATE  FUNCTION "synchro_unregister_shared_scope"(
 	"p_scope_id" TEXT /* &str */
@@ -2440,7 +2491,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:984
+-- synchro-pg/src/registry.rs:1024
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */
@@ -2460,7 +2511,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1930
+-- synchro-pg/src/lib.rs:1960
 -- finalize
 
 DO $roles$
@@ -2543,7 +2594,9 @@ BEGIN
             '%I.%I(%s)', object_record.nspname, object_record.proname, object_record.arguments
         );
         EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO synchro_owner', object_identity);
-        EXECUTE pg_catalog.format('ALTER FUNCTION %s SECURITY DEFINER', object_identity);
+        IF object_record.proname <> 'synchro_assert_projection_reader' THEN
+            EXECUTE pg_catalog.format('ALTER FUNCTION %s SECURITY DEFINER', object_identity);
+        END IF;
         EXECUTE pg_catalog.format(
             'ALTER FUNCTION %s SET search_path = pg_catalog, synchro', object_identity
         );
@@ -2604,7 +2657,8 @@ BEGIN
                  'synchro_register_membership_dependency',
                  'synchro_unregister_table', 'synchro_register_shared_scope',
                  'synchro_unregister_shared_scope', 'synchro_grant_user_scope',
-                 'synchro_revoke_user_scope', 'synchro_backfill_bucket_edges',
+                 'synchro_revoke_user_scope', 'synchro_register_assignment_function',
+                 'synchro_unregister_assignment_function', 'synchro_backfill_bucket_edges',
                   'synchro_compact', 'synchro_inject_client_retention_expiry',
                  'synchro_retry_wal_poison', 'synchro_health_detail',
                  'synchro_debug', 'synchro_primary_key_guard', 'synchro_capture_fence',
@@ -2646,6 +2700,15 @@ BEGIN
         END IF;
         IF function_record.proname = 'synchro_projection_bootstrap_slot_drop_state' THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
+        END IF;
+        IF function_record.proname = 'synchro_assert_projection_reader' THEN
+            object_identity := pg_catalog.format(
+                '%I.%I(%s)', function_record.nspname, function_record.proname,
+                function_record.arguments
+            );
+            EXECUTE pg_catalog.format(
+                'GRANT EXECUTE ON FUNCTION %s TO synchro_operator, synchro_worker', object_identity
+            );
         END IF;
     END LOOP;
 END

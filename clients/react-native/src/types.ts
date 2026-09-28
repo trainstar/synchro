@@ -186,7 +186,8 @@ export type MutationRejectionCode =
   | 'schema_incompatible'
   | 'policy_rejected'
   | 'validation_failed'
-  | 'table_not_synced';
+  | 'table_not_synced'
+  | 'atomic_batch_rejected';
 
 export interface SchemaRef {
   version: number;

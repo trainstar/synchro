@@ -18,6 +18,7 @@ This catalog defines the observable conditions that every conforming Synchro pro
 [ADR 003]: /synchro/architecture/decisions/003-pull-cursor-and-rebuild/
 [ADR 004]: /synchro/architecture/decisions/004-membership-schema-and-retention/
 [ADR 005]: /synchro/architecture/decisions/005-integrity-authorization-and-seeds/
+[Client Contract]: /synchro/spec/02-client-contract/
 
 For every release, every level-three invariant heading in this document maps to
 exactly one requirement record, and every requirement maps through exactly one
@@ -41,11 +42,19 @@ Clients MUST preserve each non-null server-issued cursor byte-for-byte and MUST 
 
 ### Opaque Server Version Invariant
 
-`server_version` MUST be a nonempty server-generated equality token. Clients and adapters MUST NOT parse, sort, increment, timestamp-compare, or generate it. Any such operation, or any server version derived from client data, is a violation of the version rules in [ADR 001] and [ADR 002].
+`server_version` MUST be a server-generated equality token of 1 through 64 octets. Each octet MUST be printable ASCII from `0x20` through `0x7E` other than `"` and `\`, so its canonical JSON string is its length plus 2 octets. Clients and adapters MUST NOT parse, sort, increment, timestamp-compare, or generate it. A client MAY use the length bound only to compute a worst-case request size. Any such operation, a token outside the bound, or any server version derived from client data, is a violation of the version rules in [ADR 001] and [ADR 002].
 
 ### Scope Assignment Authority
 
-Only the server MUST determine the authoritative scope set for an authenticated client. A client-authored scope instance or replication predicate MUST be rejected, and accepting one is a violation of the assignment rules in [ADR 003] and [ADR 004].
+Only the server MUST determine the authoritative scope set for an authenticated client. The set is the union of the default user scope, registered shared scopes, explicit grants, and registered assignment function results. A client-authored scope instance or replication predicate MUST be rejected, and accepting one is a violation of the assignment rules in [ADR 003] and [ADR 004].
+
+### Pull-Time Scope Reconciliation
+
+Connect and pull MUST compute the authoritative scope set with the same rule. Pull MUST reconcile that set after every request validation passes and before it builds `scope_updates`. A changed set MUST advance `scope_set_version` by exactly one and MUST appear in `scope_updates` of that response. An unchanged set and a failed pull MUST write no assignment state. Rebuild MUST NOT reconcile assignment. A stale set in a successful pull, any other version step, or an assignment write from a failed pull is a violation of Scope assignment in [ADR 004].
+
+### Registered Scope Assignment Function
+
+At most one registered assignment function MUST contribute scopes, and registration MUST reject a function that breaks a rule in Scope assignment in [ADR 004]. Each evaluation MUST confirm the registered definition hash. It MUST reject a null result, an empty result, a `user:` result, and more distinct results than `max_scopes`. A rejected evaluation MUST fail the complete connect or pull with `500 sync_integrity_failure` and no assignment change. Treating a failure as an empty set, truncating results, or evaluating a changed definition is a violation.
 
 ### Scope Set Version Monotonicity
 
@@ -113,6 +122,10 @@ A first push execution MUST commit its batch response, every mutation outcome, e
 
 An HTTP 200 first execution MUST place every requested mutation exactly once in `accepted` or `rejected`, preserve request-relative order within each array, and use only the statuses and required fields defined by [ADR 002]. An omitted, duplicated, cross-listed, or retryable per-mutation outcome is a violation of Complete outcome partition.
 
+### Atomic Mutation Group
+
+A first execution of a push request with `atomic: true` MUST commit the source writes of every mutation or of none. The server MUST stop at the first outcome that is not `applied` and roll back every source write, version transition, and write fence of the group. The failing mutation MUST keep its status and code, and a failing conflict MUST carry committed state read after the rollback. Every other mutation MUST receive `rejected_terminal` with `atomic_batch_rejected`. A partial group commit, a conflict row from rolled-back state, an accepted-write epoch advance after rollback, or `atomic_batch_rejected` in a non-atomic response is a violation of Atomic mutation groups in [ADR 002].
+
 ### Mutation Outcome Schema Binding
 
 Every mutation outcome MUST carry the exact immutable `outcome_schema` used for classification and row checksum encoding. First execution uses the current request schema; exact and cross-batch replay preserve the original stored binding. A client MUST verify historical rows under that manifest and MUST NOT apply an unsafe historical row as current-schema state. Missing, rewritten, unavailable, or checksum-inconsistent binding, or loss of later local intent during historical reconciliation, is a violation of Exact replay and Complete outcome partition in [ADR 002].
@@ -144,6 +157,10 @@ Schema or application reconciliation MUST give changed intent a new mutation UUI
 ### Pre Wire Mutation Dependency Resolution
 
 Before transmission, a same-row insert, update, and delete chain without a legal server precondition MUST be normalized or blocked exactly as defined by [ADR 002]. Every original local action MUST remain linked and inspectable, no dependent mutation may be sent with a fabricated base version, and an insert followed by delete before sealing MUST create no transient server row.
+
+### Atomic Group Capture And Selection
+
+Every mutation captured inside one atomic write transaction MUST carry that transaction's atomic group identity, and no other mutation MAY carry it. The client MUST reject and roll back a group that fails a commit-time rule in Atomic write groups in the [Client Contract]. The client MUST send a group only as one complete sealed batch with `atomic: true` that contains no other mutation. When one unsent group member becomes `blocked_by_predecessor`, every unsent member of that group MUST become blocked. A split group, a mixed batch, or a committed invalid group is a violation.
 
 ## Server Change Capture Invariants
 

@@ -20,6 +20,7 @@ func TestClosedOperationClasses(t *testing.T) {
 		"model/expire-client-generation",
 		"model/install-current-contract",
 		"model/publish-schema",
+		"model/set-assignment-function",
 		"model/set-client-assignments",
 		"model/stage-registry-membership-generation",
 		"process/acknowledge-contiguous-prefix",

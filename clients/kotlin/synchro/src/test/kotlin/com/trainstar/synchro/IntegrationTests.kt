@@ -385,4 +385,119 @@ class IntegrationTests {
             clientB.close()
         }
     }
+
+    @Test
+    fun testAtomicGroupIsSentInOneRequestAndApplied() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val clientA = SynchroClient(makeConfig(userID = userID), context)
+        val clientB = SynchroClient(makeConfig(userID = userID), context)
+        val firstID = UUID.randomUUID().toString()
+        val secondID = UUID.randomUUID().toString()
+        val orderID = UUID.randomUUID().toString()
+        val updatedAt = "2026-01-06T00:00:00.000Z"
+
+        try {
+            clientA.start()
+            clientA.atomicWriteTransaction { transaction ->
+                listOf(insertCustomer(userID, firstID, "first"), insertCustomer(userID, secondID, "second"))
+                    .forEach { transaction.execute(it.sql, it.params) }
+                transaction.execute(
+                    "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+                    arrayOf(orderID, firstID, userID, """{"street":"Atomic Way"}""", updatedAt, updatedAt),
+                )
+            }
+            val database = database(clientA)
+            waitForCondition(timeoutMs = 30_000) {
+                clientA.syncNow()
+                clientA.pendingChangeCount() == 0
+            }
+
+            val request = sentRequests(database).single().second
+            assertEquals(true, request.atomic)
+            assertEquals(
+                setOf(firstID, secondID, orderID),
+                request.mutations.map { it.pk.values.single().jsonPrimitive.content }.toSet(),
+            )
+            assertEquals(
+                listOf("accepted", "accepted", "accepted"),
+                database.query("SELECT lifecycle_state FROM _synchro_pending_changes").map { it.getValue("lifecycle_state") },
+            )
+
+            clientB.start()
+            waitForCondition(timeoutMs = 30_000) {
+                clientB.syncNow()
+                clientB.query("SELECT id FROM customers").map { it["id"] }.toSet() == setOf(firstID, secondID) &&
+                    clientB.queryOne("SELECT customer_id FROM orders WHERE id = ?", arrayOf(orderID))?.get("customer_id") == firstID
+            }
+        } finally {
+            clientA.stop()
+            clientA.close()
+            clientB.stop()
+            clientB.close()
+        }
+    }
+
+    @Test
+    fun testConflictInAnAtomicGroupRejectsTheWholeGroupWithoutRevert() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val clientA = SynchroClient(makeConfig(userID = userID), context)
+        val clientB = SynchroClient(makeConfig(userID = userID), context)
+        val conflictingID = UUID.randomUUID().toString()
+        val groupedID = UUID.randomUUID().toString()
+
+        try {
+            clientA.start()
+            val database = database(clientA)
+            clientA.executeBatch(listOf(insertCustomer(userID, conflictingID, "original")))
+            waitForCondition(timeoutMs = 30_000) {
+                clientA.syncNow()
+                ledgerState(database, conflictingID) == "accepted"
+            }
+
+            clientB.start()
+            waitForCondition(timeoutMs = 30_000) {
+                clientB.syncNow()
+                clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(conflictingID))?.get("name") == "original"
+            }
+            clientB.execute("UPDATE customers SET name = ? WHERE id = ?", arrayOf("server", conflictingID))
+            waitForCondition(timeoutMs = 30_000) {
+                clientB.syncNow()
+                clientB.pendingChangeCount() == 0
+            }
+
+            clientA.atomicWriteTransaction { transaction ->
+                transaction.execute("UPDATE customers SET name = ? WHERE id = ?", arrayOf("local", conflictingID))
+                insertCustomer(userID, groupedID, "grouped").let { transaction.execute(it.sql, it.params) }
+            }
+            waitForCondition(timeoutMs = 30_000) {
+                clientA.syncNow()
+                clientA.pendingChangeCount() == 0
+            }
+
+            val conflictingUpdate = database.queryOne(
+                "SELECT mutation_id, lifecycle_state FROM _synchro_pending_changes WHERE record_id = ? AND operation = 'update'",
+                arrayOf(conflictingID),
+            )!!
+            assertEquals("conflict", conflictingUpdate["lifecycle_state"])
+            assertEquals("rejected_terminal", ledgerState(database, groupedID))
+            val rejections = clientA.inspectRejectedMutations().associateBy { it.recordID }
+            assertEquals(setOf(conflictingID, groupedID), rejections.keys)
+            assertEquals(conflictingUpdate["mutation_id"], rejections.getValue(conflictingID).mutationID)
+            assertEquals(MutationStatus.CONFLICT, rejections.getValue(conflictingID).status)
+            assertEquals(MutationRejectionCode.VERSION_CONFLICT, rejections.getValue(conflictingID).code)
+            assertEquals(MutationStatus.REJECTED_TERMINAL, rejections.getValue(groupedID).status)
+            assertEquals(MutationRejectionCode.ATOMIC_BATCH_REJECTED, rejections.getValue(groupedID).code)
+            assertEquals("server", clientA.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(conflictingID))?.get("name"))
+            assertEquals("grouped", clientA.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(groupedID))?.get("name"))
+
+            clientB.syncNow()
+            assertEquals("server", clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(conflictingID))?.get("name"))
+            assertNull(clientB.queryOne("SELECT id FROM customers WHERE id = ?", arrayOf(groupedID)))
+        } finally {
+            clientA.stop()
+            clientA.close()
+            clientB.stop()
+            clientB.close()
+        }
+    }
 }

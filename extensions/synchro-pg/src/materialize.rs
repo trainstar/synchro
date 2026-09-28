@@ -198,10 +198,15 @@ pub(crate) fn resolve_membership_batch(
             .iter()
             .map(|record_id| serde_json::json!({ "record_id": record_id }))
             .collect::<Vec<_>>();
-        let rows = client.select(
-            &query,
-            None,
-            &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+        let rows = crate::bucketing::evaluate_as_function_owner(
+            &registration.membership_function,
+            || {
+                client.select(
+                    &query,
+                    None,
+                    &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+                )
+            },
         )?;
         for row in rows {
             let record_id = row
@@ -1279,7 +1284,7 @@ fn stage_table_edges(
     Ok((record_count, edge_count, batch_count))
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

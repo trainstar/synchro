@@ -78,6 +78,23 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     fun <T> writeTransaction(block: (ApplicationTransaction) -> T): T =
         transaction(block)
 
+    /**
+     * Runs a write transaction whose synced mutations the server applies all
+     * together or not at all. A nested call joins the enclosing group.
+     *
+     * @throws SynchroError.AtomicGroupInvalid when the group cannot be sent as
+     * one request. The local transaction then rolls back.
+     */
+    fun <T> atomicWriteTransaction(block: (ApplicationTransaction) -> T): T =
+        transaction { transaction ->
+            val groupID = database.writeTransaction(pushProcessor::beginAtomicGroup)
+            val result = block(transaction)
+            if (groupID != null) {
+                database.writeTransaction { db -> pushProcessor.completeAtomicGroup(db, config.clientID, groupID) }
+            }
+            result
+        }
+
     fun <T> authoredWriteTransaction(
         tableName: String,
         operation: Operation,

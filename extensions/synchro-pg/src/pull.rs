@@ -104,9 +104,7 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
             );
         }
 
-        let server_scopes = client_state.bucket_subs;
-        let scope_set_version = client_state.scope_set_version;
-        if request.scope_set_version > scope_set_version {
+        if request.scope_set_version > client_state.scope_set_version {
             return protocol_error_response(
                 ProtocolErrorCode::InvalidRequest,
                 "scope_set_version is ahead of the server",
@@ -126,6 +124,12 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                 false,
             );
         }
+        let server_scopes = crate::client::load_authoritative_scopes(client, p_user_id);
+        let scope_set_version = crate::client::next_scope_set_version(
+            &client_state.bucket_subs,
+            client_state.scope_set_version,
+            &server_scopes,
+        );
         let scope_updates = build_scope_delta(&request.scopes, &server_scopes);
         let active_scopes_before_update = request.scopes.keys().cloned().collect();
         let active_scopes: Vec<String> = server_scopes
@@ -181,6 +185,18 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
 
             if let Err(err) = response.validate_for_active_scopes(&active_scopes_before_update) {
                 pgrx::error!("invalid pull response: {}", err);
+            }
+
+            if server_scopes != client_state.bucket_subs {
+                crate::client::persist_pull_scope_transition(
+                    client,
+                    p_user_id,
+                    &request.client_id,
+                    client_state.client_generation,
+                    &client_state.bucket_subs,
+                    &server_scopes,
+                    scope_set_version,
+                );
             }
 
             return pgrx::JsonB(serde_json::to_value(response).unwrap());
@@ -302,6 +318,18 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
             &boundary.stream_generation,
         ) {
             pgrx::error!("acknowledging scope positions: {}", error);
+        }
+
+        if server_scopes != client_state.bucket_subs {
+            crate::client::persist_pull_scope_transition(
+                client,
+                p_user_id,
+                &request.client_id,
+                client_state.client_generation,
+                &client_state.bucket_subs,
+                &server_scopes,
+                scope_set_version,
+            );
         }
 
         pgrx::JsonB(serde_json::to_value(response).unwrap())

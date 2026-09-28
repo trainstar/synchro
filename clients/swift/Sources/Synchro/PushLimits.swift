@@ -58,6 +58,7 @@ enum PushLimits {
         clientID: String,
         batchID: String,
         schemaHash: String,
+        atomic: Bool,
         encoder: JSONEncoder
     ) throws -> Octets {
         try requestOctets(
@@ -66,6 +67,7 @@ enum PushLimits {
                 clientGeneration: maxProtocolInteger,
                 batchID: batchID,
                 schema: SchemaRef(version: maxProtocolInteger, hash: schemaHash),
+                atomic: atomic ? true : nil,
                 mutations: []
             ),
             encoder: encoder

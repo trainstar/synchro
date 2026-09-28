@@ -315,7 +315,7 @@ object SQLiteSchema {
         INSERT INTO _synchro_pending_changes (
             mutation_id, table_id, table_name, record_id, pk_field_id, pk_logical_type,
             operation, authored_schema_version, authored_schema_hash, base_version, client_version,
-            lifecycle_state, source_kind, depends_on_mutation_id, created_at, updated_at
+            lifecycle_state, source_kind, depends_on_mutation_id, atomic_group_id, created_at, updated_at
         )
         VALUES (
             ${SynchroDatabase.SQLITE_UUID}, '$tableID', '$tableName', CAST($recordExpression AS TEXT), '$primaryKeyFieldID', '$primaryKeyType',
@@ -326,6 +326,7 @@ object SQLiteSchema {
             $timestampExpression,
             'captured', 'capture',
             $unresolvedPredecessor,
+            (SELECT value FROM _synchro_meta WHERE key = 'atomic_group_id'),
             $timestampExpression, $timestampExpression
         );
         """.trimIndent()

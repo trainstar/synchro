@@ -698,6 +698,74 @@ func TestPushRejectsMalformedClientVersionTimestamp(t *testing.T) {
 	}
 }
 
+func TestPushAtomicMemberRequiresLiteralTrue(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-1")
+	clientID := testClientID(t, "test-atomic-push-client")
+	client := connectClient(t, srv, token, clientID)
+	request := func(idPrefix string, atomic any) map[string]any {
+		mutations := make([]map[string]any, 0, 2)
+		for _, mutationID := range []string{idPrefix + "1", idPrefix + "2"} {
+			mutations = append(mutations, map[string]any{
+				"mutation_id":     mutationID,
+				"table":           "018f2b5e-7c42-7a1d-9d31-8a95bd6744f0",
+				"pk":              map[string]any{"018f2b5e-7c42-7a1d-9d31-8a95bd6744f1": mutationID},
+				"authored_schema": client.Schema,
+				"op":              "insert",
+				"client_version":  "2026-08-14T00:00:00.000000Z",
+				"columns":         map[string]any{"018f2b5e-7c42-7a1d-9d31-8a95bd6744f2": "value"},
+			})
+		}
+		return map[string]any{
+			"client_id":         clientID,
+			"client_generation": client.Generation,
+			"batch_id":          idPrefix + "0",
+			"schema":            client.Schema,
+			"atomic":            atomic,
+			"mutations":         mutations,
+		}
+	}
+
+	for _, tt := range []struct {
+		name     string
+		idPrefix string
+		atomic   any
+	}{
+		{name: "false", idPrefix: "018f2b5e-7c42-7a1d-9d31-8a95bd67441", atomic: false},
+		{name: "number", idPrefix: "018f2b5e-7c42-7a1d-9d31-8a95bd67442", atomic: 1},
+		{name: "null", idPrefix: "018f2b5e-7c42-7a1d-9d31-8a95bd67443", atomic: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, request(tt.idPrefix, tt.atomic))
+			if status != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %v", status, body)
+			}
+			errorBody, ok := body["error"].(map[string]any)
+			if !ok || errorBody["code"] != "invalid_request" {
+				t.Fatalf("expected invalid_request, got %v", body)
+			}
+		})
+	}
+
+	status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, request("018f2b5e-7c42-7a1d-9d31-8a95bd67444", true))
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+	if accepted, ok := body["accepted"].([]any); !ok || len(accepted) != 0 {
+		t.Fatalf("expected no accepted outcome, got %v", body["accepted"])
+	}
+	rejected, ok := body["rejected"].([]any)
+	if !ok || len(rejected) != 2 {
+		t.Fatalf("expected two rejected outcomes, got %v", body["rejected"])
+	}
+	for index, wantCode := range []string{"table_not_synced", "atomic_batch_rejected"} {
+		outcome, ok := rejected[index].(map[string]any)
+		if !ok || outcome["code"] != wantCode {
+			t.Fatalf("rejected outcome %d code = %v, want %s", index, rejected[index], wantCode)
+		}
+	}
+}
+
 func TestTrustedUpstreamAuthRequiresUser(t *testing.T) {
 	srv := testServerWithConfig(t, func(cfg *Config) {
 		cfg.UserIDResolver = func(r *http.Request) (string, error) {

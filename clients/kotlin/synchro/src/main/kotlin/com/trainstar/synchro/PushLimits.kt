@@ -61,7 +61,7 @@ internal object PushLimits {
      * schema version are the protocol maximum. This reserve keeps a renewed
      * successor in the request limit.
      */
-    fun reservedEnvelope(json: Json, clientID: String, batchID: String, schemaHash: String): RequestSize =
+    fun reservedEnvelope(json: Json, clientID: String, batchID: String, schemaHash: String, atomic: Boolean): RequestSize =
         envelope(
             json,
             PushRequest(
@@ -70,6 +70,7 @@ internal object PushLimits {
                 batchID = batchID,
                 schema = SchemaRef(MAX_PROTOCOL_INTEGER, schemaHash),
                 mutations = emptyList(),
+                atomic = atomic.takeIf { it },
             ),
         )
 

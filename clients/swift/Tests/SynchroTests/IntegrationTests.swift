@@ -579,6 +579,126 @@ final class IntegrationTests: XCTestCase {
         }
     }
 
+    func testAtomicGroupAppliesEveryMutationAgainstExtension() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await self.stopAndClose(writer)
+            await self.stopAndClose(reader)
+        }
+        try await writer.start()
+        await writer.enterBackground()
+        let names = Dictionary(uniqueKeysWithValues: (0..<3).map { index in
+            (UUID().uuidString.lowercased(), "atomic member \(index)")
+        })
+        try writer.atomicWriteTransaction { transaction in
+            for (customerID, name) in names {
+                let insert = customerInsert(customerID: customerID, userID: userID, name: name)
+                try transaction.execute(insert.sql, params: insert.params)
+            }
+        }
+
+        try await writer.enterForeground()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try writer.pendingChangeCount() == 0
+        }
+
+        let sealed = try writer.query("SELECT request_json FROM _synchro_push_batches", params: nil)
+        XCTAssertEqual(sealed.count, 1)
+        let request = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: Data(try XCTUnwrap(sealed.first?["request_json"] as String?).utf8)
+        )
+        XCTAssertEqual(request.atomic, true)
+        XCTAssertEqual(request.mutations.count, names.count)
+        XCTAssertTrue(try writer.inspectRejectedMutations().isEmpty)
+        XCTAssertTrue(try writer.inspectRetainedMutations().isEmpty)
+        XCTAssertEqual(try customerNames(writer, userID: userID), names)
+        try await reader.start()
+        try await waitForCondition(timeoutNanoseconds: 60_000_000_000) {
+            try await self.syncAllowingCaptureRetry(reader)
+            return try self.customerNames(reader, userID: userID) == names
+        }
+    }
+
+    func testAtomicGroupConflictKeepsServerRowAndLocalMembersAgainstExtension() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        let other = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await self.stopAndClose(writer)
+            await self.stopAndClose(other)
+            await self.stopAndClose(reader)
+        }
+        let conflictedID = UUID().uuidString.lowercased()
+        let localID = UUID().uuidString.lowercased()
+        try await writer.start()
+        _ = try writer.executeBatch([customerInsert(customerID: conflictedID, userID: userID, name: "original")])
+        try await waitForCondition(timeoutNanoseconds: 60_000_000_000) {
+            try await self.syncAllowingCaptureRetry(writer)
+            return try writer.pendingChangeCount() == 0 && writer.getSyncStatus() == .ready
+        }
+        await writer.enterBackground()
+
+        try await other.start()
+        try await waitForCondition(timeoutNanoseconds: 60_000_000_000) {
+            try await self.syncAllowingCaptureRetry(other)
+            return try self.customerNames(other, userID: userID) == [conflictedID: "original"]
+        }
+        _ = try other.execute(
+            "UPDATE customers SET name = ?, updated_at = ? WHERE id = ?",
+            params: ["server row", "2026-01-09T00:00:00.000Z", conflictedID]
+        )
+        try await waitForCondition(timeoutNanoseconds: 60_000_000_000) {
+            try await self.syncAllowingCaptureRetry(other)
+            return try other.pendingChangeCount() == 0
+        }
+
+        try writer.atomicWriteTransaction { transaction in
+            let insert = customerInsert(customerID: localID, userID: userID, name: "local member")
+            try transaction.execute(insert.sql, params: insert.params)
+            try transaction.execute(
+                "UPDATE customers SET name = ?, updated_at = ? WHERE id = ?",
+                params: ["stale edit", "2026-01-10T00:00:00.000Z", conflictedID]
+            )
+        }
+        try await writer.enterForeground()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try writer.pendingChangeCount() == 0
+        }
+
+        let rejected = Dictionary(uniqueKeysWithValues: try writer.inspectRejectedMutations().map { ($0.recordID, $0) })
+        XCTAssertEqual(rejected.count, 2)
+        XCTAssertEqual(rejected[localID]?.status, .rejectedTerminal)
+        XCTAssertEqual(rejected[localID]?.code, .atomicBatchRejected)
+        XCTAssertEqual(rejected[conflictedID]?.status, .conflict)
+        XCTAssertEqual(rejected[conflictedID]?.code, .versionConflict)
+        XCTAssertEqual(
+            try customerNames(writer, userID: userID),
+            [conflictedID: "server row", localID: "local member"]
+        )
+        try await reader.start()
+        try await waitForCondition(timeoutNanoseconds: 60_000_000_000) {
+            try await self.syncAllowingCaptureRetry(reader)
+            return try self.customerNames(reader, userID: userID) == [conflictedID: "server row"]
+        }
+    }
+
+    /// A pull after an accepted push can end in a scheduled retry until WAL
+    /// capture completes, and capture can lag for tens of seconds. The engine
+    /// owns that retry and the reconnect after it, and it refuses a caller
+    /// sync until it is ready again. The caller polls its own observable
+    /// outcome instead.
+    private func syncAllowingCaptureRetry(_ client: SynchroClient) async throws {
+        guard client.getSyncStatus() == .ready else { return }
+        do {
+            try await client.syncNow()
+        } catch is RetryableError {
+        } catch SynchroError.notStarted where client.getSyncStatus() != .ready {}
+    }
+
     private func customerInsert(customerID: String, userID: String, name: String) -> SQLStatement {
         SQLStatement(
             sql: "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",

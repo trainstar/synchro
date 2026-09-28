@@ -739,6 +739,9 @@ internal class SyncEngine(
                 val rebuilds = runPullLoop(replayRequestJSON = backoff.workIdentity)
                 completeRequestedRebuilds(rebuilds)
                 transitionTo(SyncStatus.Ready)
+                if (changeTracker.hasPendingChanges()) {
+                    runSyncCycle()
+                }
             }
             RetryOperation.REBUILDING -> {
                 val request = decodeBackoffRequest<RebuildRequest>(backoff.workIdentity)
@@ -746,17 +749,20 @@ internal class SyncEngine(
                 rebuildScope(request.scope, replayRequestJSON = backoff.workIdentity)
                 schemaManager.completeMigrationIfReady()
                 transitionTo(SyncStatus.Ready)
+                runSyncCycle()
             }
             else -> throw SynchroError.InvalidResponse("durable backoff resume state is invalid")
         }
     }
 
     private suspend fun runSyncCycle() {
+        // A push without progress cannot send the remaining work, so the cycle continues without it.
+        var pushMadeProgress = true
         while (currentCoroutineContext().isActive) {
-            if (changeTracker.hasPendingChanges()) {
+            if (pushMadeProgress && changeTracker.hasPendingChanges()) {
                 transitionTo(SyncStatus.Pushing)
-                runPush()
-                if (changeTracker.hasPendingChanges()) {
+                pushMadeProgress = runPush()
+                if (pushMadeProgress && changeTracker.hasPendingChanges()) {
                     transitionTo(SyncStatus.Pushing)
                     continue
                 }
@@ -795,13 +801,14 @@ internal class SyncEngine(
 
     // MARK: - Push
 
-    private suspend fun runPush(expectedBatchID: String? = null) {
+    private suspend fun runPush(expectedBatchID: String? = null): Boolean {
         var nextExpectedBatchID = expectedBatchID
         if (pushProcessor.hasRenewalRequiredBatches()) {
             reconnectAndRenewPushBatches()
             nextExpectedBatchID = null
         }
         var hasMore = true
+        var madeProgress = false
         while (hasMore) {
             val outcome = try {
                 pushProcessor.processPush(
@@ -821,6 +828,7 @@ internal class SyncEngine(
             }
 
             if (outcome != null) {
+                madeProgress = true
                 for (conflict in outcome.conflicts) {
                     fireConflict(conflict)
                 }
@@ -855,6 +863,7 @@ internal class SyncEngine(
                 hasMore = false
             }
         }
+        return madeProgress
     }
 
     private suspend fun reconnectAndRenewPushBatches() {
@@ -1343,6 +1352,10 @@ internal class SyncEngine(
             if (changeTracker.hasCapturedChanges()) {
                 scheduleDebouncedPush()
             }
+        }
+        // The observer reports only later changes. Schedule the changes that exist before the install.
+        if (changeTracker.hasCapturedChanges()) {
+            scheduleDebouncedPush()
         }
     }
 

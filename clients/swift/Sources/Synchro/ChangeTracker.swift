@@ -92,6 +92,7 @@ struct PendingChange: Codable, Sendable, Equatable {
     var normalizedMutationID: String?
     let sealedBatchID: String?
     let sealedOrdinal: Int64?
+    let atomicGroupID: String?
     var fieldValuesByID: [String: StoredFieldValue] = [:]
 
     // Kept for source compatibility with pre-ledger inspection code.
@@ -116,6 +117,7 @@ struct PendingChange: Codable, Sendable, Equatable {
         normalizedMutationID: String?,
         sealedBatchID: String?,
         sealedOrdinal: Int64?,
+        atomicGroupID: String? = nil,
         fieldValuesByID: [String: StoredFieldValue] = [:]
     ) {
         self.mutationID = mutationID
@@ -136,6 +138,7 @@ struct PendingChange: Codable, Sendable, Equatable {
         self.normalizedMutationID = normalizedMutationID
         self.sealedBatchID = sealedBatchID
         self.sealedOrdinal = sealedOrdinal
+        self.atomicGroupID = atomicGroupID
         self.fieldValuesByID = fieldValuesByID
     }
 
@@ -159,6 +162,7 @@ struct PendingChange: Codable, Sendable, Equatable {
         case normalizedMutationID = "normalized_mutation_id"
         case sealedBatchID = "sealed_batch_id"
         case sealedOrdinal = "sealed_ordinal"
+        case atomicGroupID = "atomic_group_id"
         case fieldValuesByID = "field_values"
     }
 
@@ -193,6 +197,7 @@ struct PendingChange: Codable, Sendable, Equatable {
             normalizedMutationID: try c.decodeIfPresent(String.self, forKey: .normalizedMutationID),
             sealedBatchID: try c.decodeIfPresent(String.self, forKey: .sealedBatchID),
             sealedOrdinal: try c.decodeIfPresent(Int64.self, forKey: .sealedOrdinal),
+            atomicGroupID: try c.decodeIfPresent(String.self, forKey: .atomicGroupID),
             fieldValuesByID: try c.decodeIfPresent([String: StoredFieldValue].self, forKey: .fieldValuesByID) ?? [:]
         )
     }
@@ -217,6 +222,7 @@ struct PendingChange: Codable, Sendable, Equatable {
         try c.encodeIfPresent(normalizedMutationID, forKey: .normalizedMutationID)
         try c.encodeIfPresent(sealedBatchID, forKey: .sealedBatchID)
         try c.encodeIfPresent(sealedOrdinal, forKey: .sealedOrdinal)
+        try c.encodeIfPresent(atomicGroupID, forKey: .atomicGroupID)
         try c.encode(fieldValuesByID, forKey: .fieldValuesByID)
     }
 
@@ -240,6 +246,7 @@ struct PendingChange: Codable, Sendable, Equatable {
             normalizedMutationID: row["normalized_mutation_id"],
             sealedBatchID: row["sealed_batch_id"],
             sealedOrdinal: row["sealed_ordinal"],
+            atomicGroupID: row["atomic_group_id"],
             fieldValuesByID: fieldValuesByID
         )
     }
@@ -337,25 +344,43 @@ final class ChangeTracker: @unchecked Sendable {
         }
     }
 
+    /// Selects the next batch candidates in capture order.
+    ///
+    /// Ungrouped candidates form a run of at most `limit` entries that stops at the
+    /// first grouped entry. A group is selected only as a whole, and only when every
+    /// member is sendable. Otherwise the group waits and no candidate is selected.
     func pendingChanges(_ db: GRDB.Database, limit: Int) throws -> [PendingChange] {
         try normalizeUnsealedChains(db)
-        let rows = try Row.fetchAll(
+        let rows = try fetchInCaptureOrder(
             db,
-            sql: """
-                SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
-                       pk_logical_type, operation, base_version, client_version,
-                       authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
-                FROM _synchro_pending_changes
-                WHERE lifecycle_state = 'unsealed'
-                  AND dependency_mutation_id IS NULL
-                  AND (operation = 'insert' OR base_version IS NOT NULL)
-                ORDER BY local_order ASC
-                LIMIT ?
+            where: """
+                candidate.lifecycle_state = 'unsealed'
+                  AND candidate.dependency_mutation_id IS NULL
+                  AND (candidate.operation = 'insert' OR candidate.base_version IS NOT NULL)
                 """,
-            arguments: [limit]
+            arguments: [],
+            limit: limit
         )
-        return try rows.map { row in
+        let candidates: [Row]
+        if let groupID: String = rows.first?["atomic_group_id"] {
+            candidates = try fetchInCaptureOrder(
+                db,
+                where: """
+                    candidate.atomic_group_id = ?
+                      AND candidate.lifecycle_state NOT IN ('superseded_before_send', 'cancelled_before_send')
+                    """,
+                arguments: [groupID]
+            )
+            let sendable = candidates.allSatisfy { row in
+                (row["lifecycle_state"] as String?) == "unsealed"
+                    && (row["dependency_mutation_id"] as String?) == nil
+                    && ((row["operation"] as String?) == "insert" || (row["base_version"] as String?) != nil)
+            }
+            guard sendable else { return [] }
+        } else {
+            candidates = Array(rows.prefix { ($0["atomic_group_id"] as String?) == nil })
+        }
+        return try candidates.map { row in
             try PendingChange(row: row, fieldValuesByID: loadFieldValues(db, mutationID: row["mutation_id"]))
         }
     }
@@ -434,7 +459,7 @@ final class ChangeTracker: @unchecked Sendable {
                 SELECT l.mutation_id, l.local_order, l.table_id, l.record_id, l.table_name, l.pk_field_id,
                        l.pk_logical_type, l.operation, l.base_version, l.client_version,
                        l.authored_schema_version, l.authored_schema_hash, l.lifecycle_state, l.source_kind,
-                       l.dependency_mutation_id, l.normalized_mutation_id, l.sealed_batch_id, l.sealed_ordinal
+                       l.dependency_mutation_id, l.normalized_mutation_id, l.sealed_batch_id, l.sealed_ordinal, l.atomic_group_id
                 FROM _synchro_push_batch_members m
                 JOIN _synchro_pending_changes l ON l.mutation_id = m.mutation_id
                 WHERE m.batch_id = ?
@@ -508,7 +533,7 @@ final class ChangeTracker: @unchecked Sendable {
                 SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
                        pk_logical_type, operation, base_version, client_version,
                        authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
+                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal, atomic_group_id
                 FROM _synchro_pending_changes
                 WHERE dependency_mutation_id = ? AND lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')
                 ORDER BY local_order
@@ -537,6 +562,11 @@ final class ChangeTracker: @unchecked Sendable {
     }
 
     func blockDependents(_ db: GRDB.Database, predecessorID: String) throws {
+        try blockDescendants(db, of: predecessorID)
+        try blockUnsentGroupMembers(db)
+    }
+
+    private func blockDescendants(_ db: GRDB.Database, of predecessorID: String) throws {
         try db.execute(
             sql: """
                 WITH RECURSIVE descendants(mutation_id) AS (
@@ -559,6 +589,58 @@ final class ChangeTracker: @unchecked Sendable {
         )
     }
 
+    /// Marks every unsent member of a group `blocked_by_predecessor` when one member is
+    /// blocked, and then blocks the dependents of each newly blocked member.
+    ///
+    /// A member that depends on a blocked mutation can never be sent, so it also blocks
+    /// its group. Otherwise the group waits forever and no later batch is selected.
+    private func blockUnsentGroupMembers(_ db: GRDB.Database) throws {
+        while true {
+            let memberIDs = try String.fetchAll(
+                db,
+                sql: """
+                    SELECT mutation_id FROM _synchro_pending_changes
+                    WHERE lifecycle_state = 'unsealed'
+                      AND atomic_group_id IN (
+                          SELECT member.atomic_group_id
+                          FROM _synchro_pending_changes AS member
+                          LEFT JOIN _synchro_pending_changes AS predecessor
+                            ON predecessor.mutation_id = member.dependency_mutation_id
+                          WHERE member.atomic_group_id IS NOT NULL
+                            AND 'blocked_by_predecessor' IN (member.lifecycle_state, predecessor.lifecycle_state)
+                      )
+                    """
+            )
+            guard !memberIDs.isEmpty else { return }
+            for memberID in memberIDs {
+                try db.execute(
+                    sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
+                    arguments: [SynchroDateCoding.now(), memberID]
+                )
+                try blockDescendants(db, of: memberID)
+            }
+        }
+    }
+
+    /// Applies the commit-time group rules that come before measurement and gives the normalized group.
+    ///
+    /// The rules are the delete rule and chain normalization of the group rows only.
+    func normalizeAtomicGroup(_ db: GRDB.Database, groupID: String) throws -> [PendingChange] {
+        let group = try loadUnsealedEntries(db, atomicGroupID: groupID)
+        var deletedRows = Set<LogicalRowIdentity>()
+        for entry in group {
+            guard let identity = rowIdentity(entry) else { continue }
+            guard !deletedRows.contains(identity) else {
+                throw SynchroError.atomicGroupInvalid(reason: .deleteFollowedByWrite)
+            }
+            if entry.operation == "delete" {
+                deletedRows.insert(identity)
+            }
+        }
+        try normalizeTrailingRuns(db, entries: group, anyPredecessor: true)
+        return try loadUnsealedEntries(db, atomicGroupID: groupID)
+    }
+
     func laterUnresolved(
         _ db: GRDB.Database,
         after predecessor: PendingChange
@@ -569,7 +651,7 @@ final class ChangeTracker: @unchecked Sendable {
                 SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
                        pk_logical_type, operation, base_version, client_version,
                        authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
+                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal, atomic_group_id
                 FROM _synchro_pending_changes
                 WHERE table_id = ? AND pk_field_id = ? AND pk_logical_type = ? AND record_id = ?
                   AND local_order > ?
@@ -657,71 +739,16 @@ final class ChangeTracker: @unchecked Sendable {
     // MARK: - Immutable capture normalization
 
     private func normalizeUnsealedChains(_ db: GRDB.Database) throws {
-        let rows = try Row.fetchAll(
+        try normalizeTrailingRuns(
             db,
-            sql: """
-                SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
-                       pk_logical_type, operation, base_version, client_version,
-                       authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
-                FROM _synchro_pending_changes
-                WHERE lifecycle_state = 'unsealed' AND sealed_batch_id IS NULL
-                ORDER BY local_order
-                """
+            entries: loadUnsealedEntries(db).filter { $0.sealedBatchID == nil },
+            anyPredecessor: false
         )
-        let entries = try rows.map { row in
-            try PendingChange(row: row, fieldValuesByID: loadFieldValues(db, mutationID: row["mutation_id"]))
-        }
-        let grouped = Dictionary(grouping: entries) { entry -> LogicalRowIdentity? in
-            guard let tableID = entry.tableID,
-                  let pkFieldID = entry.pkFieldID,
-                  let pkLogicalType = entry.pkLogicalType else { return nil }
-            return LogicalRowIdentity(
-                tableID: tableID,
-                pkFieldID: pkFieldID,
-                pkLogicalType: pkLogicalType,
-                recordID: entry.recordID
-            )
-        }
-
-        for (identity, groupedEntries) in grouped {
-            guard identity != nil else { continue }
-            let chain = groupedEntries.sorted { $0.localOrder < $1.localOrder }
-            guard chain.count > 1,
-                  chain.first?.dependencyMutationID == nil,
-                  chain.dropFirst().enumerated().allSatisfy({ index, entry in
-                      entry.dependencyMutationID == chain[index].mutationID
-                  }) else {
-                continue
-            }
-
-            // A normalized payload must never combine two schema bindings. Keep
-            // the predecessor sendable and retain every successor dependency.
-            let schemaRefs = Set(chain.map { "\($0.authoredSchemaVersion ?? 0):\($0.authoredSchemaHash ?? "")" })
-            if schemaRefs.count != 1 {
-                if let deleteIndex = chain.firstIndex(where: { $0.operation == "delete" }), deleteIndex < chain.count - 1 {
-                    for successor in chain[(deleteIndex + 1)...] {
-                        try db.execute(
-                            sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
-                            arguments: [SynchroDateCoding.now(), successor.mutationID]
-                        )
-                    }
-                }
-                continue
-            }
-
-            try normalize(chain, db: db)
-        }
 
         // A delete has no resurrection operation. Keep the delete sendable and
         // block every later action using the typed logical row identity.
         let current = try loadUnsealedEntries(db)
-        let currentGrouped = Dictionary(grouping: current) { entry -> LogicalRowIdentity? in
-            guard let tableID = entry.tableID,
-                  let pkFieldID = entry.pkFieldID,
-                  let pkLogicalType = entry.pkLogicalType else { return nil }
-            return LogicalRowIdentity(tableID: tableID, pkFieldID: pkFieldID, pkLogicalType: pkLogicalType, recordID: entry.recordID)
-        }
+        let currentGrouped = Dictionary(grouping: current, by: rowIdentity)
         for (identity, entriesForIdentity) in currentGrouped where identity != nil {
             let chain = entriesForIdentity.sorted { $0.localOrder < $1.localOrder }
             guard let deleteIndex = chain.firstIndex(where: { $0.operation == "delete" }),
@@ -733,22 +760,132 @@ final class ChangeTracker: @unchecked Sendable {
                 )
             }
         }
+        try blockUnsentDependentsOfBlockedPredecessors(db)
+        try blockUnsentGroupMembers(db)
     }
 
-    private func loadUnsealedEntries(_ db: GRDB.Database) throws -> [PendingChange] {
-        let rows = try Row.fetchAll(
+    /// Blocks each unsealed mutation whose predecessor is blocked, because that
+    /// predecessor can never become accepted. Each pass reaches one more link of a chain.
+    private func blockUnsentDependentsOfBlockedPredecessors(_ db: GRDB.Database) throws {
+        repeat {
+            try db.execute(
+                sql: """
+                    UPDATE _synchro_pending_changes
+                    SET lifecycle_state = 'blocked_by_predecessor', updated_at = ?
+                    WHERE lifecycle_state = 'unsealed'
+                      AND dependency_mutation_id IN (
+                          SELECT mutation_id FROM _synchro_pending_changes
+                          WHERE lifecycle_state IN ('blocked_by_predecessor', 'legacy_blocked')
+                      )
+                    """,
+                arguments: [SynchroDateCoding.now()]
+            )
+        } while db.changesCount > 0
+    }
+
+    /// Normalizes the trailing run of each same-row chain.
+    ///
+    /// A run is a maximal sequence of chain entries with an equal atomic group, and a
+    /// NULL group equals a NULL group. Only the trailing run merges, because a merged
+    /// entry gets the next local order. An earlier run that merged would follow a later
+    /// group member that depends on it, and that group could never be sent.
+    ///
+    /// A run merges only when its first entry depends on the entry before the run.
+    /// `anyPredecessor` removes that condition for a new atomic group, because an
+    /// unmerged group puts two mutations for one row in one atomic request.
+    private func normalizeTrailingRuns(
+        _ db: GRDB.Database,
+        entries: [PendingChange],
+        anyPredecessor: Bool
+    ) throws {
+        for (identity, rowEntries) in Dictionary(grouping: entries, by: rowIdentity) where identity != nil {
+            let chain = rowEntries.sorted { $0.localOrder < $1.localOrder }
+            guard let last = chain.last else { continue }
+            let start = chain.lastIndex { $0.atomicGroupID != last.atomicGroupID }.map { $0 + 1 } ?? 0
+            let run = Array(chain[start...])
+            guard run.count > 1,
+                  anyPredecessor || run[0].dependencyMutationID == (start > 0 ? chain[start - 1].mutationID : nil),
+                  zip(run, run.dropFirst()).allSatisfy({ $1.dependencyMutationID == $0.mutationID }) else {
+                continue
+            }
+
+            // A normalized payload must never combine two schema bindings. Keep
+            // the predecessor sendable and retain every successor dependency.
+            let schemaRefs = Set(run.map { "\($0.authoredSchemaVersion ?? 0):\($0.authoredSchemaHash ?? "")" })
+            if schemaRefs.count != 1 {
+                if let deleteIndex = run.firstIndex(where: { $0.operation == "delete" }), deleteIndex < run.count - 1 {
+                    for successor in run[(deleteIndex + 1)...] {
+                        try db.execute(
+                            sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
+                            arguments: [SynchroDateCoding.now(), successor.mutationID]
+                        )
+                    }
+                }
+                continue
+            }
+
+            try normalize(run, db: db)
+        }
+    }
+
+    private func rowIdentity(_ entry: PendingChange) -> LogicalRowIdentity? {
+        guard let tableID = entry.tableID,
+              let pkFieldID = entry.pkFieldID,
+              let pkLogicalType = entry.pkLogicalType else { return nil }
+        return LogicalRowIdentity(
+            tableID: tableID,
+            pkFieldID: pkFieldID,
+            pkLogicalType: pkLogicalType,
+            recordID: entry.recordID
+        )
+    }
+
+    /// Loads the unsealed entries in capture order. A group ID limits them to that atomic group.
+    private func loadUnsealedEntries(_ db: GRDB.Database, atomicGroupID: String? = nil) throws -> [PendingChange] {
+        let rows = try fetchInCaptureOrder(
             db,
-            sql: """
-                SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
-                       pk_logical_type, operation, base_version, client_version,
-                       authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
-                FROM _synchro_pending_changes WHERE lifecycle_state = 'unsealed' ORDER BY local_order
-                """
+            where: "candidate.lifecycle_state = 'unsealed' AND (? IS NULL OR candidate.atomic_group_id = ?)",
+            arguments: [atomicGroupID, atomicGroupID]
         )
         return try rows.map { row in
             try PendingChange(row: row, fieldValuesByID: loadFieldValues(db, mutationID: row["mutation_id"]))
         }
+    }
+
+    /// Fetches the ledger entries that match `condition` in capture order.
+    ///
+    /// A normalized mutation takes the local order of its first transitive source.
+    /// Thus normalization does not move a mutation after a later capture of another
+    /// row. The stored local order of the normalized mutation does not change.
+    private func fetchInCaptureOrder(
+        _ db: GRDB.Database,
+        where condition: String,
+        arguments: StatementArguments,
+        limit: Int = -1
+    ) throws -> [Row] {
+        try Row.fetchAll(
+            db,
+            sql: """
+                WITH RECURSIVE lineage(candidate_id, local_order, mutation_id) AS (
+                    SELECT candidate.mutation_id, candidate.local_order, candidate.mutation_id
+                    FROM _synchro_pending_changes candidate
+                    WHERE \(condition)
+                    UNION ALL
+                    SELECT lineage.candidate_id, source.local_order, source.mutation_id
+                    FROM lineage
+                    JOIN _synchro_pending_changes source ON source.normalized_mutation_id = lineage.mutation_id
+                ),
+                capture(candidate_id, capture_order) AS (
+                    SELECT candidate_id, MIN(local_order) FROM lineage GROUP BY candidate_id
+                )
+                SELECT candidate.*
+                FROM capture
+                JOIN _synchro_pending_changes candidate ON candidate.mutation_id = capture.candidate_id
+                ORDER BY capture.capture_order
+                LIMIT ?
+                """,
+            arguments: arguments + [limit]
+        )
     }
 
     private func normalize(_ chain: [PendingChange], db: GRDB.Database) throws {
@@ -786,14 +923,14 @@ final class ChangeTracker: @unchecked Sendable {
                     INSERT INTO _synchro_pending_changes
                     (mutation_id, capture_uuid, table_id, table_name, record_id, pk_field_id, pk_logical_type,
                      operation, authored_schema_version, authored_schema_hash, base_version, client_version,
-                     lifecycle_state, source_kind, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unsealed', 'normalized', ?, ?)
+                     lifecycle_state, source_kind, dependency_mutation_id, atomic_group_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unsealed', 'normalized', ?, ?, ?, ?)
                 """,
             arguments: [
                 normalizedID, normalizedID, first.tableID, first.tableName, first.recordID,
                 first.pkFieldID, first.pkLogicalType, operation, first.authoredSchemaVersion,
                 first.authoredSchemaHash, operation == "insert" ? nil : first.baseUpdatedAt,
-                last.clientUpdatedAt, now, now,
+                last.clientUpdatedAt, first.dependencyMutationID, first.atomicGroupID, now, now,
             ]
         )
         for value in finalValues.values where operation != "delete" {

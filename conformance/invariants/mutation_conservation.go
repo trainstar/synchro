@@ -306,7 +306,7 @@ func validConflictMutationCode(code string) bool {
 
 func validTerminalMutationCode(code string) bool {
 	switch code {
-	case "schema_incompatible", "table_not_synced", "policy_rejected", "validation_failed":
+	case "schema_incompatible", "table_not_synced", "policy_rejected", "validation_failed", "atomic_batch_rejected":
 		return true
 	default:
 		return false

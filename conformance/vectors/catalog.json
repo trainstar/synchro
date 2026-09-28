@@ -1,14 +1,14 @@
 {
   "$schema": "https://synchro.dev/conformance/schemas/vector-catalog-v1.schema.json",
   "schema_version": 1,
-  "release": "0.3.2",
+  "release": "0.4.0",
   "vector_sets": [
     {
       "vector_set_id": "VSET-CANONICAL-001",
       "path": "conformance/vectors/canonical-v1.json",
-      "source_sha256": "db4eaa3f56fb4117b731b2ea0f362c8933c234056d3dea8b249c82c81ae86287",
-      "vector_count": 123,
-      "aggregate_sha256": "68a7c888c317ad64dde088e89873db8079d5fc7ba0f89ab4ec6b575ec1c01cb5",
+      "source_sha256": "b28eee7434bbcf2dc360a1aec40841e51716892fa6c3ed4ed45353d994e62b2a",
+      "vector_count": 126,
+      "aggregate_sha256": "c8c0b46ae5002ef3d6797161c7ec6a90b90cd2bc341ce378b3847ad2dd23ade9",
       "required_languages": [
         "go",
         "rust",
