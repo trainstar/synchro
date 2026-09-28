@@ -1,3 +1,9 @@
+// The Android build resolves the Synchro Kotlin SDK only from the Maven repository that
+// make release-kotlin-local publishes to. The Makefile exports SYNCHRO_MAVEN_REPO. The shell
+// stops the build when it is not set, so the build cannot use the default Maven local repository.
+const gradleMavenRepo =
+  '"-Dmaven.repo.local=${SYNCHRO_MAVEN_REPO:?Set SYNCHRO_MAVEN_REPO to the repository of make release-kotlin-local}"';
+
 /** @type {import('detox').DetoxConfig} */
 module.exports = {
   testRunner: {
@@ -24,7 +30,7 @@ module.exports = {
       testBinaryPath:
         'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
-        'cd android && ./gradlew assembleDebug assembleAndroidTest -DtestBuildType=debug -PdetoxBundleDebug=true',
+        `cd android && ./gradlew ${gradleMavenRepo} assembleDebug assembleAndroidTest -DtestBuildType=debug -PdetoxBundleDebug=true`,
       reversePorts: [8081],
     },
     'android.release': {
@@ -33,7 +39,7 @@ module.exports = {
       testBinaryPath:
         'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
-        'cd android && ./gradlew assembleRelease assembleDebugAndroidTest',
+        `cd android && ./gradlew ${gradleMavenRepo} assembleRelease assembleDebugAndroidTest`,
       reversePorts: [8081],
     },
   },

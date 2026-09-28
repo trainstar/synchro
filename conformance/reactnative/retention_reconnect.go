@@ -98,7 +98,10 @@ type RetentionReconnectCoordinator struct {
 	rejectionWire scenarios.WireExpectation
 	renewalWire   scenarios.WireExpectation
 
-	localIntent         retentionReconnectPrimaryKey
+	localIntent retentionReconnectPrimaryKey
+	// authoredIntent is the retained native mutation that the bound local write
+	// must produce, with runtime field IDs from the schema binding.
+	authoredIntent      retentionReconnectIntent
 	sealedMutationCount int
 	pinnedRebuildID     string
 
@@ -597,6 +600,10 @@ func (c *RetentionReconnectCoordinator) Prepare(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	authoredIntent, err := retentionReconnectAuthoredIntent(c.config.Scenario.Model.Setup[0], local, bound, c.config.Controller.RuntimeFieldID)
+	if err != nil {
+		return err
+	}
 	step := c.steps[retentionReconnectStepOrder[0]]
 	step.Operation = bound
 	c.steps[retentionReconnectStepOrder[0]] = step
@@ -614,6 +621,7 @@ func (c *RetentionReconnectCoordinator) Prepare(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	c.localIntent = intent
+	c.authoredIntent = authoredIntent
 	c.prepared = true
 	c.mu.Unlock()
 	return nil
@@ -1215,7 +1223,7 @@ func (c *RetentionReconnectCoordinator) floorScopes(capture finalCapture) ([]cli
 		}
 	}
 	if floor.ScopeID == "" || identity.ScopeID == "" || floor.Cursor == nil || *floor.Cursor == "" {
-		return nil, errors.New("React Native retention-reconnect compacted floor cursor is absent")
+		return nil, errors.New("React Native retention-reconnect durable cursor after compaction is absent")
 	}
 	return []clientScopeState{floor, identity}, nil
 }
@@ -1244,7 +1252,7 @@ func (c *RetentionReconnectCoordinator) validateRestartCapture(capture finalCapt
 		return err
 	}
 	if !reflect.DeepEqual(before, after) {
-		return errors.New("React Native retention-reconnect restart changed the durable floor cursor")
+		return errors.New("React Native retention-reconnect restart changed the durable cursor")
 	}
 	if !sameJSONValue(c.finalCapture.Pending, capture.Pending) || !sameJSONValue(c.finalCapture.Rejected, capture.Rejected) {
 		return errors.New("React Native retention-reconnect restart changed the durable queue")
@@ -1279,7 +1287,7 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 		}
 	}
 	if err := validateReadyStatus(capture.Status); err != nil {
-		return fmt.Errorf("React Native retention-reconnect floor resume status is invalid: %w", err)
+		return fmt.Errorf("React Native retention-reconnect compacted-scope resume status is invalid: %w", err)
 	}
 	trace, err := retentionReconnectTrace(capture.Trace)
 	if err != nil {
@@ -1293,14 +1301,14 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 		switch observed.OperationClass {
 		case "connect":
 			if err := validateTraceOperation(observed, "connect"); err != nil {
-				return fmt.Errorf("React Native retention-reconnect floor resume connect is invalid: %w", err)
+				return fmt.Errorf("React Native retention-reconnect compacted-scope resume connect is invalid: %w", err)
 			}
 			connects++
 		case "rebuild":
-			return errors.New("React Native retention-reconnect floor-equal cursor entered rebuild")
+			return errors.New("React Native retention-reconnect compacted-scope resume entered rebuild")
 		case "pull":
 			if err := validateTraceOperation(observed, "pull"); err != nil {
-				return fmt.Errorf("React Native retention-reconnect floor resume pull is invalid: %w", err)
+				return fmt.Errorf("React Native retention-reconnect compacted-scope resume pull is invalid: %w", err)
 			}
 			response, responseErr := decodePullResponseFacts(observed.PullResponseFacts)
 			if responseErr != nil || observed.CursorFingerprintsComplete == nil || !*observed.CursorFingerprintsComplete ||
@@ -1308,13 +1316,13 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 				*response.ChangeCount != 0 || *response.HasMore || *response.RebuildScopeCount != 0 ||
 				*response.ChecksumCount != uint64(len(resumed)) || !*response.ScopeCursorFingerprintsComplete ||
 				!reflect.DeepEqual(response.ScopeCursorFingerprints, responseFingerprints) {
-				return errors.New("React Native retention-reconnect floor-equal pull is invalid")
+				return errors.New("React Native retention-reconnect compacted-scope resume pull is invalid")
 			}
 			pulls++
 		}
 	}
 	if connects != 1 || pulls != 1 {
-		return fmt.Errorf("React Native retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
+		return fmt.Errorf("React Native retention-reconnect compacted-scope resume observed %d connects and %d pulls, want 1 each", connects, pulls)
 	}
 	return nil
 }
@@ -1506,51 +1514,94 @@ func (c *RetentionReconnectCoordinator) validateQueue(capture finalCapture) erro
 	return nil
 }
 
-// validateAuthoredQueueValues requires each retained mutation to hold every
-// authored column value of the bound local write.
+// validateAuthoredQueueValues requires each retained mutation to be the bound
+// local write: same runtime table, record, and operation, and each authored
+// field under its runtime field ID with the authored logical type and value.
 func (c *RetentionReconnectCoordinator) validateAuthoredQueueValues(pending []queueReplayPendingMutation) error {
-	authored, err := retentionReconnectColumnCount(c.config.Scenario.Steps, retentionReconnectStepOrder[0])
-	if err != nil {
-		return err
-	}
-	var bound struct {
-		Columns []struct {
-			Value json.RawMessage `json:"value"`
-		} `json:"columns"`
-	}
-	if json.Unmarshal(c.steps[retentionReconnectStepOrder[0]].Operation.Payload, &bound) != nil || len(bound.Columns) < authored {
-		return errors.New("React Native retention-reconnect bound local write columns are invalid")
+	intent := c.authoredIntent
+	if intent.TableName == "" || len(intent.Fields) == 0 {
+		return errors.New("React Native retention-reconnect authored intent is unavailable")
 	}
 	for _, mutation := range pending {
-		for _, column := range bound.Columns[:authored] {
-			found := false
-			for _, field := range mutation.AuthoredFields {
-				found = found || sameJSONValue(field.Value, column.Value)
-			}
-			if !found {
-				return errors.New("React Native retention-reconnect durable queue lost an authored value")
+		if mutation.TableName != intent.TableName || mutation.RecordID != intent.RecordID || mutation.Operation != intent.Operation {
+			return errors.New("React Native retention-reconnect durable queue holds another row or operation")
+		}
+		held := make(map[string]int, len(mutation.AuthoredFields))
+		for index, field := range mutation.AuthoredFields {
+			held[field.FieldID] = index
+		}
+		for _, want := range intent.Fields {
+			index, found := held[want.FieldID]
+			if !found || mutation.AuthoredFields[index].LogicalType != want.LogicalType || !sameJSONValue(mutation.AuthoredFields[index].Value, want.Value) {
+				return fmt.Errorf("React Native retention-reconnect durable queue lost authored field %s", want.FieldID)
 			}
 		}
 	}
 	return nil
 }
 
-// The binding appends runtime support columns after the authored columns, so
-// the authored step decides how many leading bound columns are authored.
-func retentionReconnectColumnCount(steps []scenarios.Step, stepID scenarios.StepID) (int, error) {
-	for _, step := range steps {
-		if step.ID != stepID {
-			continue
-		}
-		var payload struct {
-			Columns []json.RawMessage `json:"columns"`
-		}
-		if json.Unmarshal(step.Operation.Payload, &payload) != nil || len(payload.Columns) == 0 {
-			return 0, errors.New("React Native retention-reconnect authored local write columns are invalid")
-		}
-		return len(payload.Columns), nil
+// retentionReconnectIntent is the expected retained native mutation.
+type retentionReconnectIntent struct {
+	TableName string
+	RecordID  string
+	Operation string
+	Fields    []scenarios.NativeQueuedField
+}
+
+// retentionReconnectAuthoredIntent binds the authored local write to its
+// runtime row and fields. The binding appends support columns after the
+// authored ones, so authored column i has bound value i. Logical types come
+// from the authored schema in setup.
+func retentionReconnectAuthoredIntent(setup, authored, bound scenarios.Operation, runtimeField func(table, field string) (string, error)) (retentionReconnectIntent, error) {
+	var schema struct {
+		InitialSchema struct {
+			Tables []struct {
+				TableID string `json:"table_id"`
+				Fields  []struct {
+					FieldID string `json:"field_id"`
+					Type    string `json:"type"`
+				} `json:"fields"`
+			} `json:"tables"`
+		} `json:"initial_schema"`
 	}
-	return 0, errors.New("React Native retention-reconnect authored local write is absent")
+	var write struct {
+		TableID   string `json:"table_id"`
+		Operation string `json:"operation"`
+		Columns   []struct {
+			FieldID string `json:"field_id"`
+		} `json:"columns"`
+	}
+	var runtime struct {
+		TableID string            `json:"table_id"`
+		PK      map[string]string `json:"pk"`
+		Columns []struct {
+			Value json.RawMessage `json:"value"`
+		} `json:"columns"`
+	}
+	if json.Unmarshal(setup.Payload, &schema) != nil || json.Unmarshal(authored.Payload, &write) != nil || json.Unmarshal(bound.Payload, &runtime) != nil ||
+		write.TableID == "" || write.Operation == "" || len(write.Columns) == 0 || runtime.TableID == "" || len(runtime.PK) != 1 || len(runtime.Columns) < len(write.Columns) {
+		return retentionReconnectIntent{}, errors.New("React Native retention-reconnect local write binding is invalid")
+	}
+	types := make(map[string]string)
+	for _, table := range schema.InitialSchema.Tables {
+		if table.TableID == write.TableID {
+			for _, field := range table.Fields {
+				types[field.FieldID] = field.Type
+			}
+		}
+	}
+	intent := retentionReconnectIntent{TableName: runtime.TableID, Operation: write.Operation}
+	for _, recordID := range runtime.PK {
+		intent.RecordID = recordID
+	}
+	for index, column := range write.Columns {
+		fieldID, err := runtimeField(write.TableID, column.FieldID)
+		if err != nil || types[column.FieldID] == "" {
+			return retentionReconnectIntent{}, fmt.Errorf("React Native retention-reconnect authored field %s has no runtime binding or type", column.FieldID)
+		}
+		intent.Fields = append(intent.Fields, scenarios.NativeQueuedField{FieldID: fieldID, LogicalType: types[column.FieldID], Value: runtime.Columns[index].Value})
+	}
+	return intent, nil
 }
 
 // sameJSONValue compares decoded values because native serializers do not fix
@@ -1712,7 +1763,7 @@ func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error 
 	if err := validateRetentionReconnectCompaction(server, pin); err != nil {
 		return fmt.Errorf("validate React Native retention-reconnect compacted floor: %w", err)
 	}
-	if err := c.validateFloorEqualCheckpoint(ctx); err != nil {
+	if err := c.validateResumedCheckpointAtFloor(ctx); err != nil {
 		return err
 	}
 	identities, err := c.resolveIdentities(server)
@@ -1723,10 +1774,12 @@ func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error 
 	return nil
 }
 
-// validateFloorEqualCheckpoint observes the claimed boundary directly. The
-// resume pull acknowledged the persisted cursor, so its durable checkpoint must
-// equal the retention floor of the compacted scope.
-func (c *RetentionReconnectCoordinator) validateFloorEqualCheckpoint(ctx context.Context) error {
+// validateResumedCheckpointAtFloor observes the boundary directly. The resume
+// pull acknowledged the persisted cursor, so its durable checkpoint must be at
+// or above the retention floor of the compacted scope, the resumable range in
+// spec 03-state-machines. The active rebuild pin can hold the floor below the
+// cursor, so equality is not required.
+func (c *RetentionReconnectCoordinator) validateResumedCheckpointAtFloor(ctx context.Context) error {
 	var runtimeScope string
 	if json.Unmarshal(c.runtimeIDs["scope-a"], &runtimeScope) != nil || runtimeScope == "" {
 		return errors.New("React Native retention-reconnect authored scope binding is absent")
@@ -1735,12 +1788,8 @@ func (c *RetentionReconnectCoordinator) validateFloorEqualCheckpoint(ctx context
 	if err != nil {
 		return fmt.Errorf("observe React Native retention-reconnect floor: %w", err)
 	}
-	return requireFloorEqualCheckpoint(floor, checkpoint)
-}
-
-func requireFloorEqualCheckpoint(floor, checkpoint string) error {
-	if floor == "" || floor != checkpoint {
-		return fmt.Errorf("React Native retention-reconnect resumed checkpoint %q is not the retention floor %q", checkpoint, floor)
+	if err := blackbox.RequireCheckpointAtOrAboveFloor(floor, checkpoint); err != nil {
+		return fmt.Errorf("React Native retention-reconnect %w", err)
 	}
 	return nil
 }

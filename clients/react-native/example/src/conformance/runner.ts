@@ -521,11 +521,30 @@ export class PublicConformanceRunner {
         case 'pending-mutations': {
           // The native runners capture the complete retained ledger for this
           // source, pending states plus rejected_terminal. The pending-only
-          // inspection excludes rejected_terminal by design.
-          const captured = await state();
-          capture.pending_mutations = currentMutations(
-            capturedDetail(captured.retainedMutations, captured.clientState.mutationLedgerCount, 'pending-mutations')
-          );
+          // inspection excludes rejected_terminal by design. Row selectors
+          // bound a capture whose ledger exceeds the snapshot bound, so that
+          // path reads the retained ledger directly after normalization.
+          if (parameters.retained_mutation_rows === undefined) {
+            const captured = await state();
+            capture.pending_mutations = currentMutations(
+              capturedDetail(captured.retainedMutations, captured.clientState.mutationLedgerCount, 'pending-mutations')
+            );
+            break;
+          }
+          const rows = decodeRetainedMutationRows(parameters.retained_mutation_rows);
+          let retained: RetainedMutationInspection[];
+          try {
+            await client.pendingChangeCount();
+            retained = await client.inspectRetainedMutations();
+          } catch {
+            throw new ConformanceCommandError('capture_inspection_failed');
+          }
+          capture.pending_mutations = currentMutations(bounded(
+            retained.filter((mutation) =>
+              rows.some((row) => row.tableName === mutation.tableName && row.recordID === mutation.recordID)
+            ),
+            'pending-mutations'
+          ));
           break;
         }
         case 'rejected-mutations': {
@@ -904,6 +923,16 @@ function decodeSelectors(value: unknown): RowSelector[] {
     throw new ConformanceCommandError('invalid_command');
   }
   return selectors;
+}
+
+function decodeRetainedMutationRows(value: unknown): { tableName: string; recordID: string }[] {
+  return requiredArray(value).map((member) => {
+    const row = requiredRecord(member);
+    if (Object.keys(row).length !== 2) {
+      throw new ConformanceCommandError('invalid_command');
+    }
+    return { tableName: requiredIdentifier(row.table_name), recordID: requiredString(row.record_id) };
+  });
 }
 
 function durableProofIdentity(

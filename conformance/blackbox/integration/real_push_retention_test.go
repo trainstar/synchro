@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"slices"
@@ -862,6 +863,41 @@ func TestRealS12StaleClientCompactionAndReconnect(t *testing.T) {
 	}
 	if stalePush.BatchCount != 0 || stalePush.MutationCount != 0 || stalePush.SourceRowCount != 0 {
 		t.Fatalf("S-12 stale push performed durable work: %#v", stalePush)
+	}
+
+	// The compacted client stays bound to its user, so pull and rebuild with
+	// its last generation must require renewal, not authentication.
+	retiredCheckpoints := observeCheckpointMap(t, ctx, harness, client.ID)
+	staleRebuildID := "00000000-0000-4000-8b03-000000000004"
+	pullStatus, pullResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", realPullPayload(client, client.Scopes, 1))
+	rebuildStatus, rebuildResponse := requestRealRebuildPage(
+		t, ctx, harness, token, client, "user:diagnostic-user", staleRebuildID, nil, 1,
+	)
+	for _, stale := range []struct {
+		path     string
+		status   int
+		response map[string]any
+	}{
+		{path: "/sync/pull", status: pullStatus, response: pullResponse},
+		{path: "/sync/rebuild", status: rebuildStatus, response: rebuildResponse},
+	} {
+		assertPhase4ProtocolError(t, stale.status, stale.response, http.StatusConflict, "client_generation_expired")
+		if stale.response["error"].(map[string]any)["current_client_generation"] != float64(client.Generation) {
+			t.Fatalf("S-12 stale %s did not identify the retired generation: %#v", stale.path, stale.response)
+		}
+	}
+	afterStaleReads, err := harness.Operator().ObserveDiagnosticClientGeneration(ctx, client.ID)
+	if err != nil {
+		t.Fatalf("observe S-12 generation after stale reads: %v", err)
+	}
+	if afterStaleReads != retired {
+		t.Fatalf("S-12 stale reads changed the client: before=%#v after=%#v", retired, afterStaleReads)
+	}
+	if checkpoints := observeCheckpointMap(t, ctx, harness, client.ID); !maps.Equal(checkpoints, retiredCheckpoints) {
+		t.Fatalf("S-12 stale reads changed checkpoints: before=%#v after=%#v", retiredCheckpoints, checkpoints)
+	}
+	if _, err := harness.Operator().ObserveRebuildSession(ctx, client.ID, staleRebuildID); err == nil {
+		t.Fatal("S-12 stale rebuild created a rebuild session")
 	}
 
 	status, reconnected := postSync(t, ctx, harness.AdapterURL(), token, "/sync/connect", map[string]any{

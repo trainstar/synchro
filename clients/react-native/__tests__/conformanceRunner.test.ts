@@ -674,6 +674,61 @@ describe('PublicConformanceRunner call lifecycle', () => {
     }
   });
 
+  it('selects retained mutations by row from a ledger above the snapshot bound', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091',
+      authToken: 'test-token',
+      appVersion: '1.0.0',
+    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      const retained = (mutationID: string, tableName: string, recordID: string) => ({
+        representation: 'current',
+        mutationID,
+        localOrder: 1,
+        tableID: `table-${tableName}`,
+        tableName,
+        recordID,
+        primaryKeyFieldID: 'field-id',
+        primaryKeyLogicalType: 'string',
+        operation: 'insert',
+        authoredSchema: { version: 1, hash: 'a'.repeat(64) },
+        baseVersion: null,
+        clientVersion: 'client-v1',
+        status: 'pending',
+        sourceKind: 'local_write',
+        dependsOnMutationID: null,
+        normalizedMutationID: null,
+        sealedBatchID: null,
+        sealedOrdinal: null,
+        authoredFields: [{ fieldID: 'field-name', logicalType: 'string', value: 'queued' }],
+      });
+      const selected = retained('mutation-selected', 'cf_items', 'row-a');
+      const ledger = [
+        retained('mutation-other-row', 'cf_items', 'row-b'),
+        selected,
+        retained('mutation-other-table', 'cf_other_items', 'row-a'),
+      ];
+      mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(JSON.stringify(ledger));
+
+      const result = await runner.execute(command('observer', 'capture', 'client-a', {
+        client_keys: ['client-a'],
+        sources: ['pending-mutations'],
+        retained_mutation_rows: [{ table_name: 'cf_items', record_id: 'row-a' }],
+      }));
+
+      const wireMutation: Record<string, unknown> = { ...selected };
+      delete wireMutation.representation;
+      expect((result as { capture: { pending_mutations: object[] } }).capture.pending_mutations).toStrictEqual([wireMutation]);
+      expect(mockNativeModule.inspectClientStateSnapshot).not.toHaveBeenCalled();
+      expect(mockNativeModule.pendingChangeCount.mock.invocationCallOrder[0]).toBeLessThan(
+        mockNativeModule.inspectRetainedMutations.mock.invocationCallOrder[0]
+      );
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('rejects malformed durable proof facts', async () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091',

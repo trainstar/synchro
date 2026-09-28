@@ -190,6 +190,8 @@ A required target rejects a changed selector such as `GO_TEST_ARGS`, `GO_TEST_PK
 `PARTIAL=1` permits a selector for diagnosis. A `PARTIAL=1` result is not gate evidence.
 The structured result parser rejects failed, skipped, and zero-test results.
 Device gates require exactly one `KOTLIN_ANDROID_SERIAL` and pass it to Gradle as `ANDROID_SERIAL`.
+`SYNCHRO_MAVEN_REPO` selects one Maven repository for Kotlin SDK publication and every React Native Android build.
+It is repository configuration, not a test selector.
 
 The `source quality` job runs on every pull request and push.
 It runs contract, documentation, conformance, release-tooling, lint, and unit gates.

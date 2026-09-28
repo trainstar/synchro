@@ -29,14 +29,20 @@ const (
 // Source comes from direct queries of the isolated source tables. Authored is
 // the independent model of every row that the workload authored. Neither
 // uses Synchro membership, checkpoint, or checksum output.
+//
+// Names maps each runtime table and field ID to its stable authored name.
+// Registration allocates runtime IDs at random in each cluster, so violation
+// evidence uses these names and replay can compare it across clusters.
 type SourceStateObservation struct {
 	Authored []SourceRow
 	Source   []SourceRow
+	Names    map[string]string
 }
 
-// SourceRow is one live business row. ScopeIDs come from the authored business
-// membership rule. Fields holds each compared business field by manifest field
-// ID as canonical wire JSON.
+// SourceRow is one live row. ScopeIDs come from the authored business
+// membership rule. Fields holds canonical wire JSON by manifest field ID. A
+// source row holds every synced field. An authored row holds only the business
+// fields that the workload authored.
 type SourceRow struct {
 	TableID    string
 	PrimaryKey json.RawMessage
@@ -48,7 +54,13 @@ type SourceRow struct {
 // complete client's scope membership and held field values with the source.
 func CheckSourceState(sequence uint64, manifest *vectors.Manifest, clients []invariants.ClientObservation, state SourceStateObservation) []invariants.Violation {
 	var violations []invariants.Violation
-	if key, equal := equalSourceRows(state.Authored, state.Source); !equal {
+	name := func(id string) string {
+		if value, found := state.Names[id]; found {
+			return value
+		}
+		return "unnamed"
+	}
+	if key, equal := equalSourceRows(state.Authored, state.Source, name); !equal {
 		violations = append(violations, sourceStateViolation(sequence, RuleSourceStateAuthoredMismatch,
 			invariants.EvidenceField{Name: "authored_rows", Value: strconv.Itoa(len(state.Authored))},
 			invariants.EvidenceField{Name: "source_rows", Value: strconv.Itoa(len(state.Source))},
@@ -63,7 +75,7 @@ func CheckSourceState(sequence uint64, manifest *vectors.Manifest, clients []inv
 		identity, err := vectors.RowIdentity(*manifest, row.TableID, row.PrimaryKey)
 		if err != nil {
 			violations = append(violations, sourceStateViolation(sequence, RuleSourceStateRowInvalid,
-				invariants.EvidenceField{Name: "table_id", Value: row.TableID}))
+				invariants.EvidenceField{Name: "table", Value: name(row.TableID)}))
 			continue
 		}
 		expected[string(identity)] = row
@@ -75,12 +87,12 @@ func CheckSourceState(sequence uint64, manifest *vectors.Manifest, clients []inv
 		}
 	}
 	for _, client := range clients {
-		violations = append(violations, checkClientSourceState(sequence, manifest, client, expected, scopes)...)
+		violations = append(violations, checkClientSourceState(sequence, manifest, client, expected, scopes, name)...)
 	}
 	return violations
 }
 
-func checkClientSourceState(sequence uint64, manifest *vectors.Manifest, client invariants.ClientObservation, expected map[string]SourceRow, scopes map[string]map[string]struct{}) []invariants.Violation {
+func checkClientSourceState(sequence uint64, manifest *vectors.Manifest, client invariants.ClientObservation, expected map[string]SourceRow, scopes map[string]map[string]struct{}, name func(string) string) []invariants.Violation {
 	clientID := invariants.EvidenceField{Name: "client_id", Value: client.State.ClientID}
 	if !client.Complete {
 		return []invariants.Violation{sourceStateViolation(sequence, RuleSourceStateClientIncomplete, clientID)}
@@ -111,7 +123,8 @@ func checkClientSourceState(sequence uint64, manifest *vectors.Manifest, client 
 		source, found := expected[string(identity)]
 		if err != nil || !found || !heldInAnyScope(held, string(identity)) {
 			violations = append(violations, sourceStateViolation(sequence, RuleSourceStateUnauthorizedRow, clientID,
-				invariants.EvidenceField{Name: "table_id", Value: row.TableID}))
+				invariants.EvidenceField{Name: "table", Value: name(row.TableID)},
+				invariants.EvidenceField{Name: "record", Value: boundedEvidence(string(row.Row.PK))}))
 			continue
 		}
 		values := make(map[string]json.RawMessage, len(row.Row.Fields))
@@ -121,43 +134,46 @@ func checkClientSourceState(sequence uint64, manifest *vectors.Manifest, client 
 		for _, fieldID := range sortedKeys(source.Fields) {
 			if !sameJSON(values[fieldID], source.Fields[fieldID]) {
 				violations = append(violations, sourceStateViolation(sequence, RuleSourceStateValueMismatch, clientID,
-					invariants.EvidenceField{Name: "table_id", Value: row.TableID},
-					invariants.EvidenceField{Name: "field_id", Value: fieldID}))
+					invariants.EvidenceField{Name: "table", Value: name(row.TableID)},
+					invariants.EvidenceField{Name: "record", Value: boundedEvidence(string(row.Row.PK))},
+					invariants.EvidenceField{Name: "field", Value: name(fieldID)}))
 			}
 		}
 	}
 	return violations
 }
 
-func equalSourceRows(left, right []SourceRow) (string, bool) {
+// equalSourceRows requires the same live rows and scopes in both sets, and the
+// same value for every field that the authored row holds.
+func equalSourceRows(authored, source []SourceRow, name func(string) string) (string, bool) {
 	index := func(rows []SourceRow) map[string]SourceRow {
 		result := make(map[string]SourceRow, len(rows))
 		for _, row := range rows {
-			result[row.TableID+"\x00"+string(row.PrimaryKey)] = row
+			result[name(row.TableID)+"/"+string(row.PrimaryKey)] = row
 		}
 		return result
 	}
-	leftRows, rightRows := index(left), index(right)
-	keys := sortedKeys(leftRows)
-	for key := range rightRows {
-		if _, found := leftRows[key]; !found {
+	authoredRows, sourceRows := index(authored), index(source)
+	keys := sortedKeys(authoredRows)
+	for key := range sourceRows {
+		if _, found := authoredRows[key]; !found {
 			keys = append(keys, key)
 		}
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		leftRow, leftFound := leftRows[key]
-		rightRow, rightFound := rightRows[key]
-		if !leftFound || !rightFound || !sameScopes(leftRow.ScopeIDs, rightRow.ScopeIDs) || len(leftRow.Fields) != len(rightRow.Fields) {
-			return strings.ReplaceAll(key, "\x00", "/"), false
+		authoredRow, authoredFound := authoredRows[key]
+		sourceRow, sourceFound := sourceRows[key]
+		if !authoredFound || !sourceFound || !sameScopes(authoredRow.ScopeIDs, sourceRow.ScopeIDs) {
+			return key, false
 		}
-		for fieldID, value := range leftRow.Fields {
-			if !sameJSON(value, rightRow.Fields[fieldID]) {
-				return strings.ReplaceAll(key, "\x00", "/"), false
+		for fieldID, value := range authoredRow.Fields {
+			if !sameJSON(value, sourceRow.Fields[fieldID]) {
+				return key + "/" + name(fieldID), false
 			}
 		}
 	}
-	return "", len(left) == len(leftRows) && len(right) == len(rightRows)
+	return "", len(authored) == len(authoredRows) && len(source) == len(sourceRows)
 }
 
 func sameScopes(left, right []string) bool {

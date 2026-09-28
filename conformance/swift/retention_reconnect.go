@@ -43,12 +43,12 @@ type retentionReconnectBinding struct {
 }
 
 // RunRetentionReconnectScenario executes the authored expired-generation reconnect flow through Swift.
-func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (RetentionReconnectResult, error) {
+func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, operator *blackbox.OperatorExecutor, platform *Platform, client Client) (RetentionReconnectResult, error) {
 	steps, err := swiftScenarioStepMap(scenario, retentionReconnectScenarioID, 9)
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
-	if controller == nil || platform == nil {
+	if controller == nil || operator == nil || platform == nil {
 		return RetentionReconnectResult{}, errors.New("Swift retention-reconnect dependencies are unavailable")
 	}
 	if err := validateRetentionReconnectBindings(scenario, steps, client); err != nil {
@@ -211,9 +211,18 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	if err != nil {
 		return RetentionReconnectResult{}, err
 	}
-	floorResumeCall, err := resumeRetentionReconnectAtFloor(ctx, platform, client, runtimeScope)
+	floorResumeCall, err := resumeRetentionReconnectAfterCompaction(ctx, platform, client, runtimeScope)
 	if err != nil {
 		return RetentionReconnectResult{}, err
+	}
+	// The active rebuild pin can hold the floor below the cursor, so the resume
+	// proves a checkpoint at or above the observed floor, not floor equality.
+	floor, checkpoint, err := operator.ObserveScopeFloorCheckpoint(ctx, client.UserID, client.ClientID, runtimeScope)
+	if err != nil {
+		return RetentionReconnectResult{}, fmt.Errorf("observe Swift retention-reconnect floor: %w", err)
+	}
+	if err := blackbox.RequireCheckpointAtOrAboveFloor(floor, checkpoint); err != nil {
+		return RetentionReconnectResult{}, fmt.Errorf("Swift retention-reconnect %w", err)
 	}
 
 	clientFacts, err := platform.Capture(ctx, []Client{client}, []string{"pending-mutations", "rejected-mutations", "rebuild-state"})
@@ -242,15 +251,15 @@ func RunRetentionReconnectScenario(ctx context.Context, scenario scenarios.Scena
 	}, nil
 }
 
-// resumeRetentionReconnectAtFloor proves that a compacted floor remains usable
-// after the native process restarts. The post-restart pull must reuse the
-// durable cursor and must not enter rebuild.
-func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, client Client, runtimeScope string) (RetentionReconnectCall, error) {
+// resumeRetentionReconnectAfterCompaction proves that the durable cursor
+// remains usable after compaction and a native process restart. The
+// post-restart pull must reuse the durable cursor and must not enter rebuild.
+func resumeRetentionReconnectAfterCompaction(ctx context.Context, platform *Platform, client Client, runtimeScope string) (RetentionReconnectCall, error) {
 	before, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
-		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect floor cursor: %w", err)
+		return RetentionReconnectCall{}, fmt.Errorf("capture Swift retention-reconnect durable cursor: %w", err)
 	}
-	if _, err := retentionReconnectFloorCursor(before, runtimeScope); err != nil {
+	if _, err := retentionReconnectDurableCursor(before, runtimeScope); err != nil {
 		return RetentionReconnectCall{}, err
 	}
 	restartPayload, err := json.Marshal(map[string]string{"user_id": client.UserID, "client_id": client.ClientID})
@@ -267,7 +276,7 @@ func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, cl
 	}
 	resumed, err := swiftScenarioCall(ctx, platform, client, "start")
 	if err != nil {
-		return RetentionReconnectCall{}, fmt.Errorf("resume Swift retention-reconnect client at compacted floor: %w", err)
+		return RetentionReconnectCall{}, fmt.Errorf("resume Swift retention-reconnect client after compaction: %w", err)
 	}
 	after, err := platform.captureSnapshot(ctx, client)
 	if err != nil {
@@ -279,13 +288,13 @@ func resumeRetentionReconnectAtFloor(ctx context.Context, platform *Platform, cl
 	return RetentionReconnectCall{Completion: resumed.Completion, Transport: resumed.transportObservations}, nil
 }
 
-func retentionReconnectFloorCursor(snapshot runnerResult, runtimeScope string) (scopeStateRecord, error) {
+func retentionReconnectDurableCursor(snapshot runnerResult, runtimeScope string) (scopeStateRecord, error) {
 	floor, _, err := retentionReconnectScopeStates(snapshot, runtimeScope)
 	if err != nil {
 		return scopeStateRecord{}, err
 	}
 	if floor.Cursor == nil || *floor.Cursor == "" {
-		return scopeStateRecord{}, errors.New("Swift retention-reconnect compacted floor cursor is absent")
+		return scopeStateRecord{}, errors.New("Swift retention-reconnect durable cursor after compaction is absent")
 	}
 	return floor, nil
 }
@@ -323,14 +332,14 @@ func validateRetentionReconnectFloorResume(before, restarted, after runnerResult
 		return err
 	}
 	if floor.Cursor == nil || *floor.Cursor == "" {
-		return errors.New("Swift retention-reconnect compacted floor cursor is absent")
+		return errors.New("Swift retention-reconnect durable cursor after compaction is absent")
 	}
 	restartedFloor, restartedIdentity, err := retentionReconnectScopeStates(restarted, runtimeScope)
 	if err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(floor, restartedFloor) || !reflect.DeepEqual(identity, restartedIdentity) {
-		return errors.New("Swift retention-reconnect restart changed the durable floor cursor")
+		return errors.New("Swift retention-reconnect restart changed the durable cursor")
 	}
 	resumedFloor, resumedIdentity, err := retentionReconnectScopeStates(after, runtimeScope)
 	if err != nil {
@@ -348,7 +357,7 @@ func validateRetentionReconnectFloorResume(before, restarted, after runnerResult
 		return errors.New("Swift retention-reconnect resumed cursor scope changed")
 	}
 	if call.Completion != "idle" {
-		return fmt.Errorf("Swift retention-reconnect floor resume completion = %q, want idle (call error %q)", call.Completion, call.CallErrorCategory)
+		return fmt.Errorf("Swift retention-reconnect compacted-scope resume completion = %q, want idle (call error %q)", call.Completion, call.CallErrorCategory)
 	}
 
 	requestFingerprints := retentionReconnectCursorFingerprints(floor, identity)
@@ -359,24 +368,24 @@ func validateRetentionReconnectFloorResume(before, restarted, after runnerResult
 		switch observed.OperationClass {
 		case "connect":
 			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable {
-				return errors.New("Swift retention-reconnect floor resume connect is invalid")
+				return errors.New("Swift retention-reconnect compacted-scope resume connect is invalid")
 			}
 			connects++
 		case "rebuild":
-			return errors.New("Swift retention-reconnect floor-equal cursor entered rebuild")
+			return errors.New("Swift retention-reconnect compacted-scope resume entered rebuild")
 		case "pull":
 			response := observed.PullResponseFacts
 			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable || observed.CursorFingerprintsComplete == nil ||
 				!*observed.CursorFingerprintsComplete || !equalStrings(observed.CursorFingerprints, requestFingerprints) || response == nil ||
 				response.ChangeCount != 0 || response.HasMore || response.RebuildScopeCount != 0 || !response.ScopeCursorFingerprintsComplete ||
 				response.ChecksumCount != len(responseFingerprints) || !equalStrings(response.ScopeCursorFingerprints, responseFingerprints) {
-				return errors.New("Swift retention-reconnect floor-equal pull is invalid")
+				return errors.New("Swift retention-reconnect compacted-scope resume pull is invalid")
 			}
 			pulls++
 		}
 	}
 	if connects != 1 || pulls != 1 {
-		return fmt.Errorf("Swift retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
+		return fmt.Errorf("Swift retention-reconnect compacted-scope resume observed %d connects and %d pulls, want 1 each", connects, pulls)
 	}
 	return nil
 }
