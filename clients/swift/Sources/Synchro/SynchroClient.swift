@@ -8,7 +8,7 @@ private struct RebuildReceiptGroupKey: Hashable {
 
 public final class SynchroClient: @unchecked Sendable {
     private let config: SynchroConfig
-    private let database: SynchroDatabase
+    let database: SynchroDatabase
     private let httpClient: HttpClient
     private let schemaManager: SchemaManager
     private let changeTracker: ChangeTracker

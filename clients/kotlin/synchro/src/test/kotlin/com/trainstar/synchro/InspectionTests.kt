@@ -11,6 +11,13 @@ import com.trainstar.synchro.inspection.ScopeStateInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import java.io.IOException
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.AbstractQueuedSynchronizer
+import java.util.concurrent.locks.LockSupport
 import java.util.UUID
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
@@ -28,6 +35,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+
+private const val GUARD_SECONDS = 60L
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -503,6 +512,87 @@ class InspectionTests {
         } finally {
             client.close()
             context.deleteDatabase(config.dbPath)
+        }
+    }
+
+    /**
+     * Queues a transition on the fair client write lock directly behind the snapshot. The lock
+     * grants waiters in order, so the transition commits after the first transaction of the
+     * snapshot and before any later transaction of the same snapshot.
+     */
+    @Test
+    fun snapshotKeepsOneStateWhenATransitionFollowsItsFirstTransaction() {
+        val config = prepareClientConfig()
+        val client = SynchroClient(config, context)
+        val threads = Executors.newFixedThreadPool(3)
+        val release = CountDownLatch(1)
+        try {
+            client.execute(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf("o1", "before", "2026-01-01T00:00:00.000000Z"),
+            )
+            val holding = CountDownLatch(1)
+            val holder = threads.submit {
+                client.writeTransaction {
+                    holding.countDown()
+                    release.await()
+                }
+            }
+            assertTrue(holding.await(GUARD_SECONDS, TimeUnit.SECONDS))
+
+            var rows: List<Row> = emptyList()
+            val snapshotThread = AtomicReference<Thread>()
+            val snapshot = threads.submit(Callable {
+                snapshotThread.set(Thread.currentThread())
+                SynchroInspection(client).captureSnapshot(maximumRecords = 8) { _, transaction ->
+                    rows = transaction.query("SELECT id FROM orders ORDER BY id")
+                }
+            })
+            awaitQueuedOnLock(snapshotThread)
+            val transitionThread = AtomicReference<Thread>()
+            val transition = threads.submit {
+                transitionThread.set(Thread.currentThread())
+                client.execute(
+                    "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                    arrayOf("o2", "after", "2026-01-02T00:00:00.000000Z"),
+                )
+            }
+            awaitQueuedOnLock(transitionThread)
+            release.countDown()
+            holder.get(GUARD_SECONDS, TimeUnit.SECONDS)
+            val captured = snapshot.get(GUARD_SECONDS, TimeUnit.SECONDS)
+            transition.get(GUARD_SECONDS, TimeUnit.SECONDS)
+
+            assertEquals(listOf(mapOf("id" to "o1")), rows)
+            assertEquals(1, captured.capture.applicationRowCount)
+            assertEquals(1, captured.capture.mutationLedgerCount)
+            assertEquals(listOf("o1"), requireNotNull(captured.retainedMutations).map { it.recordID })
+            assertEquals(1, captured.pendingChangeCount)
+
+            var laterRows: List<Row> = emptyList()
+            val later = SynchroInspection(client).captureSnapshot(maximumRecords = 8) { _, transaction ->
+                laterRows = transaction.query("SELECT id FROM orders ORDER BY id")
+            }
+            assertEquals(listOf(mapOf("id" to "o1"), mapOf("id" to "o2")), laterRows)
+            assertEquals(2, later.capture.applicationRowCount)
+            assertEquals(listOf("o1", "o2"), requireNotNull(later.retainedMutations).map { it.recordID })
+        } finally {
+            release.countDown()
+            threads.shutdown()
+            assertTrue(threads.awaitTermination(GUARD_SECONDS, TimeUnit.SECONDS))
+            client.close()
+            context.deleteDatabase(config.dbPath)
+        }
+    }
+
+    /** Waits until the thread is parked on a lock. A thread parks on the client write lock here. */
+    private fun awaitQueuedOnLock(thread: AtomicReference<Thread>) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(GUARD_SECONDS)
+        while (true) {
+            val queued = thread.get()?.let { LockSupport.getBlocker(it) is AbstractQueuedSynchronizer } == true
+            if (queued) return
+            check(System.nanoTime() < deadline) { "thread did not queue on the client write lock" }
+            Thread.yield()
         }
     }
 
