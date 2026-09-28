@@ -186,12 +186,12 @@ func validateSwiftWireObservation(scenario scenarios.Scenario, stepID string, ob
 		if expected.StepID != scenarios.StepID(stepID) {
 			continue
 		}
-		if observed.StatusCode != expected.HTTPStatus || observed.Retryable != expected.Retryable || !equalOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
+		if observed.StatusCode != expected.HTTPStatus || wireRetryable(observed) != expected.Retryable || !equalOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
 			// The observed and authored values name the field that diverged.
 			return fmt.Errorf(
 				"Swift wire result %s differs from its authored expectation: observed status %d, retryable %t, error code %s; authored status %d, retryable %t, error code %s",
 				stepID,
-				observed.StatusCode, observed.Retryable, optionalStringOrNone(observed.ErrorCode),
+				observed.StatusCode, wireRetryable(observed), optionalStringOrNone(observed.ErrorCode),
 				expected.HTTPStatus, expected.Retryable, optionalStringOrNone(expected.ErrorCode))
 		}
 		return nil
@@ -223,7 +223,7 @@ func validateSwiftSteadyPullBaselineWires(scenario scenarios.Scenario, result Sy
 		return errors.New("Swift steady-pull baseline call shape is invalid")
 	}
 	connect := result.transportObservations[0]
-	if connect.StatusCode != 200 || connect.Retryable || connect.ErrorCode != nil {
+	if connect.StatusCode != 200 || connect.Retryable != nil || connect.ErrorCode != nil {
 		return errors.New("Swift steady-pull baseline connect did not succeed")
 	}
 	for _, observation := range result.transportObservations[1 : len(result.transportObservations)-1] {

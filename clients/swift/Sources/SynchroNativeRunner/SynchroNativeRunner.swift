@@ -441,7 +441,7 @@ private struct RunnerTransportObservation: Encodable {
     let operationClass: TransportOperationClass
     let statusCode: Int
     let errorCode: String?
-    let retryable: Bool
+    let retryable: Bool?
     let durationNanoseconds: UInt64
     let cursorFingerprints: [String]?
     let cursorFingerprintsComplete: Bool?
@@ -467,14 +467,8 @@ private struct RunnerTransportObservation: Encodable {
         sequence = observation.sequence
         operationClass = observation.operationClass
         statusCode = observation.statusCode
-        let (mappedCode, mappedRetryable) = transportFailureFacts(
-            statusCode: observation.statusCode,
-            operationClass: observation.operationClass
-        )
-        // One status code carries more than one error code, so the code the
-        // server reported wins over the code the status implies.
-        errorCode = observation.errorCode ?? mappedCode
-        retryable = mappedRetryable
+        errorCode = observation.errorCode
+        retryable = observation.retryable
         durationNanoseconds = observation.durationNanoseconds
         cursorFingerprints = observation.cursorFingerprints
         cursorFingerprintsComplete = observation.cursorFingerprintsComplete
@@ -496,41 +490,6 @@ private struct RunnerTransportObservation: Encodable {
         try container.encodeIfPresent(requestFacts, forKey: .requestFacts)
         try container.encodeIfPresent(rebuildResponseFacts, forKey: .rebuildResponseFacts)
         try container.encodeIfPresent(pullResponseFacts, forKey: .pullResponseFacts)
-    }
-}
-
-private func transportFailureFacts(
-    statusCode: Int,
-    operationClass: TransportOperationClass
-) -> (String?, Bool) {
-    guard statusCode != 0 else { return (nil, true) }
-    guard !(200..<300).contains(statusCode) else { return (nil, false) }
-    switch statusCode {
-    case 400:
-        return ("invalid_request", false)
-    case 401:
-        return ("auth_required", false)
-    case 409:
-        switch operationClass {
-        case .rebuild:
-            return ("rebuild_restart_required", false)
-        case .push:
-            return ("idempotency_conflict", false)
-        default:
-            return ("client_generation_expired", false)
-        }
-    case 422:
-        return ("schema_mismatch", false)
-    case 426:
-        return ("upgrade_required", false)
-    case 429:
-        return ("retry_later", true)
-    case 500:
-        return ("sync_integrity_failure", false)
-    case 503:
-        return ("capture_pending", true)
-    default:
-        return ("invalid_response", false)
     }
 }
 

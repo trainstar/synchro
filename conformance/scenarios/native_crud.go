@@ -796,7 +796,7 @@ func validateNativeCRUDResponse(response NativeCRUDResponse, operation string, m
 			continue
 		}
 		pushes++
-		if observation.StatusCode != 200 || observation.ErrorCode != "" || !observation.RetryablePresent || observation.Retryable || !observation.MutationCountPresent || observation.MutationCount != mutationCount {
+		if observation.StatusCode != 200 || observation.ErrorCode != "" || observation.RetryablePresent || !observation.MutationCountPresent || observation.MutationCount != mutationCount {
 			return fmt.Errorf("native CRUD %s push response is invalid", operation)
 		}
 	}

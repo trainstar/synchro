@@ -52,11 +52,12 @@ func TestPushResponseLossTerminalStateRejectsRetryableContinuation(t *testing.T)
 }
 
 func TestPushResponseLossRetryStageBindsPushAfterColdStartConnect(t *testing.T) {
+	retryable := true
 	call := SynchronizationResult{
 		Completion: "blocked",
 		transportObservations: []transportObservation{
 			{OperationClass: "connect", StatusCode: 200},
-			{OperationClass: "push", StatusCode: 429, ErrorCode: pointerString("retry_later"), Retryable: true},
+			{OperationClass: "push", StatusCode: 429, ErrorCode: pointerString("retry_later"), Retryable: &retryable},
 		},
 	}
 	if err := validatePushResponseLossRetryStage(call, 429, "retry_later"); err != nil {
@@ -78,11 +79,12 @@ func TestPushResponseLossReplayRequiresTransientRetriesBeforeTerminalConflict(t 
 	if err != nil {
 		t.Fatalf("read replay operation: %v", err)
 	}
+	retryable := true
 	call := SynchronizationResult{
 		Completion: "error",
 		transportObservations: []transportObservation{
-			{OperationClass: "push", StatusCode: http.StatusTooManyRequests, ErrorCode: pointerString("retry_later"), Retryable: true},
-			{OperationClass: "push", StatusCode: http.StatusServiceUnavailable, ErrorCode: pointerString("temporary_unavailable"), Retryable: true},
+			{OperationClass: "push", StatusCode: http.StatusTooManyRequests, ErrorCode: pointerString("retry_later"), Retryable: &retryable},
+			{OperationClass: "push", StatusCode: http.StatusServiceUnavailable, ErrorCode: pointerString("temporary_unavailable"), Retryable: &retryable},
 			{OperationClass: "push", StatusCode: http.StatusConflict, ErrorCode: pointerString("idempotency_conflict")},
 		},
 	}

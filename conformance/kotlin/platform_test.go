@@ -658,14 +658,12 @@ func TestTypedValuesRequireMatchingJSONPrimitiveTypes(t *testing.T) {
 }
 
 func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
-	retryable := false
 	generation := int64(1)
 	mutationCount := 1
 	valid := TransportObservation{
 		Sequence:            1,
 		OperationClass:      "push",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			ClientGeneration: &generation,
@@ -678,10 +676,11 @@ func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
 		t.Fatalf("valid push observation failed: %v", err)
 	}
 
+	terminal := false
 	invalid := valid
-	invalid.Retryable = nil
+	invalid.Retryable = &terminal
 	if err := validateTransportObservation(invalid); err == nil {
-		t.Fatal("push observation without retryability passed")
+		t.Fatal("push success with retryability the server did not send passed")
 	}
 	invalid = valid
 	invalid.RequestFacts = nil
@@ -690,7 +689,7 @@ func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
 	}
 	invalid = valid
 	invalid.StatusCode = 503
-	retryable = true
+	retryable := true
 	invalid.Retryable = &retryable
 	if err := validateTransportObservation(invalid); err == nil {
 		t.Fatal("HTTP failure without canonical error code passed")
@@ -732,7 +731,6 @@ func TestMappedTransportObservationPreservesServerReportedErrorCode(t *testing.T
 }
 
 func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
-	retryable := false
 	protocolVersion := 3
 	scopeSetVersion := int64(0)
 	clientGeneration := int64(1)
@@ -749,7 +747,6 @@ func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
 			Sequence:            1,
 			OperationClass:      "connect",
 			StatusCode:          http.StatusOK,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				SchemaVersion:   1,
@@ -763,7 +760,6 @@ func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
 			Sequence:                   2,
 			OperationClass:             "pull",
 			StatusCode:                 http.StatusOK,
-			Retryable:                  &retryable,
 			DurationNanoseconds:        1,
 			CursorFingerprints:         []string{},
 			CursorFingerprintsComplete: &complete,
@@ -796,7 +792,6 @@ func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
 }
 
 func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {
-	retryable := false
 	protocolVersion := 3
 	scopeSetVersion := int64(0)
 	scopeCount := 0
@@ -816,7 +811,6 @@ func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {
 			Sequence:            1,
 			OperationClass:      "connect",
 			StatusCode:          http.StatusOK,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				SchemaVersion:   1,
@@ -830,7 +824,6 @@ func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {
 			Sequence:            2,
 			OperationClass:      "push",
 			StatusCode:          http.StatusOK,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				ClientGeneration: &clientGeneration,
@@ -861,7 +854,6 @@ func TestRetainedMutationDecodesSealedBatchID(t *testing.T) {
 }
 
 func TestAuthoredRequestFactsMustMatchObservedRequest(t *testing.T) {
-	retryable := false
 	protocolVersion := 3
 	scopeSetVersion := int64(0)
 	scopeCount := 0
@@ -874,7 +866,6 @@ func TestAuthoredRequestFactsMustMatchObservedRequest(t *testing.T) {
 		Sequence:            1,
 		OperationClass:      "connect",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			ProtocolVersion: &protocolVersion,
@@ -969,7 +960,6 @@ func TestKotlinSteadyPullTransportPullSelectsOnlySuccessfulCoveredPull(t *testin
 
 func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 	scopeCursor := "rebuilt-checkpoint"
-	retryable := false
 	complete := true
 	generation := int64(1)
 	scopeSetVersion := int64(1)
@@ -998,7 +988,6 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 			Sequence:            1,
 			OperationClass:      "rebuild",
 			StatusCode:          200,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				ClientGeneration:     &generation,
@@ -1020,7 +1009,6 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 			Sequence:                   2,
 			OperationClass:             "pull",
 			StatusCode:                 200,
-			Retryable:                  &retryable,
 			DurationNanoseconds:        1,
 			CursorFingerprints:         []string{terminalFingerprint},
 			CursorFingerprintsComplete: &complete,
@@ -1050,7 +1038,6 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 }
 
 func TestTerminalRebuildResponseRequiresValidCursorFingerprint(t *testing.T) {
-	retryable := false
 	fingerprint := cursorFingerprint("terminal-cursor")
 	generation := int64(1)
 	limit := 1
@@ -1061,7 +1048,6 @@ func TestTerminalRebuildResponseRequiresValidCursorFingerprint(t *testing.T) {
 		Sequence:            1,
 		OperationClass:      "rebuild",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			ClientGeneration:     &generation,

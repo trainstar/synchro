@@ -249,8 +249,8 @@ func validatePushResponseLossRetryStage(call SynchronizationResult, status int, 
 	if err != nil || call.Completion != "blocked" {
 		return fmt.Errorf("Swift push-response-loss retry stage did not block after one push")
 	}
-	if push.OperationClass != "push" || push.StatusCode != status || !push.Retryable || optionalStringOrNone(push.ErrorCode) != code {
-		return fmt.Errorf("Swift push-response-loss retry stage = %s/%d/%t, want push/%d/true", optionalStringOrNone(push.ErrorCode), push.StatusCode, push.Retryable, status)
+	if push.OperationClass != "push" || push.StatusCode != status || push.Retryable == nil || !*push.Retryable || optionalStringOrNone(push.ErrorCode) != code {
+		return fmt.Errorf("Swift push-response-loss retry stage = %s/%d/%t, want push/%d/true", optionalStringOrNone(push.ErrorCode), push.StatusCode, wireRetryable(push), status)
 	}
 	return nil
 }
@@ -479,7 +479,7 @@ func validatePushResponseLossInitialCall(scenario scenarios.Scenario, stepID str
 		return errors.New("Swift push-response-loss initial call did not block after one request")
 	}
 	last := call.transportObservations[len(call.transportObservations)-1]
-	if last.OperationClass != "push" || last.StatusCode < 200 || last.StatusCode >= 300 || last.ErrorCode != nil || last.Retryable || call.Steps[0].Wire == nil || call.Steps[0].Wire.HTTPStatus != last.StatusCode {
+	if last.OperationClass != "push" || last.StatusCode < 200 || last.StatusCode >= 300 || last.ErrorCode != nil || last.Retryable != nil || call.Steps[0].Wire == nil || call.Steps[0].Wire.HTTPStatus != last.StatusCode {
 		return errors.New("Swift push-response-loss initial call did not preserve a committed response")
 	}
 	return nil
@@ -520,8 +520,8 @@ func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID stri
 		if wantCode == "" {
 			wantCode = "none"
 		}
-		if pushes[index].StatusCode != expected.status || pushes[index].Retryable != expected.retryable || code != wantCode {
-			return fmt.Errorf("Swift sealed-retry push %d = %d/%t/%s, want %d/%t/%s", index+1, pushes[index].StatusCode, pushes[index].Retryable, code, expected.status, expected.retryable, wantCode)
+		if pushes[index].StatusCode != expected.status || wireRetryable(pushes[index]) != expected.retryable || code != wantCode {
+			return fmt.Errorf("Swift sealed-retry push %d = %d/%t/%s, want %d/%t/%s", index+1, pushes[index].StatusCode, wireRetryable(pushes[index]), code, expected.status, expected.retryable, wantCode)
 		}
 	}
 	return nil

@@ -139,7 +139,7 @@ func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scena
 			if err != nil {
 				return SeededEmptyStartupResult{}, err
 			}
-			if call.Completion != "idle" || connect.StatusCode != 200 || connect.Retryable {
+			if call.Completion != "idle" || connect.StatusCode != 200 || connect.Retryable != nil {
 				snapshot, captureErr := platform.captureSnapshot(ctx, client)
 				if captureErr == nil && snapshot.Failure != nil {
 					return SeededEmptyStartupResult{}, fmt.Errorf("Swift startup client %s completed %q with connect status %d; operation = %s, code = %s, recovery = %s", clientID, call.Completion, connect.StatusCode, snapshot.Failure.Operation, snapshot.Failure.Code, snapshot.Failure.RecoveryAction)
@@ -304,7 +304,7 @@ func validateSwiftSeededStartupTrace(call SynchronizationResult, expectedConnect
 		return errors.New("startup request sequence is invalid")
 	}
 	for _, observation := range observations {
-		if observation.StatusCode != 200 || observation.Retryable || observation.ErrorCode != nil {
+		if observation.StatusCode != 200 || observation.Retryable != nil || observation.ErrorCode != nil {
 			return errors.New("startup request did not succeed")
 		}
 	}

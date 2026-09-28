@@ -538,15 +538,16 @@ func TestOperationWindowsUseMonotonicProvenanceMaintenanceCursorDelta(t *testing
 
 func TestExecutedHTTPFailuresKeepSuccessfulDisposition(t *testing.T) {
 	code := "temporary_unavailable"
+	retryable := true
 	for _, observation := range []transportObservation{
-		validPushObservation(0, nil, true),
-		validPushObservation(503, &code, true),
+		validPushObservation(0, nil, nil),
+		validPushObservation(503, &code, &retryable),
 	} {
 		mapped, err := transportStepObservation(observation)
 		if err != nil {
 			t.Fatalf("map executed HTTP request: %v", err)
 		}
-		if mapped.Disposition != "success" || mapped.ErrorCode != nil || mapped.Wire == nil || mapped.Wire.HTTPStatus != observation.StatusCode {
+		if mapped.Disposition != "success" || mapped.ErrorCode != nil || mapped.Wire == nil || mapped.Wire.HTTPStatus != observation.StatusCode || !mapped.Wire.Retryable {
 			t.Fatalf("mapped request = %#v", mapped)
 		}
 	}
@@ -564,7 +565,7 @@ func TestGroupedRequestsMatchTransportObservationsExactly(t *testing.T) {
 		{ContractOperation: "connect", Name: "send"},
 		{ContractOperation: "push", Name: "submit", Payload: pushDispatchPayload("apply")},
 	}
-	observations := []transportObservation{validConnectObservation(), validPushObservation(200, nil, false)}
+	observations := []transportObservation{validConnectObservation(), validPushObservation(200, nil, nil)}
 	mapped, err := mapTransportOperations(operations, observations, runnerResult{})
 	if err != nil {
 		t.Fatalf("map grouped requests: %v", err)
@@ -756,7 +757,7 @@ func validConnectObservation() transportObservation {
 	}
 }
 
-func validPushObservation(status int, code *string, retryable bool) transportObservation {
+func validPushObservation(status int, code *string, retryable *bool) transportObservation {
 	generation := int64(1)
 	mutationCount := 1
 	return transportObservation{

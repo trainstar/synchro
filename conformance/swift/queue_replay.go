@@ -100,7 +100,7 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		if err != nil {
 			return QueueReplayResult{}, err
 		}
-		if replayed.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable {
+		if replayed.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable != nil {
 			return QueueReplayResult{}, fmt.Errorf("Swift queue-replay replay for step %s did not complete successfully", stepID)
 		}
 		replayCalls = append(replayCalls, replayed)
@@ -573,7 +573,10 @@ func swiftQueueReplayCRUDResponse(operation string, call SynchronizationResult) 
 	for _, observation := range call.transportObservations {
 		value := scenarios.NativeCRUDTransport{
 			OperationClass: observation.OperationClass, StatusCode: observation.StatusCode,
-			Retryable: observation.Retryable, RetryablePresent: true,
+		}
+		if observation.Retryable != nil {
+			value.Retryable = *observation.Retryable
+			value.RetryablePresent = true
 		}
 		if observation.ErrorCode != nil {
 			value.ErrorCode = *observation.ErrorCode

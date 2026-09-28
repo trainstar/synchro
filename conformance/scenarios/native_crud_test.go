@@ -111,6 +111,7 @@ func TestValidateNativeCRUDEvidenceRejectsResponseAndPersistenceMutants(t *testi
 			name: "push response becomes retryable",
 			mutate: func(evidence *NativeCRUDEvidence) {
 				evidence.Responses[1].Transport[0].Retryable = true
+				evidence.Responses[1].Transport[0].RetryablePresent = true
 			},
 		},
 		{
@@ -310,7 +311,7 @@ func validNativeCRUDEvidence() NativeCRUDEvidence {
 	deleteRestart := cloneNativeCRUDState(deleteResponse, "process-4")
 	responses := make([]NativeCRUDResponse, 0, 3)
 	for _, operation := range []string{"insert", "update", "delete"} {
-		responses = append(responses, NativeCRUDResponse{Operation: operation, Completion: "idle", Transport: []NativeCRUDTransport{{OperationClass: "push", StatusCode: 200, RetryablePresent: true, MutationCount: 2, MutationCountPresent: true}}})
+		responses = append(responses, NativeCRUDResponse{Operation: operation, Completion: "idle", Transport: []NativeCRUDTransport{{OperationClass: "push", StatusCode: 200, MutationCount: 2, MutationCountPresent: true}}})
 	}
 	return NativeCRUDEvidence{
 		Targets: targets, Before: before, AfterInsertWrite: insertWrite, AfterInsertResponse: insertResponse, AfterInsertRestart: insertRestart,

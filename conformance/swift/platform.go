@@ -1295,7 +1295,7 @@ func (p *Platform) BeginCall(ctx context.Context, client Client, callID, method 
 		if err != nil {
 			return CallResult{}, err
 		}
-		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable {
+		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable != nil {
 			return CallResult{}, errors.New("Swift staged call setup connect did not succeed")
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
@@ -1770,7 +1770,7 @@ func transportStepObservation(observation transportObservation) (StepObservation
 	wire := &WireFacts{
 		HTTPStatus: observation.StatusCode,
 		ErrorCode:  cloneOptionalString(observation.ErrorCode),
-		Retryable:  observation.Retryable,
+		Retryable:  wireRetryable(observation),
 	}
 	return StepObservation{Disposition: "success", Wire: wire}, nil
 }

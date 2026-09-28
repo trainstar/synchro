@@ -368,7 +368,7 @@ func validateRebuildCardinalityCall(call SynchronizationResult, workload rebuild
 		return errors.New("rebuild-cardinality call does not start with connect and end with pull")
 	}
 	for _, observation := range observations {
-		if observation.StatusCode != 200 || observation.Retryable || observation.ErrorCode != nil {
+		if observation.StatusCode != 200 || observation.Retryable != nil || observation.ErrorCode != nil {
 			return errors.New("rebuild-cardinality call contains an unsuccessful transport response")
 		}
 	}
