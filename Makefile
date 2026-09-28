@@ -1942,6 +1942,7 @@ test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
 				export ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)"; \
 				export JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ;; \
 		esac; \
+		$(WARM_CONNECT_ENV) \
 		cd conformance; \
 		SYNCHRO_RN_DETOX_CONFIGURATION="$$configuration" GOFLAGS= GOWORK=off \
 			go run ./cmd/testresult suite -- go test -tags reactnativeintegration -json ./reactnative \

@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/trainstar/synchro/conformance/blackbox"
 )
 
 func TestRealReactNativeRebuildCardinalityIOS(t *testing.T) {
@@ -42,28 +40,7 @@ func runRealReactNativeRebuildCardinality(t *testing.T, platform string) {
 	if err != nil {
 		t.Fatalf("load React Native rebuild-cardinality scenario: %v", err)
 	}
-	environment, err := blackbox.LoadLocalEnvironment()
-	if err != nil {
-		t.Fatalf("load React Native conformance environment: %v", err)
-	}
-	provisionContext, cancelProvision := context.WithTimeout(runContext, 2*time.Minute)
-	harness, err := blackbox.Provision(provisionContext, blackbox.HarnessConfig{Environment: environment})
-	cancelProvision()
-	if err != nil {
-		t.Fatalf("provision React Native conformance harness: %v", err)
-	}
-	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
-	if err != nil {
-		_ = harness.Close(context.Background())
-		t.Fatalf("create React Native native controller: %v", err)
-	}
-	t.Cleanup(func() {
-		closeContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := controller.Close(closeContext); err != nil {
-			t.Errorf("close React Native native controller: %v", err)
-		}
-	})
+	harness, controller := newReactNativeScenarioHarness(t, runContext)
 	coordinator, err := NewRebuildCardinalityCoordinator(RebuildCardinalityCoordinatorConfig{
 		Scenario: scenario, Harness: harness, Controller: controller, Platform: platform,
 	})
