@@ -2372,6 +2372,14 @@ mod tests {
     use serde_json::Value;
     use sha2::{Digest, Sha256};
 
+    // Tests run in parallel transactions. A schema grant in a test locks the
+    // shared pg_namespace row until rollback, which can invert the registry
+    // lock order. The public schema has PUBLIC usage by default.
+    pgrx::extension_sql!(
+        "GRANT USAGE ON SCHEMA tests TO PUBLIC;",
+        name = "grant_test_schema_usage"
+    );
+
     include!("pg_tests/query_counts.rs");
     include!("pg_tests/order_cursor.rs");
     include!("pg_tests/integrity.rs");
@@ -2501,11 +2509,6 @@ mod tests {
                 .get_by_name::<String, &str>("ddl")?
                 .expect("test membership grant DDL");
             client.update(&grant_function, None, &[])?;
-            client.update(
-                "GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker",
-                None,
-                &[],
-            )?;
             let revoke = client
                 .select(
                     "SELECT pg_catalog.format(

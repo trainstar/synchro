@@ -70,7 +70,6 @@ fn membership_dependency_fixture() -> MembershipDependencyFixture {
              TO synchro_owner, synchro_worker;
          GRANT EXECUTE ON FUNCTION public.{target_membership}(INTEGER)
              TO synchro_owner, synchro_worker;
-         GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{source_table} TO synchro_owner;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{target_table} TO synchro_owner;
          ALTER TABLE public.{source_table} ENABLE ROW LEVEL SECURITY;
@@ -1092,7 +1091,6 @@ fn membership_function_limits_rows_before_rust_rejection() {
          REVOKE EXECUTE ON FUNCTION tests.{function}(INTEGER) FROM PUBLIC;
          GRANT EXECUTE ON FUNCTION tests.{function}(INTEGER)
              TO synchro_owner, synchro_worker;
-         GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{table} TO synchro_owner;
          ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;
          CREATE POLICY {policy} ON public.{table}
@@ -1192,7 +1190,6 @@ fn registered_membership_fixture(body: &str) -> RegisteredMembershipFixture {
          REVOKE EXECUTE ON FUNCTION tests.{function}(INTEGER) FROM PUBLIC;
          GRANT EXECUTE ON FUNCTION tests.{function}(INTEGER)
              TO synchro_owner, synchro_worker;
-         GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{table} TO synchro_owner;
          ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;
          CREATE POLICY {policy} ON public.{table}
@@ -1746,8 +1743,7 @@ fn membership_test_schema_enforces_production_validation() {
              SELECT synchro.synchro_prepare_projection_view(
                  'public.{table}', '{table}', ARRAY['id', 'private_note']
              );
-             ALTER FUNCTION public.{function}(UUID) SET SCHEMA tests;
-             GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker"
+             ALTER FUNCTION public.{function}(UUID) SET SCHEMA tests"
         ))
         .expect("prepare membership validation fixture");
         let definition = match case {
