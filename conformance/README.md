@@ -94,6 +94,15 @@ The integration package runs direct semantic tests against packaged PostgreSQL a
 
 Use `make server-consumer-smoke-phase` with its `SERVER_SMOKE_*` inputs to diagnose the public HTTP probe.
 
+## Realistic Dataset
+
+`dataset/` defines one synthetic training-application dataset. Its schema follows a real consumer: tenants, members, a shared catalog, private and shared programs, parent and child rows, many-to-many rows, stored generated columns, triggers that write other registered tables, soft deletes, and portable value boundaries.
+
+- `TestRealDatasetAuthoredFlow` runs the authored flow through the real server. It compares each user's rows with hand-written expectations and with the authored business rule over live source rows.
+- `make characterize-dataset DATASET_SEED=<n> DATASET_SIZE=s|m|l DATASET_CHARACTERIZATION_RESULT=<file>` records complete-work samples for one seeded workload. It has no numerical pass or fail rule. The file must be outside the repository.
+- `make synchrod-pg-test-serve CLIENT_DATASET=1` also prepares the dataset and its authored seed for client flows.
+- `TestRealSourceAdmissionRecovery` characterizes the source transaction record limit and stream-reset recovery.
+
 After extension source changes, run `make generate-pg-sql` and commit any generated SQL changes.
 Required pull-request CI runs `make check-pg-sql` before changes reach Candidate packaging.
 
@@ -152,6 +161,7 @@ Fixture presence, decoder tests, and implementation-derived expected values are 
 - `faults/`, `invariants/`, and `mutants/`: fault definitions, invariant checks, and adversarial controls
 - `blackbox/`, `swift/`, `kotlin/`, and `reactnative/`: real-server and native-client conformance drivers
 - `soak/`: seeded randomized invariant workloads
+- `dataset/`: the realistic synthetic dataset, its authored flow, and its seeded generator
 - `protocol/`, `schema/`, and `scopes/`: legacy illustrative fixtures
 - `performance/`: authored budget inputs in `budgets.json`
 - `artifacts/`, `schemas/`, and `internal/`: contract metadata, schemas, and validation
