@@ -596,7 +596,13 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 			value.MutationID = "00000000-0000-4000-8000-000000000999"
 		},
 		"retained authored value": func(value *queueReplayObservedRejection) {
-			value.MutationJSON = strings.ReplaceAll(value.MutationJSON, "workload-", "changed-")
+			changed := coordinator.rejections[0]
+			changed.Values = []json.RawMessage{json.RawMessage(`"changed-value"`)}
+			*value = queueReplayRejectionDetail(t, value.MutationID, value.RecordID, changed)
+		},
+		"retained row": func(value *queueReplayObservedRejection) {
+			*value = queueReplayRejectionDetail(t, value.MutationID, "other-row", coordinator.rejections[0])
+			value.RecordID = coordinator.rejections[0].RecordID
 		},
 	} {
 		changed := append([]queueReplayObservedRejection(nil), rejected...)
