@@ -4863,40 +4863,87 @@
         assert_eq!(pending_transition_class(narrowed), "class_4");
     }
 
-    fn staged_orders_window_with_drift(drift: &str) {
+    fn staged_window_state() -> Value {
+        Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_build_object(
+                 'generations', (
+                     SELECT jsonb_object_agg(generation::text, jsonb_build_array(state, validated))
+                     FROM sync_registry_generations
+                 ),
+                 'publication', (
+                     SELECT jsonb_build_array(attnames, rowfilter)
+                     FROM pg_publication_tables
+                     WHERE pubname = 'synchro_pub'
+                       AND schemaname = 'public'
+                       AND tablename = 'test_orders'
+                 )
+             )",
+        )
+        .unwrap()
+        .expect("staged window state")
+        .0
+    }
+
+    // A rejected drift must leave the active and the staged generation and the
+    // publication member unchanged.
+    fn staged_orders_window_rejects_drift(drift: &str, error: &str) {
         setup_test_tables();
         Spi::run("SELECT synchro_schema_manifest()").unwrap();
         Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
         let active = active_orders_generation();
-        stage_orders_transition(true, true);
+        let staged = stage_orders_transition(true, true);
         loaded_orders_registration_validates(active).expect("valid staged window");
         Spi::run(drift).unwrap();
-        loaded_orders_registration_validates(active).expect("staged window drift must abort");
+        let before = staged_window_state();
+        assert_eq!(before["generations"][active.to_string()], json!(["active", true]), "{before}");
+        assert_eq!(before["generations"][staged.to_string()], json!(["pending", true]), "{before}");
+        assert!(before["publication"].is_array(), "{before}");
+
+        // No subtransaction rolls back the validation, so the state shows
+        // every write that it made before the rejection.
+        let rejection = PgTryBuilder::new(|| {
+            loaded_orders_registration_validates(active).map_err(|error| error.to_string())
+        })
+        .catch_others(|caught| match caught {
+            pgrx::pg_sys::panic::CaughtError::ErrorReport(report) => Err(report.message().to_string()),
+            other => other.rethrow(),
+        })
+        .execute();
+        assert_eq!(rejection, Err(error.to_string()));
+        assert_eq!(staged_window_state(), before);
     }
 
-    #[pg_test(error = "registered relation is missing required capture triggers")]
+    #[pg_test]
     fn test_staged_window_rejects_trigger_drift() {
-        staged_orders_window_with_drift("ALTER TABLE test_orders DISABLE TRIGGER synchro_capture_fence");
-    }
-
-    #[pg_test(error = "synchro_owner direct relation privileges do not match the push policy")]
-    fn test_staged_window_rejects_privilege_drift() {
-        staged_orders_window_with_drift("REVOKE SELECT ON test_orders FROM synchro_owner");
-    }
-
-    #[pg_test(error = "registered relation is not an exact publication member")]
-    fn test_staged_window_rejects_publication_drift() {
-        staged_orders_window_with_drift(
-            "ALTER PUBLICATION synchro_pub DROP TABLE test_orders;
-             ALTER PUBLICATION synchro_pub ADD TABLE test_orders (id, user_id, headline)",
+        staged_orders_window_rejects_drift(
+            "ALTER TABLE test_orders DISABLE TRIGGER synchro_capture_fence",
+            "registered relation is missing required capture triggers",
         );
     }
 
-    #[pg_test(error = "registered relation primary key must not be deferrable")]
+    #[pg_test]
+    fn test_staged_window_rejects_privilege_drift() {
+        staged_orders_window_rejects_drift(
+            "REVOKE SELECT ON test_orders FROM synchro_owner",
+            "synchro_owner direct relation privileges do not match the push policy",
+        );
+    }
+
+    #[pg_test]
+    fn test_staged_window_rejects_publication_drift() {
+        staged_orders_window_rejects_drift(
+            "ALTER PUBLICATION synchro_pub DROP TABLE test_orders;
+             ALTER PUBLICATION synchro_pub ADD TABLE test_orders (id, user_id, headline)",
+            "registered relation is not an exact publication member",
+        );
+    }
+
+    #[pg_test]
     fn test_staged_window_rejects_key_drift() {
-        staged_orders_window_with_drift(
+        staged_orders_window_rejects_drift(
             "ALTER TABLE test_orders DROP CONSTRAINT test_orders_pkey;
              ALTER TABLE test_orders ADD PRIMARY KEY (id) DEFERRABLE",
+            "registered relation primary key must not be deferrable",
         );
     }
 
