@@ -314,10 +314,14 @@ class SynchroModuleTransactionTest {
             .put("createdAt", "2026-01-01T00:00:00.000000Z")
             .put("updatedAt", "2026-01-01T00:00:00.000000Z")
 
-        val inspect = settle("inspect rejected") { module.inspectRejectedMutations(it) }
+        val inspect = settle("inspect rejected records") { module.inspectRejectedMutationRecords(it) }
         val records = JSONArray(inspect.resolvedValue() as String)
         assertEquals(1, records.length())
         assertEquals(expected.toMap(), records.getJSONObject(0).toMap())
+        // The deprecated method keeps its published result: a legacy rejection cannot be inspected.
+        val deprecated = settle("inspect rejected") { module.inspectRejectedMutations(it) }
+        assertEquals(0, deprecated.resolutions.size)
+        assertEquals(1, deprecated.rejections.size)
         val snapshot = settle("snapshot") { module.inspectClientStateSnapshot(JavaOnlyArray.of(), it) }
         val inspection = JSONObject((snapshot.resolvedValue() as ReadableMap).getString("inspection")!!)
         val snapshotRecords = inspection.getJSONArray("rejected_mutations")

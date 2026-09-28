@@ -112,7 +112,7 @@ final class InspectionTests: XCTestCase {
         try await firstClient.close()
 
         let restartedClient = try SynchroClient(config: config)
-        let inspections = try restartedClient.inspectPendingMutations().currentRecords()
+        let inspections = try restartedClient.inspectPendingMutations()
 
         XCTAssertEqual(inspections.map(\.recordID), ["o1", "o2"])
         XCTAssertEqual(inspections.map(\.localOrder), inspections.map(\.localOrder).sorted())
@@ -144,7 +144,7 @@ final class InspectionTests: XCTestCase {
             "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
             params: ["o1", "authored", "2026-01-01T00:00:00.000000Z"]
         )
-        let pending = try XCTUnwrap(firstClient.inspectPendingMutations().currentRecords().first)
+        let pending = try XCTUnwrap(firstClient.inspectPendingMutations().first)
         let mutationID = pending.mutationID
         let mutation = Mutation(
             mutationID: mutationID,
@@ -198,7 +198,7 @@ final class InspectionTests: XCTestCase {
         try await firstClient.close()
 
         let restartedClient = try SynchroClient(config: config)
-        let rejected = try XCTUnwrap(restartedClient.inspectRejectedMutations().currentRecords().first)
+        let rejected = try XCTUnwrap(restartedClient.inspectRejectedMutations().first)
         XCTAssertEqual(rejected.status, .rejectedTerminal)
         XCTAssertEqual(rejected.code, .policyRejected)
         XCTAssertEqual(rejected.localOrder, pending.localOrder)
@@ -208,18 +208,18 @@ final class InspectionTests: XCTestCase {
         XCTAssertEqual(rejected.mutationJSON, mutationJSON)
         XCTAssertEqual(rejected.rejectionJSON, rejectionJSON)
 
-        let retainedBeforeClear = try XCTUnwrap(restartedClient.inspectRetainedMutations().currentRecords().first)
+        let retainedBeforeClear = try XCTUnwrap(restartedClient.inspectRetainedMutations().first)
         XCTAssertEqual(retainedBeforeClear.status, .serverRejected)
 
         try restartedClient.clearRejectedMutations()
 
         XCTAssertTrue(try restartedClient.inspectRejectedMutations().isEmpty)
-        XCTAssertEqual(try restartedClient.inspectRetainedMutations().currentRecords(), [retainedBeforeClear])
+        XCTAssertEqual(try restartedClient.inspectRetainedMutations(), [retainedBeforeClear])
         try await restartedClient.close()
 
         let afterClearRestart = try SynchroClient(config: config)
         XCTAssertTrue(try afterClearRestart.inspectRejectedMutations().isEmpty)
-        XCTAssertEqual(try afterClearRestart.inspectRetainedMutations().currentRecords(), [retainedBeforeClear])
+        XCTAssertEqual(try afterClearRestart.inspectRetainedMutations(), [retainedBeforeClear])
         XCTAssertEqual(try afterClearRestart.inspectCurrentSchema(), pending.authoredSchema)
         try await afterClearRestart.close()
         removeDatabase(at: config.dbPath)
@@ -507,7 +507,7 @@ final class InspectionTests: XCTestCase {
     private func rejectionFixture(
         _ client: SynchroClient
     ) throws -> (mutationID: String, mutationJSON: String, rejectionJSON: String) {
-        let pending = try XCTUnwrap(client.inspectPendingMutations().currentRecords().first)
+        let pending = try XCTUnwrap(client.inspectPendingMutations().first)
         let mutation = Mutation(
             mutationID: pending.mutationID,
             table: pending.tableID,

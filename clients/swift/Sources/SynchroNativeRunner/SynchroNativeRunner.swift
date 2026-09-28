@@ -1058,7 +1058,7 @@ private final class Runner: @unchecked Sendable {
             throw RunnerError.invalidCommand
         }
         let retainedMutationIDs = payload.operation == .delete
-            ? Set(try client.inspectRetainedMutations().map(\.mutationID))
+            ? Set(try client.inspectRetainedMutationRecords().map(\.mutationID))
             : []
         let result: ExecResult
         switch payload.operation {
@@ -1116,7 +1116,7 @@ private final class Runner: @unchecked Sendable {
         let retainedDelete: Bool
         if payload.operation == .delete && result.rowsAffected == 0 {
             let recordID = try payload.primaryKey.recordID()
-            retainedDelete = try client.inspectRetainedMutations().contains {
+            retainedDelete = try client.inspectRetainedMutationRecords().contains {
                 !retainedMutationIDs.contains($0.mutationID)
                     && $0.tableName == payload.tableName
                     && $0.recordID == recordID

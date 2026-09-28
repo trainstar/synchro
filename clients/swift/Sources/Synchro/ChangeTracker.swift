@@ -259,12 +259,25 @@ final class ChangeTracker: @unchecked Sendable {
         self.database = database
     }
 
-    func inspectPendingMutations() throws -> [RetainedMutationInspection] {
-        try database.readTransaction { try inspectMutations($0, includeTerminal: false) }
+    /// Returns current records only. A legacy import throws, as in the published releases.
+    func inspectPendingMutations() throws -> [PendingMutationInspection] {
+        try database.readTransaction { try inspectMutations($0, includeTerminal: false) }.map(Self.currentMutation)
     }
 
-    func inspectRetainedMutations() throws -> [RetainedMutationInspection] {
+    /// Returns current records only. A legacy import throws, as in the published releases.
+    func inspectRetainedMutations() throws -> [PendingMutationInspection] {
+        try inspectRetainedMutationRecords().map(Self.currentMutation)
+    }
+
+    func inspectRetainedMutationRecords() throws -> [RetainedMutationInspection] {
         try database.readTransaction { try inspectMutations($0, includeTerminal: true) }
+    }
+
+    private static func currentMutation(_ record: RetainedMutationInspection) throws -> PendingMutationInspection {
+        guard let mutation = record.current else {
+            throw SynchroError.invalidResponse(message: "stored mutation cannot be inspected")
+        }
+        return mutation
     }
 
     func inspectMutations(_ db: GRDB.Database, includeTerminal: Bool) throws -> [RetainedMutationInspection] {

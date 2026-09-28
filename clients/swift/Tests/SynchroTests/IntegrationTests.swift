@@ -562,7 +562,7 @@ final class IntegrationTests: XCTestCase {
         _ = try writer.executeBatch(names.map { customerID, name in
             customerInsert(customerID: customerID, userID: userID, name: name)
         })
-        let queueCanonicalOctets = try writer.inspectPendingMutations().currentRecords().reduce(0) { total, pending in
+        let queueCanonicalOctets = try writer.inspectPendingMutations().reduce(0) { total, pending in
             total + (try pushMeasure(pending).element.canonical)
         }
         XCTAssertGreaterThan(queueCanonicalOctets, PushLimits.maxRequestOctets)
@@ -576,7 +576,7 @@ final class IntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(capture.sealedBatchCount, 2)
         XCTAssertEqual(capture.mutationOutcomeCount, names.count)
         XCTAssertEqual(capture.rejectedMutationCount, 0)
-        XCTAssertTrue(try writer.inspectRetainedMutations().currentRecords().isEmpty)
+        XCTAssertTrue(try writer.inspectRetainedMutations().isEmpty)
         XCTAssertEqual(try customerNames(writer, userID: userID), names)
         try await reader.start()
         try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
@@ -597,7 +597,7 @@ final class IntegrationTests: XCTestCase {
         await writer.enterBackground()
         let probeID = UUID().uuidString.lowercased()
         _ = try writer.executeBatch([customerInsert(customerID: probeID, userID: userID, name: "")])
-        let probe = try XCTUnwrap(writer.inspectPendingMutations().currentRecords().first { $0.recordID == probeID })
+        let probe = try XCTUnwrap(writer.inspectPendingMutations().first { $0.recordID == probeID })
         XCTAssertEqual(probe.authoredFields.filter { $0.value == AnyCodable("") }.count, 1)
         let emptyNameOctets = try pushMeasure(probe).normalizedJSON.count
         let fitID = UUID().uuidString.lowercased()
@@ -610,7 +610,7 @@ final class IntegrationTests: XCTestCase {
             customerInsert(customerID: oversizeID, userID: userID, name: oversizeName),
             customerInsert(customerID: laterID, userID: userID, name: "later row"),
         ])
-        let pending = try writer.inspectPendingMutations().currentRecords()
+        let pending = try writer.inspectPendingMutations()
         let fit = try XCTUnwrap(pending.first { $0.recordID == fitID })
         let oversize = try XCTUnwrap(pending.first { $0.recordID == oversizeID })
         XCTAssertEqual(try pushMeasure(fit).normalizedJSON.count, PushLimits.maxNormalizedMutationOctets)
@@ -621,7 +621,7 @@ final class IntegrationTests: XCTestCase {
             try writer.pendingChangeCount() == 0
         }
 
-        let retained = try writer.inspectRetainedMutations().currentRecords()
+        let retained = try writer.inspectRetainedMutations()
         XCTAssertEqual(retained.map(\.mutationID), [oversize.mutationID])
         XCTAssertEqual(retained.first?.status, .exceedsPushLimit)
         XCTAssertTrue(try writer.inspectRejectedMutations().isEmpty)

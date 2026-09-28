@@ -1521,7 +1521,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let payload = try client.inspectPendingMutations().map(retainedMutationPayload)
+            let payload = try client.inspectPendingMutations().map(pendingMutationPayload)
             resolve(try encodeBridgeJSON(payload))
         } catch {
             rejectWithError(reject, error)
@@ -1538,7 +1538,24 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let payload = try client.inspectRetainedMutations().map(retainedMutationPayload)
+            let payload = try client.inspectRetainedMutations().map(pendingMutationPayload)
+            resolve(try encodeBridgeJSON(payload))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    @objc
+    public func inspectRetainedMutationRecords(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let payload = try client.inspectRetainedMutationRecords().map(retainedMutationPayload)
             resolve(try encodeBridgeJSON(payload))
         } catch {
             rejectWithError(reject, error)
@@ -1560,6 +1577,23 @@ public class SynchroModuleImpl: NSObject {
         } catch {
             rejectWithError(reject, error)
         }
+
+    @objc
+    public func inspectRejectedMutationRecords(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client = client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let payload = try client.inspectRejectedMutationRecords().map(retainedRejectionPayload)
+            resolve(try encodeBridgeJSON(payload))
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
     }
 
     /// Reads client state, retained details, and the requested application rows
@@ -1585,7 +1619,7 @@ public class SynchroModuleImpl: NSObject {
             let inspection: [String: Any] = [
                 "client_state": clientStatePayload(snapshot.capture),
                 "retained_mutations": snapshot.retainedMutations.map { $0.map(retainedMutationPayload) } ?? NSNull(),
-                "rejected_mutations": snapshot.rejectedMutations.map { $0.map(rejectedMutationPayload) } ?? NSNull(),
+                "rejected_mutations": snapshot.rejectedMutations.map { $0.map(retainedRejectionPayload) } ?? NSNull(),
             ]
             resolve([
                 "inspection": try encodeBridgeJSON(inspection),
@@ -1839,7 +1873,7 @@ public class SynchroModuleImpl: NSObject {
     private func retainedMutationPayload(_ value: RetainedMutationInspection) -> [String: Any] {
         switch value {
         case .current(let mutation):
-            return pendingMutationPayload(mutation)
+            return pendingMutationPayload(mutation).merging(["representation": "current"]) { current, _ in current }
         case .legacy(let mutation):
             return [
                 "representation": "legacy",
@@ -1858,7 +1892,6 @@ public class SynchroModuleImpl: NSObject {
 
     private func pendingMutationPayload(_ mutation: PendingMutationInspection) -> [String: Any] {
         [
-            "representation": "current",
             "mutationID": mutation.mutationID,
             "localOrder": mutation.localOrder,
             "tableID": mutation.tableID,
@@ -1889,10 +1922,10 @@ public class SynchroModuleImpl: NSObject {
         ]
     }
 
-    private func rejectedMutationPayload(_ value: RetainedRejectionInspection) -> [String: Any] {
+    private func retainedRejectionPayload(_ value: RetainedRejectionInspection) -> [String: Any] {
         switch value {
         case .current(let rejection):
-            return currentRejectionPayload(rejection)
+            return rejectedMutationPayload(rejection).merging(["representation": "current"]) { current, _ in current }
         case .legacy(let rejection):
             return [
                 "representation": "legacy",
@@ -1910,9 +1943,8 @@ public class SynchroModuleImpl: NSObject {
         }
     }
 
-    private func currentRejectionPayload(_ mutation: RejectedMutationInspection) -> [String: Any] {
+    private func rejectedMutationPayload(_ mutation: RejectedMutationInspection) -> [String: Any] {
         [
-            "representation": "current",
             "mutationID": mutation.mutationID,
             "tableName": mutation.tableName,
             "recordID": mutation.recordID,

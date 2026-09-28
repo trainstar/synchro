@@ -204,7 +204,9 @@ class DatabaseMigrationTests {
                     updatedAt = "2026-01-01T00:00:00.000000Z",
                 ),
             )
-            assertEquals(listOf(expected), client.inspectRejectedMutations())
+            assertEquals(listOf(expected), client.inspectRejectedMutationRecords())
+            // The deprecated method keeps its published result: a legacy rejection cannot be inspected.
+            assertThrows(SynchroError.InvalidResponse::class.java) { client.inspectRejectedMutations() }
             val snapshot = SynchroInspection(client).captureSnapshot(maximumRecords = 8) { _, _ -> }
             assertEquals(1, snapshot.capture.rejectedMutationCount)
             assertEquals(listOf(expected), snapshot.rejectedMutations)
@@ -212,7 +214,7 @@ class DatabaseMigrationTests {
             SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { database ->
                 database.execSQL("UPDATE _synchro_rejected_mutations SET mutation_json = '{}' WHERE mutation_id = 'm1'")
             }
-            assertThrows(SynchroError.InvalidResponse::class.java) { client.inspectRejectedMutations() }
+            assertThrows(SynchroError.InvalidResponse::class.java) { client.inspectRejectedMutationRecords() }
         } finally {
             client.close()
         }

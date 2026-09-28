@@ -201,7 +201,6 @@ export interface AuthoredMutationField {
 
 /** A retained mutation with its complete ledger binding and authored values. */
 export interface PendingMutationInspection {
-  representation: 'current';
   mutationID: string;
   localOrder: number;
   tableID: string;
@@ -239,13 +238,13 @@ export interface LegacyMutationInspection {
   sourceKind: string;
 }
 
+/** One retained mutation in its stored representation. */
 export type RetainedMutationInspection =
-  | PendingMutationInspection
+  | (PendingMutationInspection & { representation: 'current' })
   | LegacyMutationInspection;
 
 /** A retained rejection with its exact mutation and rejection JSON. */
 export interface RejectedMutationInspection {
-  representation: 'current';
   mutationID: string;
   tableName: string;
   recordID: string;
@@ -278,8 +277,9 @@ export interface LegacyRejectionInspection {
   updatedAt: string;
 }
 
+/** One retained rejection in its stored representation. */
 export type RetainedRejectionInspection =
-  | RejectedMutationInspection
+  | (RejectedMutationInspection & { representation: 'current' })
   | LegacyRejectionInspection;
 
 export interface ScopeStateInspection {

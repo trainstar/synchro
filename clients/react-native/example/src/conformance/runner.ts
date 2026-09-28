@@ -129,8 +129,8 @@ export type ConformanceActionResult =
 
 export interface ConformanceCapture {
   application_rows?: Row[];
-  pending_mutations?: Omit<PendingMutationInspection, 'representation'>[];
-  rejected_mutations?: Omit<RejectedMutationInspection, 'representation'>[];
+  pending_mutations?: PendingMutationInspection[];
+  rejected_mutations?: RejectedMutationInspection[];
   client_state?: ClientStateInspection;
   durable_proof?: RawDurableProof;
   provenance?: ScopeRowInspection[];
@@ -1018,30 +1018,26 @@ function describeBoundFailure(error: unknown): string {
 
 // The harness capture has only the current record shape, as in the native runners.
 // A legacy import fails the capture instead of reaching the harness with invented bindings.
-function currentMutations(
-  values: RetainedMutationInspection[]
-): Omit<PendingMutationInspection, 'representation'>[] {
+function currentMutations(values: RetainedMutationInspection[]): PendingMutationInspection[] {
   return values.map((value) => {
     if (value.representation !== 'current') {
       throw new ConformanceCommandError('capture_inspection_failed');
     }
-    const mutation: Partial<PendingMutationInspection> = { ...value };
+    const mutation: PendingMutationInspection & { representation?: 'current' } = { ...value };
     delete mutation.representation;
-    return mutation as Omit<PendingMutationInspection, 'representation'>;
+    return mutation;
   });
 }
 
 // A legacy rejection has no exact mutation or rejection, so it fails the capture.
-function currentRejections(
-  values: RetainedRejectionInspection[]
-): Omit<RejectedMutationInspection, 'representation'>[] {
+function currentRejections(values: RetainedRejectionInspection[]): RejectedMutationInspection[] {
   return values.map((value) => {
     if (value.representation !== 'current') {
       throw new ConformanceCommandError('capture_inspection_failed');
     }
-    const rejection: Partial<RejectedMutationInspection> = { ...value };
+    const rejection: RejectedMutationInspection & { representation?: 'current' } = { ...value };
     delete rejection.representation;
-    return rejection as Omit<RejectedMutationInspection, 'representation'>;
+    return rejection;
   });
 }
 

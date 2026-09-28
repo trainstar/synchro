@@ -91,8 +91,10 @@ final class DatabaseMigrationTests: XCTestCase {
             clientID: "legacy-device",
             appVersion: "1.0.0"
         ))
-        XCTAssertEqual(try client.inspectPendingMutations(), [legacyIntent])
-        XCTAssertEqual(try client.inspectRetainedMutations(), [legacyIntent])
+        XCTAssertEqual(try client.inspectRetainedMutationRecords(), [legacyIntent])
+        // The deprecated methods keep their published result: a legacy import cannot be inspected.
+        XCTAssertThrowsError(try client.inspectPendingMutations())
+        XCTAssertThrowsError(try client.inspectRetainedMutations())
         // The old rejection table stored no mutation or rejection JSON, so inspection reports none.
         let legacyRejected = RetainedRejectionInspection.legacy(LegacyRejectionInspection(
             mutationID: "m1",
@@ -106,7 +108,8 @@ final class DatabaseMigrationTests: XCTestCase {
             createdAt: "2026-01-01T00:00:00.000000Z",
             updatedAt: "2026-01-01T00:00:00.000000Z"
         ))
-        XCTAssertEqual(try client.inspectRejectedMutations(), [legacyRejected])
+        XCTAssertEqual(try client.inspectRejectedMutationRecords(), [legacyRejected])
+        XCTAssertThrowsError(try client.inspectRejectedMutations())
         let snapshot = try SynchroInspection(client: client).captureSnapshot(maximumRecords: 8) { _, _ in }
         XCTAssertEqual(snapshot.retainedMutations, [legacyIntent])
         XCTAssertEqual(snapshot.rejectedMutations, [legacyRejected])
@@ -119,11 +122,11 @@ final class DatabaseMigrationTests: XCTestCase {
                 arguments: [legacyID]
             )
         }
-        XCTAssertThrowsError(try client.inspectRetainedMutations())
+        XCTAssertThrowsError(try client.inspectRetainedMutationRecords())
         try db.writeTransaction { db in
             try db.execute(sql: "UPDATE _synchro_rejected_mutations SET mutation_json = '{}' WHERE mutation_id = 'm1'")
         }
-        XCTAssertThrowsError(try client.inspectRejectedMutations())
+        XCTAssertThrowsError(try client.inspectRejectedMutationRecords())
         try await client.close()
         try db.close()
     }

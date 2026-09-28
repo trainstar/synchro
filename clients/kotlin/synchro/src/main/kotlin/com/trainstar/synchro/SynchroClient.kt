@@ -152,7 +152,13 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
 
     fun getSyncStatus(): SyncStatus = syncEngine.getSyncStatus()
 
-    fun inspectPendingMutations(): List<RetainedMutationInspection> =
+    /**
+     * Returns the unresolved queue records.
+     *
+     * Deprecated: use [inspectRetainedMutationRecords]. This method keeps its
+     * published behavior.
+     */
+    fun inspectPendingMutations(): List<PendingMutationInspection> =
         changeTracker.inspectPendingMutations()
 
     /**
@@ -160,14 +166,41 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
      * rejected and one that is larger than a push limit. These mutations leave the
      * pending set, so an application that reports the complete retained
      * ledger reads this instead.
+     *
+     * Deprecated: use [inspectRetainedMutationRecords]. This method keeps its
+     * published behavior.
      */
-    fun inspectRetainedMutations(): List<RetainedMutationInspection> =
+    fun inspectRetainedMutations(): List<PendingMutationInspection> =
         changeTracker.inspectRetainedMutations()
+
+    /**
+     * Returns every retained mutation in its stored representation. The Kotlin
+     * ledger requires every binding, so each record is [RetainedMutationInspection.Current].
+     */
+    fun inspectRetainedMutationRecords(): List<RetainedMutationInspection> =
+        changeTracker.inspectRetainedMutationRecords()
 
     /** Returns the exact number of mutations retained for local reconciliation. */
     fun retainedMutationCount(): Int = changeTracker.retainedMutationCount()
 
-    fun inspectRejectedMutations(): List<RetainedRejectionInspection> =
+    /**
+     * Returns the retained terminal outcomes.
+     *
+     * Deprecated: use [inspectRejectedMutationRecords]. This method keeps its
+     * published behavior. It throws [SynchroError.InvalidResponse] when a legacy
+     * rejection is present, because a legacy rejection has no exact JSON.
+     */
+    fun inspectRejectedMutations(): List<RejectedMutationInspection> =
+        inspectRejectedMutationRecords().map { record ->
+            (record as? RetainedRejectionInspection.Current)?.rejection
+                ?: throw SynchroError.InvalidResponse("retained rejection lacks its exact mutation JSON")
+        }
+
+    /**
+     * Returns the retained terminal outcomes in their stored representation. A
+     * rejection stored before the mutation ledger is a [RetainedRejectionInspection.Legacy].
+     */
+    fun inspectRejectedMutationRecords(): List<RetainedRejectionInspection> =
         database.readTransaction(::inspectRejectedMutations)
 
     private fun inspectRejectedMutations(db: SQLiteDatabase): List<RetainedRejectionInspection> =

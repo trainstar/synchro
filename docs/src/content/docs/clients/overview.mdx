@@ -27,9 +27,9 @@ They do not define server sync semantics. They execute the server contract local
 
 ## Retained mutation inspection
 
-`inspectPendingMutations()` and `inspectRetainedMutations()` return a list of
-`RetainedMutationInspection` values on Swift and Kotlin. Each value is one of
-these records:
+`inspectRetainedMutationRecords()` returns every retained queue record, which
+includes local terminal states such as `exceeds_push_limit`. Each value is a
+`RetainedMutationInspection`, which is one of these records:
 
 - A current record holds a `PendingMutationInspection` with its table ID,
   primary-key binding, authored schema, and authored field values.
@@ -39,10 +39,11 @@ these records:
 
 The SDK does not fill the absent legacy fields with placeholder values. A
 record with only some bindings fails inspection. The Kotlin ledger requires
-every binding, so Kotlin returns only current records.
+every binding, so Kotlin returns only current records. To select the unresolved
+queue, filter the records by status.
 
 ```swift
-for record in try client.inspectRetainedMutations() {
+for record in try client.inspectRetainedMutationRecords() {
     switch record {
     case .current(let mutation): print(mutation.tableID, mutation.authoredFields)
     case .legacy(let mutation): print(mutation.tableName, mutation.recordID)
@@ -51,7 +52,7 @@ for record in try client.inspectRetainedMutations() {
 ```
 
 ```kotlin
-client.inspectRetainedMutations().forEach { record ->
+client.inspectRetainedMutationRecords().forEach { record ->
     when (record) {
         is RetainedMutationInspection.Current -> println(record.mutation.tableID)
         is RetainedMutationInspection.Legacy -> println(record.mutation.recordID)
@@ -59,13 +60,8 @@ client.inspectRetainedMutations().forEach { record ->
 }
 ```
 
-**API change in the next minor release.** Earlier releases returned
-`[PendingMutationInspection]` and `List<PendingMutationInspection>`. Earlier
-Swift releases also failed inspection when a legacy import was present. A caller
-that reads current-record fields must now match the current case.
-
-`inspectRejectedMutations()` and the `rejectedMutations` list of the inspection
-snapshot return `RetainedRejectionInspection` values on the same model:
+`inspectRejectedMutationRecords()` returns every retained terminal outcome as a
+`RetainedRejectionInspection`:
 
 - A current record holds a `RejectedMutationInspection` with the exact mutation
   JSON and rejection JSON.
@@ -73,10 +69,26 @@ snapshot return `RetainedRejectionInspection` values on the same model:
   table that existed before the mutation ledger. It has only the stored fields.
   The mutation JSON and rejection JSON are absent.
 
-A record with only one of the two JSON values fails inspection. Earlier releases
-returned `[RejectedMutationInspection]` and `List<RejectedMutationInspection>`, and
-failed inspection when a legacy rejection was present. React Native returns the
-same records with `representation: "current"` or `representation: "legacy"`.
+A rejected record with only one of the two JSON values fails inspection.
+
+React Native returns the same records. A record has `representation: "current"`
+with the current fields, or `representation: "legacy"` with the stored fields only.
+
+### Deprecated inspection methods
+
+These methods keep their published signatures and behavior. Existing code
+compiles without a change. Use the record methods above for new code.
+
+| Deprecated method | Result | Legacy record | Replacement |
+|---|---|---|---|
+| `inspectPendingMutations()` | current records in unresolved states | fails with an invalid-response error | `inspectRetainedMutationRecords()` filtered by status |
+| `inspectRetainedMutations()` | current records, including local terminal states | fails with an invalid-response error | `inspectRetainedMutationRecords()` |
+| `inspectRejectedMutations()` | current rejected records | fails with an invalid-response error | `inspectRejectedMutationRecords()` |
+
+The failure on a legacy record is the published behavior. The deprecated
+methods do not drop a legacy record, and they do not fill its absent fields.
+Swift can hold a legacy import from a pre-ledger queue. Kotlin can hold only a
+legacy rejection. React Native forwards the native result.
 
 ## React Native boundary
 

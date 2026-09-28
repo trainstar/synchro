@@ -325,7 +325,7 @@ private class ClientSession(private val context: Context) : Closeable {
         require(authoredColumns.size == authoredColumns.toSet().size) { "authored columns repeat" }
         val client = requireClient()
         val retainedMutationIDs = if (operation == "delete") {
-            client.inspectRetainedMutations().mapTo(mutableSetOf()) { it.mutationID }
+            client.inspectRetainedMutationRecords().mapTo(mutableSetOf()) { it.mutationID }
         } else {
             emptySet()
         }
@@ -370,7 +370,7 @@ private class ClientSession(private val context: Context) : Closeable {
             is Float, is Double -> (primaryKey as Number).toDouble().toString()
             else -> throw IllegalArgumentException("primary key record identity is unsupported")
         }
-        val retainedDelete = operation == "delete" && rowsAffected == 0 && client.inspectRetainedMutations().any {
+        val retainedDelete = operation == "delete" && rowsAffected == 0 && client.inspectRetainedMutationRecords().any {
             it.mutationID !in retainedMutationIDs && it.tableName == tableName && it.recordID == recordID && it.operation == Operation.DELETE
         }
         check(rowsAffected == 1 || retainedDelete) { "local action affected an unexpected row count" }
@@ -471,12 +471,12 @@ private class ClientSession(private val context: Context) : Closeable {
         val capture = SynchroInspection(client).captureState(MAXIMUM_RECORDS)
         val durableStateFingerprint = durableStateFingerprint()
         val retainedMutations = if (retainedMutationCount <= MAXIMUM_RECORDS) {
-            client.inspectRetainedMutations()
+            client.inspectRetainedMutationRecords()
         } else {
             null
         }
         val rejectedMutations = if (capture.rejectedMutationCount <= MAXIMUM_RECORDS) {
-            client.inspectRejectedMutations()
+            client.inspectRejectedMutationRecords()
         } else {
             null
         }
@@ -544,12 +544,12 @@ private class ClientSession(private val context: Context) : Closeable {
         val retainedCount = retainedMutationCount ?: client.retainedMutationCount()
         val pending = retainedMutations ?: when {
             retainedCount == 0 -> emptyList()
-            retainedCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutations()
+            retainedCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutationRecords()
             else -> null
         }
         val rejected = rejectedMutations ?: when {
             capture.rejectedMutationCount == 0 -> emptyList()
-            capture.rejectedMutationCount <= MAXIMUM_RECORDS -> client.inspectRejectedMutations()
+            capture.rejectedMutationCount <= MAXIMUM_RECORDS -> client.inspectRejectedMutationRecords()
             else -> null
         }
         val scopeStates = capture.scopeStates.takeUnless { capture.scopeStatesTruncated }

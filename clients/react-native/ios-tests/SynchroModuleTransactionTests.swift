@@ -518,11 +518,17 @@ final class SynchroModuleTransactionTests: XCTestCase {
             "updatedAt": "2026-01-01T00:00:00.000000Z",
         ]
 
-        let inspect = settle("inspect rejected") {
-            module.inspectRejectedMutations($0.resolve, reject: $0.reject)
+        let inspect = settle("inspect rejected records") {
+            module.inspectRejectedMutationRecords($0.resolve, reject: $0.reject)
         }
         let records = try XCTUnwrap((try resolvedValue(inspect) as? String)?.data(using: .utf8))
         XCTAssertEqual(try JSONSerialization.jsonObject(with: records) as? NSArray, [expected])
+        // The deprecated method keeps its published result: a legacy rejection cannot be inspected.
+        let deprecated = settle("inspect rejected") {
+            module.inspectRejectedMutations($0.resolve, reject: $0.reject)
+        }
+        XCTAssertEqual(deprecated.resolutions.count, 0)
+        XCTAssertEqual(deprecated.rejections.count, 1)
         let snapshot = settle("snapshot") {
             module.inspectClientStateSnapshot([], resolve: $0.resolve, reject: $0.reject)
         }
@@ -533,6 +539,7 @@ final class SynchroModuleTransactionTests: XCTestCase {
         let close = try closeModule()
 
         requireSettledOnce([inspect, snapshot, close])
+        XCTAssertEqual(deprecated.settlementCount, 1)
     }
 
     // MARK: - Bridge calls

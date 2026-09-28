@@ -171,15 +171,47 @@ public final class SynchroClient: @unchecked Sendable {
         syncEngine.getSyncStatus()
     }
 
-    public func inspectPendingMutations() throws -> [RetainedMutationInspection] {
+    /// Returns the unresolved queue records.
+    ///
+    /// Deprecated: use `inspectRetainedMutationRecords()`. This method keeps
+    /// its published behavior. It throws `SynchroError.invalidResponse` when the
+    /// queue holds a legacy import, because a legacy record has no current binding.
+    public func inspectPendingMutations() throws -> [PendingMutationInspection] {
         try changeTracker.inspectPendingMutations()
     }
 
-    public func inspectRetainedMutations() throws -> [RetainedMutationInspection] {
+    /// Returns every retained queue record, including local terminal states.
+    ///
+    /// Deprecated: use `inspectRetainedMutationRecords()`. This method keeps
+    /// its published behavior. It throws `SynchroError.invalidResponse` when the
+    /// queue holds a legacy import, because a legacy record has no current binding.
+    public func inspectRetainedMutations() throws -> [PendingMutationInspection] {
         try changeTracker.inspectRetainedMutations()
     }
 
-    public func inspectRejectedMutations() throws -> [RetainedRejectionInspection] {
+    /// Returns every retained queue record in its stored representation.
+    /// A legacy import is a `.legacy` record with only its stored fields.
+    public func inspectRetainedMutationRecords() throws -> [RetainedMutationInspection] {
+        try changeTracker.inspectRetainedMutationRecords()
+    }
+
+    /// Returns the retained terminal outcomes.
+    ///
+    /// Deprecated: use `inspectRejectedMutationRecords()`. This method keeps
+    /// its published behavior. It throws `SynchroError.invalidResponse` when a
+    /// legacy rejection is present, because a legacy rejection has no exact JSON.
+    public func inspectRejectedMutations() throws -> [RejectedMutationInspection] {
+        try inspectRejectedMutationRecords().map { record in
+            guard let rejection = record.current else {
+                throw SynchroError.invalidResponse(message: "retained rejection has no complete durable mutation")
+            }
+            return rejection
+        }
+    }
+
+    /// Returns the retained terminal outcomes in their stored representation.
+    /// A legacy rejection is a `.legacy` record with only its stored fields.
+    public func inspectRejectedMutationRecords() throws -> [RetainedRejectionInspection] {
         try database.readTransaction(Self.inspectRejectedMutations)
     }
 

@@ -2,8 +2,8 @@ import {
   configureInspection,
   nativeForInspection,
   parseClientStateInspection,
-  parseRejectedMutationInspection,
   parseRetainedMutationInspection,
+  parseRetainedRejectionInspection,
   parseTransportObservationSnapshot,
   SynchroClient,
 } from './SynchroClient';
@@ -94,7 +94,7 @@ export class SynchroInspection {
         retainedMutations:
           nullableArray(snapshot.retained_mutations, 'retained mutations')?.map(parseRetainedMutationInspection) ?? null,
         rejectedMutations:
-          nullableArray(snapshot.rejected_mutations, 'rejected mutations')?.map(parseRejectedMutationInspection) ?? null,
+          nullableArray(snapshot.rejected_mutations, 'rejected mutations')?.map(parseRetainedRejectionInspection) ?? null,
         applicationRows: [...result.applicationRows] as Row[],
       };
     } catch (error) {

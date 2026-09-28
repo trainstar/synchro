@@ -1005,7 +1005,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectPendingMutations().map(::retainedMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectPendingMutations().map(::pendingMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1018,7 +1018,20 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::retainedMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::pendingMutationJson)).toString())
+        } catch (e: Exception) {
+            rejectWithError(promise, e)
+        }
+    }
+
+    @ReactMethod
+    override fun inspectRetainedMutationRecords(promise: Promise) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            promise.resolve(JSONArray(c.inspectRetainedMutationRecords().map(::retainedMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1032,6 +1045,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
         try {
             promise.resolve(JSONArray(c.inspectRejectedMutations().map(::rejectedMutationJson)).toString())
+        } catch (e: Exception) {
+            rejectWithError(promise, e)
+        }
+    }
+
+    @ReactMethod
+    override fun inspectRejectedMutationRecords(promise: Promise) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            promise.resolve(JSONArray(c.inspectRejectedMutationRecords().map(::retainedRejectionJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1055,7 +1081,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             val inspection = JSONObject().apply {
                 put("client_state", clientStateJson(snapshot.capture))
                 put("retained_mutations", snapshot.retainedMutations?.let { JSONArray(it.map(::retainedMutationJson)) } ?: JSONObject.NULL)
-                put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::rejectedMutationJson)) } ?: JSONObject.NULL)
+                put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::retainedRejectionJson)) } ?: JSONObject.NULL)
             }
             promise.resolve(Arguments.createMap().apply {
                 putString("inspection", inspection.toString())
@@ -1475,7 +1501,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
 
     private fun retainedMutationJson(value: RetainedMutationInspection): JSONObject = when (value) {
-        is RetainedMutationInspection.Current -> pendingMutationJson(value.mutation)
+        is RetainedMutationInspection.Current -> pendingMutationJson(value.mutation).put("representation", "current")
         is RetainedMutationInspection.Legacy -> JSONObject().apply {
             put("representation", "legacy")
             put("mutationID", value.mutation.mutationID)
@@ -1491,7 +1517,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     private fun pendingMutationJson(mutation: PendingMutationInspection): JSONObject = JSONObject().apply {
-        put("representation", "current")
         put("mutationID", mutation.mutationID)
         put("localOrder", mutation.localOrder)
         put("tableID", mutation.tableID)
@@ -1521,8 +1546,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }))
     }
 
-    private fun rejectedMutationJson(value: RetainedRejectionInspection): JSONObject = when (value) {
-        is RetainedRejectionInspection.Current -> currentRejectionJson(value.rejection)
+    private fun retainedRejectionJson(value: RetainedRejectionInspection): JSONObject = when (value) {
+        is RetainedRejectionInspection.Current -> rejectedMutationJson(value.rejection).put("representation", "current")
         is RetainedRejectionInspection.Legacy -> JSONObject().apply {
             put("representation", "legacy")
             put("mutationID", value.rejection.mutationID)
@@ -1538,8 +1563,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun currentRejectionJson(mutation: RejectedMutationInspection): JSONObject = JSONObject().apply {
-        put("representation", "current")
+    private fun rejectedMutationJson(mutation: RejectedMutationInspection): JSONObject = JSONObject().apply {
         put("mutationID", mutation.mutationID)
         put("tableName", mutation.tableName)
         put("recordID", mutation.recordID)

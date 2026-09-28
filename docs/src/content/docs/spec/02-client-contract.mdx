@@ -953,13 +953,16 @@ semantics:
 - `getSyncStatus()` for the current typed state and bounded diagnostics
 - `observeSyncStatus(...)` for typed state changes
 - `observeSyncEvents(...)` for typed sync events
-- `inspectPendingMutations()` for durable unresolved queue records
-- `inspectRetainedMutations()` for all durable queue records, which include
+- `inspectRetainedMutationRecords()` for all durable queue records, which include
   local terminal states such as `exceeds_push_limit`
-- `inspectRejectedMutations()` for durable terminal outcomes and authored data
+- `inspectRejectedMutationRecords()` for durable terminal outcomes and authored data
 - an explicit policy operation to clear retained rejected records
 
-Each pending or retained record is either a current record or a legacy record.
+The deprecated `inspectPendingMutations()`, `inspectRetainedMutations()`, and
+`inspectRejectedMutations()` keep their published signatures and behavior. They
+return current records only, and they fail when a legacy record is present.
+
+Each retained record is either a current record or a legacy record.
 A current record has its table ID, primary-key binding, authored schema, and
 authored field values. A legacy record comes from a queue that existed before the
 mutation ledger. It has only the fields that the old queue stored. Its binding

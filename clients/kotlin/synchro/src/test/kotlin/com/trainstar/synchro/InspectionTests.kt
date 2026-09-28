@@ -112,7 +112,7 @@ class InspectionTests {
 
         val restartedClient = SynchroClient(config, context)
         try {
-            val inspections = restartedClient.inspectPendingMutations().currentRecords()
+            val inspections = restartedClient.inspectPendingMutations()
             assertEquals(listOf("o1", "o2"), inspections.map { it.recordID })
             assertEquals(inspections.map { it.localOrder }.sorted(), inspections.map { it.localOrder })
             assertEquals(LocalMutationStatus.SUPERSEDED_BEFORE_SEND, inspections[0].status)
@@ -252,7 +252,7 @@ class InspectionTests {
                 "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
                 arrayOf("o1", "authored", "2026-01-01T00:00:00.000000Z"),
             )
-            val mutationID = firstClient.inspectPendingMutations().currentRecords().single().mutationID
+            val mutationID = firstClient.inspectPendingMutations().single().mutationID
             exactMutationJSON = mutationJSON.replace("m1", mutationID)
             exactRejectionJSON = rejectionJSON.replace("m1", mutationID)
             firstClient.close()
@@ -284,7 +284,7 @@ class InspectionTests {
 
         val restartedClient = SynchroClient(config, context)
         try {
-            val rejected = (restartedClient.inspectRejectedMutations().single() as RetainedRejectionInspection.Current).rejection
+            val rejected = restartedClient.inspectRejectedMutations().single()
             assertEquals(MutationStatus.REJECTED_TERMINAL, rejected.status)
             assertEquals(MutationRejectionCode.POLICY_REJECTED, rejected.code)
             assertEquals("not allowed", rejected.message)
@@ -353,7 +353,7 @@ class InspectionTests {
             assertEquals(2, capture.mutationLedgerCount)
             assertEquals(1, capture.mutationOutcomeCount)
             assertEquals(1, reopened.retainedMutationCount())
-            assertEquals(listOf("retained"), reopened.inspectRetainedMutations().currentRecords().map { it.recordID })
+            assertEquals(listOf("retained"), reopened.inspectRetainedMutations().map { it.recordID })
         } finally {
             reopened.close()
             context.deleteDatabase(config.dbPath)
