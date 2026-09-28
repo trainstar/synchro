@@ -1564,8 +1564,6 @@ func (h *Harness) restartPostgres(ctx context.Context) error {
 }
 
 func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Signal) error {
-	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
-	defer cancel()
 	if h.postgres == nil {
 		return errors.New("PostgreSQL process is unavailable")
 	}
@@ -1579,6 +1577,8 @@ func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Sig
 			return err
 		}
 	}
+	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
+	defer cancel()
 	if err := h.postgres.StopPostmaster(stopContext, h.config.ShutdownTimeout, shutdown); err != nil {
 		return err
 	}
