@@ -59,7 +59,7 @@
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "path": "conformance/scenarios/performance/seeded-empty-startup-001.json",
-      "sha256": "ba71c68be99fde001b3418a759bb98bf4fab8c32e4ec975ebd2e64d76eb95920"
+      "sha256": "76591744006d374beeb0da441177a641b1e9d38471bf080f68474f23566a1eeb"
     },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
