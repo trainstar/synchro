@@ -337,6 +337,14 @@ fn synchro_prepare_projection_view(
             if existing_name != *view_name || existing_columns != projected_columns {
                 pgrx::error!("projection view identity is immutable");
             }
+            grant_projection_view_to_relation_owner(
+                client,
+                &format!(
+                    "synchro_projection.{}",
+                    crate::pull::pg_quote_ident(view_name)
+                ),
+                actor,
+            )?;
             return Ok::<_, spi::Error>(pgrx::JsonB(serde_json::json!({
                 "view": format!("synchro_projection.{view_name}"),
                 "physical_schema": physical.schema,
@@ -393,6 +401,7 @@ fn synchro_prepare_projection_view(
             None,
             &[],
         )?;
+        grant_projection_view_to_relation_owner(client, &qualified_view, actor)?;
         client.update(
             "INSERT INTO synchro.sync_projection_views (
                  physical_relation_oid, physical_schema, physical_relation,
@@ -419,6 +428,30 @@ fn synchro_prepare_projection_view(
         })))
     })
     .unwrap_or_else(|error| pgrx::error!("preparing projection view: {error}"))
+}
+
+/// The extension evaluates membership and impact functions as their owner,
+/// and registration requires that owner to be the relation owner.
+fn grant_projection_view_to_relation_owner(
+    client: &mut SpiClient<'_>,
+    qualified_view: &str,
+    relation_owner: pg_sys::Oid,
+) -> Result<(), spi::Error> {
+    let owner = client
+        .select(
+            "SELECT pg_catalog.quote_ident(pg_catalog.pg_get_userbyid($1::oid)) AS owner",
+            None,
+            &[i64::from(relation_owner.to_u32()).into()],
+        )?
+        .first()
+        .get_by_name::<String, &str>("owner")?
+        .unwrap_or_else(|| pgrx::error!("projection view owner is missing"));
+    client.update(
+        &format!("GRANT SELECT ON {qualified_view} TO {owner}"),
+        None,
+        &[],
+    )?;
+    Ok(())
 }
 
 /// Register a table for synchronization.
@@ -1711,8 +1744,8 @@ fn resolve_membership_function(
 
 /// Resolves the registered assignment function and applies every assignment
 /// function rule. Assignment has no dependency propagation, so the function
-/// reads application relations directly, and connect and pull evaluate it as
-/// `synchro_owner`.
+/// reads application relations directly. Connect and pull evaluate it as its
+/// owner.
 pub(crate) fn resolve_assignment_function(
     client: &SpiClient<'_>,
     actor: pg_sys::Oid,
@@ -1888,10 +1921,13 @@ fn validate_registered_function_dependencies(
     client: &SpiClient<'_>,
     function: &RegisteredFunction,
 ) -> Result<(), spi::Error> {
-    let valid = client
+    let row = client
         .select(
-            "SELECT NOT EXISTS (
-                 SELECT 1
+            "WITH dependency AS (
+                 SELECT relation.oid AS relation_oid,
+                        namespace.oid AS schema_oid,
+                        namespace.nspname,
+                        projection.view_oid
                  FROM pg_catalog.pg_depend dependency
                  JOIN pg_catalog.pg_class relation
                    ON dependency.refclassid = 'pg_catalog.pg_class'::regclass
@@ -1903,17 +1939,36 @@ fn validate_registered_function_dependencies(
                  WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
                    AND dependency.objid = $1::oid
                    AND dependency.deptype = 'n'
-                   AND namespace.nspname NOT IN ('pg_catalog', 'information_schema')
-                   AND projection.view_oid IS NULL
-             ) AS valid",
+             ), function_owner AS (
+                 SELECT proowner FROM pg_catalog.pg_proc WHERE oid = $1::oid
+             )
+             SELECT NOT EXISTS (
+                        SELECT 1
+                        FROM dependency
+                        WHERE dependency.nspname NOT IN ('pg_catalog', 'information_schema')
+                          AND dependency.view_oid IS NULL
+                    ) AS declared,
+                    EXISTS (SELECT 1 FROM function_owner)
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM dependency
+                        CROSS JOIN function_owner
+                        WHERE NOT pg_catalog.has_table_privilege(
+                                  function_owner.proowner, dependency.relation_oid, 'SELECT'
+                              )
+                           OR NOT pg_catalog.has_schema_privilege(
+                                  function_owner.proowner, dependency.schema_oid, 'USAGE'
+                              )
+                    ) AS readable",
             None,
             &[i64::from(function.oid).into()],
         )?
-        .first()
-        .get_by_name::<bool, &str>("valid")?
-        .unwrap_or(false);
-    if !valid {
+        .first();
+    if !row.get_by_name::<bool, &str>("declared")?.unwrap_or(false) {
         pgrx::error!("registered function reads an undeclared projection dependency");
+    }
+    if !row.get_by_name::<bool, &str>("readable")?.unwrap_or(false) {
+        pgrx::error!("registered function owner cannot read a function relation");
     }
     validate_function_calls_only_pg_catalog(client, function)
 }
@@ -1968,22 +2023,22 @@ fn validate_assignment_function_relations(
                  WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass
                    AND dependency.objid = $1::oid
                    AND dependency.deptype = 'n'
-             ), owner_role AS (
-                 SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'synchro_owner'
+             ), function_owner AS (
+                 SELECT proowner FROM pg_catalog.pg_proc WHERE oid = $1::oid
              )
              SELECT NOT EXISTS (
                         SELECT 1 FROM relation WHERE relation.nspname = 'synchro'
                     ) AS outside_synchro,
-                    EXISTS (SELECT 1 FROM owner_role)
+                    EXISTS (SELECT 1 FROM function_owner)
                     AND NOT EXISTS (
                         SELECT 1
                         FROM relation
-                        CROSS JOIN owner_role
+                        CROSS JOIN function_owner
                         WHERE NOT pg_catalog.has_table_privilege(
-                                  owner_role.oid, relation.relation_oid, 'SELECT'
+                                  function_owner.proowner, relation.relation_oid, 'SELECT'
                               )
                            OR NOT pg_catalog.has_schema_privilege(
-                                  owner_role.oid, relation.schema_oid, 'USAGE'
+                                  function_owner.proowner, relation.schema_oid, 'USAGE'
                               )
                     ) AS readable",
             None,
@@ -1997,7 +2052,7 @@ fn validate_assignment_function_relations(
         pgrx::error!("assignment function reads a synchro relation");
     }
     if !row.get_by_name::<bool, &str>("readable")?.unwrap_or(false) {
-        pgrx::error!("synchro_owner cannot read an assignment function relation");
+        pgrx::error!("assignment function owner cannot read a function relation");
     }
     Ok(())
 }

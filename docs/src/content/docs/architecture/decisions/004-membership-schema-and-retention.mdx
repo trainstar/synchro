@@ -298,13 +298,21 @@ Registration rejects a function unless every rule below is true:
 - `synchro_owner` has EXECUTE on it, and PUBLIC does not.
 - It calls no function outside `pg_catalog`.
 - It depends on no relation in schema `synchro`.
-- `synchro_owner` has SELECT on each relation it depends on and USAGE on the
-  schema of that relation.
+- The function owner has SELECT on each relation it depends on and USAGE on
+  the schema of that relation.
 
 These rules are the membership function rules with two differences. The
 function reads application relations directly, because assignment has no
 dependency propagation. The EXECUTE rule names `synchro_owner`, because connect
 and pull run as that role.
+
+Connect and pull evaluate the function as its owner in a security-restricted
+operation. PostgreSQL uses the same model for index expressions, `ANALYZE`, and
+`REFRESH MATERIALIZED VIEW`. The function body never runs with the privileges
+of `synchro_owner`. Thus a body that reads a relation through
+`pg_catalog.query_to_xml`, an operator, or a view can read only the relations
+that its owner can read. The call and dependency rules alone cannot see these
+reads.
 
 The registry stores the function OID, schema, name, `max_scopes`, and the
 SHA-256 of `pg_get_functiondef` in UTF-8. The server computes the definition
@@ -370,6 +378,15 @@ If an impact function, membership function, dependency lookup, or bound check
 fails, Synchro records a durable `scope_evaluation_failed` capture state and
 blocks capture. It never treats an evaluation failure as an empty scope set or
 an empty impact set.
+
+The worker evaluates each membership and impact function as its owner in a
+security-restricted operation, with the same model as the assignment function.
+Thus the owner must have SELECT on each relation that the function depends on
+and USAGE on the schema of that relation. Registration rejects a function that
+breaks this rule. A later privilege change fails evaluation.
+`synchro_prepare_projection_view` grants SELECT on the view to the relation
+owner. `synchro_operator` membership gives USAGE on schema
+`synchro_projection`.
 
 ## Registry and Membership Generations
 

@@ -2103,7 +2103,7 @@ AS 'MODULE_PATHNAME', 'synchro_mark_stream_reset_snapshot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:508
+-- synchro-pg/src/portable_seed.rs:510
 -- synchro_pg::portable_seed::synchro_portable_seed_manifest
 CREATE  FUNCTION "synchro_portable_seed_manifest"(
 	"p_page_limit" INT DEFAULT 1000 /* i32 */
@@ -2114,7 +2114,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:681
+-- synchro-pg/src/portable_seed.rs:683
 -- synchro_pg::portable_seed::synchro_portable_seed_scope
 CREATE  FUNCTION "synchro_portable_seed_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2305,7 +2305,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:745
+-- synchro-pg/src/registry.rs:778
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2318,7 +2318,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1022
+-- synchro-pg/src/registry.rs:1055
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2345,7 +2345,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:428
+-- synchro-pg/src/registry.rs:461
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2461,7 +2461,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_assignment_function_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:467
+-- synchro-pg/src/portable_seed.rs:469
 -- synchro_pg::portable_seed::synchro_unregister_shared_scope
 CREATE  FUNCTION "synchro_unregister_shared_scope"(
 	"p_scope_id" TEXT /* &str */
@@ -2472,7 +2472,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:979
+-- synchro-pg/src/registry.rs:1012
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */

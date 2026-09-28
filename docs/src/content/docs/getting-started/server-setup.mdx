@@ -216,7 +216,9 @@ psql --host 127.0.0.1 --username synchro_quickstart_owner \
 ```
 
 The membership function reads only `synchro_projection.notes`. It returns
-`user:{owner_id}`. The RLS policy compares `owner_id` with the authenticated
+`user:{owner_id}`. The worker evaluates the function as its owner,
+`synchro_quickstart_owner`, in a security-restricted operation.
+`synchro_prepare_projection_view` grants that role SELECT on the view. The RLS policy compares `owner_id` with the authenticated
 push identity in `synchro.user_id` when that context exists. It prevents a user
 from writing another user's row or changing `owner_id`. A missing context
 permits trusted database owner and operator maintenance. The adapter login
@@ -332,7 +334,6 @@ CREATE TABLE public.note_reviewers (
     scope_id text NOT NULL,
     PRIMARY KEY (user_id, scope_id)
 );
-GRANT SELECT ON public.note_reviewers TO synchro_owner;
 
 CREATE FUNCTION public.note_review_scopes(p_user_id text)
 RETURNS SETOF text
@@ -360,13 +361,16 @@ The extension requires these function attributes and grants:
 - `STABLE`, and not `SECURITY DEFINER`.
 - `SET search_path = pg_catalog, synchro`.
 - EXECUTE for `synchro_owner` and no EXECUTE for PUBLIC.
-- SELECT for `synchro_owner` on each relation that the function reads.
+- SELECT for the function owner on each relation that the function reads, and
+  USAGE for the function owner on the schema of that relation.
 
-Step 3 already grants `synchro_owner` USAGE on schema `public`. Schema-qualify
-each relation in the function body. The second registration argument limits
-each user to 100 function scopes. A function result must not start with
-`user:`. A scope holds rows only when a membership function returns that scope
-for the rows.
+The extension evaluates the function as its owner in a security-restricted
+operation. The function body never runs with the privileges of
+`synchro_owner`. `synchro_quickstart_owner` owns `public.note_reviewers`, so it
+needs no additional grant. Schema-qualify each relation in the function body.
+The second registration argument limits each user to 100 function scopes. A
+function result must not start with `user:`. A scope holds rows only when a
+membership function returns that scope for the rows.
 
 Register the function again after you change its definition. Until then,
 connect and pull fail with `500 sync_integrity_failure`. Remove the

@@ -443,11 +443,13 @@ pub(crate) fn load_assigned_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec
              LIMIT $2",
             crate::bucketing::qualified_function_name(&registration.function),
         );
-        let rows = client.select(
-            &query,
-            None,
-            &[user_id.into(), (registration.max_scopes + 1).into()],
-        )?;
+        let rows = crate::bucketing::evaluate_as_function_owner(&registration.function, || {
+            client.select(
+                &query,
+                None,
+                &[user_id.into(), (registration.max_scopes + 1).into()],
+            )
+        })?;
         let mut scopes = Vec::new();
         for row in rows {
             if scopes.len() == maximum {

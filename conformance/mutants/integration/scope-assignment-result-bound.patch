@@ -1,8 +1,8 @@
 diff --git a/extensions/synchro-pg/src/portable_seed.rs b/extensions/synchro-pg/src/portable_seed.rs
 --- a/extensions/synchro-pg/src/portable_seed.rs
 +++ b/extensions/synchro-pg/src/portable_seed.rs
-@@ -437,7 +437,7 @@
-         )?;
+@@ -452,7 +452,7 @@
+         })?;
          let mut scopes = Vec::new();
          for row in rows {
 -            if scopes.len() == maximum {

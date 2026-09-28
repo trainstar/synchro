@@ -81,7 +81,6 @@ CREATE TABLE public.project_members (
     project_id uuid NOT NULL,
     PRIMARY KEY (user_id, project_id)
 );
-GRANT SELECT ON public.project_members TO synchro_owner;
 
 CREATE FUNCTION public.project_scopes(p_user_id text)
 RETURNS SETOF text
@@ -101,7 +100,8 @@ SELECT synchro.synchro_register_assignment_function('public.project_scopes', 100
 ```
 
 Run the example as a role with `synchro_operator` membership. That role must own the function.
-`synchro_owner` must also have USAGE on schema `public`.
+The extension evaluates the function as its owner in a security-restricted operation.
+Thus the owner must be able to read each relation that the function reads.
 The membership function for project rows must return the same `project:{project_id}` scope IDs.
 
 Registration rejects a function unless every rule below is true:
@@ -115,7 +115,7 @@ Registration rejects a function unless every rule below is true:
 - `synchro_owner` has EXECUTE on it. PUBLIC does not have EXECUTE on it.
 - It calls no function outside `pg_catalog`.
 - It reads no relation in schema `synchro`.
-- `synchro_owner` has SELECT on each relation that it reads and USAGE on the schema of that relation.
+- The function owner has SELECT on each relation that the function reads and USAGE on the schema of that relation.
 
 The function runs with `search_path` set to `pg_catalog, synchro`.
 Schema-qualify every application relation in the function body.

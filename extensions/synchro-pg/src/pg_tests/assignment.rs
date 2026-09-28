@@ -6,11 +6,32 @@ const ASSIGNMENT_BODY: &str = "BEGIN ATOMIC
 END";
 
 fn create_assignment_members() {
-    Spi::run(
-        "CREATE TABLE public.assignment_members (user_id TEXT NOT NULL, scope_id TEXT);
-         GRANT SELECT ON public.assignment_members TO synchro_owner",
-    )
-    .expect("create assignment members");
+    Spi::run("CREATE TABLE public.assignment_members (user_id TEXT NOT NULL, scope_id TEXT)")
+        .expect("create assignment members");
+}
+
+/// Creates a non-superuser role that owns and registers an assignment
+/// function, so a test can observe the privileges of the function owner.
+fn create_assignment_owner(role: &str) {
+    Spi::run(&format!(
+        "CREATE ROLE {role} NOLOGIN NOSUPERUSER;
+         GRANT synchro_operator TO {role}"
+    ))
+    .expect("create assignment function owner");
+}
+
+fn transfer_assignment_function(name: &str, role: &str) {
+    Spi::run(&format!(
+        "ALTER FUNCTION public.{name}(TEXT) OWNER TO {role}"
+    ))
+    .expect("transfer assignment function ownership");
+}
+
+fn as_assignment_owner<T>(role: &str, action: impl FnOnce() -> T) -> T {
+    Spi::run(&format!("SET LOCAL ROLE {role}")).expect("select assignment owner role");
+    let result = action();
+    Spi::run("RESET ROLE").expect("restore test role");
+    result
 }
 
 fn create_assignment_function(name: &str, signature: &str, attributes: &str, body: &str) {
@@ -47,6 +68,11 @@ fn register_assignment_function(name: &str, max_scopes: i32) {
 }
 
 fn assert_assignment_registration_rejected(name: &str, max_scopes: i32) {
+    reject_assignment_registration(name, max_scopes);
+    assert_eq!(assignment_registration(), None);
+}
+
+fn reject_assignment_registration(name: &str, max_scopes: i32) {
     Spi::run(&format!(
         "DO $test$
          DECLARE
@@ -66,7 +92,6 @@ fn assert_assignment_registration_rejected(name: &str, max_scopes: i32) {
          $test$"
     ))
     .expect("reject assignment registration");
-    assert_eq!(assignment_registration(), None);
 }
 
 /// Returns the stored registration and compares its digest with the digest of
@@ -455,24 +480,34 @@ fn assignment_registration_rejects_synchro_relation() {
 
 #[pg_test]
 fn assignment_registration_rejects_relation_without_owner_select() {
+    let owner = "synchro_assignment_select_owner";
+    create_assignment_owner(owner);
     create_assignment_members();
-    Spi::run("REVOKE SELECT ON public.assignment_members FROM synchro_owner")
-        .expect("revoke assignment relation select");
     create_valid_assignment_function("assigned_scopes");
+    transfer_assignment_function("assigned_scopes", owner);
 
-    assert_assignment_registration_rejected("assigned_scopes", 1000);
+    as_assignment_owner(owner, || reject_assignment_registration("assigned_scopes", 1000));
+    let rejected = assignment_registration();
+    Spi::run(&format!("GRANT SELECT ON public.assignment_members TO {owner}"))
+        .expect("grant assignment relation select");
+    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+
+    assert_eq!(rejected, None);
+    assert!(assignment_registration().is_some());
 }
 
 #[pg_test]
 fn assignment_registration_rejects_schema_without_owner_usage() {
-    Spi::run(
+    let owner = "synchro_assignment_usage_owner";
+    create_assignment_owner(owner);
+    Spi::run(&format!(
         "CREATE SCHEMA assignment_private;
          CREATE TABLE assignment_private.assignment_members (
              user_id TEXT NOT NULL,
              scope_id TEXT
          );
-         GRANT SELECT ON assignment_private.assignment_members TO synchro_owner",
-    )
+         GRANT SELECT ON assignment_private.assignment_members TO {owner}"
+    ))
     .expect("create private assignment members");
     create_assignment_function(
         "assigned_scopes",
@@ -484,8 +519,66 @@ fn assignment_registration_rejects_schema_without_owner_usage() {
          END",
     );
     restrict_assignment_function("assigned_scopes", "TEXT");
+    transfer_assignment_function("assigned_scopes", owner);
 
-    assert_assignment_registration_rejected("assigned_scopes", 1000);
+    as_assignment_owner(owner, || reject_assignment_registration("assigned_scopes", 1000));
+    let rejected = assignment_registration();
+    Spi::run(&format!("GRANT USAGE ON SCHEMA assignment_private TO {owner}"))
+        .expect("grant private assignment schema usage");
+    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+
+    assert_eq!(rejected, None);
+    assert!(assignment_registration().is_some());
+}
+
+#[pg_test]
+fn assignment_evaluation_runs_as_function_owner() {
+    let owner = "synchro_assignment_evaluation_owner";
+    setup_test_tables();
+    create_assignment_owner(owner);
+    create_assignment_function(
+        "assigned_scopes",
+        ASSIGNMENT_SIGNATURE,
+        ASSIGNMENT_ATTRIBUTES,
+        "BEGIN ATOMIC
+             SELECT 'role:' || CURRENT_USER::text;
+         END",
+    );
+    restrict_assignment_function("assigned_scopes", "TEXT");
+    transfer_assignment_function("assigned_scopes", owner);
+    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+
+    let response = register_client("u1", "c1");
+
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        client_scope_ids("u1", "c1"),
+        vec![format!("role:{owner}"), "user:u1".to_string()]
+    );
+}
+
+#[pg_test]
+fn assignment_evaluation_query_to_xml_cannot_read_synchro() {
+    let owner = "synchro_assignment_query_owner";
+    setup_test_tables();
+    create_assignment_owner(owner);
+    create_assignment_function(
+        "assigned_scopes",
+        ASSIGNMENT_SIGNATURE,
+        ASSIGNMENT_ATTRIBUTES,
+        "BEGIN ATOMIC
+             SELECT 'team:alpha'::text
+             WHERE pg_catalog.query_to_xml(
+                 'SELECT count(*) FROM synchro.sync_clients', false, true, ''
+             ) IS NOT NULL;
+         END",
+    );
+    restrict_assignment_function("assigned_scopes", "TEXT");
+    transfer_assignment_function("assigned_scopes", owner);
+    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+
+    assert!(assignment_registration().is_some());
+    assert_connect_rejected("u1", "c1");
 }
 
 #[pg_test]

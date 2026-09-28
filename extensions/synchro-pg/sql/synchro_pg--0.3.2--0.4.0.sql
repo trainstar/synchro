@@ -56,6 +56,28 @@ ALTER TABLE synchro.sync_push_mutations ADD CONSTRAINT sync_push_mutations_outco
          ))
     );
 
+-- Registered functions now run as their owner, and each membership and
+-- impact function owner is the relation owner.
+DO $grant$
+DECLARE
+    projection RECORD;
+BEGIN
+    FOR projection IN
+        SELECT view.view_oid::pg_catalog.regclass AS view_name,
+               relation.relowner
+        FROM synchro.sync_projection_views AS view
+        JOIN pg_catalog.pg_class AS relation
+          ON relation.oid = view.physical_relation_oid
+    LOOP
+        EXECUTE pg_catalog.format(
+            'GRANT SELECT ON %s TO %I',
+            projection.view_name,
+            pg_catalog.pg_get_userbyid(projection.relowner)
+        );
+    END LOOP;
+END
+$grant$;
+
 UPDATE synchro.sync_extension_build
 SET installed_fingerprint = synchro.synchro_build_fingerprint(),
     installed_at = pg_catalog.now()

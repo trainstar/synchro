@@ -644,6 +644,44 @@ fn membership_dependency_resolves_old_and_new_target_rows() {
     assert_eq!(impacts, Ok(vec!["3".to_string(), "7".to_string()]));
 }
 
+/// Returns the role that owns a registered function.
+fn registered_function_owner(signature: &str) -> String {
+    Spi::get_one_with_args::<String>(
+        "SELECT pg_catalog.pg_get_userbyid(proowner)::text
+         FROM pg_catalog.pg_proc
+         WHERE oid = $1::regprocedure",
+        &[signature.into()],
+    )
+    .expect("registered function owner query")
+    .expect("registered function owner")
+}
+
+#[pg_test]
+fn membership_dependency_impact_runs_as_function_owner() {
+    let fixture = membership_dependency_fixture();
+    let body = target_row_expression(
+        &fixture,
+        "(SELECT role.oid::integer FROM pg_catalog.pg_roles role
+          WHERE role.rolname = CURRENT_USER)",
+    );
+    create_impact_function(&fixture, &format!("SELECT {body}"), true, true);
+    register_dependency(&fixture, 1);
+    activate_pending_registry_for_test();
+    let owner_oid = Spi::get_one_with_args::<i64>(
+        "SELECT proowner::bigint FROM pg_catalog.pg_proc WHERE oid = $1::regprocedure",
+        &[format!("public.{}(jsonb, jsonb)", fixture.impact_function).into()],
+    )
+    .expect("impact function owner query")
+    .expect("impact function owner");
+
+    Spi::run("SET LOCAL ROLE synchro_worker").expect("select worker role");
+    let impacts = resolve_fixture_impacts(&fixture, None, None);
+    Spi::run("RESET ROLE").expect("restore test role");
+    cleanup_membership_fixture(&fixture);
+
+    assert_eq!(impacts, Ok(vec![owner_oid.to_string()]));
+}
+
 #[pg_test]
 fn membership_dependency_fingerprint_is_independent_of_search_path() {
     let fixture = membership_dependency_fixture();
@@ -1119,6 +1157,198 @@ fn membership_function_limits_rows_before_rust_rejection() {
 
     assert_eq!(resolution, Err(()));
     assert_eq!(materialized_rows, 2);
+}
+
+struct RegisteredMembershipFixture {
+    table: String,
+    function: String,
+    registration: crate::registry::TableRegistration,
+}
+
+/// Registers one relation whose membership function has the given body.
+fn registered_membership_fixture(body: &str) -> RegisteredMembershipFixture {
+    let suffix: String = Spi::get_one("SELECT replace(gen_random_uuid()::text, '-', '')")
+        .expect("membership owner suffix query")
+        .expect("membership owner suffix");
+    let table = format!("membership_owner_{suffix}");
+    let function = format!("membership_owner_function_{suffix}");
+    let policy = format!("membership_owner_policy_{suffix}");
+
+    Spi::run(&format!(
+        "CREATE TABLE public.{table} (
+             id INTEGER PRIMARY KEY,
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+             deleted_at TIMESTAMPTZ
+         );
+         CREATE FUNCTION tests.{function}(p_key INTEGER)
+         RETURNS SETOF text
+         LANGUAGE sql
+         STABLE
+         SECURITY INVOKER
+         SET search_path = pg_catalog, synchro
+         BEGIN ATOMIC
+             {body};
+         END;
+         REVOKE EXECUTE ON FUNCTION tests.{function}(INTEGER) FROM PUBLIC;
+         GRANT EXECUTE ON FUNCTION tests.{function}(INTEGER)
+             TO synchro_owner, synchro_worker;
+         GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker;
+         GRANT SELECT, INSERT, UPDATE ON TABLE public.{table} TO synchro_owner;
+         ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY {policy} ON public.{table}
+             AS PERMISSIVE FOR ALL TO synchro_owner
+             USING (true) WITH CHECK (true);"
+    ))
+    .expect("create membership owner fixture");
+    Spi::run(&format!(
+        "SELECT synchro.synchro_register_table(
+             'public.{table}',
+             'tests.{function}',
+             'multi_scope',
+             'id', 'updated_at', 'deleted_at', 'enabled',
+             '{{}}'::text[], '{{}}'::text[], 1
+         )"
+    ))
+    .expect("register membership owner fixture");
+    activate_pending_registry_for_test();
+    let registration = Spi::connect(|client| {
+        let registry = crate::registry::load_registry_from_client(client)?;
+        Ok::<_, pgrx::spi::Error>(registry
+            .iter()
+            .find(|registration| {
+                registration.physical_schema == "public" && registration.physical_relation == table
+            })
+            .cloned()
+            .expect("registered membership owner fixture"))
+    })
+    .expect("load registered membership owner fixture");
+    RegisteredMembershipFixture {
+        table,
+        function,
+        registration,
+    }
+}
+
+fn drop_registered_membership_fixture(fixture: &RegisteredMembershipFixture) {
+    Spi::run(&format!(
+        "SELECT synchro.synchro_unregister_table('{}')",
+        fixture.table
+    ))
+    .expect("unregister membership owner fixture");
+    activate_pending_registry_for_test();
+    Spi::run(&format!(
+        "DROP FUNCTION tests.{}(INTEGER);
+         DROP TABLE public.{};",
+        fixture.function, fixture.table
+    ))
+    .expect("drop membership owner fixture");
+}
+
+/// Resolves one record as `synchro_worker` and catches an evaluation error,
+/// as the worker does.
+fn resolve_membership_as_worker(
+    fixture: &RegisteredMembershipFixture,
+) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    Spi::run("SET LOCAL ROLE synchro_worker").expect("select worker role");
+    Spi::connect(|client| {
+        Ok::<_, pgrx::spi::Error>(crate::materialize::resolve_membership_batch(
+            client,
+            &fixture.registration,
+            &["1".to_string()],
+        ))
+    })
+    .expect("resolve registered membership owner fixture")
+}
+
+#[pg_test]
+fn membership_function_runs_as_function_owner() {
+    let fixture = registered_membership_fixture("SELECT 'role:' || CURRENT_USER::text");
+    let owner = registered_function_owner(&format!("tests.{}(integer)", fixture.function));
+
+    let resolution = resolve_membership_as_worker(&fixture);
+    Spi::run("RESET ROLE").expect("restore test role");
+    drop_registered_membership_fixture(&fixture);
+
+    assert_ne!(owner, "synchro_worker");
+    assert_eq!(
+        resolution,
+        Ok(std::collections::HashMap::from([(
+            "1".to_string(),
+            vec![format!("role:{owner}")],
+        )]))
+    );
+}
+
+#[pg_test]
+fn membership_evaluation_error_restores_caller_identity() {
+    let fixture = registered_membership_fixture("SELECT (p_key / 0)::text");
+    let search_path: String = Spi::get_one("SELECT current_setting('search_path')")
+        .expect("caller search path query")
+        .expect("caller search path");
+
+    let resolution = resolve_membership_as_worker(&fixture);
+    let caller: String = Spi::get_one("SELECT current_user::text")
+        .expect("caller identity query")
+        .expect("caller identity");
+    let restored_path: String = Spi::get_one("SELECT current_setting('search_path')")
+        .expect("restored search path query")
+        .expect("restored search path");
+    Spi::run("RESET ROLE").expect("restore test role");
+    drop_registered_membership_fixture(&fixture);
+
+    assert!(resolution.is_err());
+    assert_eq!(caller, "synchro_worker");
+    assert_eq!(restored_path, search_path);
+}
+
+#[pg_test]
+fn projection_view_grants_select_to_relation_owner() {
+    let owner = "synchro_projection_view_owner";
+    Spi::run(&format!(
+        "CREATE ROLE {owner} NOLOGIN NOSUPERUSER;
+         GRANT synchro_operator TO {owner};
+         CREATE TABLE public.projection_owner_items (
+             id INTEGER PRIMARY KEY,
+             label TEXT NOT NULL
+         );
+         ALTER TABLE public.projection_owner_items OWNER TO {owner}"
+    ))
+    .expect("create projection view owner fixture");
+    let prepare_as_owner = || {
+        Spi::run(&format!("SET LOCAL ROLE {owner}")).expect("select relation owner role");
+        Spi::run(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.projection_owner_items', 'projection_owner_items',
+                 ARRAY['id', 'label']::text[]
+             )",
+        )
+        .expect("prepare projection view as relation owner");
+        Spi::run("RESET ROLE").expect("restore test role");
+    };
+    let owner_can_read = || {
+        Spi::get_one_with_args::<bool>(
+            "SELECT has_table_privilege(
+                 $1, 'synchro_projection.projection_owner_items', 'SELECT'
+             )",
+            &[owner.into()],
+        )
+        .expect("projection view owner privilege query")
+        .expect("projection view owner privilege")
+    };
+
+    prepare_as_owner();
+    let created = owner_can_read();
+    Spi::run(&format!(
+        "REVOKE SELECT ON synchro_projection.projection_owner_items FROM {owner}"
+    ))
+    .expect("revoke projection view select");
+    let revoked = owner_can_read();
+    prepare_as_owner();
+    let prepared_again = owner_can_read();
+
+    assert!(created);
+    assert!(!revoked);
+    assert!(prepared_again);
 }
 
 #[pg_test]
