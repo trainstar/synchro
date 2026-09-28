@@ -35,10 +35,56 @@ APP_RESULT_PATH = "/result"
 APP_RESULT_MAX_BYTES = 4096
 APP_RESULT_MAX_ERROR_LENGTH = 512
 APP_RESULT_READ_TIMEOUT_SECONDS = 5.0
-# The installed consumer authors these values. The harness authors the remote customer name.
-AUTHORED_CUSTOMER_NAME = "Packaged Consumer"
-INITIAL_SHIP_ADDRESS = {"street": "Packaged Initial"}
-DURABLE_SHIP_ADDRESS = {"street": "Packaged Durable"}
+# The consumer references two rows of the training dataset authored seed
+# (conformance/dataset/authored.go: OrgA and BackSquat). The fixture prepares
+# that seed with CLIENT_DATASET=1.
+DATASET_ORGANIZATION_ID = "00000001-0000-4000-8000-000000000001"
+DATASET_EXERCISE_ID = "00000004-0000-4000-8000-000000000001"
+DATASET_EXERCISE_NAME = "Back Squat"
+# The installed consumer writes these rows through its public SQL path. The
+# harness writes REMOTE_SETS and a new program title while the consumer is dead.
+AUTHORED_PROGRAM = {
+    "title": 'Packaged Block \u2705 "consumer"',
+    "description": "",
+    "visibility": "private",
+    "week_count": 6,
+    "settings": {"deload_week": 4},
+}
+AUTHORED_WORKOUT = {
+    "name": "Packaged Heavy Day",
+    "notes": 'Tiefe gut \u2705\nline "two"\\',
+    "scheduled_on": "2026-09-14",
+    "started_at": "2026-09-14T06:30:00.123456Z",
+    "duration_seconds": 3725,
+    # The server generates duration_minutes as duration_seconds / 60.
+    "duration_minutes": 62,
+    "external_ref": "9007199254740993",
+}
+AUTHORED_ENTRY = {"position": 1, "target": {"reps": [5, 5, 3], "sets": 3}}
+AUTHORED_TIMESTAMP = "2026-09-14T12:00:00.000000Z"
+DURABLE_TIMESTAMP = "2026-09-14T12:05:00.000000Z"
+# Each set is (set_index, reps, weight_kg, rpe, duration_ms, completed_at, note).
+CLIENT_SETS = (
+    (1, 5, "100", "7.5", "1", "2026-09-14T06:40:00.000001Z", ""),
+    (2, 5, "102.5", "8", "9007199254740993", "2026-09-14T06:45:00.000000Z", "solid"),
+    (3, 3, "110.25", "8.5", None, None, '\u65b0\u8a18\u9332 \U0001f389 "PR"'),
+)
+# The offline update that the consumer queues before it is killed.
+DURABLE_SET_INDEX = 3
+DURABLE_REPS = 8
+REMOTE_SETS = (
+    (4, 2, "120", "9", None, None, "server \u00e9\u4e16"),
+    (5, 1, "125.5", "9.5", None, None, ""),
+)
+# Hand-computed sums of reps * weight_kg. Only the server rollup trigger
+# writes workouts.total_volume_kg, and only a pull delivers it to the client.
+INITIAL_TOTAL_VOLUME_KG = "1343.25"  # 5 * 100 + 5 * 102.5 + 3 * 110.25
+REMOTE_TOTAL_VOLUME_KG = "1708.75"  # 1343.25 + 2 * 120 + 1 * 125.5
+FINAL_TOTAL_VOLUME_KG = "2260"  # 1708.75 + (8 - 3) * 110.25
+INITIAL_OBSERVED_SETS = "1:5:100,2:5:102.5,3:8:110.25"
+FINAL_OBSERVED_SETS = "1:5:100,2:5:102.5,3:8:110.25,4:2:120,5:1:125.5"
+CLIENT_RESUMED_WRITE = {"set_index": DURABLE_SET_INDEX, "reps": DURABLE_REPS}
+OBSERVED_FIELDS = ("exercise_name", "program_title", "total_volume_kg", "sets")
 # The server consumer uploads this customer insert only after the adapter restarts.
 SERVER_OFFLINE_WRITE = {"customer_id": "00000000-0000-4000-8000-000000000118", "customer_name": "Packaged server offline"}
 
@@ -223,7 +269,7 @@ def validate_observed(value: object, label: str) -> dict[str, str]:
     """Validate the rows that the consumer read through its public query path."""
     if (
         not isinstance(value, dict)
-        or set(value) != {"customer_name", "ship_address"}
+        or set(value) != set(OBSERVED_FIELDS)
         or not all(isinstance(item, str) for item in value.values())
     ):
         raise EvidenceError(f"{label} observed rows are invalid")
@@ -448,26 +494,162 @@ def psql_rows(sql: str, variables: dict[str, str]) -> list[str]:
     return result.stdout.splitlines()
 
 
+DATETIME_SQL = "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'"
+# The same canonical text as dataset.SourceRowsSQL: trimmed decimals, UTC
+# microsecond datetimes, and int64 as text so that no digit can round.
+SERVER_STATE_SQL = f"""SELECT json_build_object(
+  'program', (SELECT json_build_object(
+      'organization_id', organization_id::text, 'owner_id', owner_id, 'title', title,
+      'description', description, 'visibility', visibility, 'week_count', week_count,
+      'settings', settings, 'deleted', deleted_at IS NOT NULL)
+    FROM public.programs WHERE id = :'program_id'::uuid),
+  'workout', (SELECT json_build_object(
+      'program_id', program_id::text, 'owner_id', owner_id, 'name', name, 'notes', notes,
+      'scheduled_on', to_char(scheduled_on, 'YYYY-MM-DD'),
+      'started_at', to_char(started_at AT TIME ZONE 'UTC', {DATETIME_SQL}),
+      'duration_seconds', duration_seconds, 'duration_minutes', duration_minutes,
+      'total_volume_kg', trim_scale(total_volume_kg)::text, 'external_ref', external_ref::text,
+      'deleted', deleted_at IS NOT NULL)
+    FROM public.workouts WHERE id = :'workout_id'::uuid),
+  'entry', (SELECT json_build_object(
+      'workout_id', workout_id::text, 'program_id', program_id::text, 'exercise_id', exercise_id::text,
+      'owner_id', owner_id, 'position', position, 'target', target, 'deleted', deleted_at IS NOT NULL)
+    FROM public.workout_exercises WHERE id = :'entry_id'::uuid),
+  'sets', (SELECT json_agg(json_build_object(
+      'id', id::text, 'workout_id', workout_id::text, 'program_id', program_id::text,
+      'owner_id', owner_id, 'set_index', set_index, 'reps', reps,
+      'weight_kg', trim_scale(weight_kg)::text, 'rpe', rpe::text, 'duration_ms', duration_ms::text,
+      'completed_at', to_char(completed_at AT TIME ZONE 'UTC', {DATETIME_SQL}), 'note', note,
+      'deleted', deleted_at IS NOT NULL) ORDER BY set_index)
+    FROM public.exercise_sets WHERE workout_exercise_id = :'entry_id'::uuid));
+"""
+
+
+def dataset_ids(config: dict[str, object]) -> dict[str, str]:
+    return {name: str(config[name]) for name in ("program_id", "workout_id", "entry_id")}
+
+
 def server_rows(config: dict[str, object]) -> dict[str, object]:
-    rows = psql_rows(
-        """SELECT json_build_object(
-  'customer_name', customer.name,
-  'customer_user_id', customer.user_id,
-  'order_user_id', orders.user_id,
-  'ship_address', orders.ship_address)
-FROM public.orders orders
-JOIN public.customers customer ON customer.id = orders.customer_id
-WHERE orders.id = :'order_id'::uuid AND customer.id = :'customer_id'::uuid
-  AND orders.deleted_at IS NULL AND customer.deleted_at IS NULL;
-""",
-        {"order_id": str(config["order_id"]), "customer_id": str(config["customer_id"])},
-    )
+    rows = psql_rows(SERVER_STATE_SQL, dataset_ids(config))
     if len(rows) != 1:
-        raise EvidenceError("server does not hold exactly one consumer order and customer")
+        raise EvidenceError("server state query did not return one row")
     value = json_value(rows[0], "server row state")
     if not isinstance(value, dict):
         raise EvidenceError("server row state is invalid")
     return value
+
+
+def consumer_sets(config: dict[str, object], durable: bool, remote: bool) -> list[tuple[str, tuple]]:
+    """Return the authored (set_id, values) rows of one consumer state."""
+    result = []
+    for set_id, values in zip(config["set_ids"], CLIENT_SETS):
+        if durable and values[0] == DURABLE_SET_INDEX:
+            values = (values[0], DURABLE_REPS, *values[2:])
+        result.append((str(set_id), values))
+    if remote:
+        result.extend((str(set_id), values) for set_id, values in zip(config["remote_set_ids"], REMOTE_SETS))
+    return result
+
+
+def expected_server_rows(config: dict[str, object], title: str, sets: list[tuple[str, tuple]], total: str) -> dict[str, object]:
+    ids = dataset_ids(config)
+    live = {"owner_id": str(config["user_id"]), "deleted": False}
+    return {
+        "program": {**AUTHORED_PROGRAM, "title": title, "organization_id": DATASET_ORGANIZATION_ID, **live},
+        "workout": {**AUTHORED_WORKOUT, "program_id": ids["program_id"], "total_volume_kg": total, **live},
+        # The server BEFORE triggers copy the parent chain onto each child row.
+        "entry": {
+            **AUTHORED_ENTRY, "workout_id": ids["workout_id"], "program_id": ids["program_id"],
+            "exercise_id": DATASET_EXERCISE_ID, **live,
+        },
+        "sets": [
+            {
+                "id": set_id, "workout_id": ids["workout_id"], "program_id": ids["program_id"],
+                "set_index": index, "reps": reps, "weight_kg": weight, "rpe": rpe,
+                "duration_ms": duration, "completed_at": completed, "note": note, **live,
+            }
+            for set_id, (index, reps, weight, rpe, duration, completed, note) in sets
+        ],
+    }
+
+
+def differing_fields(actual: object, expected: object, path: str = "row") -> list[str]:
+    if isinstance(actual, dict) and isinstance(expected, dict) and set(actual) == set(expected):
+        return [field for key in sorted(expected) for field in differing_fields(actual[key], expected[key], f"{path}.{key}")]
+    if isinstance(actual, list) and isinstance(expected, list) and len(actual) == len(expected):
+        return [field for index, pair in enumerate(zip(actual, expected)) for field in differing_fields(*pair, f"{path}[{index}]")]
+    return [] if actual == expected else [path]
+
+
+def require_server_rows(config: dict[str, object], expected: dict[str, object], message: str) -> None:
+    actual = server_rows(config)
+    if actual != expected:
+        raise EvidenceError(f"{message}: {', '.join(differing_fields(actual, expected))}")
+
+
+def sql_literal(value: object) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, dict):
+        value = json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def set_values_sql(values: tuple) -> str:
+    """Return set_index through note of one authored set as SQL literals."""
+    index, reps, weight, rpe, duration, completed, note = values
+    return ", ".join((str(index), str(reps), sql_literal(weight), rpe, duration or "NULL", sql_literal(completed), sql_literal(note)))
+
+
+def client_statements(config: dict[str, object]) -> dict[str, object]:
+    """Author the SQL that the installed consumer runs through its public API.
+
+    The statements carry only the consumer inputs, never an expected server
+    result. The parent-chain columns stay NULL, so the server triggers fill them.
+    """
+    user = sql_literal(config["user_id"])
+    ids = {name: sql_literal(value) for name, value in dataset_ids(config).items()}
+    stamp = sql_literal(AUTHORED_TIMESTAMP)
+    program, workout, entry = AUTHORED_PROGRAM, AUTHORED_WORKOUT, AUTHORED_ENTRY
+    sets = ", ".join(
+        f"({sql_literal(set_id)}, {ids['entry_id']}, NULL, NULL, {user}, {set_values_sql(values)}, {stamp}, {stamp}, NULL)"
+        for set_id, values in consumer_sets(config, durable=False, remote=False)
+    )
+    durable_id = sql_literal(config["set_ids"][DURABLE_SET_INDEX - 1])
+    live_sets = f"FROM exercise_sets WHERE workout_exercise_id = {ids['entry_id']} AND deleted_at IS NULL"
+    return {
+        "initial_sql": [
+            "INSERT INTO programs (id, organization_id, owner_id, title, description, visibility, week_count, settings, created_at, updated_at, deleted_at) "
+            f"VALUES ({ids['program_id']}, {sql_literal(DATASET_ORGANIZATION_ID)}, {user}, {sql_literal(program['title'])}, "
+            f"{sql_literal(program['description'])}, {sql_literal(program['visibility'])}, {program['week_count']}, "
+            f"{sql_literal(program['settings'])}, {stamp}, {stamp}, NULL)",
+            "INSERT INTO workouts (id, program_id, owner_id, name, notes, scheduled_on, started_at, duration_seconds, total_volume_kg, external_ref, created_at, updated_at, deleted_at) "
+            f"VALUES ({ids['workout_id']}, {ids['program_id']}, {user}, {sql_literal(workout['name'])}, {sql_literal(workout['notes'])}, "
+            f"{sql_literal(workout['scheduled_on'])}, {sql_literal(workout['started_at'])}, {workout['duration_seconds']}, '0', "
+            f"{workout['external_ref']}, {stamp}, {stamp}, NULL)",
+            "INSERT INTO workout_exercises (id, workout_id, program_id, exercise_id, owner_id, position, target, created_at, updated_at, deleted_at) "
+            f"VALUES ({ids['entry_id']}, {ids['workout_id']}, NULL, {sql_literal(DATASET_EXERCISE_ID)}, {user}, "
+            f"{entry['position']}, {sql_literal(entry['target'])}, {stamp}, {stamp}, NULL)",
+            "INSERT INTO exercise_sets (id, workout_exercise_id, workout_id, program_id, owner_id, set_index, reps, weight_kg, rpe, duration_ms, completed_at, note, created_at, updated_at, deleted_at) "
+            f"VALUES {sets}",
+        ],
+        "durable_sql": [
+            f"UPDATE exercise_sets SET reps = {DURABLE_REPS}, updated_at = {sql_literal(DURABLE_TIMESTAMP)} WHERE id = {durable_id}",
+        ],
+        # converged is '1' when the pulled server total equals the sum of the
+        # local live sets. It compares two local values and holds no expected one.
+        "observe_sql": (
+            f"SELECT (SELECT name FROM exercises WHERE id = {sql_literal(DATASET_EXERCISE_ID)}) AS exercise_name, "
+            f"(SELECT title FROM programs WHERE id = {ids['program_id']}) AS program_title, "
+            f"(SELECT total_volume_kg FROM workouts WHERE id = {ids['workout_id']}) AS total_volume_kg, "
+            "(SELECT group_concat(set_index || ':' || reps || ':' || weight_kg, ',') FROM "
+            f"(SELECT set_index, reps, weight_kg {live_sets} ORDER BY set_index)) AS sets, "
+            f"CASE WHEN (SELECT CAST(total_volume_kg AS REAL) FROM workouts WHERE id = {ids['workout_id']}) = "
+            f"(SELECT SUM(reps * CAST(weight_kg AS REAL)) {live_sets}) THEN '1' ELSE '0' END AS converged"
+        ),
+    }
 
 
 def load_config(path: Path) -> dict[str, object]:
@@ -479,71 +661,74 @@ def load_config(path: Path) -> dict[str, object]:
 
 def author_remote_value(config_path: Path, output: Path) -> None:
     config = load_config(config_path)
-    expected = {
-        "customer_name": AUTHORED_CUSTOMER_NAME,
-        "customer_user_id": config["user_id"],
-        "order_user_id": config["user_id"],
-        "ship_address": INITIAL_SHIP_ADDRESS,
-    }
     # The durable offline write must still be absent, or the resume cannot prove its own upload.
-    if server_rows(config) != expected:
-        raise EvidenceError("server does not hold exactly the initial upload before resume")
-    remote_name = f"Server authored {uuid.uuid4()} \u00e9\u4e16"
-    rows = psql_rows(
-        """UPDATE public.customers SET name = :'remote_name', updated_at = clock_timestamp()
-WHERE id = :'customer_id'::uuid AND name = :'authored_name'
-RETURNING name;
-""",
-        {"remote_name": remote_name, "customer_id": str(config["customer_id"]), "authored_name": AUTHORED_CUSTOMER_NAME},
+    require_server_rows(
+        config,
+        expected_server_rows(config, AUTHORED_PROGRAM["title"], consumer_sets(config, durable=False, remote=False), INITIAL_TOTAL_VOLUME_KG),
+        "server does not hold exactly the initial upload before resume",
     )
-    if rows != [remote_name]:
-        raise EvidenceError("server did not author exactly one remote value")
-    write_json(output, {"schema_version": 1, "customer_name": remote_name})
+    remote_title = f"Server authored {uuid.uuid4()} \u00e9\u4e16"
+    owner = sql_literal(config["user_id"])
+    entry = sql_literal(config["entry_id"])
+    sets = ", ".join(
+        f"({sql_literal(set_id)}, {entry}, {owner}, {set_values_sql(values)})"
+        for set_id, values in zip(config["remote_set_ids"], REMOTE_SETS)
+    )
+    # One multi-row statement fires the rollup AFTER ROW trigger for each row (#178).
+    rows = psql_rows(
+        f"""BEGIN;
+INSERT INTO public.exercise_sets (id, workout_exercise_id, owner_id, set_index, reps, weight_kg, rpe, duration_ms, completed_at, note)
+VALUES {sets};
+UPDATE public.programs SET title = :'remote_title', updated_at = clock_timestamp()
+WHERE id = :'program_id'::uuid AND title = :'authored_title'
+RETURNING title;
+SELECT trim_scale(total_volume_kg)::text FROM public.workouts WHERE id = :'workout_id'::uuid;
+COMMIT;
+""",
+        {**dataset_ids(config), "remote_title": remote_title, "authored_title": str(AUTHORED_PROGRAM["title"])},
+    )
+    if rows != [remote_title, REMOTE_TOTAL_VOLUME_KG]:
+        raise EvidenceError("server did not author exactly the remote sets and program title")
+    write_json(output, {"schema_version": 1, "remote_value": remote_title})
 
 
 def load_remote_value(path: Path) -> str:
     value = load_json(path, "remote value record")
     if (
         not isinstance(value, dict)
-        or set(value) != {"schema_version", "customer_name"}
+        or set(value) != {"schema_version", "remote_value"}
         or value.get("schema_version") != 1
-        or not isinstance(value.get("customer_name"), str)
-        or not value["customer_name"].startswith("Server authored ")
+        or not isinstance(value.get("remote_value"), str)
+        or not value["remote_value"].startswith("Server authored ")
     ):
         raise EvidenceError("remote value record is invalid")
-    return value["customer_name"]
+    return value["remote_value"]
 
 
 def verify_server_state(config_path: Path, remote_path: Path, output: Path) -> None:
     config = load_config(config_path)
-    remote_name = load_remote_value(remote_path)
-    actual = server_rows(config)
-    expected = {
-        "customer_name": remote_name,
-        "customer_user_id": config["user_id"],
-        "order_user_id": config["user_id"],
-        "ship_address": DURABLE_SHIP_ADDRESS,
-    }
-    if actual != expected:
-        raise EvidenceError("server does not hold exactly the resumed upload and the remote value")
-    write_json(output, server_verification(remote_name, {"order_ship_address": DURABLE_SHIP_ADDRESS}))
+    remote_title = load_remote_value(remote_path)
+    require_server_rows(
+        config,
+        expected_server_rows(config, remote_title, consumer_sets(config, durable=True, remote=True), FINAL_TOTAL_VOLUME_KG),
+        "server does not hold exactly the resumed upload and the remote value",
+    )
+    write_json(output, server_verification(remote_title, CLIENT_RESUMED_WRITE))
 
 
-def server_verification(remote_name: str, resumed_write: dict[str, object]) -> dict[str, object]:
-    return {"schema_version": 1, "status": "passed", "remote_customer_name": remote_name, "resumed_write": resumed_write}
+def server_verification(remote_value: str, resumed_write: dict[str, object]) -> dict[str, object]:
+    return {"schema_version": 1, "status": "passed", "remote_value": remote_value, "resumed_write": resumed_write}
 
 
-def validate_server_verification(path: Path, remote_name: str, resumed_write: dict[str, object]) -> None:
-    if load_json(path, "server verification") != server_verification(remote_name, resumed_write):
+def validate_server_verification(path: Path, remote_value: str, resumed_write: dict[str, object]) -> None:
+    if load_json(path, "server verification") != server_verification(remote_value, resumed_write):
         raise EvidenceError("server verification does not confirm the resumed upload and remote value")
 
 
-def require_observed(phase: dict[str, object], label: str, customer_name: str) -> None:
+def require_observed(phase: dict[str, object], label: str, expected: dict[str, str]) -> None:
     observed = validate_observed(phase["observed"], label)
-    if observed["customer_name"] != customer_name:
-        raise EvidenceError(f"{label} consumer did not read the expected customer name")
-    if json_value(observed["ship_address"], f"{label} ship address") != DURABLE_SHIP_ADDRESS:
-        raise EvidenceError(f"{label} consumer did not read the durable ship address")
+    if observed != expected:
+        raise EvidenceError(f"{label} consumer did not read the authored dataset state: {', '.join(differing_fields(observed, expected))}")
 
 
 def complete_cell(
@@ -562,10 +747,19 @@ def complete_cell(
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
     initial = validate_phase(initial_path, "initial")
     resume = validate_phase(resume_path, "resume")
-    remote_name = load_remote_value(remote_path)
-    require_observed(initial, "initial", AUTHORED_CUSTOMER_NAME)
-    require_observed(resume, "resume", remote_name)
-    validate_server_verification(server_path, remote_name, {"order_ship_address": DURABLE_SHIP_ADDRESS})
+    remote_title = load_remote_value(remote_path)
+    initial_observed = {
+        "exercise_name": DATASET_EXERCISE_NAME,
+        "program_title": str(AUTHORED_PROGRAM["title"]),
+        "total_volume_kg": INITIAL_TOTAL_VOLUME_KG,
+        "sets": INITIAL_OBSERVED_SETS,
+    }
+    require_observed(initial, "initial", initial_observed)
+    require_observed(resume, "resume", {
+        **initial_observed, "program_title": remote_title,
+        "total_volume_kg": FINAL_TOTAL_VOLUME_KG, "sets": FINAL_OBSERVED_SETS,
+    })
+    validate_server_verification(server_path, remote_title, CLIENT_RESUMED_WRITE)
     initial_pid = required_integer(initial["pid"], "initial pid", 1)
     resume_pid = required_integer(resume["pid"], "resume pid", 1)
     if killed_pid != initial_pid:
@@ -994,7 +1188,7 @@ def bearer_token(subject: str) -> str:
     return f"{signing_input}.{base64url(signature)}"
 
 
-def smoke_config(cell_id: str, platform: str) -> dict[str, str | int]:
+def smoke_config(cell_id: str, platform: str) -> dict[str, object]:
     server_url = os.environ.get("SYNCHRO_TEST_URL", "").strip().rstrip("/")
     parsed = urlsplit(server_url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -1002,7 +1196,7 @@ def smoke_config(cell_id: str, platform: str) -> dict[str, str | int]:
     if parsed.query or parsed.fragment:
         raise EvidenceError("SYNCHRO_TEST_URL must not contain a query or fragment")
     user_id = str(uuid.uuid4())
-    return {
+    config: dict[str, object] = {
         "schema_version": 1,
         "cell_id": cell_id,
         "platform": platform,
@@ -1010,10 +1204,15 @@ def smoke_config(cell_id: str, platform: str) -> dict[str, str | int]:
         "token": bearer_token(user_id),
         "user_id": user_id,
         "client_id": str(uuid.uuid4()),
-        "customer_id": str(uuid.uuid4()),
-        "order_id": str(uuid.uuid4()),
+        "program_id": str(uuid.uuid4()),
+        "workout_id": str(uuid.uuid4()),
+        "entry_id": str(uuid.uuid4()),
+        "set_ids": [str(uuid.uuid4()) for _ in CLIENT_SETS],
+        "remote_set_ids": [str(uuid.uuid4()) for _ in REMOTE_SETS],
         "phase": "initial",
     }
+    config.update(client_statements(config))
+    return config
 
 
 def write_config(

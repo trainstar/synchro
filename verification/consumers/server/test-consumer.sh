@@ -131,7 +131,7 @@ RETURNING name;
 SQL
 )
 test "$authored" = "$remote_name" || { echo "server did not author exactly one remote value" >&2; exit 1; }
-python3 -c 'import json, sys; json.dump({"schema_version": 1, "customer_name": sys.argv[2]}, open(sys.argv[1], "w"))' "$work_dir/remote.json" "$remote_name"
+python3 -c 'import json, sys; json.dump({"schema_version": 1, "remote_value": sys.argv[2]}, open(sys.argv[1], "w"))' "$work_dir/remote.json" "$remote_name"
 start_adapter
 make --no-print-directory -C "$repo_root" server-consumer-smoke-phase \
   SERVER_SMOKE_URL="$listen_url" SERVER_SMOKE_JWT_SECRET_FILE="$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" \
@@ -152,7 +152,7 @@ SELECT EXISTS (
 SQL
 )
 test "$after_resume" = t || { echo "server does not hold exactly the resumed upload and the remote value" >&2; exit 1; }
-python3 -c 'import json, sys; json.dump({"schema_version": 1, "status": "passed", "remote_customer_name": sys.argv[2], "resumed_write": {"customer_id": sys.argv[3], "customer_name": "Packaged server offline"}}, open(sys.argv[1], "w"))' "$work_dir/server.json" "$remote_name" "$offline_id"
+python3 -c 'import json, sys; json.dump({"schema_version": 1, "status": "passed", "remote_value": sys.argv[2], "resumed_write": {"customer_id": sys.argv[3], "customer_name": "Packaged server offline"}}, open(sys.argv[1], "w"))' "$work_dir/server.json" "$remote_name" "$offline_id"
 bootstrap_row_id=00000000-0000-4000-8000-000000009501
 psql_admin -Xq -v ON_ERROR_STOP=1 -v bootstrap_row_id="$bootstrap_row_id" >/dev/null <<'SQL'
 INSERT INTO public.cf_late_registration (id, owner_id, value)
