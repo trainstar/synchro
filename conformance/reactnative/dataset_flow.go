@@ -237,25 +237,45 @@ func (c *DatasetCoordinator) Write(ctx context.Context, key string, write datase
 	return nil
 }
 
-// Synchronize runs one public synchronization to idle.
+// Synchronize runs one public synchronization to idle. A retryable response,
+// such as 503 capture_pending for a pull right after a push, ends the public
+// call in native backoff. The adapter then waits for the retry time and asks
+// again, as an application does.
 func (c *DatasetCoordinator) Synchronize(ctx context.Context, key string) error {
-	method := "start"
-	if c.active == key && c.started {
-		method = "sync-now"
+	for attempt := 0; ; attempt++ {
+		method := "start"
+		if c.active == key && c.started {
+			method = "sync-now"
+		}
+		raw, err := c.execute(ctx, key, "client", "synchronize-step", map[string]any{"client_key": key, "method": method, "completion": "idle"}, nil)
+		if err != nil {
+			return err
+		}
+		var result struct {
+			Kind       string `json:"kind"`
+			Completion string `json:"completion"`
+			Status     struct {
+				State   string          `json:"state"`
+				RetryAt time.Time       `json:"retry_at"`
+				Failure json.RawMessage `json:"failure"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil || result.Kind != "synchronized" {
+			return fmt.Errorf("React Native dataset synchronization result is invalid: %s", raw)
+		}
+		c.started = true
+		if result.Completion == "idle" {
+			return nil
+		}
+		if result.Completion != "error" || result.Status.State != "backoff" || string(result.Status.Failure) != "null" || attempt == 4 {
+			return fmt.Errorf("React Native dataset synchronization did not reach idle: %s", raw)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Until(result.Status.RetryAt)):
+		}
 	}
-	raw, err := c.execute(ctx, key, "client", "synchronize-step", map[string]any{"client_key": key, "method": method, "completion": "idle"}, nil)
-	if err != nil {
-		return err
-	}
-	var result struct {
-		Kind       string `json:"kind"`
-		Completion string `json:"completion"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil || result.Kind != "synchronized" || result.Completion != "idle" {
-		return fmt.Errorf("React Native dataset synchronization did not reach idle: %s", raw)
-	}
-	c.started = true
-	return nil
 }
 
 // Capture reads the selected local rows and the local application row count.
