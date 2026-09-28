@@ -2090,6 +2090,7 @@ fn materialize_candidate(
                     source_registry_generation: bootstrap.source_registry_generation,
                     target_registry_generation: bootstrap.identity.registry_generation,
                 },
+                0..u64::MAX,
             )
             .map_err(candidate_failure)?;
             let content_hash = transaction_content_hash(transaction);
@@ -3380,8 +3381,9 @@ fn materialize_transaction(
     }
 
     validate_progress_order(client, &stream_generation, transaction)?;
-    let activations = parse_registry_activations(transaction)?;
-    let activations = if activation_requires_bootstrap(
+    let markers = parse_registry_activations(transaction)?;
+    let activations: Vec<i64> = markers.iter().map(|marker| marker.0).collect();
+    let groups = if activation_requires_bootstrap(
         client,
         &stream_generation,
         generation,
@@ -3398,33 +3400,78 @@ fn materialize_transaction(
             &activations,
             transaction,
         )?;
-        activations
+        activation_groups(&markers)
     };
-    let registry = match activations.last().copied() {
-        Some(final_generation) => {
-            load_registry_generation_for_activation(client, generation, final_generation)
-        }
-        None => load_registry_generation_from_client(client, generation),
-    }
-    .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
-    let membership_dependencies =
-        load_membership_dependencies_from_client(client, generation, &registry)
-            .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+    // Segment 0 precedes the first activation group. Segment k follows group k
+    // and uses the registry of that group's last generation.
+    let final_generation = groups
+        .last()
+        .and_then(|group| group.generations.last().copied());
+    let segment_generations: Vec<i64> = std::iter::once(generation)
+        .chain(
+            groups
+                .iter()
+                .filter_map(|group| group.generations.last().copied()),
+        )
+        .collect();
+    let registries = segment_generations
+        .iter()
+        .map(|segment_generation| match final_generation {
+            Some(final_generation) => load_registry_generation_for_activation(
+                client,
+                *segment_generation,
+                final_generation,
+            ),
+            None => load_registry_generation_from_client(client, *segment_generation),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+    let membership_dependencies = segment_generations
+        .iter()
+        .zip(&registries)
+        .map(|(segment_generation, registry)| {
+            load_membership_dependencies_from_client(client, *segment_generation, registry)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
     let projection_target = ProjectionTarget::Active {
         stream_generation: &stream_generation,
     };
 
-    if transaction
-        .truncates
-        .iter()
-        .any(|truncate| find_registration(&registry, &truncate.relation).is_some())
-    {
+    if transaction.truncates.iter().any(|truncate| {
+        registries
+            .iter()
+            .any(|registry| find_registration(registry, &truncate.relation).is_some())
+    }) {
         return Err(failure("truncate_unsupported", transaction.commit_lsn));
     }
 
-    let fences = parse_fence_messages(transaction)?;
-    let applicable =
-        correlate_events(client, transaction, &registry, &fences, FenceTarget::Active)?;
+    let mut segment_fences: Vec<Vec<FenceMessage>> =
+        registries.iter().map(|_| Vec::new()).collect();
+    for (fence, segment) in parse_fence_messages(transaction)?
+        .into_iter()
+        .zip(fence_segments(transaction, &groups))
+    {
+        segment_fences[segment].push(fence);
+    }
+    let mut applicable_segments = Vec::with_capacity(registries.len());
+    for (segment, registry) in registries.iter().enumerate() {
+        let start = segment
+            .checked_sub(1)
+            .map_or(0, |group| groups[group].event_boundary);
+        let end = groups
+            .get(segment)
+            .map_or(u64::MAX, |group| group.event_boundary);
+        applicable_segments.push(correlate_events(
+            client,
+            transaction,
+            registry,
+            &segment_fences[segment],
+            FenceTarget::Active,
+            start..end,
+        )?);
+    }
+    let event_count = applicable_segments.iter().map(Vec::len).sum::<usize>();
 
     client
         .update(
@@ -3444,7 +3491,7 @@ fn materialize_transaction(
                 format_lsn(transaction.end_lsn).as_str().into(),
                 transaction.xid.to_string().as_str().into(),
                 generation.into(),
-                i64::try_from(applicable.len())
+                i64::try_from(event_count)
                     .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
                     .into(),
                 content_hash.to_vec().into(),
@@ -3453,23 +3500,41 @@ fn materialize_transaction(
         )
         .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
 
-    let persisted = persist_events_and_projections(
-        client,
-        projection_target,
-        transaction,
-        &registry,
-        &applicable,
-    )?;
-    let impacts = collect_membership_impacts(
-        client,
-        projection_target,
-        transaction,
-        &registry,
-        &membership_dependencies,
-        persisted,
-    )?;
-    let effect_count =
-        materialize_impacts(client, projection_target, transaction, &registry, impacts)?;
+    let mut active_generation = generation;
+    let mut effect_count = 0i64;
+    for (segment, applicable) in applicable_segments.iter().enumerate() {
+        if let Some(group) = segment.checked_sub(1).map(|group| &groups[group]) {
+            active_generation = activate_generations(
+                client,
+                active_generation,
+                &group.generations,
+                transaction.commit_lsn,
+                transaction.end_lsn,
+            )?;
+        }
+        let persisted = persist_events_and_projections(
+            client,
+            projection_target,
+            transaction,
+            &registries[segment],
+            applicable,
+        )?;
+        let impacts = collect_membership_impacts(
+            client,
+            projection_target,
+            transaction,
+            &registries[segment],
+            &membership_dependencies[segment],
+            persisted,
+        )?;
+        effect_count += materialize_impacts(
+            client,
+            projection_target,
+            transaction,
+            &registries[segment],
+            impacts,
+        )?;
+    }
 
     client
         .update(
@@ -3485,13 +3550,6 @@ fn materialize_transaction(
         )
         .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
 
-    let final_generation = activate_generations(
-        client,
-        generation,
-        &activations,
-        transaction.commit_lsn,
-        transaction.end_lsn,
-    )?;
     client
         .update(
             "UPDATE synchro.sync_wal_progress
@@ -3506,7 +3564,7 @@ fn materialize_transaction(
                 stream_generation.as_str().into(),
                 format_lsn(transaction.commit_lsn).as_str().into(),
                 format_lsn(transaction.end_lsn).as_str().into(),
-                final_generation.into(),
+                active_generation.into(),
             ],
         )
         .map_err(|_| failure("transaction_commit_failed", transaction.commit_lsn))?;
@@ -3692,7 +3750,10 @@ fn validate_progress_order(
     Ok(())
 }
 
-fn parse_registry_activations(transaction: &WalTransaction) -> Result<Vec<i64>, PoisonFailure> {
+/// Return each registry activation with its source cutover point.
+fn parse_registry_activations(
+    transaction: &WalTransaction,
+) -> Result<Vec<(i64, u64)>, PoisonFailure> {
     let mut activations = Vec::new();
     for message in transaction
         .messages
@@ -3707,9 +3768,53 @@ fn parse_registry_activations(transaction: &WalTransaction) -> Result<Vec<i64>, 
         if activation.action != "activate" || activation.generation <= 0 {
             return Err(failure("validation_failed", transaction.commit_lsn));
         }
-        activations.push(activation.generation);
+        activations.push((activation.generation, message.event_boundary));
     }
     Ok(activations)
+}
+
+/// Registry activations that take effect at one source position.
+struct ActivationGroup {
+    event_boundary: u64,
+    generations: Vec<i64>,
+}
+
+/// Group adjacent activation markers that no row event separates. Each group
+/// activates before the row events that follow it in the source transaction.
+fn activation_groups(markers: &[(i64, u64)]) -> Vec<ActivationGroup> {
+    let mut groups: Vec<ActivationGroup> = Vec::new();
+    for (generation, event_boundary) in markers {
+        match groups.last_mut() {
+            Some(group) if group.event_boundary == *event_boundary => {
+                group.generations.push(*generation)
+            }
+            _ => groups.push(ActivationGroup {
+                event_boundary: *event_boundary,
+                generations: vec![*generation],
+            }),
+        }
+    }
+    groups
+}
+
+/// Return the segment of each fence message. Segment k follows the k-th
+/// activation group in message order.
+fn fence_segments(transaction: &WalTransaction, groups: &[ActivationGroup]) -> Vec<usize> {
+    let mut segment = 0;
+    let mut segments = Vec::new();
+    for message in &transaction.messages {
+        if message.prefix == REGISTRY_PREFIX {
+            if groups
+                .get(segment)
+                .is_some_and(|group| group.event_boundary == message.event_boundary)
+            {
+                segment += 1;
+            }
+        } else if message.prefix == FENCE_PREFIX {
+            segments.push(segment);
+        }
+    }
+    segments
 }
 
 /// A valid pending activation path with a recorded or unknown bootstrap
@@ -3928,11 +4033,16 @@ fn correlate_events<'a>(
     registry: &'a [TableRegistration],
     fences: &'a [FenceMessage],
     fence_target: FenceTarget<'_>,
+    event_ordinals: std::ops::Range<u64>,
 ) -> Result<Vec<ApplicableEvent<'a>>, PoisonFailure> {
     let mut applicable = Vec::new();
     let mut applicable_events = Vec::new();
     let mut fence_validation_rows = Vec::new();
-    for event in &transaction.events {
+    for event in transaction
+        .events
+        .iter()
+        .filter(|event| event_ordinals.contains(&event.event_ordinal))
+    {
         if let Some(registration) = find_registration(registry, &event.relation) {
             applicable_events.push((event, registration));
         }

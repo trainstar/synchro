@@ -177,7 +177,7 @@ A stream reset MUST use a permanent candidate logical slot created through the r
 
 ### Commit Ordered Registry Activation
 
-Each source transaction MUST use exactly the latest validated registry generation whose activation precedes it in commit order, and all events in that transaction MUST use that generation. Activation by notification alone or switching generation within a transaction is a violation of Registry activation and relation drift in [ADR 001].
+Each source row event MUST use exactly the latest validated registry generation whose activation precedes that event in source order. An activation precedes an event when an earlier source transaction commits it, or when its activation message precedes the event in the same source transaction. Activation by notification alone, or a generation switch at any position other than an activation message, is a violation of Registry activation and relation drift in [ADR 001].
 
 ### Qualified Registered Relation Identity
 
