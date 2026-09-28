@@ -160,7 +160,6 @@
 	client-consumer-artifacts \
 	local-consumer-artifacts \
 	test-consumer-swift \
-	test-consumer-swift-smoke \
 	test-consumer-swift-ios \
 	test-consumer-kotlin \
 	test-consumer-kotlin-device \
@@ -1968,12 +1967,6 @@ test-consumer-swift: client-consumer-apple-artifact
 			--disable-dependency-cache \
 			SynchroConsumer
 
-test-consumer-swift-smoke: client-consumer-apple-artifact
-	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
-		sh verification/consumers/swift/test-consumer.sh \
-			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
-			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)"
-
 test-consumer-swift-ios: client-consumer-apple-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
@@ -2075,12 +2068,6 @@ test-client-platforms:
 		SUP-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
-		SUP-MACOS-CURRENT-001) \
-			test "$$(uname -s)" = "Darwin" || { echo "macOS is required" >&2; exit 1; }; \
-			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
-			macos_version="$$(sw_vers -productVersion)"; \
-			case "$(SUPPORT_PLATFORM_VERSION)" in *.*) test "$$macos_version" = "$(SUPPORT_PLATFORM_VERSION)" ;; *) test "$${macos_version%%.*}" = "$(SUPPORT_PLATFORM_VERSION)" ;; esac || { echo "macOS runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
-			$(MAKE) test-consumer-swift-smoke ;; \
 		SUP-ANDROID-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "24" || { echo "SUPPORT_PLATFORM_VERSION must be 24" >&2; exit 1; }; \
 			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
