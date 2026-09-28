@@ -1594,6 +1594,28 @@ func (h *Harness) restartAttachedPostgres(ctx context.Context) error {
 	if err := h.stopAdapter(ctx); err != nil {
 		return err
 	}
+	if err := h.restartAttachedPostmaster(ctx); err != nil {
+		return err
+	}
+	if err := h.verifyAttachedCluster(ctx); err != nil {
+		return err
+	}
+	if err := h.waitForWorker(ctx); err != nil {
+		return err
+	}
+	if err := h.verifyCaptureReadiness(ctx); err != nil {
+		return err
+	}
+	if !h.config.SkipAdapter {
+		if err := h.startAdapter(ctx); err != nil {
+			return err
+		}
+	}
+	h.restartCount++
+	return nil
+}
+
+func (h *Harness) restartAttachedPostmaster(ctx context.Context) error {
 	if err := h.closeDatabaseHandles(ctx); err != nil {
 		return err
 	}
@@ -1615,21 +1637,76 @@ func (h *Harness) restartAttachedPostgres(ctx context.Context) error {
 	if err := h.waitForPostgres(ctx, h.names.Database); err != nil {
 		return fmt.Errorf("wait for attached PostgreSQL readiness: %w", err)
 	}
-	if err := h.verifyAttachedCluster(ctx); err != nil {
+	return nil
+}
+
+// ResetAttachedDatabase recreates the attached database with a fresh extension
+// topology. Local provisioning gives each harness a new cluster, and this reset
+// gives the next attached harness the same initial state.
+func ResetAttachedDatabase(ctx context.Context, environment EnvironmentConfig) error {
+	if ctx == nil {
+		return errors.New("attached database reset context is required")
+	}
+	if environment.AttachDatabaseURL == "" {
+		return errors.New("attached database reset requires SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL")
+	}
+	config, err := normalizeHarnessConfig(HarnessConfig{Environment: environment, SkipAdapter: true})
+	if err != nil {
 		return err
 	}
-	if err := h.waitForWorker(ctx); err != nil {
+	h := &Harness{config: config, env: config.Environment, worker: config.Environment.Worker}
+	if err := h.configureAttachedDatabase(); err != nil {
 		return err
 	}
-	if err := h.verifyCaptureReadiness(ctx); err != nil {
+	resetErr := h.resetAttachedDatabase(ctx)
+	closeContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), config.ShutdownTimeout)
+	defer cancel()
+	return errors.Join(resetErr, h.closeDatabaseHandles(closeContext))
+}
+
+func (h *Harness) resetAttachedDatabase(ctx context.Context) error {
+	maintenance, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect attached PostgreSQL maintenance database failed")
+	}
+	var database string
+	if err := maintenance.QueryRowContext(ctx, `
+		SELECT current_setting('synchro.database'),
+		       current_setting('synchro.replication_slot'),
+		       current_setting('synchro.publication_name')`).Scan(&database, &h.names.ReplicationSlot, &h.names.Publication); err != nil ||
+		database != h.names.Database || h.names.ReplicationSlot == "" || h.names.Publication == "" {
+		return errors.New("attached PostgreSQL topology settings are invalid")
+	}
+	// The WAL worker holds the replication slot and reconnects after
+	// termination, so it stays off while the database is replaced.
+	if _, err := maintenance.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'off'"); err != nil {
+		return fmt.Errorf("disable attached synchro WAL worker failed: %w", err)
+	}
+	if err := h.restartAttachedPostmaster(ctx); err != nil {
+		return fmt.Errorf("restart attached PostgreSQL without synchro WAL worker failed: %w", err)
+	}
+	if err := h.dropReplicationSlot(ctx); err != nil {
 		return err
 	}
-	if !h.config.SkipAdapter {
-		if err := h.startAdapter(ctx); err != nil {
-			return err
-		}
+	if err := h.dropDatabase(ctx); err != nil {
+		return err
 	}
-	h.restartCount++
+	maintenance, err = h.openDatabase(ctx, "postgres", h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect attached PostgreSQL maintenance database failed")
+	}
+	if _, err := maintenance.ExecContext(ctx, "CREATE DATABASE "+quoteIdentifier(h.names.Database)+" OWNER "+quoteIdentifier(h.env.Admin.Username)); err != nil {
+		return fmt.Errorf("create attached PostgreSQL database failed: %w", err)
+	}
+	if err := h.installExtensionTopology(ctx); err != nil {
+		return err
+	}
+	if _, err := maintenance.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'on'"); err != nil {
+		return fmt.Errorf("enable attached synchro WAL worker failed: %w", err)
+	}
+	if err := h.restartAttachedPostmaster(ctx); err != nil {
+		return fmt.Errorf("restart attached PostgreSQL with synchro WAL worker failed: %w", err)
+	}
 	return nil
 }
 
@@ -2197,7 +2274,10 @@ func (h *Harness) openDatabase(ctx context.Context, database string, role RoleCr
 	}
 	host := h.socketDir
 	if h.attached {
-		if database != h.names.Database {
+		// The attached HBA boundary admits the administrator to the postgres
+		// maintenance database, which a database reset requires.
+		maintenance := database == "postgres" && role.Username == h.env.Admin.Username
+		if database != h.names.Database && !maintenance {
 			return nil, errors.New("attached PostgreSQL database is not configured")
 		}
 		host = h.attachHost

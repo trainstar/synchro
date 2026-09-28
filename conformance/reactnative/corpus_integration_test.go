@@ -6,7 +6,9 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -20,10 +22,19 @@ func TestRealReactNativeCorpusAndroid(t *testing.T) {
 
 func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 	t.Helper()
-	// Each existing runner owns a fresh cluster. Sharing an attached database
-	// would retain schema changes from an earlier scenario.
-	if os.Getenv("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL") != "" {
-		t.Fatal("React Native corpus requires isolated local PostgreSQL instances, not an attached database")
+	// Each runner needs the initial state of a fresh cluster. An attached
+	// database is reset before each runner, so the cluster must outlive each one.
+	attached := os.Getenv("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL") != ""
+	var environment blackbox.EnvironmentConfig
+	if attached {
+		var err error
+		environment, err = blackbox.LoadLocalEnvironment()
+		if err != nil {
+			t.Fatalf("load React Native attached environment: %v", err)
+		}
+		if environment.AttachDestroyOnClose {
+			t.Fatal("React Native corpus requires SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE=false")
+		}
 	}
 	runners := map[string]func(*testing.T, string){
 		warmConnectScenarioID:          runRealReactNativeWarmConnect,
@@ -51,6 +62,14 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 	}
 	for _, id := range selected {
 		t.Run(id, func(t *testing.T) {
+			if attached {
+				resetContext, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				err := blackbox.ResetAttachedDatabase(resetContext, environment)
+				cancel()
+				if err != nil {
+					t.Fatalf("reset attached database: %v", err)
+				}
+			}
 			runners[id](t, platform)
 		})
 	}
