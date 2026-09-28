@@ -54,6 +54,13 @@ To recover, make an explicit operator decision:
 PostgreSQL restarts the failed worker process.
 The new worker process then creates and binds the configured slot.
 
+### Registration transactions
+
+Separate registration transactions can commit before the worker activates an earlier one.
+The worker activates their registry generations in commit order.
+Each membership rule transition stages and activates in the generation that its own transaction created.
+A later transaction does not change a membership stage that an earlier committed transaction created.
+
 ## Publication membership
 
 Each registered relation must be a member of the configured publication without a column list and without a row filter.
