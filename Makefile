@@ -140,7 +140,6 @@
 	rn-e2e-server-seed \
 	rn-watchman-reset \
 	rn-ios-pods \
-	rn-android-emulator-reset \
 	android-emulator-prepare \
 	test-rn-e2e-ios-build \
 	test-rn-e2e-ios-run \
@@ -189,6 +188,12 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
+# adb and Detox select the device through ANDROID_SERIAL. Export the one
+# resolved serial, so a Detox run uses only that booted device.
+ifneq ($(KOTLIN_ANDROID_SERIAL),)
+override ANDROID_SERIAL := $(KOTLIN_ANDROID_SERIAL)
+export ANDROID_SERIAL
+endif
 RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
 RN_IOS_BUILD_ARGS ?=
 # AGP selects connected devices through ANDROID_SERIAL. Without one serial it
@@ -442,7 +447,6 @@ help:
 	@echo "  test-rn-e2e-ios       - Run React Native Detox tests on iOS"
 	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android ($(RN_ANDROID_DETOX_CONFIG))"
 	@echo "  test-rn               - Run React Native Detox tests on both platforms"
-	@echo "  rn-android-emulator-reset - Stop any running Pixel_7_API_34 emulator before Detox"
 	@echo "  android-emulator-prepare - Keep the booted Android test device awake and focused"
 	@echo "  synchrod-pg-test-start   - Start the extension-backed test adapter for ADAPTER_TEST_URL"
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
@@ -1480,7 +1484,7 @@ test-rn-performance-ios: conformance-mod-download test-blackbox-harness rn-seed-
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 		-run '^TestRealReactNativeSteadyPullIOS$$' -args --provision --install
 
-test-rn-performance-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-performance-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1502,7 +1506,7 @@ test-rn-pending-cycle-ios: conformance-mod-download test-blackbox-harness rn-see
 			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativePendingCycleIOS$$' -args --provision --install
 
-test-rn-pending-cycle-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-pending-cycle-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1514,7 +1518,7 @@ test-rn-pending-cycle-android: conformance-mod-download test-blackbox-harness te
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativePendingCycleAndroid$$' -args --provision --install
 
-test-rn-provenance-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-provenance-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1526,7 +1530,7 @@ test-rn-provenance-android: conformance-mod-download test-blackbox-harness test-
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeMultiScopeProvenanceAndroid$$' -args --provision --install
 
-test-rn-push-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-push-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1548,7 +1552,7 @@ test-rn-push-ios: conformance-mod-download test-blackbox-harness rn-seed-asset r
 			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativePushResponseLossIOS$$' -args --provision --install
 
-test-rn-retention-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-retention-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1570,7 +1574,7 @@ test-rn-retention-ios: conformance-mod-download test-blackbox-harness rn-seed-as
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeRetentionReconnectIOS$$' -args --provision --install
 
-test-rn-check-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-check-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1592,7 +1596,7 @@ test-rn-check-ios: conformance-mod-download test-blackbox-harness rn-seed-asset 
 			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeSchemaCheckIOS$$' -args --provision --install
 
-test-rn-requests-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-requests-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1614,7 +1618,7 @@ test-rn-requests-ios: conformance-mod-download test-blackbox-harness rn-seed-ass
 			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeRebuildRequestsIOS$$' -args --provision --install
 
-test-rn-forged-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-forged-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1636,7 +1640,7 @@ test-rn-forged-ios: conformance-mod-download test-blackbox-harness rn-seed-asset
 			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeForgedCursorIOS$$' -args --provision --install
 
-test-rn-sqm-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-sqm-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1658,7 +1662,7 @@ test-rn-sqm-ios: conformance-mod-download test-blackbox-harness rn-seed-asset rn
 			-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeSchemaQueuedMutationIOS$$' -args --provision --install
 
-test-rn-cardinality-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-cardinality-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1700,7 +1704,7 @@ test-rn-seeded-empty-startup-ios: conformance-mod-download test-blackbox-harness
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=50m \
 		-run '^TestRealReactNativeSeededEmptyStartupIOS$$' -args --provision --install
 
-test-rn-seeded-empty-startup-android: conformance-mod-download test-blackbox-harness build-seed test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-seeded-empty-startup-android: conformance-mod-download test-blackbox-harness build-seed test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install." >&2; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1722,7 +1726,7 @@ test-rn-queue-replay-ios: conformance-mod-download test-blackbox-harness rn-seed
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeQueueReplayIOS$$' -args --provision --install
 
-test-rn-queue-replay-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-queue-replay-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install." >&2; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1734,7 +1738,7 @@ test-rn-queue-replay-android: conformance-mod-download test-blackbox-harness tes
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeQueueReplayAndroid$$' -args --provision --install
 
-test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset rn-android-emulator-reset
+test-rn-warm-connect-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
@@ -1783,22 +1787,6 @@ rn-watchman-reset:
 rn-ios-pods:
 	cd clients/react-native/example/ios && pod install
 
-rn-android-emulator-reset:
-	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
-	@ADB="$(ANDROID_HOME)/platform-tools/adb"; \
-	SERIALS="$$($$ADB devices | awk '/^emulator-/{print $$1}')"; \
-	for serial in $$SERIALS; do \
-		AVD_NAME="$$($$ADB -s $$serial emu avd name 2>/dev/null | tr -d '\r' | head -n1)"; \
-		if [ "$$AVD_NAME" = "Pixel_7_API_34" ]; then \
-			echo "Stopping Android emulator $$serial ($$AVD_NAME)"; \
-			$$ADB -s $$serial emu kill >/dev/null 2>&1 || true; \
-		fi; \
-	done; \
-	if [ -n "$$SERIALS" ]; then \
-		sleep 5; \
-	fi
-
 .PHONY: rn-ios-build rn-ios-bundle
 # Callers such as test-rn-e2e-ios-build select the seed, so create the pinned seed only when none exists.
 rn-ios-build: rn-watchman-reset rn-ios-pods | $(RN_CONSUMER_SEED)
@@ -1843,7 +1831,6 @@ test-rn-e2e-ios:
 test-rn-e2e-android-build:
 	@$(MAKE) test-rn-android-parity
 	@$(MAKE) rn-watchman-reset
-	@$(MAKE) rn-android-emulator-reset
 	@$(MAKE) rn-e2e-server-seed
 	@$(MAKE) rn-android-build
 
