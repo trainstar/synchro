@@ -196,6 +196,11 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
+	// The reset rebuild must keep the row of the blocked mutation visible with
+	// the value that the compatible push applied (#267).
+	if err := requireKotlinSchemaQueuedMutationRow(ctx, platform, client, compatibleWrite); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Kotlin Android schema-queued-mutation row after reset: %w", err)
+	}
 	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
 	if err != nil || len(serverCaptures) != 1 {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Kotlin Android schema-queued-mutation server state: %w", kotlinResultError(err, ""))

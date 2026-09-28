@@ -90,7 +90,7 @@ func TestSchemaQueuedMutationFinalCaptureAcceptsReopenedStatus(t *testing.T) {
 	coordinator := &SchemaQueuedMutationCoordinator{}
 	for _, status := range []string{"stopped", "uninitialized"} {
 		t.Run(status, func(t *testing.T) {
-			raw := fmt.Sprintf(`{"kind":"capture","capture":{"client_state":null,"pending_mutations":[],"rejected_mutations":[],"sync_status":{"state":%q,"retry_at":null,"operation":null,"failure":null},"sync_events":[],"request_trace":{"observations":[],"overflowed":false,"sequenceCheckpoint":0},"durable_proof":{"row_metadata":null,"rebuild_receipt_proofs":[]}},"process":{"process_id":"process","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, status)
+			raw := fmt.Sprintf(`{"kind":"capture","capture":{"client_state":null,"pending_mutations":[],"rejected_mutations":[],"sync_status":{"state":%q,"retry_at":null,"operation":null,"failure":null},"sync_events":[],"request_trace":{"observations":[],"overflowed":false,"sequenceCheckpoint":0},"durable_proof":{"row_metadata":null,"rebuild_receipt_proofs":[]},"application_rows":[]},"process":{"process_id":"process","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, status)
 			if _, err := coordinator.validateFinalCapture(json.RawMessage(raw)); err != nil {
 				t.Fatalf("validate reopened status %q: %v", status, err)
 			}
@@ -106,13 +106,17 @@ func TestSchemaQueuedMutationFinalCaptureRequestsDurableProof(t *testing.T) {
 		t.Fatalf("create schema-queued-mutation coordinator: %v", err)
 	}
 	defer func() { _ = coordinator.Close(context.Background()) }()
+	// Prepare binds the compatible write to its runtime table and key.
+	write := coordinator.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"]
+	write.Operation.Payload = json.RawMessage(`{"table_id":"cf_schema_queue","pk":{"id":"00000000-0000-4000-8000-000000000001"}}`)
+	coordinator.steps[write.ID] = write
 	coordinator.stage = schemaQueuedMutationStageRestarted
 	response, err := coordinator.advanceLocked(context.Background(), 1)
 	if err != nil || response.Command == nil {
 		t.Fatalf("create schema-queued-mutation final capture command: command=%#v error=%v", response.Command, err)
 	}
 	sources, ok := response.Command.Action.Action.Parameters["sources"].([]string)
-	want := []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof"}
+	want := []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof", "application-rows"}
 	if !ok || !slices.Equal(sources, want) {
 		t.Fatalf("schema-queued-mutation final capture sources=%#v want=%#v", response.Command.Action.Action.Parameters["sources"], want)
 	}

@@ -178,6 +178,11 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
+	// The reset rebuild must keep the row of the blocked mutation visible with
+	// the value that the compatible push applied (#267).
+	if err := requireSwiftSchemaQueuedMutationRow(ctx, platform, client, compatibleWrite); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Swift schema-queued-mutation row after reset: %w", err)
+	}
 	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
 	if err != nil || len(serverCaptures) != 1 {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Swift schema-queued-mutation server state: %w", err)

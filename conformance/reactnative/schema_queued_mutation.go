@@ -662,19 +662,14 @@ func (c *SchemaQueuedMutationCoordinator) advanceLocked(ctx context.Context, seq
 		if _, err := c.config.Controller.Capture(ctx, []string{schemaQueuedMutationInitialClientKey}, []string{"server-state"}); err != nil {
 			return exchangeResponse{}, fmt.Errorf("capture React Native schema-queued-mutation compatible server state: %w", err)
 		}
-		var write struct {
-			Table string            `json:"table_id"`
-			PK    map[string]string `json:"pk"`
+		selectors, err := c.compatibleRowSelectors()
+		if err != nil {
+			return exchangeResponse{}, err
 		}
-		if err := json.Unmarshal(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"].Operation.Payload, &write); err != nil || len(write.PK) != 1 {
-			return exchangeResponse{}, errors.New("React Native schema-queued-mutation compatible write binding is invalid")
-		}
-		for field, recordID := range write.PK {
-			response.Command = c.command(schemaQueuedMutationInitialClientKey, "observer", "capture", map[string]any{
-				"client_keys": []string{schemaQueuedMutationInitialClientKey}, "sources": []string{"application-rows"},
-				"row_selectors": []map[string]any{{"table_name": write.Table, "primary_key_field": field, "primary_key": recordID}},
-			}, nil)
-		}
+		response.Command = c.command(schemaQueuedMutationInitialClientKey, "observer", "capture", map[string]any{
+			"client_keys": []string{schemaQueuedMutationInitialClientKey}, "sources": []string{"application-rows"},
+			"row_selectors": selectors,
+		}, nil)
 	case schemaQueuedMutationStageCompatibleRows:
 		// The S2 write names the field that the compatible publication added.
 		if err := c.bindLocalWrite("STEP-SCHEMA-QUEUED-MUTATION-005"); err != nil {
@@ -712,9 +707,14 @@ func (c *SchemaQueuedMutationCoordinator) advanceLocked(ctx context.Context, seq
 			"client_key": schemaQueuedMutationRestartClientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil,
 		}, nil)
 	case schemaQueuedMutationStageRestarted:
+		selectors, err := c.compatibleRowSelectors()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
 		response.Command = c.command(schemaQueuedMutationRestartClientKey, "observer", "capture", map[string]any{
-			"client_keys": []string{schemaQueuedMutationRestartClientKey},
-			"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof"},
+			"client_keys":   []string{schemaQueuedMutationRestartClientKey},
+			"sources":       []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof", "application-rows"},
+			"row_selectors": selectors,
 		}, nil)
 	case schemaQueuedMutationStageFinalCapture:
 		if err := c.completeLocked(ctx); err != nil {
@@ -810,7 +810,7 @@ func (c *SchemaQueuedMutationCoordinator) validateTraceCapture(raw json.RawMessa
 }
 
 func (c *SchemaQueuedMutationCoordinator) validateFinalCapture(raw json.RawMessage) (finalCapture, error) {
-	capture, err := decodeCapture(raw, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "request_trace", "durable_proof"})
+	capture, err := decodeCapture(raw, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "request_trace", "durable_proof", "application_rows"})
 	if err != nil {
 		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation final capture observed=invalid want=valid capture error=%v", err)
 	}
@@ -1109,7 +1109,19 @@ func (c *SchemaQueuedMutationCoordinator) validateDurableResult() error {
 	if err := c.validatePendingMutation(expected.Queue[0]); err != nil {
 		return err
 	}
-	return c.validateRejectedMutation(expected.Outcomes[0])
+	if err := c.validateRejectedMutation(expected.Outcomes[0]); err != nil {
+		return err
+	}
+	// The reset rebuild must keep the row of the blocked mutation visible with
+	// the value that the compatible push applied (#267).
+	rows, err := decodeRows(c.finalResult.Rows)
+	if err != nil {
+		return err
+	}
+	if err := scenarios.RequireLocalWriteRow(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"].Operation, rows); err != nil {
+		return fmt.Errorf("React Native schema-queued-mutation row after reset: %w", err)
+	}
+	return nil
 }
 
 type schemaQueuedMutationPending struct {
@@ -1284,6 +1296,22 @@ func (c *SchemaQueuedMutationCoordinator) validateStoredMutation(raw string) err
 		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q field=%q", raw, mutationID, tableID, primaryField, recordID, authoredSchema, baseVersion, fieldID)
 	}
 	return nil
+}
+
+// compatibleRowSelectors selects the application row of the compatible write.
+func (c *SchemaQueuedMutationCoordinator) compatibleRowSelectors() ([]map[string]any, error) {
+	var write struct {
+		Table string            `json:"table_id"`
+		PK    map[string]string `json:"pk"`
+	}
+	if err := json.Unmarshal(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"].Operation.Payload, &write); err != nil || len(write.PK) != 1 {
+		return nil, errors.New("React Native schema-queued-mutation compatible write binding is invalid")
+	}
+	selectors := make([]map[string]any, 0, 1)
+	for field, recordID := range write.PK {
+		selectors = append(selectors, map[string]any{"table_name": write.Table, "primary_key_field": field, "primary_key": recordID})
+	}
+	return selectors, nil
 }
 
 // bindLocalWrite replaces one authored local write with its runtime binding.
