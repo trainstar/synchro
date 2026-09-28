@@ -94,6 +94,15 @@ struct RowState {
     deleted: bool,
 }
 
+impl RowState {
+    /// The capture fence trigger updates `sync_row_versions` in the transaction of each
+    /// source write. Thus, a live version without a visible source row identifies a
+    /// present row that the row security of the source relation hides from the caller.
+    fn hidden_by_row_security(&self) -> bool {
+        self.data.is_none() && !self.deleted
+    }
+}
+
 #[derive(Debug, Clone)]
 struct EvaluatedMutation {
     mutation: Mutation,
@@ -1310,13 +1319,10 @@ fn evaluate_mutation(
         pgrx::error!("active registry and schema manifest are inconsistent")
     }
     if table_reg.push_policy == PushPolicy::ReadOnly {
-        return terminal_evaluation(
+        return policy_evaluation(
             mutation,
             outcome_schema,
-            "policy_rejected",
-            "authenticated write policy rejected the mutation",
             registered_target(table_reg, &pk_field_id, &pk_value, None),
-            None,
         );
     }
 
@@ -1334,13 +1340,10 @@ fn evaluate_mutation(
             operation_name(mutation.op),
             &serde_json::Value::Object(authored_columns.clone()),
         ) else {
-            return terminal_evaluation(
+            return policy_evaluation(
                 mutation,
                 outcome_schema,
-                "policy_rejected",
-                "authenticated write policy rejected the mutation",
                 registered_target(table_reg, &pk_field_id, &pk_value, None),
-                None,
             );
         };
         value
@@ -1446,6 +1449,16 @@ fn evaluate_mutation(
             },
         );
     }
+    if existing
+        .as_ref()
+        .is_some_and(RowState::hidden_by_row_security)
+    {
+        return policy_evaluation(
+            mutation,
+            outcome_schema,
+            registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+        );
+    }
 
     match mutation.op {
         Operation::Insert => {
@@ -1486,6 +1499,13 @@ fn evaluate_mutation(
                         .unwrap_or_else(|| {
                             pgrx::error!("conflicting push insert has no row state")
                         });
+                    if current.hidden_by_row_security() {
+                        return policy_evaluation(
+                            mutation,
+                            outcome_schema,
+                            registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                        );
+                    }
                     let code = if current.deleted {
                         "row_deleted"
                     } else {
@@ -1720,6 +1740,21 @@ fn registered_target(
         primary_key_value: primary_key_value.clone(),
         row_identity,
     }
+}
+
+fn policy_evaluation(
+    mutation: &Mutation,
+    outcome_schema: SchemaRef,
+    target: EvaluationTarget,
+) -> EvaluatedMutation {
+    terminal_evaluation(
+        mutation,
+        outcome_schema,
+        "policy_rejected",
+        "authenticated write policy rejected the mutation",
+        target,
+        None,
+    )
 }
 
 fn terminal_evaluation(
@@ -2061,6 +2096,21 @@ fn reread_group_conflict(
     let record_id = canonicalize_record_id(client, &wire_record_id, table_reg)
         .unwrap_or_else(|| pgrx::error!("atomic group conflict primary key is not canonical"));
     let existing = load_existing_record(client, &record_id, table_reg);
+    if existing
+        .as_ref()
+        .is_some_and(RowState::hidden_by_row_security)
+    {
+        return policy_evaluation(
+            &failure.mutation,
+            failure.outcome_schema.clone(),
+            registered_target(
+                table_reg,
+                &failure.primary_key_field_id,
+                &failure.primary_key_value,
+                failure.row_identity.clone(),
+            ),
+        );
+    }
     let outcome_text = |member: &str| {
         failure.outcome[member]
             .as_str()
