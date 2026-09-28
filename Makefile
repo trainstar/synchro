@@ -214,6 +214,7 @@ CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapt
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18-update-baseline
+CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS ?= $(CURDIR)/dist/conformance/synchro-pg-pg18-update-origins
 ADAPTER_TEST_URL ?=
 REPLICATION_URL = $(ADAPTER_TEST_URL)
 override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
@@ -836,28 +837,45 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		rmdir "$$lock"; \
 		trap - EXIT HUP INT TERM
 
+# The baseline is the first update origin. Each later released origin is a
+# pinned published bundle in CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS/<version>.
 conformance-update-baseline-extension-artifact:
 	@set -eu; \
 		export LC_ALL=C; \
 		final="$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)"; \
+		origins="$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"; \
 		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
+		test ! -e "$$origins" || { echo "$$origins already exists" >&2; exit 1; }; \
 		artifact="$$(cd api/go && GOWORK=off go run ./cmd/synchro-version update-baseline-artifact)"; \
 		set -- $$artifact; \
 		test "$$#" -eq 2 || { echo "update baseline artifact must have one URL and one SHA-256 digest" >&2; exit 1; }; \
-		url="$$1"; \
-		digest="$$2"; \
+		baseline_url="$$1"; \
+		baseline_digest="$$2"; \
+		later="$$(python3 scripts/update-origins.py extensions/synchro-pg/update-origins.json extensions/synchro-pg/update-baseline.json)"; \
 		work="$$final.tmp.$$$$"; \
 		mkdir -p "$$(dirname "$$final")"; \
 		cleanup() { rm -rf "$$work"; }; \
 		trap cleanup EXIT HUP INT TERM; \
-		mkdir "$$work" "$$work/extract"; \
-		curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$$work/archive.tar.gz" "$$url"; \
-		test "$$(shasum -a 256 "$$work/archive.tar.gz" | cut -d ' ' -f 1)" = "$$digest" || { echo "update baseline archive SHA-256 differs from the pinned digest" >&2; exit 1; }; \
-		tar -xzf "$$work/archive.tar.gz" -C "$$work/extract"; \
-		manifest="$$work/extract/extension/artifact-manifest.json"; \
-		test -f "$$manifest" && test -f "$$manifest.sha256" || { echo "update baseline archive omitted the extension manifest or its digest" >&2; exit 1; }; \
-		test "$$(shasum -a 256 "$$manifest" | cut -d ' ' -f 1)" = "$$(cat "$$manifest.sha256")" || { echo "update baseline extension manifest differs from its digest" >&2; exit 1; }; \
-		mv "$$work/extract/extension" "$$final"; \
+		mkdir "$$work" "$$work/origins"; \
+		fetch() { \
+			mkdir "$$work/extract"; \
+			curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$$work/archive.tar.gz" "$$1"; \
+			test "$$(shasum -a 256 "$$work/archive.tar.gz" | cut -d ' ' -f 1)" = "$$2" || { echo "update origin archive SHA-256 differs from the pinned digest" >&2; exit 1; }; \
+			tar -xzf "$$work/archive.tar.gz" -C "$$work/extract"; \
+			manifest="$$work/extract/extension/artifact-manifest.json"; \
+			test -f "$$manifest" && test -f "$$manifest.sha256" || { echo "update origin archive omitted the extension manifest or its digest" >&2; exit 1; }; \
+			test "$$(shasum -a 256 "$$manifest" | cut -d ' ' -f 1)" = "$$(cat "$$manifest.sha256")" || { echo "update origin extension manifest differs from its digest" >&2; exit 1; }; \
+			mv "$$work/extract/extension" "$$3"; \
+			rm -rf "$$work/extract" "$$work/archive.tar.gz"; \
+		}; \
+		fetch "$$baseline_url" "$$baseline_digest" "$$work/baseline"; \
+		printf '%s\n' "$$later" | while read -r version url digest; do \
+			test -n "$$version" || continue; \
+			fetch "$$url" "$$digest" "$$work/origins/$$version"; \
+		done; \
+		mkdir -p "$$(dirname "$$origins")"; \
+		mv "$$work/origins" "$$origins"; \
+		mv "$$work/baseline" "$$final"; \
 		rm -rf "$$work"; \
 		trap - EXIT HUP INT TERM
 
