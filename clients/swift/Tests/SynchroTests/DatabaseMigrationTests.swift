@@ -1,12 +1,12 @@
 import XCTest
 import GRDB
-@testable import Synchro
+@testable @_spi(Inspection) import Synchro
 
 final class DatabaseMigrationTests: XCTestCase {
-    func testShippedVersionFiveUpgradePreservesIntentAndAddsProtocolThreeState() throws {
+    func testShippedVersionFiveUpgradePreservesIntentAndAddsProtocolThreeState() async throws {
         let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("synchro_migration_\(UUID().uuidString).sqlite")
         let legacy = try DatabaseQueue(path: path)
-        try legacy.write { db in
+        try await legacy.write { db in
             try db.execute(sql: "CREATE TABLE _grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
             for identifier in ["synchro_v1", "synchro_v2_buckets", "synchro_v3_scopes", "synchro_v4_scope_integrity", "synchro_v5_rejected_mutations"] {
                 try db.execute(sql: "INSERT INTO _grdb_migrations (identifier) VALUES (?)", arguments: [identifier])
@@ -68,6 +68,48 @@ final class DatabaseMigrationTests: XCTestCase {
         XCTAssertNil(scope?.checksum)
         XCTAssertEqual(scope?.generation, 0)
         XCTAssertEqual(try db.query("SELECT * FROM _synchro_scope_rows", params: nil).count, 0)
+
+        // The old queue stored no binding or field values, so inspection reports none.
+        let legacyID: String = try XCTUnwrap(
+            db.queryOne("SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = 'r1'", params: nil)?["mutation_id"]
+        )
+        let legacyIntent = RetainedMutationInspection.legacy(LegacyMutationInspection(
+            mutationID: legacyID,
+            localOrder: 1,
+            tableName: "orders",
+            recordID: "r1",
+            operation: .insert,
+            baseVersion: nil,
+            clientVersion: "2026-01-01T00:00:00.000000Z",
+            status: .blockedByPredecessor,
+            sourceKind: "legacy_import"
+        ))
+        let client = try SynchroClient(config: SynchroConfig(
+            dbPath: path,
+            serverURL: URL(string: "http://localhost:8080")!,
+            authProvider: { "test-token" },
+            clientID: "legacy-device",
+            appVersion: "1.0.0"
+        ))
+        XCTAssertEqual(try client.inspectPendingMutations(), [legacyIntent])
+        XCTAssertEqual(try client.inspectRetainedMutations(), [legacyIntent])
+        // The imported legacy rejection has no exact mutation JSON, so rejected
+        // inspection stays strict. Clear it before the whole-state snapshot.
+        XCTAssertThrowsError(try client.inspectRejectedMutations())
+        try client.clearRejectedMutations()
+        let snapshot = try SynchroInspection(client: client).captureSnapshot(maximumRecords: 8) { _, _ in }
+        XCTAssertEqual(snapshot.retainedMutations, [legacyIntent])
+        XCTAssertEqual(snapshot.pendingChangeCount, 1)
+
+        try db.writeTransaction { db in
+            try db.execute(
+                sql: "UPDATE _synchro_pending_changes SET table_id = 'table-orders' WHERE mutation_id = ?",
+                arguments: [legacyID]
+            )
+        }
+        XCTAssertThrowsError(try client.inspectRetainedMutations())
+        try await client.close()
+        try db.close()
     }
 
     func testVersionTenUpgradeAddsBackoffWithoutChangingQueueOrRebuildState() throws {

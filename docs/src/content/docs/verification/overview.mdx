@@ -49,7 +49,7 @@ Every required test must run. Skips, ignored tests, unexplained flakes, and retr
 
 The final support gate derives semantic obligations and packaged checks from the support matrix. It rejects missing, skipped, unavailable, malformed, zero-test, and nonterminal results.
 
-Each non-excluded support cell requires packaged connect, push, pull, process-kill, and resume checks. The package installation step must use the release artifact under test.
+Each support cell with the `required` policy requires packaged connect, push, pull, process-kill, and resume checks. A `tested` cell, such as the macOS host, runs its test suites but has no packaged-cell obligation. The package installation step must use the release artifact under test.
 
 Each installed client writes a change offline, is killed, and resumes. While the client is dead, the harness writes a new remote value on the server. The cell passes only when the client reads that value through its public query path and PostgreSQL holds the exact resumed write. An empty queue alone does not pass a cell, because rejection or deletion also empties a queue.
 

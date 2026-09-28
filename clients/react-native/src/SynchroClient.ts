@@ -27,6 +27,7 @@ import type {
   MutationStatus,
   MutationRejectionCode,
   PendingMutationInspection,
+  RetainedMutationInspection,
   RejectedMutationInspection,
   ClientStateInspection,
   ScopeStateInspection,
@@ -373,10 +374,10 @@ function parseNativeArray(json: string, name: string): unknown[] {
   return value;
 }
 
-function parsePendingMutationInspection(
+export function parseRetainedMutationInspection(
   value: unknown,
   index: number
-): PendingMutationInspection {
+): RetainedMutationInspection {
   const name = `pending mutation at index ${index}`;
   if (!isRecord(value)) {
     throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
@@ -386,6 +387,23 @@ function parsePendingMutationInspection(
   }
   if (!LOCAL_MUTATION_STATUSES.includes(value.status as never)) {
     throw new InvalidResponseError(`Native bridge returned an invalid ${name} status`);
+  }
+  if (value.representation === 'legacy') {
+    return {
+      representation: 'legacy',
+      mutationID: requiredString(value.mutationID, `${name} ID`),
+      localOrder: requiredSafeInteger(value.localOrder, `${name} local order`),
+      tableName: requiredString(value.tableName, `${name} table name`),
+      recordID: requiredString(value.recordID, `${name} record ID`),
+      operation: value.operation as PendingMutationInspection['operation'],
+      baseVersion: nullableString(value.baseVersion, `${name} base version`),
+      clientVersion: requiredString(value.clientVersion, `${name} client version`),
+      status: value.status as PendingMutationInspection['status'],
+      sourceKind: requiredString(value.sourceKind, `${name} source kind`),
+    };
+  }
+  if (value.representation !== 'current') {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name} representation`);
   }
   if (!Array.isArray(value.authoredFields)) {
     throw new InvalidResponseError(`Native bridge returned invalid ${name} fields`);
@@ -405,6 +423,7 @@ function parsePendingMutationInspection(
   });
 
   return {
+    representation: 'current',
     mutationID: requiredString(value.mutationID, `${name} ID`),
     localOrder: requiredSafeInteger(value.localOrder, `${name} local order`),
     tableID: requiredString(value.tableID, `${name} table ID`),
@@ -438,7 +457,7 @@ function parsePendingMutationInspection(
   };
 }
 
-function parseRejectedMutationInspection(
+export function parseRejectedMutationInspection(
   value: unknown,
   index: number
 ): RejectedMutationInspection {
@@ -1025,23 +1044,23 @@ export class SynchroClient {
     }
   }
 
-  async inspectPendingMutations(): Promise<PendingMutationInspection[]> {
+  async inspectPendingMutations(): Promise<RetainedMutationInspection[]> {
     try {
       return parseNativeArray(
         await this.native.inspectPendingMutations(),
         'pending mutation inspection'
-      ).map(parsePendingMutationInspection);
+      ).map(parseRetainedMutationInspection);
     } catch (error) {
       throw mapNativeError(error);
     }
   }
 
-  async inspectRetainedMutations(): Promise<PendingMutationInspection[]> {
+  async inspectRetainedMutations(): Promise<RetainedMutationInspection[]> {
     try {
       return parseNativeArray(
         await this.native.inspectRetainedMutations(),
         'retained mutation inspection'
-      ).map(parsePendingMutationInspection);
+      ).map(parseRetainedMutationInspection);
     } catch (error) {
       throw mapNativeError(error);
     }

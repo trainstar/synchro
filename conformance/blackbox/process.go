@@ -1557,6 +1557,16 @@ func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Sig
 	if h.postgres == nil {
 		return errors.New("PostgreSQL process is unavailable")
 	}
+	if shutdown == syscall.SIGINT {
+		// A fast shutdown writes its shutdown checkpoint inside the bounded
+		// stop wait. A new cluster has hundreds of relation files to fsync, and
+		// shared host IO can make that exceed the bound. An explicit checkpoint
+		// first does that work under the caller's context, so the bound
+		// measures only the shutdown.
+		if err := h.checkpointOwnedPostgres(ctx); err != nil {
+			return err
+		}
+	}
 	if err := h.postgres.StopPostmaster(stopContext, h.config.ShutdownTimeout, shutdown); err != nil {
 		return err
 	}
@@ -1565,6 +1575,18 @@ func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Sig
 		return err
 	}
 	h.restartCount++
+	return nil
+}
+
+func (h *Harness) checkpointOwnedPostgres(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, "postgres", h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect for PostgreSQL checkpoint failed")
+	}
+	defer database.Close()
+	if _, err := database.ExecContext(ctx, "CHECKPOINT"); err != nil {
+		return fmt.Errorf("checkpoint PostgreSQL before restart failed: %w", err)
+	}
 	return nil
 }
 

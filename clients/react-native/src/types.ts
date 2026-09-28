@@ -199,7 +199,9 @@ export interface AuthoredMutationField {
   value: JSONValue;
 }
 
+/** A retained mutation with its complete ledger binding and authored values. */
 export interface PendingMutationInspection {
+  representation: 'current';
   mutationID: string;
   localOrder: number;
   tableID: string;
@@ -219,6 +221,27 @@ export interface PendingMutationInspection {
   sealedOrdinal: number | null;
   authoredFields: AuthoredMutationField[];
 }
+
+/**
+ * A retained mutation that a queue from before the mutation ledger imported.
+ * It has only the fields that the old queue stored.
+ */
+export interface LegacyMutationInspection {
+  representation: 'legacy';
+  mutationID: string;
+  localOrder: number;
+  tableName: string;
+  recordID: string;
+  operation: MutationOperation;
+  baseVersion: string | null;
+  clientVersion: string;
+  status: LocalMutationStatus;
+  sourceKind: string;
+}
+
+export type RetainedMutationInspection =
+  | PendingMutationInspection
+  | LegacyMutationInspection;
 
 export interface RejectedMutationInspection {
   mutationID: string;

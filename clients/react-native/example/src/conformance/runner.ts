@@ -7,12 +7,14 @@ import {
 } from '@trainstar/synchro-react-native/inspection';
 import type {
   ClientStateInspection,
+  ClientStateSnapshotInspection,
   DurableStateInspection,
   ScopeRowInspection,
   TransportObservationSnapshot,
 } from '@trainstar/synchro-react-native/inspection';
 import type {
   PendingMutationInspection,
+  RetainedMutationInspection,
   RejectedMutationInspection,
   Row,
   SQLiteBindValue,
@@ -126,7 +128,7 @@ export type ConformanceActionResult =
 
 export interface ConformanceCapture {
   application_rows?: Row[];
-  pending_mutations?: PendingMutationInspection[];
+  pending_mutations?: Omit<PendingMutationInspection, 'representation'>[];
   rejected_mutations?: RejectedMutationInspection[];
   client_state?: ClientStateInspection;
   durable_proof?: RawDurableProof;
@@ -503,35 +505,57 @@ export class PublicConformanceRunner {
     }
     const client = await this.activate(clientKeys[0]);
     const inspection = this.requireInspection(clientKeys[0]);
+    const selectors = sources.includes('application-rows') ? decodeSelectors(parameters.row_selectors) : [];
+    // Every inspection source reads the same snapshot, taken at its first use.
+    let snapshot: Promise<ClientStateSnapshotInspection> | null = null;
+    const state = () => (snapshot ??= captureSnapshot(client, inspection, selectors));
     const capture: ConformanceCapture = {};
     for (const source of sources) {
       switch (source) {
         case 'application-rows':
-          capture.application_rows = await captureRows(client, decodeSelectors(parameters.row_selectors));
+          capture.application_rows = (await state()).applicationRows;
+          if (capture.application_rows.length > MAXIMUM_CAPTURE_ROWS) {
+            throw new ConformanceCommandError('execution_failed', new Error(`captured ${capture.application_rows.length} rows, bound is ${MAXIMUM_CAPTURE_ROWS}`));
+          }
           break;
         case 'pending-mutations': {
           // The native runners capture the complete retained ledger for this
           // source, pending states plus rejected_terminal. The pending-only
-          // inspection excludes rejected_terminal by design. Optional row
-          // selectors bound the capture when the ledger is larger than one
-          // capture allows.
-          const retained = await client.inspectRetainedMutations();
-          const rows = parameters.retained_mutation_rows === undefined
-            ? undefined
-            : decodeRetainedMutationRows(parameters.retained_mutation_rows);
-          capture.pending_mutations = bounded(
-            rows === undefined
-              ? retained
-              : retained.filter((mutation) =>
-                  rows.some((row) => row.tableName === mutation.tableName && row.recordID === mutation.recordID)
-                ),
+          // inspection excludes rejected_terminal by design. Row selectors
+          // bound a capture whose ledger exceeds the snapshot bound, so that
+          // path reads the retained ledger directly after normalization.
+          if (parameters.retained_mutation_rows === undefined) {
+            const captured = await state();
+            capture.pending_mutations = currentMutations(
+              capturedDetail(captured.retainedMutations, captured.clientState.mutationLedgerCount, 'pending-mutations')
+            );
+            break;
+          }
+          const rows = decodeRetainedMutationRows(parameters.retained_mutation_rows);
+          let retained: RetainedMutationInspection[];
+          try {
+            await client.pendingChangeCount();
+            retained = await client.inspectRetainedMutations();
+          } catch {
+            throw new ConformanceCommandError('capture_inspection_failed');
+          }
+          capture.pending_mutations = currentMutations(bounded(
+            retained.filter((mutation) =>
+              rows.some((row) => row.tableName === mutation.tableName && row.recordID === mutation.recordID)
+            ),
             'pending-mutations'
+          ));
+          break;
+        }
+        case 'rejected-mutations': {
+          const captured = await state();
+          capture.rejected_mutations = capturedDetail(
+            captured.rejectedMutations,
+            captured.clientState.rejectedMutationCount,
+            'rejected-mutations'
           );
           break;
         }
-        case 'rejected-mutations':
-          capture.rejected_mutations = bounded(await client.inspectRejectedMutations(), 'rejected-mutations');
-          break;
         case 'sync-status':
           capture.sync_status = rawStatus(await client.getSyncStatus());
           break;
@@ -539,11 +563,13 @@ export class PublicConformanceRunner {
           capture.sync_events = bounded(rawEvents(this.requireSession(clientKeys[0]).events), 'sync-events');
           break;
         case 'scope-state':
-          capture.client_state = await inspection.clientState();
+          capture.client_state = (await state()).clientState;
           break;
         case 'durable-proof': {
-          const state = await inspection.clientState();
-          const identity = durableProofIdentity(parameters.durable_proof_identity, state.scopeRows);
+          const captured = await state();
+          const identity = durableProofIdentity(parameters.durable_proof_identity, captured.clientState.scopeRows);
+          // The snapshot bounds row metadata at 512 records, so the proof reads its
+          // identity directly, as it did before the snapshot existed.
           try {
             capture.durable_proof = normalizeDurableProof(
               await inspection.durableState(identity.tableName, identity.recordID)
@@ -554,7 +580,7 @@ export class PublicConformanceRunner {
           break;
         }
         case 'provenance':
-          capture.provenance = bounded((await inspection.clientState()).scopeRows, 'provenance');
+          capture.provenance = bounded((await state()).clientState.scopeRows, 'provenance');
           break;
         case 'request-trace':
           capture.request_trace = await inspection.transportObservations();
@@ -929,19 +955,32 @@ function durableProofIdentity(
   };
 }
 
-async function captureRows(client: SynchroClient, selectors: RowSelector[]): Promise<Row[]> {
-  const rows: Row[] = [];
-  for (const selector of selectors) {
-    const result = await client.query(
-      `SELECT * FROM ${quoteIdentifier(selector.table_name)} WHERE ${quoteIdentifier(selector.primary_key_field)} = ?`,
-      [sqliteBindValue(selector.primary_key)]
+// Direct inspection does not normalize. Normalize first, as the native runners
+// do, so that the one snapshot reports normalized counts and details together.
+async function captureSnapshot(
+  client: SynchroClient,
+  inspection: SynchroInspection,
+  selectors: RowSelector[]
+): Promise<ClientStateSnapshotInspection> {
+  try {
+    await client.pendingChangeCount();
+    return await inspection.captureSnapshot(
+      selectors.map((selector) => ({
+        sql: `SELECT * FROM ${quoteIdentifier(selector.table_name)} WHERE ${quoteIdentifier(selector.primary_key_field)} = ?`,
+        params: [sqliteBindValue(selector.primary_key)],
+      }))
     );
-    rows.push(...result);
-    if (rows.length > MAXIMUM_CAPTURE_ROWS) {
-      throw new ConformanceCommandError('execution_failed', new Error(`captured ${rows.length} rows, bound is ${MAXIMUM_CAPTURE_ROWS}`));
-    }
+  } catch {
+    throw new ConformanceCommandError('capture_inspection_failed');
   }
-  return rows;
+}
+
+// The snapshot omits a detail list whose record count exceeds the native bound.
+function capturedDetail<T>(values: T[] | null, count: number, source: string): T[] {
+  if (values === null) {
+    throw new ConformanceCommandError('execution_failed', new Error(`capture source ${source} holds ${count} values, bound is ${MAXIMUM_CAPTURE_VALUES}`));
+  }
+  return bounded(values, source);
 }
 
 function rawStatus(status: SyncStatus): RawSyncStatus {
@@ -1001,6 +1040,21 @@ function rawEvents(events: SyncEvent[]): RawEvent[] {
 
 function describeBoundFailure(error: unknown): string {
   return error instanceof Error ? error.message : 'result is not bounded';
+}
+
+// The harness capture has only the current record shape, as in the native runners.
+// A legacy import fails the capture instead of reaching the harness with invented bindings.
+function currentMutations(
+  values: RetainedMutationInspection[]
+): Omit<PendingMutationInspection, 'representation'>[] {
+  return values.map((value) => {
+    if (value.representation !== 'current') {
+      throw new ConformanceCommandError('capture_inspection_failed');
+    }
+    const mutation: Partial<PendingMutationInspection> = { ...value };
+    delete mutation.representation;
+    return mutation as Omit<PendingMutationInspection, 'representation'>;
+  });
 }
 
 function bounded<T>(values: T[], source: string): T[] {

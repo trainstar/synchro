@@ -171,61 +171,63 @@ public final class SynchroClient: @unchecked Sendable {
         syncEngine.getSyncStatus()
     }
 
-    public func inspectPendingMutations() throws -> [PendingMutationInspection] {
+    public func inspectPendingMutations() throws -> [RetainedMutationInspection] {
         try changeTracker.inspectPendingMutations()
     }
 
-    public func inspectRetainedMutations() throws -> [PendingMutationInspection] {
+    public func inspectRetainedMutations() throws -> [RetainedMutationInspection] {
         try changeTracker.inspectRetainedMutations()
     }
 
     public func inspectRejectedMutations() throws -> [RejectedMutationInspection] {
-        try database.readTransaction { db in
-            try SynchroMeta.listRejectedMutations(db).map { rejected in
-                guard let status = MutationStatus(rawValue: rejected.status),
-                      status == .conflict || status == .rejectedTerminal,
-                      let code = MutationRejectionCode(rawValue: rejected.code),
-                      let mutationJSON = rejected.mutationJSON,
-                      let rejectionJSON = rejected.rejectedJSON,
-                      let mutationData = mutationJSON.data(using: .utf8),
-                      let rejectionData = rejectionJSON.data(using: .utf8) else {
-                    throw SynchroError.invalidResponse(message: "retained rejection is invalid")
-                }
-                let decoder = JSONDecoder.synchroDecoder()
-                let mutation: Mutation
-                let rejection: RejectedMutation
-                do {
-                    mutation = try decoder.decode(Mutation.self, from: mutationData)
-                    rejection = try decoder.decode(RejectedMutation.self, from: rejectionData)
-                } catch {
-                    throw SynchroError.invalidResponse(message: "retained rejection payload is invalid")
-                }
-                guard mutation.mutationID == rejected.mutationID,
-                      rejection.mutationID == rejected.mutationID,
-                      mutation.table == rejection.table,
-                      mutation.pk == rejection.pk,
-                      rejection.status == status,
-                      rejection.code == code else {
-                    throw SynchroError.invalidResponse(message: "retained rejection identity is inconsistent")
-                }
-                return RejectedMutationInspection(
-                    mutationID: rejected.mutationID,
-                    localOrder: rejected.localOrder,
-                    tableName: rejected.tableName,
-                    recordID: rejected.recordID,
-                    status: status,
-                    code: code,
-                    message: rejected.message,
-                    serverRowJSON: rejected.serverRowJSON,
-                    serverVersion: rejected.serverVersion,
-                    mutationJSON: mutationJSON,
-                    rejectionJSON: rejectionJSON,
-                    mutation: mutation,
-                    rejection: rejection,
-                    createdAt: rejected.createdAt,
-                    updatedAt: rejected.updatedAt
-                )
+        try database.readTransaction(Self.inspectRejectedMutations)
+    }
+
+    private static func inspectRejectedMutations(_ db: GRDB.Database) throws -> [RejectedMutationInspection] {
+        try SynchroMeta.listRejectedMutations(db).map { rejected in
+            guard let status = MutationStatus(rawValue: rejected.status),
+                  status == .conflict || status == .rejectedTerminal,
+                  let code = MutationRejectionCode(rawValue: rejected.code),
+                  let mutationJSON = rejected.mutationJSON,
+                  let rejectionJSON = rejected.rejectedJSON,
+                  let mutationData = mutationJSON.data(using: .utf8),
+                  let rejectionData = rejectionJSON.data(using: .utf8) else {
+                throw SynchroError.invalidResponse(message: "retained rejection is invalid")
             }
+            let decoder = JSONDecoder.synchroDecoder()
+            let mutation: Mutation
+            let rejection: RejectedMutation
+            do {
+                mutation = try decoder.decode(Mutation.self, from: mutationData)
+                rejection = try decoder.decode(RejectedMutation.self, from: rejectionData)
+            } catch {
+                throw SynchroError.invalidResponse(message: "retained rejection payload is invalid")
+            }
+            guard mutation.mutationID == rejected.mutationID,
+                  rejection.mutationID == rejected.mutationID,
+                  mutation.table == rejection.table,
+                  mutation.pk == rejection.pk,
+                  rejection.status == status,
+                  rejection.code == code else {
+                throw SynchroError.invalidResponse(message: "retained rejection identity is inconsistent")
+            }
+            return RejectedMutationInspection(
+                mutationID: rejected.mutationID,
+                localOrder: rejected.localOrder,
+                tableName: rejected.tableName,
+                recordID: rejected.recordID,
+                status: status,
+                code: code,
+                message: rejected.message,
+                serverRowJSON: rejected.serverRowJSON,
+                serverVersion: rejected.serverVersion,
+                mutationJSON: mutationJSON,
+                rejectionJSON: rejectionJSON,
+                mutation: mutation,
+                rejection: rejection,
+                createdAt: rejected.createdAt,
+                updatedAt: rejected.updatedAt
+            )
         }
     }
 
@@ -246,66 +248,111 @@ public final class SynchroClient: @unchecked Sendable {
             throw SynchroError.invalidResponse(message: "inspection record limit is invalid")
         }
         return try database.stateInspectionTransaction { db, provenanceMaintenanceWorkCursor in
-            let provenanceCount = try Self.inspectCount(
+            try Self.inspectClientStateCapture(
                 db,
-                sql: "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)"
-            )
-            let scopeStateCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scopes")
-            let scopeRowCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scope_rows")
-            let rebuildAttemptCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_attempts")
-            let rebuildReceiptCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts")
-            let scopeStates = try Self.inspectScopeStates(db)
-            let scopeRows = try Self.inspectScopeRows(db)
-            let rebuildAttempts = try Self.inspectRebuildAttempts(db)
-            let rebuildReceipts = try Self.inspectRebuildReceipts(db)
-            let rowMetadataCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_row_versions")
-            let rowMetadata = try SynchroMeta.listRowMetadata(db, limit: maximumRecords).map { metadata in
-                RowMetadataInspection(
-                    tableName: metadata.tableName,
-                    recordID: metadata.recordID,
-                    serverVersion: metadata.serverVersion,
-                    rowChecksum: metadata.rowChecksum
-                )
-            }
-            let scopeStatesTruncated = scopeStates.count > maximumRecords
-            let scopeRowsTruncated = scopeRows.count > maximumRecords
-            let rebuildAttemptsTruncated = rebuildAttempts.count > maximumRecords
-            let rebuildReceiptsTruncated = rebuildReceipts.count > maximumRecords
-            let rowMetadataTruncated = rowMetadataCount > maximumRecords
-            return ClientStateCaptureInspection(
-                schema: try Self.inspectSchema(db),
-                scopeStates: Array(scopeStates.prefix(maximumRecords)),
-                scopeStatesTruncated: scopeStatesTruncated,
-                scopeRows: Array(scopeRows.prefix(maximumRecords)),
-                scopeRowsTruncated: scopeRowsTruncated,
-                rebuildAttempts: Array(rebuildAttempts.prefix(maximumRecords)),
-                rebuildAttemptsTruncated: rebuildAttemptsTruncated,
-                rebuildReceipts: Array(rebuildReceipts.prefix(maximumRecords)),
-                rebuildReceiptsTruncated: rebuildReceiptsTruncated,
-                rowMetadata: rowMetadata,
-                rowMetadataTruncated: rowMetadataTruncated,
-                overflowed: scopeStatesTruncated
-                    || scopeRowsTruncated
-                    || rebuildAttemptsTruncated
-                    || rebuildReceiptsTruncated
-                    || rowMetadataTruncated,
-                applicationRowCount: try Self.inspectApplicationRowCount(db),
-                mutationLedgerCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_pending_changes"),
-                mutationOutcomeCount: try Self.inspectCount(
-                    db,
-                    sql: "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state IN ('accepted', 'rejected')"
-                ),
-                sealedBatchCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_push_batches"),
-                rejectedMutationCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
-                scopeStateCount: scopeStateCount,
-                scopeRowCount: scopeRowCount,
-                provenanceCount: provenanceCount,
-                rowMetadataCount: rowMetadataCount,
-                rebuildAttemptCount: rebuildAttemptCount,
-                rebuildReceiptCount: rebuildReceiptCount,
+                maximumRecords: maximumRecords,
                 provenanceMaintenanceWorkCursor: provenanceMaintenanceWorkCursor
             )
         }
+    }
+
+    /// Reads counts, details, and application rows from one read-only snapshot.
+    /// `readApplicationRows` runs inside that snapshot and must not escape its transaction.
+    func inspectClientStateSnapshot(
+        maximumRecords: Int,
+        readApplicationRows: (ClientStateCaptureInspection, ApplicationTransaction) throws -> Void
+    ) throws -> ClientStateSnapshotInspection {
+        guard maximumRecords >= 0 else {
+            throw SynchroError.invalidResponse(message: "inspection record limit is invalid")
+        }
+        return try database.stateInspectionTransaction { db, provenanceMaintenanceWorkCursor in
+            try db.readOnly {
+                let capture = try Self.inspectClientStateCapture(
+                    db,
+                    maximumRecords: maximumRecords,
+                    provenanceMaintenanceWorkCursor: provenanceMaintenanceWorkCursor
+                )
+                let snapshot = ClientStateSnapshotInspection(
+                    capture: capture,
+                    pendingChangeCount: try changeTracker.countPendingChanges(db),
+                    retainedMutations: capture.mutationLedgerCount <= maximumRecords
+                        ? try changeTracker.inspectMutations(db, includeTerminal: true)
+                        : nil,
+                    rejectedMutations: capture.rejectedMutationCount <= maximumRecords
+                        ? try Self.inspectRejectedMutations(db)
+                        : nil,
+                    blockingFailure: try SynchroMeta.getBlockingFailure(db)
+                )
+                try readApplicationRows(capture, ApplicationTransaction(readOnlyDatabase: db))
+                return snapshot
+            }
+        }
+    }
+
+    private static func inspectClientStateCapture(
+        _ db: GRDB.Database,
+        maximumRecords: Int,
+        provenanceMaintenanceWorkCursor: Int64
+    ) throws -> ClientStateCaptureInspection {
+        let provenanceCount = try Self.inspectCount(
+            db,
+            sql: "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)"
+        )
+        let scopeStateCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scopes")
+        let scopeRowCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_scope_rows")
+        let rebuildAttemptCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_attempts")
+        let rebuildReceiptCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts")
+        let scopeStates = try Self.inspectScopeStates(db)
+        let scopeRows = try Self.inspectScopeRows(db)
+        let rebuildAttempts = try Self.inspectRebuildAttempts(db)
+        let rebuildReceipts = try Self.inspectRebuildReceipts(db)
+        let rowMetadataCount = try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_row_versions")
+        let rowMetadata = try SynchroMeta.listRowMetadata(db, limit: maximumRecords).map { metadata in
+            RowMetadataInspection(
+                tableName: metadata.tableName,
+                recordID: metadata.recordID,
+                serverVersion: metadata.serverVersion,
+                rowChecksum: metadata.rowChecksum
+            )
+        }
+        let scopeStatesTruncated = scopeStates.count > maximumRecords
+        let scopeRowsTruncated = scopeRows.count > maximumRecords
+        let rebuildAttemptsTruncated = rebuildAttempts.count > maximumRecords
+        let rebuildReceiptsTruncated = rebuildReceipts.count > maximumRecords
+        let rowMetadataTruncated = rowMetadataCount > maximumRecords
+        return ClientStateCaptureInspection(
+            schema: try Self.inspectSchema(db),
+            scopeStates: Array(scopeStates.prefix(maximumRecords)),
+            scopeStatesTruncated: scopeStatesTruncated,
+            scopeRows: Array(scopeRows.prefix(maximumRecords)),
+            scopeRowsTruncated: scopeRowsTruncated,
+            rebuildAttempts: Array(rebuildAttempts.prefix(maximumRecords)),
+            rebuildAttemptsTruncated: rebuildAttemptsTruncated,
+            rebuildReceipts: Array(rebuildReceipts.prefix(maximumRecords)),
+            rebuildReceiptsTruncated: rebuildReceiptsTruncated,
+            rowMetadata: rowMetadata,
+            rowMetadataTruncated: rowMetadataTruncated,
+            overflowed: scopeStatesTruncated
+                || scopeRowsTruncated
+                || rebuildAttemptsTruncated
+                || rebuildReceiptsTruncated
+                || rowMetadataTruncated,
+            applicationRowCount: try Self.inspectApplicationRowCount(db),
+            mutationLedgerCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_pending_changes"),
+            mutationOutcomeCount: try Self.inspectCount(
+                db,
+                sql: "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state IN ('accepted', 'rejected')"
+            ),
+            sealedBatchCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_push_batches"),
+            rejectedMutationCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
+            scopeStateCount: scopeStateCount,
+            scopeRowCount: scopeRowCount,
+            provenanceCount: provenanceCount,
+            rowMetadataCount: rowMetadataCount,
+            rebuildAttemptCount: rebuildAttemptCount,
+            rebuildReceiptCount: rebuildReceiptCount,
+            provenanceMaintenanceWorkCursor: provenanceMaintenanceWorkCursor
+        )
     }
 
     func inspectRowMetadata(tableName: String, recordID: String) throws -> RowMetadataInspection? {

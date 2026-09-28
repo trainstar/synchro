@@ -163,7 +163,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
             params: ["protected-local-intent", "protected"]
         )
         let pendingID = try XCTUnwrap(
-            try ChangeTracker(database: database).inspectPendingMutations().only
+            try ChangeTracker(database: database).inspectPendingMutations().currentRecords().only
         ).mutationID
         let pull = PullProcessor(database: database)
         let attempt = try pull.beginScopeRebuild(
@@ -286,7 +286,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         XCTAssertNil(try reopened.readTransaction { try SynchroMeta.getScope($0, scopeID: removedScope) })
         XCTAssertNotNil(try reopened.queryOne("SELECT id FROM orders WHERE id = 'protected'", params: nil))
         XCTAssertEqual(
-            try ChangeTracker(database: reopened).inspectPendingMutations().map(\.mutationID),
+            try ChangeTracker(database: reopened).inspectPendingMutations().currentRecords().map(\.mutationID),
             [pendingID]
         )
         try reopened.close()
@@ -680,7 +680,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
 
     func testInterruptedMigrationRejectsEveryInconsistentJournalBeforeProgress() throws {
         let successful = try makePreparedMigration("migration-success")
-        let successfulPending = try ChangeTracker(database: successful.database).inspectPendingMutations()
+        let successfulPending = try ChangeTracker(database: successful.database).inspectPendingMutations().currentRecords()
         try successful.database.close()
         let recovered = try SynchroDatabase(path: successful.path)
         let recoveredJournal = try XCTUnwrap(SchemaManager(database: recovered).recoverMigrationIfNeeded())
@@ -694,7 +694,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
             try recovered.queryOne("SELECT value FROM local_settings WHERE key = 'theme'", params: nil)?["value"] as String?,
             "dark"
         )
-        XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations(), successfulPending)
+        XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations().currentRecords(), successfulPending)
         XCTAssertNil(try SchemaManager(database: recovered).activeMigration())
         try recovered.close()
 
@@ -728,7 +728,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
 
         for (name, mutate) in mutations {
             let prepared = try makePreparedMigration("migration-\(name)")
-            let pendingBefore = try ChangeTracker(database: prepared.database).inspectPendingMutations()
+            let pendingBefore = try ChangeTracker(database: prepared.database).inspectPendingMutations().currentRecords()
             try prepared.database.writeTransaction(mutate)
             let beforeRecovery = try durableSnapshot(prepared.database)
             try prepared.database.close()
@@ -744,7 +744,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                 try reopened.queryOne("SELECT value FROM local_settings WHERE key = 'theme'", params: nil)?["value"] as String?,
                 "dark"
             )
-            XCTAssertEqual(try ChangeTracker(database: reopened).inspectPendingMutations(), pendingBefore)
+            XCTAssertEqual(try ChangeTracker(database: reopened).inspectPendingMutations().currentRecords(), pendingBefore)
             XCTAssertNotNil(try reopened.queryOne("SELECT * FROM _synchro_schema_migration", params: nil))
             XCTAssertFalse(try hasColumn(reopened, table: "orders", column: "notes"))
             try reopened.close()
@@ -1556,7 +1556,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         let reopened = try SynchroDatabase(path: environment.path)
         try assertNoDurableProgress(snapshot, reopened)
         XCTAssertEqual(
-            try ChangeTracker(database: reopened).inspectRetainedMutations().map(\.status),
+            try ChangeTracker(database: reopened).inspectRetainedMutations().currentRecords().map(\.status),
             [.cancelledBeforeSend, .cancelledBeforeSend]
         )
         try reopened.close()
@@ -1632,7 +1632,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
 
         let reopened = try SynchroDatabase(path: environment.path)
         try assertNoDurableProgress(snapshot, reopened)
-        let retained = try ChangeTracker(database: reopened).inspectRetainedMutations()
+        let retained = try ChangeTracker(database: reopened).inspectRetainedMutations().currentRecords()
         XCTAssertEqual(retained.map(\.status), [.serverRejected, .blockedByPredecessor])
         XCTAssertEqual(retained[1].dependsOnMutationID, predecessor.mutationID)
         XCTAssertEqual(
@@ -1682,7 +1682,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         let reopened = try SynchroDatabase(path: environment.path)
         try assertNoDurableProgress(snapshot, reopened)
         XCTAssertEqual(
-            try ChangeTracker(database: reopened).inspectRetainedMutations().only?.status,
+            try ChangeTracker(database: reopened).inspectRetainedMutations().currentRecords().only?.status,
             .serverRejected
         )
         XCTAssertEqual(

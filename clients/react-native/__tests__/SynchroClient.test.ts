@@ -21,6 +21,18 @@ const CLIENT_STATE_COUNTS = {
   rebuild_receipt_count: 11,
 };
 
+function snapshotResult(clientState: Record<string, unknown>, details: Record<string, unknown> = {}) {
+  return {
+    inspection: JSON.stringify({
+      client_state: clientState,
+      retained_mutations: [],
+      rejected_mutations: [],
+      ...details,
+    }),
+    applicationRows: [],
+  };
+}
+
 function makeClient(): SynchroClient {
   return new SynchroClient({
     dbPath: '/test.db',
@@ -520,6 +532,7 @@ describe('SynchroClient', () => {
 
     it('maps pending mutation inspection JSON', async () => {
       const pending = {
+        representation: 'current',
         mutationID: 'mutation-1',
         localOrder: 7,
         tableID: 'table-1',
@@ -553,6 +566,7 @@ describe('SynchroClient', () => {
 
     it('maps retained mutation inspection JSON with a server rejection', async () => {
       const retained = {
+        representation: 'current',
         mutationID: 'mutation-2',
         localOrder: 8,
         tableID: 'table-1',
@@ -586,6 +600,7 @@ describe('SynchroClient', () => {
 
     it('maps retained mutation inspection JSON with a push limit status', async () => {
       const retained = {
+        representation: 'current',
         mutationID: 'mutation-3',
         localOrder: 9,
         tableID: 'table-1',
@@ -617,6 +632,67 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.inspectRetainedMutations).toHaveBeenCalledTimes(1);
     });
 
+    it('maps a legacy retained mutation without binding fields', async () => {
+      const legacy = {
+        representation: 'legacy',
+        mutationID: 'mutation-4',
+        localOrder: 1,
+        tableName: 'orders',
+        recordID: 'r1',
+        operation: 'insert',
+        baseVersion: null,
+        clientVersion: '2026-01-01T00:00:00.000000Z',
+        status: 'blocked_by_predecessor',
+        sourceKind: 'legacy_import',
+      };
+      mockNativeModule.inspectPendingMutations.mockResolvedValueOnce(
+        JSON.stringify([legacy])
+      );
+      mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(
+        JSON.stringify([legacy])
+      );
+
+      const client = makeClient();
+      await expect(client.inspectPendingMutations()).resolves.toStrictEqual([legacy]);
+      await expect(client.inspectRetainedMutations()).resolves.toStrictEqual([legacy]);
+    });
+
+    // The payload is otherwise a complete current record, so only the representation rejects it.
+    it.each([undefined, 'placeholder'])(
+      'rejects a retained mutation with representation %p',
+      async (representation) => {
+        mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(
+          JSON.stringify([
+            {
+              representation,
+              mutationID: 'mutation-5',
+              localOrder: 1,
+              tableID: 'table-1',
+              tableName: 'orders',
+              recordID: 'r1',
+              primaryKeyFieldID: 'field-id',
+              primaryKeyLogicalType: 'uuid',
+              operation: 'insert',
+              authoredSchema: { version: 3, hash: 'd'.repeat(64) },
+              baseVersion: null,
+              clientVersion: 'client-v1',
+              status: 'pending',
+              sourceKind: 'local_write',
+              dependsOnMutationID: null,
+              normalizedMutationID: null,
+              sealedBatchID: null,
+              sealedOrdinal: null,
+              authoredFields: [],
+            },
+          ])
+        );
+
+        await expect(makeClient().inspectRetainedMutations()).rejects.toMatchObject({
+          code: 'INVALID_RESPONSE',
+        });
+      }
+    );
+
     it('maps rejected mutation inspection JSON without parsing retained JSON', async () => {
       const mutationJSON = '{ "operation": "update", "value": 1 }';
       const rejectionJSON = '{ "code": "version_conflict" }';
@@ -645,8 +721,93 @@ describe('SynchroClient', () => {
       expect(result[0].rejectionJSON).toBe(rejectionJSON);
     });
 
+    it('reads client state, retained details, and application rows from one native snapshot', async () => {
+      const clientState = {
+        schema: null,
+        scope_states: [],
+        scope_rows: [],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        provenance_maintenance_work_cursor: '3',
+      };
+      const legacy = {
+        representation: 'legacy',
+        mutationID: 'mutation-legacy',
+        localOrder: 1,
+        tableName: 'orders',
+        recordID: 'r1',
+        operation: 'insert',
+        baseVersion: null,
+        clientVersion: 'client-v1',
+        status: 'pending',
+        sourceKind: 'legacy_import',
+      };
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce({
+        ...snapshotResult(clientState, {
+          retained_mutations: [legacy],
+          rejected_mutations: null,
+        }),
+        applicationRows: [{ id: 'r1', name: 'first' }],
+      });
+
+      const { client, inspection } = await makeInspection();
+      const snapshot = await inspection.captureSnapshot([
+        { sql: 'SELECT * FROM "orders" WHERE "id" = ?', params: ['r1'] },
+      ]);
+
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([
+        { sql: 'SELECT * FROM "orders" WHERE "id" = ?', params: ['r1'] },
+      ]);
+      expect(snapshot).toStrictEqual({
+        clientState: {
+          schema: null,
+          scopeStates: [],
+          scopeRows: [],
+          rebuildAttempts: [],
+          applicationRowCount: Number.MAX_SAFE_INTEGER,
+          mutationLedgerCount: 2,
+          mutationOutcomeCount: 3,
+          sealedBatchCount: 4,
+          rejectedMutationCount: 5,
+          scopeStateCount: 6,
+          scopeRowCount: 7,
+          provenanceCount: 8,
+          rowMetadataCount: 9,
+          rebuildAttemptCount: 10,
+          rebuildReceiptCount: 11,
+          provenanceMaintenanceWorkCursor: '3',
+        },
+        retainedMutations: [legacy],
+        rejectedMutations: null,
+        applicationRows: [{ id: 'r1', name: 'first' }],
+      });
+      await client.close();
+    });
+
+    it.each([
+      ['retained_mutations', {}],
+      ['rejected_mutations', [{}]],
+      ['client_state', null],
+    ])('rejects an invalid snapshot %s member', async (member, value) => {
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
+        schema: null,
+        scope_states: [],
+        scope_rows: [],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        provenance_maintenance_work_cursor: '0',
+      }, { [member]: value }));
+
+      const { client, inspection } = await makeInspection();
+      await expect(inspection.captureSnapshot()).rejects.toMatchObject({
+        code: 'INVALID_RESPONSE',
+      });
+      await client.close();
+    });
+
     it('maps the maximum provenance maintenance cursor without numeric precision loss', async () => {
-      mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
         schema: null,
         scope_states: [],
         scope_rows: [],
@@ -656,7 +817,7 @@ describe('SynchroClient', () => {
       }));
 
       const { client, inspection } = await makeInspection();
-      await expect(inspection.clientState()).resolves.toEqual({
+      await expect(inspection.captureSnapshot().then((snapshot) => snapshot.clientState)).resolves.toEqual({
         schema: null,
         scopeStates: [],
         scopeRows: [],
@@ -680,7 +841,7 @@ describe('SynchroClient', () => {
     it.each(['-1', '01', '1.0', '9223372036854775808', 1, null])(
       'rejects invalid provenance maintenance cursor %p',
       async (cursor) => {
-        mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+        mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
           schema: null,
           scope_states: [],
           scope_rows: [],
@@ -690,7 +851,7 @@ describe('SynchroClient', () => {
         }));
 
         const { client, inspection } = await makeInspection();
-        await expect(inspection.clientState()).rejects.toMatchObject({
+        await expect(inspection.captureSnapshot()).rejects.toMatchObject({
           code: 'INVALID_RESPONSE',
         });
         await client.close();
@@ -700,7 +861,7 @@ describe('SynchroClient', () => {
     it.each(Object.keys(CLIENT_STATE_COUNTS))(
       'rejects a negative %s client-state count',
       async (countName) => {
-        mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+        mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
           schema: null,
           scope_states: [],
           scope_rows: [],
@@ -711,7 +872,7 @@ describe('SynchroClient', () => {
         }));
 
         const { client, inspection } = await makeInspection();
-        await expect(inspection.clientState()).rejects.toMatchObject({
+        await expect(inspection.captureSnapshot()).rejects.toMatchObject({
           code: 'INVALID_RESPONSE',
         });
         await client.close();
@@ -721,7 +882,7 @@ describe('SynchroClient', () => {
     it.each([Number.MAX_SAFE_INTEGER + 1, 1.5, '1', null, undefined])(
       'rejects malformed application row count %p',
       async (count) => {
-        mockNativeModule.inspectClientState.mockResolvedValueOnce(JSON.stringify({
+        mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
           schema: null,
           scope_states: [],
           scope_rows: [],
@@ -732,7 +893,7 @@ describe('SynchroClient', () => {
         }));
 
         const { client, inspection } = await makeInspection();
-        await expect(inspection.clientState()).rejects.toMatchObject({
+        await expect(inspection.captureSnapshot()).rejects.toMatchObject({
           code: 'INVALID_RESPONSE',
         });
         await client.close();
@@ -835,10 +996,10 @@ describe('SynchroClient', () => {
     });
 
     it.each([
-      ['inspectClientState', (inspection: SynchroInspection) => inspection.clientState()],
-      ['inspectTransportObservations', (inspection: SynchroInspection) => inspection.transportObservations()],
-    ])('rejects malformed JSON from the %s facade', async (method, invoke) => {
-      mockNativeModule[method].mockResolvedValueOnce('{invalid');
+      ['inspectClientStateSnapshot', (inspection: SynchroInspection) => inspection.captureSnapshot(), { inspection: '{invalid', applicationRows: [] }],
+      ['inspectTransportObservations', (inspection: SynchroInspection) => inspection.transportObservations(), '{invalid'],
+    ])('rejects malformed JSON from the %s facade', async (method, invoke, result) => {
+      mockNativeModule[method].mockResolvedValueOnce(result);
       const { client, inspection } = await makeInspection();
 
       await expect(invoke(inspection)).rejects.toMatchObject({

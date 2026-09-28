@@ -152,7 +152,9 @@ export interface Spec extends TurboModule {
   inspectPendingMutations(): Promise<string>;
   inspectRetainedMutations(): Promise<string>;
   inspectRejectedMutations(): Promise<string>;
-  inspectClientState(): Promise<string>;
+  inspectClientStateSnapshot(
+    rowStatements: ReadonlyArray<NativeSQLStatement>
+  ): Promise<{ inspection: string; applicationRows: ReadonlyArray<NativeRow> }>;
   inspectDurableState(tableName: string, recordID: string): Promise<string>;
   inspectTransportObservations(): Promise<string>;
   armTransportPause(operationClass: string): Promise<void>;
