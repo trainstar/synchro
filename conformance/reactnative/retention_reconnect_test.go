@@ -215,13 +215,27 @@ func TestRetentionReconnectQueuePreservesAuthoredIntentAcrossRenewal(t *testing.
 	}
 }
 
-func TestRetentionReconnectFloorEqualityRequiresTheObservedFloor(t *testing.T) {
-	if err := requireFloorEqualCheckpoint("effect|16/0|3|0", "effect|16/0|3|0"); err != nil {
-		t.Fatalf("equal floor and checkpoint were rejected: %v", err)
+func TestRetentionReconnectResumedCheckpointMustBeAtOrAboveTheObservedFloor(t *testing.T) {
+	for _, test := range []struct{ floor, checkpoint string }{
+		{"effect|16/0|3|0", "effect|16/0|3|0"},
+		{"generation_start|||", "transaction_end|0/24F6640||"},
+		{"effect|16/0|3|0", "transaction_end|16/0||"},
+		{"transaction_end|16/0||", "effect|16/1|1|0"},
+	} {
+		if err := requireCheckpointAtOrAboveFloor(test.floor, test.checkpoint); err != nil {
+			t.Fatalf("resumable checkpoint %q at floor %q was rejected: %v", test.checkpoint, test.floor, err)
+		}
 	}
-	for _, checkpoint := range []string{"effect|16/0|2|0", "transaction_end|16/0||", ""} {
-		if err := requireFloorEqualCheckpoint("effect|16/0|3|0", checkpoint); err == nil {
-			t.Fatalf("checkpoint %q was accepted as the retention floor", checkpoint)
+	for _, test := range []struct{ floor, checkpoint string }{
+		{"effect|16/0|3|0", "effect|16/0|2|9"},
+		{"transaction_end|16/0||", "effect|16/0|9|9"},
+		{"effect|16/0|1|0", "generation_start|||"},
+		{"effect|17/0|1|0", "transaction_end|16/FFFFFFFF||"},
+		{"effect|16/0|3|0", ""},
+		{"floor|16/0||", "transaction_end|16/0||"},
+	} {
+		if err := requireCheckpointAtOrAboveFloor(test.floor, test.checkpoint); err == nil {
+			t.Fatalf("checkpoint %q below or unrelated to floor %q was accepted", test.checkpoint, test.floor)
 		}
 	}
 }

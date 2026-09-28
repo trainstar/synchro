@@ -1713,7 +1713,7 @@ func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error 
 	if err := validateRetentionReconnectCompaction(server, pin); err != nil {
 		return fmt.Errorf("validate React Native retention-reconnect compacted floor: %w", err)
 	}
-	if err := c.validateFloorEqualCheckpoint(ctx); err != nil {
+	if err := c.validateResumedCheckpointAtFloor(ctx); err != nil {
 		return err
 	}
 	identities, err := c.resolveIdentities(server)
@@ -1724,10 +1724,12 @@ func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error 
 	return nil
 }
 
-// validateFloorEqualCheckpoint observes the claimed boundary directly. The
-// resume pull acknowledged the persisted cursor, so its durable checkpoint must
-// equal the retention floor of the compacted scope.
-func (c *RetentionReconnectCoordinator) validateFloorEqualCheckpoint(ctx context.Context) error {
+// validateResumedCheckpointAtFloor observes the boundary directly. The resume
+// pull acknowledged the persisted cursor, so its durable checkpoint must be at
+// or above the retention floor of the compacted scope, the resumable range in
+// spec 03-state-machines. The active rebuild pin can hold the floor below the
+// cursor, so equality is not required.
+func (c *RetentionReconnectCoordinator) validateResumedCheckpointAtFloor(ctx context.Context) error {
 	var runtimeScope string
 	if json.Unmarshal(c.runtimeIDs["scope-a"], &runtimeScope) != nil || runtimeScope == "" {
 		return errors.New("React Native retention-reconnect authored scope binding is absent")
@@ -1736,14 +1738,72 @@ func (c *RetentionReconnectCoordinator) validateFloorEqualCheckpoint(ctx context
 	if err != nil {
 		return fmt.Errorf("observe React Native retention-reconnect floor: %w", err)
 	}
-	return requireFloorEqualCheckpoint(floor, checkpoint)
+	return requireCheckpointAtOrAboveFloor(floor, checkpoint)
 }
 
-func requireFloorEqualCheckpoint(floor, checkpoint string) error {
-	if floor == "" || floor != checkpoint {
-		return fmt.Errorf("React Native retention-reconnect resumed checkpoint %q is not the retention floor %q", checkpoint, floor)
+func requireCheckpointAtOrAboveFloor(floor, checkpoint string) error {
+	floorPosition, floorErr := parseStreamPosition(floor)
+	checkpointPosition, checkpointErr := parseStreamPosition(checkpoint)
+	if floorErr != nil || checkpointErr != nil || compareStreamPositions(checkpointPosition, floorPosition) < 0 {
+		return fmt.Errorf("React Native retention-reconnect resumed checkpoint %q is not at or above the retention floor %q", checkpoint, floor)
 	}
 	return nil
+}
+
+// streamPosition orders kind|commit_lsn|event_ordinal|effect_ordinal. A
+// generation start precedes every commit. At one commit, each effect precedes
+// the transaction end.
+type streamPosition struct {
+	rank, lsn, event, effect uint64
+}
+
+func parseStreamPosition(value string) (streamPosition, error) {
+	parts := strings.Split(value, "|")
+	if len(parts) != 4 {
+		return streamPosition{}, errors.New("stream position is malformed")
+	}
+	if parts[0] == "generation_start" && parts[1] == "" && parts[2] == "" && parts[3] == "" {
+		return streamPosition{}, nil
+	}
+	high, low, found := strings.Cut(parts[1], "/")
+	upper, upperErr := strconv.ParseUint(high, 16, 32)
+	lower, lowerErr := strconv.ParseUint(low, 16, 32)
+	if !found || upperErr != nil || lowerErr != nil {
+		return streamPosition{}, errors.New("stream position LSN is malformed")
+	}
+	position := streamPosition{lsn: upper<<32 | lower}
+	switch {
+	case parts[0] == "transaction_end" && parts[2] == "" && parts[3] == "":
+		position.rank = 2
+	case parts[0] == "effect":
+		event, eventErr := strconv.ParseUint(parts[2], 10, 64)
+		effect, effectErr := strconv.ParseUint(parts[3], 10, 64)
+		if eventErr != nil || effectErr != nil {
+			return streamPosition{}, errors.New("stream position ordinal is malformed")
+		}
+		position.rank, position.event, position.effect = 1, event, effect
+	default:
+		return streamPosition{}, errors.New("stream position kind is malformed")
+	}
+	return position, nil
+}
+
+func compareStreamPositions(left, right streamPosition) int {
+	if (left.rank == 0) != (right.rank == 0) {
+		if left.rank == 0 {
+			return -1
+		}
+		return 1
+	}
+	for _, pair := range [][2]uint64{{left.lsn, right.lsn}, {left.rank, right.rank}, {left.event, right.event}, {left.effect, right.effect}} {
+		if pair[0] != pair[1] {
+			if pair[0] < pair[1] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 func validateRetentionReconnectCompaction(server scenarios.StateFacts, rebuild scenarios.Operation) error {
