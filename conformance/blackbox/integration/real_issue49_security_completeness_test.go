@@ -624,7 +624,8 @@ func TestRealIssue49SecurityDatabaseAuthority(t *testing.T) {
 		JOIN pg_catalog.pg_roles owner ON owner.oid = procedure.proowner
 		WHERE namespace.nspname = 'synchro'
 		  AND (owner.rolname <> 'synchro_owner'
-		       OR NOT procedure.prosecdef
+		       OR (NOT procedure.prosecdef
+		           AND procedure.proname <> 'synchro_assert_projection_reader')
 		       OR NOT COALESCE(procedure.proconfig, '{}'::text[]) @> ARRAY['search_path=pg_catalog, synchro'])`).Scan(&unsafeFunctions); err != nil {
 		t.Fatalf("inspect privileged function definitions: %v", err)
 	}
@@ -1255,6 +1256,8 @@ const security49UnexpectedFunctionAuthoritySQL = `
 		('synchro_operator', 'synchro_abort_projection_bootstrap'),
 		('synchro_operator', 'synchro_complete_projection_bootstrap_cleanup'),
 		('synchro_operator', 'synchro_projection_bootstrap_slot_drop_state'),
+		('synchro_operator', 'synchro_assert_projection_reader'),
+		('synchro_worker', 'synchro_assert_projection_reader'),
 		('synchro_worker', 'synchro_projection_bootstrap_active_stream'),
 		('synchro_worker', 'synchro_projection_bootstrap_main_boundary'),
 		('synchro_worker', 'synchro_projection_bootstrap_slot_absent'),

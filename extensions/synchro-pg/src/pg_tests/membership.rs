@@ -1527,6 +1527,215 @@ fn projection_view_update_rebuild_matches_prepared_definition() {
 }
 
 #[pg_test]
+fn projection_view_rejects_reader_without_source_access() {
+    let former = "synchro_projection_former_owner";
+    let current = "synchro_projection_current_owner";
+    Spi::run(&format!(
+        "CREATE ROLE {former} NOLOGIN NOSUPERUSER;
+         CREATE ROLE {current} NOLOGIN NOSUPERUSER;
+         GRANT synchro_operator TO {former}, {current};
+         DO $grant$ BEGIN
+             EXECUTE format('GRANT CREATE ON DATABASE %I TO {current}', current_database());
+         END $grant$;
+         CREATE TABLE public.projection_reader_items (
+             id UUID PRIMARY KEY,
+             owner_id TEXT NOT NULL,
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+             deleted_at TIMESTAMPTZ
+         );
+         ALTER TABLE public.projection_reader_items OWNER TO {former};
+         SET LOCAL ROLE {former};
+         SELECT synchro.synchro_prepare_projection_view(
+             'public.projection_reader_items', 'projection_reader_items',
+             ARRAY['owner_id']::text[]
+         );
+         RESET ROLE;
+         ALTER TABLE public.projection_reader_items OWNER TO {current};
+         REVOKE ALL ON public.projection_reader_items FROM {former};
+         GRANT SELECT ON public.projection_reader_items TO synchro_owner, synchro_worker;
+         ALTER TABLE public.projection_reader_items ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY projection_reader_items_owner ON public.projection_reader_items
+             AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
+         CREATE FUNCTION public.projection_reader_membership(p_key UUID)
+         RETURNS SETOF text
+         LANGUAGE sql
+         STABLE
+         SECURITY INVOKER
+         SET search_path = pg_catalog, synchro
+         BEGIN ATOMIC
+             SELECT 'global'::text;
+         END;
+         ALTER FUNCTION public.projection_reader_membership(UUID) OWNER TO {current};
+         REVOKE EXECUTE ON FUNCTION public.projection_reader_membership(UUID) FROM PUBLIC;
+         GRANT EXECUTE ON FUNCTION public.projection_reader_membership(UUID)
+             TO synchro_owner, synchro_worker;
+         SET LOCAL ROLE {current};
+         SELECT synchro.synchro_register_table(
+             'public.projection_reader_items', 'public.projection_reader_membership',
+             'single_scope', 'id', 'updated_at', 'deleted_at', 'read_only'
+         );
+         SELECT synchro.synchro_prepare_projection_view(
+             'public.projection_reader_items', 'projection_reader_items',
+             ARRAY['owner_id']::text[]
+         );
+         RESET ROLE"
+    ))
+    .expect("create transferred projection relation fixture");
+    activate_pending_registry_for_test();
+    Spi::run(
+        "INSERT INTO synchro.sync_captured_rows (
+             relation_id, record_id, row_data, row_version, checksum, deleted,
+             source_stream_generation, source_commit_lsn, source_event_ordinal,
+             registry_generation
+         )
+         SELECT registry.relation_id, '00000000-0000-4000-8b47-000000000011',
+                jsonb_build_object('owner_id', 'current-owner'),
+                '00000000-0000-4000-8b47-000000000012'::uuid,
+                decode(repeat('cd', 32), 'hex'), false,
+                runtime.stream_generation, '0/10'::pg_lsn, 0,
+                registry.registry_generation
+         FROM synchro.sync_runtime_state runtime
+         JOIN synchro.sync_registry_generations generation
+           ON generation.stream_generation = runtime.stream_generation
+          AND generation.state = 'active'
+         JOIN synchro.sync_registry registry
+           ON registry.registry_generation = generation.generation
+          AND registry.table_name = 'projection_reader_items'
+         WHERE runtime.singleton",
+    )
+    .expect("capture a row of the transferred relation");
+    let rows_as = |role: &str| {
+        Spi::run(&format!("SET LOCAL ROLE {role}")).expect("select projection reader role");
+        let rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM synchro_projection.projection_reader_items",
+        )
+        .expect("projection reader query")
+        .expect("projection reader count");
+        Spi::run("RESET ROLE").expect("restore test role");
+        rows
+    };
+    Spi::run(&format!(
+        "SET LOCAL ROLE {former};
+         SELECT set_config('synchro_test.projection_reader', 'none', true);
+         DO $test$
+         DECLARE visible_rows bigint;
+         BEGIN
+             SELECT count(*) INTO visible_rows FROM synchro_projection.projection_reader_items;
+             PERFORM set_config('synchro_test.projection_reader', 'rows:' || visible_rows, true);
+         EXCEPTION WHEN insufficient_privilege THEN
+             PERFORM set_config('synchro_test.projection_reader', 'rejected', true);
+         END
+         $test$;
+         RESET ROLE"
+    ))
+    .expect("read projection view as former owner");
+    let former_result = Spi::get_one::<String>(
+        "SELECT current_setting('synchro_test.projection_reader')",
+    )
+    .expect("former owner result query")
+    .expect("former owner result");
+
+    assert_eq!(former_result, "rejected");
+    assert_eq!(rows_as(current), 1);
+    assert_eq!(rows_as("synchro_worker"), 1);
+    assert_eq!(rows_as("synchro_owner"), 1);
+}
+
+#[pg_test]
+fn registration_rejects_owner_without_projection_source_access() {
+    let reader = "synchro_projection_source_reader";
+    Spi::run(&format!(
+        "CREATE ROLE {reader} NOLOGIN NOSUPERUSER;
+         GRANT synchro_operator TO {reader};
+         DO $grant$ BEGIN
+             EXECUTE format('GRANT CREATE ON DATABASE %I TO {reader}', current_database());
+         END $grant$"
+    ))
+    .expect("create projection source reader");
+    let fixture = membership_dependency_fixture();
+    let impact = format!(
+        "SELECT {} WHERE new_row ? 'target_id'",
+        target_row_expression(&fixture, "(new_row ->> 'target_id')::integer"),
+    );
+    create_impact_function(&fixture, &impact, true, true);
+    register_dependency(&fixture, 1);
+    activate_pending_registry_for_test();
+    ensure_authoritative_scopes(&["dependent-scope", "target-scope"]);
+    Spi::run(&format!(
+        "DO $transfer$ BEGIN
+             EXECUTE (
+                 SELECT format('ALTER PUBLICATION %I OWNER TO {reader}', publication.pubname)
+                 FROM pg_catalog.pg_publication publication
+             );
+         END $transfer$;
+         ALTER TABLE public.{source_table} OWNER TO {reader};
+         ALTER TABLE public.{target_table} OWNER TO {reader};
+         ALTER FUNCTION public.{source_membership}(INTEGER) OWNER TO {reader};
+         ALTER FUNCTION public.{target_membership}(INTEGER) OWNER TO {reader};
+         ALTER FUNCTION public.{impact_function}(JSONB, JSONB) OWNER TO {reader};
+         GRANT SELECT ON synchro_projection.{source_table} TO {reader};
+         CREATE OR REPLACE FUNCTION public.{target_membership}(p_key INTEGER)
+         RETURNS SETOF text
+         LANGUAGE sql
+         STABLE
+         SECURITY INVOKER
+         SET search_path = pg_catalog, synchro
+         BEGIN ATOMIC
+             SELECT CASE WHEN EXISTS (
+                 SELECT 1
+                 FROM synchro_projection.{source_table} projection
+                 WHERE projection.target_id #>> '{{}}' = p_key::text
+                   AND NOT projection.deleted
+             ) THEN 'dependent-scope'::text ELSE 'target-scope'::text END;
+         END;
+         REVOKE SELECT ON public.{source_table} FROM {reader}",
+        source_table = fixture.source_table,
+        target_table = fixture.target_table,
+        source_membership = fixture.source_membership,
+        target_membership = fixture.target_membership,
+        impact_function = fixture.impact_function,
+    ))
+    .expect("transfer projection source fixture to operator");
+    let register = || {
+        Spi::run(&format!(
+            "SET LOCAL ROLE {reader};
+             DO $test$
+             BEGIN
+                 PERFORM synchro.synchro_register_table(
+                     'public.{target_table}',
+                     'public.{target_membership}',
+                     'single_scope',
+                     'id', 'updated_at', 'deleted_at', 'enabled',
+                     p_affected_scopes => ARRAY['dependent-scope', 'target-scope']::text[]
+                 );
+                 PERFORM set_config('synchro_test.projection_source_registered', 'registered', true);
+             EXCEPTION WHEN OTHERS THEN
+                 PERFORM set_config('synchro_test.projection_source_registered', SQLERRM, true);
+             END
+             $test$;
+             RESET ROLE",
+            target_table = fixture.target_table,
+            target_membership = fixture.target_membership,
+        ))
+        .expect("attempt projection source registration");
+        Spi::get_one::<String>("SELECT current_setting('synchro_test.projection_source_registered')")
+            .expect("projection source registration result query")
+            .expect("projection source registration result")
+    };
+
+    let without_source_access = register();
+    Spi::run(&format!(
+        "GRANT SELECT ON public.{} TO {reader}",
+        fixture.source_table
+    ))
+    .expect("grant projection source access");
+    let with_source_access = register();
+
+    assert_ne!(without_source_access, "registered");
+    assert_eq!(with_source_access, "registered");
+}
+
+#[pg_test]
 fn membership_test_schema_enforces_production_validation() {
     for case in ["valid", "unparsed", "search_path", "live_table", "undeclared_field"] {
         let fixture = registration_fixture(true, "enabled", true);

@@ -1,7 +1,7 @@
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -1677,10 +1677,7 @@ SECURITY DEFINER
+@@ -1695,10 +1695,7 @@ SECURITY DEFINER
  SET search_path = pg_catalog, synchro
  AS $$
  BEGIN
@@ -13,12 +13,12 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
      RETURN NEW;
  END;
  $$;
-@@ -2493,7 +2490,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2511,7 +2508,7 @@ CREATE FUNCTION "synchro_capture_fence"()
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1942
-+-- synchro-pg/src/lib.rs:1939
+--- synchro-pg/src/lib.rs:1960
++-- synchro-pg/src/lib.rs:1957
  -- finalize
  
  DO $roles$

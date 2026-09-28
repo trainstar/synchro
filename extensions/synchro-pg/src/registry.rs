@@ -385,9 +385,10 @@ fn synchro_prepare_projection_view(
                 "CREATE VIEW {qualified_view} WITH (security_barrier = true) AS \
                  SELECT projection.record_id, projection.capture_key, projection.deleted, {} \
                  FROM synchro.sync_current_projections projection \
-                 WHERE projection.physical_relation_oid = {}::oid",
+                 WHERE projection.physical_relation_oid = {oid}::oid \
+                 AND synchro.synchro_assert_projection_reader({oid}::oid)",
                 expressions.join(", "),
-                i64::from(physical.oid),
+                oid = i64::from(physical.oid),
             ),
             None,
             &[],
@@ -1933,7 +1934,8 @@ fn validate_registered_function_dependencies(
                  SELECT relation.oid AS relation_oid,
                         namespace.oid AS schema_oid,
                         namespace.nspname,
-                        projection.view_oid
+                        projection.view_oid,
+                        projection.physical_relation_oid
                  FROM pg_catalog.pg_depend dependency
                  JOIN pg_catalog.pg_class relation
                    ON dependency.refclassid = 'pg_catalog.pg_class'::regclass
@@ -1965,7 +1967,18 @@ fn validate_registered_function_dependencies(
                            OR NOT pg_catalog.has_schema_privilege(
                                   function_owner.proowner, dependency.schema_oid, 'USAGE'
                               )
-                    ) AS readable",
+                    ) AS readable,
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM dependency
+                        CROSS JOIN function_owner
+                        WHERE dependency.physical_relation_oid IS NOT NULL
+                          AND pg_catalog.has_table_privilege(
+                                  function_owner.proowner,
+                                  dependency.physical_relation_oid,
+                                  'SELECT'
+                              ) IS NOT TRUE
+                    ) AS source_readable",
             None,
             &[i64::from(function.oid).into()],
         )?
@@ -1975,6 +1988,12 @@ fn validate_registered_function_dependencies(
     }
     if !row.get_by_name::<bool, &str>("readable")?.unwrap_or(false) {
         pgrx::error!("registered function owner cannot read a function relation");
+    }
+    if !row
+        .get_by_name::<bool, &str>("source_readable")?
+        .unwrap_or(false)
+    {
+        pgrx::error!("registered function owner cannot read a projection view source relation");
     }
     validate_function_calls_only_pg_catalog(client, function)
 }

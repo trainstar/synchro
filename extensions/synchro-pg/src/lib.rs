@@ -1422,6 +1422,24 @@ JOIN projections captured
   ON captured.relation_id = registry.relation_id
 WHERE progress.singleton;
 
+-- Each reader runs this check as itself, so a projection view returns rows
+-- only to a role that can read the source relation.
+CREATE FUNCTION synchro_assert_projection_reader(p_relation OID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    IF pg_catalog.has_table_privilege(p_relation, 'SELECT') IS NOT TRUE THEN
+        RAISE EXCEPTION 'projection view reader cannot read the source relation'
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN true;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS sync_wal_poison (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     stream_generation TEXT NOT NULL,
@@ -2021,7 +2039,9 @@ BEGIN
             '%I.%I(%s)', object_record.nspname, object_record.proname, object_record.arguments
         );
         EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO synchro_owner', object_identity);
-        EXECUTE pg_catalog.format('ALTER FUNCTION %s SECURITY DEFINER', object_identity);
+        IF object_record.proname <> 'synchro_assert_projection_reader' THEN
+            EXECUTE pg_catalog.format('ALTER FUNCTION %s SECURITY DEFINER', object_identity);
+        END IF;
         EXECUTE pg_catalog.format(
             'ALTER FUNCTION %s SET search_path = pg_catalog, synchro', object_identity
         );
@@ -2125,6 +2145,15 @@ BEGIN
         END IF;
         IF function_record.proname = 'synchro_projection_bootstrap_slot_drop_state' THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO synchro_operator', object_identity);
+        END IF;
+        IF function_record.proname = 'synchro_assert_projection_reader' THEN
+            object_identity := pg_catalog.format(
+                '%I.%I(%s)', function_record.nspname, function_record.proname,
+                function_record.arguments
+            );
+            EXECUTE pg_catalog.format(
+                'GRANT EXECUTE ON FUNCTION %s TO synchro_operator, synchro_worker', object_identity
+            );
         END IF;
     END LOOP;
 END

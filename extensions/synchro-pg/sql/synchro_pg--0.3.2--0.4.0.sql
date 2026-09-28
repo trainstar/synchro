@@ -133,6 +133,28 @@ JOIN projections captured
   ON captured.relation_id = registry.relation_id
 WHERE progress.singleton;
 
+-- Each reader runs this check as itself, so a projection view returns rows
+-- only to a role that can read the source relation.
+CREATE FUNCTION synchro.synchro_assert_projection_reader(p_relation OID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, synchro
+AS $$
+BEGIN
+    IF pg_catalog.has_table_privilege(p_relation, 'SELECT') IS NOT TRUE THEN
+        RAISE EXCEPTION 'projection view reader cannot read the source relation'
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN true;
+END;
+$$;
+ALTER FUNCTION synchro.synchro_assert_projection_reader(OID) OWNER TO synchro_owner;
+REVOKE EXECUTE ON FUNCTION synchro.synchro_assert_projection_reader(OID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION synchro.synchro_assert_projection_reader(OID)
+    TO synchro_operator, synchro_worker;
+
 -- An extension script can replace only an object that the extension owns, so
 -- each projection view is an extension member only while it is replaced.
 DO $rebuild$
@@ -167,7 +189,8 @@ BEGIN
             'CREATE OR REPLACE VIEW %s WITH (security_barrier = true) AS '
                 || 'SELECT projection.record_id, projection.capture_key, projection.deleted, %s '
                 || 'FROM synchro.sync_current_projections projection '
-                || 'WHERE projection.physical_relation_oid = %s::oid',
+                || 'WHERE projection.physical_relation_oid = %3$s::oid '
+                || 'AND synchro.synchro_assert_projection_reader(%3$s::oid)',
             projection.view_name,
             projection.expressions,
             projection.physical_relation_oid
