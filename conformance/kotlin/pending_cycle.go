@@ -540,6 +540,11 @@ func validateKotlinPendingCycleCleanupCall(call SynchronizationResult) error {
 }
 
 func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, step scenarios.PendingCycleNativeCRUDStep, name string) (Result, error) {
+	// The Swift consumer uses the same bound. Without it, a call that never
+	// pushes waits until the suite timeout and reports no cause.
+	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	ctx = deadline
 	state, err := platform.clientFor(client)
 	if err != nil {
 		return Result{}, fmt.Errorf("access Kotlin Android pending-cycle %s transport: %w", name, err)
@@ -549,10 +554,17 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 	if err != nil {
 		return Result{}, fmt.Errorf("run Kotlin Android pending-cycle %s push: %w", name, err)
 	}
+	if call.Completion == "error" {
+		return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s start failed: completion %q", name, call.Completion)
+	}
 	observation, err := kotlinScenarioWire(call, "push")
 	if err != nil {
 		if err := waitForTransportObservation(ctx, state, checkpoint, "push"); err != nil {
-			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle %s push: %w", name, err)
+			classes := make([]string, 0, len(call.transportObservations))
+			for _, observed := range call.transportObservations {
+				classes = append(classes, fmt.Sprintf("%s:%d", observed.OperationClass, observed.StatusCode))
+			}
+			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle %s push after call completion %q with transport %v: %w", name, call.Completion, classes, err)
 		}
 		observations, err := state.session.ObservationsAfter(checkpoint)
 		if err != nil {
