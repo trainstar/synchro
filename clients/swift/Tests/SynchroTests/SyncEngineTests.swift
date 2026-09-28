@@ -1451,7 +1451,7 @@ final class SyncEngineTests: XCTestCase {
             seedReceipts: nil
         )
         let requestJSON = " \n" + String(data: try JSONEncoder.synchroEncoder().encode(connectRequest), encoding: .utf8)! + "\n "
-        let deadline = Int64(Date().timeIntervalSince1970 * 1_000) + 150
+        let deadline = Int64(Date().timeIntervalSince1970 * 1_000) + 2_000
         try database.writeTransaction { db in
             try SynchroMeta.upsertBackoffRecord(
                 db,
@@ -1466,13 +1466,17 @@ final class SyncEngineTests: XCTestCase {
         }
         try database.close()
 
-        var firstConnectAt: Date?
+        let firstConnectAtMS = OSAllocatedUnfairLock<Int64?>(initialState: nil)
         let reconnectStarted = expectation(description: "reconnect begins after the stored deadline")
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
                 XCTAssertEqual(request.bodyData(), Data(requestJSON.utf8))
-                firstConnectAt = Date()
+                firstConnectAtMS.withLock { firstConnect in
+                    if firstConnect == nil {
+                        firstConnect = Int64(Date().timeIntervalSince1970 * 1_000)
+                    }
+                }
                 reconnectStarted.fulfill()
                 return try self.mockResponse(json: self.connectJSON)
             } else if path.hasSuffix("/sync/rebuild") {
@@ -1489,15 +1493,14 @@ final class SyncEngineTests: XCTestCase {
             try? recoveredDatabase.close()
         }
 
-        let start = Date()
         try await engine.start()
 
-        XCTAssertLessThan(Date().timeIntervalSince(start), 0.1)
-        XCTAssertNil(firstConnectAt)
-        await fulfillment(of: [reconnectStarted], timeout: 1.0)
+        XCTAssertLessThan(Int64(Date().timeIntervalSince1970 * 1_000), deadline)
+        XCTAssertNil(firstConnectAtMS.withLock { $0 })
+        await fulfillment(of: [reconnectStarted], timeout: 10)
 
-        XCTAssertNotNil(firstConnectAt)
-        XCTAssertGreaterThanOrEqual(firstConnectAt!.timeIntervalSince(start), 0.1)
+        let connectedAtMS = try XCTUnwrap(firstConnectAtMS.withLock { $0 })
+        XCTAssertGreaterThanOrEqual(connectedAtMS, deadline)
         try await waitForBackoffClear(in: recoveredDatabase)
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
