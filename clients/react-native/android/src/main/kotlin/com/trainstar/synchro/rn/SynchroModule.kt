@@ -1010,7 +1010,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectPendingMutations().map(::pendingMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectPendingMutations().map(::retainedMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1023,7 +1023,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::pendingMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::retainedMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1449,7 +1449,24 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         })
     }
 
+    private fun retainedMutationJson(value: RetainedMutationInspection): JSONObject = when (value) {
+        is RetainedMutationInspection.Current -> pendingMutationJson(value.mutation)
+        is RetainedMutationInspection.Legacy -> JSONObject().apply {
+            put("representation", "legacy")
+            put("mutationID", value.mutation.mutationID)
+            put("localOrder", value.mutation.localOrder)
+            put("tableName", value.mutation.tableName)
+            put("recordID", value.mutation.recordID)
+            put("operation", operationWireValue(value.mutation.operation))
+            put("baseVersion", value.mutation.baseVersion ?: JSONObject.NULL)
+            put("clientVersion", value.mutation.clientVersion)
+            put("status", localMutationStatusWireValue(value.mutation.status))
+            put("sourceKind", value.mutation.sourceKind)
+        }
+    }
+
     private fun pendingMutationJson(mutation: PendingMutationInspection): JSONObject = JSONObject().apply {
+        put("representation", "current")
         put("mutationID", mutation.mutationID)
         put("localOrder", mutation.localOrder)
         put("tableID", mutation.tableID)

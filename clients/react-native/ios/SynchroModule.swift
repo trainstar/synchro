@@ -1531,7 +1531,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let payload = try client.inspectPendingMutations().map(pendingMutationPayload)
+            let payload = try client.inspectPendingMutations().map(retainedMutationPayload)
             resolve(try encodeBridgeJSON(payload))
         } catch {
             rejectWithError(reject, error)
@@ -1548,7 +1548,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let payload = try client.inspectRetainedMutations().map(pendingMutationPayload)
+            let payload = try client.inspectRetainedMutations().map(retainedMutationPayload)
             resolve(try encodeBridgeJSON(payload))
         } catch {
             rejectWithError(reject, error)
@@ -1814,8 +1814,29 @@ public class SynchroModuleImpl: NSObject {
         return json
     }
 
+    private func retainedMutationPayload(_ value: RetainedMutationInspection) -> [String: Any] {
+        switch value {
+        case .current(let mutation):
+            return pendingMutationPayload(mutation)
+        case .legacy(let mutation):
+            return [
+                "representation": "legacy",
+                "mutationID": mutation.mutationID,
+                "localOrder": mutation.localOrder,
+                "tableName": mutation.tableName,
+                "recordID": mutation.recordID,
+                "operation": mutation.operation.rawValue,
+                "baseVersion": mutation.baseVersion ?? NSNull(),
+                "clientVersion": mutation.clientVersion,
+                "status": mutation.status.rawValue,
+                "sourceKind": mutation.sourceKind
+            ]
+        }
+    }
+
     private func pendingMutationPayload(_ mutation: PendingMutationInspection) -> [String: Any] {
         [
+            "representation": "current",
             "mutationID": mutation.mutationID,
             "localOrder": mutation.localOrder,
             "tableID": mutation.tableID,

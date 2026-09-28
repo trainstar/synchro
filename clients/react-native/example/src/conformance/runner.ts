@@ -13,6 +13,7 @@ import type {
 } from '@trainstar/synchro-react-native/inspection';
 import type {
   PendingMutationInspection,
+  RetainedMutationInspection,
   RejectedMutationInspection,
   Row,
   SQLiteBindValue,
@@ -126,7 +127,7 @@ export type ConformanceActionResult =
 
 export interface ConformanceCapture {
   application_rows?: Row[];
-  pending_mutations?: PendingMutationInspection[];
+  pending_mutations?: Omit<PendingMutationInspection, 'representation'>[];
   rejected_mutations?: RejectedMutationInspection[];
   client_state?: ClientStateInspection;
   durable_proof?: RawDurableProof;
@@ -513,7 +514,9 @@ export class PublicConformanceRunner {
           // The native runners capture the complete retained ledger for this
           // source, pending states plus rejected_terminal. The pending-only
           // inspection excludes rejected_terminal by design.
-          capture.pending_mutations = bounded(await client.inspectRetainedMutations(), 'pending-mutations');
+          capture.pending_mutations = currentMutations(
+            bounded(await client.inspectRetainedMutations(), 'pending-mutations')
+          );
           break;
         case 'rejected-mutations':
           capture.rejected_mutations = bounded(await client.inspectRejectedMutations(), 'rejected-mutations');
@@ -977,6 +980,20 @@ function rawEvents(events: SyncEvent[]): RawEvent[] {
 
 function describeBoundFailure(error: unknown): string {
   return error instanceof Error ? error.message : 'result is not bounded';
+}
+
+// The harness capture has only the current record shape, as in the native runners.
+// A legacy import fails the capture instead of reaching the harness with invented bindings.
+function currentMutations(
+  values: RetainedMutationInspection[]
+): Omit<PendingMutationInspection, 'representation'>[] {
+  return values.map((value) => {
+    if (value.representation !== 'current') {
+      throw new ConformanceCommandError('capture_inspection_failed');
+    }
+    const { representation: _representation, ...mutation } = value;
+    return mutation;
+  });
 }
 
 function bounded<T>(values: T[], source: string): T[] {

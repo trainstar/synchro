@@ -520,6 +520,7 @@ describe('SynchroClient', () => {
 
     it('maps pending mutation inspection JSON', async () => {
       const pending = {
+        representation: 'current',
         mutationID: 'mutation-1',
         localOrder: 7,
         tableID: 'table-1',
@@ -553,6 +554,7 @@ describe('SynchroClient', () => {
 
     it('maps retained mutation inspection JSON with a server rejection', async () => {
       const retained = {
+        representation: 'current',
         mutationID: 'mutation-2',
         localOrder: 8,
         tableID: 'table-1',
@@ -586,6 +588,7 @@ describe('SynchroClient', () => {
 
     it('maps retained mutation inspection JSON with a push limit status', async () => {
       const retained = {
+        representation: 'current',
         mutationID: 'mutation-3',
         localOrder: 9,
         tableID: 'table-1',
@@ -616,6 +619,67 @@ describe('SynchroClient', () => {
       ]);
       expect(mockNativeModule.inspectRetainedMutations).toHaveBeenCalledTimes(1);
     });
+
+    it('maps a legacy retained mutation without binding fields', async () => {
+      const legacy = {
+        representation: 'legacy',
+        mutationID: 'mutation-4',
+        localOrder: 1,
+        tableName: 'orders',
+        recordID: 'r1',
+        operation: 'insert',
+        baseVersion: null,
+        clientVersion: '2026-01-01T00:00:00.000000Z',
+        status: 'blocked_by_predecessor',
+        sourceKind: 'legacy_import',
+      };
+      mockNativeModule.inspectPendingMutations.mockResolvedValueOnce(
+        JSON.stringify([legacy])
+      );
+      mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(
+        JSON.stringify([legacy])
+      );
+
+      const client = makeClient();
+      await expect(client.inspectPendingMutations()).resolves.toStrictEqual([legacy]);
+      await expect(client.inspectRetainedMutations()).resolves.toStrictEqual([legacy]);
+    });
+
+    // The payload is otherwise a complete current record, so only the representation rejects it.
+    it.each([undefined, 'placeholder'])(
+      'rejects a retained mutation with representation %p',
+      async (representation) => {
+        mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(
+          JSON.stringify([
+            {
+              representation,
+              mutationID: 'mutation-5',
+              localOrder: 1,
+              tableID: 'table-1',
+              tableName: 'orders',
+              recordID: 'r1',
+              primaryKeyFieldID: 'field-id',
+              primaryKeyLogicalType: 'uuid',
+              operation: 'insert',
+              authoredSchema: { version: 3, hash: 'd'.repeat(64) },
+              baseVersion: null,
+              clientVersion: 'client-v1',
+              status: 'pending',
+              sourceKind: 'local_write',
+              dependsOnMutationID: null,
+              normalizedMutationID: null,
+              sealedBatchID: null,
+              sealedOrdinal: null,
+              authoredFields: [],
+            },
+          ])
+        );
+
+        await expect(makeClient().inspectRetainedMutations()).rejects.toMatchObject({
+          code: 'INVALID_RESPONSE',
+        });
+      }
+    );
 
     it('maps rejected mutation inspection JSON without parsing retained JSON', async () => {
       const mutationJSON = '{ "operation": "update", "value": 1 }';
