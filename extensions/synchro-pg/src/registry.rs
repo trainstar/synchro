@@ -289,6 +289,9 @@ fn synchro_prepare_projection_view(
         pgrx::error!("projection view metadata is incomplete");
     }
     Spi::connect_mut(|client| {
+        // Registry writers read projection view metadata under this lock.
+        // Take it before the view catalog writes to keep one lock order.
+        acquire_registry_write_lock(client)?;
         let view_parts: Vec<String> = client
             .select(
                 "SELECT pg_catalog.parse_ident($1, false)",
