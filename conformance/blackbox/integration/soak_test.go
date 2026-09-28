@@ -195,10 +195,10 @@ func TestSoakWALRestartFailuresKeepDistinctReplayIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate soak plan: %v", err)
 	}
-	retain := func(name string, failure error) soak.OperationFact {
+	retainFrom := func(name string, harness soak.Harness) soak.OperationFact {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), name+".jsonl")
-		if _, err := soak.Run(context.Background(), plan, soakFailingHarness{err: failure}, path); err == nil {
+		if _, err := soak.Run(context.Background(), plan, harness, path); err == nil {
 			t.Fatalf("%s failure completed", name)
 		}
 		journal, err := soak.ReadJournal(path)
@@ -206,6 +206,10 @@ func TestSoakWALRestartFailuresKeepDistinctReplayIdentities(t *testing.T) {
 			t.Fatalf("read %s journal: %v", name, err)
 		}
 		return journal.OperationFacts[len(journal.OperationFacts)-1]
+	}
+	retain := func(name string, failure error) soak.OperationFact {
+		t.Helper()
+		return retainFrom(name, soakFailingHarness{err: failure})
 	}
 	identified := map[string]func(*blackbox.WALReplayRestartObservation){
 		"replay-boundary-missing": func(v *blackbox.WALReplayRestartObservation) { v.WorkerRestarted = false },
@@ -235,9 +239,9 @@ func TestSoakWALRestartFailuresKeepDistinctReplayIdentities(t *testing.T) {
 			}
 		}
 	}
-	unidentified := fmt.Errorf("execute soak WAL process death: %w", errors.New("operator control failed"))
-	retained := retain("unidentified", unidentified)
-	replayed := retain("unidentified-again", unidentified)
+	// The live harness itself must leave an unchecked failure unidentified.
+	retained := retainFrom("unidentified", &liveSoakHarness{closed: true})
+	replayed := retainFrom("unidentified-again", &liveSoakHarness{closed: true})
 	if outcome := soak.CompareReplay(&retained, &replayed); outcome != soak.ReplayInconclusive {
 		t.Fatalf("unidentified harness failure replay = %s, want inconclusive", outcome)
 	}
