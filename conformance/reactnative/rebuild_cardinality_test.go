@@ -208,12 +208,13 @@ func TestValidateRebuildCardinalityCaptureRequiresReceiptPredicatesAndCompletion
 	for _, test := range []struct {
 		name   string
 		change func(*finalCapture)
+		detail string
 	}{
-		{name: "request chain invalid", change: withReceipt("request_chain_valid", false)},
-		{name: "records out of canonical order", change: withReceipt("records_in_canonical_order", false)},
-		{name: "row checksums invalid", change: withReceipt("row_checksums_valid", false)},
-		{name: "scope checksum invalid", change: withReceipt("scope_checksum_valid", false)},
-		{name: "final checksum differs", change: withReceipt("final_checksum_matches_local", false)},
+		{name: "request chain invalid", change: withReceipt("request_chain_valid", false), detail: "false=[request_chain_valid]"},
+		{name: "records out of canonical order", change: withReceipt("records_in_canonical_order", false), detail: "false=[records_in_canonical_order]"},
+		{name: "row checksums invalid", change: withReceipt("row_checksums_valid", false), detail: "false=[row_checksums_valid]"},
+		{name: "scope checksum invalid", change: withReceipt("scope_checksum_valid", false), detail: "false=[scope_checksum_valid]"},
+		{name: "final checksum differs", change: withReceipt("final_checksum_matches_local", false), detail: "false=[final_checksum_matches_local] page_count=2 returned_records=101 prior_pages=0 state_pages=2 want_pages=2"},
 		{name: "returned records differ", change: withReceipt("returned_record_count", workload.RecordCount+1)},
 		{name: "one rebuild split across two receipt proofs", change: withProof(func(receipts []any) []any {
 			first, second := map[string]any{}, map[string]any{}
@@ -239,8 +240,12 @@ func TestValidateRebuildCardinalityCaptureRequiresReceiptPredicatesAndCompletion
 		t.Run(test.name, func(t *testing.T) {
 			capture := rebuildCardinalityCaptureFixture(t, workload)
 			test.change(&capture)
-			if err := coordinator().validateCapture(capture); err == nil {
+			err := coordinator().validateCapture(capture)
+			if err == nil {
 				t.Fatal("changed rebuild-cardinality capture passed validation")
+			}
+			if !strings.Contains(err.Error(), test.detail) {
+				t.Fatalf("changed rebuild-cardinality capture error = %v, want %q", err, test.detail)
 			}
 		})
 	}
