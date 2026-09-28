@@ -830,3 +830,57 @@ func nativeCRUDUUID(parts ...string) string {
 	encoded := hex.EncodeToString(digest[:16])
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
 }
+
+// RequireLocalWriteRow checks that exactly one captured application row has the
+// primary key of a runtime local write and holds every value that write
+// authored. The schema-queued-mutation drivers use it for Swift, Kotlin, and
+// React Native.
+func RequireLocalWriteRow(write Operation, rows []map[string]json.RawMessage) error {
+	if OperationKey(write) != "local/write" {
+		return errors.New("local write row check requires a local write")
+	}
+	var payload struct {
+		PK      map[string]json.RawMessage `json:"pk"`
+		Columns []struct {
+			FieldID string          `json:"field_id"`
+			Value   json.RawMessage `json:"value"`
+		} `json:"columns"`
+	}
+	if err := json.Unmarshal(write.Payload, &payload); err != nil || len(payload.PK) != 1 || len(payload.Columns) == 0 {
+		return errors.New("local write row check payload is invalid")
+	}
+	var matched map[string]json.RawMessage
+	for field, key := range payload.PK {
+		for _, row := range rows {
+			if value, found := row[field]; found && jsonValuesEqual(value, key) {
+				if matched != nil {
+					return fmt.Errorf("local write row %s is duplicated", key)
+				}
+				matched = row
+			}
+		}
+		if matched == nil {
+			observed := make([]string, 0, len(rows))
+			for _, row := range rows {
+				observed = append(observed, string(row[field]))
+			}
+			sort.Strings(observed)
+			return fmt.Errorf("local write row %s is absent from %d captured rows with keys %v", key, len(rows), observed)
+		}
+	}
+	for _, column := range payload.Columns {
+		observed, found := matched[column.FieldID]
+		if !found {
+			return fmt.Errorf("local write row has no column %q", column.FieldID)
+		}
+		if !jsonValuesEqual(observed, column.Value) {
+			return fmt.Errorf("local write row column %q is %s, want %s", column.FieldID, observed, column.Value)
+		}
+	}
+	return nil
+}
+
+func jsonValuesEqual(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
+}
