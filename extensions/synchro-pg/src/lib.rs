@@ -626,19 +626,22 @@ CREATE TRIGGER synchro_push_mutations_immutable
 BEFORE UPDATE OR DELETE ON sync_push_mutations
 FOR EACH ROW EXECUTE FUNCTION synchro_reject_push_mutation_ledger_mutation();
 
+-- Row security raises insufficient_privilege when a new row fails a WITH CHECK
+-- expression, so that error is a write policy denial of one mutation.
 CREATE OR REPLACE FUNCTION synchro_execute_push_dml(
     p_sql TEXT,
     p_data JSONB,
     p_record_id TEXT,
     p_push_unit BOOLEAN
 )
-RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN)
+RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN, policy_rejected BOOLEAN)
 LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
 BEGIN
     applied := false;
     validation_failed := false;
+    policy_rejected := false;
     BEGIN
         IF p_push_unit THEN
             SET CONSTRAINTS ALL DEFERRED;
@@ -652,6 +655,9 @@ BEGIN
         WHEN data_exception OR integrity_constraint_violation THEN
             applied := false;
             validation_failed := true;
+        WHEN insufficient_privilege THEN
+            applied := false;
+            policy_rejected := true;
     END;
     RETURN NEXT;
 END;

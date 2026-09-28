@@ -136,6 +136,7 @@ enum DmlOutcome {
     Applied,
     NotApplied,
     ValidationFailed,
+    PolicyRejected,
 }
 
 fn require_no_pending_deferred_trigger_events(client: &SpiClient<'_>) {
@@ -1494,18 +1495,23 @@ fn evaluate_mutation(
                     row_identity,
                     "mutation failed physical validation",
                 ),
+                DmlOutcome::PolicyRejected => policy_evaluation(
+                    mutation,
+                    outcome_schema,
+                    registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                ),
                 DmlOutcome::NotApplied => {
+                    // The insert found no conflicting row that the caller can see, so a BEFORE
+                    // trigger or row security denied the write.
                     let current = load_existing_record(client, &record_id, table_reg)
-                        .unwrap_or_else(|| {
-                            pgrx::error!("conflicting push insert has no row state")
-                        });
-                    if current.hidden_by_row_security() {
+                        .filter(|current| !current.hidden_by_row_security());
+                    let Some(current) = current else {
                         return policy_evaluation(
                             mutation,
                             outcome_schema,
                             registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
                         );
-                    }
+                    };
                     let code = if current.deleted {
                         "row_deleted"
                     } else {
@@ -1607,9 +1613,13 @@ fn evaluate_mutation(
                     row_identity,
                     "mutation failed physical validation",
                 ),
-                DmlOutcome::NotApplied => {
-                    pgrx::error!("locked authoritative row disappeared during push")
-                }
+                // Push holds the lock on the source row, so a zero-row write to that row is a
+                // write policy denial.
+                DmlOutcome::NotApplied | DmlOutcome::PolicyRejected => policy_evaluation(
+                    mutation,
+                    outcome_schema,
+                    registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                ),
                 DmlOutcome::Applied => accepted_evaluation(
                     client,
                     mutation,
@@ -2691,7 +2701,7 @@ fn execute_push_dml(
     set_push_mutation_id(client, mutation_id);
     let outcome = client
         .update(
-            "SELECT applied, validation_failed
+            "SELECT applied, validation_failed, policy_rejected
              FROM synchro_execute_push_dml($1, $2::jsonb, $3, $4)",
             None,
             &[
@@ -2711,12 +2721,17 @@ fn execute_push_dml(
         .get_by_name::<bool, &str>("validation_failed")
         .unwrap_or_else(|_| pgrx::error!("reading push source DML validation result failed"))
         .unwrap_or_else(|| pgrx::error!("push source DML validation result is missing"));
+    let policy_rejected = outcome
+        .get_by_name::<bool, &str>("policy_rejected")
+        .unwrap_or_else(|_| pgrx::error!("reading push source DML policy result failed"))
+        .unwrap_or_else(|| pgrx::error!("push source DML policy result is missing"));
     clear_push_mutation_id(client);
-    match (applied, validation_failed) {
-        (true, false) => DmlOutcome::Applied,
-        (false, false) => DmlOutcome::NotApplied,
-        (false, true) => DmlOutcome::ValidationFailed,
-        (true, true) => pgrx::error!("push source DML returned an invalid disposition"),
+    match (applied, validation_failed, policy_rejected) {
+        (true, false, false) => DmlOutcome::Applied,
+        (false, false, false) => DmlOutcome::NotApplied,
+        (false, true, false) => DmlOutcome::ValidationFailed,
+        (false, false, true) => DmlOutcome::PolicyRejected,
+        _ => pgrx::error!("push source DML returned an invalid disposition"),
     }
 }
 
