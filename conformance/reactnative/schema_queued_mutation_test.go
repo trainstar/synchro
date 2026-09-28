@@ -164,6 +164,8 @@ func TestSchemaQueuedMutationServerEvidenceUsesControllerAndClientCaptures(t *te
 	recordID := "00000000-0000-4000-8000-000000008001"
 	digest := strings.Repeat("a", 64)
 	checksum := fmt.Sprintf(`{"algorithm":"sha256","version":1,"encoding":"hex","digest":%q}`, digest)
+	baselineDigest := strings.Repeat("b", 64)
+	baselineChecksum := fmt.Sprintf(`{"algorithm":"sha256","version":1,"encoding":"hex","digest":%q}`, baselineDigest)
 	proof, err := json.Marshal(durableProof{
 		RowMetadata: &durableMetadata{
 			TableName: "cf_schema_queue", RecordID: recordID, ServerVersion: "runtime-version", RowChecksum: &checksum,
@@ -177,18 +179,26 @@ func TestSchemaQueuedMutationServerEvidenceUsesControllerAndClientCaptures(t *te
 		userID: "user-a", clientID: "client-a", tableName: "cf_schema_queue",
 		runtimeIDs: map[string]json.RawMessage{"queued-row-primary-key": json.RawMessage(`"` + recordID + `"`)},
 		preRestart: &traceSnapshot{Observations: []transportObservation{
-			{},
+			{OperationClass: "connect"},
 			{OperationClass: "rebuild", RequestFacts: json.RawMessage(fmt.Sprintf(`{"rebuild_id_fingerprint":%q}`, hashFingerprint(rebuildID)))},
-			{},
-			{},
+			{OperationClass: "pull"},
+			{OperationClass: "connect"},
+			{OperationClass: "push"},
+			{OperationClass: "pull"},
+			{OperationClass: "connect"},
 			{OperationClass: "connect", RequestFacts: json.RawMessage(`{"client_generation":5,"scope_set_version":7}`)},
+			{OperationClass: "push"},
 		}},
+		baselineRow: &durableMetadata{
+			TableName: "cf_schema_queue", RecordID: recordID, ServerVersion: "baseline-version", RowChecksum: &baselineChecksum,
+		},
 		finalResult: &finalCapture{DurableProof: proof},
 	}
 	server := scenarios.StateFacts{Rebuilds: []scenarios.RebuildFact{{UserID: "user-a", ClientID: "client-a", RebuildID: rebuildID}}}
 	evidence, err := coordinator.serverEvidence(server)
-	if err != nil || evidence.clientGeneration != 5 || evidence.scopeSetVersion != 7 || evidence.rebuildID != rebuildID || evidence.rowVersion != "runtime-version" || evidence.rowChecksum != digest {
-		t.Fatalf("schema-queued-mutation evidence=%+v want generation=5 scope_set=7 rebuild=%q version=runtime-version checksum=%q error=%v", evidence, rebuildID, digest, err)
+	if err != nil || evidence.clientGeneration != 5 || evidence.scopeSetVersion != 7 || evidence.rebuildID != rebuildID || evidence.rowVersion != "runtime-version" ||
+		evidence.baselineVersion != "baseline-version" || evidence.baselineChecksum != baselineDigest {
+		t.Fatalf("schema-queued-mutation evidence=%+v want generation=5 scope_set=7 rebuild=%q version=runtime-version baseline=baseline-version/%q error=%v", evidence, rebuildID, baselineDigest, err)
 	}
 	if _, err := coordinator.serverEvidence(scenarios.StateFacts{}); err == nil || !strings.Contains(err.Error(), "matches=0") || !strings.Contains(err.Error(), "want=1") {
 		t.Fatalf("schema-queued-mutation absent rebuild error=%v want observed and expected values", err)
@@ -221,8 +231,8 @@ func TestNewSchemaQueuedMutationCoordinatorKeepsAndroidSidecarOnHostLoopback(t *
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android schema-queued-mutation adapter URL=%q", coordinator.adapter)
 	}
-	if coordinator.ExchangeCount() != 10 {
-		t.Fatalf("schema-queued-mutation exchanges=%d want=10", coordinator.ExchangeCount())
+	if coordinator.ExchangeCount() != 15 {
+		t.Fatalf("schema-queued-mutation exchanges=%d want=15", coordinator.ExchangeCount())
 	}
 }
 
