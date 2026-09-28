@@ -43,7 +43,10 @@ Expected values must come from the normative contract or an independent invarian
 
 Field presence and implementation-derived fixtures do not prove semantics.
 
-Required gates use structured results. A missing, skipped, filtered, or zero-test result fails the gate.
+Required gates run their declared Make selection and use structured results.
+A missing, failed, skipped, or zero-test result fails the gate.
+A result stream cannot show an omitted nonempty subset. Each required Make gate therefore rejects a changed test selector.
+A diagnostic run with `PARTIAL=1` can select a subset. It is not required-gate evidence.
 
 Package smoke installs the packaged artifact. It verifies connect, push, pull, process termination, and resume.
 

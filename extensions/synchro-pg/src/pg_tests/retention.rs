@@ -27,22 +27,29 @@
     fn test_compact_keeps_recently_acknowledged_client_active() {
         setup_test_tables();
         register_client("u1", "c1");
+        register_client("u1", "c2");
+        // Both clients are old and idle. Only c1 has a recent acknowledgement,
+        // so that acknowledgement is the only reason c1 stays active.
         Spi::run(
             "UPDATE sync_clients
-             SET last_sync_at = now() - interval '30 days',
-                 last_acknowledged_at = now()
-             WHERE user_id = 'u1' AND client_id = 'c1'",
+             SET created_at = now() - interval '30 days',
+                 last_sync_at = now() - interval '30 days',
+                 last_acknowledged_at = CASE client_id
+                     WHEN 'c1' THEN now()
+                     ELSE now() - interval '30 days'
+                 END
+             WHERE user_id = 'u1'",
         )
         .unwrap();
 
         let response: Option<pgrx::JsonB> =
             Spi::get_one("SELECT synchro_compact('7 days', 10000)").unwrap();
-        assert_eq!(response.unwrap().0["deactivated_clients"].as_i64(), Some(0));
-        let active: Option<bool> = Spi::get_one(
-            "SELECT is_active FROM sync_clients WHERE user_id = 'u1' AND client_id = 'c1'",
+        assert_eq!(response.unwrap().0["deactivated_clients"].as_i64(), Some(1));
+        let active: Option<pgrx::JsonB> = Spi::get_one(
+            "SELECT jsonb_object_agg(client_id, is_active) FROM sync_clients WHERE user_id = 'u1'",
         )
         .unwrap();
-        assert_eq!(active, Some(true));
+        assert_eq!(active.unwrap().0, json!({"c1": true, "c2": false}));
     }
 
     #[pg_test]
@@ -472,28 +479,6 @@
         setup_test_tables();
         register_client("u1", "c1");
 
-        // Insert entries.
-        insert_changelog("user:u1", "test_orders", "preserve-1", 1);
-        insert_changelog("user:u1", "test_orders", "preserve-2", 1);
-
-        // Client has never pulled and seeded bucket checkpoints remain at 0.
-        // safe_seq should be 0, so nothing gets deleted.
-        let resp: Option<pgrx::JsonB> =
-            Spi::get_one("SELECT synchro_compact('7 days', 10000)").unwrap();
-        let resp = resp.unwrap().0;
-
-        let deleted = resp["deleted_entries"].as_i64().unwrap_or(0);
-        assert_eq!(
-            deleted, 0,
-            "no entries should be deleted when active client at checkpoint 0"
-        );
-    }
-
-    #[pg_test]
-    fn test_compact_uses_typed_scope_checkpoints() {
-        setup_test_tables();
-        register_client("u1", "c1");
-
         let first = "c0010000-0000-0000-0000-000000000001";
         let second = "c0010000-0000-0000-0000-000000000002";
         Spi::run_with_args(
@@ -504,6 +489,22 @@
         .unwrap();
         insert_changelog("user:u1", "test_orders", first, 1);
         insert_changelog("user:u1", "test_orders", second, 1);
+        let effects = || -> Option<i64> {
+            Spi::get_one_with_args(
+                "SELECT count(*) FROM sync_changelog WHERE record_id = ANY($1)",
+                &[vec![first.to_string(), second.to_string()].into()],
+            )
+            .unwrap()
+        };
+
+        // The client checkpoint is still at generation start, so both
+        // captured effects are above the safe position.
+        let resp: Option<pgrx::JsonB> =
+            Spi::get_one("SELECT synchro_compact('7 days', 10000)").unwrap();
+        assert_eq!(resp.unwrap().0["deleted_entries"].as_i64(), Some(0));
+        assert_eq!(effects(), Some(2));
+
+        // The same effects become eligible once the typed checkpoint passes them.
         Spi::run(
             "UPDATE sync_client_checkpoints checkpoint
              SET position_kind = 'transaction_end',
@@ -520,9 +521,8 @@
 
         let resp: Option<pgrx::JsonB> =
             Spi::get_one("SELECT synchro_compact('7 days', 10000)").unwrap();
-        let resp = resp.unwrap().0;
-
-        assert_eq!(resp["deleted_entries"].as_i64(), Some(2));
+        assert_eq!(resp.unwrap().0["deleted_entries"].as_i64(), Some(2));
+        assert_eq!(effects(), Some(0));
     }
 
     #[pg_test]

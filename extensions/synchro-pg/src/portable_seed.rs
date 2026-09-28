@@ -20,7 +20,7 @@ use crate::registry::{load_registry_generation_from_client, TableRegistration};
 use crate::seed_token::{self, SeedContinuationPayload, SeedPagePayload, SeedSnapshotBoundary};
 use crate::spi_helpers::{
     current_utc_timestamp, decode_digest, is_lower_hex, is_lower_uuid, required_positive_i64,
-    required_text,
+    required_record_id, required_text,
 };
 use crate::stream_position::{parse_lsn, StreamPosition};
 use synchro_core::contract::ProtocolErrorCode;
@@ -885,7 +885,7 @@ fn load_seed_rows(
             return Err("portable scope edge and captured relation differ".to_string());
         }
         let table_name = required_text(&row, "table_name", "")?;
-        let record_id = required_text(&row, "record_id", "")?;
+        let record_id = required_record_id(&row)?;
         let table = registry
             .iter()
             .find(|table| table.relation_id == relation_id && table.table_name == table_name)

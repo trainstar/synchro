@@ -32,7 +32,7 @@ func TestPortableInt64KeyOnlyRowsPreserveValuesAndOverlap(t *testing.T) {
 	}
 	defer tx.Rollback()
 	for _, value := range values {
-		if _, err := encodeTypedValue("int64", value.wire, false); err != nil {
+		if _, err := encodeTypedValue(localSchemaColumn{LogicalType: "int64"}, value.wire); err != nil {
 			t.Fatal(err)
 		}
 		record := portableSeedRecord{Row: map[string]any{"key": value.wire}}

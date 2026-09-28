@@ -320,9 +320,11 @@ SELECT synchro.synchro_grant_user_scope('alice', 'notes:review');
 SELECT synchro.synchro_revoke_user_scope('alice', 'notes:review');
 ```
 
-The next connect reconciles each change. An added scope rebuilds. A removed
-scope causes local provenance cleanup. A client cannot request an invented
-scope or grant itself one.
+A shared-scope registration reaches active clients on their next pull. The
+next connect reconciles a grant or revoke. Until then, pull and rebuild keep
+the prior assignment. An added scope rebuilds. A removed scope causes local
+provenance cleanup. A client cannot request an invented scope or grant itself
+one.
 
 ## 7. Create the local tutorial token
 

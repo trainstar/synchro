@@ -377,7 +377,10 @@ jobs:
             RELEASE_CANDIDATE_CI_RUN_ID="${{ needs.candidate.outputs.candidate_ci_run_id }}" \
             RELEASE_CANDIDATE_CI_RUN_ATTEMPT="${{ needs.candidate.outputs.candidate_ci_run_attempt }}"
 
-      - name: Verify sealed release
+      # release-stage verifies the sealed bytes it writes. A restored candidate
+      # needs its own verification after the artifact transfer.
+      - name: Verify restored sealed release
+        if: needs.candidate.outputs.mode == 'recovery'
         run: make release-verify VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
 
       - name: Upload sealed release
@@ -619,9 +622,11 @@ jobs:
           curl --fail --silent http://127.0.0.1:8091/ready >/dev/null
           jwt_secret="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
           echo "::add-mask::$jwt_secret"
+          echo "::add-mask::$admin_url"
           {
             echo "SYNCHRO_TEST_URL=http://127.0.0.1:8091"
             echo "SYNCHRO_TEST_JWT_SECRET=$jwt_secret"
+            echo "ADAPTER_TEST_URL=$admin_url"
             echo "ANDROID_JAVA_HOME=$JAVA_HOME"
           } >> "$GITHUB_ENV"
 
@@ -995,6 +1000,7 @@ jobs:
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          NPM_DIST_TAG_TOKEN: ${{ secrets.NPM_DIST_TAG_TOKEN }}
         run: |
           set -euo pipefail
           release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
@@ -1007,6 +1013,9 @@ jobs:
           fi
           if [ "$(jq -r '.npm' "$classification")" = absent ]; then
             python3 "$RUNNER_TEMP/release-publish.py" npm-trusted-publishing
+          fi
+          if [ "$(jq -r '.npm' "$classification")" != published-latest ]; then
+            test -n "${NPM_DIST_TAG_TOKEN:-}" || { echo "NPM_DIST_TAG_TOKEN is required to move npm latest" >&2; exit 1; }
           fi
 
       - name: Create or verify immutable source tags
@@ -1291,7 +1300,7 @@ jobs:
             --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" \
             --output "$RUNNER_TEMP/public-before-npm.json"
 
-      - name: Publish or verify exact npm release through trusted OIDC
+      - name: Publish or verify exact npm candidate through trusted OIDC
         env:
           GITHUB_TOKEN: ''
           npm_config_cache: ${{ runner.temp }}/public-npm-cache
@@ -1309,16 +1318,17 @@ jobs:
             test "$(jq -r '.maven' "$RUNNER_TEMP/public-before-npm-classification.json")" = published
             test -z "${NODE_AUTH_TOKEN:-}"
             test -z "${NPM_TOKEN:-}"
-            env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$tarball" --access public --provenance --tag latest
+            # The candidate tag keeps the default install on the previous version until public checks pass.
+            env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$tarball" --access public --provenance --tag candidate
           else
-            test "$npm_state" = published-latest
+            test "$npm_state" = published-candidate || test "$npm_state" = published-latest
           fi
           for _ in $(seq 1 40); do
             npm_state="$(python3 "$RUNNER_TEMP/release-publish.py" registry-status --registry npm --release-dir "$release" || true)"
-            [ "$npm_state" = published-latest ] && break
+            case "$npm_state" in published-candidate|published-latest) break ;; esac
             sleep 15
           done
-          test "$npm_state" = published-latest
+          case "$npm_state" in published-candidate|published-latest) ;; *) echo "npm candidate did not become publicly verifiable" >&2; exit 1 ;; esac
           test "$(npm view "$package@$version" version)" = "$version"
           mkdir -p "$RUNNER_TEMP/npm-provenance"
           consumer_cache="$RUNNER_TEMP/public-npm-consumer-cache"
@@ -1331,8 +1341,8 @@ jobs:
             npm audit signatures --cache "$consumer_cache" --json > "$RUNNER_TEMP/npm-provenance.json"
           )
           jq -e '(.invalid // []) == [] and (.missing // []) == []' "$RUNNER_TEMP/npm-provenance.json" >/dev/null
-          jq -n --arg package "$package" --arg version "$version" --arg sha256 "$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)" \
-            '{package:$package,version:$version,sha256:$sha256,dist_tag:"latest",provenance:"verified"}' > "$RUNNER_TEMP/npm-operation.json"
+          jq -n --arg package "$package" --arg version "$version" --arg sha256 "$(shasum -a 256 "$tarball" | cut -d ' ' -f 1)" --arg state "$npm_state" \
+            '{package:$package,version:$version,sha256:$sha256,registry_state:$state,provenance:"verified"}' > "$RUNNER_TEMP/npm-operation.json"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -1362,6 +1372,34 @@ jobs:
           mkdir -p "$RUNNER_TEMP/public-rn" "$RUNNER_TEMP/empty-artifacts"
           sh verification/consumers/react-native/test-consumer.sh ios "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
           sh verification/consumers/react-native/test-consumer.sh android "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
+
+      - name: Promote npm latest only after public checks
+        env:
+          GITHUB_TOKEN: ''
+          NPM_DIST_TAG_TOKEN: ${{ secrets.NPM_DIST_TAG_TOKEN }}
+          npm_config_cache: ${{ runner.temp }}/public-npm-cache
+        run: |
+          set -euo pipefail
+          release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
+          version="${{ needs.candidate.outputs.version }}"
+          package='@trainstar/synchro-react-native'
+          npm_state="$(python3 "$RUNNER_TEMP/release-publish.py" registry-status --registry npm --release-dir "$release")"
+          if [ "$npm_state" = published-candidate ]; then
+            test -n "${NPM_DIST_TAG_TOKEN:-}" || { echo "NPM_DIST_TAG_TOKEN is required to move npm latest" >&2; exit 1; }
+            # Trusted publishing authenticates npm publish only, so the dist-tag write uses its own scoped credential.
+            userconfig="$RUNNER_TEMP/npm-promotion.npmrc"
+            (umask 077 && printf '%s\n' '//registry.npmjs.org/:_authToken=${NPM_DIST_TAG_TOKEN}' > "$userconfig")
+            status=0
+            npm dist-tag add "$package@$version" latest --userconfig "$userconfig" || status=$?
+            rm -f "$userconfig"
+            test "$status" = 0
+            for _ in $(seq 1 40); do
+              npm_state="$(python3 "$RUNNER_TEMP/release-publish.py" registry-status --registry npm --release-dir "$release" || true)"
+              [ "$npm_state" = published-latest ] && break
+              sleep 15
+            done
+          fi
+          test "$npm_state" = published-latest
 
       - name: Mark GitHub latest only after public checks
         env:

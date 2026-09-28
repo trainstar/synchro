@@ -1496,8 +1496,10 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNil(firstConnectAt)
         await fulfillment(of: [reconnectStarted], timeout: 1.0)
 
-        XCTAssertNotNil(firstConnectAt)
-        XCTAssertGreaterThanOrEqual(firstConnectAt!.timeIntervalSince(start), 0.1)
+        // The reconnect must wait for the persisted absolute deadline. The
+        // expectation timeout above is only a liveness bound.
+        let connectAt = try XCTUnwrap(firstConnectAt)
+        XCTAssertGreaterThanOrEqual(Int64(connectAt.timeIntervalSince1970 * 1_000), deadline)
         try await waitForBackoffClear(in: recoveredDatabase)
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)

@@ -235,11 +235,10 @@ func TestResolutionSchemaRuntimeMatchesCapturedState(t *testing.T) {
 
 func TestNewSteadyPullCoordinatorAcceptsAndroid(t *testing.T) {
 	coordinator, err := NewSteadyPullCoordinator(SteadyPullCoordinatorConfig{
-		Scenario:   loadSteadyPullAuthoredScenario(t),
-		Platform:   "android",
-		ServerURL:  "http://127.0.0.1:8080",
-		AuthToken:  "unit-token",
-		AppVersion: "0.3.0",
+		Scenario:  loadSteadyPullAuthoredScenario(t),
+		Platform:  "android",
+		ServerURL: "http://127.0.0.1:8080",
+		AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android steady-pull coordinator was rejected: %v", err)
@@ -259,11 +258,10 @@ func TestNewSteadyPullCoordinatorAcceptsAndroid(t *testing.T) {
 
 func TestNewSteadyPullCoordinatorRejectsUnknownPlatform(t *testing.T) {
 	coordinator, err := NewSteadyPullCoordinator(SteadyPullCoordinatorConfig{
-		Scenario:   loadSteadyPullAuthoredScenario(t),
-		Platform:   "windows",
-		ServerURL:  "http://127.0.0.1:8080",
-		AuthToken:  "unit-token",
-		AppVersion: "0.3.0",
+		Scenario:  loadSteadyPullAuthoredScenario(t),
+		Platform:  "windows",
+		ServerURL: "http://127.0.0.1:8080",
+		AuthToken: "unit-token",
 	})
 	if err == nil || coordinator != nil {
 		t.Fatal("unknown-platform steady-pull coordinator was accepted")

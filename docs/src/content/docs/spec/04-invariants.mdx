@@ -211,7 +211,7 @@ Membership and impact functions MUST satisfy the exact registered signatures and
 
 ### Dependency Driven Membership Propagation
 
-Every declared external dependency change MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
+Every declared dependency change, including a same-relation sibling dependency, MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
 
 ### Membership Generation Invalidation
 
@@ -489,7 +489,7 @@ Logs, metrics labels, traces, readiness output, and quarantine text MUST NOT con
 
 ### Pgrx Installation Authority
 
-pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
+pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership, except for the reviewed update scripts `synchro_pg--<from>--<to>.sql` in `extensions/synchro-pg/sql`. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
 
 ### Extension Migration Baseline
 

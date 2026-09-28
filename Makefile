@@ -28,6 +28,7 @@
 	test-invariants \
 	test-conformance-invariants \
 	soak \
+	soak-replay \
 	test-local-postgres \
 	test-blackbox-harness \
 	test-blackbox-components \
@@ -174,6 +175,7 @@
 	test-packaged-consumers \
 	generate-pg-sql \
 	check-pg-sql \
+	check-released-update-scripts \
 	clean
 
 ANDROID_HOME ?= /opt/homebrew/share/android-commandlinetools
@@ -187,6 +189,9 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
+# AGP selects connected devices through ANDROID_SERIAL. Without one serial it
+# uses every online device, so a device gate requires exactly one serial.
+REQUIRE_ONE_ANDROID_SERIAL = case "$(KOTLIN_ANDROID_SERIAL)" in ''|*[[:space:],]*) echo "Set KOTLIN_ANDROID_SERIAL to exactly one booted Android device." >&2; exit 1 ;; esac
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
 PGRX_PG ?= pg18
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
@@ -196,9 +201,13 @@ MUTATION_CONTROL_TEST ?=
 MUTATION_CONTROL_EXPECT ?= target_pass
 INTEGRATION_MUTANT_ID ?=
 SOAK_SEED ?= 1
-SOAK_DURATION ?= 1s
+# SOAK_OPERATIONS is the explicit seeded-stress operation budget.
+SOAK_OPERATIONS ?= 7
+SOAK_TIMEOUT ?= 35m
+# Each run creates a new seed directory here for its journals and failure wire bodies.
+SOAK_ARTIFACT_DIR ?= $(CURDIR)/.ignore/soak-evidence
+SOAK_REPLAY_JOURNAL ?=
 TESTRESULT_TEST_NAME ?=
-BLACKBOX_TEST_COUNT ?= 1
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
@@ -245,9 +254,31 @@ RN_CONSUMER_SEED ?= clients/react-native/example/verification/seed.db
 RN_ANDROID_SEED_ASSET ?= clients/react-native/example/android/app/src/main/assets/seed.db
 CLIENT_INTEGRATION_SEED ?= $(CURDIR)/.ignore/client-integration/seed.db
 REFRESH_RN_SEED_OUTPUT ?= $(CURDIR)/clients/react-native/example/seed.db
-GO_TEST_ARGS ?= -v -count=1 -p 1
-GO_TEST_PKGS ?= ./...
-GRADLE_TEST_ARGS ?= --rerun-tasks
+# A required gate runs its declared selection. A result stream cannot show that
+# a caller selector omitted tests, so a required gate rejects a changed selector.
+# PARTIAL=1 permits the selector and labels the run as partial diagnostic output.
+PARTIAL ?=
+DECLARED_GO_TEST_ARGS := -v -count=1 -p 1
+DECLARED_GO_TEST_PKGS := ./...
+DECLARED_GRADLE_TEST_ARGS := --rerun-tasks
+DECLARED_BLACKBOX_TEST_COUNT := 1
+DECLARED_SWIFT_TEST_ARGS :=
+DECLARED_DETOX_ARGS :=
+GO_TEST_ARGS ?= $(DECLARED_GO_TEST_ARGS)
+GO_TEST_PKGS ?= $(DECLARED_GO_TEST_PKGS)
+GRADLE_TEST_ARGS ?= $(DECLARED_GRADLE_TEST_ARGS)
+BLACKBOX_TEST_COUNT ?= $(DECLARED_BLACKBOX_TEST_COUNT)
+SWIFT_TEST_ARGS ?= $(DECLARED_SWIFT_TEST_ARGS)
+DETOX_ARGS ?= $(DECLARED_DETOX_ARGS)
+# A timeout bounds a run but cannot omit a test, so it is not a selector.
+BLACKBOX_TIMEOUT ?= 20m
+SWIFT_SCENARIOS_TIMEOUT ?= 30m
+changed_selectors = $(strip $(foreach name,$(1),$(if $(subst x$(DECLARED_$(name)),,x$($(name)))$(subst x$($(name)),,x$(DECLARED_$(name))),$(name))))
+declared_selection = @case "$(PARTIAL)" in \
+	'') test -z "$(call changed_selectors,$(1))" || { echo "$@ is a required gate. The caller changed $(call changed_selectors,$(1)) from its declared selection. Set PARTIAL=1 for a partial diagnostic run." >&2; exit 1; } ;; \
+	1) echo "PARTIAL: $@ runs a diagnostic selection. Its result is not required-gate evidence." >&2 ;; \
+	*) echo "PARTIAL must be empty or 1" >&2; exit 1 ;; \
+	esac
 CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
@@ -255,6 +286,8 @@ SWIFTPM_GIT_ENV := GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_C
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
+# Installed-client cells check server rows through ADAPTER_TEST_URL with this client.
+PACKAGED_SMOKE_PSQL ?= $(if $(PGRX_PG_BIN_DIR),$(PGRX_PG_BIN_DIR)psql,psql)
 RELEASE_DIR ?=
 RELEASE_SERVER_DIR ?= $(CURDIR)/dist/release-components/server
 RELEASE_PACKAGE_DIR ?= $(CURDIR)/dist/release-components/packages
@@ -317,7 +350,8 @@ help:
 	@echo "  test-conformance-scenarios - Test strict scenario loading and catalog generation"
 	@echo "  test-vectors          - Test canonical protocol 3 vectors"
 	@echo "  test-conformance-invariants - Test the invariant engine and soak driver"
-	@echo "  soak                  - Run the bounded seeded desktop soak"
+	@echo "  soak                  - Run bounded seeded stress: SOAK_SEED, SOAK_OPERATIONS, SOAK_ARTIFACT_DIR"
+	@echo "  soak-replay           - Replay one retained soak journal: SOAK_REPLAY_JOURNAL"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  test-blackbox-configured-bounds - Run the real configured-limit measurement proof"
@@ -346,7 +380,7 @@ help:
 	@echo "  test-integration-mutant - Run one manifest mutant with INTEGRATION_MUTANT_ID"
 	@echo "  test-rust-pg          - Run pgrx integration tests on PG 18"
 	@echo "  test-rust-pg-all      - Run pgrx tests on PG 14 through PG 18"
-	@echo "  test-adapter          - Run Go adapter integration tests (override GO_TEST_PKGS to focus)"
+	@echo "  test-adapter          - Run Go adapter integration tests (PARTIAL=1 permits GO_TEST_PKGS or GO_TEST_ARGS)"
 	@echo "  benchmark-adapter     - Run Go adapter tests and benchmarks (override GO_TEST_PKGS to focus)"
 	@echo "                         Set ADAPTER_TEST_URL to the one test PostgreSQL database URL"
 	@echo "  local-postgres-start  - Start an isolated PostgreSQL 18 through the Go provisioner"
@@ -360,7 +394,7 @@ help:
 	@echo "  test-swift            - Run Swift integration tests against the local adapter"
 	@echo "  test-kotlin-unit      - Run Kotlin unit tests"
 	@echo "  test-kotlin-scenarios - Run the direct Kotlin correctness scenarios"
-	@echo "  test-kotlin-instrumentation - Run Android instrumentation on the selected device"
+	@echo "  test-kotlin-instrumentation - Run Android instrumentation on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-kotlin-jvm-integration - Run only the Kotlin JVM integration tests against the local adapter"
 	@echo "  test-swift-upgrade    - Upgrade Swift intent from the published predecessor to the candidate package"
@@ -405,7 +439,7 @@ help:
 	@echo "  test-consumer-swift   - Run the packaged Swift consumer"
 	@echo "  test-consumer-swift-ios - Run the packaged Swift consumer on an iOS simulator"
 	@echo "  test-consumer-kotlin  - Build the packaged Kotlin app and instrumentation APK"
-	@echo "  test-consumer-kotlin-device - Run the packaged Kotlin consumer on a connected Android device"
+	@echo "  test-consumer-kotlin-device - Run the packaged Kotlin consumer on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-consumer-rn-ios  - Build an isolated RN iOS consumer from packaged artifacts"
 	@echo "  test-consumer-rn-android - Build an isolated RN Android consumer from packaged artifacts"
 	@echo "  test-client-platforms - Run one packaged client support cell (SUPPORT_CELL_ID required)"
@@ -413,6 +447,7 @@ help:
 	@echo "  test-packaged-smoke-structure - Run packaged smoke summary failure controls"
 	@echo "  test-packaged-consumers - Run all packaged consumer checks"
 	@echo "  check-pg-sql          - Verify tracked SQL matches pgrx generation"
+	@echo "  check-released-update-scripts - Verify released update scripts match their release tags"
 	@echo "  clean                 - Remove local build and server artifacts"
 
 version-print:
@@ -486,7 +521,7 @@ test-integration-mutant-manifest: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./mutants -count=1
 
 test-conformance-imports:
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./internal/importguard -count=1
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/importguard -count=1
 
 test-conformance-contract:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./internal/jsonstrict ./internal/schemavalidator ./internal/contract -count=1
@@ -518,9 +553,20 @@ test-conformance-invariants: test-invariants
 soak:
 	@$(WARM_CONNECT_ENV) \
 		test -n "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" || { echo "the black-box environment is required for soak: set WARM_CONNECT_ENV_FILE or export SYNCHRO_CONFORMANCE_* variables" >&2; exit 1; }; \
+		mkdir -p "$(abspath $(SOAK_ARTIFACT_DIR))"; \
 		cd conformance && GOFLAGS= GOWORK=off \
-			SOAK_SEED="$(SOAK_SEED)" SOAK_DURATION="$(SOAK_DURATION)" \
-			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=35m \
+			SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
+			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=$(SOAK_TIMEOUT) \
+			-run '^TestSoak$$' -args --provision --install
+
+# Replay reads only the retained journal and rebuilds its harness in a new cluster.
+soak-replay:
+	@test -f "$(SOAK_REPLAY_JOURNAL)" || { echo "SOAK_REPLAY_JOURNAL must name a retained soak journal" >&2; exit 1; }
+	@$(WARM_CONNECT_ENV) \
+		test -n "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" || { echo "the black-box environment is required for soak-replay: set WARM_CONNECT_ENV_FILE or export SYNCHRO_CONFORMANCE_* variables" >&2; exit 1; }; \
+		cd conformance && GOFLAGS= GOWORK=off \
+			SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL="$(abspath $(SOAK_REPLAY_JOURNAL))" \
+			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=$(SOAK_TIMEOUT) \
 			-run '^TestSoak$$' -args --provision --install
 
 test-local-postgres:
@@ -562,7 +608,7 @@ test-blackbox-mutation-control:
 		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder|TestRealS02DivergentPullPaginationIsStarvationFree|\
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
 		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm|TestRealRegistryRejectsDeferrablePrimaryKey|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
-		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
+		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
 		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac; \
@@ -792,7 +838,9 @@ conformance-update-baseline-extension-artifact:
 		trap - EXIT HUP INT TERM
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
+	$(call declared_selection,GO_TEST_ARGS BLACKBOX_TEST_COUNT)
+	cd conformance && GOFLAGS= GOWORK=off SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
+		go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=$(BLACKBOX_TIMEOUT) -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
@@ -875,32 +923,9 @@ release-verify:
 
 release-consumer-artifacts: release-verify
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
-	@set -eu; \
-		release="$(abspath $(RELEASE_DIR))"; \
-		final="$(abspath $(RELEASE_CONSUMER_DIR))"; \
-		manifest_hash="$$(shasum -a 256 "$$release/release-manifest.json" | cut -d ' ' -f 1)"; \
-		if [ -d "$$final" ]; then \
-			test "$$(cat "$$final/.release-manifest.sha256")" = "$$manifest_hash"; \
-			exit 0; \
-		fi; \
-		stage="$$final.tmp.$$$$"; \
-		trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
-		test ! -e "$$final" || { echo "release consumer artifact path is not a directory: $$final" >&2; exit 1; }; \
-		mkdir -p "$$stage/apple/Synchro" "$$stage/maven" "$$stage/npm"; \
-		git archive --format=tar HEAD Package.swift Synchro.podspec LICENSE clients/swift/Sources \
-			| tar -xf - -C "$$stage/apple/Synchro"; \
-		test ! -e "$$stage/apple/Synchro/Package.resolved"; \
-		find "$$stage/apple/Synchro" -exec touch -t 202601010000 {} +; \
-		COPYFILE_DISABLE=1 tar -cf - -C "$$stage/apple" Synchro | gzip -n > "$$stage/apple/synchro-spm-$(VERSION).tar.gz"; \
-		python3 -m zipfile -e "$$release/artifacts/synchro-maven-$(VERSION).zip" "$$stage/maven"; \
-		cp "$$release/artifacts/trainstar-synchro-react-native-$(VERSION).tgz" "$$stage/npm/"; \
-		git clone --bare --quiet . "$$stage/source.git"; \
-		git --git-dir="$$stage/source.git" tag -f "v$(VERSION)" "$$(git rev-parse HEAD)"; \
-		git --git-dir="$$stage/source.git" tag -f "api/go/v$(VERSION)" "$$(git rev-parse HEAD)"; \
-		printf '%s\n' "$$manifest_hash" > "$$stage/.release-manifest.sha256"; \
-		mkdir -p "$$(dirname "$$final")"; \
-		mv "$$stage" "$$final"; \
-		trap - EXIT HUP INT TERM
+	@python3 scripts/release-artifacts.py consumer-inputs --release-dir "$(abspath $(RELEASE_DIR))" --version "$(VERSION)" \
+		--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
+		--repo-root "$(CURDIR)" --output "$(abspath $(RELEASE_CONSUMER_DIR))"
 
 release-run-support-cell:
 	@test -n "$(SUPPORT_CELL_ID)" || { echo "SUPPORT_CELL_ID is required" >&2; exit 1; }
@@ -993,6 +1018,7 @@ build-kotlin-conformance-app:
 	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :conformance-app:assembleDebug :conformance-app:assembleDebugAndroidTest
 
 test-swift-unit:
+	$(call declared_selection,SWIFT_TEST_ARGS)
 	rm -rf clients/swift/.build/test-results/unit.xcresult
 	mkdir -p clients/swift/.build/test-results
 	@status=0; \
@@ -1001,6 +1027,7 @@ test-swift-unit:
 		exit "$$status"
 
 test-client-schema-identity: conformance-mod-download
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@set -e; \
 		status=0; \
@@ -1041,6 +1068,7 @@ test-swift-warm-connect: conformance-mod-download build-swift-native-runner
 			-run '^TestRealSwiftWarmConnect$$' -args --provision --install
 
 test-swift-scenarios: conformance-mod-download build-swift-native-runner build-seed
+	$(call declared_selection,GO_TEST_ARGS)
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		runner_dir="$$(cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --show-bin-path)"; \
@@ -1050,7 +1078,7 @@ test-swift-scenarios: conformance-mod-download build-swift-native-runner build-s
 		SYNCHRO_SWIFT_NATIVE_RUNNER="$$runner_dir/synchro-native-runner" \
 		SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
 			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
-			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=30m \
+			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=$(SWIFT_SCENARIOS_TIMEOUT) \
 			-run '^TestRealSwiftScenarios$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-swift: test-swift-warm-connect test-swift-scenarios
@@ -1058,6 +1086,7 @@ test-swift: test-swift-warm-connect test-swift-scenarios
 
 .PHONY: test-swift-integration
 test-swift-integration:
+	$(call declared_selection,SWIFT_TEST_ARGS)
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	rm -rf clients/swift/.build/integration-derived-data clients/swift/.build/test-results/integration.xcresult
 	mkdir -p clients/swift/.build/test-results
@@ -1083,6 +1112,7 @@ test-swift-integration:
 		exit "$$status"
 
 test-kotlin-unit:
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results
@@ -1093,7 +1123,7 @@ test-kotlin-unit:
 
 test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
-	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		application_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/debug/conformance-app-debug.apk"; \
@@ -1112,8 +1142,9 @@ test-kotlin-warm-connect: conformance-mod-download build-kotlin-conformance-app
 			-run '^TestRealKotlinWarmConnect$$' -args --provision --install
 
 test-kotlin-scenarios: conformance-mod-download build-kotlin-conformance-app build-seed
+	$(call declared_selection,GO_TEST_ARGS)
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
-	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	@set -eu; \
 		$(WARM_CONNECT_ENV) \
 		application_apk="$(CURDIR)/clients/kotlin/conformance-app/build/outputs/apk/debug/conformance-app-debug.apk"; \
@@ -1132,10 +1163,11 @@ test-kotlin-scenarios: conformance-mod-download build-kotlin-conformance-app bui
 			-run '^TestRealKotlinScenarios$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-kotlin-instrumentation: build-kotlin-conformance-app
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
-	@test -n "$(KOTLIN_ANDROID_SERIAL)" || (echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	rm -rf clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.injected.device.serial="$(KOTLIN_ANDROID_SERIAL)" -Pandroid.testInstrumentationRunnerArguments.notClass=com.trainstar.synchro.conformance.NativeSessionInstrumentationTest :conformance-app:connectedDebugAndroidTest
+	cd clients/kotlin && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) -Pandroid.testInstrumentationRunnerArguments.notClass=com.trainstar.synchro.conformance.NativeSessionInstrumentationTest :conformance-app:connectedDebugAndroidTest
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/conformance-app/build/outputs/androidTest-results/connected
 
 test-kotlin: test-kotlin-warm-connect test-kotlin-scenarios
@@ -1143,6 +1175,7 @@ test-kotlin: test-kotlin-warm-connect test-kotlin-scenarios
 
 # TEST_ENV carries the database URL and JWT secret, so Make does not echo the Gradle command.
 test-kotlin-jvm-integration:
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
 	# Repeat preparation to prove that the integration fixture is idempotent.
 	$(MAKE) --no-print-directory REFRESH_RN_SEED=1 REFRESH_RN_SEED_OUTPUT="$(CLIENT_INTEGRATION_SEED)" synchrod-pg-test-restart
@@ -1711,6 +1744,7 @@ test-rn-e2e-ios-run: test-rn-e2e-ios-smoke
 
 .PHONY: test-rn-e2e-ios-smoke
 test-rn-e2e-ios-smoke:
+	$(call declared_selection,DETOX_ARGS)
 	rm -f clients/react-native/example/artifacts/ios-test-results.json
 	mkdir -p clients/react-native/example/artifacts
 	cd clients/react-native/example && \
@@ -1764,6 +1798,7 @@ android-emulator-prepare:
 
 .PHONY: test-rn-e2e-android-smoke
 test-rn-e2e-android-smoke: android-emulator-prepare
+	$(call declared_selection,DETOX_ARGS)
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -f clients/react-native/example/artifacts/android-test-results.json
@@ -1790,6 +1825,7 @@ test-rn-e2e-android-run: test-rn-e2e-android-smoke
 
 .PHONY: test-rn-scenarios-ios test-rn-scenarios-android
 test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
+	$(call declared_selection,GO_TEST_ARGS)
 	@set -eu; \
 		case "$@" in \
 			test-rn-scenarios-ios) platform=IOS; configuration=ios.sim.debug ;; \
@@ -1939,7 +1975,7 @@ test-consumer-swift-smoke: client-consumer-apple-artifact
 			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)"
 
 test-consumer-swift-ios: client-consumer-apple-artifact
-	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
 
 test-consumer-kotlin: client-consumer-kotlin-artifact
@@ -1976,15 +2012,19 @@ test-consumer-kotlin: client-consumer-kotlin-artifact
 test-consumer-kotlin-device: client-consumer-kotlin-artifact
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
+	rm -rf verification/consumers/kotlin/app/build/outputs/androidTest-results/connected
 	SYNCHRO_CONSUMER_MAVEN_REPOSITORY="$(abspath $(CLIENT_ARTIFACT_DIR))/maven" \
+		ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
 		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
 		JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
 		clients/kotlin/gradlew --project-dir verification/consumers/kotlin --no-daemon \
 			-PsynchroVersion="$(CURRENT_VERSION)" \
 			:app:connectedDebugAndroidTest
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../verification/consumers/kotlin/app/build/outputs/androidTest-results/connected
 
 test-consumer-kotlin-device-smoke: test-consumer-kotlin
-	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		ANDROID_HOME="$(ANDROID_HOME)" KOTLIN_ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
 		sh verification/consumers/kotlin/test-consumer-device.sh \
 			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
@@ -2001,14 +2041,14 @@ test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-art
 		sh verification/consumers/react-native/test-consumer.sh android "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)" build-only
 
 test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-artifact
-	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
 		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
 
 test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-artifact client-consumer-rn-artifact
-	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
@@ -2016,6 +2056,7 @@ test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-
 
 test-client-platforms:
 	@test -n "$(SUPPORT_CELL_ID)" || (echo "SUPPORT_CELL_ID is required" >&2; exit 1)
+	@case "$(SUPPORT_CELL_ID)" in SUP-PG-*) echo "$(SUPPORT_CELL_ID) is a server cell. Run make release-run-support-cell SUPPORT_CELL_ID=$(SUPPORT_CELL_ID)." >&2; exit 1 ;; esac
 	@mkdir -p "$(PACKAGED_SMOKE_CELL_DIR)" "$(PACKAGED_SMOKE_TMP_ROOT)"
 	@python3 verification/packaged_smoke.py begin-cell \
 		--repo-root "$(CURDIR)" \
@@ -2028,11 +2069,6 @@ test-client-platforms:
 		export PACKAGED_SMOKE_CELL_ID="$(SUPPORT_CELL_ID)"; \
 		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
 		case "$(SUPPORT_CELL_ID)" in \
-		SUP-PG-LINUX-X64-001) \
-			test "$$(uname -s)" = "Linux" && test "$$(uname -m)" = "x86_64" || { echo "linux-x64 is required" >&2; exit 1; }; \
-			test -f "$${SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT:?SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT is required}/artifact-manifest.json"; \
-			export PACKAGED_SMOKE_EXTRA_ARTIFACT="$$SYNCHRO_CONFORMANCE_EXTENSION_ARTIFACT/artifact-manifest.json"; \
-			$(MAKE) test-consumer-kotlin-device-smoke ;; \
 		SUP-IOS-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
@@ -2083,6 +2119,21 @@ generate-pg-sql:
 	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx schema pg18 --pg-config "$(PGRX_PG_CONFIG)" --out sql/synchro_pg--$(CURRENT_VERSION).sql
 	perl -pi -e 's/[ \t]+$$//' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
 	perl -0pi -e 's/\n+\z/\n/' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
+
+# A released update script is immutable. Its bytes must equal its content at
+# the tag of its target version. The check fails when no released script is found.
+check-released-update-scripts:
+	@set -eu; \
+		checked=0; \
+		for script in extensions/synchro-pg/sql/synchro_pg--*--*.sql; do \
+			target="$${script##*--}"; target="$${target%.sql}"; \
+			git rev-parse -q --verify "refs/tags/v$$target^{commit}" >/dev/null || continue; \
+			git cat-file -e "v$$target:$$script" 2>/dev/null || { echo "released update script is absent at v$$target: $$script" >&2; exit 1; }; \
+			git show "v$$target:$$script" | cmp -s - "$$script" || { echo "released update script differs from v$$target: $$script" >&2; exit 1; }; \
+			checked=$$((checked + 1)); \
+		done; \
+		test "$$checked" -gt 0 || { echo "no released update script was checked. Fetch the release tags." >&2; exit 1; }; \
+		echo "$$checked released update scripts match their release tags"
 
 check-pg-sql:
 	@set -eu; \
@@ -2248,6 +2299,7 @@ local-postgres-stop:
 		fi
 
 test-adapter:
+	$(call declared_selection,GO_TEST_ARGS GO_TEST_PKGS)
 	@echo "Running adapter integration tests..."
 	@set -e; \
 	status=0; \
