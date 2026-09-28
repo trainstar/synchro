@@ -442,6 +442,58 @@ final class SynchroModuleTransactionTests: XCTestCase {
         XCTAssertEqual(events.names, [])
     }
 
+    // MARK: - Inspection snapshot
+
+    func testClientStateSnapshotReadsRequestedRowsInsideReadOnlySnapshot() throws {
+        try initializeModule()
+        let firstID = UUID().uuidString
+        let secondID = UUID().uuidString
+        let commits = try commitRow(id: firstID, name: "first") + commitRow(id: secondID, name: "second")
+
+        let snapshot = settle("snapshot") {
+            module.inspectClientStateSnapshot(
+                [["sql": "SELECT id, name FROM bridge_items WHERE id = ?", "params": [firstID]]],
+                resolve: $0.resolve,
+                reject: $0.reject
+            )
+        }
+        let result = try XCTUnwrap(try resolvedValue(snapshot) as? [String: Any])
+        XCTAssertEqual(Set(result.keys), ["inspection", "applicationRows"])
+        let rows = try XCTUnwrap(result["applicationRows"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["id"] as? String, firstID)
+        XCTAssertEqual(rows.first?["name"] as? String, "first")
+        let json = try XCTUnwrap((result["inspection"] as? String)?.data(using: .utf8))
+        let inspection = try XCTUnwrap(try JSONSerialization.jsonObject(with: json) as? [String: Any])
+        XCTAssertEqual(
+            Set(inspection.keys),
+            ["client_state", "retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts"]
+        )
+        // bridge_items is a local table, so the ledger and server metadata stay empty.
+        for member in ["retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts"] {
+            XCTAssertEqual((inspection[member] as? [Any])?.count, 0, member)
+        }
+        let clientState = try XCTUnwrap(inspection["client_state"] as? [String: Any])
+        XCTAssertEqual(clientState["mutation_ledger_count"] as? Int, 0)
+        XCTAssertEqual(clientState["rejected_mutation_count"] as? Int, 0)
+
+        let write = settle("snapshot write") {
+            module.inspectClientStateSnapshot(
+                [["sql": "DELETE FROM bridge_items WHERE id = ?", "params": [firstID]]],
+                resolve: $0.resolve,
+                reject: $0.reject
+            )
+        }
+        XCTAssertEqual(write.resolutions.count, 0)
+        XCTAssertEqual(write.rejections.count, 1)
+        let external = try openExternalConnection()
+        let close = try closeModule()
+
+        requireSettledOnce(commits + [snapshot, close])
+        XCTAssertEqual(try external.names(id: firstID), ["first"])
+        XCTAssertEqual(try external.rowCount(), 2)
+    }
+
     // MARK: - Bridge calls
 
     private func initializeModule() throws {

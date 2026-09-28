@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -237,6 +238,54 @@ class SynchroModuleTransactionTest {
         assertEquals(2L, external.rowCount())
         assertEquals(listOf("before-close"), external.names(firstID))
         assertEquals(listOf("after-reinitialize"), external.names(secondID))
+    }
+
+    @Test
+    fun clientStateSnapshotReadsRequestedRowsInsideReadOnlySnapshot() {
+        initializeModule()
+        val firstID = UUID.randomUUID().toString()
+        val secondID = UUID.randomUUID().toString()
+        val commits = commitRow(firstID, "first") + commitRow(secondID, "second")
+
+        val snapshot = settle("snapshot") {
+            module.inspectClientStateSnapshot(
+                JavaOnlyArray.of(JavaOnlyMap.of("sql", "SELECT id, name FROM bridge_items WHERE id = ?", "params", JavaOnlyArray.of(firstID))),
+                it,
+            )
+        }
+        val result = snapshot.resolvedValue() as ReadableMap
+        assertEquals(setOf("inspection", "applicationRows"), result.toHashMap().keys)
+        val rows = result.getArray("applicationRows")!!
+        assertEquals(1, rows.size())
+        assertEquals(firstID, rows.getMap(0)!!.getString("id"))
+        assertEquals("first", rows.getMap(0)!!.getString("name"))
+        val inspection = JSONObject(result.getString("inspection")!!)
+        assertEquals(
+            setOf("client_state", "retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts"),
+            inspection.keys().asSequence().toSet(),
+        )
+        // bridge_items is a local table, so the ledger and server metadata stay empty.
+        for (member in listOf("retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts")) {
+            assertEquals(member, 0, inspection.getJSONArray(member).length())
+        }
+        val clientState = inspection.getJSONObject("client_state")
+        assertEquals(0, clientState.getInt("mutation_ledger_count"))
+        assertEquals(0, clientState.getInt("rejected_mutation_count"))
+
+        val write = settle("snapshot write") {
+            module.inspectClientStateSnapshot(
+                JavaOnlyArray.of(JavaOnlyMap.of("sql", "DELETE FROM bridge_items WHERE id = ?", "params", JavaOnlyArray.of(firstID))),
+                it,
+            )
+        }
+        assertEquals(0, write.resolutions.size)
+        assertEquals(1, write.rejections.size)
+        val external = openExternalConnection()
+        val close = closeModule()
+
+        requireSettledOnce(commits + snapshot + close)
+        assertEquals(listOf("first"), external.names(firstID))
+        assertEquals(2L, external.rowCount())
     }
 
     private fun initializeModule() {
