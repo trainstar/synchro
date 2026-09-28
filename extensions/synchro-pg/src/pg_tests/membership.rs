@@ -1416,6 +1416,117 @@ fn projection_view_name_collision_grants_no_select() {
 }
 
 #[pg_test]
+fn projection_view_reads_only_its_bound_relation_after_rename() {
+    Spi::run(
+        "CREATE TABLE public.projection_rename_items (
+             id UUID PRIMARY KEY,
+             owner_id TEXT NOT NULL,
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+             deleted_at TIMESTAMPTZ
+         );
+         SELECT synchro.synchro_prepare_projection_view(
+             'public.projection_rename_items', 'projection_rename_items',
+             ARRAY['owner_id']::text[]
+         );
+         ALTER TABLE public.projection_rename_items RENAME TO projection_rename_decoy;
+         CREATE TABLE public.projection_rename_items (
+             id UUID PRIMARY KEY,
+             owner_id TEXT NOT NULL,
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+             deleted_at TIMESTAMPTZ
+         );
+         SELECT tests.register_test_table(
+             'projection_rename_items', $$SELECT 'global'$$, 'single_scope',
+             'id', 'updated_at', 'deleted_at', 'read_only'
+         )",
+    )
+    .expect("create renamed projection relation fixture");
+    activate_pending_registry_for_test();
+    Spi::run(
+        "INSERT INTO synchro.sync_captured_rows (
+             relation_id, record_id, row_data, row_version, checksum, deleted,
+             source_stream_generation, source_commit_lsn, source_event_ordinal,
+             registry_generation
+         )
+         SELECT registry.relation_id, '00000000-0000-4000-8b47-000000000001',
+                jsonb_build_object('owner_id', 'new-owner'),
+                '00000000-0000-4000-8b47-000000000002'::uuid,
+                decode(repeat('ab', 32), 'hex'), false,
+                runtime.stream_generation, '0/10'::pg_lsn, 0,
+                registry.registry_generation
+         FROM synchro.sync_runtime_state runtime
+         JOIN synchro.sync_registry_generations generation
+           ON generation.stream_generation = runtime.stream_generation
+          AND generation.state = 'active'
+         JOIN synchro.sync_registry registry
+           ON registry.registry_generation = generation.generation
+          AND registry.table_name = 'projection_rename_items'
+         WHERE runtime.singleton",
+    )
+    .expect("capture a row of the new relation");
+    let new_relation_rows = Spi::get_one::<i64>(
+        "SELECT count(*) FROM synchro.sync_current_projections
+         WHERE record_id = '00000000-0000-4000-8b47-000000000001'",
+    )
+    .expect("new relation projection query")
+    .expect("new relation projection count");
+    let old_view_rows =
+        Spi::get_one::<i64>("SELECT count(*) FROM synchro_projection.projection_rename_items")
+            .expect("old projection view query")
+            .expect("old projection view count");
+
+    assert_eq!(new_relation_rows, 1);
+    assert_eq!(old_view_rows, 0);
+}
+
+#[pg_test]
+fn projection_view_update_rebuild_matches_prepared_definition() {
+    Spi::run(
+        "CREATE TABLE public.projection_rebuild_items (
+             id INTEGER PRIMARY KEY,
+             owner_id TEXT NOT NULL,
+             \"Label\" TEXT NOT NULL
+         );
+         SELECT synchro.synchro_prepare_projection_view(
+             'public.projection_rebuild_items', 'projection_rebuild_items',
+             ARRAY['owner_id', 'Label']::text[]
+         )",
+    )
+    .expect("create projection rebuild fixture");
+    let definition = || {
+        Spi::get_one::<String>(
+            "SELECT pg_get_viewdef('synchro_projection.projection_rebuild_items'::regclass, true)",
+        )
+        .expect("projection view definition query")
+        .expect("projection view definition")
+    };
+    let prepared = definition();
+    Spi::run(
+        "CREATE OR REPLACE VIEW synchro_projection.projection_rebuild_items
+         WITH (security_barrier = true) AS
+         SELECT projection.record_id, projection.capture_key, projection.deleted,
+                NULL::jsonb AS \"Label\", NULL::jsonb AS owner_id
+         FROM synchro.sync_current_projections projection
+         WHERE false",
+    )
+    .expect("replace projection view with a prior definition");
+    let prior = definition();
+    let script = include_str!("../../sql/synchro_pg--0.3.2--0.4.0.sql");
+    let rebuild = &script[script
+        .find("DO $rebuild$")
+        .expect("update script rebuilds projection views")..];
+    let rebuild = &rebuild[..rebuild
+        .find("\n$rebuild$;")
+        .map(|end| end + "\n$rebuild$;".len())
+        .expect("update script ends the projection view rebuild")];
+    Spi::run(rebuild).expect("rebuild projection views as the update does");
+    let rebuilt = definition();
+
+    assert_ne!(prior, prepared);
+    assert_eq!(rebuilt, prepared);
+}
+
+#[pg_test]
 fn membership_test_schema_enforces_production_validation() {
     for case in ["valid", "unparsed", "search_path", "live_table", "undeclared_field"] {
         let fixture = registration_fixture(true, "enabled", true);

@@ -376,8 +376,6 @@ fn synchro_prepare_projection_view(
                 crate::pull::pg_quote_ident(column),
             ));
         }
-        let schema_literal = quote_literal(client, &physical.schema)?;
-        let relation_literal = quote_literal(client, &physical.relation)?;
         let qualified_view = format!(
             "synchro_projection.{}",
             crate::pull::pg_quote_ident(view_name),
@@ -387,9 +385,9 @@ fn synchro_prepare_projection_view(
                 "CREATE VIEW {qualified_view} WITH (security_barrier = true) AS \
                  SELECT projection.record_id, projection.capture_key, projection.deleted, {} \
                  FROM synchro.sync_current_projections projection \
-                 WHERE projection.physical_schema = {schema_literal} \
-                   AND projection.physical_relation = {relation_literal}",
+                 WHERE projection.physical_relation_oid = {}::oid",
                 expressions.join(", "),
+                i64::from(physical.oid),
             ),
             None,
             &[],

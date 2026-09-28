@@ -389,7 +389,8 @@ owner. `synchro_operator` membership gives USAGE on schema
 `synchro_projection`. A repeated call succeeds only when the stored view has
 the same physical relation, view name, and projected columns. Any other match
 on the relation or the view name fails with `projection view identity is
-immutable` and grants nothing.
+immutable` and grants nothing. A projection view binds to the relation OID,
+so a later relation with the same name cannot supply rows to the view.
 
 ## Registry and Membership Generations
 

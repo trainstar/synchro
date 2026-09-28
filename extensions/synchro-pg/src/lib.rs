@@ -1412,7 +1412,8 @@ SELECT registry.registry_generation,
        captured.record_id,
        captured.capture_key,
        captured.row_data,
-       captured.deleted
+       captured.deleted,
+       registry.physical_relation_oid
 FROM sync_wal_progress progress
 CROSS JOIN reset_context context
 JOIN sync_registry registry
