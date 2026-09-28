@@ -142,7 +142,7 @@ type Harness struct {
 
 	databaseCreated    bool
 	rolesCreated       bool
-	slotCreated        bool
+	slotsOwned         bool
 	publicationCreated bool
 	sourceReady        bool
 	restartCount       int
@@ -1169,22 +1169,6 @@ func provisionedHBAConfiguration(database string, roles []string) string {
 	}, "\n")
 }
 
-func workerHBAConfiguration(database, worker string) string {
-	database = quoteHBAName(database)
-	worker = quoteHBAName(worker)
-	return strings.Join([]string{
-		"# Synchro conformance authentication boundary",
-		"local " + database + " " + worker + " scram-sha-256",
-		"local all " + worker + " reject",
-		"local all all trust",
-		"host " + database + " " + worker + " 127.0.0.1/32 scram-sha-256",
-		"host all " + worker + " 127.0.0.1/32 reject",
-		"host all all 127.0.0.1/32 scram-sha-256",
-		"host all all ::1/128 scram-sha-256",
-		"",
-	}, "\n")
-}
-
 func quoteHBAName(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
@@ -1515,11 +1499,9 @@ func (h *Harness) installExtensionTopology(ctx context.Context) error {
 	if err := h.grantExtensionRolesOnDatabase(ctx, database); err != nil {
 		return err
 	}
-	var slotName string
-	if err := database.QueryRowContext(ctx, "SELECT slot_name FROM pg_create_logical_replication_slot($1, 'pgoutput')", h.names.ReplicationSlot).Scan(&slotName); err != nil || slotName != h.names.ReplicationSlot {
-		return errors.New("create isolated replication slot failed")
-	}
-	h.slotCreated = true
+	// The worker creates and binds the configured slot. A slot that exists before
+	// the first binding has no ownership evidence, so the worker refuses it.
+	h.slotsOwned = true
 	var publicationExists bool
 	if err := database.QueryRowContext(
 		ctx,
@@ -2469,6 +2451,9 @@ func ownedProcessAlive(process *ownedProcess) error {
 }
 
 // ReinstallExtension replaces the extension atomically without restarting the postmaster.
+// The drop removes the runtime binding that is the only ownership evidence for the
+// worker slot. The harness reads that binding first and then removes the released slot
+// as the operator, because a worker never removes a slot that it cannot prove it owns.
 func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReinstallResult, returnedErr error) {
 	if h == nil || ctx == nil || !h.sourceReady {
 		return ExtensionReinstallResult{}, errors.New("isolated extension reinstall is unavailable")
@@ -2497,6 +2482,15 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 	if err != nil {
 		return ExtensionReinstallResult{}, errors.New("begin extension reinstall transaction failed")
 	}
+	var boundSlot sql.NullString
+	if err := tx.QueryRowContext(ctx, "SELECT active_slot_name::text FROM synchro.sync_runtime_state WHERE singleton").Scan(&boundSlot); err != nil {
+		_ = tx.Rollback()
+		return ExtensionReinstallResult{}, errors.New("read bound worker slot before extension reinstall failed")
+	}
+	if boundSlot.Valid && boundSlot.String != h.names.ReplicationSlot {
+		_ = tx.Rollback()
+		return ExtensionReinstallResult{}, errors.New("bound worker slot is not the isolated replication slot")
+	}
 	if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE"); err != nil {
 		_ = tx.Rollback()
 		return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
@@ -2524,7 +2518,53 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 	if err := gate.connection.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&result.ReinstallLSN); err != nil || result.ReinstallLSN == "" {
 		return ExtensionReinstallResult{}, errors.New("read extension reinstall WAL position failed")
 	}
+	// The prior worker releases its slot only after it passes the gate and exits.
+	if err := gate.release(ctx); err != nil {
+		return ExtensionReinstallResult{}, fmt.Errorf("release WAL worker gate after extension reinstall: %w", err)
+	}
+	if boundSlot.Valid {
+		if err := h.dropReleasedWorkerSlot(ctx, boundSlot.String); err != nil {
+			return ExtensionReinstallResult{}, err
+		}
+	}
 	return result, nil
+}
+
+func (h *Harness) dropReleasedWorkerSlot(ctx context.Context, slot string) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("open released worker slot connection failed")
+	}
+	defer database.Close()
+	for {
+		var active sql.NullBool
+		err := database.QueryRowContext(ctx, "SELECT active FROM pg_catalog.pg_replication_slots WHERE slot_name = $1", slot).Scan(&active)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return errors.New("observe released worker slot failed")
+		}
+		if active.Valid && !active.Bool {
+			_, err := database.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", slot)
+			var postgresError *pgconn.PgError
+			if err == nil || errors.As(err, &postgresError) && postgresError.Code == "42704" {
+				return nil
+			}
+			if !errors.As(err, &postgresError) || postgresError.Code != "55006" {
+				return errors.New("drop released worker slot failed")
+			}
+		}
+		timer := time.NewTimer(processPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("wait for released worker slot failed")
+		case <-timer.C:
+		}
+	}
 }
 
 func (h *Harness) acquireWALWorkerGate(ctx context.Context) (*walWorkerGate, error) {
@@ -3528,64 +3568,6 @@ func (executor *OperatorExecutor) ConfigureDecodeTrap(ctx context.Context, prima
 // InjectRegisteredTruncate commits the fixed unsupported WAL operation.
 func (executor *OperatorExecutor) InjectRegisteredTruncate(ctx context.Context) error {
 	return executor.exec(ctx, "TRUNCATE TABLE public.cf_items")
-}
-
-// InjectDecoderMetadataChange commits one source transaction while the
-// initialized decoder is blocked from refreshing its relation metadata.
-func (executor *OperatorExecutor) InjectDecoderMetadataChange(ctx context.Context, recordID string) (returnedErr error) {
-	if executor == nil || executor.harness == nil || !executor.harness.sourceReady ||
-		ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
-		return errors.New("decoder metadata control is invalid")
-	}
-	gate, err := executor.harness.acquireWALWorkerGate(ctx)
-	if err != nil {
-		return errors.New("fence WAL worker for decoder metadata control failed")
-	}
-	defer func() {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		returnedErr = errors.Join(returnedErr, gate.release(cleanupContext))
-	}()
-	// Let the queued worker refresh registry metadata before the fault changes it.
-	for {
-		var before, after int64
-		const activeGeneration = "SELECT generation FROM synchro.sync_registry_generations WHERE state = 'active'"
-		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&before); err != nil {
-			return errors.New("read decoder registry generation before worker poll failed")
-		}
-		if err := gate.release(ctx); err != nil {
-			return errors.New("release decoder initialization gate failed")
-		}
-		gate, err = executor.harness.acquireWALWorkerGate(ctx)
-		if err != nil {
-			return errors.New("reacquire decoder initialization gate failed")
-		}
-		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&after); err != nil {
-			return errors.New("read decoder registry generation after worker poll failed")
-		}
-		if before == after {
-			break
-		}
-	}
-	transaction, err := gate.connection.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.New("begin decoder metadata control failed")
-	}
-	defer transaction.Rollback()
-	if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_items ALTER COLUMN value TYPE varchar(256)"); err != nil {
-		return errors.New("alter decoder metadata control relation failed")
-	}
-	if _, err := transaction.ExecContext(
-		ctx,
-		"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'decode-repair-source')",
-		recordID,
-	); err != nil {
-		return errors.New("insert decoder metadata control row failed")
-	}
-	if err := transaction.Commit(); err != nil {
-		return errors.New("commit decoder metadata control failed")
-	}
-	return nil
 }
 
 // RetryWALPoison requests the production same-position retry path.
@@ -6463,7 +6445,7 @@ func (h *Harness) stopAdapter(ctx context.Context) error {
 
 func (h *Harness) dropRunTopology(ctx context.Context) error {
 	if h.postgres == nil || h.postgres.Exited() {
-		if h.databaseCreated || h.rolesCreated || h.slotCreated || h.publicationCreated {
+		if h.databaseCreated || h.rolesCreated || h.slotsOwned || h.publicationCreated {
 			return errors.New("PostgreSQL stopped before topology cleanup")
 		}
 		return nil
@@ -6479,7 +6461,7 @@ func (h *Harness) dropRunTopology(ctx context.Context) error {
 			failures = append(failures, err)
 		}
 	}
-	if h.slotCreated {
+	if h.slotsOwned {
 		if err := runCleanupStage(ctx, h.config.ShutdownTimeout, h.dropReplicationSlot); err != nil {
 			failures = append(failures, err)
 		}
@@ -6630,7 +6612,7 @@ func (h *Harness) dropReplicationSlot(ctx context.Context) error {
 	}); err != nil {
 		return errors.New("drop isolated replication slot failed")
 	}
-	h.slotCreated = false
+	h.slotsOwned = false
 	return nil
 }
 

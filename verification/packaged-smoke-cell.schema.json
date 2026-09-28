@@ -49,14 +49,18 @@
             "kill_signal",
             "resume_pid",
             "durable_pending_before_kill",
-            "durable_pending_after_resume"
+            "durable_pending_after_resume",
+            "remote_value_applied",
+            "server_resumed_write_verified"
           ],
           "properties": {
             "initial_pid": { "type": "integer", "minimum": 1 },
             "kill_signal": { "const": 9 },
             "resume_pid": { "type": "integer", "minimum": 1 },
             "durable_pending_before_kill": { "type": "integer", "minimum": 1 },
-            "durable_pending_after_resume": { "const": 0 }
+            "durable_pending_after_resume": { "const": 0 },
+            "remote_value_applied": { "const": true },
+            "server_resumed_write_verified": { "const": true }
           }
         },
         {
@@ -68,7 +72,9 @@
             "kill_signal",
             "resume_pid",
             "push_digest",
-            "replay_equal"
+            "replay_equal",
+            "remote_value_applied",
+            "server_resumed_write_verified"
           ],
           "properties": {
             "kind": { "const": "server" },
@@ -76,7 +82,9 @@
             "kill_signal": { "const": 9 },
             "resume_pid": { "type": "integer", "minimum": 1 },
             "push_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "replay_equal": { "const": true }
+            "replay_equal": { "const": true },
+            "remote_value_applied": { "const": true },
+            "server_resumed_write_verified": { "const": true }
           }
         }
       ]

@@ -84,35 +84,43 @@ func Run(ctx context.Context, plan Plan, harness Harness, journalPath string) (r
 	if journalPath == "" {
 		return RunResult{}, ErrJournalPathRequired
 	}
+	// Opening the journal truncates it, so an invalid invocation must fail first.
+	if err := validateRunInputs(ctx, plan, harness); err != nil {
+		return RunResult{}, err
+	}
 	writer, err := newJournalWriter(journalPath, plan)
 	if err != nil {
 		return RunResult{}, err
 	}
+	defer func() {
+		if closeErr := writer.Close(); runErr == nil && closeErr != nil {
+			runErr = closeErr
+		}
+	}()
 	return runPlan(ctx, plan, harness, writer)
 }
 
-func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWriter) (result RunResult, runErr error) {
+func validateRunInputs(ctx context.Context, plan Plan, harness Harness) error {
 	if ctx == nil {
-		return RunResult{}, errors.New("soak context is required")
+		return errors.New("soak context is required")
 	}
 	if harness == nil {
-		return RunResult{}, ErrHarnessRequired
+		return ErrHarnessRequired
 	}
 	if len(plan.Operations) == 0 {
-		return RunResult{}, ErrZeroOperations
+		return ErrZeroOperations
 	}
 	if err := plan.Config.validate(); err != nil {
-		return RunResult{}, err
+		return err
 	}
-	if err := validateRunPlan(plan); err != nil {
+	return validateRunPlan(plan)
+}
+
+func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWriter) (result RunResult, runErr error) {
+	if err := validateRunInputs(ctx, plan, harness); err != nil {
 		return RunResult{}, err
 	}
 	if writer != nil {
-		defer func() {
-			if closeErr := writer.Close(); runErr == nil && closeErr != nil {
-				runErr = closeErr
-			}
-		}()
 		for _, operation := range plan.Operations {
 			if err := writer.RecordOperation(operation); err != nil {
 				return result, err

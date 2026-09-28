@@ -183,6 +183,7 @@
             &[record_id.into()],
         )
         .expect("insert reset baseline source row");
+        insert_changelog("user:u1", "test_orders", record_id, 1);
         let checkpoint_count: i64 = Spi::get_one(
             "SELECT count(*) FROM synchro.sync_client_checkpoints
              WHERE user_id = 'u1' AND client_id = 'c1'",
@@ -199,13 +200,18 @@
             .to_string();
         lock_and_stage_reset(&id, "synchro_reset_candidate");
 
-        Spi::run_with_args(
-            "UPDATE synchro.sync_captured_rows
-             SET row_data = jsonb_set(row_data, '{title}', to_jsonb('stale'::text))
-             WHERE record_id = $1",
+        let corrupted: Option<i64> = Spi::get_one_with_args(
+            "WITH corrupted AS (
+                 UPDATE synchro.sync_captured_rows
+                 SET row_data = jsonb_set(row_data, '{title}', to_jsonb('stale'::text))
+                 WHERE record_id = $1
+                 RETURNING 1
+             )
+             SELECT count(*) FROM corrupted",
             &[record_id.into()],
         )
         .expect("mutate live projection before reset activation");
+        assert_eq!(corrupted, Some(1));
 
         let activated = Spi::connect_mut(|client| {
             crate::stream_reset::activate_stream_reset_for_test(client, &id)

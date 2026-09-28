@@ -247,6 +247,12 @@ impact_function(p_old_row jsonb, p_new_row jsonb)
 | `pk_type` | One of `string`, `int`, or `int64`. |
 | `pk_value` | The typed primary-key value of a row that must have membership reevaluated. |
 
+A membership function can read sibling rows from its own projection.
+That function needs a self-impact declaration, whose dependency and target are the same relation.
+The impact function returns the sibling rows that the old or new row image can affect.
+The worker reevaluates those rows from the final projections of the source transaction.
+Without that declaration, a membership function reads only its supplied row from its own projection.
+
 Scope assignment uses three implemented sources:
 
 - `user:{canonical_user_id}` is assigned by default.
@@ -259,6 +265,13 @@ Connect reconciles grants and revocations on the user's next connect. A changed
 assignment advances `scope_set_version`. Added scopes start with a null cursor
 and require rebuild. Removed scopes require provenance cleanup. A client cannot
 invent a scope ID or grant itself a scope.
+
+Before that connect, pull and rebuild use the assigned scope set that the
+client's last connect stored. A revoked scope therefore stays readable to an
+already connected client until it connects again. A new grant is not readable
+until that connect. Registration and removal of a shared scope change the
+stored set of every active client when the operation commits, and the next pull
+returns the delta.
 
 ### Function restrictions
 

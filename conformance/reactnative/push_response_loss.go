@@ -429,10 +429,10 @@ func pushResponseLossWireExpectation(scenario scenarios.Scenario, id scenarios.S
 
 // PushResponseLossCoordinatorConfig configures one authenticated RN response-loss sidecar.
 type PushResponseLossCoordinatorConfig struct {
-	Scenario                                             scenarios.Scenario
-	Harness                                              *blackbox.Harness
-	Controller                                           *blackbox.NativeController
-	Platform, ServerURL, AuthToken, AppVersion, Database string
+	Scenario                                 scenarios.Scenario
+	Harness                                  *blackbox.Harness
+	Controller                               *blackbox.NativeController
+	Platform, ServerURL, AuthToken, Database string
 }
 
 // PushResponseLossCoordinator is the command sidecar for one RN response-loss run.
@@ -512,9 +512,6 @@ func NewPushResponseLossCoordinator(config PushResponseLossCoordinatorConfig) (*
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native push-response-loss coordinator auth token is required")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {
@@ -728,6 +725,9 @@ func (c *PushResponseLossCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	// An exchange holds mu while it waits for a proxy barrier, so release every
+	// barrier before acquiring mu.
+	c.recordProxyFailure(errors.New("React Native push-response-loss coordinator closed"))
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -735,7 +735,6 @@ func (c *PushResponseLossCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	c.recordProxyFailure(errors.New("React Native push-response-loss coordinator closed"))
 	shutdownErr := c.server.Shutdown(ctx)
 	listenErr := c.listener.Close()
 	if shutdownErr != nil {

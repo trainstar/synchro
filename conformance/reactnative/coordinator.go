@@ -27,7 +27,6 @@ const (
 	clientKey               = "client-a"
 	userID                  = "user-a"
 	clientID                = "client-a"
-	defaultAppVersion       = "0.3.0"
 	maximumExchangeBytes    = 1 << 20
 )
 
@@ -44,7 +43,6 @@ type CoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -203,9 +201,6 @@ func NewCoordinator(config CoordinatorConfig) (*Coordinator, error) {
 	}
 	if config.Platform != "ios" && config.Platform != "android" {
 		return nil, errors.New("React Native coordinator platform must be ios or android")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native coordinator auth token is required")

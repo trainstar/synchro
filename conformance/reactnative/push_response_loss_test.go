@@ -91,7 +91,7 @@ func TestNewPushResponseLossCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	defer upstream.Close()
 	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
-		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create response-loss coordinator: %v", err)
@@ -383,7 +383,7 @@ func TestPushResponseLossProxyWritesInvalidInitialResponseStart(t *testing.T) {
 	}))
 	defer upstream.Close()
 	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
-		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create response-loss coordinator: %v", err)

@@ -47,7 +47,6 @@ type RetentionReconnectCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -468,9 +467,6 @@ func NewRetentionReconnectCoordinator(config RetentionReconnectCoordinatorConfig
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native retention-reconnect coordinator auth token is required")
 	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
-	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {
 		serverURL = config.Harness.AdapterURL()
@@ -726,6 +722,10 @@ func (c *RetentionReconnectCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	// An exchange holds mu while it waits for a proxy barrier, so release every
+	// barrier before acquiring mu.
+	c.recordProxyFailure(errors.New("React Native retention-reconnect coordinator closed"))
+	c.releaseFault()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -733,7 +733,6 @@ func (c *RetentionReconnectCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	c.releaseFault()
 	shutdownErr := c.server.Shutdown(ctx)
 	listenerErr := c.listener.Close()
 	if shutdownErr != nil {

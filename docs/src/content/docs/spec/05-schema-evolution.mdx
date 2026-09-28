@@ -173,6 +173,15 @@ reevaluate. The impact contract covers old and new dependency state. A
 revocation, deletion, reassignment, or parent change that can remove membership
 must identify removed as well as added members.
 
+A membership function that reads sibling rows from its own projection needs a
+self-impact declaration. The dependency and the target of that declaration are
+the same relation. Its impact function returns every sibling row whose
+membership the old or new row image can change. The declared fields cover every
+own-projection field that the membership function reads. Without a
+self-impact declaration, a membership function reads only its supplied row from
+its own projection. Catalog dependencies do not show which rows a read selects,
+so registration cannot detect an undeclared sibling read.
+
 Membership and impact functions are schema-qualified `LANGUAGE SQL`, `STABLE`,
 and `SECURITY INVOKER`. Impact functions receive captured old
 and new dependency images. Membership functions can access only declared,
