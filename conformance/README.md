@@ -77,6 +77,7 @@ Use `make test-swift-integration` to run XCTest without repeating the scenario c
 Each required Make gate runs its declared selection and rejects a changed selector.
 `PARTIAL=1` permits `GO_TEST_ARGS`, `GO_TEST_PKGS`, `SWIFT_TEST_ARGS`, `GRADLE_TEST_ARGS`, `DETOX_ARGS`, or `BLACKBOX_TEST_COUNT`.
 A `PARTIAL=1` run is diagnostic output, not required-gate evidence.
+`BLACKBOX_TIMEOUT` and `SWIFT_SCENARIOS_TIMEOUT` only bound run time. A slow host can raise them without a partial label.
 `test-swift-unit`, `test-swift-integration`, and `test-kotlin-unit` parse structured results even when their runners fail.
 
 The Swift retained-schema retry control measures actual SQLite reads across mixed-table mutations.

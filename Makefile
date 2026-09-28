@@ -259,6 +259,9 @@ GRADLE_TEST_ARGS ?= $(DECLARED_GRADLE_TEST_ARGS)
 BLACKBOX_TEST_COUNT ?= $(DECLARED_BLACKBOX_TEST_COUNT)
 SWIFT_TEST_ARGS ?= $(DECLARED_SWIFT_TEST_ARGS)
 DETOX_ARGS ?= $(DECLARED_DETOX_ARGS)
+# A timeout bounds a run but cannot omit a test, so it is not a selector.
+BLACKBOX_TIMEOUT ?= 20m
+SWIFT_SCENARIOS_TIMEOUT ?= 30m
 changed_selectors = $(strip $(foreach name,$(1),$(if $(subst x$(DECLARED_$(name)),,x$($(name)))$(subst x$($(name)),,x$(DECLARED_$(name))),$(name))))
 declared_selection = @case "$(PARTIAL)" in \
 	'') test -z "$(call changed_selectors,$(1))" || { echo "$@ is a required gate. The caller changed $(call changed_selectors,$(1)) from its declared selection. Set PARTIAL=1 for a partial diagnostic run." >&2; exit 1; } ;; \
@@ -798,7 +801,7 @@ conformance-update-baseline-extension-artifact:
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	$(call declared_selection,GO_TEST_ARGS BLACKBOX_TEST_COUNT)
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=$(BLACKBOX_TIMEOUT) -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
@@ -1059,7 +1062,7 @@ test-swift-scenarios: conformance-mod-download build-swift-native-runner build-s
 		SYNCHRO_SWIFT_NATIVE_RUNNER="$$runner_dir/synchro-native-runner" \
 		SYNCHRO_SEED_TOOL="$(CURDIR)/$(SEED_BINARY)" \
 			GOFLAGS= GOWORK=off go run ./cmd/testresult suite \
-			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=30m \
+			-- go test -tags swiftintegration -json ./swift -count=1 -timeout=$(SWIFT_SCENARIOS_TIMEOUT) \
 			-run '^TestRealSwiftScenarios$$' $(GO_TEST_ARGS) -args --provision --install
 
 test-swift: test-swift-warm-connect test-swift-scenarios
