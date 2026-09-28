@@ -105,6 +105,7 @@ type runnerResult struct {
 	RebuildReceiptCount             *int                          `json:"rebuild_receipt_count"`
 	Schema                          *schemaRef                    `json:"schema"`
 	ApplicationRows                 []map[string]json.RawMessage  `json:"application_rows"`
+	ApplicationRowStorageClasses    []map[string]string           `json:"application_row_storage_classes"`
 	RetainedMutations               []retainedMutation            `json:"retained_mutations"`
 	RejectedMutations               []retainedRejection           `json:"rejected_mutations"`
 	ScopeStates                     []scopeStateRecord            `json:"scope_states"`
@@ -1034,6 +1035,9 @@ func validateRunnerResult(result runnerResult) error {
 	}
 	if len(result.ApplicationRows) > maximumRunnerRows || len(result.RetainedMutations) > maximumRunnerRecords || len(result.RejectedMutations) > maximumRunnerRecords || len(result.ScopeStates) > maximumRunnerRecords || len(result.ScopeRows) > maximumRunnerRecords || len(result.RowMetadataRecords) > maximumRunnerRecords || len(result.RebuildAttempts) > maximumRunnerRecords || len(result.RebuildReceipts) > maximumRunnerRecords || len(result.Events) > maximumRunnerRecords {
 		return errors.New("runner result is out of bounds")
+	}
+	if result.ApplicationRowStorageClasses != nil && len(result.ApplicationRowStorageClasses) != len(result.ApplicationRows) {
+		return errors.New("runner application row storage classes do not match the rows")
 	}
 	for _, row := range result.ApplicationRows {
 		if len(row) > maximumRunnerFields {

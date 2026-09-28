@@ -83,7 +83,7 @@ func (d *DatasetPlatform) Synchronize(ctx context.Context, key string) error {
 }
 
 // Capture reads the selected local rows and the local application row count.
-func (d *DatasetPlatform) Capture(ctx context.Context, key string, selectors []dataset.RowRef) ([]map[string]json.RawMessage, int, error) {
+func (d *DatasetPlatform) Capture(ctx context.Context, key string, selectors []dataset.RowRef) ([]dataset.LocalRow, int, error) {
 	state, err := d.Platform.client(d.clients[key])
 	if err != nil {
 		return nil, 0, err
@@ -102,5 +102,12 @@ func (d *DatasetPlatform) Capture(ctx context.Context, key string, selectors []d
 	if err != nil {
 		return nil, 0, err
 	}
-	return result.ApplicationRows, *result.ApplicationRowCount, nil
+	if len(result.ApplicationRowStorageClasses) != len(result.ApplicationRows) {
+		return nil, 0, errors.New("Swift dataset capture has no storage class for each row")
+	}
+	rows := make([]dataset.LocalRow, 0, len(result.ApplicationRows))
+	for index, values := range result.ApplicationRows {
+		rows = append(rows, dataset.LocalRow{Values: values, StorageClasses: result.ApplicationRowStorageClasses[index]})
+	}
+	return rows, *result.ApplicationRowCount, nil
 }

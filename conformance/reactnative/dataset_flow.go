@@ -259,16 +259,16 @@ func (c *DatasetCoordinator) Synchronize(ctx context.Context, key string) error 
 }
 
 // Capture reads the selected local rows and the local application row count.
-func (c *DatasetCoordinator) Capture(ctx context.Context, key string, selectors []dataset.RowRef) ([]map[string]json.RawMessage, int, error) {
+func (c *DatasetCoordinator) Capture(ctx context.Context, key string, selectors []dataset.RowRef) ([]dataset.LocalRow, int, error) {
 	rowSelectors := make([]map[string]string, 0, len(selectors))
 	for _, selector := range selectors {
 		rowSelectors = append(rowSelectors, map[string]string{"table_name": selector.Table, "primary_key_field": "id", "primary_key": selector.ID})
 	}
-	raw, err := c.execute(ctx, key, "observer", "capture", map[string]any{"client_keys": []string{key}, "sources": []string{"application-rows", "scope-state"}, "row_selectors": rowSelectors}, nil)
+	raw, err := c.execute(ctx, key, "observer", "capture", map[string]any{"client_keys": []string{key}, "sources": []string{"application-rows", "application-row-storage-classes", "scope-state"}, "row_selectors": rowSelectors}, nil)
 	if err != nil {
 		return nil, 0, err
 	}
-	capture, err := decodeCapture(raw, []string{"application_rows", "client_state"})
+	capture, err := decodeCapture(raw, []string{"application_rows", "application_row_storage_classes", "client_state"})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -276,9 +276,14 @@ func (c *DatasetCoordinator) Capture(ctx context.Context, key string, selectors 
 	if err != nil {
 		return nil, 0, err
 	}
-	var rows []map[string]json.RawMessage
-	if err := json.Unmarshal(capture.Rows, &rows); err != nil {
-		return nil, 0, errors.New("React Native dataset application rows are invalid")
+	var values []map[string]json.RawMessage
+	var storage []map[string]string
+	if json.Unmarshal(capture.Rows, &values) != nil || json.Unmarshal(capture.Storage, &storage) != nil || len(storage) != len(values) {
+		return nil, 0, errors.New("React Native dataset application rows or storage classes are invalid")
+	}
+	rows := make([]dataset.LocalRow, 0, len(values))
+	for index := range values {
+		rows = append(rows, dataset.LocalRow{Values: values[index], StorageClasses: storage[index]})
 	}
 	return rows, int(state.ApplicationRowCount), nil
 }

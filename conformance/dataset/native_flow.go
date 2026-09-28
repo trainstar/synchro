@@ -26,7 +26,30 @@ type NativePlatform interface {
 	Synchronize(ctx context.Context, key string) error
 	// Capture returns the local rows that selectors name and the count of
 	// every local application row.
-	Capture(ctx context.Context, key string, selectors []RowRef) ([]map[string]json.RawMessage, int, error)
+	Capture(ctx context.Context, key string, selectors []RowRef) ([]LocalRow, int, error)
+}
+
+// LocalRow is one captured local row. StorageClasses holds the SQLite
+// typeof() result of each column, because the captured JSON value of a blob
+// is base64url text and an integral real can read as an integer.
+type LocalRow struct {
+	Values         map[string]json.RawMessage
+	StorageClasses map[string]string
+}
+
+// storageClass is the SQLite storage class that the portable-to-SQLite
+// mapping requires for a non-null value of portableType.
+func storageClass(portableType string) string {
+	switch portableType {
+	case "int", "int64", "boolean":
+		return "integer"
+	case "float":
+		return "real"
+	case "bytes":
+		return "blob"
+	default:
+		return "text"
+	}
 }
 
 // RowRef names one dataset row.
@@ -289,12 +312,13 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 			return fmt.Errorf("capture %s: %w", user, err)
 		}
 		local := make(map[string]map[string]json.RawMessage, len(rows))
+		storage := make(map[string]map[string]string, len(rows))
 		for _, row := range rows {
 			var id string
-			if err := json.Unmarshal(row["id"], &id); err != nil || tables[id] == "" || local[id] != nil {
-				return fmt.Errorf("%w: %s holds an unexpected local row %s", ErrNativeMismatch, user, row["id"])
+			if err := json.Unmarshal(row.Values["id"], &id); err != nil || tables[id] == "" || local[id] != nil {
+				return fmt.Errorf("%w: %s holds an unexpected local row %s", ErrNativeMismatch, user, row.Values["id"])
 			}
-			local[id] = row
+			local[id], storage[id] = row.Values, row.StorageClasses
 		}
 		if total != len(local) {
 			problems = append(problems, fmt.Sprintf("%s holds %d local rows, %d of them authored", user, total, len(local)))
@@ -311,8 +335,8 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 			case !expected[id]:
 				problems = append(problems, fmt.Sprintf("%s holds live row %s/%s outside its scopes", user, table.Name, id))
 			}
-			if len(row) != len(table.Columns) {
-				problems = append(problems, fmt.Sprintf("%s %s/%s has %d local columns, want %d", user, table.Name, id, len(row), len(table.Columns)))
+			if len(row) != len(table.Columns) || len(storage[id]) != len(table.Columns) {
+				problems = append(problems, fmt.Sprintf("%s %s/%s has %d local columns and %d storage classes, want %d", user, table.Name, id, len(row), len(storage[id]), len(table.Columns)))
 			}
 			for _, column := range table.Columns {
 				wire, err := localWire(column.Type, row[column.Name])
@@ -321,6 +345,13 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 				}
 				if err != nil {
 					problems = append(problems, fmt.Sprintf("%s %s/%s.%s: %v", user, table.Name, id, column.Name, err))
+				}
+				want := "null"
+				if sourceRows[id][column.Name] != nil {
+					want = storageClass(column.Type)
+				}
+				if got := storage[id][column.Name]; got != want {
+					problems = append(problems, fmt.Sprintf("%s %s/%s.%s is stored as %q, want %q", user, table.Name, id, column.Name, got, want))
 				}
 			}
 		}

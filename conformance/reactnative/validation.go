@@ -457,6 +457,7 @@ func decodeCapture(result json.RawMessage, keys []string) (finalCapture, error) 
 		Trace:        copyRaw(captureMembers["request_trace"]),
 		DurableProof: copyRaw(captureMembers["durable_proof"]),
 		Rows:         copyRaw(captureMembers["application_rows"]),
+		Storage:      copyRaw(captureMembers["application_row_storage_classes"]),
 	}, nil
 }
 

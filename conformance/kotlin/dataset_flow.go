@@ -2,7 +2,6 @@ package kotlin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -84,7 +83,7 @@ func (d *DatasetPlatform) Synchronize(ctx context.Context, key string) error {
 }
 
 // Capture reads the selected local rows and the local application row count.
-func (d *DatasetPlatform) Capture(ctx context.Context, key string, selectors []dataset.RowRef) ([]map[string]json.RawMessage, int, error) {
+func (d *DatasetPlatform) Capture(ctx context.Context, key string, selectors []dataset.RowRef) ([]dataset.LocalRow, int, error) {
 	state, err := d.Platform.clientFor(d.clients[key])
 	if err != nil {
 		return nil, 0, err
@@ -105,9 +104,17 @@ func (d *DatasetPlatform) Capture(ctx context.Context, key string, selectors []d
 	if *result.ApplicationRowCount > maximumRows {
 		return nil, *result.ApplicationRowCount, nil
 	}
-	rows, err := androidApplicationRows(result.ApplicationRows)
+	values, err := androidApplicationRows(result.ApplicationRows)
 	if err != nil {
 		return nil, 0, err
+	}
+	var storage []map[string]string
+	if err := decodeFactArray(result.ApplicationRowStorageClasses, &storage, maximumRows); err != nil || len(storage) != len(values) {
+		return nil, 0, errors.New("Kotlin Android dataset capture has no storage class for each row")
+	}
+	rows := make([]dataset.LocalRow, 0, len(values))
+	for index := range values {
+		rows = append(rows, dataset.LocalRow{Values: values[index], StorageClasses: storage[index]})
 	}
 	return rows, *result.ApplicationRowCount, nil
 }

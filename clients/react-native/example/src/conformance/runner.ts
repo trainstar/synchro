@@ -129,6 +129,7 @@ export type ConformanceActionResult =
 
 export interface ConformanceCapture {
   application_rows?: Row[];
+  application_row_storage_classes?: Row[];
   pending_mutations?: PendingMutationInspection[];
   rejected_mutations?: RejectedMutationInspection[];
   client_state?: ClientStateInspection;
@@ -506,7 +507,9 @@ export class PublicConformanceRunner {
     }
     const client = await this.activate(clientKeys[0]);
     const inspection = this.requireInspection(clientKeys[0]);
-    const selectors = sources.includes('application-rows') ? decodeSelectors(parameters.row_selectors) : [];
+    const selectors = sources.includes('application-rows') || sources.includes('application-row-storage-classes')
+      ? decodeSelectors(parameters.row_selectors)
+      : [];
     // Every inspection source reads the same snapshot, taken at its first use.
     let snapshot: Promise<ClientStateSnapshotInspection> | null = null;
     const state = () => (snapshot ??= captureSnapshot(client, inspection, selectors));
@@ -517,6 +520,14 @@ export class PublicConformanceRunner {
           capture.application_rows = (await state()).applicationRows;
           if (capture.application_rows.length > MAXIMUM_CAPTURE_ROWS) {
             throw new ConformanceCommandError('execution_failed', new Error(`captured ${capture.application_rows.length} rows, bound is ${MAXIMUM_CAPTURE_ROWS}`));
+          }
+          break;
+        case 'application-row-storage-classes':
+          // Requested only with application-rows on an idle client. The
+          // entries follow the application_rows order.
+          capture.application_row_storage_classes = await captureStorageClasses(inspection, selectors);
+          if (capture.application_row_storage_classes.length !== (await state()).applicationRows.length) {
+            throw new ConformanceCommandError('capture_inspection_failed');
           }
           break;
         case 'pending-mutations': {
@@ -960,6 +971,28 @@ function durableProofIdentity(
 
 // Direct inspection does not normalize. Normalize first, as the native runners
 // do, so that the one snapshot reports normalized counts and details together.
+// The bridge value of a blob or of an integral real is ambiguous, so SQLite
+// typeof() reports the storage class of each selected row column.
+async function captureStorageClasses(inspection: SynchroInspection, selectors: RowSelector[]): Promise<Row[]> {
+  try {
+    const tables = [...new Set(selectors.map((selector) => selector.table_name))];
+    const columns = (await inspection.captureSnapshot(tables.map((table) => ({
+      sql: 'SELECT ? AS table_name, name FROM pragma_table_info(?)',
+      params: [table, table],
+    })))).applicationRows;
+    const statements = selectors.map((selector) => {
+      const names = columns.filter((column) => column.table_name === selector.table_name).map((column) => quoteIdentifier(String(column.name)));
+      return {
+        sql: `SELECT ${names.map((name) => `typeof(${name}) AS ${name}`).join(', ')} FROM ${quoteIdentifier(selector.table_name)} WHERE ${quoteIdentifier(selector.primary_key_field)} = ?`,
+        params: [sqliteBindValue(selector.primary_key)],
+      };
+    });
+    return (await inspection.captureSnapshot(statements)).applicationRows;
+  } catch {
+    throw new ConformanceCommandError('capture_inspection_failed');
+  }
+}
+
 async function captureSnapshot(
   client: SynchroClient,
   inspection: SynchroInspection,

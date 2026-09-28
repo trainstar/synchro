@@ -179,6 +179,7 @@ type finalCapture struct {
 	Trace        json.RawMessage
 	DurableProof json.RawMessage
 	Rows         json.RawMessage
+	Storage      json.RawMessage
 }
 
 // LoadWarmConnectScenario loads only the authored warm-connect scenario.

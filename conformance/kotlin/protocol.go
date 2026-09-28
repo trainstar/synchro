@@ -103,6 +103,7 @@ type Result struct {
 	DurableStateFingerprint         string                        `json:"durable_state_fingerprint"`
 	Schema                          json.RawMessage               `json:"schema"`
 	ApplicationRows                 json.RawMessage               `json:"application_rows"`
+	ApplicationRowStorageClasses    json.RawMessage               `json:"application_row_storage_classes"`
 	RetainedMutations               json.RawMessage               `json:"retained_mutations"`
 	RejectedMutations               json.RawMessage               `json:"rejected_mutations"`
 	ScopeStates                     json.RawMessage               `json:"scope_states"`
