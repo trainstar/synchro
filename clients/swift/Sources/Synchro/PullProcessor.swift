@@ -515,7 +515,10 @@ final class PullProcessor: @unchecked Sendable {
 
             var upsertStatements: [String: Statement] = [:]
             for pageRecord in pageRecords {
-                let protected = protectedRecordIDsByTable[pageRecord.schema.tableName]?.contains(pageRecord.recordID) == true
+                // Protection keeps an existing local row. A protected record without
+                // a local row, such as one a reset could not keep, gets the server row.
+                let protected = try protectedRecordIDsByTable[pageRecord.schema.tableName]?.contains(pageRecord.recordID) == true
+                    && Self.hasLocalRow(db, schema: pageRecord.schema, recordID: pageRecord.recordID)
                 if !protected {
                     let statement: Statement
                     if let existing = upsertStatements[pageRecord.schema.tableName] {
@@ -1403,6 +1406,15 @@ final class PullProcessor: @unchecked Sendable {
           AND server_row_json IS NULL
           AND server_version IS NULL
         """
+
+    private static func hasLocalRow(_ db: GRDB.Database, schema: LocalSchemaTable, recordID: String) throws -> Bool {
+        let pkCol = schema.primaryKey.first ?? "id"
+        return try Row.fetchOne(
+            db,
+            sql: "SELECT 1 FROM \(SQLiteHelpers.quoteIdentifier(schema.tableName)) WHERE \(SQLiteHelpers.quoteIdentifier(pkCol)) = ? LIMIT 1",
+            arguments: [recordID]
+        ) != nil
+    }
 
     private static func isProtectedApplicationRow(
         db: GRDB.Database,

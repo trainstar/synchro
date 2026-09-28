@@ -413,7 +413,9 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                     attempt.schemaHash,
                     schema,
                 )
-                if (!isApplicationRowProtected(db, schema.tableName, recordId)) {
+                // Protection keeps an existing local row. A protected record without
+                // a local row, such as one a reset could not keep, gets the server row.
+                if (!isApplicationRowProtected(db, schema.tableName, recordId) || !hasLocalRow(db, schema, recordId)) {
                     upsertRecord(db, recordId, localRow, schema)
                 }
                 SynchroMeta.upsertRowVersion(
@@ -856,6 +858,14 @@ internal class PullProcessor(private val database: SynchroDatabase) {
     }
 
     // MARK: - Private
+
+    private fun hasLocalRow(db: SQLiteDatabase, schema: LocalSchemaTable, recordId: String): Boolean {
+        val pkCol = schema.primaryKey.firstOrNull() ?: "id"
+        return db.rawQuery(
+            "SELECT 1 FROM ${SQLiteHelpers.quoteIdentifier(schema.tableName)} WHERE ${SQLiteHelpers.quoteIdentifier(pkCol)} = ? LIMIT 1",
+            arrayOf(recordId),
+        ).use { it.moveToFirst() }
+    }
 
     private fun upsertRecord(
         db: SQLiteDatabase,

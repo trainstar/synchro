@@ -1487,6 +1487,9 @@ class PullProcessorTests {
         insertOrder(db, "page-protected", shipAddress = "local", updatedAt = "2026-01-03T00:00:00.000000Z")
         insertPendingChange(db, "stale-protected", "captured")
         insertPendingChange(db, "page-protected", "captured")
+        // A reset can leave a protected record without a local row (#267).
+        insertPendingChange(db, "page-missing", "blocked_by_predecessor")
+        val ledgerBefore = db.query("SELECT mutation_id, record_id, lifecycle_state FROM _synchro_pending_changes ORDER BY local_order")
         val attempt = processor.beginScopeRebuild(
             scopeID,
             clientGeneration = 1,
@@ -1496,9 +1499,11 @@ class PullProcessorTests {
         )
         val protectedPage = rebuildRecord("page-protected", "server")
         val unprotectedPage = rebuildRecord("page-unprotected", "server")
+        val missingPage = rebuildRecord("page-missing", "server")
         val checksum = scopeChecksum(
             scopeID,
             listOf(
+                "page-missing" to missingPage.rowChecksum,
                 "page-protected" to protectedPage.rowChecksum,
                 "page-unprotected" to unprotectedPage.rowChecksum,
             ),
@@ -1514,7 +1519,7 @@ class PullProcessorTests {
         )
         val response = RebuildResponse(
             scope = scopeID,
-            records = listOf(protectedPage, unprotectedPage),
+            records = listOf(missingPage, protectedPage, unprotectedPage),
             cursor = null,
             hasMore = false,
             finalScopeCursor = "scope-20",
@@ -1537,6 +1542,15 @@ class PullProcessorTests {
         assertEquals(
             "server",
             db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf("page-unprotected"))?.get("ship_address"),
+        )
+
+        assertEquals(
+            "server",
+            db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf("page-missing"))?.get("ship_address"),
+        )
+        assertEquals(
+            ledgerBefore,
+            db.query("SELECT mutation_id, record_id, lifecycle_state FROM _synchro_pending_changes ORDER BY local_order"),
         )
 
         assertNotNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("stale-protected")))
