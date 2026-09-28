@@ -4,6 +4,7 @@ package kotlin
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/dataset"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -30,12 +32,30 @@ func TestRealKotlinScenarios(t *testing.T) {
 		t.Run("retention-reconnect", runKotlinRetentionReconnect)
 		t.Run("schema-queued-mutation", runKotlinSchemaQueuedMutation)
 		t.Run("schema-check", runKotlinSchemaCheck)
+		t.Run("dataset", runKotlinDataset)
 		// A scenario that holds a seed artifact runs last. Its artifact closes
 		// after the subtest returns, so it cannot reset the server for a
 		// successor.
 		t.Run("seeded-empty-startup", runKotlinSeededEmptyStartup)
 		t.Run("multi-scope-provenance", runKotlinMultiScopeProvenance)
 	})
+}
+
+// runKotlinDataset runs the authored training dataset flow through Kotlin clients.
+func runKotlinDataset(t *testing.T) {
+	t.Helper()
+	ctx, harness, _, platform := newKotlinFixture(t, 0)
+	if err := harness.ApplySourceSetup(ctx, blackbox.SourceSetup{Name: "dataset", SchemaSQL: dataset.SchemaSQL, RegistrationSQL: dataset.RegistrationSQL, Tables: dataset.TableNames()}); err != nil {
+		t.Fatalf("register the Kotlin Android dataset: %v", err)
+	}
+	source, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open the Kotlin Android dataset source: %v", err)
+	}
+	defer source.Close()
+	if err := dataset.RunNativeFlow(ctx, source, &DatasetPlatform{Platform: platform}, t.Logf); err != nil {
+		t.Fatalf("run the Kotlin Android dataset flow: %v", err)
+	}
 }
 
 func runKotlinSteadyPull(t *testing.T) {
@@ -388,6 +408,22 @@ var kotlinPerformanceSuiteReset sync.Once
 
 func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
+	ctx, harness, controller, platform := newKotlinFixture(t, pullPageSize)
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, scenarioPath)
+	if err != nil {
+		t.Fatalf("load Kotlin Android performance scenario %s: %v", scenarioPath, err)
+	}
+	return ctx, scenario, harness, controller, platform
+}
+
+// newKotlinFixture provisions the shared server and one direct Kotlin platform.
+// Its cleanups reset the server whether or not the scenario passes.
+func newKotlinFixture(t *testing.T, pullPageSize int) (context.Context, *blackbox.Harness, *blackbox.NativeController, *Platform) {
+	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
 		t.Fatal("TestRealKotlinScenarios requires --provision --install")
 	}
@@ -443,16 +479,8 @@ func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize
 	if err != nil {
 		t.Fatalf("create Kotlin Android direct platform: %v", err)
 	}
-	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("resolve repository root: %v", err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	t.Cleanup(cancel)
-	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, scenarioPath)
-	if err != nil {
-		t.Fatalf("load Kotlin Android performance scenario %s: %v", scenarioPath, err)
-	}
 	// The reset isolates both successful and failed scenarios.
 	t.Cleanup(func() {
 		if t.Failed() && os.Getenv("SYNCHRO_KEEP_SERVER_STATE") != "" {
@@ -477,5 +505,5 @@ func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize
 			t.Errorf("close Kotlin Android direct platform: %v", err)
 		}
 	})
-	return ctx, scenario, harness, controller, platform
+	return ctx, harness, controller, platform
 }
