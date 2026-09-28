@@ -178,6 +178,8 @@ type NativeQueuedMutation struct {
 
 // NativeQueueSuccessorRow records unchanged restart durability and one changed successor.
 type NativeQueueSuccessorRow struct {
+	// Target holds the authored initial and changed values for this row.
+	Target              NativeCRUDTarget
 	BeforeRestart       NativeQueuedMutation
 	AfterRestart        NativeQueuedMutation
 	OriginalAfterChange NativeQueuedMutation
@@ -617,12 +619,38 @@ func ValidateNativeQueueSuccessorEvidence(evidence NativeQueueSuccessorEvidence)
 			row.Successor.TableID != row.BeforeRestart.TableID || row.Successor.TableName != row.BeforeRestart.TableName ||
 			row.Successor.RecordID != row.BeforeRestart.RecordID || row.Successor.PrimaryKeyFieldID != row.BeforeRestart.PrimaryKeyFieldID ||
 			row.Successor.PrimaryKeyLogicalType != row.BeforeRestart.PrimaryKeyLogicalType || row.Successor.Operation != "update" ||
-			row.Successor.DependsOnMutationID == nil || *row.Successor.DependsOnMutationID != row.BeforeRestart.MutationID ||
-			nativeQueuedAuthoredIntentEqual(row.BeforeRestart, row.Successor) {
+			row.Successor.DependsOnMutationID == nil || *row.Successor.DependsOnMutationID != row.BeforeRestart.MutationID {
 			return errors.New("native changed intent did not retain a distinct linked successor")
+		}
+		// Identity and linkage cannot show changed content, so the authored
+		// values are compared separately for the same field.
+		fieldID, found := nativeQueuedFieldCarrying(row.BeforeRestart, row.Target.InitialValue)
+		if !found {
+			return errors.New("native queued original intent does not retain the authored initial value")
+		}
+		if value, found := nativeQueuedFieldValue(row.Successor, fieldID); !found || !nativeCRUDJSONEqual(value, row.Target.UpdatedValue) {
+			return errors.New("native queued successor does not retain the authored changed value")
 		}
 	}
 	return nil
+}
+
+func nativeQueuedFieldCarrying(mutation NativeQueuedMutation, value json.RawMessage) (string, bool) {
+	for _, field := range mutation.AuthoredFields {
+		if nativeCRUDJSONEqual(field.Value, value) {
+			return field.FieldID, true
+		}
+	}
+	return "", false
+}
+
+func nativeQueuedFieldValue(mutation NativeQueuedMutation, fieldID string) (json.RawMessage, bool) {
+	for _, field := range mutation.AuthoredFields {
+		if field.FieldID == fieldID {
+			return field.Value, true
+		}
+	}
+	return nil, false
 }
 
 func validateNativeQueuedMutation(mutation NativeQueuedMutation) error {

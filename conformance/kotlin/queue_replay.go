@@ -284,7 +284,7 @@ func kotlinQueueSuccessorEvidence(targets []scenarios.NativeCRUDTarget, beforeRa
 			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("Kotlin Android queue successor changed-intent count for table %q is %d", target.TableID, len(successors))
 		}
 		evidence.Rows = append(evidence.Rows, scenarios.NativeQueueSuccessorRow{
-			BeforeRestart: kotlinNativeQueuedMutation(original), AfterRestart: kotlinNativeQueuedMutation(restartedMutation),
+			Target: target, BeforeRestart: kotlinNativeQueuedMutation(original), AfterRestart: kotlinNativeQueuedMutation(restartedMutation),
 			OriginalAfterChange: kotlinNativeQueuedMutation(changedOriginal), Successor: kotlinNativeQueuedMutation(successors[0]),
 		})
 	}

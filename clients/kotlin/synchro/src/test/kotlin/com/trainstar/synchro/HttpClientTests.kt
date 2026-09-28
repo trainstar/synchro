@@ -1,10 +1,18 @@
 package com.trainstar.synchro
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import okhttp3.Call
+import okhttp3.Connection
+import okhttp3.EventListener
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
@@ -12,7 +20,12 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.CoroutineContext
 
 class HttpClientTests {
 
@@ -408,6 +421,85 @@ class HttpClientTests {
         )
 
         assertTrue(runCatching { httpClient.pull(request) }.exceptionOrNull() is SynchroError.InvalidResponse)
+    }
+
+    /**
+     * K-11. OkHttp can deliver a response after the caller is canceled but before the caller
+     * resumes. The canceled caller never reads that response, so the transport must close it.
+     * The proof is the real OkHttp exchange: the call must end and release its connection.
+     */
+    @Test
+    fun canceledCallerReleasesEveryDeliveredResponse() {
+        for (cancellation in listOf("none", "before_response", "after_response")) {
+            val released = AtomicInteger()
+            val callFinished = CountDownLatch(1)
+            val okHttp = OkHttpClient.Builder().eventListener(object : EventListener() {
+                override fun connectionReleased(call: Call, connection: Connection) {
+                    released.incrementAndGet()
+                }
+
+                override fun callEnd(call: Call) = callFinished.countDown()
+
+                override fun callFailed(call: Call, ioe: IOException) = callFinished.countDown()
+            }).build()
+            val client = HttpClient(
+                SynchroConfig(
+                    dbPath = "",
+                    serverURL = server.url("/").toString().trimEnd('/'),
+                    authProvider = { "test-token" },
+                    clientID = "test-device",
+                    appVersion = "1.0.0",
+                ),
+                okHttp,
+            )
+            server.enqueue(
+                if (cancellation == "before_response") {
+                    MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                } else {
+                    MockResponse().setResponseCode(500).setBody("""{"error":"held response"}""")
+                },
+            )
+            // The caller runs only when this test runs its queued task. A delivered response
+            // therefore waits here until the test decides whether to cancel the caller first.
+            val callerTasks = LinkedBlockingQueue<Runnable>()
+            val callerDispatcher = object : CoroutineDispatcher() {
+                override fun dispatch(context: CoroutineContext, block: Runnable) = callerTasks.put(block)
+            }
+            fun nextCallerTask(): Runnable =
+                requireNotNull(callerTasks.poll(5, TimeUnit.SECONDS)) { "$cancellation: the caller was not resumed" }
+            var failure: Throwable? = null
+            val caller = CoroutineScope(callerDispatcher).launch {
+                failure = runCatching { client.fetchSchema() }.exceptionOrNull()
+            }
+            nextCallerTask().run()
+            assertEquals("/sync/schema", server.takeRequest(5, TimeUnit.SECONDS)?.path)
+
+            when (cancellation) {
+                "none" -> nextCallerTask().run()
+                "before_response" -> {
+                    caller.cancel()
+                    nextCallerTask().run()
+                }
+                "after_response" -> {
+                    val deliveredResponse = nextCallerTask()
+                    caller.cancel()
+                    deliveredResponse.run()
+                }
+            }
+
+            assertTrue("$cancellation: the caller must complete", caller.isCompleted)
+            if (cancellation == "none") {
+                assertEquals(500, (failure as SynchroError.ServerError).status)
+            } else {
+                assertTrue("$cancellation: $failure", failure is CancellationException)
+            }
+            assertTrue("$cancellation: the OkHttp call must end", callFinished.await(5, TimeUnit.SECONDS))
+            assertEquals("$cancellation: the exchange must release its connection once", 1, released.get())
+            val pool = okHttp.connectionPool
+            assertEquals("$cancellation: no connection may stay allocated", 0, pool.connectionCount() - pool.idleConnectionCount())
+            pool.evictAll()
+            okHttp.dispatcher.executorService.shutdown()
+        }
     }
 
 }

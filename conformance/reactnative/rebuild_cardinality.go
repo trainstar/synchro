@@ -68,7 +68,6 @@ type RebuildCardinalityCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // RebuildCardinalityCoordinatorResult contains final server and identity evidence.
@@ -995,18 +994,8 @@ func (c *RebuildCardinalityCoordinator) validateCapture(capture finalCapture) er
 		return fmt.Errorf("React Native rebuild-cardinality client %s rebuild attempt facts=%d want=%d", c.steps[c.current].NativeBinding.ClientID, attempts, *expected.RebuildAttemptCount)
 	}
 	wantPages := (c.workloads[c.current].RecordCount + c.workloads[c.current].PageSize - 1) / c.workloads[c.current].PageSize
-	var pages, records uint64
-	for _, receipt := range proof.RebuildReceiptProofs {
-		if receipt.PageCount == 0 || receipt.PageCount > state.RebuildReceiptCount-pages ||
-			!receipt.RequestChainValid || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid ||
-			!receipt.ScopeChecksumValid || !receipt.FinalChecksumMatches {
-			return fmt.Errorf("React Native rebuild-cardinality client %s receipt proof detail is invalid", c.steps[c.current].NativeBinding.ClientID)
-		}
-		pages += receipt.PageCount
-		records += receipt.ReturnedRecordCount
-	}
-	if pages != state.RebuildReceiptCount || pages != wantPages || records != c.workloads[c.current].RecordCount {
-		return fmt.Errorf("React Native rebuild-cardinality client %s receipt pages=%d state=%d want=%d records=%d want=%d", c.steps[c.current].NativeBinding.ClientID, pages, state.RebuildReceiptCount, wantPages, records, c.workloads[c.current].RecordCount)
+	if err := validateFreshRebuildCompletion(proof, state, capture.Events, wantPages, c.workloads[c.current].RecordCount); err != nil {
+		return fmt.Errorf("React Native rebuild-cardinality client %s: %w", c.steps[c.current].NativeBinding.ClientID, err)
 	}
 	detailCount := state.ScopeRowCount
 	if detailCount > 512 {
@@ -1018,8 +1007,8 @@ func (c *RebuildCardinalityCoordinator) validateCapture(capture finalCapture) er
 	if err := c.validateClientIdentityEvidence(state, capture); err != nil {
 		return fmt.Errorf("React Native rebuild-cardinality client %s identity evidence is invalid: %w", c.steps[c.current].NativeBinding.ClientID, err)
 	}
-	if len(capture.Provenance) == 0 || len(capture.Events) == 0 {
-		return fmt.Errorf("React Native rebuild-cardinality client %s durable evidence is incomplete: provenance_records=%d event_records=%d", c.steps[c.current].NativeBinding.ClientID, len(capture.Provenance), len(capture.Events))
+	if len(capture.Provenance) == 0 {
+		return fmt.Errorf("React Native rebuild-cardinality client %s provenance evidence is incomplete", c.steps[c.current].NativeBinding.ClientID)
 	}
 	trace, err := captureTraceFromRaw(capture.Trace)
 	if err != nil {

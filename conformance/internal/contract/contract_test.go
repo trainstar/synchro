@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -23,15 +24,8 @@ func repositoryRoot(t *testing.T) string {
 }
 
 func TestLoadRealAuthoredCatalogs(t *testing.T) {
-	bundle, err := Load(context.Background(), repositoryRoot(t))
-	if err != nil {
+	if _, err := Load(context.Background(), repositoryRoot(t)); err != nil {
 		t.Fatalf("load authored catalogs: %v", err)
-	}
-	if got := len(bundle.Requirements.Requirements); got != 111 {
-		t.Fatalf("requirement count = %d, want 111", got)
-	}
-	if got := len(bundle.Faults.Controls); got != 111 {
-		t.Fatalf("control count = %d, want 111", got)
 	}
 }
 
@@ -110,7 +104,7 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 
 		bundle = newBundle(t)
 		bundle.Requirements.Requirements = bundle.Requirements.Requirements[1:]
-		requireErrorContains(t, bundle.Validate(), "exactly 111 records")
+		requireErrorContains(t, bundle.Validate(), "names unknown requirement")
 
 		bundle = newBundle(t)
 		bundle.Faults.Controls = append(bundle.Faults.Controls, bundle.Faults.Controls[0])
@@ -118,7 +112,61 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 
 		bundle = newBundle(t)
 		bundle.Faults.Controls = bundle.Faults.Controls[1:]
-		requireErrorContains(t, bundle.Validate(), "controls must contain exactly 111")
+		requireErrorContains(t, bundle.Validate(), "is not used by a control")
+
+		bundle = newBundle(t)
+		bundle.Faults.Controls = append([]Control(nil), bundle.Faults.Controls...)
+		bundle.Faults.Controls[0].NormativeReferences = bundle.Faults.Controls[1].NormativeReferences
+		requireErrorContains(t, bundle.Validate(), "normative references do not exactly match")
+	})
+
+	t.Run("reordered catalogs and shared bindings remain valid", func(t *testing.T) {
+		bundle := newBundle(t)
+		slices.Reverse(bundle.Requirements.Requirements)
+		slices.Reverse(bundle.Faults.Faults)
+		slices.Reverse(bundle.Faults.Controls)
+		slices.Reverse(bundle.Support.Cells)
+		slices.Reverse(bundle.Support.SemanticCorpusCellIDs)
+		slices.Reverse(bundle.Artifacts.Artifacts)
+		if err := bundle.Validate(); err != nil {
+			t.Fatalf("reordered catalogs failed validation: %v", err)
+		}
+
+		bundle = newBundle(t)
+		first, second := bundle.Requirements.Requirements[0], bundle.Requirements.Requirements[1]
+		shared := append(append([]NormativeReference(nil), first.NormativeReferences...), second.NormativeReferences...)
+		bundle.Requirements.Requirements[0].NormativeReferences = shared
+		bundle.Requirements.Requirements[1].NormativeReferences = append([]NormativeReference(nil), shared...)
+		for index, control := range bundle.Faults.Controls {
+			if control.RequirementIDs[0] == first.ID || control.RequirementIDs[0] == second.ID {
+				references := make([]string, 0, len(shared))
+				for _, reference := range shared {
+					references = append(references, reference.Path+reference.Anchor)
+				}
+				bundle.Faults.Controls[index].NormativeReferences = references
+			}
+		}
+		if err := bundle.Validate(); err != nil {
+			t.Fatalf("requirements that share two invariants failed validation: %v", err)
+		}
+
+		bundle = newBundle(t)
+		extra := bundle.Faults.Controls[0]
+		extra.ID = "CTRL-SHARED-BOUNDARY-001"
+		bundle.Faults.Controls = append(bundle.Faults.Controls, extra)
+		if err := bundle.Validate(); err != nil {
+			t.Fatalf("a requirement with two controls failed validation: %v", err)
+		}
+
+		bundle = newBundle(t)
+		removed := bundle.Faults.Controls[0]
+		bundle.Faults.Controls = bundle.Faults.Controls[1:]
+		bundle.Faults.Faults = slices.DeleteFunc(append([]Fault(nil), bundle.Faults.Faults...), func(fault Fault) bool {
+			return fault.ID == removed.FaultID
+		})
+		if err := bundle.Validate(); err != nil {
+			t.Fatalf("a requirement without a dedicated control failed validation: %v", err)
+		}
 	})
 
 	t.Run("invariant references require canonical H3 anchors", func(t *testing.T) {
@@ -189,7 +237,11 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 
 		bundle = newBundle(t)
 		bundle.Support.SemanticCorpusCellIDs = append([]SupportCellID(nil), bundle.Support.SemanticCorpusCellIDs...)
-		bundle.Support.SemanticCorpusCellIDs[0], bundle.Support.SemanticCorpusCellIDs[1] = bundle.Support.SemanticCorpusCellIDs[1], bundle.Support.SemanticCorpusCellIDs[0]
+		bundle.Support.SemanticCorpusCellIDs[0] = "SUP-IOS-CURRENT-001"
+		requireErrorContains(t, bundle.Validate(), "semantic corpus cell IDs do not match")
+
+		bundle = newBundle(t)
+		bundle.Support.SemanticCorpusCellIDs = append(bundle.Support.SemanticCorpusCellIDs, bundle.Support.SemanticCorpusCellIDs[0])
 		requireErrorContains(t, bundle.Validate(), "semantic corpus cell IDs do not match")
 	})
 
@@ -211,9 +263,9 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 			mutate func(*Bundle)
 			want   string
 		}{
-			{"metric", func(b *Bundle) { b.Performance.Budgets[0].Metric = "rebuild_pull_http_requests" }, "locked metric"},
-			{"comparator", func(b *Bundle) { b.Performance.Budgets[0].Comparator = "lte" }, "locked metric"},
-			{"limit", func(b *Bundle) { b.Performance.Budgets[0].Limit = "2" }, "locked metric"},
+			{"metric", func(b *Bundle) { b.Performance.Budgets[0].Metric = "rebuild_pull_http_requests" }, "locked v0.3.0 semantic snapshot"},
+			{"comparator", func(b *Bundle) { b.Performance.Budgets[0].Comparator = "lte" }, "locked v0.3.0 semantic snapshot"},
+			{"limit", func(b *Bundle) { b.Performance.Budgets[0].Limit = "2" }, "locked v0.3.0 semantic snapshot"},
 			{"nested stratum parameter", func(b *Bundle) {
 				b.Performance.RequiredMeasurements[8].Strata[0].Parameters = []byte(`{"bound_family":"fanout","boundary":"changed"}`)
 			}, "locked v0.3.0 semantic snapshot"},
@@ -773,41 +825,6 @@ func writeFixtureFile(t *testing.T, root, relativePath string, data []byte) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write fixture file %q: %v", relativePath, err)
 	}
-}
-
-func mutateRequirementReferencePath(t *testing.T, root, path string) {
-	t.Helper()
-	requirementsPath := filepath.Join(root, "conformance", "requirements.json")
-	data, err := os.ReadFile(requirementsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document map[string]any
-	if err := json.Unmarshal(data, &document); err != nil {
-		t.Fatal(err)
-	}
-	requirements, ok := document["requirements"].([]any)
-	if !ok || len(requirements) == 0 {
-		t.Fatal("fixture requirements did not decode as a nonempty array")
-	}
-	requirement, ok := requirements[0].(map[string]any)
-	if !ok {
-		t.Fatal("fixture first requirement did not decode as an object")
-	}
-	references, ok := requirement["normative_references"].([]any)
-	if !ok || len(references) == 0 {
-		t.Fatal("fixture first requirement has no normative reference")
-	}
-	reference, ok := references[0].(map[string]any)
-	if !ok {
-		t.Fatal("fixture first normative reference did not decode as an object")
-	}
-	reference["path"] = path
-	encoded, err := json.Marshal(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeFixtureFile(t, root, "conformance/requirements.json", encoded)
 }
 
 func requireErrorContains(t *testing.T, err error, want string) {

@@ -19,14 +19,13 @@ var (
 )
 
 type observerDriverState struct {
-	mu             sync.Mutex
-	beginCount     int
-	commitCount    int
-	readOnly       bool
-	isolation      driver.IsolationLevel
-	setReadOnly    int
-	queries        []string
-	writesRejected int
+	mu          sync.Mutex
+	beginCount  int
+	commitCount int
+	readOnly    bool
+	isolation   driver.IsolationLevel
+	setReadOnly int
+	queries     []string
 }
 
 type observerDriver struct{}
@@ -67,7 +66,6 @@ func (connection *observerConn) ExecContext(_ context.Context, query string, _ [
 		connection.state.setReadOnly++
 		return driver.RowsAffected(0), nil
 	}
-	connection.state.writesRejected++
 	return nil, errors.New("permission denied for table cf_items")
 }
 
@@ -184,17 +182,5 @@ func TestObserverRejectsMutationAndInternalAccess(t *testing.T) {
 		}},
 	}); err == nil {
 		t.Fatal("observer accepted an internal sync table")
-	}
-}
-
-func TestObserverRoleRejectsWrites(t *testing.T) {
-	database, state := observerTestDB(t)
-	if _, err := database.ExecContext(context.Background(), "INSERT INTO cf_items (id) VALUES ('x')"); err == nil {
-		t.Fatal("observer role write succeeded")
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.writesRejected != 1 {
-		t.Fatalf("rejected write count = %d", state.writesRejected)
 	}
 }

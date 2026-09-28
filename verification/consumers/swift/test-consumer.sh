@@ -14,12 +14,67 @@ tool="$repo_root/verification/packaged_smoke.py"
 package="$artifact_dir/apple/Synchro"
 archive="$artifact_dir/apple/synchro-spm-$(tr -d '\n' < "$repo_root/VERSION").tar.gz"
 tmp_root=${PACKAGED_SMOKE_TMP_ROOT:?PACKAGED_SMOKE_TMP_ROOT is required}
+phase_seconds=${PACKAGED_SMOKE_PHASE_SECONDS:-120}
+case "$phase_seconds" in
+  ''|*[!0-9]*|0) printf '%s\n' "PACKAGED_SMOKE_PHASE_SECONDS must be a positive integer" >&2; exit 1 ;;
+esac
 
 test -f "$package/Package.swift"
 test -f "$archive"
 mkdir -p "$tmp_root"
 work_dir=$(mktemp -d "$tmp_root/swift-packaged-smoke.XXXXXX")
-trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+phase_pid=
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  # Each phase ends at its own alarm, so this wait is bounded. The consumer
+  # is gone before its files are removed.
+  if [ -n "$phase_pid" ]; then
+    wait "$phase_pid" 2>/dev/null || :
+  fi
+  rm -rf "$work_dir"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# The shell reaps an exited child at once, so a later signal to its numeric
+# process ID can reach an unrelated process. The consumer therefore gets a
+# lifetime bound from an alarm that survives exec, and no cleanup signal.
+start_phase() {
+  SYNCHRO_PACKAGED_SMOKE_CONFIG="$work_dir/config.json" \
+  SYNCHRO_PACKAGED_SMOKE_DATABASE="$work_dir/consumer.db" \
+  SYNCHRO_PACKAGED_SMOKE_PHASE=$1 \
+  SYNCHRO_PACKAGED_SMOKE_PHASE_RESULT="$work_dir/$1.json" \
+    perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' \
+      "$phase_seconds" "$binary" > "$work_dir/$1.log" 2>&1 &
+  phase_pid=$!
+}
+
+await_phase_result() {
+  phase_ready=0
+  elapsed=0
+  while [ "$elapsed" -lt "$phase_seconds" ]; do
+    if [ -f "$work_dir/$1.json" ]; then
+      phase_ready=1
+      return
+    fi
+    # Signal 0 only probes. The alarm bounds the consumer if this probe errs.
+    if ! kill -0 "$phase_pid" 2>/dev/null; then
+      return
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+}
+
+reap_phase() {
+  set +e
+  wait "$phase_pid"
+  phase_status=$?
+  set -e
+  phase_pid=
+}
 
 python3 "$tool" config \
   --cell "$cell_id" \
@@ -41,26 +96,11 @@ SYNCHRO_SWIFT_PACKAGE_PATH="$package" swift build \
 binary="$work_dir/build/debug/SynchroConsumer"
 test -x "$binary"
 
-SYNCHRO_PACKAGED_SMOKE_CONFIG="$work_dir/config.json" \
-SYNCHRO_PACKAGED_SMOKE_DATABASE="$work_dir/consumer.db" \
-SYNCHRO_PACKAGED_SMOKE_PHASE=initial \
-SYNCHRO_PACKAGED_SMOKE_PHASE_RESULT="$work_dir/initial.json" \
-  "$binary" > "$work_dir/initial.log" 2>&1 &
-initial_pid=$!
-
-ready=0
-for _ in $(seq 1 120); do
-  if [ -f "$work_dir/initial.json" ]; then
-    ready=1
-    break
-  fi
-  if ! kill -0 "$initial_pid" 2>/dev/null; then
-    break
-  fi
-  sleep 1
-done
-if [ "$ready" -ne 1 ]; then
-  wait "$initial_pid" || true
+start_phase initial
+initial_pid=$phase_pid
+await_phase_result initial
+if [ "$phase_ready" -ne 1 ]; then
+  reap_phase
   # The consumer names its failure on stderr, and the work directory is
   # deleted on exit, so the cause must be reported here or it is lost.
   cat "$work_dir/initial.log" >&2 || true
@@ -69,35 +109,16 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 kill -9 "$initial_pid"
-set +e
-wait "$initial_pid"
-kill_status=$?
-set -e
-if [ "$kill_status" -ne 137 ] || kill -0 "$initial_pid" 2>/dev/null; then
+reap_phase
+if [ "$phase_status" -ne 137 ]; then
   printf '%s\n' "Packaged Swift process kill was not observed" >&2
   exit 1
 fi
 
-SYNCHRO_PACKAGED_SMOKE_CONFIG="$work_dir/config.json" \
-SYNCHRO_PACKAGED_SMOKE_DATABASE="$work_dir/consumer.db" \
-SYNCHRO_PACKAGED_SMOKE_PHASE=resume \
-SYNCHRO_PACKAGED_SMOKE_PHASE_RESULT="$work_dir/resume.json" \
-  "$binary" > "$work_dir/resume.log" 2>&1 &
-resume_pid=$!
-
-resumed=0
-for _ in $(seq 1 120); do
-  if [ -f "$work_dir/resume.json" ]; then
-    resumed=1
-    break
-  fi
-  if ! kill -0 "$resume_pid" 2>/dev/null; then
-    break
-  fi
-  sleep 1
-done
-wait "$resume_pid"
-if [ "$resumed" -ne 1 ]; then
+start_phase resume
+await_phase_result resume
+reap_phase
+if [ "$phase_ready" -ne 1 ] || [ "$phase_status" -ne 0 ]; then
   cat "$work_dir/resume.log" >&2 || true
   printf '%s\n' "Packaged Swift resume phase did not pass" >&2
   exit 1

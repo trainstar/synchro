@@ -266,6 +266,13 @@ assignment advances `scope_set_version`. Added scopes start with a null cursor
 and require rebuild. Removed scopes require provenance cleanup. A client cannot
 invent a scope ID or grant itself a scope.
 
+Before that connect, pull and rebuild use the assigned scope set that the
+client's last connect stored. A revoked scope therefore stays readable to an
+already connected client until it connects again. A new grant is not readable
+until that connect. Registration and removal of a shared scope change the
+stored set of every active client when the operation commits, and the next pull
+returns the delta.
+
 ### Function restrictions
 
 Membership and impact functions must be schema-qualified `LANGUAGE SQL`,

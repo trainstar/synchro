@@ -158,7 +158,9 @@ File.write(podfile, content.sub(target, pods))
 RUBY
     (
       cd "$work_dir/app/ios"
-      pod install
+      # CocoaPods caches a git pod by URL and tag, so a shared cache could supply
+      # sources that differ from this materialized release.
+      CP_CACHE_DIR="$work_dir/cocoapods-cache" pod install
       # A Debug build queries the Metro port and can retry it forever on
       # a machine with no packager, so the consumer builds Release and
       # always runs its embedded bundle.
@@ -253,6 +255,7 @@ RUBY
       printf '%s\n' "Packaged React Native iOS process kill was not observed" >&2
       exit 1
     fi
+    python3 "$tool" author-remote --config "$work_dir/config.json" --output "$work_dir/remote.json"
     launch_output=$(launch_ios_app "$simulator_udid" dev.synchro.consumer)
     resume_pid=${launch_output##*: }
     case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "React Native iOS resume process id is invalid" >&2; exit 1 ;; esac
@@ -381,6 +384,7 @@ GRADLE
       printf '%s\n' "Packaged React Native Android process kill was not observed" >&2
       exit 1
     fi
+    python3 "$tool" author-remote --config "$work_dir/config.json" --output "$work_dir/remote.json"
     "$adb" shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
     resume_pid=$("$adb" shell pidof com.synchroconsumer | tr -d '\r')
     case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "React Native Android resume process id is invalid" >&2; exit 1 ;; esac
@@ -407,13 +411,16 @@ GRADLE
     ;;
 esac
 
+python3 "$tool" verify-server --config "$work_dir/config.json" --remote "$work_dir/remote.json" --output "$work_dir/server.json"
 set -- python3 "$tool" complete-cell \
   --repo-root "$repo_root" \
   --cell "$cell_id" \
   --output "$cell_result" \
   --initial "$work_dir/initial.json" \
   --resume "$work_dir/resume.json" \
-  --killed-pid "$initial_pid"
+  --killed-pid "$initial_pid" \
+  --remote "$work_dir/remote.json" \
+  --server-verification "$work_dir/server.json"
 distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-"$tarball $native_artifact"}
 for artifact in $distribution_artifacts; do
   set -- "$@" --artifact "$artifact"

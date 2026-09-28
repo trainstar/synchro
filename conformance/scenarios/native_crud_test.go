@@ -163,6 +163,24 @@ func TestQueueSuccessorControlRejectsIdentityAndContentMutants(t *testing.T) {
 				evidence.Rows[0].Successor.DependsOnMutationID = nil
 			},
 		},
+		{
+			name: "linked successor keeps the original value",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Successor.AuthoredFields = append([]NativeQueuedField(nil), evidence.Rows[0].BeforeRestart.AuthoredFields...)
+			},
+		},
+		{
+			name: "successor writes the changed value to another field",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Successor.AuthoredFields = []NativeQueuedField{{FieldID: "other", LogicalType: "string", Value: json.RawMessage(`"updated"`)}}
+			},
+		},
+		{
+			name: "original lacks the authored initial value",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Target.InitialValue = json.RawMessage(`"not-authored"`)
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -225,8 +243,12 @@ func validNativeQueueSuccessorEvidence() NativeQueueSuccessorEvidence {
 		Status: "superseded_before_send", SourceKind: "application", DependsOnMutationID: &dependency, NormalizedMutationID: &normalized,
 		AuthoredFields: []NativeQueuedField{{FieldID: "value", LogicalType: "string", Value: json.RawMessage(`"updated"`)}},
 	}
+	target := NativeCRUDTarget{
+		TableID: "items", TableName: "runtime_items", PrimaryKeyField: "id", RecordID: "row-a", ValueField: "value",
+		InitialValue: json.RawMessage(`"initial"`), UpdatedValue: json.RawMessage(`"updated"`),
+	}
 	return NativeQueueSuccessorEvidence{Rows: []NativeQueueSuccessorRow{{
-		BeforeRestart: original, AfterRestart: afterRestart, OriginalAfterChange: afterChange, Successor: successor,
+		Target: target, BeforeRestart: original, AfterRestart: afterRestart, OriginalAfterChange: afterChange, Successor: successor,
 	}}}
 }
 

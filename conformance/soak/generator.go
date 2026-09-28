@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/trainstar/synchro/conformance/faults"
 	"github.com/trainstar/synchro/conformance/internal/contract"
@@ -29,8 +28,6 @@ const (
 	MaximumFaultRate = 100
 	// MinimumCoverageOperations is the count that covers every operation family.
 	MinimumCoverageOperations = 7
-	// MaximumSoakDuration bounds duration-to-plan conversion.
-	MaximumSoakDuration = 72 * time.Hour
 )
 
 var (
@@ -71,11 +68,15 @@ var operationKinds = []OperationKind{
 //
 // All fields are part of the replay configuration and are written to journals.
 type Config struct {
+	// OperationCount is the explicit operation budget. It is not a duration.
 	OperationCount int      `json:"operation_count"`
 	Users          []string `json:"users"`
 	Clients        []string `json:"clients"`
 	Scopes         []string `json:"scopes"`
 	FaultRate      int      `json:"fault_rate"`
+	// Control names one harness negative control. Empty runs no control.
+	// Replay rebuilds the harness with the same control.
+	Control string `json:"control,omitempty"`
 }
 
 // Operation is one generated workload instruction.
@@ -209,43 +210,15 @@ func (g *Generator) Generate() (Plan, error) {
 	return plan, nil
 }
 
-// ConfigForDuration converts a bounded soak duration to a reproducible plan size.
-func ConfigForDuration(duration time.Duration) (Config, error) {
-	if duration <= 0 || duration > MaximumSoakDuration {
-		return Config{}, fmt.Errorf("%w: duration must be greater than zero and at most %s", ErrInvalidConfig, MaximumSoakDuration)
-	}
-	// One live operation drives the real adapter, the extension, and often a
-	// WAL wait or a process restart, so it costs seconds, not milliseconds.
-	const secondsPerOperation = 5
-	unit := secondsPerOperation * time.Second
-	count := int64(duration / unit)
-	if duration%unit != 0 {
-		count++
-	}
-	if count < MinimumCoverageOperations {
-		count = MinimumCoverageOperations
-	}
-	if count > MaximumOperationCount {
-		count = MaximumOperationCount
-	}
-	return Config{OperationCount: int(count), FaultRate: DefaultFaultRate}, nil
-}
-
-// GenerateForDuration returns a plan with a count derived from duration.
-func GenerateForDuration(seed uint64, duration time.Duration, catalog *faults.Catalog) (Plan, error) {
-	config, err := ConfigForDuration(duration)
-	if err != nil {
-		return Plan{}, err
-	}
-	return Generate(seed, config, catalog)
-}
-
 func (c Config) validate() error {
 	if c.OperationCount < MinimumCoverageOperations || c.OperationCount > MaximumOperationCount {
 		return fmt.Errorf("%w: operation count must be between %d and %d", ErrInvalidConfig, MinimumCoverageOperations, MaximumOperationCount)
 	}
 	if c.FaultRate < 0 || c.FaultRate > MaximumFaultRate {
 		return fmt.Errorf("%w: fault rate must be between 0 and %d", ErrInvalidConfig, MaximumFaultRate)
+	}
+	if len(c.Control) > MaximumIdentityBytes || strings.IndexFunc(c.Control, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+		return fmt.Errorf("%w: control is invalid", ErrInvalidConfig)
 	}
 	identitySets := []struct {
 		name   string
@@ -275,7 +248,7 @@ func (c Config) validate() error {
 }
 
 func normalizeConfig(config Config) (Config, error) {
-	useDefaults := config.OperationCount == 0 && config.FaultRate == 0 && config.Users == nil && config.Clients == nil && config.Scopes == nil
+	useDefaults := config.OperationCount == 0 && config.FaultRate == 0 && config.Users == nil && config.Clients == nil && config.Scopes == nil && config.Control == ""
 	if config.OperationCount == 0 {
 		config.OperationCount = DefaultOperationCount
 	}

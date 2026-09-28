@@ -89,7 +89,6 @@ type SchemaCheckCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // SchemaCheckCoordinatorResult contains server evidence and resolved identities.
@@ -491,9 +490,6 @@ func NewSchemaCheckCoordinator(config SchemaCheckCoordinatorConfig) (*SchemaChec
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native schema-check auth token is required")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {

@@ -1,7 +1,30 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
+index aeafc6d..4b56a96 100644
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
+@@ -2048,7 +2048,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1108
++-- synchro-pg/src/health.rs:1109
+ -- synchro_pg::health::synchro_health_detail
+ CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
+@@ -2260,7 +2260,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1101
++-- synchro-pg/src/health.rs:1102
+ -- synchro_pg::health::synchro_readiness
+ CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+index 983d484..e53ba4f 100644
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -943,7 +943,8 @@ pub(crate) fn load_readiness_status_with_configuration(
+@@ -986,7 +986,8 @@ pub(crate) fn load_readiness_status_with_configuration(
      );
      status.set(
          "relation_identity",
@@ -11,16 +34,3 @@ diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/hea
      );
      if configuration.publication.is_some() {
          status.set(
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-@@ -2051,3 +2051,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1098
-+-- synchro-pg/src/health.rs:1099
- -- synchro_pg::health::synchro_health_detail
-@@ -2263,3 +2263,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1091
-+-- synchro-pg/src/health.rs:1092
- -- synchro_pg::health::synchro_readiness

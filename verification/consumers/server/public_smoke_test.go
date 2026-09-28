@@ -105,12 +105,13 @@ func TestPullRetriesOnlyCapturePending(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := pullUntilCustomerDelivered(
+	if _, err := pullUntilCustomerDelivered(
 		context.Background(),
 		server.Client(),
 		"token",
 		server.URL,
 		state,
+		authoredName,
 	); err != nil {
 		t.Fatalf("pull until customer delivered: %v", err)
 	}
@@ -150,12 +151,13 @@ func TestPullRequiresExactAuthoredCustomer(t *testing.T) {
 			}))
 			defer server.Close()
 
-			if err := pullUntilCustomerDelivered(
+			if _, err := pullUntilCustomerDelivered(
 				context.Background(),
 				server.Client(),
 				"token",
 				server.URL,
 				state,
+				authoredName,
 			); err == nil {
 				t.Fatal("pull without the exact authored customer passed")
 			}
@@ -194,12 +196,13 @@ func TestPullFollowsCursorDeltasUntilAuthoredCustomer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := pullUntilCustomerDelivered(
+	if _, err := pullUntilCustomerDelivered(
 		context.Background(),
 		server.Client(),
 		"token",
 		server.URL,
 		state,
+		authoredName,
 	); err != nil {
 		t.Fatalf("pull until customer delivered: %v", err)
 	}
@@ -280,6 +283,41 @@ func TestBootstrapIncrementalCursorsFollowsRebuildContinuation(t *testing.T) {
 	}
 }
 
+func TestResumedPullReportsOnlyARemoteName(t *testing.T) {
+	state := smokePullState()
+	remote := smokePulledCustomer(state)
+	remote["row"].(map[string]any)[state.Fields["name"]] = "Server authored remote"
+	for _, test := range []struct {
+		name    string
+		changes []any
+		want    string
+	}{
+		{name: "authored only", changes: []any{smokePulledCustomer(state)}},
+		{name: "authored then remote", changes: []any{smokePulledCustomer(state), remote}, want: "Server authored remote"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				_ = json.NewEncoder(response).Encode(pullPage(state, test.changes, false, nil))
+			}))
+			defer server.Close()
+
+			name, err := pullUntilCustomerDelivered(
+				context.Background(), server.Client(), "token", server.URL, state,
+				func(name string) bool { return name != smokeName },
+			)
+			if test.want == "" {
+				if err == nil {
+					t.Fatalf("pull without a remote name reported %q", name)
+				}
+				return
+			}
+			if err != nil || name != test.want {
+				t.Fatalf("pull = %q, %v; want %q", name, err, test.want)
+			}
+		})
+	}
+}
+
 func TestPushDigestBindsRequestAndResponse(t *testing.T) {
 	baseline := pushDigest([]byte("request"), []byte("response"))
 	if baseline == pushDigest([]byte("changed"), []byte("response")) {
@@ -296,7 +334,7 @@ func TestRequireAcceptedPushRejectsTerminalOutcome(t *testing.T) {
 			"accepted":[{"mutation_id":"` + smokeMutationID + `"}],
 			"rejected":[]
 		}`
-	if err := requireAcceptedPush([]byte(accepted)); err != nil {
+	if err := requireAcceptedPush([]byte(accepted), smokeBatchID, smokeMutationID); err != nil {
 		t.Fatalf("accepted push: %v", err)
 	}
 	rejected := `{
@@ -304,9 +342,13 @@ func TestRequireAcceptedPushRejectsTerminalOutcome(t *testing.T) {
 			"accepted":[],
 			"rejected":[{"mutation_id":"` + smokeMutationID + `"}]
 		}`
-	if err := requireAcceptedPush([]byte(rejected)); err == nil {
+	if err := requireAcceptedPush([]byte(rejected), smokeBatchID, smokeMutationID); err == nil {
 		t.Fatal("terminally rejected push passed")
 	}
+}
+
+func authoredName(name string) bool {
+	return name == smokeName
 }
 
 func smokePullState() clientState {

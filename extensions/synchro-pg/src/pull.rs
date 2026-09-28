@@ -1392,10 +1392,14 @@ pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias
                 expression
             )
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
 
-    format!("jsonb_build_object({pairs})")
+    // PostgreSQL limits one call to FUNC_MAX_ARGS (100) arguments, so each call takes at most 50 pairs.
+    let objects = pairs
+        .chunks(50)
+        .map(|chunk| format!("jsonb_build_object({})", chunk.join(", ")))
+        .collect::<Vec<_>>();
+    format!("({})", objects.join(" || "))
 }
 
 pub(crate) fn compute_bucket_checksums(

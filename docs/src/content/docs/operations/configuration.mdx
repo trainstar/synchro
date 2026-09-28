@@ -72,6 +72,24 @@ Each registered relation must be a member of the configured publication without 
 To repair a member, drop the table from the publication.
 Then add the table to the publication again without a column list and without a row filter.
 
+## Partitioned tables
+
+A registered partitioned table needs `publish_via_partition_root = true` on the configured publication.
+Without this setting, pgoutput publishes each change under its leaf partition, and the worker cannot find the registration.
+Synchro creates its publication with `publish_via_partition_root = true`.
+
+Registration never changes the option of an existing publication, because other subscribers can share that publication.
+
+- Registration rejects a partitioned table when the configured publication does not have `publish_via_partition_root = true`.
+- Registration rejects a relation that the publication publishes through an ancestor partitioned table.
+- The rejected registration leaves the registry and the publication unchanged.
+- The readiness check `publication` fails with `publication_mismatch` when a registered relation is not published under its own identity.
+
+To register a partitioned table on an existing publication, first confirm that no other subscriber depends on leaf partition identities.
+Then run `ALTER PUBLICATION <name> SET (publish_via_partition_root = true)` and register the table.
+A `TRUNCATE` of one leaf partition is not published under the root identity.
+Do not truncate a partition of a registered partitioned table.
+
 ## Generated columns
 
 The worker reads only the columns that pgoutput sends.

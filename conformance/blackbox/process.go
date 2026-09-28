@@ -1181,22 +1181,6 @@ func provisionedHBAConfiguration(database string, roles []string) string {
 	}, "\n")
 }
 
-func workerHBAConfiguration(database, worker string) string {
-	database = quoteHBAName(database)
-	worker = quoteHBAName(worker)
-	return strings.Join([]string{
-		"# Synchro conformance authentication boundary",
-		"local " + database + " " + worker + " scram-sha-256",
-		"local all " + worker + " reject",
-		"local all all trust",
-		"host " + database + " " + worker + " 127.0.0.1/32 scram-sha-256",
-		"host all " + worker + " 127.0.0.1/32 reject",
-		"host all all 127.0.0.1/32 scram-sha-256",
-		"host all all ::1/128 scram-sha-256",
-		"",
-	}, "\n")
-}
-
 func quoteHBAName(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
@@ -2044,6 +2028,14 @@ func (h *Harness) grantRunRoles(ctx context.Context) error {
 		}
 		if _, err := database.ExecContext(ctx, "GRANT SELECT ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.env.Observer.Username)); err != nil {
 			return errors.New("grant observer source-table access failed")
+		}
+		// Row security is enabled on every source table, so the SELECT grant
+		// alone returns no rows to the observer.
+		if _, err := database.ExecContext(ctx,
+			"CREATE POLICY synchro_conformance_observer ON public."+quoteIdentifier(table)+
+				" AS PERMISSIVE FOR SELECT TO "+quoteIdentifier(h.env.Observer.Username)+" USING (true)",
+		); err != nil {
+			return errors.New("create observer source-table row security policy failed")
 		}
 	}
 	if err := h.verifyRunRoleSeparation(ctx, database); err != nil {
@@ -3635,64 +3627,6 @@ func (executor *OperatorExecutor) ConfigureDecodeTrap(ctx context.Context, prima
 // InjectRegisteredTruncate commits the fixed unsupported WAL operation.
 func (executor *OperatorExecutor) InjectRegisteredTruncate(ctx context.Context) error {
 	return executor.exec(ctx, "TRUNCATE TABLE public.cf_items")
-}
-
-// InjectDecoderMetadataChange commits one source transaction while the
-// initialized decoder is blocked from refreshing its relation metadata.
-func (executor *OperatorExecutor) InjectDecoderMetadataChange(ctx context.Context, recordID string) (returnedErr error) {
-	if executor == nil || executor.harness == nil || !executor.harness.sourceReady ||
-		ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
-		return errors.New("decoder metadata control is invalid")
-	}
-	gate, err := executor.harness.acquireWALWorkerGate(ctx)
-	if err != nil {
-		return errors.New("fence WAL worker for decoder metadata control failed")
-	}
-	defer func() {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		returnedErr = errors.Join(returnedErr, gate.release(cleanupContext))
-	}()
-	// Let the queued worker refresh registry metadata before the fault changes it.
-	for {
-		var before, after int64
-		const activeGeneration = "SELECT generation FROM synchro.sync_registry_generations WHERE state = 'active'"
-		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&before); err != nil {
-			return errors.New("read decoder registry generation before worker poll failed")
-		}
-		if err := gate.release(ctx); err != nil {
-			return errors.New("release decoder initialization gate failed")
-		}
-		gate, err = executor.harness.acquireWALWorkerGate(ctx)
-		if err != nil {
-			return errors.New("reacquire decoder initialization gate failed")
-		}
-		if err := gate.connection.QueryRowContext(ctx, activeGeneration).Scan(&after); err != nil {
-			return errors.New("read decoder registry generation after worker poll failed")
-		}
-		if before == after {
-			break
-		}
-	}
-	transaction, err := gate.connection.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.New("begin decoder metadata control failed")
-	}
-	defer transaction.Rollback()
-	if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_items ALTER COLUMN value TYPE varchar(256)"); err != nil {
-		return errors.New("alter decoder metadata control relation failed")
-	}
-	if _, err := transaction.ExecContext(
-		ctx,
-		"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'decode-repair-source')",
-		recordID,
-	); err != nil {
-		return errors.New("insert decoder metadata control row failed")
-	}
-	if err := transaction.Commit(); err != nil {
-		return errors.New("commit decoder metadata control failed")
-	}
-	return nil
 }
 
 // RetryWALPoison requests the production same-position retry path.

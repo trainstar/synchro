@@ -17,6 +17,9 @@ import (
 
 var coreSyncEntrypoints = []string{"serveConnect", "servePush", "servePull", "serveRebuild"}
 
+// The audit loads and traverses adapter packages under this import prefix.
+const adapterInternalImportPrefix = "github.com/trainstar/synchro/api/go/internal/"
+
 var allowedCoreHTTPSelectors = map[string]bool{
 	"MethodPost":                true,
 	"NoBody":                    true,
@@ -89,6 +92,23 @@ func coreSyncBoundaryOutboundHTTP() {
 			t.Fatalf("outbound HTTP negative control passed: %v", err)
 		}
 	})
+
+	t.Run("rejects outbound HTTP in an adapter internal package", func(t *testing.T) {
+		mutated := maps.Clone(sources)
+		const name = "api/go/internal/jsonnumber/number.go"
+		const signature = "func CanonicalizeTokens(document []byte) ([]byte, error) {\n"
+		number, ok := mutated[name]
+		if !ok || strings.Count(string(number), signature) != 1 {
+			t.Fatalf("core sync audit did not load the CanonicalizeTokens source in %s", name)
+		}
+		number = []byte(strings.Replace(string(number), "import (\n", "import (\n\t\"net/http\"\n", 1))
+		number = []byte(strings.Replace(string(number), signature, signature+"\t_, _ = http.Get(\"http://127.0.0.1\")\n", 1))
+		mutated[name] = number
+		err := auditCoreSyncBoundary(mutated)
+		if err == nil || !strings.Contains(err.Error(), "net/http.Get") {
+			t.Fatalf("internal package outbound HTTP negative control passed: %v", err)
+		}
+	})
 }
 
 func assertCoreSyncBoundary(t *testing.T) {
@@ -121,8 +141,49 @@ func loadCoreSyncSources(t *testing.T) map[string][]byte {
 			t.Fatalf("read %s: %v", name, err)
 		}
 		sources[name] = data
+		if err := loadAdapterInternalImports(root, name, data, sources); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return sources
+}
+
+// loadAdapterInternalImports adds the production sources of each adapter
+// internal package that source imports. Their declarations join the audit.
+func loadAdapterInternalImports(root, name string, source []byte, sources map[string][]byte) error {
+	file, err := parser.ParseFile(token.NewFileSet(), name, source, parser.ImportsOnly)
+	if err != nil {
+		return fmt.Errorf("parse %s imports: %w", name, err)
+	}
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || !strings.HasPrefix(importPath, adapterInternalImportPrefix) {
+			continue
+		}
+		relative := path.Join("api/go/internal", strings.TrimPrefix(importPath, adapterInternalImportPrefix))
+		entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(relative)))
+		if err != nil {
+			return fmt.Errorf("read adapter internal package %s: %w", relative, err)
+		}
+		for _, entry := range entries {
+			packageSource := path.Join(relative, entry.Name())
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+				continue
+			}
+			if _, loaded := sources[packageSource]; loaded {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(packageSource)))
+			if err != nil {
+				return fmt.Errorf("read %s: %w", packageSource, err)
+			}
+			sources[packageSource] = data
+			if err := loadAdapterInternalImports(root, packageSource, data, sources); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func auditCoreSyncBoundary(sources map[string][]byte) error {
@@ -298,6 +359,9 @@ func forbiddenCorePackageSelector(importPath, selector string) string {
 	if strings.HasPrefix(importPath, "net/") || importPath == "crypto/tls" ||
 		importPath == "os/exec" || importPath == "syscall" {
 		return "forbidden network-capable dependency " + importPath + "." + selector
+	}
+	if strings.HasPrefix(importPath, adapterInternalImportPrefix) {
+		return ""
 	}
 	if strings.Contains(strings.Split(importPath, "/")[0], ".") {
 		return "forbidden external dependency " + importPath + "." + selector

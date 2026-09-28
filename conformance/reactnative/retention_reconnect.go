@@ -47,7 +47,6 @@ type RetentionReconnectCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -133,6 +132,8 @@ type RetentionReconnectCoordinator struct {
 	resumeCapture  *finalCapture
 	initialTrace   *traceSnapshot
 	traceEvidence  *retentionReconnectTraceEvidence
+	// initialPending is the complete retained queue before generation renewal.
+	initialPending []queueReplayPendingMutation
 	result         RetentionReconnectCoordinatorResult
 }
 
@@ -466,9 +467,6 @@ func NewRetentionReconnectCoordinator(config RetentionReconnectCoordinatorConfig
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native retention-reconnect coordinator auth token is required")
 	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
-	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {
 		serverURL = config.Harness.AdapterURL()
@@ -724,6 +722,10 @@ func (c *RetentionReconnectCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	// An exchange holds mu while it waits for a proxy barrier, so release every
+	// barrier before acquiring mu.
+	c.recordProxyFailure(errors.New("React Native retention-reconnect coordinator closed"))
+	c.releaseFault()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -731,7 +733,6 @@ func (c *RetentionReconnectCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	c.releaseFault()
 	shutdownErr := c.server.Shutdown(ctx)
 	listenerErr := c.listener.Close()
 	if shutdownErr != nil {
@@ -1245,6 +1246,9 @@ func (c *RetentionReconnectCoordinator) validateRestartCapture(capture finalCapt
 	if !reflect.DeepEqual(before, after) {
 		return errors.New("React Native retention-reconnect restart changed the durable floor cursor")
 	}
+	if !sameJSONValue(c.finalCapture.Pending, capture.Pending) || !sameJSONValue(c.finalCapture.Rejected, capture.Rejected) {
+		return errors.New("React Native retention-reconnect restart changed the durable queue")
+	}
 	if err := validateSyncStatusShape(capture.Status); err != nil {
 		return err
 	}
@@ -1448,10 +1452,7 @@ func (c *RetentionReconnectCoordinator) validateQueue(capture finalCapture) erro
 	if err != nil {
 		return err
 	}
-	var pending []struct {
-		MutationID string `json:"mutationID"`
-		Status     string `json:"status"`
-	}
+	var pending []queueReplayPendingMutation
 	if err := decodeStrictValue(capture.Pending, &pending); err != nil || pending == nil {
 		return errors.New("React Native retention-reconnect pending queue is invalid")
 	}
@@ -1491,7 +1492,84 @@ func (c *RetentionReconnectCoordinator) validateQueue(capture finalCapture) erro
 		}
 		seen[mutation.MutationID] = struct{}{}
 	}
+	if c.initialPending == nil {
+		if err := c.validateAuthoredQueueValues(pending); err != nil {
+			return err
+		}
+		c.initialPending = pending
+		return nil
+	}
+	// Generation renewal can change delivery status, not authored intent.
+	if !reflect.DeepEqual(retentionAuthoredIntent(pending), retentionAuthoredIntent(c.initialPending)) {
+		return errors.New("React Native retention-reconnect renewal changed retained authored intent")
+	}
 	return nil
+}
+
+// validateAuthoredQueueValues requires each retained mutation to hold every
+// authored column value of the bound local write.
+func (c *RetentionReconnectCoordinator) validateAuthoredQueueValues(pending []queueReplayPendingMutation) error {
+	authored, err := retentionReconnectColumnCount(c.config.Scenario.Steps, retentionReconnectStepOrder[0])
+	if err != nil {
+		return err
+	}
+	var bound struct {
+		Columns []struct {
+			Value json.RawMessage `json:"value"`
+		} `json:"columns"`
+	}
+	if json.Unmarshal(c.steps[retentionReconnectStepOrder[0]].Operation.Payload, &bound) != nil || len(bound.Columns) < authored {
+		return errors.New("React Native retention-reconnect bound local write columns are invalid")
+	}
+	for _, mutation := range pending {
+		for _, column := range bound.Columns[:authored] {
+			found := false
+			for _, field := range mutation.AuthoredFields {
+				found = found || sameJSONValue(field.Value, column.Value)
+			}
+			if !found {
+				return errors.New("React Native retention-reconnect durable queue lost an authored value")
+			}
+		}
+	}
+	return nil
+}
+
+// The binding appends runtime support columns after the authored columns, so
+// the authored step decides how many leading bound columns are authored.
+func retentionReconnectColumnCount(steps []scenarios.Step, stepID scenarios.StepID) (int, error) {
+	for _, step := range steps {
+		if step.ID != stepID {
+			continue
+		}
+		var payload struct {
+			Columns []json.RawMessage `json:"columns"`
+		}
+		if json.Unmarshal(step.Operation.Payload, &payload) != nil || len(payload.Columns) == 0 {
+			return 0, errors.New("React Native retention-reconnect authored local write columns are invalid")
+		}
+		return len(payload.Columns), nil
+	}
+	return 0, errors.New("React Native retention-reconnect authored local write is absent")
+}
+
+// sameJSONValue compares decoded values because native serializers do not fix
+// object member order.
+func sameJSONValue(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
+}
+
+func retentionAuthoredIntent(pending []queueReplayPendingMutation) []queueReplayPendingMutation {
+	intent := make([]queueReplayPendingMutation, len(pending))
+	for index, mutation := range pending {
+		mutation.Status = ""
+		mutation.NormalizedMutationID = nil
+		mutation.SealedBatchID = nil
+		mutation.SealedOrdinal = nil
+		intent[index] = mutation
+	}
+	return intent
 }
 
 func (c *RetentionReconnectCoordinator) prepareRenewal(ctx context.Context) error {
@@ -1634,11 +1712,36 @@ func (c *RetentionReconnectCoordinator) finishLocked(ctx context.Context) error 
 	if err := validateRetentionReconnectCompaction(server, pin); err != nil {
 		return fmt.Errorf("validate React Native retention-reconnect compacted floor: %w", err)
 	}
+	if err := c.validateFloorEqualCheckpoint(ctx); err != nil {
+		return err
+	}
 	identities, err := c.resolveIdentities(server)
 	if err != nil {
 		return err
 	}
 	c.result = RetentionReconnectCoordinatorResult{ServerFacts: server, IdentityResolution: identities}
+	return nil
+}
+
+// validateFloorEqualCheckpoint observes the claimed boundary directly. The
+// resume pull acknowledged the persisted cursor, so its durable checkpoint must
+// equal the retention floor of the compacted scope.
+func (c *RetentionReconnectCoordinator) validateFloorEqualCheckpoint(ctx context.Context) error {
+	var runtimeScope string
+	if json.Unmarshal(c.runtimeIDs["scope-a"], &runtimeScope) != nil || runtimeScope == "" {
+		return errors.New("React Native retention-reconnect authored scope binding is absent")
+	}
+	floor, checkpoint, err := c.config.Harness.Operator().ObserveScopeFloorCheckpoint(ctx, c.main.userID, c.main.clientID, runtimeScope)
+	if err != nil {
+		return fmt.Errorf("observe React Native retention-reconnect floor: %w", err)
+	}
+	return requireFloorEqualCheckpoint(floor, checkpoint)
+}
+
+func requireFloorEqualCheckpoint(floor, checkpoint string) error {
+	if floor == "" || floor != checkpoint {
+		return fmt.Errorf("React Native retention-reconnect resumed checkpoint %q is not the retention floor %q", checkpoint, floor)
+	}
 	return nil
 }
 

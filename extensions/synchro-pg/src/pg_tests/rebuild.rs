@@ -85,19 +85,34 @@
         )
         .unwrap();
         insert_edge("test_products", record_id, "global");
-        Spi::run_with_args(
-            "DELETE FROM sync_row_versions
-             WHERE record_id = $1
-               AND relation_id = (
-                   SELECT r.relation_id
-                   FROM sync_registry r
-                   JOIN sync_registry_generations g
-                     ON g.generation = r.registry_generation
-                   WHERE g.state = 'active' AND r.table_name = 'test_products'
-               )",
+        insert_changelog("global", "test_products", record_id, 1);
+        let baseline = rebuild_client("user1", "client1", "global", None, 100);
+        assert!(baseline["error"].is_null(), "{baseline}");
+        let records = baseline["records"].as_array().expect("baseline records");
+        assert_eq!(records.len(), 1, "{baseline}");
+        assert_eq!(
+            records[0]["server_version"].as_str(),
+            Some(current_row_version("test_products", record_id).as_str())
+        );
+
+        let removed: Option<i64> = Spi::get_one_with_args(
+            "WITH removed AS (
+                 DELETE FROM sync_row_versions
+                 WHERE record_id = $1
+                   AND relation_id = (
+                       SELECT r.relation_id
+                       FROM sync_registry r
+                       JOIN sync_registry_generations g
+                         ON g.generation = r.registry_generation
+                       WHERE g.state = 'active' AND r.table_name = 'test_products'
+                   )
+                 RETURNING 1
+             )
+             SELECT count(*) FROM removed",
             &[record_id.into()],
         )
         .unwrap();
+        assert_eq!(removed, Some(1));
 
         let response = rebuild_client("user1", "client1", "global", None, 100);
         assert_eq!(
@@ -230,21 +245,37 @@
     fn test_rebuild_filters_soft_deleted() {
         setup_test_tables();
         register_client("u1", "c1");
-
-        Spi::run(
-            "INSERT INTO test_orders (id, user_id, title, deleted_at) VALUES
-             ('bde10000-1111-1111-1111-111111111111', 'u1', 'Deleted', now())",
+        let live = "bde10000-0000-0000-0000-000000000001";
+        let deleted = "bde10000-1111-1111-1111-111111111111";
+        for (record_id, title) in [(live, "Live"), (deleted, "Deleted")] {
+            Spi::run_with_args(
+                "INSERT INTO test_orders (id, user_id, title) VALUES ($1::uuid, 'u1', $2)",
+                &[record_id.into(), title.into()],
+            )
+            .unwrap();
+            insert_changelog("user:u1", "test_orders", record_id, 1);
+            insert_edge("test_orders", record_id, "user:u1");
+        }
+        Spi::run_with_args(
+            "UPDATE test_orders SET deleted_at = now() WHERE id = $1::uuid",
+            &[deleted.into()],
         )
         .unwrap();
+        insert_changelog("user:u1", "test_orders", deleted, 3);
+
         let resp = rebuild_client("u1", "c1", "user:u1", None, 100);
-        let deleted = resp["records"]
+        let primary_key_field_id = field_id("test_orders", "id");
+        let rebuilt: Vec<&str> = resp["records"]
             .as_array()
             .unwrap_or_else(|| panic!("{resp}"))
             .iter()
-            .any(|record| {
-                record["pk"]["id"].as_str() == Some("bde10000-1111-1111-1111-111111111111")
-            });
-        assert!(!deleted);
+            .map(|record| {
+                record["pk"][&primary_key_field_id]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{resp}"))
+            })
+            .collect();
+        assert_eq!(rebuilt, vec![live], "{resp}");
     }
 
     #[pg_test]
