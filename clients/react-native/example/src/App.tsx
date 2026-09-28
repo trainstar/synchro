@@ -788,7 +788,39 @@ function StandardApp() {
           (await client.pendingChangeCount()) === 0
         );
       });
-      if (!conflictResolved) {
+      // The native client persists the rejection before it emits the conflict event.
+      const rejection = (await client.inspectRejectedMutationRecords()).find(
+        (record) => record.tableName === 'customers' && record.recordID === pendingRecordID
+      );
+      let rejectionRecorded = false;
+      if (rejection?.representation === 'current') {
+        const mutation = JSON.parse(rejection.mutationJSON) as {
+          mutation_id?: unknown;
+          op?: unknown;
+          columns?: Record<string, unknown>;
+        };
+        const outcome = JSON.parse(rejection.rejectionJSON) as {
+          mutation_id?: unknown;
+          status?: unknown;
+          code?: unknown;
+        };
+        const serverRow =
+          rejection.serverRowJSON === null
+            ? {}
+            : (JSON.parse(rejection.serverRowJSON) as Record<string, unknown>);
+        rejectionRecorded =
+          rejection.status === 'conflict' &&
+          rejection.code === 'version_conflict' &&
+          mutation.mutation_id === rejection.mutationID &&
+          outcome.mutation_id === rejection.mutationID &&
+          outcome.status === 'conflict' &&
+          outcome.code === 'version_conflict' &&
+          mutation.op === 'update' &&
+          Object.values(mutation.columns ?? {}).includes('client-version') &&
+          Object.values(serverRow).includes('server-version');
+      }
+      const conflictOK = conflictResolved && rejectionRecorded;
+      if (!conflictOK) {
         setLastError(
           JSON.stringify({
             conflicts: conflictsRef.current,
@@ -797,12 +829,13 @@ function StandardApp() {
               [pendingRecordID]
             ),
             pendingCount: await client.pendingChangeCount(),
+            rejection,
           })
         );
       }
       pendingConflictRecordRef.current = null;
       setPendingConflictRecordID(null);
-      update('conflict', conflictResolved);
+      update('conflict', conflictOK);
     } catch (error) {
       captureError('conflict', error);
       update('conflict', false);
