@@ -1,18 +1,17 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
-index f7b4858..c33043d 100644
+index 41085ef..5e55284 100644
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -3528,8 +3528,7 @@ fn materialize_transaction(
-         })
+@@ -3529,7 +3529,7 @@ fn materialize_transaction(
          .collect();
      let mut active_generation = generation;
--    let mut effect_bases = HashMap::new();
+     let mut effect_bases = HashMap::new();
 -    let mut segments = Vec::with_capacity(applicable_segments.len());
 +    let mut effect_count = 0i64;
      let mut membership_transitions = Vec::with_capacity(activations.len());
      for (segment, applicable) in applicable_segments.iter().enumerate() {
          let registry = &registries[segment];
-@@ -3554,15 +3553,6 @@ fn materialize_transaction(
+@@ -3554,15 +3554,6 @@ fn materialize_transaction(
              registry,
              applicable,
          )?;
@@ -28,7 +27,7 @@ index f7b4858..c33043d 100644
          // A relation that a later generation removes has no final projection.
          persisted.direct_impacts.retain_mut(|impact| {
              let relation_id = registry[impact.registration_index].relation_id.as_str();
-@@ -3574,23 +3564,22 @@ fn materialize_transaction(
+@@ -3574,23 +3565,22 @@ fn materialize_transaction(
                  None => false,
              }
          });
@@ -46,7 +45,7 @@ index f7b4858..c33043d 100644
 +            transaction,
 +            evaluation_registry,
 +            impacts,
-+            &HashMap::new(),
++            &mut effect_bases,
 +        )?;
      }
 -    let impacts = collect_membership_impacts(
@@ -62,8 +61,8 @@ index f7b4858..c33043d 100644
 -        transaction,
 -        evaluation_registry,
 -        impacts,
--        &effect_bases,
+-        &mut effect_bases,
 -    )?;
      // A membership rule stage replaces the edges of rows that no source event
      // changed. It waits for the final projection like every other membership
-     // evaluation of the transaction.
+     // evaluation of the transaction. It compares with the membership before the

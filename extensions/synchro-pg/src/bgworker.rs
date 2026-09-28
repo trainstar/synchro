@@ -2152,7 +2152,7 @@ fn materialize_candidate(
                 transaction,
                 &registry,
                 impacts,
-                &HashMap::new(),
+                &mut HashMap::new(),
             )
             .map_err(candidate_failure)?;
             let updated = client
@@ -3589,15 +3589,17 @@ fn materialize_transaction(
         transaction,
         evaluation_registry,
         impacts,
-        &effect_bases,
+        &mut effect_bases,
     )?;
     // A membership rule stage replaces the edges of rows that no source event
     // changed. It waits for the final projection like every other membership
-    // evaluation of the transaction.
-    crate::materialize::activate_staged_membership_generations(
+    // evaluation of the transaction. It compares with the membership before the
+    // transaction, and effect_bases holds that membership for every changed row.
+    crate::materialize::activate_membership_stages(
         client,
         &membership_transitions,
         active_generation,
+        &effect_bases,
         &stream_generation,
         &format_lsn(transaction.commit_lsn),
         &format_lsn(transaction.end_lsn),
@@ -6900,14 +6902,14 @@ fn persist_impact_batch(
 /// `effect_bases` holds the buckets of a row before its transaction when a
 /// registry activation in that transaction rewrote the retained edges. Effects
 /// compare the final membership with that base. Edge writes replace the current
-/// edges.
+/// edges. On return, it holds the base of every impacted row.
 fn materialize_impacts(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
     transaction: &WalTransaction,
     registry: &[TableRegistration],
     impacts: Vec<ImpactedRow>,
-    effect_bases: &HashMap<(String, String), Vec<String>>,
+    effect_bases: &mut HashMap<(String, String), Vec<String>>,
 ) -> Result<i64, PoisonFailure> {
     if let ProjectionTarget::Candidate {
         bootstrap_id,
@@ -7025,8 +7027,8 @@ fn materialize_impacts(
             existing.sort();
             existing.dedup();
             let effect_base = effect_bases
-                .get(&(registration.relation_id.clone(), impact.record_id.clone()))
-                .unwrap_or(&existing);
+                .entry((registration.relation_id.clone(), impact.record_id.clone()))
+                .or_insert_with(|| existing.clone());
 
             let mut entries = build_edge_diff_entries(
                 &registration.table_name,

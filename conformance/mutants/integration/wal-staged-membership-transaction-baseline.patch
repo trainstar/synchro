@@ -1,0 +1,13 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+index 41085ef..3d727d8 100644
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -3599,7 +3599,7 @@ fn materialize_transaction(
+         client,
+         &membership_transitions,
+         active_generation,
+-        &effect_bases,
++        &HashMap::new(),
+         &stream_generation,
+         &format_lsn(transaction.commit_lsn),
+         &format_lsn(transaction.end_lsn),
