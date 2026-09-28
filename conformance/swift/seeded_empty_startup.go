@@ -42,7 +42,7 @@ type swiftSeedStartupControl struct {
 
 // RunSeededEmptyStartupScenario executes the authored seeded and empty startup flows through Swift.
 func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, artifact *blackbox.NativeArtifact, platform *Platform) (SeededEmptyStartupResult, error) {
-	steps, err := swiftScenarioStepMap(scenario, seededEmptyStartupScenarioID, 23)
+	steps, err := swiftScenarioStepMap(scenario, seededEmptyStartupScenarioID, 29)
 	if err != nil {
 		return SeededEmptyStartupResult{}, err
 	}
@@ -51,10 +51,6 @@ func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scena
 	}
 	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
 		return SeededEmptyStartupResult{}, fmt.Errorf("install Swift seeded-startup contract: %w", err)
-	}
-	floorCall, err := runSwiftSeededFloorClient(ctx, scenario, steps, controller, artifact, platform)
-	if err != nil {
-		return SeededEmptyStartupResult{}, err
 	}
 	clients := make([]SeededStartupClientResult, 0, 6)
 	seedPaths := make([]string, 0, 3)
@@ -182,6 +178,10 @@ func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scena
 	if err := validateSwiftSeededStartupResume(clients[0].StartupCall, resumed, 2); err != nil {
 		return SeededEmptyStartupResult{}, err
 	}
+	floorCall, err := runSwiftSeededFloorClient(ctx, scenario, steps, controller, artifact, platform)
+	if err != nil {
+		return SeededEmptyStartupResult{}, err
+	}
 	return SeededEmptyStartupResult{Clients: clients, RejectedSeedControls: rejectedControls, RestartStep: restart, ResumeCall: resumed, FloorCall: floorCall}, nil
 }
 
@@ -199,11 +199,19 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 	if _, err := artifact.StageStep(ctx, stage); err != nil {
 		return SynchronizationResult{}, fmt.Errorf("stage Swift floor seed: %w", err)
 	}
+	// The earlier clients hold the shared scope, so they expire before the
+	// compaction can move its floor past the seed position.
 	for _, step := range []struct{ id, key string }{
 		{"002", "model/commit-source-transaction"},
 		{"003", "process/materialize-source-transaction"},
-		{"004", "model/compact-scope"},
-		{"005", "model/set-client-assignments"},
+		{"004", "model/expire-client-generation"},
+		{"005", "model/expire-client-generation"},
+		{"006", "model/expire-client-generation"},
+		{"007", "model/expire-client-generation"},
+		{"008", "model/expire-client-generation"},
+		{"009", "model/expire-client-generation"},
+		{"010", "model/compact-scope"},
+		{"011", "model/set-client-assignments"},
 	} {
 		operation, err := swiftScenarioOperation(steps, seededFloorStep+step.id, step.key)
 		if err != nil {
@@ -219,7 +227,7 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 			return SynchronizationResult{}, fmt.Errorf("apply Swift floor step %s: %w", step.id, resultError(err, observation.Disposition))
 		}
 	}
-	binding := steps[scenarios.StepID(seededFloorStep+"007")].NativeBinding
+	binding := steps[scenarios.StepID(seededFloorStep+"013")].NativeBinding
 	if binding == nil || binding.Method != "start" || binding.Completion != "idle" {
 		return SynchronizationResult{}, errors.New("Swift floor startup binding is invalid")
 	}
@@ -231,7 +239,7 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 	if err := platform.Install(ctx, client, "seed", seedPath); err != nil {
 		return SynchronizationResult{}, fmt.Errorf("install Swift floor client: %w", err)
 	}
-	write, err := swiftScenarioOperation(steps, seededFloorStep+"006", "local/write")
+	write, err := swiftScenarioOperation(steps, seededFloorStep+"012", "local/write")
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
@@ -250,7 +258,7 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 	if before.PendingChangeCount == nil || *before.PendingChangeCount != 1 {
 		return SynchronizationResult{}, errors.New("Swift floor client does not hold its offline intent before startup")
 	}
-	push, err := swiftScenarioOperation(steps, seededFloorStep+"008", "push/submit")
+	push, err := swiftScenarioOperation(steps, seededFloorStep+"014", "push/submit")
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
@@ -261,10 +269,10 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 	if err != nil {
 		return SynchronizationResult{}, fmt.Errorf("run Swift floor client: %w", err)
 	}
-	if err := validateSwiftWireExpectation(scenario, seededFloorStep+"007", "connect", call); err != nil {
+	if err := validateSwiftWireExpectation(scenario, seededFloorStep+"013", "connect", call); err != nil {
 		return SynchronizationResult{}, err
 	}
-	if err := validateSwiftWireExpectation(scenario, seededFloorStep+"008", "push", call); err != nil {
+	if err := validateSwiftWireExpectation(scenario, seededFloorStep+"014", "push", call); err != nil {
 		return SynchronizationResult{}, err
 	}
 	withoutPush := call

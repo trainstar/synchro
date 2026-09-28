@@ -52,7 +52,7 @@ func TestSeededEmptyStartupDirectBindingGroupsRemainClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load seeded-startup scenario: %v", err)
 	}
-	steps, err := swiftScenarioStepMap(scenario, seededEmptyStartupScenarioID, 23)
+	steps, err := swiftScenarioStepMap(scenario, seededEmptyStartupScenarioID, 29)
 	if err != nil {
 		t.Fatalf("validate seeded-startup scenario: %v", err)
 	}

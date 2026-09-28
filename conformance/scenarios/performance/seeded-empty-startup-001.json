@@ -1116,286 +1116,6 @@
   ],
   "steps": [
     {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-001",
-      "phase": "exercise",
-      "transport": "artifact",
-      "description": "Export a portable seed for the floor client before later shared progress.",
-      "native_binding": {
-        "kind": "artifact",
-        "user_id": "user-seeded-floor",
-        "client_id": "client-seeded-floor"
-      },
-      "operation": {
-        "contract_operation": "artifact",
-        "name": "install-portable-seed",
-        "payload": {
-          "user_id": "user-seeded-floor",
-          "client_id": "client-seeded-floor",
-          "portable_seed_artifact_id": "ARTDEF-PORTABLE-SEED-001",
-          "seed_fixture_id": "SEEDFIX-PORTABLE-SHARED-1000-001"
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-002",
-      "phase": "setup",
-      "transport": "model",
-      "description": "Commit one shared row after the floor seed position.",
-      "native_binding": {
-        "kind": "controller"
-      },
-      "operation": {
-        "contract_operation": "model",
-        "name": "commit-source-transaction",
-        "payload": {
-          "stream_generation": "stream-1",
-          "commit_lsn": "10",
-          "end_lsn": "11",
-          "events": [
-            {
-              "event_ordinal": 1,
-              "relation": "public.items",
-              "operation": "insert",
-              "before": null,
-              "after": {
-                "identity": {
-                  "kind": "synced",
-                  "synced_row": {
-                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u000ffloor-later-row",
-                    "table_id": "items",
-                    "primary_key_field_id": "id",
-                    "portable_type": "string",
-                    "canonical_wire_json": "\"floor-later-row\""
-                  },
-                  "capture_key": null
-                },
-                "fields": [
-                  {
-                    "field": "id",
-                    "type": "string",
-                    "wire_json": "\"floor-later-row\""
-                  },
-                  {
-                    "field": "value",
-                    "type": "string",
-                    "wire_json": "\"after-floor-seed\""
-                  }
-                ],
-                "version": "floor-later-version",
-                "checksum": "9fd8b9a05084cdc4878e65fc55de0498fa4cab47b41f55eefdf5bed3f6980593",
-                "deleted": false
-              }
-            }
-          ]
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-003",
-      "phase": "setup",
-      "transport": "process",
-      "description": "Materialize the later shared row through the WAL path.",
-      "native_binding": {
-        "kind": "controller"
-      },
-      "operation": {
-        "contract_operation": "process",
-        "name": "materialize-source-transaction",
-        "payload": {
-          "stream_generation": "stream-1",
-          "commit_lsn": "10"
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-004",
-      "phase": "setup",
-      "transport": "model",
-      "description": "Compact the shared scope so its floor passes the seed position.",
-      "native_binding": {
-        "kind": "controller"
-      },
-      "operation": {
-        "contract_operation": "model",
-        "name": "compact-scope",
-        "payload": {
-          "batch_size": 10000,
-          "scope_id": "scope-a"
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-005",
-      "phase": "setup",
-      "transport": "model",
-      "description": "Assign the shared scope to the floor client.",
-      "native_binding": {
-        "kind": "controller"
-      },
-      "operation": {
-        "contract_operation": "model",
-        "name": "set-client-assignments",
-        "payload": {
-          "user_id": "user-seeded-floor",
-          "client_id": "client-seeded-floor",
-          "assignments": [
-            {
-              "scope_id": "scope-a"
-            }
-          ]
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-006",
-      "phase": "exercise",
-      "transport": "local",
-      "description": "Write one offline row on the seeded client before its first start.",
-      "native_binding": {
-        "kind": "local-write",
-        "user_id": "user-seeded-floor",
-        "client_id": "client-seeded-floor"
-      },
-      "operation": {
-        "contract_operation": "local",
-        "name": "write",
-        "payload": {
-          "authenticated_user_id": "user-seeded-floor",
-          "client_id": "client-seeded-floor",
-          "mutation_id": "00000000-0000-4000-8000-000000009001",
-          "table_id": "entries",
-          "pk": {
-            "field_id": "id",
-            "value": "floor-offline-row"
-          },
-          "authored_schema": {
-            "version": 1,
-            "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
-          },
-          "operation": "insert",
-          "client_version": "2026-08-11T01:02:03.000000Z",
-          "columns": [
-            {
-              "field_id": "value",
-              "value": "offline-before-start"
-            }
-          ]
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-007",
-      "phase": "exercise",
-      "transport": "http",
-      "description": "Connect with the below-floor seed receipt and fall back to a rebuild.",
-      "native_binding": {
-        "kind": "public-call",
-        "user_id": "user-seeded-floor",
-        "client_id": "client-seeded-floor",
-        "call_id": "seeded_floor_startup",
-        "stage": "synchronous",
-        "method": "start",
-        "completion": "idle"
-      },
-      "operation": {
-        "contract_operation": "connect",
-        "name": "send",
-        "payload": {
-          "user_id": "user-seeded-floor",
-          "client_id": "client-seeded-floor",
-          "runtime_version": 3,
-          "protocol_version": 3,
-          "client_generation": 1,
-          "schema_reset": false,
-          "schema": {
-            "version": 1,
-            "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
-          },
-          "scope_set_version": 1,
-          "known_scopes": [],
-          "seed_receipts": {
-            "scope-a": "local_seed_receipt"
-          }
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
-      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-008",
-      "phase": "exercise",
-      "transport": "http",
-      "description": "Push the kept offline row.",
-      "native_binding": {
-        "kind": "public-call",
-        "user_id": "user-seeded-floor",
-        "client_id": "client-seeded-floor",
-        "call_id": "seeded_floor_startup",
-        "stage": "synchronous",
-        "method": "start",
-        "completion": "idle"
-      },
-      "operation": {
-        "contract_operation": "push",
-        "name": "submit",
-        "payload": {
-          "authenticated_user_id": "user-seeded-floor",
-          "request": {
-            "client_id": "client-seeded-floor",
-            "client_generation": 1,
-            "batch_id": "00000000-0000-4000-8000-000000009002",
-            "schema": {
-              "version": 1,
-              "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
-            },
-            "mutations": [
-              {
-                "mutation_id": "00000000-0000-4000-8000-000000009001",
-                "table": "entries",
-                "pk": {
-                  "id": "floor-offline-row"
-                },
-                "authored_schema": {
-                  "version": 1,
-                  "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
-                },
-                "op": "insert",
-                "client_version": "2026-08-11T01:02:03.000000Z",
-                "columns": {
-                  "value": "offline-before-start"
-                }
-              }
-            ]
-          },
-          "delivery": "apply",
-          "commit_lsn": "20",
-          "end_lsn": "21"
-        }
-      },
-      "expected_outcome": {
-        "disposition": "success"
-      }
-    },
-    {
       "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-001",
       "phase": "exercise",
       "transport": "artifact",
@@ -1937,25 +1657,409 @@
       "expected_outcome": {
         "disposition": "success"
       }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-001",
+      "phase": "exercise",
+      "transport": "artifact",
+      "description": "Export a portable seed for the floor client before later shared progress.",
+      "native_binding": {
+        "kind": "artifact",
+        "user_id": "user-seeded-floor",
+        "client_id": "client-seeded-floor"
+      },
+      "operation": {
+        "contract_operation": "artifact",
+        "name": "install-portable-seed",
+        "payload": {
+          "user_id": "user-seeded-floor",
+          "client_id": "client-seeded-floor",
+          "portable_seed_artifact_id": "ARTDEF-PORTABLE-SEED-001",
+          "seed_fixture_id": "SEEDFIX-PORTABLE-SHARED-1000-001"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-002",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit one shared row after the floor seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u000ffloor-later-row",
+                    "table_id": "items",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"floor-later-row\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"floor-later-row\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"after-floor-seed\""
+                  }
+                ],
+                "version": "floor-later-version",
+                "checksum": "9fd8b9a05084cdc4878e65fc55de0498fa4cab47b41f55eefdf5bed3f6980593",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-003",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the later shared row through the WAL path.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-004",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Expire an earlier startup client so compaction can pass the floor seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "expire-client-generation",
+        "payload": {
+          "user_id": "user-seeded-1",
+          "client_id": "client-seeded-1"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-005",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Expire an earlier startup client so compaction can pass the floor seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "expire-client-generation",
+        "payload": {
+          "user_id": "user-seeded-2",
+          "client_id": "client-seeded-2"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-006",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Expire an earlier startup client so compaction can pass the floor seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "expire-client-generation",
+        "payload": {
+          "user_id": "user-seeded-3",
+          "client_id": "client-seeded-3"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-007",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Expire an earlier startup client so compaction can pass the floor seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "expire-client-generation",
+        "payload": {
+          "user_id": "user-empty-1",
+          "client_id": "client-empty-1"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-008",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Expire an earlier startup client so compaction can pass the floor seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "expire-client-generation",
+        "payload": {
+          "user_id": "user-empty-2",
+          "client_id": "client-empty-2"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-009",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Expire an earlier startup client so compaction can pass the floor seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "expire-client-generation",
+        "payload": {
+          "user_id": "user-empty-3",
+          "client_id": "client-empty-3"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-010",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Compact the shared scope so its floor passes the seed position.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "compact-scope",
+        "payload": {
+          "batch_size": 10000,
+          "scope_id": "scope-a"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-011",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Assign the shared scope to the floor client.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "set-client-assignments",
+        "payload": {
+          "user_id": "user-seeded-floor",
+          "client_id": "client-seeded-floor",
+          "assignments": [
+            {
+              "scope_id": "scope-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-012",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Write one offline row on the seeded client before its first start.",
+      "native_binding": {
+        "kind": "local-write",
+        "user_id": "user-seeded-floor",
+        "client_id": "client-seeded-floor"
+      },
+      "operation": {
+        "contract_operation": "local",
+        "name": "write",
+        "payload": {
+          "authenticated_user_id": "user-seeded-floor",
+          "client_id": "client-seeded-floor",
+          "mutation_id": "00000000-0000-4000-8000-000000009001",
+          "table_id": "entries",
+          "pk": {
+            "field_id": "id",
+            "value": "floor-offline-row"
+          },
+          "authored_schema": {
+            "version": 1,
+            "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
+          },
+          "operation": "insert",
+          "client_version": "2026-08-11T01:02:03.000000Z",
+          "columns": [
+            {
+              "field_id": "value",
+              "value": "offline-before-start"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-013",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Connect with the below-floor seed receipt and fall back to a rebuild.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-seeded-floor",
+        "client_id": "client-seeded-floor",
+        "call_id": "seeded_floor_startup",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-seeded-floor",
+          "client_id": "client-seeded-floor",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [],
+          "seed_receipts": {
+            "scope-a": "local_seed_receipt"
+          }
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-014",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Push the kept offline row.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-seeded-floor",
+        "client_id": "client-seeded-floor",
+        "call_id": "seeded_floor_startup",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "operation": {
+        "contract_operation": "push",
+        "name": "submit",
+        "payload": {
+          "authenticated_user_id": "user-seeded-floor",
+          "request": {
+            "client_id": "client-seeded-floor",
+            "client_generation": 1,
+            "batch_id": "00000000-0000-4000-8000-000000009002",
+            "schema": {
+              "version": 1,
+              "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
+            },
+            "mutations": [
+              {
+                "mutation_id": "00000000-0000-4000-8000-000000009001",
+                "table": "entries",
+                "pk": {
+                  "id": "floor-offline-row"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "1bac1d9aeadbfcd8cec77f3b8a25132a19a3499eaad68ffdb0e67f42f68aa368"
+                },
+                "op": "insert",
+                "client_version": "2026-08-11T01:02:03.000000Z",
+                "columns": {
+                  "value": "offline-before-start"
+                }
+              }
+            ]
+          },
+          "delivery": "apply",
+          "commit_lsn": "20",
+          "end_lsn": "21"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
     }
   ],
   "wire_expectations": [
-    {
-      "step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-007",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "contract_case": "connect_success",
-      "http_status": 200,
-      "error_code": null,
-      "retryable": false
-    },
-    {
-      "step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-008",
-      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
-      "contract_case": "push_success",
-      "http_status": 200,
-      "error_code": null,
-      "retryable": false
-    },
     {
       "step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-003",
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
@@ -2000,6 +2104,22 @@
       "step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-015",
       "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
       "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-013",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-014",
+      "assertion_id": "ASSERT-PERF-SEEDED-EMPTY-STARTUP-SEMANTIC-001",
+      "contract_case": "push_success",
       "http_status": 200,
       "error_code": null,
       "retryable": false
