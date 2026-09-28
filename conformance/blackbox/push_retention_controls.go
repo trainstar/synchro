@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 const diagnosticRetentionClientID = "s12-retention-client"
@@ -320,6 +322,76 @@ func (executor *OperatorExecutor) ObserveScopeFloorCheckpoint(ctx context.Contex
 		return "", "", errors.New("scope floor or client checkpoint is absent")
 	}
 	return floor.String, checkpoint.String, nil
+}
+
+// RequireCheckpointAtOrAboveFloor compares two positions that
+// ObserveScopeFloorCheckpoint returned. A resumed checkpoint is resumable when
+// it is at or above the retention floor in stream order (spec
+// 03-state-machines). An active rebuild pin can hold the floor below the
+// cursor, so equality is not required.
+func RequireCheckpointAtOrAboveFloor(floor, checkpoint string) error {
+	floorPosition, floorErr := parseStreamPosition(floor)
+	checkpointPosition, checkpointErr := parseStreamPosition(checkpoint)
+	if floorErr != nil || checkpointErr != nil || compareStreamPositions(checkpointPosition, floorPosition) < 0 {
+		return fmt.Errorf("resumed checkpoint %q is not at or above the retention floor %q", checkpoint, floor)
+	}
+	return nil
+}
+
+// streamPosition orders kind|commit_lsn|event_ordinal|effect_ordinal. A
+// generation start precedes every commit. At one commit, each effect precedes
+// the transaction end.
+type streamPosition struct {
+	rank, lsn, event, effect uint64
+}
+
+func parseStreamPosition(value string) (streamPosition, error) {
+	parts := strings.Split(value, "|")
+	if len(parts) != 4 {
+		return streamPosition{}, errors.New("stream position is malformed")
+	}
+	if parts[0] == "generation_start" && parts[1] == "" && parts[2] == "" && parts[3] == "" {
+		return streamPosition{}, nil
+	}
+	high, low, found := strings.Cut(parts[1], "/")
+	upper, upperErr := strconv.ParseUint(high, 16, 32)
+	lower, lowerErr := strconv.ParseUint(low, 16, 32)
+	if !found || upperErr != nil || lowerErr != nil {
+		return streamPosition{}, errors.New("stream position LSN is malformed")
+	}
+	position := streamPosition{lsn: upper<<32 | lower}
+	switch {
+	case parts[0] == "transaction_end" && parts[2] == "" && parts[3] == "":
+		position.rank = 2
+	case parts[0] == "effect":
+		event, eventErr := strconv.ParseUint(parts[2], 10, 64)
+		effect, effectErr := strconv.ParseUint(parts[3], 10, 64)
+		if eventErr != nil || effectErr != nil {
+			return streamPosition{}, errors.New("stream position ordinal is malformed")
+		}
+		position.rank, position.event, position.effect = 1, event, effect
+	default:
+		return streamPosition{}, errors.New("stream position kind is malformed")
+	}
+	return position, nil
+}
+
+func compareStreamPositions(left, right streamPosition) int {
+	if (left.rank == 0) != (right.rank == 0) {
+		if left.rank == 0 {
+			return -1
+		}
+		return 1
+	}
+	for _, pair := range [][2]uint64{{left.lsn, right.lsn}, {left.rank, right.rank}, {left.event, right.event}, {left.effect, right.effect}} {
+		if pair[0] != pair[1] {
+			if pair[0] < pair[1] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // ObserveDiagnosticClientGeneration returns bounded state for one diagnostic client.

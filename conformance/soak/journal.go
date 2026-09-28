@@ -100,13 +100,22 @@ func planDigest(seed uint64, config Config, identity CatalogIdentity, operations
 }
 
 // OperationFact records completion or failure for one deterministic operation.
-// An invariant-violation failure retains its violations so replay can prove
-// that it reproduces the same failure.
+//
+// A failure keeps a bounded, stable identity that replay compares:
+//   - An invariant violation keeps the total violation count, the SHA-256 of
+//     the complete ordered violation set, and at most
+//     MaximumFailureViolationSample violations as diagnostics.
+//   - A harness failure keeps its operation stage and failure class when the
+//     harness identified them with a StageError.
 type OperationFact struct {
 	Sequence            uint64                 `json:"sequence"`
 	Status              string                 `json:"status"`
 	ObservationSequence uint64                 `json:"observation_sequence,omitempty"`
 	FailureCode         string                 `json:"failure_code,omitempty"`
+	FailureStage        string                 `json:"failure_stage,omitempty"`
+	FailureClass        string                 `json:"failure_class,omitempty"`
+	ViolationCount      int                    `json:"violation_count,omitempty"`
+	ViolationDigest     string                 `json:"violation_digest,omitempty"`
 	Violations          []invariants.Violation `json:"violations,omitempty"`
 }
 
@@ -243,19 +252,57 @@ func (w *journalWriter) RecordCompletion(sequence, observationSequence uint64) e
 	return w.recordFact(OperationFact{Sequence: sequence, Status: "completed", ObservationSequence: observationSequence})
 }
 
-func (w *journalWriter) RecordFailure(sequence uint64, code string, violations []invariants.Violation) error {
-	fact := OperationFact{Sequence: sequence, Status: "failed", FailureCode: code, Violations: violations}
+// RecordFailure writes one terminal failure fact. The fact stays within the
+// journal line bound for any number of violations.
+func (w *journalWriter) RecordFailure(fact OperationFact) error {
 	if err := validateFailureFact(fact); err != nil {
 		return err
 	}
 	return w.recordFact(fact)
 }
 
-// MaximumFailureViolations bounds the violations retained with one failure.
-const MaximumFailureViolations = 256
+// MaximumFailureViolationSample bounds the violations kept as diagnostics.
+const MaximumFailureViolationSample = 32
+
+// failureFact builds the bounded terminal fact for one failed operation.
+func failureFact(sequence uint64, code string, runErr error, violations []invariants.Violation) OperationFact {
+	fact := OperationFact{Sequence: sequence, Status: "failed", FailureCode: code}
+	var stage *StageError
+	if code == "harness-error" && errors.As(runErr, &stage) && validFailureIdentity(stage.Stage) && validFailureIdentity(stage.Class) {
+		fact.FailureStage, fact.FailureClass = stage.Stage, stage.Class
+	}
+	if len(violations) != 0 {
+		encoded, err := json.Marshal(violations)
+		if err != nil {
+			panic("encode ordered violations: " + err.Error())
+		}
+		digest := sha256.Sum256(encoded)
+		fact.ViolationCount = len(violations)
+		fact.ViolationDigest = hex.EncodeToString(digest[:])
+		fact.Violations = append([]invariants.Violation(nil), violations[:min(len(violations), MaximumFailureViolationSample)]...)
+	}
+	return fact
+}
+
+func validFailureIdentity(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+	return true
+}
 
 func validateFailureFact(fact OperationFact) error {
-	if !validFailureCode(fact.FailureCode) || (fact.FailureCode == "invariant-violation") != (len(fact.Violations) != 0) || len(fact.Violations) > MaximumFailureViolations {
+	violationFailure := fact.FailureCode == "invariant-violation"
+	if !validFailureCode(fact.FailureCode) || violationFailure != (fact.ViolationCount != 0) ||
+		violationFailure != validLowerHexDigest64(fact.ViolationDigest) || fact.ViolationCount < 0 ||
+		len(fact.Violations) > min(fact.ViolationCount, MaximumFailureViolationSample) || violationFailure && len(fact.Violations) == 0 ||
+		(fact.FailureStage == "") != (fact.FailureClass == "") ||
+		fact.FailureStage != "" && (fact.FailureCode != "harness-error" || !validFailureIdentity(fact.FailureStage) || !validFailureIdentity(fact.FailureClass)) {
 		return fmt.Errorf("%w: failure fact is invalid", ErrInvalidJournal)
 	}
 	for _, violation := range fact.Violations {

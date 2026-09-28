@@ -243,16 +243,16 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 		},
 	}}
 	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor, "identity-cursor"), snapshot(floorCursor, "identity-cursor"), snapshot(resumedCursor, "identity-cursor"), call, runtimeScope); err != nil {
-		t.Fatalf("validate floor-equal retention resume: %v", err)
+		t.Fatalf("validate compacted-scope retention resume: %v", err)
 	}
 	call.transportObservations[1].PullResponseFacts.RebuildScopeCount = 1
 	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor, "identity-cursor"), snapshot(floorCursor, "identity-cursor"), snapshot(resumedCursor, "identity-cursor"), call, runtimeScope); err == nil {
-		t.Fatal("floor-equal retention resume accepted a rebuild")
+		t.Fatal("compacted-scope retention resume accepted a rebuild")
 	}
 	call.transportObservations[1].PullResponseFacts.RebuildScopeCount = 0
 	changedIdentity := Result{ScopeStates: json.RawMessage(`[{"scope_id":"` + identityScope + `","cursor":"identity-cursor","checksum":null,"generation":2,"local_checksum":""},{"scope_id":"` + runtimeScope + `","cursor":"` + resumedCursor + `","checksum":null,"generation":1,"local_checksum":""}]`)}
 	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor, "identity-cursor"), snapshot(floorCursor, "identity-cursor"), changedIdentity, call, runtimeScope); err == nil {
-		t.Fatal("floor-equal retention resume accepted a changed identity scope generation")
+		t.Fatal("compacted-scope retention resume accepted a changed identity scope generation")
 	}
 	changedIdentityCursor := snapshot(resumedCursor, "changed-identity-cursor")
 	changedStates, err := androidCursorScopeStates(changedIdentityCursor.ScopeStates)
@@ -261,7 +261,7 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 	}
 	call.transportObservations[1].PullResponseFacts.ScopeCursorFingerprints = retentionReconnectCursorFingerprints(changedStates...)
 	if err := validateRetentionReconnectFloorResume(snapshot(floorCursor, "identity-cursor"), snapshot(floorCursor, "identity-cursor"), changedIdentityCursor, call, runtimeScope); err != nil {
-		t.Fatalf("floor-equal retention resume rejected an opaque identity cursor advance: %v", err)
+		t.Fatalf("compacted-scope retention resume rejected an opaque identity cursor advance: %v", err)
 	}
 }
 

@@ -43,8 +43,8 @@ func TestRealSwiftScenarios(t *testing.T) {
 
 func runSwiftRetentionReconnect(t *testing.T) {
 	t.Helper()
-	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "retention-reconnect-001.json"), 1)
-	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "retention-reconnect-001.json"), 1)
+	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, harness.Operator(), platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Swift retention-reconnect scenario: %v", err)
 	}
