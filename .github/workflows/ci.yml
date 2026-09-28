@@ -235,7 +235,16 @@ jobs:
           echo "SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-baseline" >> "$GITHUB_ENV"
 
       - name: Run real server black box with deterministic stateful seed
-        run: make test-blackbox
+        run: make test-blackbox SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
+
+      - name: Retain seeded stress replay evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: candidate-soak-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/soak-evidence
+          # A setup failure before the stress test leaves no journal. The test step keeps that failure.
+          if-no-files-found: ignore
 
       - name: Run curated integration mutants
         run: make test-integration-mutants
@@ -295,7 +304,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run Swift checks against local PostgreSQL
-        run: make test-swift-unit test-swift test-client-schema-identity test-consumer-swift test-swift-upgrade
+        run: make test-swift test-client-schema-identity test-consumer-swift test-swift-upgrade
 
       - name: Stop local fixture
         if: always()

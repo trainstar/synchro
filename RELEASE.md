@@ -49,7 +49,9 @@ Restrict `release` and `release-signing` deployments to the exact `master` branc
 
 Configure npm trusted publishing for `.github/workflows/release.yml` and the `release` environment.
 Do not configure an npm publication token.
-`NPM_DIST_TAG_TOKEN` may only move npm dist-tags. Trusted publishing cannot move `latest`.
+`NPM_DIST_TAG_TOKEN` is the promotion credential for `npm dist-tag add` only. It is not an npm publication credential.
+Trusted publishing publishes the bytes, but it cannot move `latest`.
+Without this secret, the workflow stops before any tag or registry write for a new npm version.
 
 The `publish` job is the only job that uses the protected `release` environment.
 Do not configure approval rules on `release-signing`.
@@ -246,7 +248,7 @@ The manifest records candidate environment resolution in `release-manifest.json`
 4. Wait for the protected `release` environment approval.
 5. Recheck the approved candidate and sealed identity.
 6. Attest the sealed files with the exact sealed release manifest.
-7. Verify the Central credentials and the npm trusted publisher for each unpublished registry.
+7. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry.
 8. Create immutable `v<version>` and `api/go/v<version>` tags.
 9. Publish GitHub assets without marking them latest.
 10. Verify source and asset access.
@@ -272,7 +274,7 @@ Synchro has no numeric performance guarantee. Performance budgets remain deferre
 | --- | --- |
 | No sealed candidate | Start a new candidate. |
 | Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Resume with original sealed bytes and the original artifact-owner run ID. |
-| Registry credential check fails | Correct the `release` environment Central secrets or the npm trusted publisher. Then resume with the original artifact-owner run ID. |
+| Registry credential check fails | Correct the `release` environment Central secrets, `NPM_DIST_TAG_TOKEN`, or the npm trusted publisher. Then resume with the original artifact-owner run ID. |
 | One source tag exists | Verify its commit and create the missing tag there. |
 | GitHub draft exists | Verify its existing assets and upload only missing sealed assets before publication. |
 | GitHub published and a registry is missing | Keep non-latest status and publish the original payload. |
