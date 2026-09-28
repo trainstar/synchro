@@ -509,12 +509,26 @@ export class PublicConformanceRunner {
         case 'application-rows':
           capture.application_rows = await captureRows(client, decodeSelectors(parameters.row_selectors));
           break;
-        case 'pending-mutations':
+        case 'pending-mutations': {
           // The native runners capture the complete retained ledger for this
           // source, pending states plus rejected_terminal. The pending-only
-          // inspection excludes rejected_terminal by design.
-          capture.pending_mutations = bounded(await client.inspectRetainedMutations(), 'pending-mutations');
+          // inspection excludes rejected_terminal by design. Optional row
+          // selectors bound the capture when the ledger is larger than one
+          // capture allows.
+          const retained = await client.inspectRetainedMutations();
+          const rows = parameters.retained_mutation_rows === undefined
+            ? undefined
+            : decodeRetainedMutationRows(parameters.retained_mutation_rows);
+          capture.pending_mutations = bounded(
+            rows === undefined
+              ? retained
+              : retained.filter((mutation) =>
+                  rows.some((row) => row.tableName === mutation.tableName && row.recordID === mutation.recordID)
+                ),
+            'pending-mutations'
+          );
           break;
+        }
         case 'rejected-mutations':
           capture.rejected_mutations = bounded(await client.inspectRejectedMutations(), 'rejected-mutations');
           break;
@@ -883,6 +897,16 @@ function decodeSelectors(value: unknown): RowSelector[] {
     throw new ConformanceCommandError('invalid_command');
   }
   return selectors;
+}
+
+function decodeRetainedMutationRows(value: unknown): { tableName: string; recordID: string }[] {
+  return requiredArray(value).map((member) => {
+    const row = requiredRecord(member);
+    if (Object.keys(row).length !== 2) {
+      throw new ConformanceCommandError('invalid_command');
+    }
+    return { tableName: requiredIdentifier(row.table_name), recordID: requiredString(row.record_id) };
+  });
 }
 
 function durableProofIdentity(

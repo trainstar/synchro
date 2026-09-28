@@ -186,7 +186,7 @@ func TestRetentionReconnectSealedRetriesRetainExactBytes(t *testing.T) {
 
 func TestRetentionReconnectQueueAllowsInspectableRejection(t *testing.T) {
 	coordinator := retentionReconnectQueueCoordinator(t)
-	capture := retentionReconnectQueueCapture(`"sealed"`, `"queued"`, `"1970-01-01T00:00:00.000000Z"`)
+	capture := retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000000Z"`)
 	if err := coordinator.validateQueue(capture); err != nil {
 		t.Fatalf("validate retention-reconnect queue with an inspectable rejection: %v", err)
 	}
@@ -196,22 +196,28 @@ func TestRetentionReconnectQueueAllowsInspectableRejection(t *testing.T) {
 // the retained mutation must survive generation renewal.
 func TestRetentionReconnectQueuePreservesAuthoredIntentAcrossRenewal(t *testing.T) {
 	coordinator := retentionReconnectQueueCoordinator(t)
-	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"sealed"`, `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
+	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
 		t.Fatalf("validate initial retention-reconnect queue: %v", err)
 	}
-	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"pending"`, `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
+	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"pending"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
 		t.Fatalf("renewed status change was rejected: %v", err)
 	}
 	for name, capture := range map[string]finalCapture{
-		"authored value": retentionReconnectQueueCapture(`"sealed"`, `"changed"`, `"1970-01-01T00:00:00.000000Z"`),
-		"client version": retentionReconnectQueueCapture(`"sealed"`, `"queued"`, `"1970-01-01T00:00:00.000001Z"`),
+		"authored value": retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"changed"`, `"1970-01-01T00:00:00.000000Z"`),
+		"client version": retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000001Z"`),
 	} {
 		if err := coordinator.validateQueue(capture); err == nil {
 			t.Fatalf("renewal accepted a changed retained %s", name)
 		}
 	}
-	if err := retentionReconnectQueueCoordinator(t).validateQueue(retentionReconnectQueueCapture(`"sealed"`, `"other"`, `"1970-01-01T00:00:00.000000Z"`)); err == nil {
-		t.Fatal("initial queue accepted a retained mutation without the authored value")
+	for name, capture := range map[string]finalCapture{
+		"authored value": retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"other"`, `"1970-01-01T00:00:00.000000Z"`),
+		// The value is preserved but held by another valid field.
+		"field identity": retentionReconnectQueueCapture(`"sealed"`, "runtime-other", `"queued"`, `"1970-01-01T00:00:00.000000Z"`),
+	} {
+		if err := retentionReconnectQueueCoordinator(t).validateQueue(capture); err == nil {
+			t.Fatalf("initial queue accepted a retained mutation with a wrong %s", name)
+		}
 	}
 }
 
@@ -247,20 +253,30 @@ func retentionReconnectQueueCoordinator(t *testing.T) *RetentionReconnectCoordin
 	for _, step := range scenario.Steps {
 		steps[step.ID] = step
 	}
+	// Without a controller, a runtime binding with distinct names stands in for
+	// the controller's bound write and field IDs.
+	authored := steps[retentionReconnectStepOrder[0]].Operation
+	bound := authored
+	bound.Payload = json.RawMessage(`{"table_id":"runtime_rows","pk":{"id":"runtime-record"},"columns":[{"field_id":"value","value":"queued"}]}`)
+	intent, err := retentionReconnectAuthoredIntent(scenario.Model.Setup[0], authored, bound, func(_, field string) (string, error) { return "runtime-" + field, nil })
+	if err != nil {
+		t.Fatalf("bind retention-reconnect authored intent: %v", err)
+	}
 	return &RetentionReconnectCoordinator{
 		config:            RetentionReconnectCoordinatorConfig{Scenario: scenario},
 		steps:             steps,
+		authoredIntent:    intent,
 		sealedGeneration:  1,
 		sealedBatchID:     "batch-runtime",
 		sealedMutationIDs: []string{"mutation-runtime"},
 	}
 }
 
-func retentionReconnectQueueCapture(status, value, clientVersion string) finalCapture {
+func retentionReconnectQueueCapture(status, fieldID, value, clientVersion string) finalCapture {
 	return finalCapture{
 		ClientState: json.RawMessage(`{"schema":{"version":1,"hash":"` + strings.Repeat("a", 64) + `"},"provenanceMaintenanceWorkCursor":"cursor","mutationLedgerCount":1}`),
-		Pending: json.RawMessage(`[{"mutationID":"mutation-runtime","status":` + status + `,"clientVersion":` + clientVersion +
-			`,"authoredFields":[{"fieldID":"value","logicalType":"string","value":` + value + `}]}]`),
+		Pending: json.RawMessage(`[{"mutationID":"mutation-runtime","tableName":"runtime_rows","recordID":"runtime-record","operation":"insert","status":` + status +
+			`,"clientVersion":` + clientVersion + `,"authoredFields":[{"fieldID":"` + fieldID + `","logicalType":"string","value":` + value + `}]}]`),
 		Rejected: json.RawMessage(`[{"mutationID":"mutation-runtime","status":"rejected_terminal","code":"policy_rejected"}]`),
 	}
 }

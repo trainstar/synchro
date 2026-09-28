@@ -558,15 +558,20 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 		"provenanceMaintenanceWorkCursor": "0",
 	}
 	// Without a controller, the authored write stands in for the runtime
-	// binding that localCommand records. The device assigns its own mutation IDs.
+	// binding. Each native mutation ID is the one a retained capture of that
+	// write reports, which differs from the authored mutation ID.
 	rejected := make([]queueReplayObservedRejection, 0, len(workloads))
 	for index, workload := range workloads {
-		rejection, err := queueReplayBoundRejection(workload.rejected, workload.rejected)
+		rejection, err := queueReplayBoundRejection(workload.rejected, workload.rejected, authoredFieldID)
 		if err != nil {
 			t.Fatalf("derive queue-replay authored rejection: %v", err)
 		}
+		captured := queueReplayRetainedMutation(fmt.Sprintf("00000000-0000-4000-8000-%012d", index+1), rejection, rejection.Fields)
+		if rejection.MutationID, err = bindRetainedRejection([]queueReplayPendingMutation{captured}, rejection); err != nil {
+			t.Fatalf("bind queue-replay retained rejection: %v", err)
+		}
 		coordinator.rejections = append(coordinator.rejections, rejection)
-		rejected = append(rejected, queueReplayRejectionDetail(t, fmt.Sprintf("00000000-0000-4000-8000-%012d", index+1), rejection.RecordID, rejection))
+		rejected = append(rejected, queueReplayObservedRejection{MutationID: rejection.MutationID, TableName: rejection.TableName, RecordID: rejection.RecordID, Code: "schema_incompatible"})
 	}
 	observations := make([]transportObservation, len(workloads)*2)
 	for index := range observations {
@@ -592,17 +597,10 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 		"row":    func(value *queueReplayObservedRejection) { value.RecordID = "other-row" },
 		"table":  func(value *queueReplayObservedRejection) { value.TableName = "other_table" },
 		"reason": func(value *queueReplayObservedRejection) { value.Code = "validation_failed" },
-		"retained mutation identity": func(value *queueReplayObservedRejection) {
+		// A valid native capture was bound, so a rejection that names any other
+		// mutation, even a well-formed one, is not that write's rejection.
+		"captured mutation ID": func(value *queueReplayObservedRejection) {
 			value.MutationID = "00000000-0000-4000-8000-000000000999"
-		},
-		"retained authored value": func(value *queueReplayObservedRejection) {
-			changed := coordinator.rejections[0]
-			changed.Values = []json.RawMessage{json.RawMessage(`"changed-value"`)}
-			*value = queueReplayRejectionDetail(t, value.MutationID, value.RecordID, changed)
-		},
-		"retained row": func(value *queueReplayObservedRejection) {
-			*value = queueReplayRejectionDetail(t, value.MutationID, "other-row", coordinator.rejections[0])
-			value.RecordID = coordinator.rejections[0].RecordID
 		},
 	} {
 		changed := append([]queueReplayObservedRejection(nil), rejected...)
@@ -1043,14 +1041,44 @@ func cloneQueueReplayScenario(scenario scenarios.Scenario) scenarios.Scenario {
 	return clone
 }
 
-// queueReplayRejectionDetail builds one device rejection detail whose retained
-// mutation body carries mutationID, the row, and the authored values.
-func queueReplayRejectionDetail(t *testing.T, mutationID, recordID string, rejection queueReplayRejection) queueReplayObservedRejection {
-	t.Helper()
-	columns := make(map[string]json.RawMessage, len(rejection.Values))
-	for index, value := range rejection.Values {
-		columns[fmt.Sprintf("field-%d", index)] = value
+func authoredFieldID(_, field string) (string, error) { return "runtime-" + field, nil }
+
+func queueReplayRetainedMutation(mutationID string, rejection queueReplayRejection, fields []scenarios.NativeQueuedField) queueReplayPendingMutation {
+	mutation := queueReplayPendingMutation{MutationID: mutationID, TableName: rejection.TableName, RecordID: rejection.RecordID, Operation: rejection.Operation}
+	for _, field := range fields {
+		mutation.AuthoredFields = append(mutation.AuthoredFields, struct {
+			FieldID     string          `json:"fieldID"`
+			LogicalType string          `json:"logicalType"`
+			Value       json.RawMessage `json:"value"`
+		}{FieldID: field.FieldID, LogicalType: "string", Value: field.Value})
 	}
-	body := queueReplayFixtureJSON(t, map[string]any{"mutation_id": mutationID, "pk": map[string]string{"id": recordID}, "columns": columns})
-	return queueReplayObservedRejection{MutationID: mutationID, TableName: rejection.TableName, RecordID: recordID, Code: rejection.Code, MutationJSON: string(body)}
+	return mutation
+}
+
+// The retained capture binds the authored rejected write to exactly one native
+// mutation by table, record, operation, and each field ID and value.
+func TestBindRetainedRejectionRequiresOneMatchingNativeMutation(t *testing.T) {
+	rejection := queueReplayRejection{TableName: "cf_schema_queue", RecordID: "row-a", Operation: "insert", Fields: []scenarios.NativeQueuedField{
+		{FieldID: "runtime-a", Value: json.RawMessage(`"workload-a"`)}, {FieldID: "runtime-b", Value: json.RawMessage(`"workload-b"`)},
+	}}
+	moved := []scenarios.NativeQueuedField{{FieldID: "runtime-a", Value: json.RawMessage(`"workload-b"`)}, {FieldID: "runtime-b", Value: json.RawMessage(`"workload-a"`)}}
+	otherRecord, otherOperation := rejection, rejection
+	otherRecord.RecordID = "row-b"
+	otherOperation.Operation = "update"
+	distractors := []queueReplayPendingMutation{
+		queueReplayRetainedMutation("other-record", otherRecord, rejection.Fields),
+		queueReplayRetainedMutation("other-operation", otherOperation, rejection.Fields),
+		queueReplayRetainedMutation("moved-values", rejection, moved),
+		queueReplayRetainedMutation("missing-field", rejection, rejection.Fields[:1]),
+	}
+	match := queueReplayRetainedMutation("native-id", rejection, rejection.Fields)
+	if id, err := bindRetainedRejection(append(distractors, match), rejection); err != nil || id != "native-id" {
+		t.Fatalf("bound native mutation = %q, %v, want native-id", id, err)
+	}
+	if _, err := bindRetainedRejection(distractors, rejection); err == nil {
+		t.Fatal("bound a rejected write with no matching native mutation")
+	}
+	if _, err := bindRetainedRejection(append(distractors, match, queueReplayRetainedMutation("second", rejection, rejection.Fields)), rejection); err == nil {
+		t.Fatal("bound a rejected write that matches two native mutations")
+	}
 }
