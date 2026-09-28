@@ -370,7 +370,7 @@ func validateRetentionReconnectFloorResume(before, restarted, after Result, call
 	for _, observed := range call.transportObservations {
 		switch observed.OperationClass {
 		case "connect":
-			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable == nil || *observed.Retryable {
+			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable != nil {
 				return errors.New("Kotlin Android retention-reconnect compacted-scope resume connect is invalid")
 			}
 			connects++
@@ -378,7 +378,7 @@ func validateRetentionReconnectFloorResume(before, restarted, after Result, call
 			return errors.New("Kotlin Android retention-reconnect compacted-scope resume entered rebuild")
 		case "pull":
 			response := observed.PullResponseFacts
-			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable == nil || *observed.Retryable || observed.CursorFingerprintsComplete == nil ||
+			if observed.StatusCode != 200 || observed.ErrorCode != nil || observed.Retryable != nil || observed.CursorFingerprintsComplete == nil ||
 				!*observed.CursorFingerprintsComplete || !reflect.DeepEqual(observed.CursorFingerprints, requestFingerprints) || response == nil ||
 				response.ChangeCount != 0 || response.HasMore || response.RebuildScopeCount != 0 || !response.ScopeCursorFingerprintsComplete ||
 				response.ChecksumCount != len(responseFingerprints) || !reflect.DeepEqual(response.ScopeCursorFingerprints, responseFingerprints) {

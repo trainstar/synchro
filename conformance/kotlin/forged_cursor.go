@@ -260,7 +260,7 @@ func validateKotlinForgedCursorTransport(scenario scenarios.Scenario, observatio
 			return errors.New("Kotlin Android forged-cursor transport order differs from the authored call")
 		}
 		if index == 0 {
-			if observed.StatusCode != http.StatusOK || observed.ErrorCode != nil || observed.Retryable == nil || *observed.Retryable {
+			if observed.StatusCode != http.StatusOK || observed.ErrorCode != nil || observed.Retryable != nil {
 				return errors.New("Kotlin Android forged-cursor setup connect did not succeed")
 			}
 			continue

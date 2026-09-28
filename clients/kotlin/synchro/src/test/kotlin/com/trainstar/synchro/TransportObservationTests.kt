@@ -311,8 +311,8 @@ class TransportObservationTests {
             assertTrue(runCatching { client.fetchSchema() }.exceptionOrNull() is SynchroError.ServerError)
 
             val observations = collector.snapshot().observations
-            assertEquals("temporary_unavailable", observations[0].errorCode)
-            assertEquals(null, observations[1].errorCode)
+            assertEquals(listOf("temporary_unavailable", null), observations.map { it.errorCode })
+            assertEquals(listOf(true, null), observations.map { it.retryable })
         } finally {
             server.shutdown()
         }

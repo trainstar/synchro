@@ -231,14 +231,13 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 	floorCursor := "floor-cursor"
 	resumedCursor := "resumed-cursor"
 	complete := true
-	retryable := false
 	snapshot := func(cursor, identityCursor string) Result {
 		return Result{ScopeStates: json.RawMessage(`[{"scope_id":"` + identityScope + `","cursor":"` + identityCursor + `","checksum":null,"generation":1,"local_checksum":""},{"scope_id":"` + runtimeScope + `","cursor":"` + cursor + `","checksum":null,"generation":1,"local_checksum":""}]`)}
 	}
 	call := SynchronizationResult{Completion: "idle", transportObservations: []TransportObservation{
-		{OperationClass: "connect", StatusCode: 200, Retryable: &retryable},
+		{OperationClass: "connect", StatusCode: 200},
 		{
-			OperationClass: "pull", StatusCode: 200, Retryable: &retryable, CursorFingerprints: retentionReconnectCursorFingerprints(scopeStateRecord{ScopeID: identityScope, Cursor: &identityCursor}, scopeStateRecord{ScopeID: runtimeScope, Cursor: &floorCursor}), CursorFingerprintsComplete: &complete,
+			OperationClass: "pull", StatusCode: 200, CursorFingerprints: retentionReconnectCursorFingerprints(scopeStateRecord{ScopeID: identityScope, Cursor: &identityCursor}, scopeStateRecord{ScopeID: runtimeScope, Cursor: &floorCursor}), CursorFingerprintsComplete: &complete,
 			PullResponseFacts: &TransportPullResponseFacts{ChangeCount: 0, HasMore: false, RebuildScopeCount: 0, ChecksumCount: 2, ScopeCursorFingerprints: retentionReconnectCursorFingerprints(scopeStateRecord{ScopeID: identityScope, Cursor: &identityCursor}, scopeStateRecord{ScopeID: runtimeScope, Cursor: &resumedCursor}), ScopeCursorFingerprintsComplete: true},
 		},
 	}}

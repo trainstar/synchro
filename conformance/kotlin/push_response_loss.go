@@ -417,7 +417,7 @@ func validatePushResponseLossInitialCall(scenario scenarios.Scenario, stepID str
 		return fmt.Errorf("Kotlin Android push-response-loss initial call shape = %q/%d/%d, want %q/1/at least 1", call.Completion, len(call.Steps), len(call.transportObservations), wantCompletion)
 	}
 	last := call.transportObservations[len(call.transportObservations)-1]
-	if last.OperationClass != "push" || last.StatusCode < 200 || last.StatusCode >= 300 || last.ErrorCode != nil || last.Retryable == nil || *last.Retryable {
+	if last.OperationClass != "push" || last.StatusCode < 200 || last.StatusCode >= 300 || last.ErrorCode != nil || last.Retryable != nil {
 		return fmt.Errorf("Kotlin Android push-response-loss committed response = %s/%d/%s/%s, want push/2xx/false/none", last.OperationClass, last.StatusCode, pushResponseLossOptionalBool(last.Retryable), pushResponseLossOptionalString(last.ErrorCode))
 	}
 	stepWire := call.Steps[0].Wire
@@ -466,7 +466,7 @@ func validatePushResponseLossReplayCall(scenario scenarios.Scenario, stepID stri
 		if wantCode == "" {
 			wantCode = "none"
 		}
-		if pushes[index].StatusCode != expected.status || pushes[index].Retryable == nil || *pushes[index].Retryable != expected.retryable || code != wantCode {
+		if pushes[index].StatusCode != expected.status || wireRetryable(pushes[index]) != expected.retryable || code != wantCode {
 			return fmt.Errorf("Kotlin Android sealed-retry push %d = %d/%s/%s, want %d/%t/%s", index+1, pushes[index].StatusCode, pushResponseLossOptionalBool(pushes[index].Retryable), code, expected.status, expected.retryable, wantCode)
 		}
 	}

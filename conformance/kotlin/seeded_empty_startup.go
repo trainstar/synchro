@@ -136,7 +136,7 @@ func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scena
 			if err != nil {
 				return SeededEmptyStartupResult{}, err
 			}
-			if call.Completion != "idle" || connect.StatusCode != 200 || connect.Retryable == nil || *connect.Retryable {
+			if call.Completion != "idle" || connect.StatusCode != 200 || connect.Retryable != nil {
 				return SeededEmptyStartupResult{}, fmt.Errorf("Kotlin Android startup client %s completed %q with connect status %d", clientID, call.Completion, connect.StatusCode)
 			}
 			if err := validateKotlinWireExpectation(scenario, startupID, "connect", call); err != nil {
@@ -300,7 +300,7 @@ func validateKotlinSeededStartupTrace(call SynchronizationResult, expectedConnec
 		return errors.New("startup request sequence is invalid")
 	}
 	for _, observation := range observations {
-		if observation.StatusCode != 200 || observation.Retryable == nil || *observation.Retryable || observation.ErrorCode != nil {
+		if observation.StatusCode != 200 || observation.Retryable != nil || observation.ErrorCode != nil {
 			return errors.New("startup request did not succeed")
 		}
 	}

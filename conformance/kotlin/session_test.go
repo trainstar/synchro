@@ -154,7 +154,7 @@ func TestDecodeResponseCarriesBoundedCommandErrorDetail(t *testing.T) {
 }
 
 func TestDecodeResponseValidatesPushMutationCount(t *testing.T) {
-	observation := `{"sequence":1,"operation_class":"push","status_code":200,"error_code":null,"retryable":false,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"` + testDigest + `","mutation_count":2}}`
+	observation := `{"sequence":1,"operation_class":"push","status_code":200,"error_code":null,"retryable":null,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"` + testDigest + `","mutation_count":2}}`
 	result, err := DecodeResponse([]byte(responseWithObservations(observation)))
 	if err != nil {
 		t.Fatalf("valid push response failed: %v", err)
@@ -166,8 +166,8 @@ func TestDecodeResponseValidatesPushMutationCount(t *testing.T) {
 	for _, invalid := range []string{
 		strings.Replace(observation, `,"mutation_count":2`, "", 1),
 		strings.Replace(observation, `,"error_code":null`, "", 1),
-		strings.Replace(observation, `,"retryable":false`, "", 1),
-		strings.Replace(observation, `"retryable":false`, `"retryable":true`, 1),
+		strings.Replace(observation, `,"retryable":null`, "", 1),
+		strings.Replace(observation, `"retryable":null`, `"retryable":false`, 1),
 		strings.Replace(observation, `"mutation_count":2`, `"mutation_count":0`, 1),
 		strings.Replace(observation, `"mutation_count":2`, `"mutation_count":1001`, 1),
 		strings.Replace(observation, `"operation_class":"push"`, `"operation_class":"pull"`, 1),
@@ -274,7 +274,6 @@ func TestSessionRetainsImmutableRebuildObservationFacts(t *testing.T) {
 			Sequence:            1,
 			OperationClass:      "rebuild",
 			StatusCode:          200,
-			Retryable:           pointer(false),
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				ClientGeneration:     pointer(int64(1)),

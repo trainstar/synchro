@@ -116,6 +116,7 @@ data class TransportObservation(
     @SerialName("request_facts") val requestFacts: TransportRequestFacts? = null,
     @SerialName("rebuild_response_facts") val rebuildResponseFacts: TransportRebuildResponseFacts? = null,
     @SerialName("pull_response_facts") val pullResponseFacts: TransportPullResponseFacts? = null,
+    val retryable: Boolean? = null,
 )
 
 @Serializable
@@ -294,6 +295,7 @@ class TransportObservationCollector(capacity: Int = 256) {
         operationClass: TransportOperationClass,
         statusCode: Int,
         errorCode: String? = null,
+        retryable: Boolean? = null,
         durationNanoseconds: Long,
         cursorFingerprints: List<String>?,
         cursorFingerprintsComplete: Boolean?,
@@ -311,6 +313,7 @@ class TransportObservationCollector(capacity: Int = 256) {
                     operationClass = operationClass,
                     statusCode = statusCode,
                     errorCode = errorCode,
+                    retryable = retryable,
                     durationNanoseconds = durationNanoseconds,
                     cursorFingerprints = cursorFingerprints,
                     cursorFingerprintsComplete = cursorFingerprintsComplete,

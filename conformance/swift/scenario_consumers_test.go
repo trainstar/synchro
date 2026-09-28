@@ -14,7 +14,8 @@ func TestWireExpectationRejectsMissingAndMismatchedObservations(t *testing.T) {
 	scenario := scenarios.Scenario{WireExpectations: []scenarios.WireExpectation{
 		{StepID: "STEP-ERROR-001", HTTPStatus: 503, Retryable: true, ErrorCode: &code},
 	}}
-	observed := transportObservation{OperationClass: "pull", StatusCode: 503, Retryable: true, ErrorCode: &code}
+	retryable, terminal := true, false
+	observed := transportObservation{OperationClass: "pull", StatusCode: 503, Retryable: &retryable, ErrorCode: &code}
 	result := SynchronizationResult{transportObservations: []transportObservation{observed}}
 	if err := validateSwiftWireExpectation(scenario, "STEP-ERROR-001", "pull", result); err != nil {
 		t.Fatalf("matching observed error failed: %v", err)
@@ -24,7 +25,8 @@ func TestWireExpectationRejectsMissingAndMismatchedObservations(t *testing.T) {
 		change func(*transportObservation)
 	}{
 		{"status", func(value *transportObservation) { value.StatusCode = 200 }},
-		{"retryability", func(value *transportObservation) { value.Retryable = false }},
+		{"retryability", func(value *transportObservation) { value.Retryable = &terminal }},
+		{"missing retryability", func(value *transportObservation) { value.Retryable = nil }},
 		{"canonical code", func(value *transportObservation) { value.ErrorCode = &wrongCode }},
 		{"missing code", func(value *transportObservation) { value.ErrorCode = nil }},
 		{"missing operation", func(value *transportObservation) { value.OperationClass = "connect" }},

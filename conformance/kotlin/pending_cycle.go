@@ -490,7 +490,7 @@ func validateKotlinPendingCycleBeginTransport(observations []TransportObservatio
 		return err
 	}
 	connect := observations[0]
-	if connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable == nil || *connect.Retryable {
+	if connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable != nil {
 		return errors.New("Kotlin Android pending-cycle setup connect did not succeed")
 	}
 	return nil
@@ -505,15 +505,12 @@ func validateKotlinPendingCycleTransport(observations []TransportObservation, ex
 		if observation.OperationClass != expectedClasses[index] {
 			return fmt.Errorf("Kotlin Android pending-cycle transport operation class %q at position %d, want %q", observation.OperationClass, index, expectedClasses[index])
 		}
-		if observation.Retryable == nil {
-			return fmt.Errorf("Kotlin Android pending-cycle %s transport retryability is absent", observation.OperationClass)
-		}
 	}
 	return nil
 }
 
 func validateKotlinPendingCycleStepWire(scenario scenarios.Scenario, stepID, operationClass string, step StepObservation, observed TransportObservation) error {
-	if step.Disposition != "success" || step.Wire == nil || step.Wire.HTTPStatus != observed.StatusCode || observed.Retryable == nil || step.Wire.Retryable != *observed.Retryable || !equalKotlinOptionalStrings(step.Wire.ErrorCode, observed.ErrorCode) {
+	if step.Disposition != "success" || step.Wire == nil || step.Wire.HTTPStatus != observed.StatusCode || step.Wire.Retryable != wireRetryable(observed) || !equalKotlinOptionalStrings(step.Wire.ErrorCode, observed.ErrorCode) {
 		return fmt.Errorf("Kotlin Android pending-cycle %s step result does not match transport", stepID)
 	}
 	if observed.OperationClass != operationClass {
@@ -543,6 +540,11 @@ func validateKotlinPendingCycleCleanupCall(call SynchronizationResult) error {
 }
 
 func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, step scenarios.PendingCycleNativeCRUDStep, name string) (Result, error) {
+	// The Swift consumer uses the same bound. Without it, a call that never
+	// pushes waits until the suite timeout and reports no cause.
+	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	ctx = deadline
 	state, err := platform.clientFor(client)
 	if err != nil {
 		return Result{}, fmt.Errorf("access Kotlin Android pending-cycle %s transport: %w", name, err)
@@ -552,10 +554,17 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 	if err != nil {
 		return Result{}, fmt.Errorf("run Kotlin Android pending-cycle %s push: %w", name, err)
 	}
+	if call.Completion == "error" {
+		return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s start failed: completion %q", name, call.Completion)
+	}
 	observation, err := kotlinScenarioWire(call, "push")
 	if err != nil {
 		if err := waitForTransportObservation(ctx, state, checkpoint, "push"); err != nil {
-			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle %s push: %w", name, err)
+			classes := make([]string, 0, len(call.transportObservations))
+			for _, observed := range call.transportObservations {
+				classes = append(classes, fmt.Sprintf("%s:%d", observed.OperationClass, observed.StatusCode))
+			}
+			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle %s push after call completion %q with transport %v: %w", name, call.Completion, classes, err)
 		}
 		observations, err := state.session.ObservationsAfter(checkpoint)
 		if err != nil {
@@ -563,7 +572,7 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 		}
 		found := false
 		for _, candidate := range observations {
-			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && candidate.Retryable != nil && !*candidate.Retryable {
+			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && candidate.Retryable == nil {
 				observation = candidate
 				found = true
 				break
@@ -573,7 +582,7 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 			return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s recovery did not produce a successful push", name)
 		}
 	}
-	if observation.StatusCode != 200 || observation.Retryable == nil || *observation.Retryable {
+	if observation.StatusCode != 200 || observation.Retryable != nil {
 		return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s push did not complete successfully", name)
 	}
 	if err := controller.BindApplicationPush(step.ApplicationPush); err != nil {

@@ -179,7 +179,7 @@ func validateKotlinSteadyPullBaselineWires(scenario scenarios.Scenario, result S
 		return errors.New("Kotlin Android steady-pull baseline call shape is invalid")
 	}
 	connect := result.transportObservations[0]
-	if connect.StatusCode != 200 || connect.Retryable == nil || *connect.Retryable || connect.ErrorCode != nil {
+	if connect.StatusCode != 200 || connect.Retryable != nil || connect.ErrorCode != nil {
 		return errors.New("Kotlin Android steady-pull baseline connect did not succeed")
 	}
 	for _, observation := range result.transportObservations[1 : len(result.transportObservations)-1] {
@@ -195,7 +195,7 @@ func validateKotlinWireObservation(scenario scenarios.Scenario, stepID string, o
 		if expected.StepID != scenarios.StepID(stepID) {
 			continue
 		}
-		if observed.StatusCode != expected.HTTPStatus || observed.Retryable == nil || *observed.Retryable != expected.Retryable || !equalKotlinOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
+		if observed.StatusCode != expected.HTTPStatus || wireRetryable(observed) != expected.Retryable || !equalKotlinOptionalStrings(observed.ErrorCode, expected.ErrorCode) {
 			return fmt.Errorf("Kotlin Android wire result %s differs from its authored expectation", stepID)
 		}
 		return nil
