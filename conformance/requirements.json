@@ -430,7 +430,7 @@
       "id": "SYNC-WAL-007",
       "title": "Commit-ordered registry activation",
       "category": "change-capture",
-      "statement": "Each source transaction uses exactly the latest validated registry generation activated before it in commit order, and all events in that transaction use that one generation.",
+      "statement": "Each source row event uses exactly the latest validated registry generation activated before it in source order, either by an earlier committed transaction or by an earlier activation message in the same transaction.",
       "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#commit-ordered-registry-activation" }]

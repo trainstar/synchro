@@ -91,6 +91,9 @@ pub struct WalLogicalMessage {
     pub prefix: String,
     pub content: Vec<u8>,
     pub message_lsn: u64,
+    /// Row and truncate ordinals below this value precede the message in the
+    /// source transaction. Registry activation uses it as its cutover point.
+    pub event_boundary: u64,
 }
 
 /// One complete, committed source transaction.
@@ -503,10 +506,12 @@ impl WalDecoder {
         let transaction = self.transaction.as_mut().ok_or_else(|| {
             DecodeError::InvalidMessage("logical message encountered without BEGIN".to_string())
         })?;
+        let event_boundary = transaction.next_ordinal;
         transaction.messages.push(WalLogicalMessage {
             prefix,
             content,
             message_lsn,
+            event_boundary,
         });
         Ok(())
     }
@@ -1259,11 +1264,13 @@ mod tests {
                     prefix: "synchro".to_string(),
                     content: b"before-refresh".to_vec(),
                     message_lsn: 15,
+                    event_boundary: 2,
                 },
                 WalLogicalMessage {
                     prefix: "synchro".to_string(),
                     content: b"after-refresh".to_vec(),
                     message_lsn: 19,
+                    event_boundary: 3,
                 },
             ]
         );
