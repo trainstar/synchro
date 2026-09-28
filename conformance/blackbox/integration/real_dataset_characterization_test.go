@@ -21,7 +21,7 @@ import (
 // This characterization records complete correct work for one seeded
 // dataset. It has no numerical pass or fail rule (decision D-06). The run
 // fails only when its exact data, authorization, or progress checks fail.
-const characterizationFormat = "synchro-dataset-characterization-v1"
+const characterizationFormat = "synchro-dataset-characterization-v2"
 
 // characterizationRebuildUsers bounds the users whose complete assigned
 // scopes are rebuilt and compared in the final reconciliation.
@@ -94,15 +94,17 @@ type characterizationResult struct {
 		MaterializationPollNS int64  `json:"materialization_poll_ns"`
 		Boundary              string `json:"boundary"`
 	} `json:"observer"`
-	Load             []characterizationTransaction `json:"initial_load"`
-	InitialRebuilds  []characterizationRebuild     `json:"initial_rebuilds"`
-	Pushes           []characterizationPush        `json:"pushes"`
-	PushReconcileNS  int64                         `json:"push_reconciliation_ns"`
-	History          []characterizationTransaction `json:"history"`
-	FinalRebuilds    []characterizationRebuild     `json:"final_rebuilds"`
-	Export           characterizationExport        `json:"catalog_export"`
-	PullAfterHistory map[string]int                `json:"pull_after_history_status_counts"`
-	Resources        struct {
+	Load            []characterizationTransaction `json:"initial_load"`
+	InitialRebuilds []characterizationRebuild     `json:"initial_rebuilds"`
+	Pushes          []characterizationPush        `json:"pushes"`
+	PushReconcileNS int64                         `json:"push_reconciliation_ns"`
+	History         []characterizationTransaction `json:"history"`
+	FinalRebuilds   []characterizationRebuild     `json:"final_rebuilds"`
+	Export          characterizationExport        `json:"catalog_export"`
+	// HistoryReconcileNS covers the reconnect and incremental pulls of the
+	// retained clients until each equals the source after the history.
+	HistoryReconcileNS int64 `json:"history_reconciliation_ns"`
+	Resources          struct {
 		WorkerRSSBaselineBytes int64            `json:"wal_worker_rss_baseline_bytes"`
 		WorkerRSSPeakBytes     int64            `json:"wal_worker_observed_peak_rss_bytes"`
 		MaxPendingFences       int              `json:"max_observed_pending_fences"`
@@ -208,15 +210,17 @@ func runDatasetCharacterization(t *testing.T) {
 		result.History = append(result.History, applyCharacterizationTransaction(run, transaction))
 	}
 	result.Phase = "final-reconciliation"
-	result.PullAfterHistory = map[string]int{}
-	for _, user := range users {
-		status, _, err := run.post(clients[user].Token, "/sync/pull", characterizationPullRequest(clients[user]))
-		if err != nil {
-			t.Fatalf("pull after history for %s: %v", user, err)
-		}
-		result.PullAfterHistory[strconv.Itoa(status)]++
-	}
+	// Each retained client takes the documented path after the history: a
+	// reconnect for assignment changes, then incremental pulls that apply any
+	// rebuild instruction. Each pull must succeed, and the client must equal
+	// the source before the run records the incremental work as complete.
+	started = time.Now()
 	expected = run.expected()
+	for _, user := range users {
+		run.reconnect(clients[user])
+		run.converge(clients[user], expected, 5*time.Minute)
+	}
+	result.HistoryReconcileNS = int64(time.Since(started))
 	for _, user := range users {
 		_, result.FinalRebuilds = characterizationConnect(run, user, "characterization-final-"+user, expected, result.FinalRebuilds)
 	}
@@ -319,6 +323,7 @@ func characterizationPushSets(run *datasetRuntime, client *datasetClient, sets [
 	run.t.Helper()
 	random := dataset.NewRandom(seed ^ uint64(len(client.User)))
 	mutations := make([]map[string]any, 0, len(sets))
+	authored := make(map[string]map[string]string, len(sets))
 	for _, id := range sets {
 		version := client.Versions["exercise_sets/"+id]
 		if version == "" {
@@ -328,9 +333,10 @@ func characterizationPushSets(run *datasetRuntime, client *datasetClient, sets [
 		weight := strings.TrimSuffix(strings.TrimRight(random.Weight(), "0"), ".")
 		weightJSON, _ := json.Marshal(weight)
 		noteJSON, _ := json.Marshal(random.Paragraph(0, 80))
-		mutations = append(mutations, client.mutation(run.t, "exercise_sets", id, "update", version, map[string]string{
+		authored[id] = map[string]string{
 			"reps": strconv.Itoa(random.IntN(20)), "weight_kg": string(weightJSON), "note": string(noteJSON),
-		}))
+		}
+		mutations = append(mutations, client.mutation(run.t, "exercise_sets", id, "update", version, authored[id]))
 	}
 	accepted, rejected, elapsed := run.push(client, mutations)
 	if len(rejected) != 0 {
@@ -349,18 +355,19 @@ func characterizationPushSets(run *datasetRuntime, client *datasetClient, sets [
 	started := time.Now()
 	sample.OwnerChanges = run.pull(client)
 	sample.OwnerPullNS = int64(time.Since(started))
+	// A later expected state comes from the source, so each authored value
+	// must be in the source and in its outcome before that state is trusted.
+	expected := run.expected()
+	idField := client.Tables["exercise_sets"].FieldIDs["id"]
+	for _, outcome := range accepted {
+		var id string
+		if err := json.Unmarshal(outcome.ServerRow[idField], &id); err != nil || authored[id] == nil {
+			run.t.Fatalf("characterization push outcome for %s names no submitted set", client.User)
+		}
+		run.requireAuthoredOutcome(expected, client, "exercise_sets", id, authored[id], outcome.ServerRow)
+		delete(authored, id)
+	}
 	return sample
-}
-
-func characterizationPullRequest(client *datasetClient) map[string]any {
-	scopes := make(map[string]any, len(client.Cursors))
-	for scope, cursor := range client.Cursors {
-		scopes[scope] = map[string]any{"cursor": cursor}
-	}
-	return map[string]any{
-		"client_id": client.ID, "client_generation": client.Generation, "schema": json.RawMessage(client.Schema),
-		"scope_set_version": client.ScopeSetVersion, "scopes": scopes, "limit": 1000,
-	}
 }
 
 // characterizationCatalogExport exports the portable catalog scope in one
