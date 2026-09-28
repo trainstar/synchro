@@ -1,17 +1,17 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
-index f7b4858..e730ba8 100644
+index 41085ef..0f1cd55 100644
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -3596,7 +3596,7 @@ fn materialize_transaction(
-     // evaluation of the transaction.
-     crate::materialize::activate_staged_membership_generations(
+@@ -3597,7 +3597,7 @@ fn materialize_transaction(
+     // transaction, and effect_bases holds that membership for every changed row.
+     crate::materialize::activate_membership_stages(
          client,
 -        &membership_transitions,
 +        &[],
          active_generation,
+         &effect_bases,
          &stream_generation,
-         &format_lsn(transaction.commit_lsn),
-@@ -7159,6 +7159,21 @@ fn activate_generations(
+@@ -7161,6 +7161,22 @@ fn activate_generations(
      let Some(final_generation) = activations.last().copied() else {
          return Ok(active_generation);
      };
@@ -19,10 +19,11 @@ index f7b4858..e730ba8 100644
 +        active_stream_generation(client).map_err(|_| failure("validation_failed", commit_lsn))?;
 +    let mut source_generation = active_generation;
 +    for generation in activations {
-+        crate::materialize::activate_staged_membership_generations(
++        crate::materialize::activate_membership_stages(
 +            client,
 +            &[(source_generation, *generation)],
 +            *generation,
++            &HashMap::new(),
 +            &stream_generation,
 +            &format_lsn(commit_lsn),
 +            &format_lsn(end_lsn),

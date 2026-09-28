@@ -629,6 +629,48 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.inspectRetainedMutations).toHaveBeenCalledTimes(1);
     });
 
+    // No public flow creates a legacy record, so this authored payload is the positive codec proof.
+    it('decodes authored legacy retained and rejected records with their stored fields only', async () => {
+      const retained = {
+        representation: 'legacy',
+        mutationID: 'mutation-4',
+        localOrder: 1,
+        tableName: 'orders',
+        recordID: 'r1',
+        operation: 'insert',
+        baseVersion: null,
+        clientVersion: '2026-01-01T00:00:00.000000Z',
+        status: 'blocked_by_predecessor',
+        sourceKind: 'legacy_import',
+      };
+      const rejected = {
+        representation: 'legacy',
+        mutationID: 'm1',
+        tableName: 'orders',
+        recordID: 'r0',
+        status: 'rejected_terminal',
+        code: 'policy_rejected',
+        message: 'blocked',
+        serverRowJSON: '{"id":"r0"}',
+        serverVersion: 'server-v7',
+        createdAt: '2026-01-01T00:00:00.000000Z',
+        updatedAt: '2026-01-01T00:00:00.000000Z',
+      };
+      mockNativeModule.inspectRetainedMutationRecords.mockResolvedValueOnce(JSON.stringify([retained]));
+      mockNativeModule.inspectRejectedMutationRecords.mockResolvedValueOnce(JSON.stringify([rejected]));
+
+      const client = makeClient();
+      // Both calls settle before the assertions, so a failure leaves no queued native result.
+      const results = await Promise.allSettled([
+        client.inspectRetainedMutationRecords(),
+        client.inspectRejectedMutationRecords(),
+      ]);
+      expect(results).toStrictEqual([
+        { status: 'fulfilled', value: [retained] },
+        { status: 'fulfilled', value: [rejected] },
+      ]);
+    });
+
     // The payload is otherwise a complete current record, so only the representation rejects it.
     it.each([undefined, 'placeholder'])(
       'rejects a retained mutation with representation %p',

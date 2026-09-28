@@ -20,24 +20,32 @@ import (
 // activation. The second registration replaces the membership rule with rule,
 // which exceeds the registered fanout for fp-carol. After the second
 // activation the inserted row moves to fp-alice and receives the second added
-// field. Only its final value is valid under the new rule.
+// field. Only its final value is valid under the new rule. The ruled row has
+// owner ruledOwner and changes only its value before the first activation. The
+// new rule maps ruledOwner to user:fp-rule, so only the rule moves the row.
+// declared is the affected scope argument of the rule registration.
 type mixedActivationPhase struct {
-	moved    string
-	inserted string
-	first    string
-	second   string
-	rule     string
+	moved      string
+	inserted   string
+	ruled      string
+	ruledOwner string
+	first      string
+	second     string
+	rule       string
+	declared   string
 }
 
 // mixedActivationRuleSQL creates a membership rule that is equal to
-// cf_items_membership except that fp-carol maps to nine scopes. The cf_items
+// cf_items_membership except for two cases. The owners in the second argument
+// map to user:fp-rule. The owner fp-carol maps to nine scopes, and the cf_items
 // registration allows at most eight.
 const mixedActivationRuleSQL = `
 	CREATE FUNCTION public.%[1]s(p_id uuid)
 	RETURNS SETOF text
 	LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 	BEGIN ATOMIC
-		SELECT CASE WHEN (p.owner_id #>> '{}') = 'fp-carol'
+		SELECT CASE WHEN (p.owner_id #>> '{}') IN (%[2]s) THEN 'user:fp-rule'
+		            WHEN (p.owner_id #>> '{}') = 'fp-carol'
 		            THEN 'user:fp-carol-' || fanout.n
 		            ELSE 'user:' || (p.owner_id #>> '{}') END
 		FROM synchro_projection.cf_items AS p
@@ -91,39 +99,55 @@ func TestRealTransactionMembershipUsesFinalProjectionAcrossActivations(t *testin
 	harness, _ := provisionRealProofHarness(t, ctx)
 	admin := openIssue49Admin(t, ctx, harness)
 	crashPhase := mixedActivationPhase{
-		moved:    "00000000-0000-4000-a507-000000000001",
-		inserted: "00000000-0000-4000-a507-000000000002",
-		first:    "crash_first",
-		second:   "crash_second",
-		rule:     "cf_items_crash_rule",
+		moved:      "00000000-0000-4000-a507-000000000001",
+		inserted:   "00000000-0000-4000-a507-000000000002",
+		ruled:      "00000000-0000-4000-a507-000000000003",
+		ruledOwner: "fp-dave",
+		first:      "crash_first",
+		second:     "crash_second",
+		rule:       "cf_items_crash_rule",
+		// The omitted declaration makes the stage infer its affected scopes.
+		declared: "'{}'::text[]",
 	}
 	replayPhase := mixedActivationPhase{
-		moved:    "00000000-0000-4000-a507-000000000011",
-		inserted: "00000000-0000-4000-a507-000000000012",
-		first:    "replay_first",
-		second:   "replay_second",
-		rule:     "cf_items_replay_rule",
+		moved:      "00000000-0000-4000-a507-000000000011",
+		inserted:   "00000000-0000-4000-a507-000000000012",
+		ruled:      "00000000-0000-4000-a507-000000000013",
+		ruledOwner: "fp-erin",
+		first:      "replay_first",
+		second:     "replay_second",
+		rule:       "cf_items_replay_rule",
+		declared:   "ARRAY['user:fp-alice', 'user:fp-erin', 'user:fp-rule']",
 	}
 	rolledBack := mixedActivationPhase{
-		moved:    crashPhase.moved,
-		inserted: "00000000-0000-4000-a507-000000000021",
-		first:    "rolled_back_first",
-		second:   "rolled_back_second",
-		rule:     crashPhase.rule,
+		moved:      crashPhase.moved,
+		inserted:   "00000000-0000-4000-a507-000000000021",
+		ruled:      crashPhase.ruled,
+		ruledOwner: crashPhase.ruledOwner,
+		first:      "rolled_back_first",
+		second:     "rolled_back_second",
+		rule:       crashPhase.rule,
+		declared:   crashPhase.declared,
 	}
-	for _, rule := range []string{crashPhase.rule, replayPhase.rule} {
-		if _, err := admin.ExecContext(ctx, fmt.Sprintf(mixedActivationRuleSQL, rule)); err != nil {
-			t.Fatalf("create membership rule %s: %v", rule, err)
+	// The replay rule keeps the crash rule mapping, so the crash phase rows keep
+	// their membership in the replay phase.
+	for _, rule := range []struct{ name, owners string }{
+		{crashPhase.rule, "'fp-dave'"},
+		{replayPhase.rule, "'fp-dave', 'fp-erin'"},
+	} {
+		if _, err := admin.ExecContext(ctx, fmt.Sprintf(mixedActivationRuleSQL, rule.name, rule.owners)); err != nil {
+			t.Fatalf("create membership rule %s: %v", rule.name, err)
 		}
 	}
-	for _, recordID := range []string{crashPhase.moved, replayPhase.moved} {
+	baselineRows := []string{crashPhase.moved, crashPhase.ruled, replayPhase.moved, replayPhase.ruled}
+	for index, owner := range []string{"fp-alice", crashPhase.ruledOwner, "fp-alice", replayPhase.ruledOwner} {
 		if _, err := admin.ExecContext(ctx, `
 			INSERT INTO public.cf_items (id, owner_id, value)
-			VALUES ($1, 'fp-alice', 'baseline')`, recordID); err != nil {
-			t.Fatalf("insert baseline row %s: %v", recordID, err)
+			VALUES ($1, $2, 'baseline')`, baselineRows[index], owner); err != nil {
+			t.Fatalf("insert baseline row %s: %v", baselineRows[index], err)
 		}
 	}
-	waitForRealWALRecords(t, ctx, harness, "cf_items", crashPhase.moved, replayPhase.moved)
+	waitForRealWALRecords(t, ctx, harness, "cf_items", baselineRows...)
 	var initialGeneration, generationsBefore int64
 	if err := admin.QueryRowContext(ctx, `
 		SELECT (SELECT generation FROM synchro.sync_registry_generations WHERE state = 'active'),
@@ -180,7 +204,7 @@ func TestRealTransactionMembershipUsesFinalProjectionAcrossActivations(t *testin
 		var replayXID string
 		restart, err = harness.Operator().RunWALTransactionReplayRestart(
 			ctx,
-			[]string{replayPhase.moved, replayPhase.inserted},
+			[]string{replayPhase.moved, replayPhase.inserted, replayPhase.ruled},
 			func(ctx context.Context) error {
 				transaction, err := admin.BeginTx(ctx, nil)
 				if err != nil {
@@ -212,8 +236,12 @@ func TestRealTransactionMembershipUsesFinalProjectionAcrossActivations(t *testin
 			t.Fatalf("registry generations = %d, want %d: the rolled-back registrations must leave none",
 				generationsAfter, generationsBefore+4)
 		}
-		requireMixedActivationPhase(t, "crash", crash, crashPhase, initialGeneration, 0)
-		requireMixedActivationPhase(t, "replay", replay, replayPhase, crash.progress, 1)
+		// The crash phase creates user:fp-rule at generation 1 through its insert
+		// effect, and the stage advances it once.
+		requireMixedActivationPhase(t, "crash", crash, crashPhase, initialGeneration, 0,
+			map[string]int64{"user:fp-alice": 1, "user:fp-dave": 1, "user:fp-rule": 2})
+		requireMixedActivationPhase(t, "replay", replay, replayPhase, crash.progress, 1,
+			map[string]int64{"user:fp-alice": 1, "user:fp-erin": 1, "user:fp-rule": 1})
 		if !restart.WorkerExitedBeforeAcknowledgement || !restart.WorkerRestarted ||
 			restart.BeforeRestart.ContiguousAcknowledged || !restart.AfterRestart.ContiguousAcknowledged ||
 			restart.BeforeStages != restart.AfterStages {
@@ -251,11 +279,12 @@ func (phase mixedActivationPhase) write(ctx context.Context, transaction *sql.Tx
 	}{
 		{"UPDATE public.cf_items SET owner_id = 'fp-bob', value = 'moved-away' WHERE id = $1", []any{phase.moved}},
 		{"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, 'fp-carol', 'inserted-before')", []any{phase.inserted}},
+		{"UPDATE public.cf_items SET value = 'rule-target' WHERE id = $1", []any{phase.ruled}},
 		{fmt.Sprintf("ALTER TABLE public.cf_items ADD COLUMN %s text", phase.first), nil},
 		{register(phase.first, unchangedRule, "'{}'::text[]"), nil},
 		{fmt.Sprintf("UPDATE public.cf_items SET owner_id = 'fp-alice', value = 'moved-back', %s = 'first-value' WHERE id = $1", phase.first), []any{phase.moved}},
 		{fmt.Sprintf("ALTER TABLE public.cf_items ADD COLUMN %s text", phase.second), nil},
-		{register(phase.second, "'public."+phase.rule+"'", "ARRAY['user:fp-alice']"), nil},
+		{register(phase.second, "'public."+phase.rule+"'", phase.declared), nil},
 		{fmt.Sprintf("UPDATE public.cf_items SET owner_id = 'fp-alice', %s = 'second-value' WHERE id = $1", phase.second), []any{phase.inserted}},
 	}
 	for index, statement := range statements {
@@ -321,6 +350,7 @@ func waitForMixedActivationTransaction(ctx context.Context, admin *sql.DB, xid s
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		var acknowledged bool
+		var poison sql.NullString
 		err := admin.QueryRowContext(ctx, `
 			SELECT EXISTS (
 				SELECT 1
@@ -331,7 +361,11 @@ func waitForMixedActivationTransaction(ctx context.Context, admin *sql.DB, xid s
 				WHERE transaction.source_xid::text = $1
 				  AND progress.acknowledged_end_lsn >= transaction.end_lsn
 				  AND slot.confirmed_flush_lsn = progress.acknowledged_end_lsn
-			)`, xid).Scan(&acknowledged)
+			),
+			(SELECT failure_class FROM synchro.sync_wal_poison WHERE lifecycle = 'active' LIMIT 1)`, xid).Scan(&acknowledged, &poison)
+		if err == nil && poison.Valid {
+			return fmt.Errorf("the mixed activation transaction created poison %s", poison.String)
+		}
 		if err == nil && acknowledged {
 			return nil
 		}
@@ -450,7 +484,7 @@ func observeMixedActivationPhase(
 	if err := stages.Close(); err != nil {
 		t.Fatalf("read the membership stages: %v", err)
 	}
-	for _, recordID := range []string{phase.moved, phase.inserted} {
+	for _, recordID := range []string{phase.moved, phase.inserted, phase.ruled} {
 		var captured mixedActivationCaptured
 		if err := admin.QueryRowContext(ctx, `
 			SELECT captured.registry_generation,
@@ -523,8 +557,8 @@ func observeMixedActivationPhase(
 }
 
 // requireMixedActivationPhase compares one phase with values authored from the
-// contract. Row ordinals number the four row events of the transaction from 0.
-// Operation 1 is insert and 2 is update.
+// contract. Row ordinals number the five row events of the transaction from 0.
+// Operation 1 is insert, 2 is update, and 3 is delete.
 func requireMixedActivationPhase(
 	t *testing.T,
 	name string,
@@ -532,6 +566,7 @@ func requireMixedActivationPhase(
 	phase mixedActivationPhase,
 	activeBefore int64,
 	replays int,
+	wantScopeChanges map[string]int64,
 ) {
 	t.Helper()
 	if len(result.generations) != 2 {
@@ -545,7 +580,7 @@ func requireMixedActivationPhase(
 	if !reflect.DeepEqual(result.generations, wantGenerations) {
 		t.Fatalf("%s phase generations = %#v, want %#v", name, result.generations, wantGenerations)
 	}
-	wantTransaction := fmt.Sprintf("registry_generation=%d events=4 effects=2 replays=%d hash_format=2", activeBefore, replays)
+	wantTransaction := fmt.Sprintf("registry_generation=%d events=5 effects=4 replays=%d hash_format=2", activeBefore, replays)
 	if result.transaction != wantTransaction || result.progress != second.generation {
 		t.Fatalf("%s phase transaction = %q progress generation %d, want %q and %d",
 			name, result.transaction, result.progress, wantTransaction, second.generation)
@@ -554,30 +589,33 @@ func requireMixedActivationPhase(
 	wantCaptured := map[string]mixedActivationCaptured{
 		phase.moved:    {generation: second.generation, owner: text("fp-alice"), value: text("moved-back"), first: text("first-value")},
 		phase.inserted: {generation: second.generation, owner: text("fp-alice"), value: text("inserted-before"), second: text("second-value")},
+		phase.ruled:    {generation: second.generation, owner: text(phase.ruledOwner), value: text("rule-target")},
 	}
 	if !reflect.DeepEqual(result.captured, wantCaptured) {
 		t.Fatalf("%s phase captured rows = %#v, want %#v", name, result.captured, wantCaptured)
 	}
 	wantStages := []string{fmt.Sprintf(
-		"generation=%d source=%d state=activated affected={user:fp-alice} verified=t at_commit=t",
-		second.generation, first.generation)}
+		"generation=%d source=%d state=activated affected={user:fp-alice,user:%s,user:fp-rule} verified=t at_commit=t",
+		second.generation, first.generation, phase.ruledOwner)}
 	if !reflect.DeepEqual(result.stages, wantStages) {
 		t.Fatalf("%s phase membership stages = %#v, want %#v", name, result.stages, wantStages)
 	}
-	// The declared scope of the rule change advances once. No intermediate
-	// value creates a scope.
-	wantScopeChanges := map[string]int64{"user:fp-alice": 1}
+	// Each scope whose membership the transaction changes advances once, and
+	// no intermediate value creates a scope. The inserted row enters
+	// user:fp-alice and the ruled row moves from its owner scope to user:fp-rule.
 	if !reflect.DeepEqual(result.scopeChanges, wantScopeChanges) || result.activePoison != 0 {
 		t.Fatalf("%s phase scope changes = %#v poison=%d, want %#v and no poison",
 			name, result.scopeChanges, result.activePoison, wantScopeChanges)
 	}
-	wantEdges := map[string]string{phase.moved: "user:fp-alice", phase.inserted: "user:fp-alice"}
+	wantEdges := map[string]string{phase.moved: "user:fp-alice", phase.inserted: "user:fp-alice", phase.ruled: "user:fp-rule"}
 	if !reflect.DeepEqual(result.edges, wantEdges) {
 		t.Fatalf("%s phase membership edges = %#v, want %#v", name, result.edges, wantEdges)
 	}
 	wantEffects := []string{
-		"user:fp-alice|" + phase.moved + "|2|2|0|captured-version",
-		"user:fp-alice|" + phase.inserted + "|1|3|0|captured-version",
+		"user:" + phase.ruledOwner + "|" + phase.ruled + "|3|2|0|captured-version",
+		"user:fp-rule|" + phase.ruled + "|1|2|0|captured-version",
+		"user:fp-alice|" + phase.moved + "|2|3|0|captured-version",
+		"user:fp-alice|" + phase.inserted + "|1|4|0|captured-version",
 	}
 	if !reflect.DeepEqual(result.effects, wantEffects) {
 		t.Fatalf("%s phase pull effects =\n%s\nwant\n%s", name, strings.Join(result.effects, "\n"), strings.Join(wantEffects, "\n"))
