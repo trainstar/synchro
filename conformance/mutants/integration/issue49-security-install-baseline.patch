@@ -13,12 +13,12 @@ index aeafc6d..129652f 100644
  CREATE TABLE IF NOT EXISTS sync_runtime_state (
      singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
      stream_generation TEXT NOT NULL,
-@@ -2459,7 +2463,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2469,7 +2473,7 @@ CREATE FUNCTION "synchro_capture_fence"()
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1935
-+-- synchro-pg/src/lib.rs:1939
+--- synchro-pg/src/lib.rs:1945
++-- synchro-pg/src/lib.rs:1949
  -- finalize
  
  DO $roles$
