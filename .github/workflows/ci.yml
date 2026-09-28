@@ -293,7 +293,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run Swift checks against local PostgreSQL
-        run: make test-swift-unit test-swift test-client-schema-identity test-consumer-swift
+        run: make test-swift-unit test-swift test-client-schema-identity test-consumer-swift test-swift-upgrade
 
       - name: Stop local fixture
         if: always()
@@ -373,7 +373,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-kotlin-instrumentation test-kotlin test-consumer-kotlin-device
+          script: make test-kotlin-instrumentation test-kotlin test-consumer-kotlin-device test-kotlin-upgrade
 
       - name: Build Kotlin source consumer
         run: make test-consumer-kotlin
@@ -435,7 +435,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run React Native iOS checks against local PostgreSQL
-        run: make test-rn-e2e-ios test-consumer-rn-ios
+        run: make test-rn-e2e-ios test-consumer-rn-ios test-rn-upgrade-ios
 
       - name: Stop local fixture
         if: always()
@@ -451,6 +451,7 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      KOTLIN_ANDROID_SERIAL: emulator-5554
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -538,6 +539,7 @@ jobs:
           script: |
             make test-rn-e2e-android-run
             make test-consumer-rn-android
+            make test-rn-upgrade-android
 
   pull-request:
     name: pull-request

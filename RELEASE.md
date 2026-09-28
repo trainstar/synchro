@@ -44,11 +44,12 @@ Configure `release-signing` without required reviewers.
 Store only `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` in that environment.
 
 Configure the protected `release` environment with one required approval.
-Store only `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` there.
+Store only `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, and `NPM_DIST_TAG_TOKEN` there.
 Restrict `release` and `release-signing` deployments to the exact `master` branch.
 
 Configure npm trusted publishing for `.github/workflows/release.yml` and the `release` environment.
 Do not configure an npm publication token.
+`NPM_DIST_TAG_TOKEN` may only move npm dist-tags. Trusted publishing cannot move `latest`.
 
 The `publish` job is the only job that uses the protected `release` environment.
 Do not configure approval rules on `release-signing`.
@@ -247,9 +248,10 @@ The manifest records candidate environment resolution in `release-manifest.json`
 9. Publish GitHub assets without marking them latest.
 10. Verify source and asset access.
 11. Publish Maven and verify public consumption.
-12. Publish npm directly under `latest` through trusted OIDC.
-13. Verify the exact public npm bytes, provenance, and clean React Native builds.
-14. Mark GitHub latest after all public checks pass.
+12. Publish npm under the `candidate` dist-tag through trusted OIDC.
+13. Verify the explicit npm version, exact public bytes, provenance, and clean React Native builds.
+14. Move npm `latest` to the verified version with `NPM_DIST_TAG_TOKEN`.
+15. Mark GitHub latest after all public checks pass.
 
 ## Success Evidence
 
@@ -272,6 +274,7 @@ Synchro has no numeric performance guarantee. Performance budgets remain deferre
 | GitHub draft exists | Verify its existing assets and upload only missing sealed assets before publication. |
 | GitHub published and a registry is missing | Keep non-latest status and publish the original payload. |
 | Registry outcome is unknown | Query the recorded operation before retry. |
+| npm is `published-candidate` | Resume. Verify the published bytes and provenance, then move `latest`. Do not publish again. |
 | Published bytes match | Skip upload and repeat incomplete public checks only. |
 | Bytes, tag, source, or version differ | Stop and record the conflict. |
 | Original artifacts or the sealed candidate receipt expired | Stop. Never rebuild an existing release version. |
