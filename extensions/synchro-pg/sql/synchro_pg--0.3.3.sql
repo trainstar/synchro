@@ -1992,7 +1992,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_stream_reset_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:131
+-- synchro-pg/src/client.rs:138
 -- synchro_pg::client::synchro_connect
 CREATE  FUNCTION "synchro_connect"(
 	"p_user_id" TEXT, /* &str */
