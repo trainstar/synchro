@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"slices"
 	"testing"
 	"time"
@@ -73,39 +74,63 @@ func TestRealRegistrationsCommittedBeforeActivationActivateInOrder(t *testing.T)
 			}
 		}
 	}()
-	for _, registration := range []struct{ table, function, scope string }{
-		{"public.cf_items", "public.cf_items_ordering_membership", "user:ordering-first"},
-		{"public.cf_document_notes", "public.cf_document_notes_ordering_membership", "user:ordering-second"},
-	} {
-		if _, err := admin.ExecContext(ctx, `
+	register := func(executor interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}, table, function, scope string) {
+		t.Helper()
+		if _, err := executor.ExecContext(ctx, `
 			SELECT synchro.synchro_register_table(
 				$1, $2, 'multi_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
 				p_affected_scopes => ARRAY[$3]::text[]
-			)`, registration.table, registration.function, registration.scope,
+			)`, table, function, scope,
 		); err != nil {
-			t.Fatalf("register %s before activation: %v", registration.table, err)
+			t.Fatalf("register %s before activation: %v", table, err)
 		}
 	}
-	var pendingWhilePaused int
-	if err := admin.QueryRowContext(ctx,
-		"SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'",
-	).Scan(&pendingWhilePaused); err != nil {
-		t.Fatalf("observe pending registrations: %v", err)
+	register(admin, "public.cf_items", "public.cf_items_ordering_membership", "user:ordering-first")
+	// The second migration is still open when the worker starts to activate the first one.
+	second, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin second registration: %v", err)
 	}
-	if pendingWhilePaused < 2 {
-		t.Fatalf("both registrations must commit before activation: pending generations = %d", pendingWhilePaused)
+	defer second.Rollback()
+	var secondPID int
+	if err := second.QueryRowContext(ctx, "SELECT pg_catalog.pg_backend_pid()").Scan(&secondPID); err != nil {
+		t.Fatalf("observe second registration backend: %v", err)
 	}
+	register(second, "public.cf_document_notes", "public.cf_document_notes_ordering_membership", "user:ordering-second")
 	if err := resume(ctx); err != nil {
 		t.Fatalf("resume WAL materialization: %v", err)
 	}
 	paused = false
+	// When the worker waits for the open migration, the first activation is in progress.
+	workerWaited := false
+	deadline := time.Now().Add(30 * time.Second)
+	for !workerWaited && time.Now().Before(deadline) {
+		if err := admin.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_catalog.pg_stat_activity worker
+				WHERE worker.backend_type = 'synchro WAL consumer'
+				  AND $1 = ANY(pg_catalog.pg_blocking_pids(worker.pid))
+			)`, secondPID,
+		).Scan(&workerWaited); err != nil {
+			t.Fatalf("observe worker wait: %v", err)
+		}
+		if !workerWaited {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if err := second.Commit(); err != nil {
+		t.Fatalf("commit second registration: %v", err)
+	}
+	t.Logf("worker waited for the open second registration: %t", workerWaited)
 
 	type registryState struct {
 		pending, poison              int
 		itemsFunction, notesFunction string
 	}
 	var state registryState
-	deadline := time.Now().Add(60 * time.Second)
+	deadline = time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := admin.QueryRowContext(ctx, `
 			SELECT (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'),
@@ -129,6 +154,20 @@ func TestRealRegistrationsCommittedBeforeActivationActivateInOrder(t *testing.T)
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// Each rule transition activates in the generation that its own transaction created.
+	var stageScopes string
+	if err := admin.QueryRowContext(ctx, `
+		SELECT COALESCE(string_agg(stage.state || ':' || array_to_string(stage.affected_scopes, ','), ' '
+		                           ORDER BY stage.registry_generation), '')
+		FROM synchro.sync_registry_membership_stages stage
+		WHERE EXISTS (
+			SELECT 1 FROM unnest(stage.affected_scopes) AS scope(scope_id)
+			WHERE scope_id LIKE 'user:ordering-%'
+		)`,
+	).Scan(&stageScopes); err != nil {
+		t.Fatalf("observe membership stages: %v", err)
+	}
+
 	itemID := "00000000-0000-4000-8242-000000000001"
 	documentID := "00000000-0000-4000-8242-000000000002"
 	noteID := "00000000-0000-4000-8242-000000000003"
@@ -136,6 +175,9 @@ func TestRealRegistrationsCommittedBeforeActivationActivateInOrder(t *testing.T)
 		want := registryState{itemsFunction: "cf_items_ordering_membership", notesFunction: "cf_document_notes_ordering_membership"}
 		if state != want {
 			t.Fatalf("registrations committed before activation did not both activate: got %#v, want %#v; %s", state, want, harness.FailureDiagnostics())
+		}
+		if want := "activated:user:ordering-first activated:user:ordering-second"; stageScopes != want {
+			t.Fatalf("membership stages = %q, want %q", stageScopes, want)
 		}
 		for _, statement := range []struct {
 			sql  string
