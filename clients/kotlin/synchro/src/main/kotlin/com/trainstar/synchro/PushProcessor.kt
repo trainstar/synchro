@@ -801,6 +801,8 @@ internal class PushProcessor(
                 row.pkLogicalType,
                 row.recordID,
             )
+            // An earlier row can block this whole chain through a delete, a group, or a dependency.
+            if (chain.isEmpty()) return@forEach
             val runGroupID = chain.last().atomicGroupID
             val runStart = chain.indexOfLast { it.atomicGroupID != runGroupID } + 1
             val run = chain.subList(runStart, chain.size)

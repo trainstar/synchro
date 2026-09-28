@@ -2041,6 +2041,39 @@ class PushProcessorTests {
     }
 
     @Test
+    fun deleteThatBlocksAGroupOfAnotherRowStillSealsTheDelete() = runTest {
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        installServerRow(database, "server", "sv-start", recordID = "a")
+        database.execute(
+            "UPDATE orders SET deleted_at = ? WHERE id = ?",
+            arrayOf("2026-01-01T00:30:00.000000Z", "a"),
+        )
+        client.atomicWriteTransaction { transaction ->
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("after delete", "a"))
+            transaction.insertOrder("b", "grouped")
+        }
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("dependent", "b"))
+        val deleteID = ledgerID(database, "a", "delete")
+        val blockedIDs = listOf(ledgerID(database, "a", "update"), ledgerID(database, "b"), ledgerID(database, "b", "update"))
+        val server = MockWebServer()
+        server.enqueue(retryableResponse())
+        server.start()
+        try {
+            sealWithRetryableFailure(processor, server)
+
+            val sealed = pushJSON.decodeFromString<PushRequest>(server.takeRequest().body.readUtf8())
+            assertEquals(listOf(deleteID), sealed.mutations.map { it.mutationID })
+            assertEquals(
+                listOf("sealed", "blocked_by_predecessor", "blocked_by_predecessor", "blocked_by_predecessor"),
+                (listOf(deleteID) + blockedIDs).map { lifecycleState(database, it) },
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun groupWaitsWhileOneMemberHasNoBaseVersion() = runTest {
         val (database, _, processor) = environment()
         val client = clientFor(database)
