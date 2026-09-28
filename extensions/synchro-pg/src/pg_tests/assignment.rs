@@ -12,6 +12,8 @@ fn create_assignment_members() {
 
 /// Creates a non-superuser role that owns and registers an assignment
 /// function, so a test can observe the privileges of the function owner.
+/// Call it before registry setup. Parallel tests grant `synchro_operator`
+/// before they take the registry write lock, so a later grant can deadlock.
 fn create_assignment_owner(role: &str) {
     Spi::run(&format!(
         "CREATE ROLE {role} NOLOGIN NOSUPERUSER;
@@ -534,8 +536,8 @@ fn assignment_registration_rejects_schema_without_owner_usage() {
 #[pg_test]
 fn assignment_evaluation_runs_as_function_owner() {
     let owner = "synchro_assignment_evaluation_owner";
-    setup_test_tables();
     create_assignment_owner(owner);
+    setup_test_tables();
     create_assignment_function(
         "assigned_scopes",
         ASSIGNMENT_SIGNATURE,
@@ -560,8 +562,8 @@ fn assignment_evaluation_runs_as_function_owner() {
 #[pg_test]
 fn assignment_evaluation_query_to_xml_cannot_read_synchro() {
     let owner = "synchro_assignment_query_owner";
-    setup_test_tables();
     create_assignment_owner(owner);
+    setup_test_tables();
     create_assignment_function(
         "assigned_scopes",
         ASSIGNMENT_SIGNATURE,

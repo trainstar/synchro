@@ -42,8 +42,7 @@ fn registration_fixture(
          END;
          REVOKE EXECUTE ON FUNCTION public.{function}(UUID) FROM PUBLIC;
          GRANT EXECUTE ON FUNCTION public.{function}(UUID)
-             TO synchro_owner, synchro_worker;
-         GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;"
+             TO synchro_owner, synchro_worker;"
     ))
     .expect("create registration fixture");
 

@@ -70,7 +70,6 @@ fn membership_dependency_fixture() -> MembershipDependencyFixture {
              TO synchro_owner, synchro_worker;
          GRANT EXECUTE ON FUNCTION public.{target_membership}(INTEGER)
              TO synchro_owner, synchro_worker;
-         GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{source_table} TO synchro_owner;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{target_table} TO synchro_owner;
          ALTER TABLE public.{source_table} ENABLE ROW LEVEL SECURITY;
@@ -1092,7 +1091,6 @@ fn membership_function_limits_rows_before_rust_rejection() {
          REVOKE EXECUTE ON FUNCTION tests.{function}(INTEGER) FROM PUBLIC;
          GRANT EXECUTE ON FUNCTION tests.{function}(INTEGER)
              TO synchro_owner, synchro_worker;
-         GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{table} TO synchro_owner;
          ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;
          CREATE POLICY {policy} ON public.{table}
@@ -1192,7 +1190,6 @@ fn registered_membership_fixture(body: &str) -> RegisteredMembershipFixture {
          REVOKE EXECUTE ON FUNCTION tests.{function}(INTEGER) FROM PUBLIC;
          GRANT EXECUTE ON FUNCTION tests.{function}(INTEGER)
              TO synchro_owner, synchro_worker;
-         GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker;
          GRANT SELECT, INSERT, UPDATE ON TABLE public.{table} TO synchro_owner;
          ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;
          CREATE POLICY {policy} ON public.{table}
@@ -1413,6 +1410,151 @@ fn projection_view_name_collision_grants_no_select() {
 
     assert!(!intruder_can_read);
     assert_eq!(rejected, "true");
+}
+
+#[pg_test]
+fn projection_view_preparation_waits_for_registry_writer() {
+    Spi::run("CREATE EXTENSION IF NOT EXISTS dblink").expect("install dblink extension");
+    let connection_string: String = Spi::get_one(
+        "SELECT format(
+                    'host=%L port=%s dbname=%I user=%I',
+                    current_setting('unix_socket_directories'),
+                    current_setting('port'),
+                    current_database(),
+                    current_user
+                )",
+    )
+    .unwrap()
+    .expect("dblink connection string");
+    let suffix: String = Spi::get_one("SELECT replace(gen_random_uuid()::text, '-', '')")
+        .expect("projection lock order suffix query")
+        .expect("projection lock order suffix");
+    let writer = "synchro_projection_lock_writer";
+    let preparer = "synchro_projection_lock_preparer";
+    let view = format!("pl_view_{suffix}");
+    let writer_table = format!("pl_writer_{suffix}");
+    let preparer_table = format!("pl_preparer_{suffix}");
+    for (connection, table) in [(writer, &writer_table), (preparer, &preparer_table)] {
+        Spi::run_with_args(
+            "SELECT public.dblink_connect($1, $2)",
+            &[connection.into(), connection_string.as_str().into()],
+        )
+        .unwrap();
+        dblink_exec(connection, "BEGIN");
+        dblink_exec(
+            connection,
+            &format!(
+                "CREATE TABLE public.{table} (
+                     id UUID PRIMARY KEY,
+                     label TEXT NOT NULL DEFAULT '',
+                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                     deleted_at TIMESTAMPTZ
+                 );
+                 CREATE FUNCTION public.{table}_scope(p_key UUID)
+                 RETURNS SETOF text
+                 LANGUAGE sql
+                 STABLE
+                 SECURITY INVOKER
+                 SET search_path = pg_catalog, synchro
+                 BEGIN ATOMIC
+                     SELECT 'global'::text;
+                 END;
+                 REVOKE EXECUTE ON FUNCTION public.{table}_scope(UUID) FROM PUBLIC;
+                 GRANT EXECUTE ON FUNCTION public.{table}_scope(UUID)
+                     TO synchro_owner, synchro_worker;
+                 GRANT SELECT ON TABLE public.{table} TO synchro_owner;
+                 ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY {table}_policy ON public.{table}
+                     AS PERMISSIVE FOR ALL TO synchro_owner
+                     USING (true) WITH CHECK (true)"
+            ),
+        );
+    }
+    let prepare = |table: &str| {
+        format!(
+            "SELECT synchro.synchro_prepare_projection_view(
+                 'public.{table}', '{view}', ARRAY['label']::text[]
+             )::text"
+        )
+    };
+
+    dblink_query(
+        writer,
+        &format!(
+            "SELECT synchro.synchro_register_table(
+                 'public.{writer_table}', 'public.{writer_table}_scope', 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'read_only'
+             )::text"
+        ),
+    );
+    let writer_pid: i32 = dblink_query(writer, "SELECT pg_backend_pid()")
+        .parse()
+        .expect("parse registry writer PID");
+    let preparer_pid: i32 = dblink_query(preparer, "SELECT pg_backend_pid()")
+        .parse()
+        .expect("parse projection preparer PID");
+    let sent: i32 = Spi::get_one_with_args(
+        "SELECT public.dblink_send_query($1, $2)",
+        &[preparer.into(), prepare(&preparer_table).as_str().into()],
+    )
+    .unwrap()
+    .expect("send projection preparation");
+
+    let mut waiting = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        waiting = Spi::get_one_with_args(
+            "SELECT EXISTS (
+                        SELECT 1 FROM pg_locks
+                        WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                    )
+                    AND $2 = ANY (pg_catalog.pg_blocking_pids($1))",
+            &[preparer_pid.into(), writer_pid.into()],
+        )
+        .unwrap()
+        .unwrap_or(false);
+        let busy: Option<i32> =
+            Spi::get_one_with_args("SELECT public.dblink_is_busy($1)", &[preparer.into()])
+                .unwrap();
+        if waiting || busy == Some(0) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // A preparer that wrote the view before the registry lock would block
+    // this same-name preparation while it waits for the writer.
+    let writer_view = waiting.then(|| dblink_query(writer, &prepare(&writer_table)));
+    dblink_exec(writer, "ROLLBACK");
+    let preparer_view: Option<String> = Spi::get_one_with_args(
+        "SELECT result
+         FROM public.dblink_get_result($1, false) AS result_row(result text)",
+        &[preparer.into()],
+    )
+    .unwrap();
+    let preparer_error: String = Spi::get_one_with_args(
+        "SELECT public.dblink_error_message($1)",
+        &[preparer.into()],
+    )
+    .unwrap()
+    .unwrap_or_else(|| "error-status-missing".to_string());
+    Spi::run_with_args(
+        "SELECT result
+         FROM public.dblink_get_result($1, false) AS result_row(result text)",
+        &[preparer.into()],
+    )
+    .unwrap();
+    dblink_exec(preparer, "ROLLBACK");
+    for connection in [writer, preparer] {
+        Spi::run_with_args("SELECT public.dblink_disconnect($1)", &[connection.into()])
+            .unwrap();
+    }
+
+    assert_eq!(sent, 1);
+    assert!(waiting, "projection preparation did not wait for the registry writer");
+    let expected_view = format!("synchro_projection.{view}");
+    assert!(writer_view.is_some_and(|result| result.contains(&expected_view)));
+    assert_eq!(preparer_error, "OK");
+    assert!(preparer_view.is_some_and(|result| result.contains(&expected_view)));
 }
 
 #[pg_test]
@@ -1746,8 +1888,7 @@ fn membership_test_schema_enforces_production_validation() {
              SELECT synchro.synchro_prepare_projection_view(
                  'public.{table}', '{table}', ARRAY['id', 'private_note']
              );
-             ALTER FUNCTION public.{function}(UUID) SET SCHEMA tests;
-             GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker"
+             ALTER FUNCTION public.{function}(UUID) SET SCHEMA tests"
         ))
         .expect("prepare membership validation fixture");
         let definition = match case {
