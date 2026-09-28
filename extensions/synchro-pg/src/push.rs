@@ -2346,28 +2346,34 @@ fn load_existing_record(
         pk = pg_quote_ident(&table_reg.pk_column),
         pk_type = table_reg.pk_type,
     );
-    let source = client
-        .select(&sql, None, &[record_id.into()])
-        .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
-        .next()
-        .map(|row| {
-            let deleted = row
-                .get_by_name::<String, &str>("deleted_at")
-                .unwrap_or(None)
-                .is_some();
-            let data = row
-                .get_by_name::<String, &str>("data")
-                .unwrap_or(None)
-                .map(|data| {
-                    let mut data: serde_json::Value = serde_json::from_str(&data)
-                        .unwrap_or_else(|_| pgrx::error!("authoritative source row is not JSON"));
-                    crate::pull::canonicalize_synced_row_data(table_reg, &mut data).unwrap_or_else(
-                        |_| pgrx::error!("authoritative source row is not canonical"),
-                    );
-                    data
-                });
-            (deleted, data)
-        });
+    let load_source = || {
+        client
+            .select(&sql, None, &[record_id.into()])
+            .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
+            .next()
+            .map(|row| {
+                let deleted = row
+                    .get_by_name::<String, &str>("deleted_at")
+                    .unwrap_or(None)
+                    .is_some();
+                let data = row
+                    .get_by_name::<String, &str>("data")
+                    .unwrap_or(None)
+                    .map(|data| {
+                        let mut data: serde_json::Value = serde_json::from_str(&data)
+                            .unwrap_or_else(|_| {
+                                pgrx::error!("authoritative source row is not JSON")
+                            });
+                        crate::pull::canonicalize_synced_row_data(table_reg, &mut data)
+                            .unwrap_or_else(|_| {
+                                pgrx::error!("authoritative source row is not canonical")
+                            });
+                        data
+                    });
+                (deleted, data)
+            })
+    };
+    let mut source = load_source();
     let versions = client
         .select(
             "SELECT row_version::text AS row_version, deleted
@@ -2387,6 +2393,11 @@ fn load_existing_record(
                 .unwrap_or(false),
         )
     });
+    if source.is_none() && version.as_ref().is_some_and(|(_, deleted)| !deleted) {
+        // A writer can commit a new row between the two reads. Each writer changes the version
+        // row in its own transaction, so the locked version fixes the committed source state.
+        source = load_source();
+    }
     match (source, version) {
         (None, None) => None,
         (source, version) => {

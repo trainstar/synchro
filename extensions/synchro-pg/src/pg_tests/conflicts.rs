@@ -1623,6 +1623,8 @@
              BEGIN
                  IF (TG_OP = 'INSERT' AND NEW.title = 'vetoed')
                     OR (TG_OP = 'UPDATE' AND OLD.title = 'locked') THEN
+                     INSERT INTO public.test_bare_items (id, name)
+                     VALUES (gen_random_uuid(), 'veto-side-effect:' || TG_OP);
                      RETURN NULL;
                  END IF;
                  RETURN NEW;
@@ -1652,6 +1654,7 @@
         let before = (
             orders.map(|id| row_snapshot("test_orders", id)),
             row_snapshot("test_bare_items", kept_item),
+            sync_effect_counts(),
         );
 
         let response = push_client(
@@ -1710,10 +1713,81 @@
             (
                 orders.map(|id| row_snapshot("test_orders", id)),
                 row_snapshot("test_bare_items", kept_item),
+                sync_effect_counts(),
             ),
             before
         );
         assert_eq!(source_order_count(&[vetoed_insert]), 0);
+        let side_effects: i64 = Spi::get_one(
+            "SELECT count(*) FROM test_bare_items WHERE name LIKE 'veto-side-effect:%'",
+        )
+        .unwrap()
+        .expect("side effect count");
+        assert_eq!(side_effects, 0);
+    }
+
+    fn sync_effect_counts() -> (i64, i64) {
+        let count = |sql: &str| -> i64 { Spi::get_one(sql).unwrap().expect("sync effect count") };
+        (
+            count("SELECT count(*) FROM synchro.sync_write_fences"),
+            count("SELECT count(*) FROM synchro.sync_row_versions"),
+        )
+    }
+
+    #[pg_test]
+    fn test_push_insert_sees_row_committed_during_row_state_evaluation() {
+        setup_test_tables();
+        let (user_id, client_id) = (HIDDEN_ROW_USER, "c1");
+        register_client(user_id, client_id);
+        let record_id = "f2650000-0000-4000-8000-000000000061";
+        let version = insert_live_order(record_id, user_id, "committed row");
+        // The first source read misses the row, and every later read sees it. This models
+        // another transaction that commits the row between the source and version reads.
+        Spi::run(
+            "CREATE FUNCTION public.test_orders_first_read_misses()
+             RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+             BEGIN
+                 IF current_setting('test.orders_first_read', true) IS NULL
+                    OR current_setting('test.orders_first_read', true) = '' THEN
+                     PERFORM set_config('test.orders_first_read', 'done', true);
+                     RETURN false;
+                 END IF;
+                 RETURN true;
+             END
+             $$;
+             GRANT EXECUTE ON FUNCTION public.test_orders_first_read_misses() TO synchro_owner;
+             DROP POLICY synchro_test_owner_all ON test_orders;
+             CREATE POLICY test_orders_committed_during_read ON test_orders
+             AS PERMISSIVE FOR ALL TO synchro_owner
+             USING (public.test_orders_first_read_misses())
+             WITH CHECK (true)",
+        )
+        .unwrap();
+
+        let response = push_client(
+            user_id,
+            client_id,
+            "committed-during-read",
+            vec![push_mutation(
+                (user_id, client_id),
+                "committed-during-read-insert",
+                "test_orders",
+                "insert",
+                record_id,
+                None,
+                Some(&[("user_id", json!(user_id)), ("title", json!("b-insert"))]),
+            )],
+        );
+
+        assert_eq!(response.json["accepted"], json!([]));
+        let outcome = &response.json["rejected"][0];
+        assert_eq!(outcome["status"], "conflict");
+        assert_eq!(outcome["code"], "row_already_exists");
+        assert_eq!(outcome["server_version"].as_str(), Some(version.as_str()));
+        assert_eq!(
+            outcome["server_row"][field_id("test_orders", "title")],
+            "committed row"
+        );
     }
 
     #[pg_test]
