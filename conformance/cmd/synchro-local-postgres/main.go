@@ -736,8 +736,7 @@ func prepareDataset(ctx context.Context, database *sql.DB) error {
 			        JOIN synchro.sync_registry_generations generation
 			          ON generation.generation = registry.registry_generation AND generation.state = 'active'
 			        WHERE registry.physical_schema = 'public' AND registry.physical_relation = ANY($1)) = cardinality($1)
-			   AND EXISTS (SELECT 1 FROM public.organizations WHERE id = $2::uuid)
-			   AND NOT EXISTS (SELECT 1 FROM synchro.sync_write_fences WHERE coverage = 'pending')`,
+			   AND EXISTS (SELECT 1 FROM public.organizations WHERE id = $2::uuid)`,
 			dataset.TableNames(), dataset.OrgA,
 		).Scan(&complete); err != nil || !complete {
 			return errors.New("an earlier dataset preparation is incomplete; prepare a new database")
