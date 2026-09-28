@@ -320,7 +320,9 @@ fn synchro_prepare_projection_view(
 
         let existing = client
             .select(
-                "SELECT view_name::text AS view_name, projected_columns::text[] AS projected_columns
+                "SELECT physical_relation_oid::bigint AS physical_relation_oid,
+                        view_name::text AS view_name,
+                        projected_columns::text[] AS projected_columns
                  FROM synchro.sync_projection_views
                  WHERE physical_relation_oid = $1::oid OR view_name = $2::name",
                 None,
@@ -328,13 +330,19 @@ fn synchro_prepare_projection_view(
             )?
             .next();
         if let Some(existing) = existing {
+            let existing_oid = existing
+                .get_by_name::<i64, &str>("physical_relation_oid")?
+                .unwrap_or_default();
             let existing_name = existing
                 .get_by_name::<String, &str>("view_name")?
                 .unwrap_or_default();
             let existing_columns = existing
                 .get_by_name::<Vec<String>, &str>("projected_columns")?
                 .unwrap_or_default();
-            if existing_name != *view_name || existing_columns != projected_columns {
+            if existing_oid != i64::from(physical.oid)
+                || existing_name != *view_name
+                || existing_columns != projected_columns
+            {
                 pgrx::error!("projection view identity is immutable");
             }
             grant_projection_view_to_relation_owner(

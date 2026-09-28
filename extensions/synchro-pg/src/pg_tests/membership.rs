@@ -1352,6 +1352,70 @@ fn projection_view_grants_select_to_relation_owner() {
 }
 
 #[pg_test]
+fn projection_view_name_collision_grants_no_select() {
+    let victim = "synchro_projection_victim_owner";
+    let intruder = "synchro_projection_intruder_owner";
+    Spi::run(&format!(
+        "CREATE ROLE {victim} NOLOGIN NOSUPERUSER;
+         CREATE ROLE {intruder} NOLOGIN NOSUPERUSER;
+         GRANT synchro_operator TO {victim}, {intruder};
+         CREATE TABLE public.projection_victim_items (
+             id INTEGER PRIMARY KEY,
+             label TEXT NOT NULL
+         );
+         CREATE TABLE public.projection_decoy_items (
+             id INTEGER PRIMARY KEY,
+             label TEXT NOT NULL
+         );
+         ALTER TABLE public.projection_victim_items OWNER TO {victim};
+         ALTER TABLE public.projection_decoy_items OWNER TO {intruder}"
+    ))
+    .expect("create projection view collision fixture");
+    Spi::run(&format!("SET LOCAL ROLE {victim}")).expect("select victim role");
+    Spi::run(
+        "SELECT synchro.synchro_prepare_projection_view(
+             'public.projection_victim_items', 'projection_victim_items',
+             ARRAY['id', 'label']::text[]
+         )",
+    )
+    .expect("prepare victim projection view");
+    Spi::run("RESET ROLE").expect("restore test role");
+
+    Spi::run(&format!(
+        "SET LOCAL ROLE {intruder};
+         SELECT set_config('synchro_test.projection_rejected', 'false', true);
+         DO $test$
+         BEGIN
+             PERFORM synchro.synchro_prepare_projection_view(
+                 'public.projection_decoy_items', 'projection_victim_items',
+                 ARRAY['id', 'label']::text[]
+             );
+         EXCEPTION WHEN OTHERS THEN
+             PERFORM set_config('synchro_test.projection_rejected', 'true', true);
+         END
+         $test$;
+         RESET ROLE"
+    ))
+    .expect("attempt projection view name collision");
+    let rejected = Spi::get_one::<String>(
+        "SELECT current_setting('synchro_test.projection_rejected')",
+    )
+    .expect("projection collision result query")
+    .expect("projection collision result");
+    let intruder_can_read = Spi::get_one_with_args::<bool>(
+        "SELECT has_table_privilege(
+             $1, 'synchro_projection.projection_victim_items', 'SELECT'
+         )",
+        &[intruder.into()],
+    )
+    .expect("intruder projection privilege query")
+    .expect("intruder projection privilege");
+
+    assert!(!intruder_can_read);
+    assert_eq!(rejected, "true");
+}
+
+#[pg_test]
 fn membership_test_schema_enforces_production_validation() {
     for case in ["valid", "unparsed", "search_path", "live_table", "undeclared_field"] {
         let fixture = registration_fixture(true, "enabled", true);

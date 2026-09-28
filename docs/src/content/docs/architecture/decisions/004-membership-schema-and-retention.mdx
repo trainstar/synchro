@@ -386,7 +386,10 @@ and USAGE on the schema of that relation. Registration rejects a function that
 breaks this rule. A later privilege change fails evaluation.
 `synchro_prepare_projection_view` grants SELECT on the view to the relation
 owner. `synchro_operator` membership gives USAGE on schema
-`synchro_projection`.
+`synchro_projection`. A repeated call succeeds only when the stored view has
+the same physical relation, view name, and projected columns. Any other match
+on the relation or the view name fails with `projection view identity is
+immutable` and grants nothing.
 
 ## Registry and Membership Generations
 
