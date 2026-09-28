@@ -1025,6 +1025,116 @@
         );
     }
 
+    // A SQL entry point lets a PL/pgSQL exception block roll back a failed
+    // materialization, as the worker transaction does.
+    #[pg_extern]
+    fn materialize_test_orders_inserts(start: i32, count: i32, commit_lsn: i64) {
+        let registration = Spi::connect(|client| {
+            crate::registry::load_registry_from_client(client).map(|registry| {
+                registry
+                    .into_iter()
+                    .find(|registration| registration.table_name == "test_orders")
+                    .expect("orders registration")
+            })
+        })
+        .expect("load orders registration");
+        let transaction = wal_counting_transaction(
+            &registration,
+            u64::try_from(commit_lsn).expect("test commit LSN"),
+            u32::try_from(start).expect("test order start"),
+            u32::try_from(count).expect("test order count"),
+        );
+        Spi::connect_mut(|client| {
+            crate::bgworker::materialize_transaction_for_test(client, &transaction)
+        })
+        .unwrap_or_else(|class| pgrx::error!("{class}"));
+    }
+
+    #[pg_test]
+    fn wal_self_impact_overflow_fails_the_whole_transaction() {
+        setup_test_tables();
+        let (table_id, user_field_id): (String, String) = Spi::connect(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            let orders = registry
+                .iter()
+                .find(|registration| registration.table_name == "test_orders")
+                .expect("orders registration");
+            let user_field = orders
+                .fields
+                .iter()
+                .find(|field| field.physical_column == "user_id")
+                .expect("orders user field");
+            Ok::<_, pgrx::spi::Error>((orders.table_id.clone(), user_field.field_id.clone()))
+        })
+        .expect("load orders self-impact identity");
+        // Every live order of the changed user is a sibling. The bound admits two.
+        Spi::run(&format!(
+            "CREATE FUNCTION tests.orders_same_user_impact(p_old_row jsonb, p_new_row jsonb)
+             RETURNS SETOF synchro.synchro_row_ref
+             LANGUAGE sql STABLE SECURITY INVOKER
+             SET search_path = pg_catalog, synchro
+             BEGIN ATOMIC
+                 SELECT ROW('{table_id}'::uuid, 'string', pg_catalog.to_jsonb(peer.record_id))::synchro.synchro_row_ref
+                 FROM synchro_projection.test_orders AS peer
+                 WHERE NOT peer.deleted
+                   AND peer.user_id #>> '{{}}' IN (p_old_row ->> '{user_field_id}', p_new_row ->> '{user_field_id}');
+             END;
+             REVOKE ALL ON FUNCTION tests.orders_same_user_impact(jsonb, jsonb) FROM PUBLIC;
+             GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker;
+             GRANT EXECUTE ON FUNCTION tests.orders_same_user_impact(jsonb, jsonb)
+                 TO synchro_owner, synchro_worker;
+             SELECT synchro.synchro_register_membership_dependency(
+                 'test_orders', 'test_orders', 'tests.orders_same_user_impact',
+                 ARRAY['{user_field_id}']::text[], 2
+             )"
+        ))
+        .expect("declare orders self-impact");
+        activate_pending_registry_for_test();
+
+        Spi::run("SELECT tests.materialize_test_orders_inserts(1, 2, 256)")
+            .expect("two sibling orders stay within the impact bound");
+        let durable_state = || {
+            Spi::get_one::<pgrx::JsonB>(
+                "SELECT jsonb_build_object(
+                     'orders', (SELECT count(*) FROM test_orders),
+                     'transactions', (SELECT count(*) FROM synchro.sync_wal_transactions),
+                     'events', (SELECT count(*) FROM synchro.sync_wal_events),
+                     'projections', (SELECT count(*) FROM synchro.sync_captured_projections),
+                     'rows', (SELECT count(*) FROM synchro.sync_captured_rows),
+                     'effects', (SELECT count(*) FROM synchro.sync_changelog),
+                     'edges', (SELECT count(*) FROM synchro.sync_bucket_edges),
+                     'materialized', (
+                         SELECT materialized_commit_lsn::text
+                         FROM synchro.sync_wal_progress
+                         WHERE singleton
+                     )
+                 )",
+            )
+            .expect("read self-impact durable state")
+            .expect("self-impact durable state")
+            .0
+        };
+        let before = durable_state();
+        assert_eq!(before["orders"], json!(2), "{before}");
+        assert_eq!(before["materialized"], json!("0/100"), "{before}");
+
+        // A third sibling makes the impact result exceed its bound.
+        Spi::run(
+            "DO $test$
+             BEGIN
+                 PERFORM tests.materialize_test_orders_inserts(3, 1, 512);
+                 RAISE EXCEPTION 'self-impact overflow was materialized';
+             EXCEPTION WHEN OTHERS THEN
+                 IF SQLERRM <> 'scope_evaluation_failed' THEN
+                     RAISE;
+                 END IF;
+             END
+             $test$",
+        )
+        .expect("self-impact overflow must fail the whole transaction");
+        assert_eq!(durable_state(), before);
+    }
+
     fn registry_activation_message(generation: i64, event_boundary: u64) -> WalLogicalMessage {
         WalLogicalMessage {
             prefix: "synchro_registry".to_string(),
