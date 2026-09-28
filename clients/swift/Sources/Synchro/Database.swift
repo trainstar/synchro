@@ -134,10 +134,15 @@ final class SynchroDatabase: @unchecked Sendable {
     }
 
     func writeTransaction<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
-        let result = try dbPool.write { db in
-            try block(db)
+        let (result, changedRows) = try dbPool.write { db in
+            let changesBefore = db.totalChangesCount
+            let result = try block(db)
+            return (result, db.totalChangesCount != changesBefore)
         }
-        notifyDatabaseChange()
+        // A notification restarts the push debounce. A write that changed no rows must not delay the push.
+        if changedRows {
+            notifyDatabaseChange()
+        }
         return result
     }
 

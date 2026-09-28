@@ -1605,6 +1605,44 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertTrue(try tracker.inspectPendingMutations().isEmpty)
     }
 
+    func testPendingCountPollingDoesNotDelayTheDebouncedPush() async throws {
+        let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                return try self.mockResponse(json: self.connectJSON)
+            } else if path.hasSuffix("/sync/rebuild") {
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            } else if path.hasSuffix("/sync/pull") {
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            } else if path.hasSuffix("/sync/push") {
+                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+        let pushDebounce: TimeInterval = 0.3
+        let (engine, database) = try makeIntegrationEnv(pushDebounce: pushDebounce, syncInterval: 3_600)
+        addTeardownBlock {
+            await engine.stop()
+            try? database.close()
+        }
+        try await engine.start()
+
+        _ = try database.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "polled", "u1", "2026-01-01T13:00:00.000Z"]
+        )
+        let writtenAt = Date()
+        let tracker = ChangeTracker(database: database)
+        // Each poll is sooner than the debounce. A poll that changes no rows must not start the debounce again.
+        while pushedRecordIDs.withLock({ $0.isEmpty }), Date().timeIntervalSince(writtenAt) < pushDebounce + 1 {
+            _ = try tracker.pendingChangeCount()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertEqual(pushedRecordIDs.withLock { $0 }, ["w1"])
+    }
+
     /// Stores a captured change and a due durable pull backoff, as a stopped engine leaves them.
     private func persistRecoveredPullBackoffWithCapturedChange(dbPath: String, clientID: String) throws -> String {
         let database = try SynchroDatabase(path: dbPath)
