@@ -2113,12 +2113,18 @@ fn materialize_candidate(
                 target,
                 transaction,
                 &registry,
-                &dependencies,
-                persisted,
+                vec![(dependencies.as_slice(), persisted)],
             )
             .map_err(candidate_failure)?;
-            materialize_impacts(client, target, transaction, &registry, impacts)
-                .map_err(candidate_failure)?;
+            materialize_impacts(
+                client,
+                target,
+                transaction,
+                &registry,
+                impacts,
+                &HashMap::new(),
+            )
+            .map_err(candidate_failure)?;
             let updated = client
                 .update(
                     "UPDATE synchro.sync_stream_resets
@@ -3473,9 +3479,28 @@ fn materialize_transaction(
         )
         .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
 
+    // Each segment applies its row images under its own generation. Membership
+    // and effects wait for the final projection of the whole source transaction
+    // and use the final registry.
+    let evaluation_registry = &registries[registries.len() - 1];
+    let evaluation_indexes = registration_indexes(evaluation_registry);
+    let segment_dependencies: Vec<Vec<MembershipDependency>> = membership_dependencies
+        .iter()
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .filter(|dependency| {
+                    evaluation_indexes.contains_key(dependency.target_relation_id.as_str())
+                })
+                .cloned()
+                .collect()
+        })
+        .collect();
     let mut active_generation = generation;
-    let mut effect_count = 0i64;
+    let mut effect_bases = HashMap::new();
+    let mut segments = Vec::with_capacity(applicable_segments.len());
     for (segment, applicable) in applicable_segments.iter().enumerate() {
+        let registry = &registries[segment];
         if let Some(group) = segment.checked_sub(1).map(|group| &groups[group]) {
             active_generation = activate_generations(
                 client,
@@ -3485,29 +3510,50 @@ fn materialize_transaction(
                 transaction.end_lsn,
             )?;
         }
-        let persisted = persist_events_and_projections(
+        let mut persisted = persist_events_and_projections(
             client,
             projection_target,
             transaction,
-            &registries[segment],
+            registry,
             applicable,
         )?;
-        let impacts = collect_membership_impacts(
-            client,
-            projection_target,
-            transaction,
-            &registries[segment],
-            &membership_dependencies[segment],
-            persisted,
-        )?;
-        effect_count += materialize_impacts(
-            client,
-            projection_target,
-            transaction,
-            &registries[segment],
-            impacts,
-        )?;
+        if segment + 1 < registries.len() {
+            align_edges_before_activation(
+                client,
+                transaction,
+                registry,
+                &persisted.direct_impacts,
+                &mut effect_bases,
+            )?;
+        }
+        // A relation that a later generation removes has no final projection.
+        persisted.direct_impacts.retain_mut(|impact| {
+            let relation_id = registry[impact.registration_index].relation_id.as_str();
+            match evaluation_indexes.get(relation_id) {
+                Some(index) => {
+                    impact.registration_index = *index;
+                    true
+                }
+                None => false,
+            }
+        });
+        segments.push((segment_dependencies[segment].as_slice(), persisted));
     }
+    let impacts = collect_membership_impacts(
+        client,
+        projection_target,
+        transaction,
+        evaluation_registry,
+        segments,
+    )?;
+    let effect_count = materialize_impacts(
+        client,
+        projection_target,
+        transaction,
+        evaluation_registry,
+        impacts,
+        &effect_bases,
+    )?;
 
     client
         .update(
@@ -6253,27 +6299,38 @@ fn captured_row_deleted(
     Ok(!value.is_null())
 }
 
+/// Each segment pairs its persisted events with the membership dependencies of
+/// its generation. A later direct change of a row replaces an earlier one.
 fn collect_membership_impacts(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
     transaction: &WalTransaction,
     registry: &[TableRegistration],
-    dependencies: &[MembershipDependency],
-    persisted: PersistedEvents,
+    segments: Vec<(&[MembershipDependency], PersistedEvents)>,
 ) -> Result<Vec<ImpactedRow>, PoisonFailure> {
-    let mut impacts: HashMap<(usize, String), ImpactedRow> = persisted
-        .direct_impacts
-        .into_iter()
-        .map(|impact| {
-            (
+    let activation_migrated_digests = segments.len() > 1;
+    let mut impacts: HashMap<(usize, String), ImpactedRow> = HashMap::new();
+    let mut dependency_events = Vec::new();
+    for (dependencies, persisted) in segments {
+        for impact in persisted.direct_impacts {
+            impacts.insert(
                 (impact.registration_index, impact.record_id.clone()),
                 impact,
-            )
-        })
-        .collect();
+            );
+        }
+        dependency_events.extend(
+            persisted
+                .dependency_events
+                .into_iter()
+                .map(|event| (dependencies, event)),
+        );
+    }
+    if activation_migrated_digests {
+        refresh_direct_impact_digests(client, target, transaction, registry, &mut impacts)?;
+    }
     let mut reevaluation_projections = Vec::new();
 
-    for event in persisted.dependency_events {
+    for (dependencies, event) in dependency_events {
         for dependency in dependencies
             .iter()
             .filter(|dependency| dependency.dependency_relation_id == event.dependency_relation_id)
@@ -6413,6 +6470,137 @@ fn collect_membership_impacts(
         .into_iter()
         .map(|(impact, _)| impact)
         .collect())
+}
+
+/// A later activation in the transaction migrates the captured digest of a row
+/// that an earlier segment changed. Edges and effects use the final digest.
+fn refresh_direct_impact_digests(
+    client: &SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    registry: &[TableRegistration],
+    impacts: &mut HashMap<(usize, String), ImpactedRow>,
+) -> Result<(), PoisonFailure> {
+    let inputs = impacts
+        .iter()
+        .filter(|(_, impact)| impact.direct_change && impact.digest.is_some())
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let captured = load_captured_rows_batch(client, target, &inputs, registry)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+    for key in inputs {
+        let row = captured
+            .get(&key)
+            .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+        let impact = impacts
+            .get_mut(&key)
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        if row.row_version != impact.row_version {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+        impact.digest = Some(row.digest);
+    }
+    Ok(())
+}
+
+/// A registry activation verifies each retained edge against its captured row.
+/// Membership of a changed row waits for the final projection, so its edges
+/// still hold the buckets from before this segment. Record those buckets once
+/// as the base of the net effects. Then bind the retained edges to the current
+/// captured row, or remove them when that row is absent or deleted.
+fn align_edges_before_activation(
+    client: &mut SpiClient<'_>,
+    transaction: &WalTransaction,
+    registry: &[TableRegistration],
+    impacts: &[ImpactedRow],
+    effect_bases: &mut HashMap<(String, String), Vec<String>>,
+) -> Result<(), PoisonFailure> {
+    let touched = impacts
+        .iter()
+        .map(|impact| {
+            (
+                registry[impact.registration_index].relation_id.clone(),
+                impact.record_id.clone(),
+            )
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    for batch in touched.chunks(JSONB_BATCH_SIZE) {
+        let input = batch
+            .iter()
+            .map(|(relation_id, record_id)| {
+                serde_json::json!({"relation_id": relation_id, "record_id": record_id})
+            })
+            .collect::<Vec<_>>();
+        let prior = client
+            .update(
+                "WITH touched AS (
+                     SELECT relation_id::uuid AS relation_id, record_id
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, record_id text
+                     )
+                 ), prior AS (
+                     SELECT edge.relation_id, edge.record_id, edge.bucket_id
+                     FROM synchro.sync_bucket_edges edge
+                     JOIN touched
+                       ON touched.relation_id = edge.relation_id
+                      AND touched.record_id = edge.record_id
+                 ), removed AS (
+                     DELETE FROM synchro.sync_bucket_edges edge
+                     USING touched
+                     LEFT JOIN synchro.sync_captured_rows captured
+                       ON captured.relation_id = touched.relation_id
+                      AND captured.record_id = touched.record_id
+                     WHERE edge.relation_id = touched.relation_id
+                       AND edge.record_id = touched.record_id
+                       AND (captured.record_id IS NULL OR captured.deleted)
+                     RETURNING edge.record_id
+                 ), aligned AS (
+                     UPDATE synchro.sync_bucket_edges edge
+                     SET checksum = captured.checksum,
+                         row_version = captured.row_version,
+                         updated_at = now()
+                     FROM touched
+                     JOIN synchro.sync_captured_rows captured
+                       ON captured.relation_id = touched.relation_id
+                      AND captured.record_id = touched.record_id
+                     WHERE edge.relation_id = touched.relation_id
+                       AND edge.record_id = touched.record_id
+                       AND NOT captured.deleted
+                     RETURNING edge.record_id
+                 )
+                 SELECT prior.relation_id::text AS relation_id, prior.record_id,
+                        prior.bucket_id
+                 FROM prior",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+            )
+            .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+        let mut buckets = HashMap::<(String, String), Vec<String>>::new();
+        for row in prior {
+            let relation_id = optional_text(&row, "relation_id")
+                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+            let record_id = optional_text(&row, "record_id")
+                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+            let bucket_id = optional_text(&row, "bucket_id")
+                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+            buckets
+                .entry((relation_id, record_id))
+                .or_default()
+                .push(bucket_id);
+        }
+        for key in batch {
+            if !effect_bases.contains_key(key) {
+                let base = buckets.remove(key).unwrap_or_default();
+                effect_bases.insert(key.clone(), base);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn persist_reevaluation_projection_batch(
@@ -6647,12 +6835,17 @@ fn persist_impact_batch(
     Ok(())
 }
 
+/// `effect_bases` holds the buckets of a row before its transaction when a
+/// registry activation in that transaction rewrote the retained edges. Effects
+/// compare the final membership with that base. Edge writes replace the current
+/// edges.
 fn materialize_impacts(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
     transaction: &WalTransaction,
     registry: &[TableRegistration],
     impacts: Vec<ImpactedRow>,
+    effect_bases: &HashMap<(String, String), Vec<String>>,
 ) -> Result<i64, PoisonFailure> {
     if let ProjectionTarget::Candidate {
         bootstrap_id,
@@ -6769,12 +6962,15 @@ fn materialize_impacts(
             desired.dedup();
             existing.sort();
             existing.dedup();
+            let effect_base = effect_bases
+                .get(&(registration.relation_id.clone(), impact.record_id.clone()))
+                .unwrap_or(&existing);
 
             let mut entries = build_edge_diff_entries(
                 &registration.table_name,
                 &impact.record_id,
                 impact.operation,
-                &existing,
+                effect_base,
                 &desired,
             );
             if !impact.direct_change {
