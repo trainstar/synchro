@@ -49,6 +49,61 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			}
 			waitForRealWALRecords(t, ctx, harness, "cf_items", beforeID)
 
+			// The predecessor validates a field addition, but its worker waits on
+			// the gate and never activates it. The restart of the update ends the
+			// gate session. The retained generation has no recorded source
+			// requirement, so it must activate as Class 3 with the value written
+			// after registration.
+			const retainedValue = "retained-pending-value"
+			session, err := admin.Conn(ctx)
+			if err != nil {
+				t.Fatalf("acquire retained-generation session: %v", err)
+			}
+			defer session.Close()
+			if _, err := session.ExecContext(ctx, "SELECT pg_advisory_lock(2002873458::bigint)"); err != nil {
+				t.Fatalf("acquire WAL worker gate: %v", err)
+			}
+			transaction, err := session.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin retained-generation registration: %v", err)
+			}
+			defer transaction.Rollback()
+			for step, statement := range []string{
+				"ALTER TABLE public.cf_items ADD COLUMN retained_note text",
+				`WITH parent AS MATERIALIZED (
+				     SELECT r.*
+				     FROM synchro.sync_registry r
+				     JOIN synchro.sync_registry_generations g ON g.generation = r.registry_generation
+				     WHERE g.state = 'active' AND g.validated
+				       AND r.physical_relation_oid = 'public.cf_items'::regclass
+				 )
+				 SELECT synchro.synchro_register_table(
+				     format('%I.%I', physical_schema, physical_relation),
+				     format('%I.%I', membership_function_schema, membership_function_name),
+				     composition, pk_column, updated_at_col, deleted_at_col, push_policy,
+				     exclude_columns, array_append(sync_columns, 'retained_note'),
+				     max_scope_fanout
+				 )
+				 FROM parent`,
+			} {
+				if _, err := transaction.ExecContext(ctx, statement); err != nil {
+					t.Fatalf("retained-generation registration statement %d on %s: %v", step+1, origin.version, err)
+				}
+			}
+			var retainedGeneration int64
+			if err := transaction.QueryRowContext(ctx, `
+				SELECT generation FROM synchro.sync_registry_generations
+				WHERE state = 'pending' AND validated`).Scan(&retainedGeneration); err != nil {
+				t.Fatalf("observe retained pending generation on %s: %v", origin.version, err)
+			}
+			if _, err := transaction.ExecContext(ctx,
+				"UPDATE public.cf_items SET retained_note = $2 WHERE id = $1", beforeID, retainedValue); err != nil {
+				t.Fatalf("write the retained field after registration: %v", err)
+			}
+			if err := transaction.Commit(); err != nil {
+				t.Fatalf("commit retained-generation registration: %v", err)
+			}
+
 			update, err := harness.UpdateExtension(ctx)
 			if err != nil {
 				t.Fatalf("update extension from %s: %v", origin.version, err)
@@ -79,6 +134,41 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			}
 			t.Logf("extension catalog snapshot lines: updated=%d clean=%d", len(catalogs.Updated), len(catalogs.Clean))
 
+			var retainedState, retainedClass, retainedFieldID string
+			var pendingGenerations int64
+			deadline := time.Now().Add(60 * time.Second)
+			for {
+				if err := admin.QueryRowContext(ctx, `
+					SELECT generation.state,
+					       COALESCE((SELECT transition_class FROM synchro.sync_schema_manifest
+					                 ORDER BY schema_version DESC LIMIT 1), ''),
+					       (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending')
+					FROM synchro.sync_registry_generations generation
+					WHERE generation.generation = $1`, retainedGeneration).Scan(
+					&retainedState, &retainedClass, &pendingGenerations); err != nil {
+					t.Fatalf("observe retained generation after the update: %v", err)
+				}
+				if retainedState != "pending" || time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if retainedState != "active" || retainedClass != "class_3" || pendingGenerations != 0 {
+				t.Fatalf("retained generation from %s after the update: state=%q class=%q pending=%d, want active class_3 with no pending generation; health=%#v",
+					origin.version, retainedState, retainedClass, pendingGenerations, loadIssue49Health(t, ctx, admin))
+			}
+			if err := admin.QueryRowContext(ctx, `
+				SELECT field.field_id::text
+				FROM synchro.sync_registry_fields field
+				JOIN synchro.sync_registry registry
+				  ON registry.registry_generation = field.registry_generation
+				 AND registry.relation_id = field.relation_id
+				WHERE field.registry_generation = $1
+				  AND registry.table_name = 'cf_items'
+				  AND field.physical_column = 'retained_note'`, retainedGeneration).Scan(&retainedFieldID); err != nil {
+				t.Fatalf("observe retained field identity: %v", err)
+			}
+
 			createNoteSiblingImpact(t, ctx, admin)
 			if err := declareNoteSiblingImpact(ctx, admin, "id", "document_id", "author_id", "deleted_at"); err != nil {
 				t.Fatalf("declare a same-table impact after the update from %s: %v", origin.version, err)
@@ -107,6 +197,9 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			table := requireRealTable(t, client, "cf_items")
 			requireRebuildRecordVersion(t, records, table, beforeID, "before-extension-update")
 			requireRebuildRecordVersion(t, records, table, afterID, "after-extension-update")
+			retainedTable := table
+			retainedTable.ValueField = retainedFieldID
+			requireRebuildRecordVersion(t, records, retainedTable, beforeID, retainedValue)
 		})
 		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := harness.Close(closeContext); err != nil {
