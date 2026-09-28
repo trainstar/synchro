@@ -2046,7 +2046,7 @@ func (h *Harness) grantRunRoles(ctx context.Context) error {
 			"CREATE POLICY synchro_conformance_source ON public."+quoteIdentifier(table)+
 				" AS PERMISSIVE FOR ALL TO "+quoteIdentifier(h.sourceRole)+" USING (true) WITH CHECK (true)",
 		); err != nil {
-			return errors.New("create source-table row security policy failed")
+			return fmt.Errorf("create source-table row security policy failed: %w", err)
 		}
 		if _, err := database.ExecContext(ctx, "GRANT SELECT ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.env.Observer.Username)); err != nil {
 			return errors.New("grant observer source-table access failed")
