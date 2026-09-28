@@ -3349,8 +3349,11 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		}
 		recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
 		if record, bound := c.records[recordKey]; bound {
-			// The accepted write replaced the source row that the image models.
-			record.Image = *event.After
+			// The accepted write replaced the source row that the image models,
+			// unless a later source change already replaced that image.
+			if event.Before != nil && reflect.DeepEqual(record.Image, *event.Before) {
+				record.Image = *event.After
+			}
 			continue
 		}
 		c.records[recordKey] = &nativeRecordBinding{
