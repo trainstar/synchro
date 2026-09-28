@@ -2246,11 +2246,9 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 		}
 	}()
 	if len(transaction.Events) == 0 {
-		sourceXID, err := sourceTransaction.EmitCommitMarker(ctx)
-		if err != nil {
+		if err := sourceTransaction.EmitCommitMarker(ctx); err != nil {
 			return NativeStepObservation{}, err
 		}
-		transaction.SourceXID = sourceXID
 	}
 	for _, event := range transaction.Events {
 		statement, arguments, err := nativeSourceStatement(event, installation)
@@ -2266,6 +2264,14 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 			return NativeStepObservation{}, errors.New("native source event did not affect exactly one authoritative row")
 		}
 	}
+	// Two authored transactions can write the same row with the same
+	// operation. The source transaction ID binds each one to its own WAL
+	// transaction.
+	sourceXID, err := sourceTransaction.XID(ctx)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	transaction.SourceXID = sourceXID
 	if err := sourceTransaction.Commit(); err != nil {
 		return NativeStepObservation{}, err
 	}
@@ -3164,7 +3170,7 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 		}
 		if err := waitNativePoll(walDeadline); err != nil {
 			cancelWAL()
-			return NativeStepObservation{}, fmt.Errorf("native source transaction did not become WAL-materialized: %w", resolveErr)
+			return NativeStepObservation{}, fmt.Errorf("native source transaction did not become WAL-materialized: %w", c.describeWALBindingFailure(resolveErr))
 		}
 	}
 	cancelWAL()
@@ -3361,6 +3367,10 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 	if len(binding.Events) == 0 {
 		return resolveNativeEmptyRuntimeTransaction(ctx, database, binding)
 	}
+	if binding.SourceXID == 0 {
+		return errors.New("native source transaction has no source transaction ID")
+	}
+	sourceXID := fmt.Sprintf("%d", binding.SourceXID)
 	type runtimeIdentity struct {
 		stream   string
 		commit   string
@@ -3390,8 +3400,9 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND event.operation = $2
 				  AND (fence.new_capture_key = $3::jsonb OR fence.old_capture_key = $3::jsonb)
+				  AND transaction.source_xid = $4::xid
 				ORDER BY event.commit_lsn DESC
-				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey).Scan(
+				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
 			)
 		} else {
@@ -3406,8 +3417,9 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
 				  AND event.operation = $3
+				  AND transaction.source_xid = $4::xid
 				ORDER BY event.commit_lsn DESC
-				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation).Scan(
+				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
 			)
 		}
@@ -3420,7 +3432,11 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				}
 				identifier = nativeCaptureDependencyKey(*image)
 			}
-			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s; emitted %s", event.Relation, event.PhysicalOperation, identifier, describeNativeRelationEvents(ctx, database, event.Table.RuntimeName, event.Dependency))
+			return &nativeWALBindingError{
+				detail:     fmt.Sprintf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s", event.Relation, event.PhysicalOperation, identifier),
+				relation:   event.Table.RuntimeName,
+				dependency: event.Dependency,
+			}
 		}
 		identity.ordinal = uint64(ordinal)
 		identities = append(identities, identity)
@@ -4283,6 +4299,33 @@ func waitNativePoll(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// nativeWALBindingError names one authored event that has no runtime WAL
+// event yet. The wait polls it quickly and describes the relation only after
+// the wait budget ends, because the description samples the worker for
+// several seconds.
+type nativeWALBindingError struct {
+	detail     string
+	relation   string
+	dependency *nativeCaptureDependencyBinding
+}
+
+func (err *nativeWALBindingError) Error() string { return err.detail }
+
+func (c *NativeController) describeWALBindingFailure(err error) error {
+	var binding *nativeWALBindingError
+	if !errors.As(err, &binding) {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, openErr := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if openErr != nil {
+		return fmt.Errorf("%s; emitted unavailable", binding.detail)
+	}
+	defer database.Close()
+	return fmt.Errorf("%s; emitted %s", binding.detail, describeNativeRelationEvents(ctx, database, binding.relation, binding.dependency))
 }
 
 // describeNativeRelationEvents summarizes the WAL events recorded for one

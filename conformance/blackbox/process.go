@@ -3092,7 +3092,27 @@ func (transaction *SourceTransaction) ExecContext(ctx context.Context, statement
 }
 
 // EmitCommitMarker emits a non-DML logical message for an event-free source transaction.
-func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) (uint64, error) {
+func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) error {
+	if transaction == nil || transaction.tx == nil {
+		return errors.New("source transaction is unavailable")
+	}
+	transaction.mu.Lock()
+	defer transaction.mu.Unlock()
+	if transaction.done {
+		return errors.New("source transaction is complete")
+	}
+	var markerLSN string
+	if err := transaction.tx.QueryRowContext(ctx, `
+		SELECT pg_catalog.pg_logical_emit_message(true, 'synchro_conformance_marker', '')::text
+	`).Scan(&markerLSN); err != nil || markerLSN == "" {
+		return errors.New("emit source transaction marker failed")
+	}
+	return nil
+}
+
+// XID returns the 32-bit transaction ID that the WAL worker records as the
+// source_xid of this transaction.
+func (transaction *SourceTransaction) XID(ctx context.Context) (uint64, error) {
 	if transaction == nil || transaction.tx == nil {
 		return 0, errors.New("source transaction is unavailable")
 	}
@@ -3102,12 +3122,10 @@ func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) (uin
 		return 0, errors.New("source transaction is complete")
 	}
 	var sourceXID uint64
-	var markerLSN string
 	if err := transaction.tx.QueryRowContext(ctx, `
-		SELECT (pg_catalog.txid_current() % 4294967296)::bigint,
-		       pg_catalog.pg_logical_emit_message(true, 'synchro_conformance_marker', '')::text
-	`).Scan(&sourceXID, &markerLSN); err != nil || sourceXID == 0 || markerLSN == "" {
-		return 0, errors.New("emit source transaction marker failed")
+		SELECT (pg_catalog.txid_current() % 4294967296)::bigint
+	`).Scan(&sourceXID); err != nil || sourceXID == 0 {
+		return 0, errors.New("read source transaction ID failed")
 	}
 	return sourceXID, nil
 }
