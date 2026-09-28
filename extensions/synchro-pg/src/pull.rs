@@ -798,16 +798,33 @@ fn query_scope_candidates(
                                                                AND projection.image_kind = sync_changelog.projection_image
                                                          )
                                                          OR sync_changelog.projection_image IS NULL
-                                                            AND EXISTS (
-                                                                SELECT 1
-                                                                FROM sync_captured_rows captured
-                                                                WHERE captured.source_stream_generation = sync_changelog.stream_generation
-                                                                  AND captured.source_commit_lsn = sync_changelog.commit_lsn
-                                                                  AND captured.source_event_ordinal = sync_changelog.event_ordinal
-                                                                  AND captured.relation_id = sync_changelog.relation_id
-                                                                  AND captured.record_id = sync_changelog.record_id
-                                                                  AND captured.row_version = sync_changelog.row_version
-                                                                  AND NOT captured.deleted
+                                                            AND (
+                                                                EXISTS (
+                                                                    SELECT 1
+                                                                    FROM sync_captured_rows captured
+                                                                    WHERE captured.source_stream_generation = sync_changelog.stream_generation
+                                                                      AND captured.source_commit_lsn = sync_changelog.commit_lsn
+                                                                      AND captured.source_event_ordinal = sync_changelog.event_ordinal
+                                                                      AND captured.relation_id = sync_changelog.relation_id
+                                                                      AND captured.record_id = sync_changelog.record_id
+                                                                      AND captured.row_version = sync_changelog.row_version
+                                                                      AND NOT captured.deleted
+                                                                )
+                                                                -- A dependency change that removes a live row from a
+                                                                -- scope has no row event at this position. Its evidence
+                                                                -- is the live reevaluation image at the same position.
+                                                                OR EXISTS (
+                                                                    SELECT 1
+                                                                    FROM sync_captured_projections projection
+                                                                    WHERE projection.stream_generation = sync_changelog.stream_generation
+                                                                      AND projection.commit_lsn = sync_changelog.commit_lsn
+                                                                      AND projection.event_ordinal = sync_changelog.event_ordinal
+                                                                      AND projection.relation_id = sync_changelog.relation_id
+                                                                      AND projection.record_id = sync_changelog.record_id
+                                                                      AND projection.row_version = sync_changelog.row_version
+                                                                      AND projection.image_kind = 'after'
+                                                                      AND NOT projection.deleted
+                                                                )
                                                             )
                                                      )
                                               )

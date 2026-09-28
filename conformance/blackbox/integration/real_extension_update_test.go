@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,75 +21,135 @@ import (
 	"github.com/trainstar/synchro/conformance/internal/release"
 )
 
+// TestRealExtensionUpdateFromBaseline updates each pinned released origin to
+// the current version. Each update must equal a clean installation, keep the
+// cross-table membership declarations, and accept a same-table declaration.
 func TestRealExtensionUpdateFromBaseline(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	harness, baselineVersion := provisionRealUpdateBaselineHarness(t, ctx)
-	token, err := harness.DiagnosticBearerToken(time.Now())
-	if err != nil {
-		t.Fatalf("sign extension update token: %v", err)
+	for _, origin := range realUpdateOrigins(t) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		harness := provisionRealUpdateHarness(t, ctx, origin)
+		token, err := harness.DiagnosticBearerToken(time.Now())
+		if err != nil {
+			t.Fatalf("sign extension update token: %v", err)
+		}
+		admin := openIssue49Admin(t, ctx, harness)
+		originDependencies := activeMembershipDependencies(t, ctx, admin)
+
+		t.Run("assertion", func(t *testing.T) {
+			t.Logf("update origin %s", origin.version)
+			beforeID := "00000000-0000-4000-8c07-000000000001"
+			if err := harness.Source().ExecContext(
+				ctx,
+				"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+				beforeID,
+				"diagnostic-user",
+				"before-extension-update",
+			); err != nil {
+				t.Fatalf("insert source row before extension update: %v", err)
+			}
+			waitForRealWALRecords(t, ctx, harness, "cf_items", beforeID)
+
+			update, err := harness.UpdateExtension(ctx)
+			if err != nil {
+				t.Fatalf("update extension from %s: %v", origin.version, err)
+			}
+			if update.VersionBeforeUpdate != origin.version || update.ReadyBeforeUpdate ||
+				update.ExtensionObjectsStateBeforeUpdate == "ok" || update.VersionAfterUpdate != release.Version {
+				t.Fatalf(
+					"extension update observation is invalid: before=%q ready=%t objects=%q after=%q",
+					update.VersionBeforeUpdate,
+					update.ReadyBeforeUpdate,
+					update.ExtensionObjectsStateBeforeUpdate,
+					update.VersionAfterUpdate,
+				)
+			}
+
+			catalogs, err := harness.ObserveExtensionCatalogs(ctx)
+			if err != nil {
+				t.Fatalf("observe extension catalogs: %v", err)
+			}
+			if onlyUpdated, onlyClean := extensionCatalogDifference(catalogs.Updated, catalogs.Clean); len(onlyUpdated) != 0 || len(onlyClean) != 0 {
+				t.Fatalf(
+					"extension objects updated from %s differ from a clean installation: differences=%d\nonly updated:\n%s\nonly clean:\n%s",
+					origin.version,
+					len(onlyUpdated)+len(onlyClean),
+					strings.Join(firstLines(onlyUpdated, 20), "\n"),
+					strings.Join(firstLines(onlyClean, 20), "\n"),
+				)
+			}
+			t.Logf("extension catalog snapshot lines: updated=%d clean=%d", len(catalogs.Updated), len(catalogs.Clean))
+
+			createNoteSiblingImpact(t, ctx, admin)
+			if err := declareNoteSiblingImpact(ctx, admin, "id", "document_id", "author_id", "deleted_at"); err != nil {
+				t.Fatalf("declare a same-table impact after the update from %s: %v", origin.version, err)
+			}
+			waitForReleaseImpactRegistration(t, ctx, admin, "cf_document_notes_team_impact")
+			wantDependencies := append(slices.Clone(originDependencies), "cf_document_notes>cf_document_notes:cf_document_notes_team_impact")
+			slices.Sort(wantDependencies)
+			if got := activeMembershipDependencies(t, ctx, admin); !slices.Equal(got, wantDependencies) {
+				t.Fatalf("membership declarations after the update from %s = %v, want %v", origin.version, got, wantDependencies)
+			}
+
+			afterID := "00000000-0000-4000-8c07-000000000002"
+			if err := harness.Source().ExecContext(
+				ctx,
+				"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+				afterID,
+				"diagnostic-user",
+				"after-extension-update",
+			); err != nil {
+				t.Fatalf("insert source row after extension update: %v", err)
+			}
+			waitForRealWALRecords(t, ctx, harness, "cf_items", afterID)
+
+			client := connectRealProtocolClient(t, ctx, harness, token, "extension-update-after")
+			records, _ := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8c07-000000000011")
+			table := requireRealTable(t, client, "cf_items")
+			requireRebuildRecordVersion(t, records, table, beforeID, "before-extension-update")
+			requireRebuildRecordVersion(t, records, table, afterID, "after-extension-update")
+		})
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := harness.Close(closeContext); err != nil {
+			t.Errorf("close extension update harness for %s: %v", origin.version, err)
+		}
+		closeCancel()
+		cancel()
 	}
+}
 
-	t.Run("assertion", func(t *testing.T) {
-		beforeID := "00000000-0000-4000-8c07-000000000001"
-		if err := harness.Source().ExecContext(
-			ctx,
-			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
-			beforeID,
-			"diagnostic-user",
-			"before-extension-update",
-		); err != nil {
-			t.Fatalf("insert source row before extension update: %v", err)
+// activeMembershipDependencies returns each active declaration as
+// "dependency>target:impact function" in sorted order.
+func activeMembershipDependencies(t *testing.T, ctx context.Context, admin *sql.DB) []string {
+	t.Helper()
+	rows, err := admin.QueryContext(ctx, `
+		SELECT source.physical_relation::text || '>' || target.physical_relation::text || ':' ||
+		       dependency.impact_function_name::text
+		FROM synchro.sync_membership_dependencies dependency
+		JOIN synchro.sync_registry_generations generation
+		  ON generation.generation = dependency.registry_generation AND generation.state = 'active'
+		JOIN synchro.sync_registry source
+		  ON source.registry_generation = dependency.registry_generation
+		 AND source.relation_id = dependency.dependency_relation_id
+		JOIN synchro.sync_registry target
+		  ON target.registry_generation = dependency.registry_generation
+		 AND target.relation_id = dependency.target_relation_id
+		ORDER BY 1`)
+	if err != nil {
+		t.Fatalf("observe membership declarations: %v", err)
+	}
+	defer rows.Close()
+	var declarations []string
+	for rows.Next() {
+		var declaration string
+		if err := rows.Scan(&declaration); err != nil {
+			t.Fatalf("read membership declaration: %v", err)
 		}
-		waitForRealWALRecords(t, ctx, harness, "cf_items", beforeID)
-
-		update, err := harness.UpdateExtension(ctx)
-		if err != nil {
-			t.Fatalf("update extension from baseline: %v", err)
-		}
-		if update.VersionBeforeUpdate != baselineVersion || update.ReadyBeforeUpdate ||
-			update.ExtensionObjectsStateBeforeUpdate == "ok" || update.VersionAfterUpdate != release.Version {
-			t.Fatalf(
-				"extension update observation is invalid: before=%q ready=%t objects=%q after=%q",
-				update.VersionBeforeUpdate,
-				update.ReadyBeforeUpdate,
-				update.ExtensionObjectsStateBeforeUpdate,
-				update.VersionAfterUpdate,
-			)
-		}
-
-		catalogs, err := harness.ObserveExtensionCatalogs(ctx)
-		if err != nil {
-			t.Fatalf("observe extension catalogs: %v", err)
-		}
-		if onlyUpdated, onlyClean := extensionCatalogDifference(catalogs.Updated, catalogs.Clean); len(onlyUpdated) != 0 || len(onlyClean) != 0 {
-			t.Fatalf(
-				"updated extension objects differ from a clean installation: differences=%d\nonly updated:\n%s\nonly clean:\n%s",
-				len(onlyUpdated)+len(onlyClean),
-				strings.Join(firstLines(onlyUpdated, 20), "\n"),
-				strings.Join(firstLines(onlyClean, 20), "\n"),
-			)
-		}
-		t.Logf("extension catalog snapshot lines: updated=%d clean=%d", len(catalogs.Updated), len(catalogs.Clean))
-
-		afterID := "00000000-0000-4000-8c07-000000000002"
-		if err := harness.Source().ExecContext(
-			ctx,
-			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
-			afterID,
-			"diagnostic-user",
-			"after-extension-update",
-		); err != nil {
-			t.Fatalf("insert source row after extension update: %v", err)
-		}
-		waitForRealWALRecords(t, ctx, harness, "cf_items", afterID)
-
-		client := connectRealProtocolClient(t, ctx, harness, token, "extension-update-after")
-		records, _ := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8c07-000000000011")
-		table := requireRealTable(t, client, "cf_items")
-		requireRebuildRecordVersion(t, records, table, beforeID, "before-extension-update")
-		requireRebuildRecordVersion(t, records, table, afterID, "after-extension-update")
-	})
+		declarations = append(declarations, declaration)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read membership declarations: %v", err)
+	}
+	return declarations
 }
 
 // TestRealExtensionUpdateRepairsRetainedDecoderPoison proves SYNC-WAL-005 and
@@ -107,7 +168,9 @@ func TestRealExtensionUpdateRepairsRetainedDecoderPoison(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
-	harness, baselineVersion := provisionRealUpdateBaselineHarness(t, ctx)
+	baseline := realUpdateOrigins(t)[0]
+	baselineVersion := baseline.version
+	harness := provisionRealUpdateHarness(t, ctx, baseline)
 	token, err := harness.DiagnosticBearerToken(time.Now())
 	if err != nil {
 		t.Fatalf("sign retained-poison update token: %v", err)
@@ -286,9 +349,56 @@ func TestRealExtensionUpdateRepairsRetainedDecoderPoison(t *testing.T) {
 	})
 }
 
-// provisionRealUpdateBaselineHarness provisions an owned instance with the
-// update baseline extension. A missing baseline artifact is a setup failure.
-func provisionRealUpdateBaselineHarness(t *testing.T, ctx context.Context) (*blackbox.Harness, string) {
+type realUpdateOrigin struct {
+	version  string
+	artifact string
+}
+
+// realUpdateOrigins returns the pinned baseline and each later pinned released
+// origin with its published bundle. A missing bundle is a setup failure.
+func realUpdateOrigins(t *testing.T) []realUpdateOrigin {
+	t.Helper()
+	baselineArtifact := os.Getenv("SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT")
+	originArtifacts := os.Getenv("SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS")
+	if baselineArtifact == "" || originArtifacts == "" {
+		t.Fatal("extension update origin artifacts are unavailable")
+	}
+	origins := []realUpdateOrigin{{version: readUpdateBaselineVersion(t), artifact: baselineArtifact}}
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(repoRoot, "extensions", "synchro-pg", "update-origins.json"))
+	if err != nil {
+		t.Fatalf("read extension update origins: %v", err)
+	}
+	var pins struct {
+		Origins []struct {
+			Version string `json:"version"`
+		} `json:"origins"`
+	}
+	if err := json.Unmarshal(data, &pins); err != nil || len(pins.Origins) == 0 {
+		t.Fatal("extension update origins are invalid")
+	}
+	entries, err := os.ReadDir(originArtifacts)
+	if err != nil {
+		t.Fatalf("read extension update origin artifacts: %v", err)
+	}
+	if len(entries) != len(pins.Origins) {
+		t.Fatalf("extension update origin artifacts = %d, want %d pinned origins", len(entries), len(pins.Origins))
+	}
+	for _, pin := range pins.Origins {
+		if !extensionVersionPattern.MatchString(pin.Version) {
+			t.Fatal("extension update origin version is not in X.Y.Z form")
+		}
+		origins = append(origins, realUpdateOrigin{version: pin.Version, artifact: filepath.Join(originArtifacts, pin.Version)})
+	}
+	return origins
+}
+
+// provisionRealUpdateHarness provisions an owned instance with the extension
+// bundle of one update origin.
+func provisionRealUpdateHarness(t *testing.T, ctx context.Context, origin realUpdateOrigin) *blackbox.Harness {
 	t.Helper()
 	if !*provision || !*install {
 		t.Fatal("real proof requires --provision --install")
@@ -297,18 +407,13 @@ func provisionRealUpdateBaselineHarness(t *testing.T, ctx context.Context) (*bla
 	if err != nil {
 		t.Fatalf("load extension update environment: %v", err)
 	}
-	baselineArtifact := os.Getenv("SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT")
-	if baselineArtifact == "" {
-		t.Fatal("extension update baseline artifact is unavailable")
-	}
-	baselineVersion := readUpdateBaselineVersion(t)
 	harness, err := blackbox.Provision(ctx, blackbox.HarnessConfig{
 		Environment:                     environment,
-		UpdateBaselineExtensionArtifact: baselineArtifact,
-		UpdateBaselineExtensionVersion:  baselineVersion,
+		UpdateBaselineExtensionArtifact: origin.artifact,
+		UpdateBaselineExtensionVersion:  origin.version,
 	})
 	if err != nil {
-		t.Fatalf("provision extension update baseline harness: %v", err)
+		t.Fatalf("provision extension update harness for %s: %v", origin.version, err)
 	}
 	t.Cleanup(func() {
 		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -317,7 +422,7 @@ func provisionRealUpdateBaselineHarness(t *testing.T, ctx context.Context) (*bla
 			t.Errorf("close extension update harness: %v", err)
 		}
 	})
-	return harness, baselineVersion
+	return harness
 }
 
 // extensionCatalogDifference returns the lines that only one sorted list has.

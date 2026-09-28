@@ -190,6 +190,8 @@ A required target rejects a changed selector such as `GO_TEST_ARGS`, `GO_TEST_PK
 `PARTIAL=1` permits a selector for diagnosis. A `PARTIAL=1` result is not gate evidence.
 The structured result parser rejects failed, skipped, and zero-test results.
 Device gates require exactly one `KOTLIN_ANDROID_SERIAL` and pass it to Gradle as `ANDROID_SERIAL`.
+`SYNCHRO_MAVEN_REPO` selects one Maven repository for Kotlin SDK publication and every React Native Android build.
+It is repository configuration, not a test selector.
 
 The `source quality` job runs on every pull request and push.
 It runs contract, documentation, conformance, release-tooling, lint, and unit gates.
@@ -268,6 +270,8 @@ Reject missing jobs, skipped work, failed work, stale results, incomplete record
 Correctness checks currently enforce contract, integration, scenario, fault, declared-selection, zero-skip, seeded-stateful, and package-smoke behavior.
 
 Synchro has no numeric performance guarantee. Performance budgets remain deferred.
+`make characterize-dataset` records complete-work samples for a seeded dataset without a performance verdict.
+The R1 definition now derives its Linux host identity from `/etc/machine-id`. The tracked R1 baseline was recorded under an earlier definition, so a comparison with it is unavailable. `make test-r1-benchmark` rejects that definition mismatch.
 
 ## Failure And Recovery
 

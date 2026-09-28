@@ -233,6 +233,7 @@ jobs:
         run: |
           make conformance-update-baseline-extension-artifact
           echo "SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-baseline" >> "$GITHUB_ENV"
+          echo "SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-origins" >> "$GITHUB_ENV"
 
       - name: Run real server black box with deterministic stateful seed
         run: make test-blackbox SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
@@ -446,7 +447,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run React Native iOS checks against local PostgreSQL
-        run: make test-rn-e2e-ios test-consumer-rn-ios test-rn-upgrade-ios
+        run: make test-rn-e2e-ios test-rn-bridge-transactions-ios test-consumer-rn-ios test-rn-upgrade-ios
 
       - name: Stop local fixture
         if: always()
@@ -549,6 +550,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -memory 6144 -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             make test-rn-e2e-android-run
+            make test-rn-bridge-transactions-android
             make test-consumer-rn-android
             make test-rn-upgrade-android
 

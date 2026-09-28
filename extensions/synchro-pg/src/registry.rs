@@ -4811,21 +4811,32 @@ fn validate_generation_entries(
     Ok(())
 }
 
+// A stage moves forward only from a parent generation that this transaction
+// created. A committed parent already has an activation message in WAL, so the
+// worker must find that parent's stage unchanged when it activates it.
 fn carry_pending_membership_stage(
     client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
     client.update(
         "WITH lineage AS (
-             SELECT parent_generation
-             FROM synchro.sync_registry_generations
-             WHERE generation = $1 AND state = 'pending'
+             SELECT generation.parent_generation,
+                    parent.xmin = pg_catalog.xid(pg_catalog.pg_current_xact_id())
+                        AS parent_in_transaction
+             FROM synchro.sync_registry_generations generation
+             JOIN synchro.sync_registry_generations parent
+               ON parent.generation = generation.parent_generation
+             WHERE generation.generation = $1 AND generation.state = 'pending'
          ), candidate_stages AS (
              SELECT stage.target_relation_ids, stage.affected_scopes
              FROM lineage
              JOIN synchro.sync_registry_membership_stages stage
-               ON stage.registry_generation IN ($1, lineage.parent_generation)
-              AND stage.state = 'pending'
+               ON stage.state = 'pending'
+              AND (
+                  stage.registry_generation = $1
+                  OR (lineage.parent_in_transaction
+                      AND stage.registry_generation = lineage.parent_generation)
+              )
          ), candidate_targets AS (
              SELECT DISTINCT target_relation_id
              FROM candidate_stages stage
@@ -4867,9 +4878,12 @@ fn carry_pending_membership_stage(
     client.update(
         "DELETE FROM synchro.sync_registry_membership_stages stage
          USING synchro.sync_registry_generations generation
+         JOIN synchro.sync_registry_generations parent
+           ON parent.generation = generation.parent_generation
          WHERE generation.generation = $1
            AND stage.registry_generation = generation.parent_generation
-           AND stage.state = 'pending'",
+           AND stage.state = 'pending'
+           AND parent.xmin = pg_catalog.xid(pg_catalog.pg_current_xact_id())",
         None,
         &[generation.into()],
     )?;
