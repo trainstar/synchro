@@ -17,6 +17,30 @@ import java.util.UUID
 
 internal class RebuildChecksumMismatchException(val scopeID: String) : Exception("rebuild checksum mismatch")
 
+/**
+ * Selects each record ID of one table whose application row holds unresolved
+ * local intent. A rebuild or reset must keep that row. Argument: the table name.
+ */
+internal val PROTECTED_RECORD_IDS_SQL = """
+    SELECT DISTINCT pending.record_id
+    FROM _synchro_pending_changes AS pending
+    WHERE pending.table_name = ?
+      AND (
+        pending.lifecycle_state IN ('captured', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
+        OR (
+            pending.lifecycle_state IN ('rejected_terminal', 'exceeds_push_limit')
+            AND NOT EXISTS (
+                SELECT 1
+                FROM _synchro_pending_changes AS replacement
+                WHERE replacement.table_name = pending.table_name
+                  AND replacement.record_id = pending.record_id
+                  AND replacement.local_order > pending.local_order
+                  AND replacement.lifecycle_state IN ('accepted', 'conflict')
+            )
+        )
+      )
+""".trimIndent()
+
 internal class PullProcessor(private val database: SynchroDatabase) {
     @OptIn(ExperimentalSerializationApi::class)
     private val rebuildJSON = Json {
@@ -1057,26 +1081,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         tableName: String,
         recordId: String,
     ): Boolean = db.rawQuery(
-        """
-        SELECT 1
-        FROM _synchro_pending_changes AS pending
-        WHERE pending.table_name = ? AND pending.record_id = ?
-          AND (
-            pending.lifecycle_state IN ('captured', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
-            OR (
-                pending.lifecycle_state IN ('rejected_terminal', 'exceeds_push_limit')
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM _synchro_pending_changes AS replacement
-                    WHERE replacement.table_name = pending.table_name
-                      AND replacement.record_id = pending.record_id
-                      AND replacement.local_order > pending.local_order
-                      AND replacement.lifecycle_state IN ('accepted', 'conflict')
-                )
-            )
-          )
-        LIMIT 1
-        """.trimIndent(),
+        "SELECT 1 FROM ($PROTECTED_RECORD_IDS_SQL) WHERE record_id = ? LIMIT 1",
         arrayOf(tableName, recordId),
     ).use { it.moveToFirst() }
 

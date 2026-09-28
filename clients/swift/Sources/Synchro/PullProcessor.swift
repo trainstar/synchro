@@ -1387,39 +1387,32 @@ final class PullProcessor: @unchecked Sendable {
         return value
     }
 
+    /// Selects each record ID of one table whose application row holds
+    /// unresolved local intent. A rebuild or reset must keep that row.
+    /// Arguments: the table name twice.
+    static let protectedRecordIDsSQL = """
+        SELECT record_id
+        FROM _synchro_pending_changes
+        WHERE table_name = ?
+          AND lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
+        UNION
+        SELECT record_id
+        FROM _synchro_rejected_mutations
+        WHERE table_name = ?
+          AND status = 'rejected_terminal'
+          AND server_row_json IS NULL
+          AND server_version IS NULL
+        """
+
     private static func isProtectedApplicationRow(
         db: GRDB.Database,
         tableName: String,
         recordID: String
     ) throws -> Bool {
-        if try Row.fetchOne(
+        try Row.fetchOne(
             db,
-            sql: """
-                SELECT 1
-                FROM _synchro_pending_changes
-                WHERE table_name = ?
-                  AND record_id = ?
-                  AND lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
-                LIMIT 1
-                """,
-            arguments: [tableName, recordID]
-        ) != nil {
-            return true
-        }
-
-        return try Row.fetchOne(
-            db,
-            sql: """
-                SELECT 1
-                FROM _synchro_rejected_mutations
-                WHERE table_name = ?
-                  AND record_id = ?
-                  AND status = 'rejected_terminal'
-                  AND server_row_json IS NULL
-                  AND server_version IS NULL
-                LIMIT 1
-                """,
-            arguments: [tableName, recordID]
+            sql: "SELECT 1 FROM (\(protectedRecordIDsSQL)) WHERE record_id = ? LIMIT 1",
+            arguments: [tableName, tableName, recordID]
         ) != nil
     }
 
