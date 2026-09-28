@@ -2550,7 +2550,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1987
+-- synchro-pg/src/lib.rs:1999
 -- finalize
 
 DO $roles$
