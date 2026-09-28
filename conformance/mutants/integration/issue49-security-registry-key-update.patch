@@ -14,12 +14,12 @@ index aeafc6d..147c953 100644
      RETURN NEW;
  END;
  $$;
-@@ -2469,7 +2466,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2459,7 +2456,7 @@ CREATE FUNCTION "synchro_capture_fence"()
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1945
-+-- synchro-pg/src/lib.rs:1942
+--- synchro-pg/src/lib.rs:1935
++-- synchro-pg/src/lib.rs:1932
  -- finalize
  
  DO $roles$
