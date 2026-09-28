@@ -206,7 +206,7 @@ final class PushProcessor: @unchecked Sendable {
         }
 
         let values = change.fieldValuesByID
-        if change.operation != "delete" && values.isEmpty {
+        if change.operation == "update" && values.isEmpty {
             throw SynchroError.invalidResponse(message: "mutation has no immutable authored values")
         }
         for value in values.values {
@@ -1295,7 +1295,7 @@ final class PushProcessor: @unchecked Sendable {
             }
             switch intent.operation {
             case "insert", "update":
-                guard !intent.fieldValuesByID.isEmpty else { return nil }
+                guard intent.operation == "insert" || !intent.fieldValuesByID.isEmpty else { return nil }
                 var values: [(column: LocalSchemaColumn, value: AnyCodable)] = []
                 for stored in intent.fieldValuesByID.values.sorted(by: { $0.fieldID < $1.fieldID }) {
                     guard let column = columnsByID[stored.fieldID],

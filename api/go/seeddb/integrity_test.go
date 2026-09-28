@@ -160,12 +160,6 @@ func TestVerifySQLiteInternalSchemaRejectsCorruption(t *testing.T) {
 			},
 		},
 		{
-			name: "scope row index SQL shape changed",
-			mutate: func(t *testing.T, db *sql.DB) {
-				recreateScopeRowsIndex(t, db, `("table_name", "record_id")`)
-			},
-		},
-		{
 			name: "scope checksum type changed",
 			mutate: func(t *testing.T, db *sql.DB) {
 				_, err := db.Exec(`
@@ -194,6 +188,14 @@ func TestVerifySQLiteInternalSchemaRejectsCorruption(t *testing.T) {
 				t.Fatal("accepted corrupt internal schema")
 			}
 		})
+	}
+}
+
+func TestVerifySQLiteInternalSchemaAcceptsEquivalentIndexSQL(t *testing.T) {
+	db := newCanonicalInternalSQLiteDatabase(t)
+	recreateScopeRowsIndex(t, db, `("table_name", "record_id")`)
+	if err := verifySQLiteSchema(context.Background(), db, nil); err != nil {
+		t.Fatalf("rejected an index with equivalent quoted column names: %v", err)
 	}
 }
 

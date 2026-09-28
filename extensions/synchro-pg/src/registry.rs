@@ -734,6 +734,7 @@ fn synchro_register_table(
             }),
         )?;
         validate_registered_columns_are_published(client, &registration)?;
+        validate_published_relation_identities(client, registration.registry_generation)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -963,6 +964,7 @@ fn synchro_register_capture_dependency(
             }),
         )?;
         validate_registered_columns_are_published(client, &registration)?;
+        validate_published_relation_identities(client, registration.registry_generation)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -1021,6 +1023,9 @@ fn synchro_unregister_table(p_table_name: &str) {
 /// Declare the bounded impact rule from a captured dependency relation to a
 /// synced target relation.
 ///
+/// The dependency and the target can be the same relation. That self-impact
+/// declaration names the sibling rows whose membership a row change affects.
+///
 /// The declaration is copied with the complete registry generation. The worker
 /// evaluates this function after it applies all source projections for a WAL
 /// transaction.
@@ -1058,9 +1063,6 @@ fn synchro_register_membership_dependency(
             &registrations,
             p_target_table_name,
         )?;
-        if dependency.relation_id == target.relation_id {
-            pgrx::error!("membership dependency cannot target itself");
-        }
         if !target.is_synced() {
             pgrx::error!("membership dependency target must be a synced relation");
         }
@@ -2603,7 +2605,8 @@ fn load_and_validate_primary_key(
                 c.relreplident::text AS replica_identity
          FROM pg_catalog.pg_class c
          JOIN pg_catalog.pg_index i ON i.indrelid = c.oid AND i.indisprimary
-         JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality) ON true
+         JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+           ON key.ordinality <= i.indnkeyatts
          LEFT JOIN pg_catalog.pg_attribute a
            ON a.attrelid = c.oid AND a.attnum = key.attnum AND NOT a.attisdropped
          WHERE c.oid = $1::oid
@@ -3685,7 +3688,7 @@ fn ensure_publication_membership(
         }
     } else {
         let create_sql = format!(
-            "CREATE PUBLICATION {} FOR TABLE {}",
+            "CREATE PUBLICATION {} FOR TABLE {} WITH (publish_via_partition_root = true)",
             crate::pull::pg_quote_ident(&publication),
             qualified_relation_name(&relation.schema, &relation.relation),
         );
@@ -3708,6 +3711,65 @@ fn ensure_publication_membership(
             pgrx::error!("configured publication member must not use a column list or a row filter")
         }
     }
+}
+
+/// Rejects a generation when pgoutput would publish a registered relation under another identity.
+///
+/// A partitioned table needs `publish_via_partition_root`, because pgoutput otherwise publishes
+/// each change under its leaf partition. A registered partition is hidden when the publication
+/// publishes it through an ancestor. Registration never changes the
+/// option of an existing publication, because other subscribers can share that publication.
+fn validate_published_relation_identities(
+    client: &SpiClient<'_>,
+    registry_generation: i64,
+) -> Result<(), spi::Error> {
+    let publication = configured_publication_name();
+    let rows = client.select(
+        "SELECT registry.physical_schema::text AS physical_schema,
+                registry.physical_relation::text AS physical_relation,
+                relation.relkind = 'p' AS partitioned,
+                publication.pubviaroot AS via_root
+         FROM synchro.sync_registry registry
+         JOIN pg_catalog.pg_class relation
+           ON relation.oid = registry.physical_relation_oid
+         JOIN pg_catalog.pg_publication publication
+           ON publication.pubname = $2
+         WHERE registry.registry_generation = $1
+           AND NOT EXISTS (
+               SELECT 1
+               FROM pg_catalog.pg_get_publication_tables(publication.pubname::text) published
+               WHERE published.relid = registry.physical_relation_oid
+           )
+         ORDER BY registry.physical_schema, registry.physical_relation
+         LIMIT 1",
+        None,
+        &[registry_generation.into(), publication.as_str().into()],
+    )?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(());
+    };
+    let relation = qualified_relation_name(
+        &row.get_by_name::<String, &str>("physical_schema")?
+            .unwrap_or_default(),
+        &row.get_by_name::<String, &str>("physical_relation")?
+            .unwrap_or_default(),
+    );
+    let partitioned = row
+        .get_by_name::<bool, &str>("partitioned")?
+        .unwrap_or(false);
+    let via_root = row.get_by_name::<bool, &str>("via_root")?.unwrap_or(false);
+    if partitioned && !via_root {
+        pgrx::error!(
+            "registered partitioned table {} requires publication {:?} to set publish_via_partition_root = true",
+            relation,
+            publication
+        );
+    }
+    pgrx::error!(
+        "registered relation {} is not published under its own identity in publication {:?}",
+        relation,
+        publication
+    );
 }
 
 /// Rejects a registered column that pgoutput does not send for the configured publication.
@@ -4343,7 +4405,8 @@ fn load_catalog_for_registrations(
            ON relation.oid = registry.physical_relation_oid
          JOIN pg_catalog.pg_index index
            ON index.indrelid = relation.oid AND index.indisprimary
-         JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality) ON true
+         JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+           ON key.ordinality <= index.indnkeyatts
          LEFT JOIN pg_catalog.pg_attribute attribute
            ON attribute.attrelid = relation.oid
           AND attribute.attnum = key.attnum
@@ -5121,27 +5184,29 @@ fn validate_generation_function_projections(
             {
                 pgrx::error!("membership function reads an undeclared projection field");
             }
-            if source.relation_id != target.relation_id {
-                let dependency = dependencies
-                    .iter()
-                    .find(|dependency| {
-                        dependency.dependency_relation_id == source.relation_id
-                            && dependency.target_relation_id == target.relation_id
-                    })
-                    .unwrap_or_else(|| {
-                        pgrx::error!("membership function has no declared impact dependency")
-                    });
-                let declared: std::collections::HashSet<&str> = dependency
-                    .dependency_columns
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                if columns
-                    .iter()
-                    .any(|column| !declared.contains(column.as_str()))
-                {
-                    pgrx::error!("membership function dependency fields are incomplete");
-                }
+            // Catalog dependencies cannot show which rows a read selects. Without a
+            // self-impact declaration, the contract limits an own-projection read to
+            // the supplied row. A declaration must cover every column that it reads.
+            let dependency = dependencies.iter().find(|dependency| {
+                dependency.dependency_relation_id == source.relation_id
+                    && dependency.target_relation_id == target.relation_id
+            });
+            if source.relation_id == target.relation_id && dependency.is_none() {
+                continue;
+            }
+            let dependency = dependency.unwrap_or_else(|| {
+                pgrx::error!("membership function has no declared impact dependency")
+            });
+            let declared: std::collections::HashSet<&str> = dependency
+                .dependency_columns
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if columns
+                .iter()
+                .any(|column| !declared.contains(column.as_str()))
+            {
+                pgrx::error!("membership function dependency fields are incomplete");
             }
         }
     }
@@ -5383,8 +5448,7 @@ fn load_membership_dependencies_from_catalog(
         else {
             pgrx::error!("membership dependency target relation is not registered");
         };
-        if dependency_relation_id == target_relation_id
-            || dependency_registration_kind != dependency_registration.registration_kind
+        if dependency_registration_kind != dependency_registration.registration_kind
             || !target_registration.is_synced()
             || target_table_id != target_registration.table_id
             || dependency_columns.is_empty()

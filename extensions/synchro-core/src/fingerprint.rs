@@ -345,29 +345,81 @@ mod tests {
         expected_sha256: Option<String>,
     }
 
-    #[test]
-    fn batch_fingerprints_match_all_authored_vectors() {
+    /// These negatives describe raw request bytes: syntax, member presence,
+    /// duplicate members, and the request byte limit. The typed fingerprint
+    /// API never receives such input. The wire decoder owns them, and
+    /// `contract::tests::push_wire_decoder_rejects_raw_member_defects` and the
+    /// adapter request-intake tests prove that boundary. Every other negative
+    /// must pass the vector decoder and fail in production fingerprinting.
+    const WIRE_STAGE_NEGATIVES: [&str; 9] = [
+        "VEC-BATCH-MALFORMED-JSON-001",
+        "VEC-BATCH-MISSING-MEMBER-001",
+        "VEC-BATCH-SOURCE-LIMIT-1048577-001",
+        "VEC-MUTATION-DUPLICATE-COLUMNS-001",
+        "VEC-MUTATION-DUPLICATE-OBJECT-MEMBER-001",
+        "VEC-MUTATION-MALFORMED-JSON-001",
+        "VEC-MUTATION-MISSING-MEMBER-001",
+        "VEC-MUTATION-PRESENCE-NULL-BASE-001",
+        "VEC-MUTATION-PRESENCE-NULL-COLUMNS-001",
+    ];
+
+    fn authored_fingerprint_vectors(kind: &str) -> Vec<Vector> {
         let document: VectorDocument = serde_json::from_str(&vector_file()).unwrap();
-        for vector in document
+        let vectors: Vec<Vector> = document
             .vectors
             .into_iter()
-            .filter(|vector| vector.kind == "batch_fingerprint")
-        {
-            let result = fingerprint_batch_vector(&vector);
-            assert_vector_result(&vector, result);
+            .filter(|vector| vector.kind == kind)
+            .collect();
+        assert!(
+            vectors.iter().any(|vector| vector.valid),
+            "{kind} has no valid authored vector"
+        );
+        vectors
+    }
+
+    #[test]
+    fn batch_fingerprints_match_all_authored_vectors() {
+        for vector in authored_fingerprint_vectors("batch_fingerprint") {
+            let typed = legacy_batch_vector(&vector);
+            assert_vector_result(&vector, typed, |(user, request)| {
+                Ok((
+                    batch_fingerprint_preimage(user, request).map_err(|error| error.to_string())?,
+                    batch_fingerprint(user, request).map_err(|error| error.to_string())?,
+                ))
+            });
         }
     }
 
     #[test]
     fn mutation_fingerprints_match_all_authored_vectors() {
+        for vector in authored_fingerprint_vectors("mutation_fingerprint") {
+            let typed = legacy_mutation_vector(&vector);
+            assert_vector_result(&vector, typed, |(user, client, mutation)| {
+                Ok((
+                    mutation_fingerprint_preimage(user, client, mutation)
+                        .map_err(|error| error.to_string())?,
+                    mutation_fingerprint(user, client, mutation)
+                        .map_err(|error| error.to_string())?,
+                ))
+            });
+        }
+    }
+
+    #[test]
+    fn wire_stage_negatives_name_authored_invalid_fingerprint_vectors() {
         let document: VectorDocument = serde_json::from_str(&vector_file()).unwrap();
-        for vector in document
-            .vectors
-            .into_iter()
-            .filter(|vector| vector.kind == "mutation_fingerprint")
-        {
-            let result = fingerprint_mutation_vector(&vector);
-            assert_vector_result(&vector, result);
+        for id in WIRE_STAGE_NEGATIVES {
+            let vector = document
+                .vectors
+                .iter()
+                .find(|vector| vector.vector_id == id)
+                .unwrap_or_else(|| panic!("{id} is not an authored vector"));
+            assert!(
+                !vector.valid
+                    && (vector.kind == "batch_fingerprint"
+                        || vector.kind == "mutation_fingerprint"),
+                "{id} is not an invalid fingerprint vector"
+            );
         }
     }
 
@@ -400,11 +452,11 @@ mod tests {
             batch_fingerprint("user-a", &reversed).unwrap()
         );
 
-        let mut changed_generation = ordered_request;
+        let mut changed_generation = ordered_request.clone();
         changed_generation.client_generation = 2;
         assert_ne!(
-            batch_fingerprint("user-a", &changed_generation).unwrap(),
-            batch_fingerprint("user-b", &changed_generation).unwrap()
+            batch_fingerprint("user-a", &ordered_request).unwrap(),
+            batch_fingerprint("user-a", &changed_generation).unwrap()
         );
     }
 
@@ -505,34 +557,53 @@ mod tests {
         }
     }
 
-    fn fingerprint_batch_vector(vector: &Vector) -> Result<(Vec<u8>, Sha256Digest), String> {
+    fn legacy_batch_vector(vector: &Vector) -> Result<(String, PushRequest), String> {
         let input = object(&vector.input)?;
         let authenticated_user_id = required_string(input, "authenticated_user_id")?;
         let batch_json = required_string(input, "batch_json")?;
-        let request = legacy_batch(&batch_json)?;
-        let preimage = batch_fingerprint_preimage(&authenticated_user_id, &request)
-            .map_err(|error| error.to_string())?;
-        let digest = batch_fingerprint(&authenticated_user_id, &request)
-            .map_err(|error| error.to_string())?;
-        Ok((preimage, digest))
+        Ok((authenticated_user_id, legacy_batch(&batch_json)?))
     }
 
-    fn fingerprint_mutation_vector(vector: &Vector) -> Result<(Vec<u8>, Sha256Digest), String> {
+    fn legacy_mutation_vector(vector: &Vector) -> Result<(String, String, Mutation), String> {
         let input = object(&vector.input)?;
         let authenticated_user_id = required_string(input, "authenticated_user_id")?;
         let client_id = required_string(input, "client_id")?;
         let mutation_json = required_string(input, "mutation_json")?;
-        let mutation = legacy_mutation_json(&mutation_json)?;
-        let preimage = mutation_fingerprint_preimage(&authenticated_user_id, &client_id, &mutation)
-            .map_err(|error| error.to_string())?;
-        let digest = mutation_fingerprint(&authenticated_user_id, &client_id, &mutation)
-            .map_err(|error| error.to_string())?;
-        Ok((preimage, digest))
+        Ok((
+            authenticated_user_id,
+            client_id,
+            legacy_mutation_json(&mutation_json)?,
+        ))
     }
 
-    fn assert_vector_result(vector: &Vector, result: Result<(Vec<u8>, Sha256Digest), String>) {
+    /// A wire-stage negative must stop in the vector decoder. Every other
+    /// vector must decode, so a negative fails only in production fingerprinting.
+    fn assert_vector_result<T>(
+        vector: &Vector,
+        typed: Result<T, String>,
+        fingerprint: impl Fn(&T) -> Result<(Vec<u8>, Sha256Digest), String>,
+    ) {
+        if WIRE_STAGE_NEGATIVES.contains(&vector.vector_id.as_str()) {
+            assert!(
+                typed.is_err(),
+                "{} must stop at the wire stage",
+                vector.vector_id
+            );
+            return;
+        }
+        let typed = typed.unwrap_or_else(|error| {
+            panic!(
+                "{} must reach production fingerprinting: {error}",
+                vector.vector_id
+            )
+        });
+        let result = fingerprint(&typed);
         if !vector.valid {
-            assert!(result.is_err(), "{} must fail", vector.vector_id);
+            assert!(
+                result.is_err(),
+                "{} must fail in production fingerprinting",
+                vector.vector_id
+            );
             return;
         }
 

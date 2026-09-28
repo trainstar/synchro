@@ -1,7 +1,8 @@
 diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+index b75e9b0..1d20b34 100644
 --- a/extensions/synchro-pg/src/pull.rs
 +++ b/extensions/synchro-pg/src/pull.rs
-@@ -96,13 +96,6 @@ fn synchro_pull(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+@@ -97,13 +97,6 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
          if let Err(error) = validate_schema_ref(client, &request.schema) {
              return error;
          }
@@ -16,9 +17,10 @@ diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.
          let server_scopes = client_state.bucket_subs;
          let scope_set_version = client_state.scope_set_version;
 diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/rebuild.rs
+index ffd0926..973c8d1 100644
 --- a/extensions/synchro-pg/src/rebuild.rs
 +++ b/extensions/synchro-pg/src/rebuild.rs
-@@ -203,13 +203,6 @@ fn synchro_rebuild(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+@@ -203,13 +203,6 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
              if !session_is_current(&session, &request, &client_state, &scope_binding, &boundary) {
                  return rebuild_restart_response(&request.scope);
              }
@@ -32,7 +34,7 @@ diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/re
              let row_ordinal = continuation
                  .as_ref()
                  .map(|continuation| continuation.next_row_ordinal)
-@@ -230,13 +223,6 @@ fn synchro_rebuild(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
+@@ -230,13 +223,6 @@ fn synchro_rebuild_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::Js
          if continuation.is_some() || !client_state.bucket_subs.contains(&request.scope) {
              return invalid_request_response();
          }
@@ -45,4 +47,4 @@ diff --git a/extensions/synchro-pg/src/rebuild.rs b/extensions/synchro-pg/src/re
 -        }
          let boundary = match load_materialized_boundary(client) {
              Ok(boundary) => boundary,
-             Err(error) => return integrity_failure_with_log("loading boundary", &error),
+             Err(_) => return integrity_failure_with_log("loading boundary"),

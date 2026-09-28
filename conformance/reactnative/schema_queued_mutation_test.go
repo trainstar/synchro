@@ -70,7 +70,7 @@ func TestValidateSchemaQueuedMutationScenarioRejectsContractChanges(t *testing.T
 
 func TestSchemaQueuedMutationCommandUsesEmptyStepsArray(t *testing.T) {
 	coordinator, err := NewSchemaQueuedMutationCoordinator(SchemaQueuedMutationCoordinatorConfig{
-		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create schema-queued-mutation coordinator: %v", err)
@@ -100,7 +100,7 @@ func TestSchemaQueuedMutationFinalCaptureAcceptsReopenedStatus(t *testing.T) {
 
 func TestSchemaQueuedMutationFinalCaptureRequestsDurableProof(t *testing.T) {
 	coordinator, err := NewSchemaQueuedMutationCoordinator(SchemaQueuedMutationCoordinatorConfig{
-		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create schema-queued-mutation coordinator: %v", err)
@@ -209,7 +209,7 @@ func TestSchemaQueuedMutationHasNoRawObserverRead(t *testing.T) {
 
 func TestNewSchemaQueuedMutationCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewSchemaQueuedMutationCoordinator(SchemaQueuedMutationCoordinatorConfig{
-		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android schema-queued-mutation coordinator=%v error=%v", coordinator, err)

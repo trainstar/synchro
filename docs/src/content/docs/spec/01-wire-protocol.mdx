@@ -515,11 +515,15 @@ Every mutation requires `mutation_id`, `table`, one-field typed `pk`, `authored_
 
 | Operation | `base_version` | `columns` |
 | --- | --- | --- |
-| `insert` | MUST be absent | REQUIRED nonempty object keyed by fields writable under `authored_schema` |
+| `insert` | MUST be absent | REQUIRED object keyed by fields writable under `authored_schema`. It MAY be empty. |
 | `update` | REQUIRED nonempty opaque token | REQUIRED nonempty patch keyed by fields writable under `authored_schema` |
 | `delete` | REQUIRED nonempty opaque token | MUST be absent |
 
-Empty `columns`, unknown operations, duplicate mutation IDs, duplicate field members, and presence-matrix violations make the whole request `400 invalid_request`.
+Empty `update` columns, unknown operations, duplicate mutation IDs, duplicate field members, and presence-matrix violations make the whole request `400 invalid_request`.
+
+An `insert` with empty `columns` authors no field. The supplied primary key identifies the row, and source defaults, identity generation, and `BEFORE INSERT` triggers supply the other values. A required value that the source does not supply produces terminal `validation_failed`.
+
+A server that predates the empty-insert rule, such as `synchro_pg` 0.3.2 or earlier, rejects the whole request that contains such an insert with `400 invalid_request`. It does no durable work for that request. The client keeps the sealed batch unchanged and reports the non-retryable protocol error. After the server upgrade, the same sealed batch is accepted.
 
 The server inspects every submitted field after structural validation. A known current primary-key, generated, version, creation-time, update-time, deletion-time, or other non-writable field produces terminal `validation_failed`. An invalid value or failed current domain constraint also produces terminal `validation_failed`. A retained authored table or field that cannot be represented by the current manifest produces terminal `schema_incompatible`. The server MUST NOT remove any submitted field and report the mutation as applied.
 

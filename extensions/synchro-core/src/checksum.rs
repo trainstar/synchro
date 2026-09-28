@@ -1448,6 +1448,24 @@ mod tests {
         .expect("manifest table must be valid")
     }
 
+    /// Returns the selected families and requires a valid vector in each, so a
+    /// removed family fails its consumer instead of passing with no input.
+    fn authored_vectors_of(kinds: &[&str]) -> Vec<Value> {
+        let vectors: Vec<Value> = authored_vectors()
+            .into_iter()
+            .filter(|vector| kinds.iter().any(|kind| vector["kind"] == *kind))
+            .collect();
+        for kind in kinds {
+            assert!(
+                vectors
+                    .iter()
+                    .any(|vector| vector["kind"] == *kind && vector["valid"] == true),
+                "{kind} has no valid authored vector"
+            );
+        }
+        vectors
+    }
+
     fn assert_expected_bytes(vector: &Value, bytes: &[u8]) {
         let expected = vector["expected"]["canonical_bytes_hex"]
             .as_str()
@@ -1461,10 +1479,7 @@ mod tests {
 
     #[test]
     fn typed_values_match_authored_canonical_vectors() {
-        for vector in authored_vectors()
-            .into_iter()
-            .filter(|vector| vector["kind"] == "typed_value")
-        {
+        for vector in authored_vectors_of(&["typed_value"]) {
             let input = &vector["input"];
             let result = encode_typed_value(
                 &field_spec(&input["field_spec"]),
@@ -1482,10 +1497,7 @@ mod tests {
 
     #[test]
     fn row_identity_and_digest_match_authored_canonical_vectors() {
-        for vector in authored_vectors()
-            .into_iter()
-            .filter(|vector| vector["kind"] == "row_identity" || vector["kind"] == "row_digest")
-        {
+        for vector in authored_vectors_of(&["row_identity", "row_digest"]) {
             let input = &vector["input"];
             let table = table_from_manifest(
                 input["manifest_json"]
@@ -1557,10 +1569,7 @@ mod tests {
 
     #[test]
     fn scope_digests_match_authored_canonical_vectors() {
-        for vector in authored_vectors()
-            .into_iter()
-            .filter(|vector| vector["kind"] == "scope_digest")
-        {
+        for vector in authored_vectors_of(&["scope_digest"]) {
             let input = &vector["input"];
             let result: Result<(Vec<u8>, Sha256Digest), DigestError> = (|| {
                 let schema_hash = SchemaHash::from_lower_hex(

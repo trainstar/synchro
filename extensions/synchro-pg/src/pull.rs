@@ -32,12 +32,13 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
         );
     }
 
+    // Parser errors can quote submitted values, so the response keeps only the class.
     let request: PullRequest = match serde_json::from_value(p_request.0) {
         Ok(request) => request,
-        Err(err) => {
+        Err(_) => {
             return protocol_error_response(
                 ProtocolErrorCode::InvalidRequest,
-                format!("invalid pull request: {err}"),
+                "invalid pull request",
                 false,
             );
         }
@@ -1302,7 +1303,7 @@ pub(crate) fn hydrate_records(
         let data_str: String = row
             .get_by_name::<String, &str>("data")
             .map_err(|error| format!("reading hydrated row data: {error}"))?
-            .ok_or_else(|| format!("row {table_name}.{id} has no hydrated data"))?;
+            .ok_or_else(|| format!("hydrated {table_name} row has no data"))?;
         let updated_at: Option<String> = row
             .get_by_name::<String, &str>("updated_at")
             .map_err(|error| format!("reading hydrated update time: {error}"))?;
@@ -1313,15 +1314,15 @@ pub(crate) fn hydrate_records(
             .get_by_name::<String, &str>("row_version")
             .map_err(|error| format!("reading hydrated row version: {error}"))?
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("row {table_name}.{id} has no server version"))?;
+            .ok_or_else(|| format!("hydrated {table_name} row has no server version"))?;
 
         let mut data: serde_json::Value = serde_json::from_str(&data_str)
-            .map_err(|error| format!("row {table_name}.{id} is invalid JSON: {error}"))?;
+            .map_err(|_| format!("hydrated {table_name} row is invalid JSON"))?;
         canonicalize_synced_row_data(table_reg, &mut data)
-            .map_err(|error| format!("row {table_name}.{id} is not canonical: {error}"))?;
+            .map_err(|_| format!("hydrated {table_name} row is not canonical"))?;
         let digest =
             synced_row_digest_with_schema_hash(table_reg, &data, &id, &row_version, schema_hash)
-                .map_err(|error| format!("row {table_name}.{id} digest failed: {error}"))?;
+                .map_err(|_| format!("hydrated {table_name} row digest failed"))?;
         let row_checksum = ChecksumObject::new(digest);
 
         let mut record = serde_json::json!({
@@ -1374,10 +1375,14 @@ pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias
                 expression
             )
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
 
-    format!("jsonb_build_object({pairs})")
+    // PostgreSQL limits one call to FUNC_MAX_ARGS (100) arguments, so each call takes at most 50 pairs.
+    let objects = pairs
+        .chunks(50)
+        .map(|chunk| format!("jsonb_build_object({})", chunk.join(", ")))
+        .collect::<Vec<_>>();
+    format!("({})", objects.join(" || "))
 }
 
 pub(crate) fn compute_bucket_checksums(

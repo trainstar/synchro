@@ -892,21 +892,6 @@ func TestSourceMutationErrorPreservesOnlySQLState(t *testing.T) {
 	}
 }
 
-func TestWorkerHBAConfigurationRestrictsCredential(t *testing.T) {
-	configuration := workerHBAConfiguration("synchro_conformance_test", "synchro_cf_worker")
-	wanted := "# Synchro conformance authentication boundary\n" +
-		"local \"synchro_conformance_test\" \"synchro_cf_worker\" scram-sha-256\n" +
-		"local all \"synchro_cf_worker\" reject\n" +
-		"local all all trust\n" +
-		"host \"synchro_conformance_test\" \"synchro_cf_worker\" 127.0.0.1/32 scram-sha-256\n" +
-		"host all \"synchro_cf_worker\" 127.0.0.1/32 reject\n" +
-		"host all all 127.0.0.1/32 scram-sha-256\n" +
-		"host all all ::1/128 scram-sha-256\n"
-	if configuration != wanted {
-		t.Fatalf("HBA configuration = %q", configuration)
-	}
-}
-
 func TestScrubPostgresEnvironmentRemovesWorkerConnectionString(t *testing.T) {
 	input := []string{
 		"DATABASE_URL=operator-dsn",

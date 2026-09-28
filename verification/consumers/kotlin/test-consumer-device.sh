@@ -132,6 +132,7 @@ fi
 # it so the resume launch starts from a controlled state.
 adb_command shell am force-stop "$package"
 
+python3 "$tool" author-remote --config "$work_dir/initial-config.json" --output "$work_dir/remote.json"
 write_config "$work_dir/resume-config.json"
 # am start -W never returns when the launched activity dies at once, so the
 # launch is asynchronous and the process id is polled.
@@ -169,13 +170,16 @@ if [ "$resumed" -ne 1 ]; then
   exit 1
 fi
 
+python3 "$tool" verify-server --config "$work_dir/initial-config.json" --remote "$work_dir/remote.json" --output "$work_dir/server.json"
 set -- python3 "$tool" complete-cell \
   --repo-root "$repo_root" \
   --cell "$cell_id" \
   --output "$cell_result" \
   --initial "$work_dir/initial.json" \
   --resume "$work_dir/resume.json" \
-  --killed-pid "$initial_pid"
+  --killed-pid "$initial_pid" \
+  --remote "$work_dir/remote.json" \
+  --server-verification "$work_dir/server.json"
 distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-$aar}
 for artifact in $distribution_artifacts; do
   set -- "$@" --artifact "$artifact"

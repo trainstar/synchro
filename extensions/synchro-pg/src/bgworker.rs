@@ -35,6 +35,8 @@ const MAX_POISON_DETAIL_BYTES: usize = 512;
 const MAX_PEEK_BATCH_BYTES: usize = MAX_TRANSACTION_BYTES;
 const STARTUP_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const STARTUP_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+const UNOWNED_SLOT_COLLISION: &str =
+    "configured replication slot exists without synchro ownership evidence";
 
 #[derive(Clone)]
 struct PoisonFailure {
@@ -194,7 +196,7 @@ struct WorkerSlotPreparation {
     worker_role_oid: pg_sys::Oid,
     startup: WorkerStartupIdentity,
     connected_database: String,
-    existing_slot: ExistingWorkerSlot,
+    slot_exists: bool,
 }
 
 struct PublicationIdentity {
@@ -214,17 +216,10 @@ pub(crate) struct WorkerStartupIdentity {
     pub(crate) active_slot_is_unbound: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExistingWorkerSlot {
-    Missing,
-    Inactive,
-    Active,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SlotBindingDecision {
     Reuse,
-    Replace,
+    Create,
     Fail,
 }
 
@@ -932,41 +927,36 @@ fn prepare_worker(database: &str, worker_login: &str) -> Result<WorkerIdentity, 
             activate_worker_role_in_transaction(client, worker_role_oid)?;
             let (_, connected_database) = connected_database(client, database)?;
             let startup = capture_worker_startup_identity(client, &configured_slot)?;
-            let existing_slot = existing_worker_slot(client, &startup.runtime.slot_name)?;
-            if slot_binding_decision(&startup, existing_slot) == SlotBindingDecision::Fail {
-                return Err("configured replication slot is owned by another backend".to_string());
+            let slot_exists = worker_slot_exists(client, &startup.runtime.slot_name)?;
+            if slot_binding_decision(&startup, slot_exists) == SlotBindingDecision::Fail {
+                return Err(UNOWNED_SLOT_COLLISION.to_string());
             }
             Ok(WorkerSlotPreparation {
                 session_login_oid,
                 worker_role_oid,
                 startup,
                 connected_database,
-                existing_slot,
+                slot_exists,
             })
         })
     })?;
-    let startup_runtime =
-        match slot_binding_decision(&preparation.startup, preparation.existing_slot) {
-            SlotBindingDecision::Fail => {
-                return Err("configured replication slot is owned by another backend".to_string());
-            }
-            SlotBindingDecision::Reuse => {
-                prepare_bound_worker_slot(&preparation, &configured_slot)?
-            }
-            SlotBindingDecision::Replace => {
-                let boundary = run_replication_transaction(preparation.worker_role_oid, || {
-                    Spi::connect_mut(|client| {
-                        replace_unbound_slot(
-                            client,
-                            &preparation.startup.runtime.slot_name,
-                            preparation.existing_slot,
-                            &preparation.connected_database,
-                        )
-                    })
-                })?;
-                bind_unbound_worker_slot(&preparation, &configured_slot, &boundary)?
-            }
-        };
+    let startup_runtime = match slot_binding_decision(&preparation.startup, preparation.slot_exists)
+    {
+        SlotBindingDecision::Fail => return Err(UNOWNED_SLOT_COLLISION.to_string()),
+        SlotBindingDecision::Reuse => prepare_bound_worker_slot(&preparation, &configured_slot)?,
+        SlotBindingDecision::Create => {
+            let boundary = run_replication_transaction(preparation.worker_role_oid, || {
+                Spi::connect_mut(|client| {
+                    create_unbound_slot(
+                        client,
+                        &preparation.startup.runtime.slot_name,
+                        &preparation.connected_database,
+                    )
+                })
+            })?;
+            bind_unbound_worker_slot(&preparation, &configured_slot, &boundary)?
+        }
+    };
     Ok(WorkerIdentity {
         session_login_oid: preparation.session_login_oid,
         worker_role_oid: preparation.worker_role_oid,
@@ -1344,46 +1334,27 @@ fn prepare_bound_worker_slot(
     })
 }
 
-fn existing_worker_slot(
-    client: &mut SpiClient<'_>,
-    slot: &str,
-) -> Result<ExistingWorkerSlot, String> {
-    let rows = client
+fn worker_slot_exists(client: &mut SpiClient<'_>, slot: &str) -> Result<bool, String> {
+    client
         .select(
-            "SELECT active
-              FROM pg_catalog.pg_replication_slots
-              WHERE slot_name = $1",
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1
+             ) AS present",
             None,
             &[slot.into()],
         )
-        .map_err(|_| "checking replication slot failed".to_string())?;
-    match rows.into_iter().next() {
-        Some(row) => match row
-            .get_by_name::<bool, &str>("active")
-            .map_err(|_| "checking replication slot failed".to_string())?
-        {
-            Some(true) | None => Ok(ExistingWorkerSlot::Active),
-            Some(false) => Ok(ExistingWorkerSlot::Inactive),
-        },
-        None => Ok(ExistingWorkerSlot::Missing),
-    }
+        .map_err(|_| "checking replication slot failed".to_string())?
+        .first()
+        .get_by_name::<bool, &str>("present")
+        .map_err(|_| "checking replication slot failed".to_string())?
+        .ok_or_else(|| "checking replication slot failed".to_string())
 }
 
-fn replace_unbound_slot(
+fn create_unbound_slot(
     client: &mut SpiClient<'_>,
     slot: &str,
-    existing_slot: ExistingWorkerSlot,
     connected_database: &str,
 ) -> Result<String, String> {
-    if existing_slot == ExistingWorkerSlot::Inactive {
-        client
-            .select(
-                "SELECT pg_catalog.pg_drop_replication_slot($1)",
-                None,
-                &[slot.into()],
-            )
-            .map_err(|_| "dropping configured replication slot failed".to_string())?;
-    }
     client
         .select(
             "SELECT pg_catalog.pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -1484,16 +1455,18 @@ fn bind_replacement_slot(
     Ok(())
 }
 
+/// Only a bound runtime row is ownership evidence for an existing slot.
+/// An unbound runtime creates the configured slot only when it is missing.
+/// An existing slot with the configured name can belong to another consumer,
+/// so startup fails and leaves it unchanged for an explicit operator decision.
 pub(crate) fn slot_binding_decision(
     runtime_state: &WorkerStartupIdentity,
-    existing_slot: ExistingWorkerSlot,
+    slot_exists: bool,
 ) -> SlotBindingDecision {
-    if !runtime_state.active_slot_is_unbound {
-        return SlotBindingDecision::Reuse;
-    }
-    match existing_slot {
-        ExistingWorkerSlot::Active => SlotBindingDecision::Fail,
-        ExistingWorkerSlot::Missing | ExistingWorkerSlot::Inactive => SlotBindingDecision::Replace,
+    match (runtime_state.active_slot_is_unbound, slot_exists) {
+        (false, _) => SlotBindingDecision::Reuse,
+        (true, false) => SlotBindingDecision::Create,
+        (true, true) => SlotBindingDecision::Fail,
     }
 }
 
@@ -3041,7 +3014,7 @@ fn preload_relations(
         let rows = client
             .select(
                 "SELECT a.attname::text AS name,
-                        (a.attnum = ANY(i.indkey)) AS is_key
+                        (a.attnum = ANY((i.indkey::int2[])[0:i.indnkeyatts - 1])) AS is_key
                  FROM pg_catalog.pg_attribute a
                  JOIN pg_catalog.pg_index i
                    ON i.indrelid = a.attrelid AND i.indisprimary
@@ -4027,6 +4000,68 @@ fn parse_fence_messages(transaction: &WalTransaction) -> Result<Vec<FenceMessage
     Ok(fences)
 }
 
+fn fence_names_relation(fence: &FenceMessage, relation: &RelationKey) -> bool {
+    fence.physical_schema == relation.namespace
+        && fence.physical_relation == relation.name
+        && fence.physical_relation_oid == relation.oid
+}
+
+/// With publish_via_partition_root, pgoutput publishes a partition row change
+/// under the partitioned table, but the capture fence runs on the partition.
+/// This returns each (partition, partitioned table) pair in which the fence
+/// names a current partition of the published relation.
+fn partition_fence_relations<'a>(
+    client: &SpiClient<'_>,
+    pairs: impl Iterator<Item = (&'a FenceMessage, &'a RelationKey)>,
+) -> Result<HashSet<(u32, u32)>, String> {
+    let input = pairs
+        .filter(|(fence, relation)| !fence_names_relation(fence, relation))
+        .map(|(fence, relation)| {
+            serde_json::json!({
+                "fence_oid": i64::from(fence.physical_relation_oid),
+                "fence_schema": fence.physical_schema,
+                "fence_relation": fence.physical_relation,
+                "event_oid": i64::from(relation.oid),
+            })
+        })
+        .collect::<Vec<_>>();
+    if input.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let rows = client
+        .select(
+            "SELECT input.fence_oid, input.event_oid
+             FROM jsonb_to_recordset($1::jsonb) AS input(
+                 fence_oid bigint, fence_schema text, fence_relation text, event_oid bigint
+             )
+             JOIN pg_catalog.pg_class partition ON partition.oid = input.fence_oid::oid
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = partition.relnamespace
+             WHERE partition.relispartition
+               AND namespace.nspname::text = input.fence_schema
+               AND partition.relname::text = input.fence_relation
+               AND input.event_oid::oid IN (
+                   SELECT ancestor.relid
+                   FROM pg_catalog.pg_partition_ancestors(partition.oid) AS ancestor
+                   WHERE ancestor.relid <> partition.oid
+               )",
+            None,
+            &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+        )
+        .map_err(|_| "loading partition fence relations failed".to_string())?;
+    let mut partitions = HashSet::new();
+    for row in rows {
+        let oid = |name: &str| {
+            row.get_by_name::<i64, &str>(name)
+                .ok()
+                .flatten()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| "partition fence relation is invalid".to_string())
+        };
+        partitions.insert((oid("fence_oid")?, oid("event_oid")?));
+    }
+    Ok(partitions)
+}
+
 fn correlate_events<'a>(
     client: &SpiClient<'_>,
     transaction: &'a WalTransaction,
@@ -4199,6 +4234,14 @@ fn correlate_events<'a>(
         log!("synchro WAL fence row identity correlation failed");
         return Err(failure("fence_correlation_failed", transaction.commit_lsn));
     };
+    let partition_fences = partition_fence_relations(
+        client,
+        applicable_events
+            .iter()
+            .zip(&fence_indexes)
+            .map(|((event, _), fence_index)| (applicable_fences[*fence_index], &event.relation)),
+    )
+    .map_err(|_| failure("fence_correlation_failed", transaction.commit_lsn))?;
 
     for (((event, registration), keys), fence_index) in applicable_events
         .into_iter()
@@ -4214,9 +4257,8 @@ fn correlate_events<'a>(
                 != registration
                     .is_synced()
                     .then_some(registration.table_id.as_str())
-            || fence.physical_schema != event.relation.namespace
-            || fence.physical_relation != event.relation.name
-            || fence.physical_relation_oid != event.relation.oid
+            || !(fence_names_relation(fence, &event.relation)
+                || partition_fences.contains(&(fence.physical_relation_oid, event.relation.oid)))
             || fence.operation != operation_name
             || fence.old_record_id != old_record_id
             || fence.new_record_id != new_record_id
@@ -7261,7 +7303,6 @@ fn registered_id(image: &TupleImage, column: &str) -> Result<String, String> {
     match image.get(column) {
         Some(TupleValue::Text(bytes)) => std::str::from_utf8(bytes)
             .ok()
-            .filter(|value| !value.is_empty())
             .map(String::from)
             .ok_or_else(|| "registered identity is invalid".to_string()),
         Some(TupleValue::Binary(_)) => Err("binary registered identity is unsupported".to_string()),

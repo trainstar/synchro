@@ -731,6 +731,11 @@
         )
         .unwrap();
         assert_eq!(in_pub, Some(true));
+        // A partitioned table needs root identity, and a new publication has no other subscriber.
+        let via_root: Option<bool> =
+            Spi::get_one("SELECT pubviaroot FROM pg_publication WHERE pubname = 'synchro_pub'")
+                .unwrap();
+        assert_eq!(via_root, Some(true));
     }
 
     #[pg_test]
@@ -2629,17 +2634,66 @@
         assert!(tables.iter().any(|table| table["name"] == "test_products"));
     }
 
+    // A SQL entry point lets a PL/pgSQL exception block roll back a failed
+    // activation in a subtransaction, so the test can inspect the state after.
+    #[pg_extern]
+    fn activate_pending_registry() {
+        activate_pending_registry_for_test();
+    }
+
+    fn orders_capture_state() -> Value {
+        Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_build_object(
+                 'active_generation', (
+                     SELECT generation FROM sync_registry_generations WHERE state = 'active'
+                 ),
+                 'pending_generations', (
+                     SELECT count(*) FROM sync_registry_generations WHERE state = 'pending'
+                 ),
+                 'publication_row_filter', (
+                     SELECT rowfilter FROM pg_publication_tables
+                     WHERE pubname = 'synchro_pub'
+                       AND schemaname = 'public'
+                       AND tablename = 'test_orders'
+                 )
+             )",
+        )
+        .unwrap()
+        .expect("test_orders capture state")
+        .0
+    }
+
     #[pg_test]
     fn test_unregister_keeps_filtered_publication_member() {
         setup_test_tables();
         replace_orders_publication_member(ORDERS_ROW_FILTER_MEMBER);
         Spi::run("SELECT synchro_unregister_table('test_orders')").unwrap();
+        let before = orders_capture_state();
+        assert!(before["publication_row_filter"].is_string(), "{before}");
+        assert!(before["pending_generations"].as_i64() > Some(0), "{before}");
 
-        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
-        assert!(
-            result.is_err(),
-            "activation must not remove a filtered publication member"
-        );
+        Spi::run(
+            "DO $test$
+             DECLARE
+                 rejected boolean := false;
+             BEGIN
+                 BEGIN
+                     PERFORM tests.activate_pending_registry();
+                 EXCEPTION WHEN OTHERS THEN
+                     rejected := true;
+                 END;
+                 IF NOT rejected THEN
+                     RAISE EXCEPTION 'activation removed a filtered publication member';
+                 END IF;
+             END
+             $test$",
+        )
+        .expect("activation must fail before it removes a filtered publication member");
+        assert_eq!(orders_capture_state(), before);
+        assert!(crate::registry::load_registry()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.table_name == "test_orders"));
     }
 
     #[pg_test]

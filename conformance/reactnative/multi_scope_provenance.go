@@ -32,7 +32,6 @@ type MultiScopeProvenanceCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // MultiScopeProvenanceCoordinatorResult contains the checked server result.
@@ -167,9 +166,6 @@ func NewMultiScopeProvenanceCoordinator(config MultiScopeProvenanceCoordinatorCo
 	}
 	if (config.Controller == nil || config.Harness == nil) && (config.ServerURL == "" || config.AuthToken == "") {
 		return nil, errors.New("React Native multi-scope provenance dependencies are unavailable")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	serverURL := config.ServerURL
 	if serverURL == "" {

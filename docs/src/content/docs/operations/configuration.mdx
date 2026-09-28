@@ -28,6 +28,28 @@ The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one s
 
 The worker reads peeked pgoutput data one message at a time. It preserves each complete valid source transaction when a poll batch reaches its soft 16 MiB target.
 
+### Replication slot ownership
+
+The worker owns a slot only when `synchro.sync_runtime_state` binds that slot to the current stream.
+A slot name, plugin, or database match is not ownership evidence.
+
+- A bound worker validates and reuses its slot.
+- An unbound worker creates the configured slot only when no slot has that name.
+- An unbound worker never drops or adopts an existing slot with the configured name.
+
+When a slot with the configured name exists before the first binding, worker startup fails.
+The worker logs `configured replication slot exists without synchro ownership evidence` and leaves that slot unchanged.
+Capture readiness stays unready.
+
+To recover, make an explicit operator decision:
+
+1. Identify the consumer that owns the existing slot.
+2. If another consumer owns the slot, set `synchro.replication_slot` to an unused name and reload the configuration.
+3. If the slot is an obsolete Synchro slot that you can prove is unused, verify that it is inactive and drop it.
+
+PostgreSQL restarts the failed worker process.
+The new worker process then creates and binds the configured slot.
+
 ## Publication membership
 
 Each registered relation must be a member of the configured publication without a column list and without a row filter.
@@ -38,6 +60,24 @@ Each registered relation must be a member of the configured publication without 
 
 To repair a member, drop the table from the publication.
 Then add the table to the publication again without a column list and without a row filter.
+
+## Partitioned tables
+
+A registered partitioned table needs `publish_via_partition_root = true` on the configured publication.
+Without this setting, pgoutput publishes each change under its leaf partition, and the worker cannot find the registration.
+Synchro creates its publication with `publish_via_partition_root = true`.
+
+Registration never changes the option of an existing publication, because other subscribers can share that publication.
+
+- Registration rejects a partitioned table when the configured publication does not have `publish_via_partition_root = true`.
+- Registration rejects a relation that the publication publishes through an ancestor partitioned table.
+- The rejected registration leaves the registry and the publication unchanged.
+- The readiness check `publication` fails with `publication_mismatch` when a registered relation is not published under its own identity.
+
+To register a partitioned table on an existing publication, first confirm that no other subscriber depends on leaf partition identities.
+Then run `ALTER PUBLICATION <name> SET (publish_via_partition_root = true)` and register the table.
+A `TRUNCATE` of one leaf partition is not published under the root identity.
+Do not truncate a partition of a registered partitioned table.
 
 ## Generated columns
 

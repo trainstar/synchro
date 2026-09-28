@@ -819,14 +819,14 @@ impl Mutation {
                 if self.base_version.is_some() {
                     return Err(ContractViolation::UnexpectedMutationBaseVersion);
                 }
-                validate_columns(self.columns.as_ref())
+                validate_columns(self.columns.as_ref(), true)
                     .map_err(|_| ContractViolation::MissingMutationColumns)?;
             }
             Operation::Update => {
                 if self.base_version.as_deref().is_none_or(str::is_empty) {
                     return Err(ContractViolation::MissingMutationBaseVersion);
                 }
-                validate_columns(self.columns.as_ref())
+                validate_columns(self.columns.as_ref(), false)
                     .map_err(|_| ContractViolation::MissingMutationColumns)?;
             }
             Operation::Delete => {
@@ -1863,11 +1863,13 @@ fn validate_one_field_pk(value: &Value) -> Result<(), ContractViolation> {
     Ok(())
 }
 
-fn validate_columns(value: Option<&Value>) -> Result<(), ContractViolation> {
+/// An insert can author no fields, so the server key and source defaults create the row.
+/// An update must change at least one field.
+fn validate_columns(value: Option<&Value>, allow_empty: bool) -> Result<(), ContractViolation> {
     let object = value
         .and_then(Value::as_object)
         .ok_or(ContractViolation::InvalidColumns)?;
-    if object.is_empty()
+    if (object.is_empty() && !allow_empty)
         || object.len() > MAX_PUSH_COLUMNS
         || object.keys().any(|field_id| field_id.is_empty())
     {
@@ -2672,6 +2674,92 @@ mod tests {
             },
         };
         assert_eq!(error.validate(), Ok(()));
+    }
+
+    /// The raw-wire fingerprint vector negatives have their production owner
+    /// here. Each defect starts from a valid encoded request or mutation.
+    #[test]
+    fn push_wire_decoder_rejects_raw_member_defects() {
+        let decode_mutation = |raw: &str| {
+            serde_json::from_str::<Mutation>(raw)
+                .map_err(|error| error.to_string())
+                .and_then(|value| value.validate().map_err(|error| error.to_string()))
+        };
+        let decode_request = |raw: &str| {
+            serde_json::from_str::<PushRequest>(raw)
+                .map_err(|error| error.to_string())
+                .and_then(|value| value.validate().map_err(|error| error.to_string()))
+        };
+        let insert = serde_json::to_string(&mutation(Operation::Insert)).unwrap();
+        let update = serde_json::to_string(&mutation(Operation::Update)).unwrap();
+        let delete = serde_json::to_string(&mutation(Operation::Delete)).unwrap();
+        let request = serde_json::to_string(&push_request()).unwrap();
+        for valid in [&insert, &update, &delete] {
+            assert_eq!(decode_mutation(valid), Ok(()), "{valid}");
+        }
+        assert_eq!(decode_request(&request), Ok(()));
+
+        let replace = |raw: &str, from: &str, to: &str| {
+            assert_eq!(raw.matches(from).count(), 1, "{from} must occur once");
+            raw.replace(from, to)
+        };
+        let mutation_defects = [
+            ("malformed JSON", r#"{"mutation_id":}"#.to_owned()),
+            (
+                "missing member",
+                replace(
+                    &insert,
+                    r#","client_version":"2026-07-18T13:59:01.000000Z""#,
+                    "",
+                ),
+            ),
+            (
+                "duplicate object member",
+                replace(
+                    &insert,
+                    &format!(r#"{{"mutation_id":"{MUTATION_ID}""#),
+                    &format!(
+                        r#"{{"mutation_id":"{MUTATION_ID}","mutation_id":"018f2b5e-7c42-7a1d-9d31-8a95bd674012""#
+                    ),
+                ),
+            ),
+            (
+                "duplicate column member",
+                replace(
+                    &insert,
+                    r#""columns":{"fld_documents_title":"Title"}"#,
+                    r#""columns":{"fld_documents_title":"Title","fld_documents_title":"Other"}"#,
+                ),
+            ),
+            (
+                "null base version",
+                replace(
+                    &insert,
+                    r#","client_version":"#,
+                    r#","base_version":null,"client_version":"#,
+                ),
+            ),
+            (
+                "null columns",
+                replace(
+                    &delete,
+                    r#","client_version":"#,
+                    r#","columns":null,"client_version":"#,
+                ),
+            ),
+        ];
+        for (name, raw) in mutation_defects {
+            assert!(decode_mutation(&raw).is_err(), "{name}: {raw}");
+        }
+        for (name, raw) in [
+            ("malformed JSON", r#"{"client_id":}"#.to_owned()),
+            (
+                "missing member",
+                replace(&request, r#""client_generation":4,"#, ""),
+            ),
+        ] {
+            assert!(decode_request(&raw).is_err(), "{name}: {raw}");
+        }
     }
 
     #[test]

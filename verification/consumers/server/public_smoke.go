@@ -27,6 +27,12 @@ const (
 	smokeMutationID = "00000000-0000-4000-8000-000000000114"
 	smokeRowID      = "00000000-0000-4000-8000-000000000115"
 	smokeTime       = "2026-09-14T12:00:00.000000Z"
+	smokeName       = "Packaged server consumer"
+	// The offline mutation is authored before the adapter dies and uploaded only after it restarts.
+	offlineBatchID    = "00000000-0000-4000-8000-000000000116"
+	offlineMutationID = "00000000-0000-4000-8000-000000000117"
+	offlineRowID      = "00000000-0000-4000-8000-000000000118"
+	offlineName       = "Packaged server offline"
 )
 
 type schemaRef struct {
@@ -53,6 +59,7 @@ type storedState struct {
 	Client   clientState     `json:"client"`
 	Request  json.RawMessage `json:"request"`
 	Response json.RawMessage `json:"response"`
+	Offline  json.RawMessage `json:"offline"`
 }
 
 type phaseResult struct {
@@ -62,6 +69,8 @@ type phaseResult struct {
 	AdapterPID    int    `json:"adapter_pid"`
 	PushDigest    string `json:"push_digest"`
 	ReplayEqual   *bool  `json:"replay_equal,omitempty"`
+	// The resumed client reports the customer name that pull delivered, not an expected value.
+	ObservedCustomerName *string `json:"observed_customer_name,omitempty"`
 }
 
 type tableDefinition struct {
@@ -235,22 +244,26 @@ func returningConnect(state clientState) map[string]any {
 }
 
 func pushPayload(state clientState) map[string]any {
+	return insertPayload(state, smokeBatchID, smokeMutationID, smokeRowID, smokeName)
+}
+
+func insertPayload(state clientState, batchID, mutationID, rowID, name string) map[string]any {
 	return map[string]any{
 		"client_id":         state.ClientID,
 		"client_generation": state.Generation,
-		"batch_id":          smokeBatchID,
+		"batch_id":          batchID,
 		"schema":            state.Schema,
 		"mutations": []any{
 			map[string]any{
-				"mutation_id":     smokeMutationID,
+				"mutation_id":     mutationID,
 				"table":           state.TableID,
-				"pk":              map[string]any{state.PrimaryKeyID: smokeRowID},
+				"pk":              map[string]any{state.PrimaryKeyID: rowID},
 				"authored_schema": state.Schema,
 				"op":              "insert",
 				"client_version":  smokeTime,
 				"columns": map[string]any{
 					state.Fields["user_id"]:   smokeUserID,
-					state.Fields["name"]:      "Packaged server consumer",
+					state.Fields["name"]:      name,
 					state.Fields["balance"]:   "0",
 					state.Fields["is_active"]: true,
 				},
@@ -325,13 +338,13 @@ func requireOK(status int, operation string) error {
 	return nil
 }
 
-func requireAcceptedPush(body []byte) error {
+func requireAcceptedPush(body []byte, batchID, mutationID string) error {
 	var response pushResponseSummary
 	if err := json.Unmarshal(body, &response); err != nil {
 		return fmt.Errorf("decode push response: %w", err)
 	}
-	if response.BatchID != smokeBatchID || len(response.Accepted) != 1 ||
-		response.Accepted[0].MutationID != smokeMutationID || len(response.Rejected) != 0 {
+	if response.BatchID != batchID || len(response.Accepted) != 1 ||
+		response.Accepted[0].MutationID != mutationID || len(response.Rejected) != 0 {
 		return errors.New("push did not accept the packaged server mutation")
 	}
 	return nil
@@ -413,7 +426,8 @@ func pullUntilCustomerDelivered(
 	token string,
 	baseURL string,
 	state clientState,
-) error {
+	accept func(name string) bool,
+) (string, error) {
 	pullContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -428,49 +442,49 @@ func pullUntilCustomerDelivered(
 			pullPayload(state),
 		)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if status == http.StatusServiceUnavailable && capturePending(body) {
 			select {
 			case <-pullContext.Done():
-				return errors.New("pull remained capture_pending")
+				return "", errors.New("pull remained capture_pending")
 			case <-time.After(100 * time.Millisecond):
 			}
 			continue
 		}
 		if err := requireOK(status, "pull"); err != nil {
-			return err
+			return "", err
 		}
 
 		var response pullResponse
 		if err := json.Unmarshal(body, &response); err != nil {
-			return fmt.Errorf("decode pull response: %w", err)
+			return "", fmt.Errorf("decode pull response: %w", err)
 		}
 		if response.ScopeSetVersion != state.ScopeSetVersion || response.Changes == nil ||
 			response.ScopeCursors == nil || response.Rebuild == nil {
-			return errors.New("pull response is incomplete")
+			return "", errors.New("pull response is incomplete")
 		}
 		if len(response.Rebuild) != 0 {
-			return errors.New("incremental pull requested an unexpected rebuild")
+			return "", errors.New("incremental pull requested an unexpected rebuild")
 		}
 		for _, rawChange := range response.Changes {
-			delivered, err := isAuthoredCustomerUpsert(rawChange, state)
+			name, delivered, err := pulledCustomerName(rawChange, state)
 			if err != nil {
-				return err
+				return "", err
 			}
-			if delivered {
-				return nil
+			if delivered && accept(name) {
+				return name, nil
 			}
 		}
 		if !response.HasMore {
-			return errors.New("pull did not deliver the authored customer")
+			return "", errors.New("pull did not deliver the expected customer")
 		}
 		progressed, err := applyScopeCursorDeltas(state.Scopes, response.ScopeCursors)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !progressed {
-			return errors.New("paginated pull did not advance a scope cursor")
+			return "", errors.New("paginated pull did not advance a scope cursor")
 		}
 	}
 }
@@ -491,53 +505,57 @@ func applyScopeCursorDeltas(scopes map[string]scopeCursor, deltas map[string]str
 	return progressed, nil
 }
 
-func isAuthoredCustomerUpsert(rawChange json.RawMessage, state clientState) (bool, error) {
+// pulledCustomerName returns the name of the packaged customer row after it checks every other authored field.
+func pulledCustomerName(rawChange json.RawMessage, state clientState) (string, bool, error) {
 	var change pullChange
 	if err := json.Unmarshal(rawChange, &change); err != nil {
-		return false, fmt.Errorf("decode pull change: %w", err)
+		return "", false, fmt.Errorf("decode pull change: %w", err)
 	}
 	if change.Table != state.TableID {
-		return false, nil
+		return "", false, nil
 	}
 	rawPrimaryKey, found := change.PK[state.PrimaryKeyID]
 	if !found {
-		return false, nil
+		return "", false, nil
 	}
 	var rowID string
 	if err := json.Unmarshal(rawPrimaryKey, &rowID); err != nil {
-		return false, errors.New("customer primary key is invalid")
+		return "", false, errors.New("customer primary key is invalid")
 	}
 	if rowID != smokeRowID {
-		return false, nil
+		return "", false, nil
 	}
 	if len(change.PK) != 1 {
-		return false, errors.New("authored customer primary key is not exact")
+		return "", false, errors.New("authored customer primary key is not exact")
 	}
 	if _, found := state.Scopes[change.Scope]; !found {
-		return false, errors.New("authored customer came from an unassigned scope")
+		return "", false, errors.New("authored customer came from an unassigned scope")
 	}
 	if change.Op != "upsert" || change.Row == nil {
-		return false, errors.New("authored customer was not delivered as an upsert")
+		return "", false, errors.New("authored customer was not delivered as an upsert")
 	}
 	expectedStrings := map[string]string{
 		state.PrimaryKeyID:      smokeRowID,
 		state.Fields["user_id"]: smokeUserID,
-		state.Fields["name"]:    "Packaged server consumer",
 		state.Fields["balance"]: "0",
 	}
 	for fieldID, expected := range expectedStrings {
 		var actual string
 		if raw, found := change.Row[fieldID]; !found ||
 			json.Unmarshal(raw, &actual) != nil || actual != expected {
-			return false, errors.New("authored customer string value changed")
+			return "", false, errors.New("authored customer string value changed")
 		}
 	}
 	var active bool
 	if raw, found := change.Row[state.Fields["is_active"]]; !found ||
 		json.Unmarshal(raw, &active) != nil || !active {
-		return false, errors.New("authored customer activity value changed")
+		return "", false, errors.New("authored customer activity value changed")
 	}
-	return true, nil
+	var name string
+	if raw, found := change.Row[state.Fields["name"]]; !found || json.Unmarshal(raw, &name) != nil {
+		return "", false, errors.New("authored customer name is missing")
+	}
+	return name, true, nil
 }
 
 func capturePending(body []byte) bool {
@@ -593,7 +611,7 @@ func readStoredState(path string) (storedState, error) {
 	if err := decodeJSON(data, &state); err != nil {
 		return storedState{}, err
 	}
-	if state.Client.ClientID != smokeClientID || len(state.Request) == 0 || len(state.Response) == 0 {
+	if state.Client.ClientID != smokeClientID || len(state.Request) == 0 || len(state.Response) == 0 || len(state.Offline) == 0 {
 		return storedState{}, errors.New("stored server smoke state is invalid")
 	}
 	return state, nil
@@ -640,6 +658,7 @@ func run(ctx context.Context, args []string) error {
 	var pushRequest []byte
 	var pushResponse []byte
 	var replayEqual *bool
+	var observed *string
 	if *phase == "initial" {
 		status, body, err := postJSON(ctx, client, token, *baseURL+"/sync/connect", freshConnect(smokeClientID))
 		if err != nil {
@@ -667,13 +686,23 @@ func run(ctx context.Context, args []string) error {
 		if err := requireOK(status, "push"); err != nil {
 			return err
 		}
-		if err := requireAcceptedPush(pushResponse); err != nil {
+		if err := requireAcceptedPush(pushResponse, smokeBatchID, smokeMutationID); err != nil {
 			return err
+		}
+		if _, err := pullUntilCustomerDelivered(ctx, client, token, *baseURL, state, func(name string) bool {
+			return name == smokeName
+		}); err != nil {
+			return err
+		}
+		offlineRequest, err := json.Marshal(insertPayload(state, offlineBatchID, offlineMutationID, offlineRowID, offlineName))
+		if err != nil {
+			return errors.New("encode offline push request failed")
 		}
 		if err := writeJSON(statePath, storedState{
 			Client:   state,
 			Request:  pushRequest,
 			Response: pushResponse,
+			Offline:  offlineRequest,
 		}); err != nil {
 			return errors.New("persist server smoke state failed")
 		}
@@ -698,7 +727,7 @@ func run(ctx context.Context, args []string) error {
 		if err := requireOK(status, "push replay"); err != nil {
 			return err
 		}
-		if err := requireAcceptedPush(pushResponse); err != nil {
+		if err := requireAcceptedPush(pushResponse, smokeBatchID, smokeMutationID); err != nil {
 			return err
 		}
 		equal := bytes.Equal(pushResponse, stored.Response)
@@ -706,18 +735,34 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("push replay response changed")
 		}
 		replayEqual = &equal
+		status, offlineResponse, err := postBytes(ctx, client, token, *baseURL+"/sync/push", stored.Offline)
+		if err != nil {
+			return fmt.Errorf("offline push: %w", err)
+		}
+		if err := requireOK(status, "offline push"); err != nil {
+			return err
+		}
+		if err := requireAcceptedPush(offlineResponse, offlineBatchID, offlineMutationID); err != nil {
+			return err
+		}
+		// The harness changes the name while the adapter is dead, so any other name proves remote delivery.
+		name, err := pullUntilCustomerDelivered(ctx, client, token, *baseURL, state, func(name string) bool {
+			return name != smokeName
+		})
+		if err != nil {
+			return err
+		}
+		observed = &name
 	}
 
-	if err := pullUntilCustomerDelivered(ctx, client, token, *baseURL, state); err != nil {
-		return err
-	}
 	return writeJSON(*output, phaseResult{
-		SchemaVersion: 1,
-		Phase:         *phase,
-		Status:        "passed",
-		AdapterPID:    *adapterPID,
-		PushDigest:    pushDigest(pushRequest, pushResponse),
-		ReplayEqual:   replayEqual,
+		SchemaVersion:        1,
+		Phase:                *phase,
+		Status:               "passed",
+		AdapterPID:           *adapterPID,
+		PushDigest:           pushDigest(pushRequest, pushResponse),
+		ReplayEqual:          replayEqual,
+		ObservedCustomerName: observed,
 	})
 }
 

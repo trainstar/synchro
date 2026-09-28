@@ -1,7 +1,34 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
+index aeafc6d..129652f 100644
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
+@@ -10,6 +10,10 @@ The ordering of items is not stable, it is driven by a dependency graph.
+ -- synchro-pg/src/lib.rs:40
+ -- bootstrap
+ 
++-- Mutant: opportunistic pre-baseline compatibility logic.
++CREATE TABLE IF NOT EXISTS sync_pre_0_3_0_compatibility (
++    legacy_version TEXT PRIMARY KEY
++);
+ CREATE TABLE IF NOT EXISTS sync_runtime_state (
+     singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+     stream_generation TEXT NOT NULL,
+@@ -2459,7 +2463,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/lib.rs:1929
++-- synchro-pg/src/lib.rs:1933
+ -- finalize
+ 
+ DO $roles$
 diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
+index e6663cd..22ac7e9 100644
 --- a/extensions/synchro-pg/src/lib.rs
 +++ b/extensions/synchro-pg/src/lib.rs
-@@ -40,4 +40,8 @@ pgrx::extension_sql!(
+@@ -39,6 +39,10 @@ pub(crate) const MEMBERSHIP_BACKFILL_LOCK_KEY: i64 = 0x6d65_6d62;
+ 
+ pgrx::extension_sql!(
      r#"
 +-- Mutant: opportunistic pre-baseline compatibility logic.
 +CREATE TABLE IF NOT EXISTS sync_pre_0_3_0_compatibility (
@@ -10,19 +37,3 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
  CREATE TABLE IF NOT EXISTS sync_runtime_state (
      singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
      stream_generation TEXT NOT NULL,
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-@@ -13,3 +13,7 @@
-+-- Mutant: opportunistic pre-baseline compatibility logic.
-+CREATE TABLE IF NOT EXISTS sync_pre_0_3_0_compatibility (
-+    legacy_version TEXT PRIMARY KEY
-+);
- CREATE TABLE IF NOT EXISTS sync_runtime_state (
-     singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
-     stream_generation TEXT NOT NULL,
-@@ -2462,3 +2466,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1935
-+-- synchro-pg/src/lib.rs:1939
- -- finalize

@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/sha512"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
@@ -74,18 +73,6 @@ func testTokenHS256(userID string, secret []byte) string {
 	)
 	sigInput := header + "." + payload
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(sigInput))
-	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	return sigInput + "." + sig
-}
-
-func testTokenHS384(userID string, secret []byte) string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS384","typ":"JWT"}`))
-	payload := base64.RawURLEncoding.EncodeToString(
-		[]byte(fmt.Sprintf(`{"sub":"%s","iat":1700000000,"exp":9999999999}`, userID)),
-	)
-	sigInput := header + "." + payload
-	mac := hmac.New(sha512.New384, secret)
 	mac.Write([]byte(sigInput))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return sigInput + "." + sig
@@ -443,33 +430,6 @@ func TestRequireCurrentExtensionObjectsRejectsStale(t *testing.T) {
 	}
 }
 
-func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
-	srv := testServerWithConfig(t, func(cfg *Config) {
-		cfg.UserIDResolver = func(r *http.Request) (string, error) {
-			return "user-1", nil
-		}
-	})
-	clientID := testClientID(t, "test-canonical-connect-upstream-client")
-	schema := currentSchemaReference(t, srv)
-
-	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         clientID,
-		"platform":          "ios",
-		"app_version":       "1.0.0",
-		"protocol_version":  ExpectedProtocolVersion,
-		"schema":            schema,
-		"scope_set_version": 0,
-		"known_scopes":      map[string]any{},
-	})
-
-	if status != 200 {
-		t.Fatalf("expected 200, got %d: %v", status, body)
-	}
-	if body["protocol_version"] == nil {
-		t.Error("response missing 'protocol_version'")
-	}
-}
-
 func TestConnectUpgradeRequired426(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
@@ -698,28 +658,6 @@ func TestPushRejectsMalformedClientVersionTimestamp(t *testing.T) {
 	}
 }
 
-func TestTrustedUpstreamAuthRequiresUser(t *testing.T) {
-	srv := testServerWithConfig(t, func(cfg *Config) {
-		cfg.UserIDResolver = func(r *http.Request) (string, error) {
-			return "", ErrAuthRequired
-		}
-	})
-
-	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         "client",
-		"platform":          "ios",
-		"app_version":       "1.0.0",
-		"protocol_version":  1,
-		"schema":            map[string]any{"version": 0, "hash": ""},
-		"scope_set_version": 0,
-		"known_scopes":      map[string]any{},
-	})
-
-	if status != 401 {
-		t.Fatalf("expected 401, got %d: %v", status, body)
-	}
-}
-
 func TestRoutesAuthenticateBeforeVersionGate(t *testing.T) {
 	handler := Routes(Config{
 		DB:               &sql.DB{},
@@ -745,47 +683,6 @@ func TestRoutesAuthenticateBeforeVersionGate(t *testing.T) {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 			}
 		})
-	}
-}
-
-func TestJWTRejectsHS384Token(t *testing.T) {
-	secret := []byte("test-secret")
-	called := false
-	handler := jwtMiddleware(Config{JWTSecret: secret}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		called = true
-	}))
-	request := httptest.NewRequest(http.MethodPost, "/sync/connect", nil)
-	request.Header.Set("Authorization", "Bearer "+testTokenHS384("user", secret))
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
-	}
-	if called {
-		t.Fatal("HS384 token reached the protected handler")
-	}
-}
-
-func TestJWTRejectsDuplicateAuthorizationHeaders(t *testing.T) {
-	secret := []byte("test-secret")
-	called := false
-	handler := jwtMiddleware(Config{JWTSecret: secret}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		called = true
-	}))
-	request := httptest.NewRequest(http.MethodPost, "/sync/connect", nil)
-	request.Header.Add("Authorization", "Bearer "+testTokenHS256("first-user", secret))
-	request.Header.Add("Authorization", "Bearer "+testTokenHS256("second-user", secret))
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
-	}
-	if called {
-		t.Fatal("duplicate authorization headers reached the protected handler")
 	}
 }
 

@@ -70,7 +70,7 @@ func TestNewForgedCursorCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	defer upstream.Close()
 	coordinator, err := NewForgedCursorCoordinator(ForgedCursorCoordinatorConfig{
-		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadForgedCursorAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create Android forged-cursor coordinator: %v", err)
