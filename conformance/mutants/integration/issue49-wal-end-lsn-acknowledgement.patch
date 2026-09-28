@@ -6,8 +6,8 @@ index aeafc6d..7eb44b1 100644
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/bgworker.rs:760
-+-- synchro-pg/src/bgworker.rs:777
+--- synchro-pg/src/bgworker.rs:770
++-- synchro-pg/src/bgworker.rs:787
  -- synchro_pg::bgworker::synchro_retry_wal_poison
  CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
  STRICT

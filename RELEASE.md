@@ -99,6 +99,10 @@ Without it, readiness and the adapter report stale extension objects after the u
 
 A released update script is immutable. Never edit an update script whose target version has a release tag.
 `make check-released-update-scripts` compares each such script with its content at that tag. Source quality runs it on every pull request and push.
+The gate takes the released targets from `update-baseline.json` and `update-origins.json` in `extensions/synchro-pg`.
+It fails when the tag of a released target is missing, or when a released origin has no update script.
+Only the target equal to `VERSION` can lack a release tag.
+Before step 4 adds the next update script, add the released `<current>` version and its archive digest to `update-origins.json`.
 
 Candidate CI runs `TestRealExtensionUpdateFromBaseline`.
 The test updates the pinned baseline through the update chain.

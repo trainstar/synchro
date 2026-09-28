@@ -1063,10 +1063,10 @@
         .expect("registry generation state")
     }
 
-    #[pg_test]
-    fn wal_activation_applies_to_later_rows_of_its_transaction() {
-        setup_test_tables();
-        let generation = register_orders_with_added_column("cutover_note");
+    /// Build a registration transaction whose activation precedes one insert
+    /// that writes the added column. It writes the source row and its fence in
+    /// the current transaction.
+    fn activation_cutover_transaction(generation: i64, column: &str) -> WalTransaction {
         let registration = Spi::connect(|client| {
             crate::registry::load_registry_generation_from_client(client, generation).map(
                 |registry| {
@@ -1085,8 +1085,10 @@
         let fence_id = "d6000000-0000-4000-8000-000000000002";
         let row_version = "d6000000-0000-4000-8000-000000000003";
         Spi::run_with_args(
-            "INSERT INTO test_orders (id, user_id, title, cutover_note)
-             VALUES ($1::uuid, 'u1', 'WAL query count', 'written after registration')",
+            &format!(
+                "INSERT INTO test_orders (id, user_id, title, {column})
+                 VALUES ($1::uuid, 'u1', 'WAL query count', 'written after registration')"
+            ),
             &[record_id.into()],
         )
         .unwrap();
@@ -1126,13 +1128,15 @@
                         TupleValue::Text(b"2000-01-01 00:00:00+00".to_vec())
                     }
                     "deleted_at" => TupleValue::Null,
-                    "cutover_note" => TupleValue::Text(b"written after registration".to_vec()),
+                    added if added == column => {
+                        TupleValue::Text(b"written after registration".to_vec())
+                    }
                     column => panic!("unexpected test_orders synced column {column}"),
                 };
                 (field.physical_column.clone(), value)
             })
             .collect();
-        let transaction = WalTransaction {
+        WalTransaction {
             xid: xid.parse().expect("parse cutover transaction xid"),
             final_lsn: 0x700,
             commit_lsn: 0x700,
@@ -1175,7 +1179,15 @@
                     event_boundary: 1,
                 },
             ],
-        };
+        }
+    }
+
+    #[pg_test]
+    fn wal_activation_applies_to_later_rows_of_its_transaction() {
+        setup_test_tables();
+        let generation = register_orders_with_added_column("cutover_note");
+        let record_id = "d6000000-0000-4000-8000-000000000001";
+        let transaction = activation_cutover_transaction(generation, "cutover_note");
 
         Spi::connect_mut(|client| {
             crate::bgworker::materialize_transaction_for_test(client, &transaction)
@@ -1202,6 +1214,51 @@
             captured.0,
             json!({"generation": generation, "value": "written after registration"})
         );
+    }
+
+    #[pg_test]
+    fn wal_replay_fingerprint_binds_the_activation_boundary() {
+        setup_test_tables();
+        let generation = register_orders_with_added_column("replay_note");
+        let transaction = activation_cutover_transaction(generation, "replay_note");
+        let replay = |transaction: &WalTransaction| {
+            Spi::connect_mut(|client| {
+                crate::bgworker::materialize_transaction_for_test(client, transaction)
+            })
+        };
+        let replay_count = || -> i64 {
+            Spi::get_one("SELECT replay_count FROM synchro.sync_wal_transactions WHERE commit_lsn = '0/700'")
+                .unwrap()
+                .expect("recorded transaction")
+        };
+        let mut moved_activation = transaction.clone();
+        moved_activation.messages[0].event_boundary = 1;
+        let mut changed_fence = transaction.clone();
+        changed_fence.messages[1].message_lsn = 1;
+
+        replay(&transaction).expect("materialize the registration transaction");
+        assert_eq!(replay(&transaction), Ok(()));
+        assert_eq!(replay(&moved_activation), Err("validation_failed".to_string()));
+        assert_eq!(replay_count(), 1);
+
+        // A record from an earlier release keeps format 1. That release applied
+        // one generation to every row event, so its fingerprint omits the boundary.
+        Spi::run_with_args(
+            "UPDATE synchro.sync_wal_transactions
+             SET content_hash = $1, content_hash_format = 1
+             WHERE commit_lsn = '0/700'",
+            &[crate::bgworker::legacy_transaction_content_hash_for_test(&transaction).into()],
+        )
+        .unwrap();
+        assert_eq!(replay(&moved_activation), Ok(()));
+        assert_eq!(replay(&changed_fence), Err("validation_failed".to_string()));
+        assert_eq!(replay_count(), 2);
+
+        // A current record never accepts the format 1 fingerprint.
+        Spi::run("UPDATE synchro.sync_wal_transactions SET content_hash_format = 2 WHERE commit_lsn = '0/700'")
+            .unwrap();
+        assert_eq!(replay(&transaction), Err("validation_failed".to_string()));
+        assert_eq!(replay_count(), 2);
     }
 
     #[pg_test]

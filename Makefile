@@ -630,7 +630,7 @@ test-blackbox-mutation-control:
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
 		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm|TestRealRegistryRejectsDeferrablePrimaryKey|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
 		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
-		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline) ;; \
+		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline|TestRealTransactionMembershipUsesFinalProjectionAcrossActivations) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac; \
 	case "$$assertion" in assertion|assertion\#[0-9][0-9]) ;; *) echo "MUTATION_CONTROL_TEST does not name a supported assertion" >&2; exit 1 ;; esac; \
@@ -2218,18 +2218,31 @@ generate-pg-sql:
 	perl -0pi -e 's/\n+\z/\n/' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
 
 # A released update script is immutable. Its bytes must equal its content at
-# the tag of its target version. The check fails when no released script is found.
+# the tag of its target version. The update baseline and the update origins
+# record every released update target, so a missing release tag fails. Only the
+# current unreleased version may lack a tag.
 check-released-update-scripts:
 	@set -eu; \
+		origins="$$(python3 scripts/update-origins.py extensions/synchro-pg/update-origins.json extensions/synchro-pg/update-baseline.json)"; \
+		origins="$$(printf '%s\n' "$$origins" | cut -d ' ' -f 1)"; \
+		released=" $$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' extensions/synchro-pg/update-baseline.json) $$(echo $$origins) "; \
 		checked=0; \
 		for script in extensions/synchro-pg/sql/synchro_pg--*--*.sql; do \
 			target="$${script##*--}"; target="$${target%.sql}"; \
-			git rev-parse -q --verify "refs/tags/v$$target^{commit}" >/dev/null || continue; \
+			case "$$released" in \
+			*" $$target "*) ;; \
+			*) test "$$target" = "$(CURRENT_VERSION)" || { echo "update script targets a version that is neither released nor current: $$script" >&2; exit 1; }; continue ;; \
+			esac; \
+			git rev-parse -q --verify "refs/tags/v$$target^{commit}" >/dev/null || { echo "release tag v$$target is missing. Fetch the release tags." >&2; exit 1; }; \
 			git cat-file -e "v$$target:$$script" 2>/dev/null || { echo "released update script is absent at v$$target: $$script" >&2; exit 1; }; \
 			git show "v$$target:$$script" | cmp -s - "$$script" || { echo "released update script differs from v$$target: $$script" >&2; exit 1; }; \
 			checked=$$((checked + 1)); \
 		done; \
-		test "$$checked" -gt 0 || { echo "no released update script was checked. Fetch the release tags." >&2; exit 1; }; \
+		for version in $$origins; do \
+			set -- extensions/synchro-pg/sql/synchro_pg--*--"$$version".sql; \
+			test -f "$$1" || { echo "released update origin $$version has no update script" >&2; exit 1; }; \
+		done; \
+		test "$$checked" -gt 0 || { echo "no released update script was checked" >&2; exit 1; }; \
 		echo "$$checked released update scripts match their release tags"
 
 check-pg-sql:
