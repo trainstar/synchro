@@ -3412,11 +3412,19 @@ fn materialize_transaction(
             &activations,
             transaction,
         )?;
-        let new_markers: Vec<(i64, u64)> = markers
+        // A queued ancestor activates at the position of the child that follows it.
+        let mut boundary = 0;
+        let mut new_markers: Vec<(i64, u64)> = new_activations
             .iter()
-            .copied()
-            .filter(|marker| new_activations.contains(&marker.0))
+            .rev()
+            .map(|generation| {
+                if let Some(marker) = markers.iter().find(|marker| marker.0 == *generation) {
+                    boundary = marker.1;
+                }
+                (*generation, boundary)
+            })
             .collect();
+        new_markers.reverse();
         activation_groups(&new_markers)
     };
     // Segment 0 precedes the first activation group. Segment k follows group k
@@ -3989,18 +3997,22 @@ fn activation_requires_bootstrap(
 /// slot is bound emits its own activation and is also replayed when the slot
 /// binds, so a slot can contain the activation of one generation twice. An
 /// activation of a generation that the active chain of this stream already
-/// contains is that duplicate and is ignored. Every other invalid activation
-/// fails validation.
+/// contains is that duplicate and is ignored.
+///
+/// A registration that commits before the new slot starts is not decoded, so
+/// its generation waits for the replay. A later decoded child of it then
+/// activates its queued pending ancestors first, in chain order. Every other
+/// invalid activation fails validation.
 fn validate_activation_chain(
     client: &SpiClient<'_>,
     stream_generation: &str,
     active_generation: i64,
     activations: &[i64],
     transaction: &WalTransaction,
-) -> Result<HashSet<i64>, PoisonFailure> {
+) -> Result<Vec<i64>, PoisonFailure> {
     let mut parent = active_generation;
     let mut seen = HashSet::new();
-    let mut new_activations = HashSet::new();
+    let mut new_activations = Vec::new();
     for generation in activations {
         if !seen.insert(*generation) {
             return Err(failure_with_detail(
@@ -4109,6 +4121,75 @@ fn validate_activation_chain(
                 continue;
             }
         }
+        if state == "pending" && actual_parent.is_some_and(|actual| actual != parent) {
+            let ancestors = client
+                .select(
+                    "WITH RECURSIVE ancestors(generation, parent_generation, depth) AS (
+                         SELECT pending.generation, pending.parent_generation, 1
+                         FROM synchro.sync_registry_generations pending
+                         JOIN synchro.sync_registry_activation_requests request
+                           ON request.registry_generation = pending.generation
+                         WHERE pending.generation = $1
+                         UNION ALL
+                         SELECT pending.generation, pending.parent_generation, ancestors.depth + 1
+                         FROM ancestors
+                         JOIN synchro.sync_registry_generations pending
+                           ON pending.generation = ancestors.parent_generation
+                         JOIN synchro.sync_registry_activation_requests request
+                           ON request.registry_generation = pending.generation
+                         WHERE ancestors.parent_generation <> $3
+                     )
+                     SELECT ancestors.generation, ancestors.parent_generation,
+                            generation.state = 'pending' AND generation.validated
+                                AND generation.stream_generation = $2 AS queued_pending
+                     FROM ancestors
+                     JOIN synchro.sync_registry_generations generation
+                       ON generation.generation = ancestors.generation
+                     ORDER BY ancestors.depth DESC",
+                    None,
+                    &[
+                        actual_parent.into(),
+                        stream_generation.into(),
+                        parent.into(),
+                    ],
+                )
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "loading queued registry ancestors failed",
+                    )
+                })?;
+            let mut chain = Vec::new();
+            let mut chain_parent = parent;
+            for row in ancestors {
+                let ancestor = row.get_by_name::<i64, &str>("generation").ok().flatten();
+                let ancestor_parent = row
+                    .get_by_name::<i64, &str>("parent_generation")
+                    .ok()
+                    .flatten();
+                let queued_pending = row
+                    .get_by_name::<bool, &str>("queued_pending")
+                    .ok()
+                    .flatten();
+                match (ancestor, queued_pending) {
+                    (Some(ancestor), Some(true)) if ancestor_parent == Some(chain_parent) => {
+                        chain.push(ancestor);
+                        chain_parent = ancestor;
+                    }
+                    _ => {
+                        chain.clear();
+                        break;
+                    }
+                }
+            }
+            if chain.last().copied() == actual_parent
+                && chain.iter().all(|ancestor| seen.insert(*ancestor))
+            {
+                new_activations.extend(chain);
+                parent = chain_parent;
+            }
+        }
         if actual_parent != Some(parent)
             || !validated
             || state != "pending"
@@ -4121,7 +4202,7 @@ fn validate_activation_chain(
             ));
         }
         parent = *generation;
-        new_activations.insert(*generation);
+        new_activations.push(*generation);
     }
     Ok(new_activations)
 }
