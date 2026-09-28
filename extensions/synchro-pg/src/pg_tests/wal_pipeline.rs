@@ -1295,6 +1295,35 @@
         assert_eq!(generation_state(second), "active");
         assert_eq!(progress(), Some(second));
 
+        // A generation that committed before the slot started waits for the
+        // replay. Its decoded child activates it first.
+        let queued = register_orders_with_added_column("repeat_queued");
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_registry_activation_requests (registry_generation) VALUES ($1)",
+            &[queued.into()],
+        )
+        .unwrap();
+        let child = register_orders_with_added_column("repeat_child");
+        assert_eq!(materialize(&marker_only(child, 0xd80)), Ok(()));
+        let chain: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_agg(jsonb_build_array(generation, state, parent_generation, activation_commit_lsn::text)
+                              ORDER BY generation)
+             FROM sync_registry_generations WHERE generation IN ($1, $2)",
+            &[queued.into(), child.into()],
+        )
+        .unwrap()
+        .expect("queued chain state");
+        assert_eq!(
+            chain.0,
+            json!([[queued, "superseded", second, "0/D80"], [child, "active", queued, "0/D80"]])
+        );
+        assert_eq!(progress(), Some(child));
+        assert_eq!(materialize(&marker_only(queued, 0xd90)), Ok(()));
+        assert_eq!(materialize(&marker_only(child, 0xda0)), Ok(()));
+        assert_eq!(generation_state(queued), "superseded");
+        assert_eq!(generation_state(child), "active");
+        assert_eq!(progress(), Some(child));
+
         // A pending generation whose parent is not active is not a repeat.
         let third = register_orders_with_added_column("repeat_third");
         let fourth = register_orders_with_added_column("repeat_fourth");
@@ -1310,7 +1339,7 @@
         );
         assert_eq!(generation_state(third), "pending");
         assert_eq!(generation_state(fourth), "pending");
-        assert_eq!(progress(), Some(second));
+        assert_eq!(progress(), Some(child));
     }
 
     #[pg_test]
