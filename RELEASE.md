@@ -75,9 +75,9 @@ Do not continue when a required control, credential, or runtime is unavailable.
 10. Run `make version-check`.
 11. Confirm the support matrix in `conformance/support-matrix.json`.
 12. Merge the preparation changes into `dev` through a pull request.
-13. Confirm Candidate CI passed for the exact `dev` commit.
-14. Promote `dev` into `master` through a checked pull request with a merge commit.
-15. Record the exact merged `master` SHA.
+13. Promote `dev` into `master` through a checked pull request with a merge commit.
+14. Record the exact merged `master` SHA.
+15. Confirm Candidate CI passed for that exact `master` commit.
 16. Dispatch Release from the `master` head.
 17. Merge `master` back into `dev` through a pull request with a merge commit.
 
@@ -197,17 +197,12 @@ Device gates require exactly one `KOTLIN_ANDROID_SERIAL` and pass it to Gradle a
 `SYNCHRO_MAVEN_REPO` selects one Maven repository for Kotlin SDK publication and every React Native Android build.
 It is repository configuration, not a test selector.
 
-The `source quality` job runs on every pull request and push.
+The `source quality` job runs on every pull request and every `master` push.
 It runs contract, documentation, conformance, release-tooling, lint, and unit gates.
-The candidate jobs run on each `dev` and `master` push.
+CI does not run on a `dev` push.
+The candidate jobs run only on a `master` push.
 They run the server, Swift, Kotlin, React Native, and source-consumer gates.
-
-Candidate CI runs the platform suites one time for each source tree.
-A push reuses the passed Candidate of a parent commit that has the identical tree.
-Only a `dev` or `master` push run with a successful `candidate` job qualifies.
-A promotion or back-merge therefore reuses the `dev` result without a second suite run.
-A hotfix changes the tree and runs every platform suite.
-Source quality, CodeQL, and the dependency scan run on every push.
+Source quality, CodeQL, and the dependency scan also run on each `master` push.
 These jobs are shorter, and security results depend on current advisory data.
 
 Each React Native Candidate job runs its smoke suite and every authored journey.

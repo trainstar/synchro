@@ -399,6 +399,9 @@ func (runtime *datasetRuntime) pull(client *datasetClient) int {
 		if err != nil || status != http.StatusOK || decodeDataset(data, &response) != nil {
 			runtime.t.Fatalf("dataset pull for %s status=%d err=%v body=%.400s", client.ID, status, err, data)
 		}
+		if err := requirePullEnvelope(data, client.Cursors); err != nil {
+			runtime.t.Fatalf("dataset pull for %s: %v", client.ID, err)
+		}
 		for _, change := range response.Changes {
 			client.store(change.Scope, change, runtime.t)
 		}
@@ -423,6 +426,82 @@ func (runtime *datasetRuntime) pull(client *datasetClient) int {
 	}
 	runtime.t.Fatal("dataset pull exceeded its page bound")
 	return changes
+}
+
+// pullResponseMembers are the members of every HTTP 200 pull response
+// (spec/01-wire-protocol.mdx). A terminal page also has checksums.
+var pullResponseMembers = []string{"changes", "scope_set_version", "scope_cursors", "scope_updates", "rebuild", "has_more"}
+
+// requirePullEnvelope checks the exact member set of one successful pull page
+// and its exact terminal checksum map before the client applies the page.
+// cursors holds the active scopes before the page.
+func requirePullEnvelope(data []byte, cursors map[string]*string) error {
+	if _, err := blackbox.CanonicalResponseBytes(data); err != nil {
+		return fmt.Errorf("pull response is not strict JSON: %w", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return fmt.Errorf("pull response is not an object: %w", err)
+	}
+	for _, member := range pullResponseMembers {
+		if _, ok := envelope[member]; !ok {
+			return fmt.Errorf("pull response lacks %s", member)
+		}
+	}
+	hasMore, ok := envelope["has_more"].(bool)
+	if !ok {
+		return errors.New("pull response has_more is not a Boolean")
+	}
+	checksums, present := envelope["checksums"]
+	if present == hasMore {
+		return fmt.Errorf("pull response with has_more %t has checksums %t", hasMore, present)
+	}
+	members := len(pullResponseMembers)
+	if present {
+		members++
+	}
+	if len(envelope) != members {
+		return errors.New("pull response has an unknown member")
+	}
+	if hasMore {
+		return nil
+	}
+	// The terminal key set is the active scope set after this page's scope updates.
+	active := make(map[string]bool, len(cursors))
+	for scope := range cursors {
+		active[scope] = true
+	}
+	updates, _ := envelope["scope_updates"].(map[string]any)
+	removed, removedOK := updates["remove"].([]any)
+	added, addedOK := updates["add"].([]any)
+	if !removedOK || !addedOK {
+		return errors.New("pull response scope_updates is malformed")
+	}
+	for _, scope := range removed {
+		id, ok := scope.(string)
+		if !ok {
+			return errors.New("pull response removes a malformed scope")
+		}
+		delete(active, id)
+	}
+	for _, scope := range added {
+		entry, _ := scope.(map[string]any)
+		id, ok := entry["id"].(string)
+		if !ok {
+			return errors.New("pull response adds a malformed scope")
+		}
+		active[id] = true
+	}
+	terminal, ok := checksums.(map[string]any)
+	if !ok || len(terminal) != len(active) {
+		return fmt.Errorf("terminal checksums have %d scopes, want %d", len(terminal), len(active))
+	}
+	for scope := range active {
+		if _, valid := mutationControlChecksumDigest(terminal[scope]); !valid {
+			return fmt.Errorf("terminal checksum for %s is missing or malformed", scope)
+		}
+	}
+	return nil
 }
 
 // applyTransaction commits one source transaction as the trusted application
