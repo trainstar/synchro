@@ -54,4 +54,7 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 			runners[id](t, platform)
 		})
 	}
+	// The authored dataset flow is not a scenario document. Its expectations
+	// are the hand-written dataset checkpoints.
+	t.Run("dataset", func(t *testing.T) { runRealReactNativeDataset(t, platform) })
 }
