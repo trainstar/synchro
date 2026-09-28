@@ -26,7 +26,6 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 		steadyPullScenarioID:           runRealReactNativeSteadyPull,
 		pendingCycleScenarioID:         runRealReactNativePendingCycle,
 		queueReplayScenarioID:          runRealReactNativeQueueReplay,
-		rebuildApplyScenarioID:         runRealReactNativeRebuildApply,
 		rebuildCardinalityScenarioID:   runRealReactNativeRebuildCardinality,
 		rebuildRequestsScenarioID:      runRealReactNativeRebuildRequests,
 		seededEmptyStartupScenarioID:   runRealReactNativeSeededEmptyStartup,

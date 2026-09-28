@@ -760,6 +760,22 @@ func requestString(observation transportObservation, name string) (string, error
 	return value, nil
 }
 
+func requestStringOptional(observation transportObservation, name string) (string, error) {
+	var facts map[string]json.RawMessage
+	if json.Unmarshal(observation.RequestFacts, &facts) != nil {
+		return "", errors.New("React Native request facts are invalid")
+	}
+	raw, found := facts[name]
+	if !found || isJSONNull(raw) {
+		return "", nil
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil || value == "" {
+		return "", errors.New("React Native request fact is invalid")
+	}
+	return value, nil
+}
+
 func decodeClientState(raw json.RawMessage) (inspectedClientState, error) {
 	var state inspectedClientState
 	if err := jsonstrict.Decode(raw, &state); err != nil || state.Schema == nil {

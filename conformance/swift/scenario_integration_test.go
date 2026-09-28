@@ -23,7 +23,6 @@ func TestRealSwiftScenarios(t *testing.T) {
 		run  func(*testing.T)
 	}{
 		{"steady-pull", runSwiftSteadyPull},
-		{"rebuild-apply", runSwiftRebuildApply},
 		{"rebuild-cardinality", runSwiftRebuildCardinality},
 		{"push-response-loss", runSwiftPushResponseLoss},
 		{"retention-reconnect", runSwiftRetentionReconnect},
@@ -115,18 +114,8 @@ func runSwiftSteadyPull(t *testing.T) {
 	}
 }
 
-func runSwiftRebuildApply(t *testing.T) {
-	t.Helper()
-	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-apply-001.json"), 100)
-	result, err := RunRebuildApplyScenario(ctx, scenario, controller, platform)
-	if err != nil {
-		t.Fatalf("run direct Swift rebuild-apply scenario: %v", err)
-	}
-	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
-		t.Fatalf("Swift rebuild-apply identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
-	}
-}
-
+// runSwiftRebuildCardinality also proves rebuild-apply. Both scenarios author
+// one workload (scenarios.TestRebuildApplyAndCardinalityAuthorOneWorkload).
 func runSwiftRebuildCardinality(t *testing.T) {
 	t.Helper()
 	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("performance", "rebuild-cardinality-001.json"), 100)
