@@ -188,7 +188,6 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
-RN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
 RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
 RN_IOS_BUILD_ARGS ?=
 # AGP selects connected devices through ANDROID_SERIAL. Without one serial it
@@ -413,7 +412,7 @@ help:
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
 	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
-	@echo "  test-rn-bridge-transactions - Run the native bridge transaction tests on iOS and one Android device"
+	@echo "  test-rn-bridge-transactions - Run the native bridge transaction tests on iOS and KOTLIN_ANDROID_SERIAL"
 	@echo "  build-rn-bridge-transactions-android - Build the Android bridge transaction test APK without a device"
 	@echo "  build-rn-bridge-transactions-ios - Build the iOS bridge transaction test target for the host simulator architecture"
 	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
@@ -1376,15 +1375,14 @@ test-rn-bridge-transactions-ios: rn-ios-pods
 build-rn-bridge-transactions-ios: rn-ios-pods
 	cd clients/react-native/example && xcodebuild build-for-testing -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/bridge-transactions ARCHS="$$(uname -m)" $(RN_IOS_BUILD_ARGS)
 
-# AGP selects connected devices only from ANDROID_SERIAL or --serial. It splits ANDROID_SERIAL at commas.
 test-rn-bridge-transactions-android: release-kotlin-local
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	@test -n "$(RN_ANDROID_SERIAL)" || (echo "Set RN_ANDROID_SERIAL to one booted Android device."; exit 1)
-	@case "$(RN_ANDROID_SERIAL)" in *[,[:space:]]*) echo "Set RN_ANDROID_SERIAL to exactly one device serial."; exit 1;; esac
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	rm -rf clients/react-native/android/build/outputs/androidTest-results/connected
 	@status=0; \
-		(cd clients/react-native/example/android && ANDROID_SERIAL="$(RN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
+		(cd clients/react-native/example/android && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/react-native/android/build/outputs/androidTest-results/connected) || status=$$?; \
 		exit "$$status"
 
