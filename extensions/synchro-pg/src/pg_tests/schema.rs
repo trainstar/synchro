@@ -2680,10 +2680,15 @@
         )
         .expect("activation must fail before it removes a filtered publication member");
         assert_eq!(orders_capture_state(), before);
-        assert!(crate::registry::load_registry()
-            .unwrap()
-            .iter()
-            .any(|entry| entry.table_name == "test_orders"));
+        let active_orders: Option<i64> = Spi::get_one(
+            "SELECT count(*)
+             FROM sync_registry registry
+             JOIN sync_registry_generations generation
+               ON generation.generation = registry.registry_generation
+             WHERE generation.state = 'active' AND registry.table_name = 'test_orders'",
+        )
+        .unwrap();
+        assert_eq!(active_orders, Some(1));
     }
 
     #[pg_test]

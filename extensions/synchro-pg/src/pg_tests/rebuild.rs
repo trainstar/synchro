@@ -95,17 +95,11 @@
             Some(current_row_version("test_products", record_id).as_str())
         );
 
+        // Rebuild takes each version from the scope edge and the captured row.
         let removed: Option<i64> = Spi::get_one_with_args(
             "WITH removed AS (
-                 DELETE FROM sync_row_versions
-                 WHERE record_id = $1
-                   AND relation_id = (
-                       SELECT r.relation_id
-                       FROM sync_registry r
-                       JOIN sync_registry_generations g
-                         ON g.generation = r.registry_generation
-                       WHERE g.state = 'active' AND r.table_name = 'test_products'
-                   )
+                 UPDATE sync_bucket_edges SET row_version = NULL
+                 WHERE record_id = $1 AND bucket_id = 'global'
                  RETURNING 1
              )
              SELECT count(*) FROM removed",
@@ -242,7 +236,7 @@
     }
 
     #[pg_test]
-    fn test_rebuild_filters_soft_deleted() {
+    fn test_rebuild_rejects_membership_of_soft_deleted_row() {
         setup_test_tables();
         register_client("u1", "c1");
         let live = "bde10000-0000-0000-0000-000000000001";
@@ -256,26 +250,57 @@
             insert_changelog("user:u1", "test_orders", record_id, 1);
             insert_edge("test_orders", record_id, "user:u1");
         }
+        let primary_key_field_id = field_id("test_orders", "id");
+        let rebuilt_keys = |response: &Value| -> Vec<String> {
+            let mut keys: Vec<String> = response["records"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{response}"))
+                .iter()
+                .map(|record| {
+                    record["pk"][&primary_key_field_id]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{response}"))
+                        .to_string()
+                })
+                .collect();
+            keys.sort();
+            keys
+        };
+        let baseline = rebuild_client("u1", "c1", "user:u1", None, 100);
+        assert_eq!(rebuilt_keys(&baseline), vec![live, deleted], "{baseline}");
+
+        // Keep the edge consistent with the captured tombstone, so only the
+        // tombstone guard can reject the rebuild.
         Spi::run_with_args(
             "UPDATE test_orders SET deleted_at = now() WHERE id = $1::uuid",
             &[deleted.into()],
         )
         .unwrap();
         insert_changelog("user:u1", "test_orders", deleted, 3);
+        let aligned: Option<i64> = Spi::get_one_with_args(
+            "WITH aligned AS (
+                 UPDATE sync_bucket_edges edge
+                 SET checksum = captured.checksum, row_version = captured.row_version
+                 FROM sync_captured_rows captured
+                 WHERE edge.bucket_id = 'user:u1'
+                   AND edge.record_id = $1
+                   AND captured.relation_id = edge.relation_id
+                   AND captured.record_id = edge.record_id
+                   AND captured.deleted
+                 RETURNING 1
+             )
+             SELECT count(*) FROM aligned",
+            &[deleted.into()],
+        )
+        .unwrap();
+        assert_eq!(aligned, Some(1));
 
-        let resp = rebuild_client("u1", "c1", "user:u1", None, 100);
-        let primary_key_field_id = field_id("test_orders", "id");
-        let rebuilt: Vec<&str> = resp["records"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{resp}"))
-            .iter()
-            .map(|record| {
-                record["pk"][&primary_key_field_id]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("{resp}"))
-            })
-            .collect();
-        assert_eq!(rebuilt, vec![live], "{resp}");
+        let response = rebuild_client("u1", "c1", "user:u1", None, 100);
+        assert_eq!(
+            response["error"]["code"].as_str(),
+            Some("sync_integrity_failure"),
+            "{response}"
+        );
     }
 
     #[pg_test]

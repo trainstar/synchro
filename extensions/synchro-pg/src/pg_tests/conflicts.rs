@@ -1167,6 +1167,7 @@
         // call and would repair numeric values if its output were trusted.
         Spi::run(
             "CREATE TABLE public.test_policy_calls (table_id TEXT, operation TEXT, data JSONB);
+             GRANT INSERT ON public.test_policy_calls TO PUBLIC;
              CREATE FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
              RETURNS JSONB
              LANGUAGE plpgsql
