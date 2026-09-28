@@ -1801,9 +1801,6 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
 		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment payload is invalid")
 	}
-	if len(payload.Assignments) == 0 {
-		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment is empty")
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {

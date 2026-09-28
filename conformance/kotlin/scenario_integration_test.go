@@ -30,6 +30,7 @@ func TestRealKotlinScenarios(t *testing.T) {
 		t.Run("retention-reconnect", runKotlinRetentionReconnect)
 		t.Run("schema-queued-mutation", runKotlinSchemaQueuedMutation)
 		t.Run("schema-check", runKotlinSchemaCheck)
+		t.Run("scope-empty-pull", runKotlinScopeEmptyPull)
 		// A scenario that holds a seed artifact runs last. Its artifact closes
 		// after the subtest returns, so it cannot reset the server for a
 		// successor.
@@ -205,6 +206,18 @@ func runKotlinSchemaCheck(t *testing.T) {
 	// short call list means the run skipped an authored schema transition.
 	if len(result.Calls) != len(scenario.WireExpectations) {
 		t.Fatalf("Kotlin Android schema-check calls = %d, want %d", len(result.Calls), len(scenario.WireExpectations))
+	}
+}
+
+func runKotlinScopeEmptyPull(t *testing.T) {
+	t.Helper()
+	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/scope-empty-pull-001.json", 100)
+	result, err := RunScopeEmptyPullScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "scope-empty-pull-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Kotlin Android scope-empty-pull scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Kotlin Android scope-empty-pull identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
 }
 

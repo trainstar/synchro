@@ -132,6 +132,11 @@
       "sha256": "15dd86384b4af22220ccfa3fbec98c5de6856f45758353c4be171758383df5ed"
     },
     {
+      "scenario_id": "SCN-SCOPE-EMPTY-PULL-001",
+      "path": "conformance/scenarios/server/scope-empty-pull-001.json",
+      "sha256": "7bea54bd15ab19b94e28801198d65f0283f4ce7d2853db18642d1714105c2763"
+    },
+    {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "path": "conformance/scenarios/server/wal-decode-failure-001.json",
       "sha256": "da92ccb393489a3645714ed6c7d1676910c4edec215b819fb1aea5f8cbe3047c"

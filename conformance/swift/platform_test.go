@@ -564,6 +564,28 @@ func TestCursorSourcesBindToExactDurableFingerprints(t *testing.T) {
 	}
 }
 
+func TestEmptyScopePullBindsToNoCursor(t *testing.T) {
+	pull := scenarios.Operation{
+		ContractOperation: "pull",
+		Name:              "request-page",
+		Payload:           json.RawMessage(`{"scopes":[]}`),
+	}
+	complete := true
+	observation := transportObservation{OperationClass: "pull", CursorFingerprints: []string{}, CursorFingerprintsComplete: &complete}
+	if err := validateCursorSourceBinding(pull, observation, runnerResult{}, nil); err != nil {
+		t.Fatalf("bind empty-scope pull: %v", err)
+	}
+	observation.CursorFingerprints = []string{cursorFingerprint("checkpoint-a")}
+	if err := validateCursorSourceBinding(pull, observation, runnerResult{}, nil); err == nil {
+		t.Fatal("empty-scope pull with a cursor passed")
+	}
+	pull.Payload = json.RawMessage(`{}`)
+	observation.CursorFingerprints = []string{}
+	if err := validateCursorSourceBinding(pull, observation, runnerResult{}, nil); err == nil {
+		t.Fatal("pull without an authored scope set passed")
+	}
+}
+
 func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 	scopeCursor := "rebuilt-checkpoint"
 	complete := true

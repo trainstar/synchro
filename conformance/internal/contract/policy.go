@@ -180,11 +180,11 @@ func (b *Bundle) validateRequirementsAndControls(ctx context.Context) []error {
 		failures = append(failures, fmt.Errorf("bundle has no captured behavioral source for normative references"))
 		return failures
 	}
-	if len(b.Requirements.Requirements) != 116 {
-		failures = append(failures, fmt.Errorf("requirements must contain exactly 116 records, found %d", len(b.Requirements.Requirements)))
+	if len(b.Requirements.Requirements) != 117 {
+		failures = append(failures, fmt.Errorf("requirements must contain exactly 117 records, found %d", len(b.Requirements.Requirements)))
 	}
-	if len(b.Faults.Controls) != 116 {
-		failures = append(failures, fmt.Errorf("controls must contain exactly 116 records, found %d", len(b.Faults.Controls)))
+	if len(b.Faults.Controls) != 117 {
+		failures = append(failures, fmt.Errorf("controls must contain exactly 117 records, found %d", len(b.Faults.Controls)))
 	}
 
 	requirements := make(map[RequirementID]Requirement, len(b.Requirements.Requirements))
@@ -320,8 +320,8 @@ func (b *Bundle) invariantHeadings() ([]markdownHeading, []error) {
 			count++
 		}
 	}
-	if count != 116 {
-		return headings, []error{fmt.Errorf("invariants document must contain exactly 116 level-three headings, found %d", count)}
+	if count != 117 {
+		return headings, []error{fmt.Errorf("invariants document must contain exactly 117 level-three headings, found %d", count)}
 	}
 	return headings, nil
 }
