@@ -2346,9 +2346,9 @@ fn load_existing_record(
         pk = pg_quote_ident(&table_reg.pk_column),
         pk_type = table_reg.pk_type,
     );
-    let load_source = || {
+    let load_source = |sql: &str| {
         client
-            .select(&sql, None, &[record_id.into()])
+            .select(sql, None, &[record_id.into()])
             .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
             .next()
             .map(|row| {
@@ -2373,7 +2373,7 @@ fn load_existing_record(
                 (deleted, data)
             })
     };
-    let mut source = load_source();
+    let mut source = load_source(&sql);
     let versions = client
         .select(
             "SELECT row_version::text AS row_version, deleted
@@ -2396,7 +2396,9 @@ fn load_existing_record(
     if source.is_none() && version.as_ref().is_some_and(|(_, deleted)| !deleted) {
         // A writer can commit a new row between the two reads. Each writer changes the version
         // row in its own transaction, so the locked version fixes the committed source state.
-        source = load_source();
+        // A writer locks the source row before the version row. NOWAIT fails this push with a
+        // retryable lock error instead of a deadlock that can abort that writer.
+        source = load_source(&format!("{sql} NOWAIT"));
     }
     match (source, version) {
         (None, None) => None,
