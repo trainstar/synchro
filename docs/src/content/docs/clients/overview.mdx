@@ -25,6 +25,45 @@ The native SDKs own:
 
 They do not define server sync semantics. They execute the server contract locally and productize the offline runtime for the app.
 
+## Retained mutation inspection
+
+`inspectPendingMutations()` and `inspectRetainedMutations()` return a list of
+`RetainedMutationInspection` values on Swift and Kotlin. Each value is one of
+these records:
+
+- A current record holds a `PendingMutationInspection` with its table ID,
+  primary-key binding, authored schema, and authored field values.
+- A legacy record holds a `LegacyMutationInspection`. It comes from a queue
+  that existed before the mutation ledger. It has only the stored fields. The
+  binding fields and authored values are absent.
+
+The SDK does not fill the absent legacy fields with placeholder values. A
+record with only some bindings fails inspection. The Kotlin ledger requires
+every binding, so Kotlin returns only current records.
+
+```swift
+for record in try client.inspectRetainedMutations() {
+    switch record {
+    case .current(let mutation): print(mutation.tableID, mutation.authoredFields)
+    case .legacy(let mutation): print(mutation.tableName, mutation.recordID)
+    }
+}
+```
+
+```kotlin
+client.inspectRetainedMutations().forEach { record ->
+    when (record) {
+        is RetainedMutationInspection.Current -> println(record.mutation.tableID)
+        is RetainedMutationInspection.Legacy -> println(record.mutation.recordID)
+    }
+}
+```
+
+**API change in the next minor release.** Earlier releases returned
+`[PendingMutationInspection]` and `List<PendingMutationInspection>`. Earlier
+Swift releases also failed inspection when a legacy import was present. A caller
+that reads current-record fields must now match the current case.
+
 ## React Native boundary
 
 React Native exposes the same product surface as the native SDKs, but it must remain a bridge.
