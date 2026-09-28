@@ -1577,6 +1577,7 @@ public class SynchroModuleImpl: NSObject {
         } catch {
             rejectWithError(reject, error)
         }
+    }
 
     @objc
     public func inspectRejectedMutationRecords(
@@ -1593,7 +1594,6 @@ public class SynchroModuleImpl: NSObject {
         } catch {
             rejectWithError(reject, error)
         }
-    }
     }
 
     /// Reads client state, retained details, and the requested application rows
