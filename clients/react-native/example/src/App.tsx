@@ -1036,12 +1036,21 @@ function StandardApp() {
         (mutation) =>
           mutation.tableName === 'categories' && mutation.recordID === insertedCategoryID
       );
+      // The record method returns the same native record with its representation.
+      const records = await seedClient.inspectRetainedMutationRecords();
+      const record = records.find(
+        (mutation) =>
+          mutation.tableName === 'categories' && mutation.recordID === insertedCategoryID
+      );
       const seedInitOK =
         (initialStatus.status === 'uninitialized' || initialStatus.status === 'local_ready') &&
         seededRow?.id === seededCategoryID &&
         seededRow?.name === 'Seed Category' &&
         pending?.tableName === 'categories' &&
-        pending?.operation === 'insert';
+        pending?.operation === 'insert' &&
+        pending.authoredFields.some((field) => field.value === 'Seed Init Category') &&
+        records.length === 1 &&
+        JSON.stringify(record) === JSON.stringify({ representation: 'current', ...pending });
 
       if (!seedInitOK) {
         setLastError(
@@ -1049,6 +1058,7 @@ function StandardApp() {
             initialStatus,
             seededRow,
             pending,
+            records,
           })
         );
       }

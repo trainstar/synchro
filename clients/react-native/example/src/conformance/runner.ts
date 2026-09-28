@@ -536,7 +536,7 @@ export class PublicConformanceRunner {
           let retained: RetainedMutationInspection[];
           try {
             await client.pendingChangeCount();
-            retained = await client.inspectRetainedMutations();
+            retained = await client.inspectRetainedMutationRecords();
           } catch {
             throw new ConformanceCommandError('capture_inspection_failed');
           }
