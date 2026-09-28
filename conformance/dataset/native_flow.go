@@ -35,13 +35,20 @@ type RowRef struct {
 	ID    string
 }
 
-// LocalWrite is one local insert. Columns hold local SQLite values as JSON:
-// an int64 is a JSON integer, and every text type is a JSON string.
+// LocalWrite is one local insert. Columns hold the authored local SQLite
+// values as JSON: an int64 is a JSON integer, and every text type is a JSON
+// string. Support holds values that the statement writes but the application
+// does not author, so they stay out of the pushed mutation.
 type LocalWrite struct {
 	Table   string
 	ID      string
 	Columns map[string]json.RawMessage
+	Support map[string]json.RawMessage
 }
+
+// nativeLocalTimestamp is the local creation and update time of the pushed
+// row. The canonical server row replaces it.
+const nativeLocalTimestamp = `"2026-03-02T07:05:00.000000Z"`
 
 // ErrNativeMismatch reports local native state that differs from the
 // authored expectation.
@@ -166,7 +173,14 @@ func nativeLocalWrite(push AuthoredPush) (LocalWrite, error) {
 			columns[name] = json.RawMessage(wire)
 		}
 	}
-	return LocalWrite{Table: push.Table, ID: push.ID, Columns: columns}, nil
+	// The local schema declares these columns NOT NULL without a default. The
+	// application writes local values, and the server fills its own.
+	owner, err := json.Marshal(push.User)
+	if err != nil {
+		return LocalWrite{}, err
+	}
+	support := map[string]json.RawMessage{"owner_id": owner, "created_at": json.RawMessage(nativeLocalTimestamp), "updated_at": json.RawMessage(nativeLocalTimestamp)}
+	return LocalWrite{Table: push.Table, ID: push.ID, Columns: columns, Support: support}, nil
 }
 
 // authoredSelectors names every authored row identity of both checkpoints,

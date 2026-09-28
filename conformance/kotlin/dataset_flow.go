@@ -46,6 +46,13 @@ func (d *DatasetPlatform) Write(ctx context.Context, key string, write dataset.L
 		action.Fields[name] = value
 		action.AuthoredColumns = append(action.AuthoredColumns, name)
 	}
+	for name, raw := range write.Support {
+		value, err := typedValue(raw, true)
+		if err != nil {
+			return fmt.Errorf("Kotlin Android dataset support column %s: %w", name, err)
+		}
+		action.Fields[name] = value
+	}
 	sort.Strings(action.AuthoredColumns)
 	state.mu.Lock()
 	defer state.mu.Unlock()

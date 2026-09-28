@@ -206,13 +206,17 @@ func (c *DatasetCoordinator) Open(ctx context.Context, key, user string) error {
 
 // Write inserts one row through the public authored write path.
 func (c *DatasetCoordinator) Write(ctx context.Context, key string, write dataset.LocalWrite) error {
-	columns := make(map[string]any, len(write.Columns))
+	columns := make([]map[string]any, 0, len(write.Columns)+len(write.Support))
 	for name, raw := range write.Columns {
-		columns[name] = raw
+		var value any = raw
 		// A JavaScript number cannot hold every int64, so the bridge takes a tag.
 		if integer, err := strconv.ParseInt(string(raw), 10, 64); err == nil && (integer > int64(warmConnectMaximumSafeInteger) || integer < -int64(warmConnectMaximumSafeInteger)) {
-			columns[name] = map[string]string{"type": "int64", "value": string(raw)}
+			value = map[string]string{"type": "int64", "value": string(raw)}
 		}
+		columns = append(columns, map[string]any{"field_id": name, "value": value})
+	}
+	for name, raw := range write.Support {
+		columns = append(columns, map[string]any{"field_id": name, "value": raw, "support": true})
 	}
 	payload, err := json.Marshal(map[string]any{"table_id": write.Table, "pk": map[string]string{"id": write.ID}, "operation": "insert", "columns": columns})
 	if err != nil {

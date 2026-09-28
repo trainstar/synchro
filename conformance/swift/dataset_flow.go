@@ -52,6 +52,9 @@ func (d *DatasetPlatform) Write(ctx context.Context, key string, write dataset.L
 		}
 		action.AuthoredColumns = append(action.AuthoredColumns, name)
 	}
+	for name, raw := range write.Support {
+		action.Fields[name] = raw
+	}
 	sort.Strings(action.AuthoredColumns)
 	if err := validateRunnerLocalAction(action); err != nil {
 		return err
