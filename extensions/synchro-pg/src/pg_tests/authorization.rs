@@ -194,15 +194,59 @@ fn seed_and_operator_have_only_declared_function_grants() {
     ));
 }
 
+/// Lists each security definer function in the `synchro` schema whose path
+/// does not end with `pg_temp`.
+fn definer_functions_without_trailing_temporary_path() -> Vec<String> {
+    Spi::get_one::<Vec<String>>(
+        "SELECT COALESCE(
+                    pg_catalog.array_agg(procedure.proname::text ORDER BY procedure.proname),
+                    ARRAY[]::text[]
+                )
+         FROM pg_catalog.pg_proc procedure
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         WHERE namespace.nspname = 'synchro'
+           AND procedure.prosecdef
+           AND NOT COALESCE(procedure.proconfig, ARRAY[]::text[])
+               @> ARRAY['search_path=pg_catalog, synchro, pg_temp']",
+    )
+    .expect("definer path query")
+    .expect("definer path result")
+}
+
+#[pg_test]
+fn definer_functions_search_temporary_schema_last() {
+    let definers = Spi::get_one::<i64>(
+        "SELECT count(*)
+         FROM pg_catalog.pg_proc procedure
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         WHERE namespace.nspname = 'synchro' AND procedure.prosecdef",
+    )
+    .expect("count definer functions")
+    .expect("definer function count");
+    assert!(definers > 0);
+    assert_eq!(
+        definer_functions_without_trailing_temporary_path(),
+        Vec::<String>::new()
+    );
+
+    Spi::run(
+        "ALTER FUNCTION synchro.synchro_unregister_assignment_function()
+         SET search_path = pg_catalog, synchro",
+    )
+    .expect("remove temporary schema from one definer path");
+    assert_eq!(
+        definer_functions_without_trailing_temporary_path(),
+        vec!["synchro_unregister_assignment_function".to_string()]
+    );
+}
+
 #[pg_test]
 fn registration_functions_have_required_security_and_grants() {
     let protected: Option<bool> = Spi::get_one(
         "WITH registration_functions AS (
              SELECT procedure.oid,
                     procedure.prosecdef,
-                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner,
-                    COALESCE(procedure.proconfig, ARRAY[]::text[])
-                        @> ARRAY['search_path=pg_catalog, synchro'] AS fixed_path
+                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner
              FROM pg_catalog.pg_proc procedure
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
              CROSS JOIN (
@@ -221,7 +265,6 @@ fn registration_functions_have_required_security_and_grants() {
          SELECT count(*) = 4
                 AND bool_and(prosecdef)
                 AND bool_and(owned_by_synchro_owner)
-                AND bool_and(fixed_path)
                 AND bool_and(
                     pg_catalog.has_function_privilege(
                         'synchro_operator', oid, 'EXECUTE'
@@ -254,9 +297,7 @@ fn projection_bootstrap_functions_are_operator_only() {
     let protected: Option<bool> = Spi::get_one(
         "WITH bootstrap_functions AS (
              SELECT procedure.oid, procedure.prosecdef,
-                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner,
-                    COALESCE(procedure.proconfig, ARRAY[]::text[])
-                        @> ARRAY['search_path=pg_catalog, synchro'] AS fixed_path
+                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner
              FROM pg_catalog.pg_proc procedure
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
              CROSS JOIN (
@@ -277,7 +318,6 @@ fn projection_bootstrap_functions_are_operator_only() {
          SELECT count(*) = 8
                 AND bool_and(prosecdef)
                 AND bool_and(owned_by_synchro_owner)
-                AND bool_and(fixed_path)
                 AND bool_and(pg_catalog.has_function_privilege(
                     'synchro_operator', oid, 'EXECUTE'
                 ))
@@ -298,9 +338,7 @@ fn projection_bootstrap_runtime_reads_are_worker_only() {
     let protected: Option<bool> = Spi::get_one(
         "WITH runtime_read_functions AS (
              SELECT procedure.oid, procedure.prosecdef,
-                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner,
-                    COALESCE(procedure.proconfig, ARRAY[]::text[])
-                        @> ARRAY['search_path=pg_catalog, synchro'] AS fixed_path
+                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner
              FROM pg_catalog.pg_proc procedure
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
              CROSS JOIN (
@@ -319,7 +357,6 @@ fn projection_bootstrap_runtime_reads_are_worker_only() {
           SELECT count(*) = 6
                 AND bool_and(prosecdef)
                 AND bool_and(owned_by_synchro_owner)
-                AND bool_and(fixed_path)
                 AND bool_and(pg_catalog.has_function_privilege(
                     'synchro_worker', oid, 'EXECUTE'
                 ))
