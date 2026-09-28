@@ -1611,11 +1611,15 @@ final class PushProcessorTests: XCTestCase {
         let oversizeAddress = try ordersAddress(recordID: "w-big", normalizedOctets: 65_537)
         try insertOrder(db, id: "w-big", address: oversizeAddress)
         try insertOrder(db, id: "w-end", address: "later row")
-        _ = try db.execute(
-            "UPDATE orders SET deleted_at = ? WHERE id = ?",
-            params: ["2026-01-01T10:30:00.000Z", "w-big"]
-        )
-        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["after delete", "w-big"])
+        // Entries in different atomic-group runs do not merge, so the oversize insert keeps two dependents.
+        try db.applicationAtomicWriteTransaction(
+            validate: { connection, groupID in
+                try processor.validateAtomicGroup(connection, groupID: groupID, clientID: "test-device")
+            }
+        ) { transaction in
+            try transaction.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["grouped", "w-big"])
+        }
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["after group", "w-big"])
         let fitID = try mutationID(db, recordID: "w-fit", operation: "insert")
         let oversizeID = try mutationID(db, recordID: "w-big", operation: "insert")
         let laterID = try mutationID(db, recordID: "w-end", operation: "insert")

@@ -768,6 +768,7 @@ internal class PushProcessor(
      * Only the trailing run of a same-row chain merges. A run is a maximal sequence
      * with an equal atomic group, and no group equals no group. A merged record
      * gets the next local order, so an earlier run would move after a later capture.
+     * A cancellation creates no record, so an insert and delete in any run cancel.
      * With [atomicGroupID], only the trailing run of that group is normalized.
      */
     private fun normalizeUnsealedChains(db: SQLiteDatabase, atomicGroupID: String? = null) {
@@ -803,21 +804,30 @@ internal class PushProcessor(
             )
             // An earlier row can block this whole chain through a delete, a group, or a dependency.
             if (chain.isEmpty()) return@forEach
-            val runGroupID = chain.last().atomicGroupID
-            val runStart = chain.indexOfLast { it.atomicGroupID != runGroupID } + 1
-            val run = chain.subList(runStart, chain.size)
-            val selected = atomicGroupID == null || runGroupID == atomicGroupID
-            // A newer authored schema cannot be folded into its predecessor.
-            // The predecessor stays sendable and the successor stays dependent.
-            val oneSchema = run.map { SchemaRef(it.authoredSchemaVersion, it.authoredSchemaHash) }.toSet().size == 1
-            if (selected && run.size > 1 && oneSchema) {
+            val runs = mutableListOf<List<PendingChange>>()
+            var runStart = 0
+            for (index in 1..chain.size) {
+                if (index == chain.size || chain[index].atomicGroupID != chain[runStart].atomicGroupID) {
+                    runs += chain.subList(runStart, index)
+                    runStart = index
+                }
+            }
+            runs.forEachIndexed { runIndex, run ->
+                val trailing = runIndex == runs.lastIndex
+                val selected = atomicGroupID == null || (trailing && run.first().atomicGroupID == atomicGroupID)
+                // A newer authored schema cannot be folded into its predecessor.
+                // The predecessor stays sendable and the successor stays dependent.
+                val oneSchema = run.map { SchemaRef(it.authoredSchemaVersion, it.authoredSchemaHash) }.toSet().size == 1
+                if (!selected || run.size < 2 || !oneSchema) return@forEachIndexed
                 val runDeleteIndex = run.indexOfFirst { it.operation == "delete" }
                 // A merged delete gets the next local order. Thus it merges only when no capture follows it.
                 when {
+                    run.first().operation == "insert" && runDeleteIndex >= 0 ->
+                        cancelBeforeSend(db, run.take(runDeleteIndex + 1))
+                    !trailing -> Unit
                     runDeleteIndex < 0 && run.first().operation in setOf("insert", "update") ->
                         normalizeChain(db, run, run.first().operation, mergedValues(db, run))
                     runDeleteIndex < 0 -> throw SynchroError.InvalidResponse("unknown local mutation operation")
-                    run.first().operation == "insert" -> cancelBeforeSend(db, run.take(runDeleteIndex + 1))
                     runDeleteIndex == run.lastIndex -> normalizeChain(db, run, "delete", emptyList())
                 }
             }
@@ -1113,9 +1123,8 @@ internal class PushProcessor(
             } else {
                 null
             }
-            val hasAuthoritativeAbsence = row == null &&
-                outcome.status == MutationStatus.CONFLICT &&
-                outcome.code in setOf(MutationRejectionCode.ROW_DELETED, MutationRejectionCode.ROW_NOT_FOUND)
+            // A conflict gives the authoritative state. No row means true absence or a fence-only delete for every code.
+            val hasAuthoritativeAbsence = row == null && outcome.status == MutationStatus.CONFLICT
             val canApply = current != null &&
                 (row == null || projection != null) &&
                 patches != null &&

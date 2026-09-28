@@ -3331,7 +3331,10 @@ class SyncEngineTests {
         )
         var resetRequest: JsonObject? = null
         val (engine, db) = makeIntegrationEnv { request ->
-            if (!request.path.orEmpty().endsWith("/sync/connect")) {
+            if (request.path.orEmpty().endsWith("/sync/pull")) {
+                // The reset assigns no scope, and a normal cycle still pulls to reconcile assignment.
+                mockResponse(emptyScopePullJSON(scopeSetVersion = 0))
+            } else if (!request.path.orEmpty().endsWith("/sync/connect")) {
                 mockResponse("""{"error":"unexpected"}""", 500)
             } else {
                 val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
@@ -3615,10 +3618,10 @@ class SyncEngineTests {
     @Test
     fun blockedPredecessorBlocksDependentUpdateAndCycleCompletes() = runTest {
         val (engine, db) = makeIntegrationEnv { request ->
-            if (request.path.orEmpty().endsWith("/sync/connect")) {
-                mockResponse(connectResumeJSON)
-            } else {
-                mockResponse("""{"error":"unexpected"}""", 500)
+            when {
+                request.path.orEmpty().endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
+                request.path.orEmpty().endsWith("/sync/pull") -> mockResponse(emptyScopePullJSON(scopeSetVersion = 1))
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
         try {
@@ -3642,7 +3645,11 @@ class SyncEngineTests {
 
             withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
 
-            assertEquals(1, server!!.requestCount)
+            // The connect assigns no scope. The cycle sends no push, and it still pulls to reconcile assignment.
+            assertEquals(
+                listOf("connect", "pull"),
+                List(server!!.requestCount) { server!!.takeRequest().path.orEmpty().substringAfterLast('/') },
+            )
             assertEquals(listOf("legacy_blocked", "blocked_by_predecessor"), mutationStates(db, predecessor, dependent))
             assertEquals(predecessor, dependsOnMutationID(db, dependent))
             assertFalse(ChangeTracker(db).hasPendingChanges())
@@ -3655,10 +3662,10 @@ class SyncEngineTests {
     @Test
     fun blockedPredecessorBlocksDependentGroupAndCycleCompletes() = runTest {
         val (engine, db) = makeIntegrationEnv { request ->
-            if (request.path.orEmpty().endsWith("/sync/connect")) {
-                mockResponse(connectResumeJSON)
-            } else {
-                mockResponse("""{"error":"unexpected"}""", 500)
+            when {
+                request.path.orEmpty().endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
+                request.path.orEmpty().endsWith("/sync/pull") -> mockResponse(emptyScopePullJSON(scopeSetVersion = 1))
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
             }
         }
         try {
@@ -3695,7 +3702,11 @@ class SyncEngineTests {
 
             withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
 
-            assertEquals(1, server!!.requestCount)
+            // The connect assigns no scope. The cycle sends no push, and it still pulls to reconcile assignment.
+            assertEquals(
+                listOf("connect", "pull"),
+                List(server!!.requestCount) { server!!.takeRequest().path.orEmpty().substringAfterLast('/') },
+            )
             assertEquals(
                 listOf("blocked_by_predecessor", "blocked_by_predecessor", "blocked_by_predecessor"),
                 mutationStates(db, predecessor, dependent, peer),
@@ -4357,6 +4368,18 @@ class SyncEngineTests {
             "scope_updates": {"add": [], "remove": []},
             "rebuild": $rebuild,
             "has_more": $hasMore${if (hasMore) "" else ",\n            \"checksums\": {\"$scopeID\": ${checksumJSON(checksum)}}"}
+        }
+    """.trimIndent()
+
+    private fun emptyScopePullJSON(scopeSetVersion: Int): String = """
+        {
+            "changes": [],
+            "scope_set_version": $scopeSetVersion,
+            "scope_cursors": {},
+            "scope_updates": {"add": [], "remove": []},
+            "rebuild": [],
+            "has_more": false,
+            "checksums": {}
         }
     """.trimIndent()
 

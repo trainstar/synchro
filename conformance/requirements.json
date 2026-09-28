@@ -1021,6 +1021,15 @@
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-scope-assignment-function" }]
     },
     {
+      "id": "SYNC-SCOPE-009",
+      "title": "Empty scope set pull",
+      "category": "scope",
+      "statement": "A normal native sync cycle sends pull with an empty scopes map when the client knows no scope, and a scope that the pull response adds is rebuilt and materialized in that cycle without a reconnect.",
+      "required_proof_types": ["native-e2e"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#empty-scope-set-pull" }]
+    },
+    {
       "id": "SYNC-ATOMICITY-002",
       "title": "Atomic mutation group",
       "category": "data-correctness",

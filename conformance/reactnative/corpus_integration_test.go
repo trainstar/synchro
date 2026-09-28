@@ -51,6 +51,7 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 		forgedCursorScenarioID:         runRealReactNativeForgedCursor,
 		retentionReconnectScenarioID:   runRealReactNativeRetentionReconnect,
 		schemaQueuedMutationScenarioID: runRealReactNativeSchemaQueuedMutation,
+		scopeEmptyPullScenarioID:       runRealReactNativeScopeEmptyPull,
 	}
 	authored, err := scenarios.LoadAll(context.Background(), "../..")
 	if err != nil {

@@ -616,6 +616,10 @@ The client applies the server's assignment delta atomically with the returned
 The client never invents an assignment, advances `scope_set_version` from a
 local observation, or uses a removed scope's cursor for another scope.
 
+Pull reconciles assignment, so a client that knows no scope still pulls in
+each normal sync cycle. This pull has an empty `scopes` map. A new assignment
+then arrives in that response without a reconnect.
+
 `scope_set_version` advances only from an authoritative assignment response
 that changes the assigned scope set. The client rejects a future value,
 preserves the current value when the assignment set is unchanged, and commits
@@ -632,7 +636,8 @@ The normal native sync loop is:
 3. Push every eligible sealed batch in durable queue order.
 4. Reconcile each successful push response by exact mutation ID.
 5. Rebuild scopes with no usable cursor or an explicit rebuild requirement.
-6. Pull incremental changes for assigned scopes.
+6. Pull incremental changes for assigned scopes. Send this pull also when no
+   scope is assigned. Its `scopes` map is then empty.
 7. Apply changes, assignment updates, checksums, and cursors atomically.
 8. Rebuild scopes listed by pull, then continue incremental pull.
 9. Publish final typed status and events.

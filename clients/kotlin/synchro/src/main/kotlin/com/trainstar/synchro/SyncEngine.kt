@@ -781,11 +781,6 @@ internal class SyncEngine(
                 continue
             }
 
-            if (loadKnownScopes().isEmpty()) {
-                schemaManager.completeMigrationIfReady()
-                return
-            }
-
             transitionTo(SyncStatus.Pulling)
             val requestedRebuilds = runPullLoop()
             if (requestedRebuilds.isNotEmpty()) {
@@ -908,9 +903,6 @@ internal class SyncEngine(
 
         while (hasMore) {
             val scopes = loadKnownScopes()
-            if (scopes.isEmpty()) {
-                return emptySet()
-            }
 
             val request = if (nextReplayRequestJSON != null) {
                 decodeBackoffRequest<PullRequest>(nextReplayRequestJSON).also { replay ->
