@@ -1,7 +1,7 @@
 {
   "$schema": "https://synchro.dev/conformance/schemas/fault-catalog-v1.schema.json",
   "schema_version": 1,
-  "release": "0.3.2",
+  "release": "0.3.3",
   "faults": [
     { "id": "FAULT-TIME-001", "description": "Emit a non-UTC, noncanonical wire timestamp instead of the field's required RFC 3339 representation." },
     { "id": "FAULT-CURSOR-001", "description": "Parse and rewrite an opaque scope cursor before presenting it to the server." },
