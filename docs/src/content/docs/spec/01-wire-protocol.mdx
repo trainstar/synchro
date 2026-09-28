@@ -683,7 +683,7 @@ Terminal codes have one meaning:
 
 - `schema_incompatible`: preserved authored table or field identity cannot be represented by the current synced schema.
 - `table_not_synced`: the target has never been a synced table in this contract.
-- `policy_rejected`: deterministic authenticated write policy denies the mutation.
+- `policy_rejected`: deterministic authenticated write policy denies the mutation. The row security and triggers of the source relation are part of that policy.
 - `validation_failed`: a known current field is non-writable, a value is invalid, a current domain constraint fails, or a deferrable constraint fails at the end of its push unit.
 - `atomic_batch_rejected`: another mutation in the same atomic batch did not apply. Only an atomic batch response contains this code.
 
@@ -700,6 +700,13 @@ Insert atomically reserves an absent row identity. Update and delete lock the au
 
 When multiple terminal semantic rules apply, classification order is `schema_incompatible`, `table_not_synced`, `policy_rejected`, then `validation_failed`. Conflict evaluation occurs only after those checks pass.
 
+A write policy denial by the source relation has `rejected_terminal` with `policy_rejected` and no `server_row`, `row_checksum`, or `server_version`. The server detects these denials during row-state evaluation and the source write, after the checks above pass:
+
+- Row security hides a live target row from the caller. That row is not `absent`. The rule applies to every operation and base relation. The server identifies a hidden row from its authoritative row version state. A row that this state marks as deleted keeps the `row_deleted` conflict.
+- An update or delete changes zero rows, although the server holds the lock on the target row. A row security clause or a `BEFORE` trigger that returns `NULL` causes this result.
+- An insert changes zero rows, and the caller can see no conflicting row.
+- A new or changed row fails a row security `WITH CHECK` expression.
+
 No per-mutation retryable status or code exists. Operational uncertainty is always a whole-request 429 or 503 response with no `accepted` or `rejected` arrays.
 
 ### Atomic batches
@@ -711,9 +718,9 @@ A request with `atomic: true` applies all of its mutations or none of them. The 
 
 The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the server checks every deferrable constraint of the group. If every mutation applies and the check passes, the response is an ordinary all-applied response. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
 
-- The failing mutation keeps its evaluated status and code.
+- The failing mutation keeps its evaluated status and code, unless the conflict rule below changes it.
 - If the constraint check at the end of the group fails, the last mutation is the failing mutation. It has `rejected_terminal` with `validation_failed`.
-- A failing `conflict` carries the committed row state that the server reads after the rollback.
+- A failing `conflict` carries the committed row state that the server reads after the rollback. If row security hides that live row from the caller, the failing mutation has `rejected_terminal` with `policy_rejected` and no `server_row`, `row_checksum`, or `server_version`.
 - Every other mutation has `rejected_terminal`, code `atomic_batch_rejected`, and message `atomic batch rejected`. It has no `server_row`, `row_checksum`, `server_version`, or `retryable`, and its `outcome_schema` is the request `schema`.
 - `accepted` is empty, and `rejected` contains every outcome in request order.
 

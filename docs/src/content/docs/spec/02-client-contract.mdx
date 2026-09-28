@@ -465,6 +465,12 @@ codes, including `version_conflict`, `row_already_exists`, `row_deleted`, or
 `validation_failed`, `table_not_synced`, `schema_incompatible`, or
 `atomic_batch_rejected`.
 
+A terminal rejection has no row and no server version. It does not describe
+absence or deletion. This rule also applies to `policy_rejected` when source
+row security hides a live row or denies a write. The client does not
+remove the local row or replace its stored server version because of a
+terminal rejection.
+
 When an outcome includes a canonical row or tombstone, matching checksum, and
 server version, the client verifies and applies that state in the same
 reconciliation transaction. When the
