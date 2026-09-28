@@ -102,7 +102,11 @@ CREATE TABLE IF NOT EXISTS sync_registry_generations (
         (state = 'pending' AND activation_commit_lsn IS NULL AND activation_end_lsn IS NULL AND activated_at IS NULL)
         OR (state IN ('active', 'superseded') AND validated AND activated_at IS NOT NULL)
     ),
-    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn)
+    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn),
+    -- Validation records whether the edge from the parent needs source values:
+    -- 0 direct, 1 projection bootstrap, 2 bootstrap with client data. NULL is
+    -- unknown and needs a verified bootstrap before activation.
+    source_requirement SMALLINT CHECK (source_requirement IN (0, 1, 2))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_registry_one_active
     ON sync_registry_generations ((state)) WHERE state = 'active';
@@ -110,9 +114,10 @@ INSERT INTO sync_registry_generations (
     stream_generation,
     state,
     validated,
-    activated_at
+    activated_at,
+    source_requirement
 )
-SELECT stream_generation, 'active', true, now()
+SELECT stream_generation, 'active', true, now(), 0
 FROM sync_runtime_state
 WHERE singleton = true
   AND NOT EXISTS (SELECT 1 FROM sync_registry_generations);

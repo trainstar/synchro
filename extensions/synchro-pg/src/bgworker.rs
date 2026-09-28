@@ -3381,13 +3381,25 @@ fn materialize_transaction(
 
     validate_progress_order(client, &stream_generation, transaction)?;
     let activations = parse_registry_activations(transaction)?;
-    validate_activation_chain(
+    let activations = if activation_requires_bootstrap(
         client,
         &stream_generation,
         generation,
         &activations,
         transaction,
-    )?;
+    )? {
+        log!("synchro WAL deferred a registry activation that requires projection bootstrap");
+        Vec::new()
+    } else {
+        validate_activation_chain(
+            client,
+            &stream_generation,
+            generation,
+            &activations,
+            transaction,
+        )?;
+        activations
+    };
     let registry = match activations.last().copied() {
         Some(final_generation) => {
             load_registry_generation_for_activation(client, generation, final_generation)
@@ -3698,6 +3710,71 @@ fn parse_registry_activations(transaction: &WalTransaction) -> Result<Vec<i64>, 
         activations.push(activation.generation);
     }
     Ok(activations)
+}
+
+/// A valid pending activation path with a recorded or unknown bootstrap
+/// requirement stays pending for the operator bootstrap. Its transaction still
+/// materializes under the active registry.
+fn activation_requires_bootstrap(
+    client: &SpiClient<'_>,
+    stream_generation: &str,
+    active_generation: i64,
+    activations: &[i64],
+    transaction: &WalTransaction,
+) -> Result<bool, PoisonFailure> {
+    let Some((first, last)) = activations.first().zip(activations.last()) else {
+        return Ok(false);
+    };
+    let mut path_start = client
+        .select(
+            "SELECT parent_generation FROM synchro.sync_registry_generations WHERE generation = $1",
+            None,
+            &[(*first).into()],
+        )
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+        .first()
+        .get_by_name::<i64, &str>("parent_generation")
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+    let first_parent = path_start;
+    for _ in 0..10_000 {
+        let Some(current) = path_start else {
+            return Ok(false);
+        };
+        if current == active_generation {
+            break;
+        }
+        let row = client
+            .select(
+                "SELECT parent_generation
+                 FROM synchro.sync_registry_generations
+                 WHERE generation = $1 AND state = 'pending' AND validated
+                   AND stream_generation = $2",
+                None,
+                &[current.into(), stream_generation.into()],
+            )
+            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+        let Some(row) = row.into_iter().next() else {
+            return Ok(false);
+        };
+        path_start = row
+            .get_by_name::<i64, &str>("parent_generation")
+            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+    }
+    if path_start != Some(active_generation) {
+        return Ok(false);
+    }
+    let Some(first_parent) = first_parent else {
+        return Ok(false);
+    };
+    validate_activation_chain(
+        client,
+        stream_generation,
+        first_parent,
+        activations,
+        transaction,
+    )?;
+    crate::schema::generation_requires_projection_bootstrap(client, *last)
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))
 }
 
 fn validate_activation_chain(

@@ -1966,8 +1966,12 @@
         )
         .unwrap();
 
-        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
-        assert!(result.is_err(), "live Class 4 type change must require bootstrap");
+        let generation = latest_validated_pending_generation();
+        assert_eq!(recorded_source_requirement(generation), Some(1));
+        assert!(
+            requires_projection_bootstrap(generation),
+            "live Class 4 type change must require bootstrap"
+        );
     }
 
     #[pg_test]
@@ -2023,9 +2027,10 @@
         )
         .unwrap();
 
-        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
+        let generation = latest_validated_pending_generation();
+        assert_eq!(recorded_source_requirement(generation), Some(1));
         assert!(
-            result.is_err(),
+            requires_projection_bootstrap(generation),
             "historical Class 4 type change must require bootstrap"
         );
     }
@@ -4577,4 +4582,205 @@
         assert_eq!(remaining, Some(0));
         let pages: Option<i64> = Spi::get_one("SELECT count(*) FROM sync_rebuild_pages").unwrap();
         assert_eq!(pages, Some(0));
+    }
+
+    const ORDERS_MEMBERSHIP_SQL: &str =
+        "$$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$";
+
+    fn register_orders_excluding(exclude_columns: &str) {
+        Spi::run(&format!(
+            "SELECT tests.register_test_table(
+                 'test_orders', {ORDERS_MEMBERSHIP_SQL}, 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'enabled', {exclude_columns}
+             )"
+        ))
+        .unwrap();
+    }
+
+    fn latest_validated_pending_generation() -> i64 {
+        Spi::get_one(
+            "SELECT generation
+             FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("validated pending generation")
+    }
+
+    fn recorded_source_requirement(generation: i64) -> Option<i16> {
+        Spi::get_one_with_args(
+            "SELECT source_requirement FROM sync_registry_generations WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap()
+    }
+
+    fn pending_transition_class(generation: i64) -> String {
+        Spi::connect(|client| {
+            let pending = crate::schema::prepare_pending_manifest(client, generation)
+                .expect("prepare pending manifest")
+                .expect("pending manifest");
+            let body = serde_json::from_str::<Value>(&pending.canonical_body)
+                .expect("decode pending manifest");
+            Ok::<_, spi::Error>(body["transition_class"].as_str().unwrap().to_string())
+        })
+        .unwrap()
+    }
+
+    fn requires_projection_bootstrap(generation: i64) -> bool {
+        Spi::connect(|client| {
+            crate::schema::generation_requires_projection_bootstrap(client, generation)
+        })
+        .unwrap()
+    }
+
+    fn latest_published_class() -> String {
+        Spi::get_one(
+            "SELECT transition_class FROM sync_schema_manifest
+             ORDER BY schema_version DESC LIMIT 1",
+        )
+        .unwrap()
+        .expect("published manifest class")
+    }
+
+    #[pg_test]
+    fn test_reexposed_populated_field_requires_client_data_bootstrap() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title, internal_notes)
+             VALUES ('d5000000-0000-4000-8000-000000000001', 'reexpose-user', 'row', NULL),
+                    ('d5000000-0000-4000-8000-000000000002', 'reexpose-user', 'row', 'kept')",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY[]::text[]");
+        let generation = latest_validated_pending_generation();
+
+        assert_eq!(recorded_source_requirement(generation), Some(2));
+        assert!(requires_projection_bootstrap(generation));
+        assert_eq!(pending_transition_class(generation), "class_3");
+        let activation_marker: Option<bool> = Spi::get_one_with_args(
+            "SELECT EXISTS (
+                 SELECT 1 FROM sync_registry_activation_requests
+                 WHERE registry_generation = $1
+             )",
+            &[generation.into()],
+        )
+        .unwrap();
+        assert_eq!(activation_marker, Some(false));
+    }
+
+    #[pg_test]
+    fn test_added_default_field_requires_client_data_bootstrap() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ('d5000000-0000-4000-8000-000000000003', 'default-user', 'row');
+             ALTER TABLE test_orders ADD COLUMN filled_note TEXT DEFAULT 'filled'",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let generation = latest_validated_pending_generation();
+
+        assert_eq!(recorded_source_requirement(generation), Some(2));
+        assert!(requires_projection_bootstrap(generation));
+        assert_eq!(pending_transition_class(generation), "class_3");
+    }
+
+    #[pg_test]
+    fn test_recorded_source_requirement_ignores_later_source_changes() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ('d5000000-0000-4000-8000-000000000004', 'frozen-user', 'row');
+             ALTER TABLE test_orders ADD COLUMN null_note TEXT",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let direct = latest_validated_pending_generation();
+        Spi::run("UPDATE test_orders SET null_note = 'written after admission'").unwrap();
+
+        assert_eq!(recorded_source_requirement(direct), Some(0));
+        assert!(!requires_projection_bootstrap(direct));
+        assert_eq!(pending_transition_class(direct), "class_2");
+        activate_pending_registry_for_test();
+        assert_eq!(latest_published_class(), "class_2");
+
+        Spi::run(
+            "ALTER TABLE test_orders ADD COLUMN cleared_note TEXT;
+             UPDATE test_orders SET cleared_note = 'present at admission'",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let backfill = latest_validated_pending_generation();
+        Spi::run("UPDATE test_orders SET cleared_note = NULL").unwrap();
+
+        assert_eq!(recorded_source_requirement(backfill), Some(2));
+        assert!(requires_projection_bootstrap(backfill));
+        assert_eq!(pending_transition_class(backfill), "class_3");
+    }
+
+    #[pg_test]
+    fn test_pending_child_requirement_uses_its_stored_parent() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ('d5000000-0000-4000-8000-000000000005', 'parent-user', 'row');
+             ALTER TABLE test_orders ADD COLUMN first_note TEXT",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let first = latest_validated_pending_generation();
+        Spi::run(
+            "UPDATE test_orders SET first_note = 'written after the first admission';
+             ALTER TABLE test_orders ADD COLUMN second_note TEXT",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let second = latest_validated_pending_generation();
+        let parent: Option<i64> = Spi::get_one_with_args(
+            "SELECT parent_generation FROM sync_registry_generations WHERE generation = $1",
+            &[second.into()],
+        )
+        .unwrap();
+
+        assert_eq!(parent, Some(first));
+        assert_eq!(recorded_source_requirement(first), Some(0));
+        assert_eq!(recorded_source_requirement(second), Some(0));
+        assert!(!requires_projection_bootstrap(second));
+        activate_pending_registry_for_test();
+        assert_eq!(latest_published_class(), "class_2");
+    }
+
+    #[pg_test]
+    fn test_unknown_legacy_requirement_needs_verified_bootstrap() {
+        setup_test_tables();
+        Spi::run("ALTER TABLE test_orders ADD COLUMN legacy_note TEXT").unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let generation = latest_validated_pending_generation();
+        assert_eq!(recorded_source_requirement(generation), Some(0));
+        Spi::run_with_args(
+            "UPDATE sync_registry_generations SET source_requirement = NULL WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap();
+
+        assert!(requires_projection_bootstrap(generation));
+        assert_eq!(pending_transition_class(generation), "class_3");
+    }
+
+    #[pg_test]
+    fn test_decimal_domain_change_follows_inclusion_rule() {
+        setup_test_tables();
+        Spi::run("ALTER TABLE test_orders ALTER COLUMN amount TYPE NUMERIC(17,3)").unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let widened = latest_validated_pending_generation();
+        assert_eq!(pending_transition_class(widened), "class_2");
+        activate_pending_registry_for_test();
+
+        Spi::run("ALTER TABLE test_orders ALTER COLUMN amount TYPE NUMERIC(17,2)").unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let narrowed = latest_validated_pending_generation();
+        assert_eq!(pending_transition_class(narrowed), "class_4");
     }

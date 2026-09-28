@@ -1032,3 +1032,88 @@
             "WAL materialization query count grew beyond its JSONB batch boundary: {measurements:?}"
         );
     }
+
+    fn registry_activation_message(generation: i64) -> WalLogicalMessage {
+        WalLogicalMessage {
+            prefix: "synchro_registry".to_string(),
+            content: format!(r#"{{"generation":{generation},"action":"activate"}}"#).into_bytes(),
+            message_lsn: 0,
+        }
+    }
+
+    fn register_orders_with_added_column(column: &str) -> i64 {
+        Spi::run(&format!("ALTER TABLE test_orders ADD COLUMN {column} TEXT")).unwrap();
+        Spi::run(
+            "SELECT tests.register_test_table(
+                 'test_orders',
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
+                 ARRAY['internal_notes']
+             )",
+        )
+        .unwrap();
+        Spi::get_one(
+            "SELECT generation FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC LIMIT 1",
+        )
+        .unwrap()
+        .expect("pending orders generation")
+    }
+
+    fn generation_state(generation: i64) -> String {
+        Spi::get_one_with_args(
+            "SELECT state FROM sync_registry_generations WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap()
+        .expect("registry generation state")
+    }
+
+    #[pg_test]
+    fn wal_defers_activation_with_unknown_source_requirement() {
+        setup_test_tables();
+        let active: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations WHERE state = 'active'",
+        )
+        .unwrap()
+        .expect("active generation");
+        let generation = register_orders_with_added_column("deferred_note");
+        Spi::run_with_args(
+            "UPDATE sync_registry_generations SET source_requirement = NULL WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap();
+        let marker_only = |commit_lsn: u64| WalTransaction {
+            xid: 1,
+            final_lsn: commit_lsn,
+            commit_lsn,
+            end_lsn: commit_lsn + 1,
+            commit_timestamp: 0,
+            events: Vec::new(),
+            truncates: Vec::new(),
+            messages: vec![registry_activation_message(generation)],
+        };
+
+        Spi::connect_mut(|client| {
+            crate::bgworker::materialize_transaction_for_test(client, &marker_only(0x800))
+        })
+        .expect("materialize deferred legacy activation");
+        let progress: Option<i64> =
+            Spi::get_one("SELECT registry_generation FROM synchro.sync_wal_progress WHERE singleton")
+                .unwrap();
+        assert_eq!(generation_state(generation), "pending");
+        assert_eq!(generation_state(active), "active");
+        assert_eq!(progress, Some(active));
+
+        Spi::run_with_args(
+            "UPDATE sync_registry_generations SET source_requirement = 0 WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap();
+        Spi::connect_mut(|client| {
+            crate::bgworker::materialize_transaction_for_test(client, &marker_only(0x900))
+        })
+        .expect("materialize direct activation");
+        assert_eq!(generation_state(generation), "active");
+    }

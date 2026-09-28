@@ -30,6 +30,6 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchr
  $$;
 @@ -2462,3 +2459,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1930
-+-- synchro-pg/src/lib.rs:1927
+--- synchro-pg/src/lib.rs:1935
++-- synchro-pg/src/lib.rs:1932
  -- finalize

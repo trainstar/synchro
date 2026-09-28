@@ -84,6 +84,6 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchr
  CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
 @@ -2462,3 +2454,3 @@
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1930
-+-- synchro-pg/src/lib.rs:1922
+--- synchro-pg/src/lib.rs:1935
++-- synchro-pg/src/lib.rs:1927
  -- finalize

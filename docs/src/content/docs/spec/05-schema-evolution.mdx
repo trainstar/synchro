@@ -359,7 +359,8 @@ server never infers the parent from numeric version order alone.
 from the parent manifest. Class 1 does not mint a manifest. The initial record
 uses `initial`. `compatibility_floor` is the earliest manifest version reachable
 through the current contiguous sequence of Class 2 transitions. It equals the
-manifest's own version after an initial, Class 3, or Class 4 boundary. The
+manifest's own version after an initial, Class 3, or Class 4 boundary. A
+Class 2 floor never names a version newer than its parent manifest. The
 immutable manifest history resolves that version to its exact hash. The server
 evaluates the complete known lineage between a client reference and the current
 reference. It never decides compatibility from `compatibility_floor` or version
@@ -531,11 +532,23 @@ compatible Class 2 transitions for connect to return `replace`.
 Class 2 changes include these changes when they do not require historical
 materialization:
 
-- add a nullable field with no required backfill
+- add a nullable field whose existing source values are all SQL `NULL`
 - add an empty table
 - add a declared local index
 - change `nullable` from `false` to `true` or `writable` from `false` to `true`
   while every earlier field and table contract remains valid
+- widen a `decimal` field so that its scale and its integer digits
+  (`precision` minus `scale`) do not decrease
+
+The server establishes historical nullness from the actual source rows when the
+registry generation becomes validated, under the registry and source write
+gates. Nullable metadata and a column default do not establish it. The server
+records the result once with that generation, bound to its stored parent
+generation and target definition. Bootstrap admission and manifest publication
+read that recorded result. A later source write cannot change the class of an
+admitted generation. A registry generation without a recorded result, such as a
+pending generation from an earlier release, requires verified bootstrap and is
+classified as requiring historical values.
 
 ### Class 3: Compatible Rebuild-Requiring Change
 
@@ -549,7 +562,9 @@ intersection returns `replace` and forbids `affected_scopes`.
 Class 3 changes include:
 
 - add a table that already has authoritative rows
-- add a field whose historical values must be materialized
+- add a field whose historical values must be materialized, including a
+  re-exposed field with a non-null value and an added field with a populated
+  default
 - change `single_scope` to `multi_scope` or `multi_scope` to `single_scope`
 - change membership materialization in a way that changes local provenance or
   requires a new local materialization contract
@@ -585,6 +600,7 @@ Class 4 changes include:
 
 - remove or rename a table or field
 - change a field's portable type
+- narrow a `decimal` field's scale or integer digits
 - tighten a field from nullable to non-null
 - remove writability from a field that earlier manifests accepted as writable
 - change a primary-key field, primary-key type, or primary-key identity

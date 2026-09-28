@@ -1042,7 +1042,7 @@ fn synchro_register_membership_dependency(
         acquire_registry_write_lock(client)?;
         acquire_source_write_gate(client)?;
         let base = latest_complete_generation(client)?;
-        let registrations = load_registry_generation_entries(client, base.generation, false)?;
+        let registrations = load_registry_generation_entries(client, base.generation, true, false)?;
         let dependency = registered_relation_for_dependency_reference(
             client,
             &registrations,
@@ -2948,17 +2948,21 @@ fn create_next_generation(
     Ok(new_generation)
 }
 
+/// Validate the pending generation and record its source requirement in one
+/// checked update. Every registration path uses this writer.
 fn mark_generation_validated(
     client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
+    let requirement = crate::schema::evaluate_source_requirement(client, generation)?;
     let count = client
         .update(
             "UPDATE synchro.sync_registry_generations
-             SET validated = true
-             WHERE generation = $1 AND state = 'pending' AND NOT validated",
+             SET validated = true, source_requirement = $2
+             WHERE generation = $1 AND state = 'pending' AND NOT validated
+               AND source_requirement IS NULL",
             None,
-            &[generation.into()],
+            &[generation.into(), requirement.into()],
         )?
         .len();
     if count != 1 {
@@ -3005,9 +3009,10 @@ fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Resu
     Ok(())
 }
 
-/// Class 3 generations remain pending until the operator has staged and
-/// verified an exported-snapshot projection bootstrap. Other generations keep
-/// the normal commit-ordered WAL activation path.
+/// A pending path with a recorded or unknown bootstrap requirement remains
+/// pending until the operator has staged and verified an exported-snapshot
+/// projection bootstrap. Other generations keep the normal commit-ordered WAL
+/// activation path.
 fn emit_registry_activation_when_ready(
     client: &mut SpiClient<'_>,
     generation: i64,
@@ -4826,7 +4831,7 @@ pub(crate) fn load_registry_generation_from_client(
     client: &SpiClient<'_>,
     generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    load_registry_generation_entries(client, generation, true)
+    load_registry_generation_entries(client, generation, true, true)
 }
 
 /// Load prior metadata for the transaction that activates a validated generation.
@@ -4836,8 +4841,8 @@ pub(crate) fn load_registry_generation_for_activation(
     active_generation: i64,
     final_generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    load_registry_generation_entries(client, final_generation, true)?;
-    load_registry_generation_entries(client, active_generation, false)
+    load_registry_generation_entries(client, final_generation, true, true)?;
+    load_registry_generation_entries(client, active_generation, true, false)
 }
 
 /// Load the active decoder registry after a committed registration transaction.
@@ -4875,12 +4880,16 @@ pub(crate) fn load_registry_generation_for_worker(
     }
 }
 
-fn load_registry_generation_entries(
+/// Load one stored generation. `require_validated` rejects a generation that
+/// its validation writer has not recorded. `validate_capture_controls` checks
+/// the live catalog against the stored definition.
+pub(crate) fn load_registry_generation_entries(
     client: &SpiClient<'_>,
     generation: i64,
+    require_validated: bool,
     validate_capture_controls: bool,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    validate_complete_generation(client, generation)?;
+    validate_generation_identity(client, generation, require_validated)?;
     let rows = client.select(
         "SELECT registry_generation,
                  relation_id::text AS relation_id,
@@ -5427,10 +5436,6 @@ fn load_membership_dependencies_from_catalog(
         });
     }
     Ok(dependencies)
-}
-
-fn validate_complete_generation(client: &SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
-    validate_generation_identity(client, generation, true)
 }
 
 fn validate_generation_identity(
