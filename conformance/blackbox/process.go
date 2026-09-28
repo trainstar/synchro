@@ -147,6 +147,9 @@ type Harness struct {
 	attached    bool
 	attachHost  string
 
+	// setupTables are the quoted tables that ApplySourceSetup created.
+	setupTables []string
+
 	lock      *installationLock
 	installed *installedExtension
 	postgres  *ownedProcess
@@ -1914,7 +1917,8 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 // ApplySourceSetup registers one more independent source schema on a ready
 // harness. A native scenario suite shares one attached database, so a setup
 // that one scenario needs cannot be applied at provisioning. The setup tables
-// must be unregistered. The call drops any earlier copy of them first.
+// must be unregistered. The call drops any earlier copy of them first, and
+// ReinstallExtension drops them again.
 func (h *Harness) ApplySourceSetup(ctx context.Context, setup SourceSetup) error {
 	if h == nil || ctx == nil || !h.sourceReady {
 		return errors.New("isolated source setup is unavailable")
@@ -1929,6 +1933,7 @@ func (h *Harness) ApplySourceSetup(ctx context.Context, setup SourceSetup) error
 	if err := h.executeSourceScript(ctx, setup.Name+" reset", "DROP TABLE IF EXISTS "+strings.Join(tables, ", ")+" CASCADE"); err != nil {
 		return err
 	}
+	h.setupTables = append(h.setupTables, tables...)
 	if err := h.executeSourceScript(ctx, setup.Name+" schema", setup.SchemaSQL); err != nil {
 		return err
 	}
@@ -2611,6 +2616,13 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 		return ExtensionReinstallResult{}, fmt.Errorf("drop synchro_pg extension failed: %w", err)
 	}
 	defer tx.Rollback()
+	// The publication survives the reinstall. A run-time setup table would
+	// stay in it without a registration, so the reinstall drops the table.
+	if len(h.setupTables) != 0 {
+		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+strings.Join(h.setupTables, ", ")+" CASCADE"); err != nil {
+			return ExtensionReinstallResult{}, fmt.Errorf("drop run-time source setup tables failed: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
 		return ExtensionReinstallResult{}, fmt.Errorf("create synchro_pg extension failed: %w", err)
 	}
@@ -2630,6 +2642,7 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 	if err := tx.Commit(); err != nil {
 		return ExtensionReinstallResult{}, errors.New("commit extension reinstall transaction failed")
 	}
+	h.setupTables = nil
 	if err := gate.connection.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&result.ReinstallLSN); err != nil || result.ReinstallLSN == "" {
 		return ExtensionReinstallResult{}, errors.New("read extension reinstall WAL position failed")
 	}
