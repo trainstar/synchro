@@ -1519,7 +1519,7 @@ pub(crate) fn registered_function_fingerprint(
         .get_by_name::<String, &str>("search_path")?
         .unwrap_or_else(|| pgrx::error!("search path is unavailable"));
     client.select(
-        "SELECT pg_catalog.set_config('search_path', 'pg_catalog, synchro', true)",
+        "SELECT pg_catalog.set_config('search_path', 'pg_catalog, synchro, pg_temp', true)",
         None,
         &[],
     )?;
@@ -1557,7 +1557,7 @@ fn load_catalog_functions(
         .get_by_name::<String, &str>("search_path")?
         .unwrap_or_else(|| pgrx::error!("search path is unavailable"));
     client.select(
-        "SELECT pg_catalog.set_config('search_path', 'pg_catalog, synchro', true)",
+        "SELECT pg_catalog.set_config('search_path', 'pg_catalog, synchro, pg_temp', true)",
         None,
         &[],
     )?;

@@ -21,7 +21,7 @@ CREATE FUNCTION synchro.synchro_register_assignment_function(
 STRICT
 LANGUAGE c
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
 ALTER FUNCTION synchro.synchro_register_assignment_function(TEXT, INT) OWNER TO synchro_owner;
 REVOKE EXECUTE ON FUNCTION synchro.synchro_register_assignment_function(TEXT, INT) FROM PUBLIC;
@@ -32,7 +32,7 @@ CREATE FUNCTION synchro.synchro_unregister_assignment_function() RETURNS void
 STRICT
 LANGUAGE c
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS 'MODULE_PATHNAME', 'synchro_unregister_assignment_function_wrapper';
 ALTER FUNCTION synchro.synchro_unregister_assignment_function() OWNER TO synchro_owner;
 REVOKE EXECUTE ON FUNCTION synchro.synchro_unregister_assignment_function() FROM PUBLIC;
@@ -140,7 +140,7 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 STABLE
 SECURITY INVOKER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF pg_catalog.has_table_privilege(p_relation, 'SELECT') IS NOT TRUE THEN
@@ -260,7 +260,7 @@ $$;
 ALTER FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
     SECURITY DEFINER;
 ALTER FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
-    SET search_path = pg_catalog, synchro;
+    SET search_path = pg_catalog, synchro, pg_temp;
 ALTER FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
     OWNER TO synchro_owner;
 REVOKE EXECUTE ON FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
@@ -281,9 +281,38 @@ END;
 $$;
 ALTER FUNCTION synchro.synchro_check_push_constraints() SECURITY DEFINER;
 ALTER FUNCTION synchro.synchro_check_push_constraints()
-    SET search_path = pg_catalog, synchro;
+    SET search_path = pg_catalog, synchro, pg_temp;
 ALTER FUNCTION synchro.synchro_check_push_constraints() OWNER TO synchro_owner;
 REVOKE EXECUTE ON FUNCTION synchro.synchro_check_push_constraints() FROM PUBLIC;
+-- A caller's temporary relation must not shadow an extension relation in a
+-- privileged function, so pg_temp is last in each function path.
+DO $search_path$
+DECLARE
+    object_record RECORD;
+BEGIN
+    FOR object_record IN
+        SELECT namespace.nspname, procedure.proname,
+               pg_catalog.pg_get_function_identity_arguments(procedure.oid) AS arguments
+        FROM pg_catalog.pg_proc procedure
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+        JOIN pg_catalog.pg_depend dependency
+          ON dependency.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+         AND dependency.objid = procedure.oid
+         AND dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+         AND dependency.deptype = 'e'
+        JOIN pg_catalog.pg_extension extension
+          ON extension.oid = dependency.refobjid
+         AND extension.extname = 'synchro_pg'
+        WHERE namespace.nspname = 'synchro'
+          AND procedure.prokind = 'f'
+    LOOP
+        EXECUTE pg_catalog.format(
+            'ALTER FUNCTION %I.%I(%s) SET search_path = pg_catalog, synchro, pg_temp',
+            object_record.nspname, object_record.proname, object_record.arguments
+        );
+    END LOOP;
+END
+$search_path$;
 
 UPDATE synchro.sync_extension_build
 SET installed_fingerprint = synchro.synchro_build_fingerprint(),

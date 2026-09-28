@@ -129,7 +129,7 @@ CREATE OR REPLACE FUNCTION synchro_replay_registry_activation_requests()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 DECLARE
     request RECORD;
@@ -741,7 +741,7 @@ CREATE OR REPLACE FUNCTION sync_lock_scope_digest_boundary()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     LOCK TABLE synchro.sync_wal_progress IN ROW EXCLUSIVE MODE;
@@ -753,7 +753,7 @@ CREATE OR REPLACE FUNCTION sync_invalidate_scope_digest()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF TG_OP IN ('UPDATE', 'DELETE') THEN
@@ -1450,7 +1450,7 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 STABLE
 SECURITY INVOKER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF pg_catalog.has_table_privilege(p_relation, 'SELECT') IS NOT TRUE THEN
@@ -1742,7 +1742,7 @@ CREATE OR REPLACE FUNCTION synchro_primary_key_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
@@ -1757,7 +1757,7 @@ CREATE OR REPLACE FUNCTION synchro_capture_fence_record()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 DECLARE
     v_fence_id UUID := gen_random_uuid();
@@ -1963,7 +1963,7 @@ CREATE OR REPLACE FUNCTION synchro_capture_truncate_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock_shared(1936876389::bigint);
@@ -2064,7 +2064,7 @@ BEGIN
             EXECUTE pg_catalog.format('ALTER FUNCTION %s SECURITY DEFINER', object_identity);
         END IF;
         EXECUTE pg_catalog.format(
-            'ALTER FUNCTION %s SET search_path = pg_catalog, synchro', object_identity
+            'ALTER FUNCTION %s SET search_path = pg_catalog, synchro, pg_temp', object_identity
         );
     END LOOP;
 END

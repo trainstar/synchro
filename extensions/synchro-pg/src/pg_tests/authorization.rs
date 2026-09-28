@@ -193,15 +193,164 @@ fn seed_and_operator_have_only_declared_function_grants() {
     ));
 }
 
+/// Lists each security definer function in the `synchro` schema whose path
+/// does not end with `pg_temp`.
+fn definer_functions_without_trailing_temporary_path() -> Vec<String> {
+    Spi::get_one::<Vec<String>>(
+        "SELECT COALESCE(
+                    pg_catalog.array_agg(procedure.proname::text ORDER BY procedure.proname),
+                    ARRAY[]::text[]
+                )
+         FROM pg_catalog.pg_proc procedure
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         WHERE namespace.nspname = 'synchro'
+           AND procedure.prosecdef
+           AND NOT COALESCE(procedure.proconfig, ARRAY[]::text[])
+               @> ARRAY['search_path=pg_catalog, synchro, pg_temp']",
+    )
+    .expect("definer path query")
+    .expect("definer path result")
+}
+
+#[pg_test]
+fn definer_functions_search_temporary_schema_last() {
+    let definers = Spi::get_one::<i64>(
+        "SELECT count(*)
+         FROM pg_catalog.pg_proc procedure
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         WHERE namespace.nspname = 'synchro' AND procedure.prosecdef",
+    )
+    .expect("count definer functions")
+    .expect("definer function count");
+    assert!(definers > 0);
+    assert_eq!(
+        definer_functions_without_trailing_temporary_path(),
+        Vec::<String>::new()
+    );
+
+    Spi::run(
+        "ALTER FUNCTION synchro.synchro_unregister_assignment_function()
+         SET search_path = pg_catalog, synchro",
+    )
+    .expect("remove temporary schema from one definer path");
+    assert_eq!(
+        definer_functions_without_trailing_temporary_path(),
+        vec!["synchro_unregister_assignment_function".to_string()]
+    );
+}
+
+#[pg_test]
+fn backfill_rejects_caller_staging_table() {
+    setup_test_tables();
+    Spi::run(
+        "CREATE TABLE public.backfill_shadow_runs (role_name TEXT NOT NULL);
+         GRANT INSERT ON public.backfill_shadow_runs TO PUBLIC;
+         CREATE SEQUENCE public.backfill_shadow_calls;
+         GRANT USAGE ON SEQUENCE public.backfill_shadow_calls TO PUBLIC",
+    )
+    .expect("create backfill shadow log");
+
+    Spi::run("SET LOCAL ROLE synchro_operator").expect("select operator role");
+    Spi::run(
+        "CREATE TEMP TABLE synchro_backfill_edges (
+             relation_id UUID NOT NULL,
+             table_name TEXT NOT NULL,
+             record_id TEXT NOT NULL,
+             bucket_id TEXT NOT NULL,
+             checksum BYTEA NOT NULL,
+             row_version UUID NOT NULL,
+             PRIMARY KEY (table_name, record_id, bucket_id)
+         );
+         GRANT ALL ON pg_temp.synchro_backfill_edges TO PUBLIC;
+         CREATE FUNCTION pg_temp.record_backfill_shadow() RETURNS trigger
+         LANGUAGE plpgsql AS $shadow$
+         BEGIN
+             PERFORM pg_catalog.nextval('public.backfill_shadow_calls');
+             INSERT INTO public.backfill_shadow_runs (role_name) VALUES (current_user);
+             RETURN NULL;
+         END
+         $shadow$;
+         CREATE TRIGGER record_backfill_shadow_truncate
+         BEFORE TRUNCATE ON pg_temp.synchro_backfill_edges
+         FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.record_backfill_shadow();
+         CREATE TRIGGER record_backfill_shadow_write
+         BEFORE INSERT OR UPDATE OR DELETE ON pg_temp.synchro_backfill_edges
+         FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.record_backfill_shadow()",
+    )
+    .expect("create caller staging table");
+    // A sequence keeps its value after the rejected call rolls back, so it
+    // records a trigger run that the rollback removes from the log table.
+    Spi::run(
+        "DO $test$
+         DECLARE
+             rejected BOOLEAN := false;
+         BEGIN
+             BEGIN
+                 PERFORM synchro.synchro_backfill_bucket_edges();
+             EXCEPTION WHEN duplicate_table THEN
+                 rejected := true;
+             END;
+             PERFORM pg_catalog.set_config(
+                 'synchro_test.backfill_rejected', rejected::text, true
+             );
+         END
+         $test$",
+    )
+    .expect("call backfill with caller staging table");
+    Spi::run("RESET ROLE").expect("restore test role");
+
+    let shadow_roles = Spi::get_one::<Vec<String>>(
+        "SELECT COALESCE(array_agg(role_name ORDER BY role_name), ARRAY[]::text[])
+         FROM public.backfill_shadow_runs",
+    )
+    .expect("load backfill shadow roles");
+    let shadow_called = Spi::get_one::<bool>("SELECT is_called FROM public.backfill_shadow_calls")
+        .expect("load backfill shadow calls");
+    let rejected =
+        Spi::get_one::<String>("SELECT current_setting('synchro_test.backfill_rejected')")
+            .expect("load backfill rejection");
+    assert_eq!(shadow_roles, Some(Vec::new()));
+    assert_eq!(shadow_called, Some(false));
+    assert_eq!(rejected.as_deref(), Some("true"));
+}
+
+#[pg_test]
+fn backfill_runs_twice_in_one_transaction() {
+    setup_test_tables();
+    Spi::run(
+        "INSERT INTO test_products (id, name, price)
+         VALUES ('26262626-2626-4626-8626-262626262626', 'Repeated Backfill', 7)",
+    )
+    .expect("insert backfill product");
+    insert_changelog(
+        "global",
+        "test_products",
+        "26262626-2626-4626-8626-262626262626",
+        1,
+    );
+
+    for _ in 0..2 {
+        let backfill = Spi::get_one::<pgrx::JsonB>(
+            "SELECT synchro.synchro_backfill_bucket_edges('test_products')",
+        )
+        .expect("run backfill")
+        .expect("backfill response");
+        let stage_exists = Spi::get_one::<bool>(
+            "SELECT pg_catalog.to_regclass('pg_temp.synchro_backfill_edges') IS NOT NULL",
+        )
+        .expect("check backfill stage");
+        assert_eq!(backfill.0["records"], 1);
+        assert_eq!(stage_exists, Some(false));
+    }
+}
+
 #[pg_test]
 fn registration_functions_have_required_security_and_grants() {
     let protected: Option<bool> = Spi::get_one(
         "WITH registration_functions AS (
              SELECT procedure.oid,
                     procedure.prosecdef,
-                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner,
-                    COALESCE(procedure.proconfig, ARRAY[]::text[])
-                        @> ARRAY['search_path=pg_catalog, synchro'] AS fixed_path
+                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner
              FROM pg_catalog.pg_proc procedure
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
              CROSS JOIN (
@@ -220,7 +369,6 @@ fn registration_functions_have_required_security_and_grants() {
          SELECT count(*) = 4
                 AND bool_and(prosecdef)
                 AND bool_and(owned_by_synchro_owner)
-                AND bool_and(fixed_path)
                 AND bool_and(
                     pg_catalog.has_function_privilege(
                         'synchro_operator', oid, 'EXECUTE'
@@ -253,9 +401,7 @@ fn projection_bootstrap_functions_are_operator_only() {
     let protected: Option<bool> = Spi::get_one(
         "WITH bootstrap_functions AS (
              SELECT procedure.oid, procedure.prosecdef,
-                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner,
-                    COALESCE(procedure.proconfig, ARRAY[]::text[])
-                        @> ARRAY['search_path=pg_catalog, synchro'] AS fixed_path
+                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner
              FROM pg_catalog.pg_proc procedure
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
              CROSS JOIN (
@@ -276,7 +422,6 @@ fn projection_bootstrap_functions_are_operator_only() {
          SELECT count(*) = 8
                 AND bool_and(prosecdef)
                 AND bool_and(owned_by_synchro_owner)
-                AND bool_and(fixed_path)
                 AND bool_and(pg_catalog.has_function_privilege(
                     'synchro_operator', oid, 'EXECUTE'
                 ))
@@ -297,9 +442,7 @@ fn projection_bootstrap_runtime_reads_are_worker_only() {
     let protected: Option<bool> = Spi::get_one(
         "WITH runtime_read_functions AS (
              SELECT procedure.oid, procedure.prosecdef,
-                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner,
-                    COALESCE(procedure.proconfig, ARRAY[]::text[])
-                        @> ARRAY['search_path=pg_catalog, synchro'] AS fixed_path
+                    procedure.proowner = owner_role.oid AS owned_by_synchro_owner
              FROM pg_catalog.pg_proc procedure
              JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
              CROSS JOIN (
@@ -318,7 +461,6 @@ fn projection_bootstrap_runtime_reads_are_worker_only() {
           SELECT count(*) = 6
                 AND bool_and(prosecdef)
                 AND bool_and(owned_by_synchro_owner)
-                AND bool_and(fixed_path)
                 AND bool_and(pg_catalog.has_function_privilege(
                     'synchro_worker', oid, 'EXECUTE'
                 ))
