@@ -173,10 +173,10 @@ Repeat compaction while either `deactivated_clients` or `deleted_entries` is non
 A running worker does not by itself prove that registry activation succeeded.
 Registrations can commit while no logical slot is bound.
 This occurs while the worker is disabled, and while a new worker creates and binds its first slot.
-Synchro records the activation request of each such registration and emits no direct activation message.
-When the initial slot binds, Synchro emits one transactional activation message for each request.
-Normal WAL processing activates the pending generations once, in generation order.
-Source writes to a relation become pull-visible only after its registration activates.
+Each registration emits its transactional activation message and also records an activation request.
+When the initial slot binds, Synchro emits a new transactional activation message for each pending request.
+The new slot can contain both messages for a registration that committed after the slot started.
+The worker activates the generation at the first message and ignores a later activation of a generation that the active chain already contains.
 
 Older builds without this replay can remain at registry generation 1 while later WAL advances.
 Publication readiness then reports `publication_mismatch` because the pending relations are not in the active registry.

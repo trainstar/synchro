@@ -3402,14 +3402,19 @@ fn materialize_transaction(
         log!("synchro WAL deferred a registry activation that requires projection bootstrap");
         Vec::new()
     } else {
-        validate_activation_chain(
+        let new_activations = validate_activation_chain(
             client,
             &stream_generation,
             generation,
             &activations,
             transaction,
         )?;
-        activation_groups(&markers)
+        let new_markers: Vec<(i64, u64)> = markers
+            .iter()
+            .copied()
+            .filter(|marker| new_activations.contains(&marker.0))
+            .collect();
+        activation_groups(&new_markers)
     };
     // Segment 0 precedes the first activation group. Segment k follows group k
     // and uses the registry of that group's last generation.
@@ -3963,15 +3968,22 @@ fn activation_requires_bootstrap(
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))
 }
 
+/// Return the activations that are new. A registration that commits while no
+/// slot is bound emits its own activation and is also replayed when the slot
+/// binds, so a slot can contain the activation of one generation twice. An
+/// activation of a generation that the active chain of this stream already
+/// contains is that duplicate and is ignored. Every other invalid activation
+/// fails validation.
 fn validate_activation_chain(
     client: &SpiClient<'_>,
     stream_generation: &str,
     active_generation: i64,
     activations: &[i64],
     transaction: &WalTransaction,
-) -> Result<(), PoisonFailure> {
+) -> Result<HashSet<i64>, PoisonFailure> {
     let mut parent = active_generation;
     let mut seen = HashSet::new();
+    let mut new_activations = HashSet::new();
     for generation in activations {
         if !seen.insert(*generation) {
             return Err(failure_with_detail(
@@ -4042,6 +4054,44 @@ fn validate_activation_chain(
                 )
             })?
             .unwrap_or_default();
+        if state != "pending" && stream == stream_generation {
+            let activated = client
+                .select(
+                    "WITH RECURSIVE chain(generation, parent_generation) AS (
+                         SELECT generation, parent_generation
+                         FROM synchro.sync_registry_generations
+                         WHERE state = 'active' AND stream_generation = $2
+                         UNION ALL
+                         SELECT prior.generation, prior.parent_generation
+                         FROM synchro.sync_registry_generations prior
+                         JOIN chain ON prior.generation = chain.parent_generation
+                         WHERE prior.state = 'superseded' AND prior.stream_generation = $2
+                     )
+                     SELECT EXISTS (SELECT 1 FROM chain WHERE generation = $1) AS activated",
+                    None,
+                    &[(*generation).into(), stream_generation.into()],
+                )
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "loading the active registry chain failed",
+                    )
+                })?
+                .first()
+                .get_by_name::<bool, &str>("activated")
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "reading the active registry chain failed",
+                    )
+                })?
+                .unwrap_or(false);
+            if activated {
+                continue;
+            }
+        }
         if actual_parent != Some(parent)
             || !validated
             || state != "pending"
@@ -4054,8 +4104,9 @@ fn validate_activation_chain(
             ));
         }
         parent = *generation;
+        new_activations.insert(*generation);
     }
-    Ok(())
+    Ok(new_activations)
 }
 
 fn parse_fence_messages(transaction: &WalTransaction) -> Result<Vec<FenceMessage>, PoisonFailure> {

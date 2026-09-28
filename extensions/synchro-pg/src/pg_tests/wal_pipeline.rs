@@ -1262,6 +1262,58 @@
     }
 
     #[pg_test]
+    fn wal_ignores_only_a_repeated_activation_of_the_active_chain() {
+        setup_test_tables();
+        let marker_only = |generation: i64, commit_lsn: u64| WalTransaction {
+            xid: 1,
+            final_lsn: commit_lsn,
+            commit_lsn,
+            end_lsn: commit_lsn + 1,
+            commit_timestamp: 0,
+            events: Vec::new(),
+            truncates: Vec::new(),
+            messages: vec![registry_activation_message(generation, 0)],
+        };
+        let materialize = |transaction: &WalTransaction| {
+            Spi::connect_mut(|client| {
+                crate::bgworker::materialize_transaction_for_test(client, transaction)
+            })
+        };
+        let progress = || -> Option<i64> {
+            Spi::get_one("SELECT registry_generation FROM synchro.sync_wal_progress WHERE singleton")
+                .unwrap()
+        };
+        let first = register_orders_with_added_column("repeat_first");
+        assert_eq!(materialize(&marker_only(first, 0xa00)), Ok(()));
+        let second = register_orders_with_added_column("repeat_second");
+        assert_eq!(materialize(&marker_only(second, 0xb00)), Ok(()));
+
+        // The binding replay repeats activations that the slot already applied.
+        assert_eq!(materialize(&marker_only(second, 0xc00)), Ok(()));
+        assert_eq!(materialize(&marker_only(first, 0xd00)), Ok(()));
+        assert_eq!(generation_state(first), "superseded");
+        assert_eq!(generation_state(second), "active");
+        assert_eq!(progress(), Some(second));
+
+        // A pending generation whose parent is not active is not a repeat.
+        let third = register_orders_with_added_column("repeat_third");
+        let fourth = register_orders_with_added_column("repeat_fourth");
+        let parent: Option<i64> = Spi::get_one_with_args(
+            "SELECT parent_generation FROM sync_registry_generations WHERE generation = $1",
+            &[fourth.into()],
+        )
+        .unwrap();
+        assert_eq!(parent, Some(third));
+        assert_eq!(
+            materialize(&marker_only(fourth, 0xe00)),
+            Err("validation_failed".to_string())
+        );
+        assert_eq!(generation_state(third), "pending");
+        assert_eq!(generation_state(fourth), "pending");
+        assert_eq!(progress(), Some(second));
+    }
+
+    #[pg_test]
     fn wal_defers_activation_with_unknown_source_requirement() {
         setup_test_tables();
         let active: i64 = Spi::get_one(
