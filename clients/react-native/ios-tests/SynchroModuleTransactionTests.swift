@@ -467,10 +467,10 @@ final class SynchroModuleTransactionTests: XCTestCase {
         let inspection = try XCTUnwrap(try JSONSerialization.jsonObject(with: json) as? [String: Any])
         XCTAssertEqual(
             Set(inspection.keys),
-            ["client_state", "retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts"]
+            ["client_state", "retained_mutations", "rejected_mutations"]
         )
-        // bridge_items is a local table, so the ledger and server metadata stay empty.
-        for member in ["retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts"] {
+        // bridge_items is a local table, so the mutation ledger stays empty.
+        for member in ["retained_mutations", "rejected_mutations"] {
             XCTAssertEqual((inspection[member] as? [Any])?.count, 0, member)
         }
         let clientState = try XCTUnwrap(inspection["client_state"] as? [String: Any])

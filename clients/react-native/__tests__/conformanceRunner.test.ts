@@ -62,18 +62,6 @@ function snapshotResult(clientState: Record<string, unknown>, details: Record<st
   };
 }
 
-// The snapshot holds every row's metadata. A second row checks that the runner
-// selects the durable-proof identity instead of the first entry.
-function durableDetails(proof: { row_metadata: Record<string, unknown> | null; rebuild_receipts: unknown[] }) {
-  return {
-    row_metadata: proof.row_metadata === null ? [] : [
-      { ...proof.row_metadata, record_id: 'other-row', server_version: 'version-other' },
-      proof.row_metadata,
-    ],
-    rebuild_receipts: proof.rebuild_receipts,
-  };
-}
-
 it('rejects duplicate command members before execution', () => {
   expect(() => parseConformanceCommand('{"schema_version":1,"schema_version":1}')).toThrow();
 });
@@ -535,7 +523,8 @@ describe('PublicConformanceRunner call lifecycle', () => {
         rebuild_attempts: [],
         ...CLIENT_STATE_COUNTS,
         provenance_maintenance_work_cursor: '1',
-      }, durableDetails({
+      }, {}));
+    mockNativeModule.inspectDurableState.mockResolvedValueOnce(JSON.stringify({
         row_metadata: {
           table_name: 'cf_items',
           record_id: 'runtime-row-a',
@@ -556,7 +545,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
           stored_scope_checksum: 'checksum-runtime',
           local_scope_checksum: 'different-checksum',
         }],
-      })));
+      }));
 
       await expect(
         runner.execute(command('observer', 'capture', 'client-a', {
@@ -574,6 +563,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
       });
       expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
       expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([]);
+      expect(mockNativeModule.inspectDurableState).toHaveBeenCalledWith('cf_items', 'runtime-row-a');
     } finally {
       await runner.close();
     }
@@ -617,7 +607,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
           ...CLIENT_STATE_COUNTS,
           mutation_ledger_count: 1,
           provenance_maintenance_work_cursor: '0',
-        }, { retained_mutations: [current], row_metadata: [], rebuild_receipts: [] }),
+        }, { retained_mutations: [current] }),
         applicationRows: [{ id: 'row-a', name: 'first' }],
       });
 
@@ -671,7 +661,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
         ...CLIENT_STATE_COUNTS,
         mutation_ledger_count: 513,
         provenance_maintenance_work_cursor: '0',
-      }, { retained_mutations: null, row_metadata: [], rebuild_receipts: [] }));
+      }, { retained_mutations: null }));
 
       await expect(
         runner.execute(command('observer', 'capture', 'client-a', {
@@ -705,7 +695,8 @@ describe('PublicConformanceRunner call lifecycle', () => {
         rebuild_attempts: [],
         ...CLIENT_STATE_COUNTS,
         provenance_maintenance_work_cursor: '0',
-      }, { row_metadata: [{}], rebuild_receipts: [] }));
+      }, {}));
+    mockNativeModule.inspectDurableState.mockResolvedValueOnce('{}');
 
       await expect(
         runner.execute(command('observer', 'capture', 'client-a', {
@@ -733,10 +724,11 @@ describe('PublicConformanceRunner call lifecycle', () => {
         rebuild_attempts: [],
         ...CLIENT_STATE_COUNTS,
         provenance_maintenance_work_cursor: '1',
-      }, durableDetails({
+      }, {}));
+    mockNativeModule.inspectDurableState.mockResolvedValueOnce(JSON.stringify({
         row_metadata: null,
         rebuild_receipts: [],
-      })));
+      }));
 
       await expect(
         runner.execute(command('observer', 'capture', 'client-a', {
@@ -753,6 +745,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
       });
       expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
       expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([]);
+      expect(mockNativeModule.inspectDurableState).toHaveBeenCalledWith('cf_items', 'bootstrap-absent-row');
     } finally {
       await runner.close();
     }

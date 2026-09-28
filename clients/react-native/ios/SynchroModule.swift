@@ -1582,18 +1582,66 @@ public class SynchroModuleImpl: NSObject {
                     rows += try transaction.query(statement.sql, params: statement.params)
                 }
             }
-            let capture = snapshot.capture
             let inspection: [String: Any] = [
-                "client_state": clientStatePayload(capture),
+                "client_state": clientStatePayload(snapshot.capture),
                 "retained_mutations": snapshot.retainedMutations.map { $0.map(retainedMutationPayload) } ?? NSNull(),
                 "rejected_mutations": snapshot.rejectedMutations.map { $0.map(rejectedMutationPayload) } ?? NSNull(),
-                "row_metadata": capture.rowMetadataTruncated ? NSNull() : capture.rowMetadata.map(rowMetadataPayload),
-                "rebuild_receipts": capture.rebuildReceiptsTruncated ? NSNull() : capture.rebuildReceipts.map(rebuildReceiptPayload),
             ]
             resolve([
                 "inspection": try encodeBridgeJSON(inspection),
                 "applicationRows": rowsToBridgeRows(rows),
             ])
+        } catch {
+            rejectWithError(reject, error)
+        }
+    }
+
+    /// Reads one record's row metadata and every rebuild receipt. The inspection snapshot bounds
+    /// row metadata, so a durable proof reads its identity directly.
+    @objc
+    public func inspectDurableState(
+        _ tableName: String,
+        recordID: String,
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        guard let client else {
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        do {
+            let inspection = SynchroInspection(client: client)
+            let metadata: Any = try inspection.rowMetadata(
+                tableName: tableName,
+                recordID: recordID
+            ).map { value in
+                [
+                    "table_name": value.tableName,
+                    "record_id": value.recordID,
+                    "server_version": value.serverVersion,
+                    "row_checksum": value.rowChecksum ?? NSNull(),
+                ] as [String: Any]
+            } ?? NSNull()
+            let receipts = try inspection.rebuildReceipts().map { value in
+                [
+                    "rebuild_id_fingerprint": value.rebuildIDFingerprint,
+                    "page_count": value.pageCount,
+                    "returned_record_count": value.returnedRecordCount,
+                    "request_chain_expected": value.requestChainExpected,
+                    "request_chain_observed": value.requestChainObserved,
+                    "record_identities_hex": value.recordIdentitiesHex,
+                    "received_row_checksums": value.receivedRowChecksums,
+                    "computed_row_checksums": value.computedRowChecksums,
+                    "computed_scope_checksum": value.computedScopeChecksum ?? NSNull(),
+                    "final_scope_checksum": value.finalScopeChecksum ?? NSNull(),
+                    "stored_scope_checksum": value.storedScopeChecksum ?? NSNull(),
+                    "local_scope_checksum": value.localScopeChecksum ?? NSNull(),
+                ] as [String: Any]
+            }
+            resolve(try encodeBridgeJSON([
+                "row_metadata": metadata,
+                "rebuild_receipts": receipts,
+            ]))
         } catch {
             rejectWithError(reject, error)
         }
@@ -1764,32 +1812,6 @@ public class SynchroModuleImpl: NSObject {
             "provenance_maintenance_work_cursor": String(
                 capture.provenanceMaintenanceWorkCursor
             ),
-        ]
-    }
-
-    private func rowMetadataPayload(_ value: RowMetadataInspection) -> [String: Any] {
-        [
-            "table_name": value.tableName,
-            "record_id": value.recordID,
-            "server_version": value.serverVersion,
-            "row_checksum": value.rowChecksum ?? NSNull(),
-        ]
-    }
-
-    private func rebuildReceiptPayload(_ value: RebuildReceiptInspection) -> [String: Any] {
-        [
-            "rebuild_id_fingerprint": value.rebuildIDFingerprint,
-            "page_count": value.pageCount,
-            "returned_record_count": value.returnedRecordCount,
-            "request_chain_expected": value.requestChainExpected,
-            "request_chain_observed": value.requestChainObserved,
-            "record_identities_hex": value.recordIdentitiesHex,
-            "received_row_checksums": value.receivedRowChecksums,
-            "computed_row_checksums": value.computedRowChecksums,
-            "computed_scope_checksum": value.computedScopeChecksum ?? NSNull(),
-            "final_scope_checksum": value.finalScopeChecksum ?? NSNull(),
-            "stored_scope_checksum": value.storedScopeChecksum ?? NSNull(),
-            "local_scope_checksum": value.localScopeChecksum ?? NSNull(),
         ]
     }
 

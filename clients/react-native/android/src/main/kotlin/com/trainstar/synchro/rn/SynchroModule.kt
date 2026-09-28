@@ -9,8 +9,6 @@ import android.os.Process
 import com.facebook.react.bridge.*
 import com.trainstar.synchro.*
 import com.trainstar.synchro.inspection.ClientStateCaptureInspection
-import com.trainstar.synchro.inspection.RebuildReceiptInspection
-import com.trainstar.synchro.inspection.RowMetadataInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import com.trainstar.synchro.inspection.TransportObservationSnapshot
@@ -1054,18 +1052,60 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                     rows += transaction.query(statement.sql, statement.params)
                 }
             }
-            val capture = snapshot.capture
             val inspection = JSONObject().apply {
-                put("client_state", clientStateJson(capture))
+                put("client_state", clientStateJson(snapshot.capture))
                 put("retained_mutations", snapshot.retainedMutations?.let { JSONArray(it.map(::retainedMutationJson)) } ?: JSONObject.NULL)
                 put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::rejectedMutationJson)) } ?: JSONObject.NULL)
-                put("row_metadata", if (capture.rowMetadataTruncated) JSONObject.NULL else JSONArray(capture.rowMetadata.map(::rowMetadataJson)))
-                put("rebuild_receipts", if (capture.rebuildReceiptsTruncated) JSONObject.NULL else JSONArray(capture.rebuildReceipts.map(::rebuildReceiptJson)))
             }
             promise.resolve(Arguments.createMap().apply {
                 putString("inspection", inspection.toString())
                 putArray("applicationRows", rowsToWritableArray(rows))
             })
+        } catch (error: Exception) {
+            rejectWithError(promise, error)
+        }
+    }
+
+    /**
+     * Reads one record's row metadata and every rebuild receipt. The inspection snapshot bounds
+     * row metadata, so a durable proof reads its identity directly.
+     */
+    @ReactMethod
+    override fun inspectDurableState(tableName: String, recordID: String, promise: Promise) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            val inspection = SynchroInspection(c)
+            val metadataJson: Any = inspection.rowMetadata(tableName, recordID)?.let { value ->
+                JSONObject().apply {
+                    put("table_name", value.tableName)
+                    put("record_id", value.recordID)
+                    put("server_version", value.serverVersion)
+                    put("row_checksum", value.rowChecksum ?: JSONObject.NULL)
+                }
+            } ?: JSONObject.NULL
+            val receipts = JSONArray(inspection.rebuildReceipts().map { value ->
+                JSONObject().apply {
+                    put("rebuild_id_fingerprint", value.rebuildIDFingerprint)
+                    put("page_count", value.pageCount)
+                    put("returned_record_count", value.returnedRecordCount)
+                    put("request_chain_expected", JSONArray(value.requestChainExpected))
+                    put("request_chain_observed", JSONArray(value.requestChainObserved))
+                    put("record_identities_hex", JSONArray(value.recordIdentitiesHex))
+                    put("received_row_checksums", JSONArray(value.receivedRowChecksums))
+                    put("computed_row_checksums", JSONArray(value.computedRowChecksums))
+                    put("computed_scope_checksum", value.computedScopeChecksum ?: JSONObject.NULL)
+                    put("final_scope_checksum", value.finalScopeChecksum ?: JSONObject.NULL)
+                    put("stored_scope_checksum", value.storedScopeChecksum ?: JSONObject.NULL)
+                    put("local_scope_checksum", value.localScopeChecksum ?: JSONObject.NULL)
+                }
+            })
+            promise.resolve(JSONObject().apply {
+                put("row_metadata", metadataJson)
+                put("rebuild_receipts", receipts)
+            }.toString())
         } catch (error: Exception) {
             rejectWithError(promise, error)
         }
@@ -1425,29 +1465,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             )
         }
     }
-
-    private fun rowMetadataJson(value: RowMetadataInspection): JSONObject = JSONObject().apply {
-        put("table_name", value.tableName)
-        put("record_id", value.recordID)
-        put("server_version", value.serverVersion)
-        put("row_checksum", value.rowChecksum ?: JSONObject.NULL)
-    }
-
-    private fun rebuildReceiptJson(value: RebuildReceiptInspection): JSONObject =
-        JSONObject().apply {
-            put("rebuild_id_fingerprint", value.rebuildIDFingerprint)
-            put("page_count", value.pageCount)
-            put("returned_record_count", value.returnedRecordCount)
-            put("request_chain_expected", JSONArray(value.requestChainExpected))
-            put("request_chain_observed", JSONArray(value.requestChainObserved))
-            put("record_identities_hex", JSONArray(value.recordIdentitiesHex))
-            put("received_row_checksums", JSONArray(value.receivedRowChecksums))
-            put("computed_row_checksums", JSONArray(value.computedRowChecksums))
-            put("computed_scope_checksum", value.computedScopeChecksum ?: JSONObject.NULL)
-            put("final_scope_checksum", value.finalScopeChecksum ?: JSONObject.NULL)
-            put("stored_scope_checksum", value.storedScopeChecksum ?: JSONObject.NULL)
-            put("local_scope_checksum", value.localScopeChecksum ?: JSONObject.NULL)
-        }
 
     private fun parseStatements(statements: ReadableArray): List<SQLStatement> =
         (0 until statements.size()).map { i ->

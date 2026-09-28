@@ -549,15 +549,15 @@ export class PublicConformanceRunner {
         case 'durable-proof': {
           const captured = await state();
           const identity = durableProofIdentity(parameters.durable_proof_identity, captured.clientState.scopeRows);
-          if (captured.rowMetadata === null || captured.rebuildReceipts === null) {
+          // The snapshot bounds row metadata at 512 records, so the proof reads its
+          // identity directly, as it did before the snapshot existed.
+          try {
+            capture.durable_proof = normalizeDurableProof(
+              await inspection.durableState(identity.tableName, identity.recordID)
+            );
+          } catch {
             throw new ConformanceCommandError('capture_inspection_failed');
           }
-          capture.durable_proof = normalizeDurableProof({
-            row_metadata: captured.rowMetadata.find(
-              (row) => row.table_name === identity.tableName && row.record_id === identity.recordID
-            ) ?? null,
-            rebuild_receipts: captured.rebuildReceipts,
-          });
           break;
         }
         case 'provenance':

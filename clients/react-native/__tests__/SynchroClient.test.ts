@@ -27,8 +27,6 @@ function snapshotResult(clientState: Record<string, unknown>, details: Record<st
       client_state: clientState,
       retained_mutations: [],
       rejected_mutations: [],
-      row_metadata: [],
-      rebuild_receipts: [],
       ...details,
     }),
     applicationRows: [],
@@ -744,18 +742,10 @@ describe('SynchroClient', () => {
         status: 'pending',
         sourceKind: 'legacy_import',
       };
-      const metadata = {
-        table_name: 'orders',
-        record_id: 'r1',
-        server_version: 'server-v1',
-        row_checksum: null,
-      };
       mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce({
         ...snapshotResult(clientState, {
           retained_mutations: [legacy],
           rejected_mutations: null,
-          row_metadata: [metadata],
-          rebuild_receipts: null,
         }),
         applicationRows: [{ id: 'r1', name: 'first' }],
       });
@@ -790,8 +780,6 @@ describe('SynchroClient', () => {
         },
         retainedMutations: [legacy],
         rejectedMutations: null,
-        rowMetadata: [metadata],
-        rebuildReceipts: null,
         applicationRows: [{ id: 'r1', name: 'first' }],
       });
       await client.close();
@@ -800,8 +788,7 @@ describe('SynchroClient', () => {
     it.each([
       ['retained_mutations', {}],
       ['rejected_mutations', [{}]],
-      ['row_metadata', [{ table_name: 'orders' }]],
-      ['rebuild_receipts', [{}]],
+      ['client_state', null],
     ])('rejects an invalid snapshot %s member', async (member, value) => {
       mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
         schema: null,

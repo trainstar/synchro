@@ -261,11 +261,11 @@ class SynchroModuleTransactionTest {
         assertEquals("first", rows.getMap(0)!!.getString("name"))
         val inspection = JSONObject(result.getString("inspection")!!)
         assertEquals(
-            setOf("client_state", "retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts"),
+            setOf("client_state", "retained_mutations", "rejected_mutations"),
             inspection.keys().asSequence().toSet(),
         )
-        // bridge_items is a local table, so the ledger and server metadata stay empty.
-        for (member in listOf("retained_mutations", "rejected_mutations", "row_metadata", "rebuild_receipts")) {
+        // bridge_items is a local table, so the mutation ledger stays empty.
+        for (member in listOf("retained_mutations", "rejected_mutations")) {
             assertEquals(member, 0, inspection.getJSONArray(member).length())
         }
         val clientState = inspection.getJSONObject("client_state")
