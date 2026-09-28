@@ -27,12 +27,23 @@ private struct PackagedSmokeConfig: Decodable {
     }
 }
 
+private struct PackagedSmokeObserved: Encodable {
+    let customerName: String
+    let shipAddress: String
+
+    enum CodingKeys: String, CodingKey {
+        case customerName = "customer_name"
+        case shipAddress = "ship_address"
+    }
+}
+
 private struct PackagedSmokePhaseResult: Encodable {
     let schemaVersion = 1
     let phase: String
     let status = "passed"
     let pid: Int32
     let pendingChangeCount: Int
+    let observed: PackagedSmokeObserved
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -40,6 +51,7 @@ private struct PackagedSmokePhaseResult: Encodable {
         case status
         case pid
         case pendingChangeCount = "pending_change_count"
+        case observed
     }
 }
 
@@ -208,7 +220,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             guard pending == 1 else {
                 throw CocoaError(.fileWriteUnknown)
             }
-            try writePhaseResult(phase: smoke.phase, pendingCount: pending, documents: documents)
+            try writePhaseResult(
+                phase: smoke.phase,
+                pendingCount: pending,
+                observed: try observe(client, smoke),
+                documents: documents
+            )
             return
         }
 
@@ -223,27 +240,60 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         try await runAndWaitForScheduledRetry(client) {
             try await client.start()
         }
-        try await runAndWaitForScheduledRetry(client) {
-            try await client.syncNow()
-        }
-        let pendingAfterResume = try client.pendingChangeCount()
-        guard pendingAfterResume == 0 else {
-            throw CocoaError(.fileWriteUnknown)
+        // The harness authors a remote customer name while this process is dead.
+        // Only ordinary synchronization can deliver it to the local query path.
+        let deadline = Date().addingTimeInterval(90)
+        var pendingAfterResume = try client.pendingChangeCount()
+        var observed = try observe(client, smoke)
+        while pendingAfterResume != 0 || observed.customerName == "Packaged Consumer" {
+            guard Date() < deadline else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            try await runAndWaitForScheduledRetry(client) {
+                try await client.syncNow()
+            }
+            pendingAfterResume = try client.pendingChangeCount()
+            observed = try observe(client, smoke)
+            if pendingAfterResume != 0 || observed.customerName == "Packaged Consumer" {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
         }
         await client.stop()
         try await client.close()
         try writePhaseResult(
             phase: smoke.phase,
             pendingCount: pendingAfterResume,
+            observed: observed,
             documents: documents
         )
     }
 
-    private func writePhaseResult(phase: String, pendingCount: Int, documents: URL) throws {
+    private func observe(_ client: SynchroClient, _ smoke: PackagedSmokeConfig) throws -> PackagedSmokeObserved {
+        guard let customerName = try client.queryOne(
+            "SELECT name FROM customers WHERE id = ?",
+            params: [smoke.customerID]
+        )?["name"] as? String,
+            let shipAddress = try client.queryOne(
+                "SELECT ship_address FROM orders WHERE id = ?",
+                params: [smoke.orderID]
+            )?["ship_address"] as? String
+        else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return PackagedSmokeObserved(customerName: customerName, shipAddress: shipAddress)
+    }
+
+    private func writePhaseResult(
+        phase: String,
+        pendingCount: Int,
+        observed: PackagedSmokeObserved,
+        documents: URL
+    ) throws {
         let result = PackagedSmokePhaseResult(
             phase: phase,
             pid: ProcessInfo.processInfo.processIdentifier,
-            pendingChangeCount: pendingCount
+            pendingChangeCount: pendingCount,
+            observed: observed
         )
         let destination = documents.appendingPathComponent("\(phase)-result.json")
         try JSONEncoder().encode(result).write(to: destination, options: .atomic)

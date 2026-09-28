@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -347,4 +349,157 @@ func waitForReinstalledWorker(
 	}
 	t.Fatalf("reinstalled worker did not bind a fresh active slot: %#v, %v; %s", observation, err, harness.FailureDiagnostics())
 	return blackbox.ExtensionReinstallObservation{}
+}
+
+// TestRealWorkerStartupRetainsUnownedConfiguredSlot proves that an unbound worker
+// never drops an existing slot with the configured name. Only the runtime binding
+// is ownership evidence, and a fresh installation has no binding.
+func TestRealWorkerStartupRetainsUnownedConfiguredSlot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	slot := harness.Names().ReplicationSlot
+	admin := openIssue49Admin(t, ctx, harness)
+	priorPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
+	if err != nil {
+		t.Fatalf("observe worker before cold reinstall: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'off'"); err != nil {
+		t.Fatalf("disable worker for cold reinstall: %v", err)
+	}
+	if err := admin.Close(); err != nil {
+		t.Fatalf("close administrator connection before worker detachment: %v", err)
+	}
+	if err := harness.RestartPostgres(ctx); err != nil {
+		t.Fatalf("restart isolated PostgreSQL without worker: %v", err)
+	}
+	admin = openIssue49Admin(t, ctx, harness)
+	// The runtime binding proves that the harness worker owns this slot.
+	if _, err := admin.ExecContext(ctx, `
+		SELECT pg_catalog.pg_drop_replication_slot(runtime.active_slot_name)
+		FROM synchro.sync_runtime_state runtime
+		WHERE runtime.singleton AND runtime.active_slot_name = $1`, slot); err != nil {
+		t.Fatalf("drop owned prior slot: %v", err)
+	}
+	tx, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin cold reinstall: %v", err)
+	}
+	defer tx.Rollback()
+	publication := pgx.Identifier{harness.Names().Publication}.Sanitize()
+	if _, err := tx.ExecContext(ctx,
+		"DROP PUBLICATION "+publication+"; DROP EXTENSION synchro_pg CASCADE; CREATE EXTENSION synchro_pg; CREATE PUBLICATION "+publication,
+	); err != nil {
+		t.Fatalf("replace extension and publication atomically: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit cold reinstall: %v", err)
+	}
+	if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
+		t.Fatalf("register relations before slot creation: %v", err)
+	}
+
+	// Another consumer owns this slot. Its retained position must survive worker startup.
+	type slotState struct {
+		plugin, database, restartLSN, confirmedLSN string
+		active, temporary                          bool
+	}
+	readSlot := func() (slotState, bool) {
+		var state slotState
+		err := admin.QueryRowContext(ctx, `
+			SELECT plugin, database, restart_lsn::text, confirmed_flush_lsn::text, active, temporary
+			FROM pg_catalog.pg_replication_slots WHERE slot_name = $1`, slot,
+		).Scan(&state.plugin, &state.database, &state.restartLSN, &state.confirmedLSN, &state.active, &state.temporary)
+		if errors.Is(err, sql.ErrNoRows) {
+			return slotState{}, false
+		}
+		if err != nil {
+			t.Fatalf("observe configured slot: %v", err)
+		}
+		return state, true
+	}
+	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_create_logical_replication_slot($1, 'pgoutput')", slot); err != nil {
+		t.Fatalf("create unrelated consumer slot: %v", err)
+	}
+	created, _ := readSlot()
+	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_logical_emit_message(true, 'unrelated_consumer', 'progress')"); err != nil {
+		t.Fatalf("write unrelated consumer progress: %v", err)
+	}
+	var advancedLSN string
+	if err := admin.QueryRowContext(ctx,
+		"SELECT end_lsn::text FROM pg_catalog.pg_replication_slot_advance($1, pg_catalog.pg_current_wal_lsn())", slot,
+	).Scan(&advancedLSN); err != nil {
+		t.Fatalf("advance unrelated consumer slot: %v", err)
+	}
+	foreign, present := readSlot()
+	if !present || foreign.confirmedLSN != advancedLSN || foreign.confirmedLSN == created.confirmedLSN ||
+		foreign.plugin != "pgoutput" || foreign.active || foreign.temporary {
+		t.Fatalf("unrelated consumer slot setup is invalid: present=%t created=%#v state=%#v advanced=%s", present, created, foreign, advancedLSN)
+	}
+
+	if _, err := admin.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'on'"); err != nil {
+		t.Fatalf("enable worker: %v", err)
+	}
+	if err := admin.Close(); err != nil {
+		t.Fatalf("close administrator connection before worker startup: %v", err)
+	}
+	if err := harness.RestartPostgres(ctx); err != nil {
+		t.Fatalf("restart isolated PostgreSQL with worker: %v", err)
+	}
+	admin = openIssue49Admin(t, ctx, harness)
+
+	// A worker exhausts its 30-second preparation budget before PostgreSQL restarts it.
+	// A second worker process proves that one complete startup attempt refused the slot.
+	workerPIDs := map[int]bool{}
+	deadline := time.Now().Add(120 * time.Second)
+	for len(workerPIDs) < 2 && time.Now().Before(deadline) {
+		rows, err := admin.QueryContext(ctx, `
+			SELECT pid FROM pg_catalog.pg_stat_activity
+			WHERE datname = current_database() AND backend_type = 'synchro WAL consumer'`)
+		if err != nil {
+			t.Fatalf("observe worker processes: %v", err)
+		}
+		for rows.Next() {
+			var pid int
+			if err := rows.Scan(&pid); err != nil {
+				t.Fatalf("scan worker process: %v", err)
+			}
+			if pid != priorPID {
+				workerPIDs[pid] = true
+			}
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("read worker processes: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var unbound bool
+	if err := admin.QueryRowContext(ctx, `
+		SELECT runtime.active_slot_name IS NULL AND progress.generation_start_lsn IS NULL
+		FROM synchro.sync_runtime_state runtime
+		JOIN synchro.sync_wal_progress progress ON progress.singleton
+		WHERE runtime.singleton`).Scan(&unbound); err != nil {
+		t.Fatalf("observe worker binding: %v", err)
+	}
+	retained, present := readSlot()
+	t.Run("assertion", func(t *testing.T) {
+		if !present || retained != foreign {
+			t.Fatalf("worker startup changed the unrelated consumer slot: present=%t before=%#v after=%#v", present, foreign, retained)
+		}
+		if !unbound {
+			t.Fatal("worker bound a slot that it does not own")
+		}
+		if len(workerPIDs) < 2 {
+			t.Fatalf("worker did not complete one refused startup attempt: processes=%d", len(workerPIDs))
+		}
+	})
+
+	// Explicit operator removal is the recovery path. The worker then creates and binds a fresh slot.
+	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", slot); err != nil {
+		t.Fatalf("drop unrelated consumer slot as the operator: %v", err)
+	}
+	recovered := waitForReinstalledWorker(t, ctx, harness, blackbox.ExtensionReinstallResult{PriorWorkerPID: priorPID, ReinstallLSN: advancedLSN}, 1)
+	if recovered.PendingRegistryGenerationCount != 0 {
+		t.Fatalf("worker did not activate registrations after operator recovery: %#v", recovered)
+	}
 }

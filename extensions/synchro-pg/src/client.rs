@@ -117,8 +117,8 @@ pub(crate) fn load_client_connect_state(
         })
     } else {
         Err(protocol_error_response(
-            ProtocolErrorCode::InvalidRequest,
-            "client is not registered",
+            ProtocolErrorCode::AuthRequired,
+            "authentication is required",
             false,
         ))
     }

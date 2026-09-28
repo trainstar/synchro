@@ -178,11 +178,15 @@ The operation presence matrix is fixed:
 
 | Operation | `base_version` | `columns` | `client_version` |
 | --- | --- | --- | --- |
-| `insert` | absent | nonempty authored writable fields | required |
+| `insert` | absent | authored writable fields, possibly empty | required |
 | `update` | required opaque token | nonempty authored writable patch | required |
 | `delete` | required opaque token | absent | required |
 
-The client rejects an empty patch, an unknown operation, a missing required
+An insert that authors no writable field is a key-only create with empty
+`columns`. The client captures it only when the insert has its own capture
+context, because an insert without that context has unknown authored fields.
+
+The client rejects an empty update patch, an unknown operation, a missing required
 value, a present forbidden value, or a duplicate mutation ID within one batch
 before sending it. The server remains authoritative for schema, policy, value,
 and row state validation.

@@ -107,7 +107,7 @@ func TestNewRetentionReconnectCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	defer upstream.Close()
 
 	coordinator, err := NewRetentionReconnectCoordinator(RetentionReconnectCoordinatorConfig{
-		Scenario: loadRetentionReconnectAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadRetentionReconnectAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create retention-reconnect coordinator: %v", err)
@@ -185,18 +185,69 @@ func TestRetentionReconnectSealedRetriesRetainExactBytes(t *testing.T) {
 }
 
 func TestRetentionReconnectQueueAllowsInspectableRejection(t *testing.T) {
-	coordinator := &RetentionReconnectCoordinator{
+	coordinator := retentionReconnectQueueCoordinator(t)
+	capture := retentionReconnectQueueCapture(`"sealed"`, `"queued"`, `"1970-01-01T00:00:00.000000Z"`)
+	if err := coordinator.validateQueue(capture); err != nil {
+		t.Fatalf("validate retention-reconnect queue with an inspectable rejection: %v", err)
+	}
+}
+
+// The renewed queue can change delivery status only. Every authored field of
+// the retained mutation must survive generation renewal.
+func TestRetentionReconnectQueuePreservesAuthoredIntentAcrossRenewal(t *testing.T) {
+	coordinator := retentionReconnectQueueCoordinator(t)
+	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"sealed"`, `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
+		t.Fatalf("validate initial retention-reconnect queue: %v", err)
+	}
+	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"pending"`, `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
+		t.Fatalf("renewed status change was rejected: %v", err)
+	}
+	for name, capture := range map[string]finalCapture{
+		"authored value": retentionReconnectQueueCapture(`"sealed"`, `"changed"`, `"1970-01-01T00:00:00.000000Z"`),
+		"client version": retentionReconnectQueueCapture(`"sealed"`, `"queued"`, `"1970-01-01T00:00:00.000001Z"`),
+	} {
+		if err := coordinator.validateQueue(capture); err == nil {
+			t.Fatalf("renewal accepted a changed retained %s", name)
+		}
+	}
+	if err := retentionReconnectQueueCoordinator(t).validateQueue(retentionReconnectQueueCapture(`"sealed"`, `"other"`, `"1970-01-01T00:00:00.000000Z"`)); err == nil {
+		t.Fatal("initial queue accepted a retained mutation without the authored value")
+	}
+}
+
+func TestRetentionReconnectFloorEqualityRequiresTheObservedFloor(t *testing.T) {
+	if err := requireFloorEqualCheckpoint("effect|16/0|3|0", "effect|16/0|3|0"); err != nil {
+		t.Fatalf("equal floor and checkpoint were rejected: %v", err)
+	}
+	for _, checkpoint := range []string{"effect|16/0|2|0", "transaction_end|16/0||", ""} {
+		if err := requireFloorEqualCheckpoint("effect|16/0|3|0", checkpoint); err == nil {
+			t.Fatalf("checkpoint %q was accepted as the retention floor", checkpoint)
+		}
+	}
+}
+
+func retentionReconnectQueueCoordinator(t *testing.T) *RetentionReconnectCoordinator {
+	t.Helper()
+	scenario := loadRetentionReconnectAuthoredScenario(t)
+	steps := make(map[scenarios.StepID]scenarios.Step, len(scenario.Steps))
+	for _, step := range scenario.Steps {
+		steps[step.ID] = step
+	}
+	return &RetentionReconnectCoordinator{
+		config:            RetentionReconnectCoordinatorConfig{Scenario: scenario},
+		steps:             steps,
 		sealedGeneration:  1,
 		sealedBatchID:     "batch-runtime",
 		sealedMutationIDs: []string{"mutation-runtime"},
 	}
-	capture := finalCapture{
+}
+
+func retentionReconnectQueueCapture(status, value, clientVersion string) finalCapture {
+	return finalCapture{
 		ClientState: json.RawMessage(`{"schema":{"version":1,"hash":"` + strings.Repeat("a", 64) + `"},"provenanceMaintenanceWorkCursor":"cursor","mutationLedgerCount":1}`),
-		Pending:     json.RawMessage(`[{"mutationID":"mutation-runtime","status":"sealed"}]`),
-		Rejected:    json.RawMessage(`[{"mutationID":"mutation-runtime","status":"rejected_terminal","code":"policy_rejected"}]`),
-	}
-	if err := coordinator.validateQueue(capture); err != nil {
-		t.Fatalf("validate retention-reconnect queue with an inspectable rejection: %v", err)
+		Pending: json.RawMessage(`[{"mutationID":"mutation-runtime","status":` + status + `,"clientVersion":` + clientVersion +
+			`,"authoredFields":[{"fieldID":"value","logicalType":"string","value":` + value + `}]}]`),
+		Rejected: json.RawMessage(`[{"mutationID":"mutation-runtime","status":"rejected_terminal","code":"policy_rejected"}]`),
 	}
 }
 
@@ -442,6 +493,11 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 	if err := coordinator.validateRestartCapture(changed); err == nil {
 		t.Fatal("durable restart accepted a changed identity cursor")
 	}
+	changed = restarted
+	changed.Pending = json.RawMessage(`[{"mutationID":"lost-after-restart"}]`)
+	if err := coordinator.validateRestartCapture(changed); err == nil {
+		t.Fatal("durable restart accepted a changed retained queue")
+	}
 	trace.Observations[1].CursorFingerprints = []string{hashFingerprint(floorCursor)}
 	if err := coordinator.validateFloorResumeCapture(retentionReconnectFloorCapture(t, resumedCursor, resumedIdentityCursor, &trace)); err == nil {
 		t.Fatal("floor resume omitted the identity cursor")
@@ -471,6 +527,8 @@ func retentionReconnectFloorCapture(t *testing.T, cursor, identityCursor string,
 	}
 	return finalCapture{
 		ClientState: state,
+		Pending:     json.RawMessage(`[]`),
+		Rejected:    json.RawMessage(`[]`),
 		Status:      json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`),
 		Trace:       traceRaw,
 	}

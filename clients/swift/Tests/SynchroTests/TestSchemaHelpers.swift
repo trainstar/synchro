@@ -114,18 +114,14 @@ extension SchemaManifest {
 extension LocalSchemaColumn {
     init(
         name: String,
-        dbType: String = "text",
         logicalType: String = "string",
         nullable: Bool = true,
         precision: Int? = nil,
         scale: Int? = nil,
         defaultSQL: String? = nil,
-        defaultKind: String = "none",
         sqliteDefaultSQL: String? = nil,
         isPrimaryKey: Bool = false
     ) {
-        let _ = dbType
-        let _ = defaultKind
         self.init(
             fieldID: name,
             name: name,
@@ -143,20 +139,12 @@ extension LocalSchemaColumn {
 extension LocalSchemaTable {
     init(
         tableName: String,
-        pushPolicy: String = "owner_only",
-        parentTable: String? = nil,
-        parentFKCol: String? = nil,
-        dependencies: [String]? = nil,
         updatedAtColumn: String,
         deletedAtColumn: String,
         composition: CompositionClass? = .singleScope,
         primaryKey: [String],
         columns: [LocalSchemaColumn]
     ) {
-        let _ = pushPolicy
-        let _ = parentTable
-        let _ = parentFKCol
-        let _ = dependencies
         self.init(
             tableID: tableName,
             relationID: "relation-\(tableName)",

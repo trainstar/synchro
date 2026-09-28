@@ -75,10 +75,11 @@ Do not continue when a required control, credential, or runtime is unavailable.
 13. Confirm Candidate CI passed for the exact `dev` commit.
 14. Promote `dev` into `master` through a checked pull request with a merge commit.
 15. Record the exact merged `master` SHA.
-16. Confirm Candidate CI passed for that exact `master` commit.
-17. Confirm that exactly one `vX.Y.Z` milestone exists.
-18. Dispatch Release from the `master` head.
-19. Merge `master` back into `dev` through a pull request with a merge commit.
+16. Dispatch Release from the `master` head.
+17. Merge `master` back into `dev` through a pull request with a merge commit.
+
+The Release workflow rejects a `master` commit without a successful Candidate run.
+It also rejects a version without exactly one matching milestone.
 
 The update script contains the reviewed statements that change the `<current>` extension objects into the `X.Y.Z` extension objects.
 The script ends with this statement:
@@ -172,11 +173,22 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 | Gate | Outcome |
 | --- | --- |
 | Candidate | Required source CI passes for the exact commit. |
-| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on all seven required support cells. |
+| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on every required support cell. |
 | Publish | One approval authorizes dependency-ordered publication. |
 | Public | Public bytes match the sealed payloads, and clean consumers resolve and build from public coordinates. |
 
 Candidate CI owns source correctness. Release does not run completed source suites again.
+
+Each required gate is one Make target with a declared test selection.
+A required target rejects a changed selector such as `GO_TEST_ARGS`, `GO_TEST_PKGS`, `SWIFT_TEST_ARGS`, `GRADLE_TEST_ARGS`, `DETOX_ARGS`, or `BLACKBOX_TEST_COUNT`.
+`PARTIAL=1` permits a selector for diagnosis. A `PARTIAL=1` result is not gate evidence.
+The structured result parser rejects failed, skipped, and zero-test results.
+Device gates require exactly one `KOTLIN_ANDROID_SERIAL` and pass it to Gradle as `ANDROID_SERIAL`.
+
+The `source quality` job runs on every pull request and push.
+It runs contract, documentation, conformance, release-tooling, lint, and unit gates.
+The candidate jobs run on each `dev` and `master` push.
+They run the server, Swift, Kotlin, React Native, and source-consumer gates.
 
 Candidate CI runs the platform suites one time for each source tree.
 A push reuses the passed Candidate of a parent commit that has the identical tree.
@@ -186,7 +198,7 @@ A hotfix changes the tree and runs every platform suite.
 Source quality, CodeQL, and the dependency scan run on every push.
 These jobs are shorter, and security results depend on current advisory data.
 
-Each React Native Candidate job runs its smoke suite and all 14 authored journeys.
+Each React Native Candidate job runs its smoke suite and every authored journey.
 Each journey uses a fresh local PostgreSQL instance.
 The corpus rejects missing scenario runners before execution.
 
@@ -226,19 +238,18 @@ The manifest records candidate environment resolution in `release-manifest.json`
 
 1. Verify the selected `master` commit and Candidate CI result.
 2. Build, seal, hash, and verify each distribution once.
-3. Run clean package installation and lifecycle checks.
-4. Complete every Package-gate cell.
-5. Wait for the protected `release` environment approval.
-6. Recheck the approved candidate and sealed identity.
-7. Attest the sealed files with the exact sealed release manifest.
-8. Verify the Central credentials and the npm trusted publisher for each unpublished registry.
-9. Create immutable `v<version>` and `api/go/v<version>` tags.
-10. Publish GitHub assets without marking them latest.
-11. Verify source and asset access.
-12. Publish Maven and verify public consumption.
-13. Publish npm directly under `latest` through trusted OIDC.
-14. Verify the exact public npm bytes, provenance, and clean React Native builds.
-15. Mark GitHub latest after all public checks pass.
+3. Run the clean package installation and lifecycle check on every required support cell.
+4. Wait for the protected `release` environment approval.
+5. Recheck the approved candidate and sealed identity.
+6. Attest the sealed files with the exact sealed release manifest.
+7. Verify the Central credentials and the npm trusted publisher for each unpublished registry.
+8. Create immutable `v<version>` and `api/go/v<version>` tags.
+9. Publish GitHub assets without marking them latest.
+10. Verify source and asset access.
+11. Publish Maven and verify public consumption.
+12. Publish npm directly under `latest` through trusted OIDC.
+13. Verify the exact public npm bytes, provenance, and clean React Native builds.
+14. Mark GitHub latest after all public checks pass.
 
 ## Success Evidence
 
@@ -246,7 +257,7 @@ Record repository, source SHA, workflow run and attempt, commands, resolved envi
 
 Reject missing jobs, skipped work, failed work, stale results, incomplete records, and unexplained retry-only passes.
 
-Correctness checks currently enforce contract, integration, scenario, fault, zero-skip, seeded-stateful, and package-smoke behavior.
+Correctness checks currently enforce contract, integration, scenario, fault, declared-selection, zero-skip, seeded-stateful, and package-smoke behavior.
 
 Synchro has no numeric performance guarantee. Performance budgets remain deferred.
 

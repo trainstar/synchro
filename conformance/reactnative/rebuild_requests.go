@@ -61,7 +61,6 @@ type RebuildRequestsCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // RebuildRequestsCoordinatorResult contains validated server and native identity evidence.
@@ -355,9 +354,6 @@ func NewRebuildRequestsCoordinator(config RebuildRequestsCoordinatorConfig) (*Re
 	}
 	if config.Platform != "ios" && config.Platform != "android" {
 		return nil, errors.New("React Native rebuild-requests coordinator platform must be ios or android")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native rebuild-requests coordinator auth token is required")

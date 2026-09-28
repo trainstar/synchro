@@ -1145,6 +1145,36 @@ func rebuildAttemptFactCount(attempts []rebuildAttempt, receipts []rebuildReceip
 	return uint64(len(identities)), nil
 }
 
+// validateFreshRebuildCompletion checks every receipt predicate of one fresh
+// rebuild workload and binds each scope's completion event to one receipt.
+func validateFreshRebuildCompletion(proof durableProof, state inspectedClientState, events json.RawMessage, wantPages, wantRecords uint64) error {
+	var pages, records uint64
+	receipts := make(map[string]struct{}, len(proof.RebuildReceiptProofs))
+	for _, receipt := range proof.RebuildReceiptProofs {
+		if receipt.PageCount == 0 || receipt.PageCount > state.RebuildReceiptCount-pages ||
+			!receipt.RequestChainValid || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid ||
+			!receipt.ScopeChecksumValid || !receipt.FinalChecksumMatches {
+			return errors.New("rebuild receipt proof detail is invalid")
+		}
+		pages += receipt.PageCount
+		records += receipt.ReturnedRecordCount
+		receipts[receipt.RebuildIDFingerprint] = struct{}{}
+	}
+	if pages != state.RebuildReceiptCount || pages != wantPages || records != wantRecords {
+		return fmt.Errorf("rebuild receipt pages=%d state=%d want=%d records=%d want=%d", pages, state.RebuildReceiptCount, wantPages, records, wantRecords)
+	}
+	for _, scope := range state.ScopeStates {
+		rebuildID, err := completedRebuildID(events, scope.ScopeID)
+		if err != nil {
+			return err
+		}
+		if _, found := receipts[hashFingerprint(rebuildID)]; !found {
+			return fmt.Errorf("rebuild completion for scope %q has no receipt", scope.ScopeID)
+		}
+	}
+	return nil
+}
+
 func validLowerHexDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value

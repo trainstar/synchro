@@ -74,7 +74,9 @@ Smoke result observers use the existing Jest test budget.
 Native waits, readiness checks, and controller handoffs keep their own bounds.
 
 Use `make test-swift-integration` to run XCTest without repeating the scenario corpus.
-`SWIFT_TEST_ARGS` selects diagnostic XCTest cases in `test-swift-unit` and `test-swift-integration`. Required CI leaves it empty.
+Each required Make gate runs its declared selection and rejects a changed selector.
+`PARTIAL=1` permits `GO_TEST_ARGS`, `GO_TEST_PKGS`, `SWIFT_TEST_ARGS`, `GRADLE_TEST_ARGS`, `DETOX_ARGS`, or `BLACKBOX_TEST_COUNT`.
+A `PARTIAL=1` run is diagnostic output, not required-gate evidence.
 `test-swift-unit`, `test-swift-integration`, and `test-kotlin-unit` parse structured results even when their runners fail.
 
 The Swift retained-schema retry control measures actual SQLite reads across mixed-table mutations.
@@ -161,7 +163,9 @@ Fixture presence, decoder tests, and implementation-derived expected values are 
 
 The specification, authored requirements, support matrix, and scenarios define expected behavior. They do not report an outcome.
 
-Use structured results for required gates. Skipped, filtered, and zero-test results fail the gate.
+Required gates run their declared Make selection and use structured results.
+The result parser rejects failed, skipped, and zero-test results.
+It cannot detect a nonempty subset, so each required Make gate rejects a changed selector.
 
 Soak wire records preserve the original request and response from each exchange.
 Cursor issuance and later acknowledgment use separate exchange identities.
@@ -171,7 +175,13 @@ The real extension-reinstall test covers registrations committed before a replac
 Its missing-replay control acknowledges later WAL while registry activation remains blocked.
 The same cluster then proves cold reinstall recovery, readiness, and source-to-client delivery across repeated reinstalls.
 This adds the real slot-boundary proof that SQL-only activation-message checks do not establish.
-The live server soak executes response loss on push or pull and WAL-worker replay interruption.
+The live server soak is bounded seeded stress. `SOAK_OPERATIONS` sets its explicit operation budget, and each run reports its measured elapsed time.
+It executes response loss on push or pull and WAL-worker replay interruption.
+Every operation ends at a quiescent point. The soak then reads the isolated source tables directly and compares them with an independent model of the authored rows.
+It also compares the client's complete scope membership and held values with those source rows. Expected membership comes from each table's business rule, not from Synchro output.
+Each run writes its journal to a new directory under `SOAK_ARTIFACT_DIR`. A failed run also keeps its original wire bodies there before cleanup.
+The journal holds the seed, configuration, planned operations, and the terminal failure with its violations.
+Replay a retained journal in a new cluster with `make soak-replay SOAK_REPLAY_JOURNAL=<journal>`. Replay passes only when it reproduces the retained outcome exactly.
 Its in-memory client is reference state, not native process-recovery evidence.
 Native recovery remains covered by the real native scenario gates.
 

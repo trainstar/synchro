@@ -189,6 +189,10 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         if (oldVersion < 14) {
             createPendingProtocolIdentityIndex(db)
         }
+        if (oldVersion < 15) {
+            // Earlier INSERT capture aborts a key-only insert. It now captures empty columns. D-01.
+            migrateCaptureTriggers(db)
+        }
     }
 
     private fun createScopeTables(db: SQLiteDatabase) {
@@ -811,7 +815,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
         @JvmSynthetic
         internal fun open(context: Context, dbPath: String): SynchroDatabase = SynchroDatabase(context, dbPath)
 
-        internal const val DATABASE_VERSION: Int = 14
+        internal const val DATABASE_VERSION: Int = 15
 
         /** SQLite creates the UUID in the same application-write transaction as capture. */
         const val SQLITE_UUID: String =

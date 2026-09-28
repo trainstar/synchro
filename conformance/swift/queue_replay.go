@@ -250,7 +250,7 @@ func swiftQueueSuccessorEvidence(targets []scenarios.NativeCRUDTarget, before, r
 			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("Swift queue successor changed-intent count for table %q is %d", target.TableID, len(successors))
 		}
 		evidence.Rows = append(evidence.Rows, scenarios.NativeQueueSuccessorRow{
-			BeforeRestart: swiftNativeQueuedMutation(original), AfterRestart: swiftNativeQueuedMutation(restartedMutation),
+			Target: target, BeforeRestart: swiftNativeQueuedMutation(original), AfterRestart: swiftNativeQueuedMutation(restartedMutation),
 			OriginalAfterChange: swiftNativeQueuedMutation(changedOriginal), Successor: swiftNativeQueuedMutation(successors[0]),
 		})
 	}

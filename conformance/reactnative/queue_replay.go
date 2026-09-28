@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,7 +151,6 @@ type QueueReplayCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -171,19 +171,27 @@ type QueueReplayCoordinator struct {
 	clientID   string
 	clientKey  string
 
-	mu           sync.Mutex
-	proxyMu      sync.Mutex
-	prepared     bool
-	closed       bool
-	completed    bool
-	failed       error
-	stage        queueReplayStage
-	nextSeq      uint64
-	process      *actionProcessIdentity
-	stepIndex    int
-	localIndex   int
-	trace        []transportObservation
-	finalResult  *finalCapture
+	// closing ends every barrier wait. An exchange holds mu while it waits, so
+	// Close must end those waits before it can acquire mu.
+	closing     chan struct{}
+	closingOnce sync.Once
+
+	mu          sync.Mutex
+	proxyMu     sync.Mutex
+	prepared    bool
+	closed      bool
+	completed   bool
+	failed      error
+	stage       queueReplayStage
+	nextSeq     uint64
+	process     *actionProcessIdentity
+	stepIndex   int
+	localIndex  int
+	trace       []transportObservation
+	finalResult *finalCapture
+	// rejections holds the runtime identity of each authored rejected write,
+	// recorded when that write is bound for execution.
+	rejections   []queueReplayRejection
 	result       QueueReplayCoordinatorResult
 	responseLoss *queueReplayResponseLoss
 	replayPull   *queueReplayTerminalPull
@@ -241,8 +249,18 @@ const (
 type queueReplayWorkload struct {
 	step     scenarios.Step
 	local    []scenarios.Operation
+	rejected scenarios.Operation
 	publish  scenarios.Operation
 	dropPush scenarios.Operation
+}
+
+// queueReplayRejection is the runtime identity and reason of one authored
+// rejected mutation.
+type queueReplayRejection struct {
+	MutationID string `json:"mutationID"`
+	TableName  string `json:"tableName"`
+	RecordID   string `json:"recordID"`
+	Code       string `json:"code"`
 }
 
 type queueReplayResponseLoss struct {
@@ -263,6 +281,8 @@ type queueReplayTerminalPull struct {
 	err        error
 }
 
+var errQueueReplayClosed = errors.New("React Native queue-replay coordinator closed")
+
 // NewQueueReplayCoordinator creates an authenticated host-loopback listener.
 func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueReplayCoordinator, error) {
 	if err := ValidateQueueReplayScenario(config.Scenario); err != nil {
@@ -274,9 +294,6 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 	identity, err := queueReplayClientIdentity(config.Scenario)
 	if err != nil {
 		return nil, err
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native queue-replay coordinator auth token is required")
@@ -320,8 +337,8 @@ func NewQueueReplayCoordinator(config QueueReplayCoordinatorConfig) (*QueueRepla
 		identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
 		successorClientKey: identity.clientID + "-successor-proof", successorClientID: identity.clientID + "-successor-proof", successorDatabase: successorDatabase,
-		nextSeq: 1,
-		server:  &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
+		nextSeq: 1, closing: make(chan struct{}),
+		server: &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
 	}
 	coordinator.server.Handler = coordinator
 	return coordinator, nil
@@ -469,6 +486,7 @@ func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	c.closingOnce.Do(func() { close(c.closing) })
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -476,7 +494,6 @@ func (c *QueueReplayCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	_ = c.releaseResponseLossPush()
 	shutdownErr := c.server.Shutdown(ctx)
 	listenErr := c.listener.Close()
 	if shutdownErr != nil {
@@ -618,7 +635,10 @@ func (c *QueueReplayCoordinator) proxyAdapter(writer http.ResponseWriter, reques
 			// cancellation while the client still reads. The hold waits for
 			// the coordinated release only, and the drop below reaches a
 			// connected client or fails silently on a gone one.
-			<-responseLoss.release
+			select {
+			case <-responseLoss.release:
+			case <-c.closing:
+			}
 			if err := c.dropProxyResponse(writer); err != nil {
 				c.recordResponseLossProxyFailure(responseLoss, err)
 			}
@@ -674,6 +694,8 @@ func (c *QueueReplayCoordinator) waitForReplayPull(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native queue-replay terminal replay pull: %w", ctx.Err())
+	case <-c.closing:
+		return errQueueReplayClosed
 	case <-barrier.served:
 	}
 	c.proxyMu.Lock()
@@ -753,6 +775,9 @@ func (c *QueueReplayCoordinator) waitForResponseLossPush(ctx context.Context) er
 	case <-ctx.Done():
 		c.recordResponseLossProxyFailure(fault, ctx.Err())
 		return fmt.Errorf("wait for React Native queue-replay response-loss push: %w", ctx.Err())
+	case <-c.closing:
+		c.recordResponseLossProxyFailure(fault, errQueueReplayClosed)
+		return errQueueReplayClosed
 	case <-fault.committed:
 	}
 	c.proxyMu.Lock()
@@ -925,7 +950,7 @@ func (c *QueueReplayCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if state.RejectedMutationCount > queueReplayMaximumRejectedDetails {
 			return fmt.Errorf("React Native queue-replay rejected mutation detail count=%d exceeds bound=%d", state.RejectedMutationCount, queueReplayMaximumRejectedDetails)
 		}
-		if err := validateRejectedMutationDetails(capture.Rejected, state.RejectedMutationCount); err != nil {
+		if err := c.validateRejectedMutationDetails(capture.Rejected); err != nil {
 			return err
 		}
 		c.finalResult.Rejected = copyRaw(capture.Rejected)
@@ -1170,6 +1195,13 @@ func (c *QueueReplayCoordinator) localCommand() (*conformanceCommand, error) {
 		if err != nil {
 			return nil, fmt.Errorf("bind React Native queue-replay local write %d for step %s: %w", c.localIndex+offset+1, workload.step.ID, err)
 		}
+		if bytes.Equal(authored.Payload, workload.rejected.Payload) {
+			rejection, err := queueReplayBoundRejection(operation)
+			if err != nil {
+				return nil, fmt.Errorf("bind React Native queue-replay rejected write for step %s: %w", workload.step.ID, err)
+			}
+			c.rejections = append(c.rejections, rejection)
+		}
 		operations = append(operations, operation)
 	}
 	return c.commandOperations("client", "execute-steps", map[string]any{"client_key": c.clientKey}, operations), nil
@@ -1386,7 +1418,10 @@ func (c *QueueReplayCoordinator) validateCapture(capture finalCapture) error {
 	if err != nil {
 		return err
 	}
-	return validateRejectedMutationDetails(capture.Rejected, state.RejectedMutationCount)
+	if state.RejectedMutationCount != uint64(len(c.rejections)) {
+		return fmt.Errorf("React Native queue-replay rejected mutation count=%d, bound rejections=%d", state.RejectedMutationCount, len(c.rejections))
+	}
+	return c.validateRejectedMutationDetails(capture.Rejected)
 }
 
 func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) (inspectedClientState, error) {
@@ -1447,12 +1482,43 @@ func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) 
 	return state, nil
 }
 
-func validateRejectedMutationDetails(raw json.RawMessage, expected uint64) error {
-	var rejected []json.RawMessage
-	if json.Unmarshal(raw, &rejected) != nil || uint64(len(rejected)) != expected {
-		return fmt.Errorf("React Native queue-replay rejected mutation detail count=%d want=%d", len(rejected), expected)
+// validateRejectedMutationDetails binds each retained rejection to one authored
+// rejected write by mutation ID, runtime row, and reason. The next schema
+// removes that write's field, so the contract reason is schema_incompatible.
+func (c *QueueReplayCoordinator) validateRejectedMutationDetails(raw json.RawMessage) error {
+	var observed []queueReplayRejection
+	if json.Unmarshal(raw, &observed) != nil || observed == nil {
+		return errors.New("React Native queue-replay rejected mutation details are invalid")
+	}
+	if len(c.rejections) != c.rejectedCount() {
+		return fmt.Errorf("React Native queue-replay bound rejections=%d want=%d", len(c.rejections), c.rejectedCount())
+	}
+	expected := append([]queueReplayRejection(nil), c.rejections...)
+	sortRejections := func(values []queueReplayRejection) {
+		sort.Slice(values, func(left, right int) bool { return values[left].MutationID < values[right].MutationID })
+	}
+	sortRejections(expected)
+	sortRejections(observed)
+	if !slices.Equal(observed, expected) {
+		return fmt.Errorf("React Native queue-replay rejected mutations %+v want %+v", observed, expected)
 	}
 	return nil
+}
+
+func queueReplayBoundRejection(operation scenarios.Operation) (queueReplayRejection, error) {
+	var payload struct {
+		MutationID string            `json:"mutation_id"`
+		TableID    string            `json:"table_id"`
+		PK         map[string]string `json:"pk"`
+	}
+	if json.Unmarshal(operation.Payload, &payload) != nil || payload.MutationID == "" || payload.TableID == "" || len(payload.PK) != 1 {
+		return queueReplayRejection{}, errors.New("bound rejected write identity is invalid")
+	}
+	rejection := queueReplayRejection{MutationID: payload.MutationID, TableName: payload.TableID, Code: "schema_incompatible"}
+	for _, recordID := range payload.PK {
+		rejection.RecordID = recordID
+	}
+	return rejection, nil
 }
 
 func queueReplayTerminalRejectionCodes(raw json.RawMessage) string {
@@ -1874,7 +1940,7 @@ func reactNativeQueueSuccessorEvidence(targets []scenarios.NativeCRUDTarget, bef
 			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("React Native queue successor changed-intent count for table %q is %d", target.TableID, len(successors))
 		}
 		evidence.Rows = append(evidence.Rows, scenarios.NativeQueueSuccessorRow{
-			BeforeRestart: reactNativeQueuedMutation(original), AfterRestart: reactNativeQueuedMutation(restartedMutation),
+			Target: target, BeforeRestart: reactNativeQueuedMutation(original), AfterRestart: reactNativeQueuedMutation(restartedMutation),
 			OriginalAfterChange: reactNativeQueuedMutation(changedOriginal), Successor: reactNativeQueuedMutation(successors[0]),
 		})
 	}
@@ -1926,7 +1992,7 @@ func queueReplayWorkloads(scenario scenarios.Scenario) ([]queueReplayWorkload, e
 		if err != nil {
 			return nil, err
 		}
-		workloads = append(workloads, queueReplayWorkload{step: step, local: inputs.Local, publish: inputs.Publish, dropPush: inputs.DropPush})
+		workloads = append(workloads, queueReplayWorkload{step: step, local: inputs.Local, rejected: inputs.Rejected, publish: inputs.Publish, dropPush: inputs.DropPush})
 		current = inputs.NextSchema
 	}
 	return workloads, nil

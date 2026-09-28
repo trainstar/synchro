@@ -2,6 +2,7 @@ package blackbox
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -278,6 +279,47 @@ func (executor *OperatorExecutor) ObserveDiagnosticRetentionCompaction(
 		return DiagnosticRetentionCompactionObservation{}, errors.New("retention compaction observation is invalid")
 	}
 	return observation, nil
+}
+
+// ObserveScopeFloorCheckpoint reads the retention floor of one scope and one
+// client's durable checkpoint for that scope from one statement snapshot. Each
+// position is formatted as kind|commit_lsn|event_ordinal|effect_ordinal.
+func (executor *OperatorExecutor) ObserveScopeFloorCheckpoint(ctx context.Context, userID, clientID, scopeID string) (string, string, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return "", "", errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || userID == "" || clientID == "" || scopeID == "" || len(userID) > 128 || len(clientID) > 128 || len(scopeID) > 256 {
+		return "", "", errors.New("scope floor observation input is invalid")
+	}
+	harness := executor.harness
+	database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
+	if err != nil {
+		return "", "", errors.New("open scope floor observation connection failed")
+	}
+	defer database.Close()
+	var floor, checkpoint sql.NullString
+	err = database.QueryRowContext(ctx, `
+		SELECT
+			(SELECT format('%s|%s|%s|%s', floor_position_kind,
+			        COALESCE(floor_commit_lsn::text, ''),
+			        COALESCE(floor_event_ordinal::text, ''),
+			        COALESCE(floor_effect_ordinal::text, ''))
+			 FROM synchro.sync_scope_state WHERE scope_id = $3),
+			(SELECT format('%s|%s|%s|%s', position_kind,
+			        COALESCE(commit_lsn::text, ''),
+			        COALESCE(event_ordinal::text, ''),
+			        COALESCE(effect_ordinal::text, ''))
+			 FROM synchro.sync_client_checkpoints
+			 WHERE user_id = $1 AND client_id = $2 AND bucket_id = $3)`,
+		userID, clientID, scopeID,
+	).Scan(&floor, &checkpoint)
+	if err != nil {
+		return "", "", errors.New("read scope floor observation failed")
+	}
+	if !floor.Valid || !checkpoint.Valid {
+		return "", "", errors.New("scope floor or client checkpoint is absent")
+	}
+	return floor.String, checkpoint.String, nil
 }
 
 // ObserveDiagnosticClientGeneration returns bounded state for one diagnostic client.

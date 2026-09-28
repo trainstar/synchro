@@ -247,16 +247,6 @@ class Issue49RequirementProofTests {
                 reopened.queryOne("SELECT name FROM categories WHERE id = ?", arrayOf(category.seededID))?.get("name"),
             )
 
-            val rewrittenVersionMutant = observation(afterRestart).copy(
-                baseVersion = "$authoritativeVersion-rewritten",
-            )
-            assertNotEquals(observation(beforeRestart), rewrittenVersionMutant)
-
-            val regeneratedIdentityMutant = observation(afterRestart).copy(
-                mutationID = UUID.randomUUID().toString(),
-            )
-            assertNotEquals(observation(beforeRestart), regeneratedIdentityMutant)
-
             assertThrows(Exception::class.java) {
                 reopened.query("SELECT * FROM _synchro_pending_changes")
             }
@@ -995,16 +985,12 @@ class Issue49RequirementProofTests {
                 }
             }
         }
-        val unlistedEdgeMutant = allowed.toMutableMap()
-        unlistedEdgeMutant[SyncLifecycleState.STOPPED] =
-            unlistedEdgeMutant.getValue(SyncLifecycleState.STOPPED) + SyncLifecycleState.PULLING
         forceLifecycleState(database, SyncLifecycleState.STOPPED)
         assertThrows(SynchroError.InvalidStateTransition::class.java) {
             database.writeTransaction {
                 SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.PULLING)
             }
         }
-        assertTrue(SyncLifecycleState.PULLING in unlistedEdgeMutant.getValue(SyncLifecycleState.STOPPED))
 
         forceLifecycleState(database, SyncLifecycleState.PULLING)
         database.writeTransaction {

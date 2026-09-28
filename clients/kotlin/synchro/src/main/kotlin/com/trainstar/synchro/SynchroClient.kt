@@ -755,12 +755,21 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
 
     // MARK: - Status
 
+    /**
+     * Delivers each status synchronously from engine work, in transition order.
+     * A callback must return before the application calls [start], [stop], [retry],
+     * [resetSchema], [syncNow], or [close]. A synchronous call from a callback throws
+     * [IllegalStateException] before it has an effect. Schedule the call independently,
+     * for example on another coroutine, and do not block the callback until it finishes.
+     */
     fun onStatusChange(callback: (SyncStatus) -> Unit): Cancellable =
         syncEngine.onStatusChange(callback)
 
+    /** Delivers conflicts under the synchronous callback rule of [onStatusChange]. */
     fun onConflict(callback: (ConflictEvent) -> Unit): Cancellable =
         syncEngine.onConflict(callback)
 
+    /** Delivers sync events under the synchronous callback rule of [onStatusChange]. */
     fun onSyncEvent(callback: (SyncEvent) -> Unit): Cancellable =
         syncEngine.onEvent(callback)
 

@@ -1,6 +1,7 @@
 import XCTest
 import CryptoKit
 import Foundation
+import GRDB
 #if canImport(CommonCrypto)
 import CommonCrypto
 #endif
@@ -636,6 +637,103 @@ final class IntegrationTests: XCTestCase {
         try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
             try await self.syncAndWaitForScheduledRetry(reader)
             return try self.customerNames(reader, userID: userID) == expected
+        }
+    }
+
+    /// A connect that the extension rejects must leave local durable state and
+    /// queued intent unchanged. The client contract requires a 400 response to
+    /// preserve unresolved local state. Only the blocking-failure record changes.
+    func testRejectedConnectPreservesLocalStateAndQueuedIntent() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let clientID = UUID().uuidString.lowercased()
+        let dbPath = tempDBPath()
+        let customerID = UUID().uuidString.lowercased()
+
+        let writer = try SynchroClient(config: makeConfig(userID: userID, clientID: clientID, dbPath: dbPath))
+        try await writer.start()
+        await writer.enterBackground()
+        _ = try writer.executeBatch([customerInsert(customerID: customerID, userID: userID, name: "queued before rejection")])
+        XCTAssertEqual(try writer.inspectPendingMutations().map(\.recordID), [customerID])
+        await writer.stop()
+        try await writer.close()
+        let connectedGeneration = try localMeta(dbPath, key: "client_generation")
+
+        // A scope that the server never assigned makes the extension reject connect
+        // after it has loaded the prior client state.
+        let unassignedScope = "user:\(UUID().uuidString.lowercased())"
+        try await DatabaseQueue(path: dbPath).write { db in
+            try db.execute(sql: "INSERT INTO _synchro_scopes (scope_id) VALUES (?)", arguments: [unassignedScope])
+        }
+        let beforeRejection = try localDurableState(dbPath)
+
+        let collector = TransportObservationCollector()
+        let rejected = try SynchroClient(config: makeConfig(
+            userID: userID,
+            clientID: clientID,
+            dbPath: dbPath,
+            transportObservationCollector: collector
+        ))
+        do {
+            try await rejected.start()
+            XCTFail("connect with an unassigned scope started")
+        } catch {}
+        XCTAssertEqual(
+            collector.snapshot().observations.map { "\($0.operationClass.rawValue) \($0.statusCode) \($0.errorCode ?? "none")" },
+            ["connect 400 invalid_request"]
+        )
+        let failure = try XCTUnwrap(rejected.getBlockingFailure())
+        XCTAssertEqual(failure.code, .invalidRequest)
+        await rejected.stop()
+        try await rejected.close()
+        XCTAssertEqual(try localDurableState(dbPath), beforeRejection)
+
+        try await DatabaseQueue(path: dbPath).write { db in
+            try db.execute(sql: "DELETE FROM _synchro_scopes WHERE scope_id = ?", arguments: [unassignedScope])
+        }
+        let resumed = try SynchroClient(config: makeConfig(userID: userID, clientID: clientID, dbPath: dbPath))
+        addTeardownBlock {
+            await resumed.stop()
+            try await resumed.close()
+        }
+        XCTAssertEqual(resumed.getSyncStatus(), .error)
+        try await resumed.retryAfterError()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(resumed)
+            return try resumed.pendingChangeCount() == 0
+        }
+        XCTAssertNil(try resumed.getBlockingFailure())
+        XCTAssertEqual(try localMeta(dbPath, key: "client_generation"), connectedGeneration)
+
+        let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await reader.stop()
+            try await reader.close()
+        }
+        try await reader.start()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(reader)
+            return try self.customerNames(reader, userID: userID) == [customerID: "queued before rejection"]
+        }
+    }
+
+    private func localMeta(_ dbPath: String, key: String) throws -> String? {
+        try DatabaseQueue(path: dbPath).read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM _synchro_meta WHERE key = ?", arguments: [key])
+        }
+    }
+
+    /// Every local row except the blocking-failure record, in a stable order.
+    private func localDurableState(_ dbPath: String) throws -> [String] {
+        try DatabaseQueue(path: dbPath).read { db in
+            let tables = try String.fetchAll(
+                db,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name <> '_synchro_blocking_error' ORDER BY name"
+            )
+            return try tables.flatMap { table in
+                let columns = try String.fetchAll(db, sql: "SELECT name FROM pragma_table_info(?) ORDER BY cid", arguments: [table])
+                let row = columns.map { "quote(\"\($0)\")" }.joined(separator: " || '|' || ")
+                return try String.fetchAll(db, sql: "SELECT \(row) FROM \"\(table)\"").map { "\(table) \($0)" }.sorted()
+            }
         }
     }
 
