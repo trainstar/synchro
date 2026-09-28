@@ -216,10 +216,10 @@ class SchemaIntegrationTests {
         return output.toString()
     }
 
-    // -- 1. testAdditiveSchemaChangePreservesData --
+    // -- 1. testSameSchemaReconnectPreservesPushedData --
 
     @Test
-    fun testAdditiveSchemaChangePreservesData() = runBlocking {
+    fun testSameSchemaReconnectPreservesPushedData() = runBlocking {
         val serverSchema = fetchServerSchema()
         val userID = UUID.randomUUID().toString().lowercase()
         val clientID = UUID.randomUUID().toString()

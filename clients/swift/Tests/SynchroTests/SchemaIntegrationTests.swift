@@ -140,9 +140,9 @@ final class SchemaIntegrationTests: XCTestCase {
         return try await http.fetchSchema()
     }
 
-    // MARK: - 1. testAdditiveSchemaChangePreservesData
+    // MARK: - 1. testSameSchemaReconnectPreservesPushedData
 
-    func testAdditiveSchemaChangePreservesData() async throws {
+    func testSameSchemaReconnectPreservesPushedData() async throws {
         let serverSchema = try await fetchServerSchema()
         let userID = UUID().uuidString.lowercased()
         let clientID = UUID().uuidString.lowercased()
