@@ -609,6 +609,8 @@ RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN, policy_rejected BOOLE
 LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
+DECLARE
+    v_rollback_unapplied BOOLEAN := false;
 BEGIN
     applied := false;
     validation_failed := false;
@@ -619,6 +621,12 @@ BEGIN
         END IF;
         EXECUTE p_sql INTO applied USING p_data, p_record_id;
         applied := COALESCE(applied, false);
+        IF NOT applied THEN
+            -- A trigger can write other rows and then skip the target row. The raise rolls
+            -- back those writes, because push rejects a mutation that applies no row.
+            v_rollback_unapplied := true;
+            RAISE EXCEPTION 'push source DML applied no row';
+        END IF;
         IF p_push_unit THEN
             SET CONSTRAINTS ALL IMMEDIATE;
         END IF;
@@ -629,6 +637,10 @@ BEGIN
         WHEN insufficient_privilege THEN
             applied := false;
             policy_rejected := true;
+        WHEN raise_exception THEN
+            IF NOT v_rollback_unapplied THEN
+                RAISE;
+            END IF;
     END;
     RETURN NEXT;
 END;
