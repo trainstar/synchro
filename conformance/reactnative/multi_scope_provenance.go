@@ -65,8 +65,8 @@ type multiScopeProvenanceCommitPayload struct {
 				} `json:"synced_row"`
 			} `json:"identity"`
 			Fields []struct {
-				Field    string          `json:"field"`
-				WireJSON json.RawMessage `json:"wire_json"`
+				Field    string `json:"field"`
+				WireJSON string `json:"wire_json"`
 			} `json:"fields"`
 		} `json:"after"`
 	} `json:"events"`
@@ -792,7 +792,7 @@ func (c *MultiScopeProvenanceCoordinator) runtimeRecords(server scenarios.StateF
 			}
 			row := make(map[string]json.RawMessage, len(event.After.Fields))
 			for _, field := range event.After.Fields {
-				row[field.Field] = copyRaw(field.WireJSON)
+				row[field.Field] = json.RawMessage(field.WireJSON)
 			}
 			delete(row, event.After.Identity.SyncedRow.PrimaryKeyFieldID)
 			row[value.ApplicationIdentifier] = copyRaw(value.RuntimeValue)
@@ -1147,7 +1147,9 @@ func validateMultiScopeProvenanceClient(expected scenarios.ClientDurabilityFact,
 
 // validateMultiScopeProvenanceContents compares the exact application rows and
 // provenance rows of one client with the authored records. Counts alone accept
-// swapped rows and wrong values.
+// swapped rows and wrong values. The runtime table adds owner and lifecycle
+// columns that the authored model does not declare, so the comparison reads
+// only the authored columns and requires each of them.
 func validateMultiScopeProvenanceContents(expected scenarios.ClientDurabilityFact, capture finalCapture, state inspectedClientState, records map[string]multiScopeProvenanceRecord, scopes map[string]string) error {
 	generations := make(map[string]uint64, len(state.ScopeStates))
 	for _, scope := range state.ScopeStates {
@@ -1175,7 +1177,23 @@ func validateMultiScopeProvenanceContents(expected scenarios.ClientDurabilityFac
 	if err != nil {
 		return err
 	}
-	gotRows, err := multiScopeProvenanceRowSet(rows)
+	columns := make(map[string]struct{})
+	for _, record := range records {
+		for column := range record.row {
+			columns[column] = struct{}{}
+		}
+	}
+	authoredColumns := make([]map[string]json.RawMessage, 0, len(rows))
+	for _, row := range rows {
+		projected := make(map[string]json.RawMessage, len(columns))
+		for column := range columns {
+			if value, found := row[column]; found {
+				projected[column] = value
+			}
+		}
+		authoredColumns = append(authoredColumns, projected)
+	}
+	gotRows, err := multiScopeProvenanceRowSet(authoredColumns)
 	if err != nil {
 		return err
 	}
