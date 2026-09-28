@@ -170,6 +170,7 @@
 	test-packaged-consumers \
 	generate-pg-sql \
 	check-pg-sql \
+	check-released-update-scripts \
 	clean
 
 ANDROID_HOME ?= /opt/homebrew/share/android-commandlinetools
@@ -421,6 +422,7 @@ help:
 	@echo "  test-packaged-smoke-structure - Run packaged smoke summary failure controls"
 	@echo "  test-packaged-consumers - Run all packaged consumer checks"
 	@echo "  check-pg-sql          - Verify tracked SQL matches pgrx generation"
+	@echo "  check-released-update-scripts - Verify released update scripts match their release tags"
 	@echo "  clean                 - Remove local build and server artifacts"
 
 version-print:
@@ -1966,6 +1968,21 @@ generate-pg-sql:
 	cd extensions/synchro-pg && CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" cargo pgrx schema pg18 --pg-config "$(PGRX_PG_CONFIG)" --out sql/synchro_pg--$(CURRENT_VERSION).sql
 	perl -pi -e 's/[ \t]+$$//' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
 	perl -0pi -e 's/\n+\z/\n/' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
+
+# A released update script is immutable. Its bytes must equal its content at
+# the tag of its target version. The check fails when no released script is found.
+check-released-update-scripts:
+	@set -eu; \
+		checked=0; \
+		for script in extensions/synchro-pg/sql/synchro_pg--*--*.sql; do \
+			target="$${script##*--}"; target="$${target%.sql}"; \
+			git rev-parse -q --verify "refs/tags/v$$target^{commit}" >/dev/null || continue; \
+			git cat-file -e "v$$target:$$script" 2>/dev/null || { echo "released update script is absent at v$$target: $$script" >&2; exit 1; }; \
+			git show "v$$target:$$script" | cmp -s - "$$script" || { echo "released update script differs from v$$target: $$script" >&2; exit 1; }; \
+			checked=$$((checked + 1)); \
+		done; \
+		test "$$checked" -gt 0 || { echo "no released update script was checked. Fetch the release tags." >&2; exit 1; }; \
+		echo "$$checked released update scripts match their release tags"
 
 check-pg-sql:
 	@set -eu; \

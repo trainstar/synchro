@@ -95,6 +95,9 @@ WHERE singleton;
 The statement records the build of the new library.
 Without it, readiness and the adapter report stale extension objects after the update.
 
+A released update script is immutable. Never edit an update script whose target version has a release tag.
+`make check-released-update-scripts` compares each such script with its content at that tag. Source quality runs it on every pull request and push.
+
 Candidate CI runs `TestRealExtensionUpdateFromBaseline`.
 The test updates the pinned baseline through the update chain.
 Then it compares the extension objects with a clean installation of `X.Y.Z`.
