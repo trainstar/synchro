@@ -1,6 +1,6 @@
 import { by, device, element, expect, waitFor } from 'detox';
 import { loadScenario } from './scenarioLoader';
-import { assertUserIsolation, prepareConflict } from './serverSetup';
+import { assertCustomersOnServer, assertUserIsolation, prepareConflict } from './serverSetup';
 import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 async function scrollToAndTap(buttonId: string) {
@@ -76,6 +76,12 @@ async function runMultiUserAction() {
   await assertUserIsolation(await readPendingRecord('multi-user-record-id'));
   await scrollToAndTap('btn-multiUser');
   await expectBadge('multiUser');
+}
+
+async function runAtomicGroupAction() {
+  await runAction('atomicGroup');
+  const [firstID, secondID] = (await readPendingRecord('atomic-record-ids')).split(',');
+  await assertCustomersOnServer({ [firstID]: 'atomic-first', [secondID]: 'atomic-second' });
 }
 
 async function waitForUninitializedStatus() {
@@ -179,6 +185,14 @@ describe('Synchro RN E2E', () => {
 
   it('multi-user isolation, user 2 cannot see user 1 data', async () => {
     await runMultiUserAction();
+  });
+
+  it('atomic write transaction pushes both rows as one batch and the server applies both', async () => {
+    await runAtomicGroupAction();
+  });
+
+  it('atomic write transaction rejects a write after a delete of the same row and leaves no local change', async () => {
+    await runAction('atomicInvalid');
   });
 
   it('stops sync', async () => {
