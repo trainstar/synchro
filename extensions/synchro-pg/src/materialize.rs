@@ -244,9 +244,10 @@ struct MembershipStage {
 /// several transitions. Their membership is evaluated once, with the registry
 /// of `evaluation_generation`, against the projection that the caller has
 /// already brought to its final state. `baseline` holds the buckets before the
-/// transaction of each row that the transaction changed. The caller has already
-/// written the final edges of those rows, so the changed scopes compare the
-/// staged membership with that baseline. The affected scopes are the union of
+/// transaction of each changed row that existed before the transaction. The
+/// caller has already written the final edges of the changed rows, so the
+/// changed scopes compare the staged membership with that baseline. A row that
+/// the transaction inserted has no baseline and compares with its final edges. The affected scopes are the union of
 /// the declared scopes. A transition without a declaration adds the changed
 /// scopes.
 pub(crate) fn activate_membership_stages(
@@ -374,28 +375,6 @@ pub(crate) fn activate_membership_stages(
         }
     }
     Ok(())
-}
-
-/// The registry test helper activates generations without WAL row events, so
-/// every row keeps its current edges as its prior membership.
-#[cfg(any(test, feature = "pg_test"))]
-pub(crate) fn activate_staged_membership_generations(
-    client: &mut SpiClient<'_>,
-    transitions: &[(i64, i64)],
-    evaluation_generation: i64,
-    stream_generation: &str,
-    activation_commit_lsn: &str,
-    activation_end_lsn: &str,
-) -> Result<(), String> {
-    activate_membership_stages(
-        client,
-        transitions,
-        evaluation_generation,
-        &std::collections::HashMap::new(),
-        stream_generation,
-        activation_commit_lsn,
-        activation_end_lsn,
-    )
 }
 
 /// Record the membership before the transaction of the changed rows of the

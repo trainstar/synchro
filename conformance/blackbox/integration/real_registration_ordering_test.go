@@ -272,6 +272,34 @@ func TestRealRegistrationDuringInitialSlotBindingActivatesOnce(t *testing.T) {
 	if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
 		t.Fatalf("register while the slot binding is held: %v", err)
 	}
+	// One source transaction changes the cf_items rule and writes a cf_items
+	// row. The new slot decodes it, so the row must use the new rule.
+	sameTransactionID := "00000000-0000-4000-8243-000000000002"
+	if _, err := admin.ExecContext(ctx, `
+		BEGIN;
+		CREATE FUNCTION public.cf_items_binding_membership(p_id uuid)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER
+		SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC
+			SELECT 'user:binding-' || (p.owner_id #>> '{}')
+			FROM synchro_projection.cf_items AS p
+			WHERE p.record_id = p_id::text AND NOT p.deleted;
+		END;
+		REVOKE ALL ON FUNCTION public.cf_items_binding_membership(uuid) FROM PUBLIC;
+		GRANT EXECUTE ON FUNCTION public.cf_items_binding_membership(uuid) TO synchro_owner, synchro_worker;
+		INSERT INTO synchro.sync_scope_state (scope_id, stream_generation)
+		SELECT 'user:binding-rule', stream_generation FROM synchro.sync_runtime_state WHERE singleton;
+		SELECT synchro.synchro_register_table(
+			'public.cf_items', 'public.cf_items_binding_membership', 'multi_scope',
+			'id', 'updated_at', 'deleted_at', 'enabled',
+			p_affected_scopes => ARRAY['user:binding-rule']::text[]
+		);
+		INSERT INTO public.cf_items (id, owner_id, value) VALUES ('`+sameTransactionID+`', 'owner', 'same-transaction');
+		COMMIT;`,
+	); err != nil {
+		t.Fatalf("register and write in one transaction while the slot binding is held: %v", err)
+	}
 	var registered []int64
 	rows, err := admin.QueryContext(ctx, "SELECT generation FROM synchro.sync_registry_generations WHERE state = 'pending' ORDER BY generation")
 	if err != nil {
@@ -334,6 +362,30 @@ func TestRealRegistrationDuringInitialSlotBindingActivatesOnce(t *testing.T) {
 			t.Fatalf("registration during slot binding: acknowledged %t poison %q pending %d activated %d of %v active %d; %s",
 				acknowledged, poison, pending, activated, registered, active, harness.FailureDiagnostics())
 		}
+		// The row from the registering transaction reaches the projection under
+		// the new rule, and its fence is materialized.
+		var sameTransactionBuckets []string
+		var coverage string
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if sameTransactionBuckets, err = harness.Operator().ObserveMembershipBuckets(ctx, "cf_items", sameTransactionID); err != nil {
+				t.Fatalf("observe same-transaction cf_items membership: %v", err)
+			}
+			if err := admin.QueryRowContext(ctx, `
+				SELECT COALESCE(string_agg(coverage, ',' ORDER BY dml_ordinal), '')
+				FROM synchro.sync_write_fences WHERE new_record_id = $1`, sameTransactionID,
+			).Scan(&coverage); err != nil {
+				t.Fatalf("observe same-transaction fence: %v", err)
+			}
+			if slices.Equal(sameTransactionBuckets, []string{"user:binding-owner"}) && coverage == "materialized" {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !slices.Equal(sameTransactionBuckets, []string{"user:binding-owner"}) || coverage != "materialized" {
+			t.Fatalf("same-transaction write: membership %v want [user:binding-owner], fence coverage %q want materialized; %s",
+				sameTransactionBuckets, coverage, harness.FailureDiagnostics())
+		}
 		waitForReinstalledWorker(t, ctx, harness, reinstall, registered[0]-1)
 		if err := harness.Source().ExecContext(ctx,
 			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-binding')", itemID,
@@ -341,18 +393,18 @@ func TestRealRegistrationDuringInitialSlotBindingActivatesOnce(t *testing.T) {
 			t.Fatalf("write after slot binding: %v", err)
 		}
 		var buckets []string
-		deadline := time.Now().Add(30 * time.Second)
+		deadline = time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			if buckets, err = harness.Operator().ObserveMembershipBuckets(ctx, "cf_items", itemID); err != nil {
 				t.Fatalf("observe cf_items membership: %v", err)
 			}
-			if slices.Equal(buckets, []string{"user:diagnostic-user"}) {
+			if slices.Equal(buckets, []string{"user:binding-diagnostic-user"}) {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		if !slices.Equal(buckets, []string{"user:diagnostic-user"}) {
-			t.Fatalf("cf_items membership = %v, want [user:diagnostic-user]; %s", buckets, harness.FailureDiagnostics())
+		if !slices.Equal(buckets, []string{"user:binding-diagnostic-user"}) {
+			t.Fatalf("cf_items membership = %v, want [user:binding-diagnostic-user]; %s", buckets, harness.FailureDiagnostics())
 		}
 	})
 }

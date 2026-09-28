@@ -178,6 +178,9 @@ struct DependencyEvent {
 struct PersistedEvents {
     direct_impacts: Vec<ImpactedRow>,
     dependency_events: Vec<DependencyEvent>,
+    /// Each changed synced row, in first-touch order, with whether its
+    /// captured row existed before the events of this call.
+    initial_presence: Vec<((usize, String), bool)>,
 }
 
 struct MaterializedTransaction {
@@ -3402,14 +3405,27 @@ fn materialize_transaction(
         log!("synchro WAL deferred a registry activation that requires projection bootstrap");
         Vec::new()
     } else {
-        validate_activation_chain(
+        let new_activations = validate_activation_chain(
             client,
             &stream_generation,
             generation,
             &activations,
             transaction,
         )?;
-        activation_groups(&markers)
+        // A queued ancestor activates at the position of the child that follows it.
+        let mut boundary = 0;
+        let mut new_markers: Vec<(i64, u64)> = new_activations
+            .iter()
+            .rev()
+            .map(|generation| {
+                if let Some(marker) = markers.iter().find(|marker| marker.0 == *generation) {
+                    boundary = marker.1;
+                }
+                (*generation, boundary)
+            })
+            .collect();
+        new_markers.reverse();
+        activation_groups(&new_markers)
     };
     // Segment 0 precedes the first activation group. Segment k follows group k
     // and uses the registry of that group's last generation.
@@ -3529,6 +3545,7 @@ fn materialize_transaction(
         .collect();
     let mut active_generation = generation;
     let mut effect_bases = HashMap::new();
+    let mut existed_before = HashMap::new();
     let mut segments = Vec::with_capacity(applicable_segments.len());
     let mut membership_transitions = Vec::with_capacity(activations.len());
     for (segment, applicable) in applicable_segments.iter().enumerate() {
@@ -3554,6 +3571,13 @@ fn materialize_transaction(
             registry,
             applicable,
         )?;
+        // The first touch of a row in the transaction tells whether it existed
+        // before the transaction.
+        for ((index, record_id), present) in &persisted.initial_presence {
+            existed_before
+                .entry((registry[*index].relation_id.clone(), record_id.clone()))
+                .or_insert(*present);
+        }
         if segment + 1 < registries.len() {
             align_edges_before_activation(
                 client,
@@ -3595,6 +3619,10 @@ fn materialize_transaction(
     // changed. It waits for the final projection like every other membership
     // evaluation of the transaction. It compares with the membership before the
     // transaction, and effect_bases holds that membership for every changed row.
+    // A row that the transaction inserted had no earlier membership that a
+    // client can hold, and its insert effect carries the final membership. It
+    // keeps no baseline, so the stage compares it with its final edges.
+    effect_bases.retain(|key, _| existed_before.get(key).copied().unwrap_or(true));
     crate::materialize::activate_membership_stages(
         client,
         &membership_transitions,
@@ -3965,15 +3993,26 @@ fn activation_requires_bootstrap(
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))
 }
 
+/// Return the activations that are new. A registration that commits while no
+/// slot is bound emits its own activation and is also replayed when the slot
+/// binds, so a slot can contain the activation of one generation twice. An
+/// activation of a generation that the active chain of this stream already
+/// contains is that duplicate and is ignored.
+///
+/// A registration that commits before the new slot starts is not decoded, so
+/// its generation waits for the replay. A later decoded child of it then
+/// activates its queued pending ancestors first, in chain order. Every other
+/// invalid activation fails validation.
 fn validate_activation_chain(
     client: &SpiClient<'_>,
     stream_generation: &str,
     active_generation: i64,
     activations: &[i64],
     transaction: &WalTransaction,
-) -> Result<(), PoisonFailure> {
+) -> Result<Vec<i64>, PoisonFailure> {
     let mut parent = active_generation;
     let mut seen = HashSet::new();
+    let mut new_activations = Vec::new();
     for generation in activations {
         if !seen.insert(*generation) {
             return Err(failure_with_detail(
@@ -4044,6 +4083,113 @@ fn validate_activation_chain(
                 )
             })?
             .unwrap_or_default();
+        if state != "pending" && stream == stream_generation {
+            let activated = client
+                .select(
+                    "WITH RECURSIVE chain(generation, parent_generation) AS (
+                         SELECT generation, parent_generation
+                         FROM synchro.sync_registry_generations
+                         WHERE state = 'active' AND stream_generation = $2
+                         UNION ALL
+                         SELECT prior.generation, prior.parent_generation
+                         FROM synchro.sync_registry_generations prior
+                         JOIN chain ON prior.generation = chain.parent_generation
+                         WHERE prior.state = 'superseded' AND prior.stream_generation = $2
+                     )
+                     SELECT EXISTS (SELECT 1 FROM chain WHERE generation = $1) AS activated",
+                    None,
+                    &[(*generation).into(), stream_generation.into()],
+                )
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "loading the active registry chain failed",
+                    )
+                })?
+                .first()
+                .get_by_name::<bool, &str>("activated")
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "reading the active registry chain failed",
+                    )
+                })?
+                .unwrap_or(false);
+            if activated {
+                continue;
+            }
+        }
+        if state == "pending" && actual_parent.is_some_and(|actual| actual != parent) {
+            let ancestors = client
+                .select(
+                    "WITH RECURSIVE ancestors(generation, parent_generation, depth) AS (
+                         SELECT pending.generation, pending.parent_generation, 1
+                         FROM synchro.sync_registry_generations pending
+                         JOIN synchro.sync_registry_activation_requests request
+                           ON request.registry_generation = pending.generation
+                         WHERE pending.generation = $1
+                         UNION ALL
+                         SELECT pending.generation, pending.parent_generation, ancestors.depth + 1
+                         FROM ancestors
+                         JOIN synchro.sync_registry_generations pending
+                           ON pending.generation = ancestors.parent_generation
+                         JOIN synchro.sync_registry_activation_requests request
+                           ON request.registry_generation = pending.generation
+                         WHERE ancestors.parent_generation <> $3
+                     )
+                     SELECT ancestors.generation, ancestors.parent_generation,
+                            generation.state = 'pending' AND generation.validated
+                                AND generation.stream_generation = $2 AS queued_pending
+                     FROM ancestors
+                     JOIN synchro.sync_registry_generations generation
+                       ON generation.generation = ancestors.generation
+                     ORDER BY ancestors.depth DESC",
+                    None,
+                    &[
+                        actual_parent.into(),
+                        stream_generation.into(),
+                        parent.into(),
+                    ],
+                )
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "loading queued registry ancestors failed",
+                    )
+                })?;
+            let mut chain = Vec::new();
+            let mut chain_parent = parent;
+            for row in ancestors {
+                let ancestor = row.get_by_name::<i64, &str>("generation").ok().flatten();
+                let ancestor_parent = row
+                    .get_by_name::<i64, &str>("parent_generation")
+                    .ok()
+                    .flatten();
+                let queued_pending = row
+                    .get_by_name::<bool, &str>("queued_pending")
+                    .ok()
+                    .flatten();
+                match (ancestor, queued_pending) {
+                    (Some(ancestor), Some(true)) if ancestor_parent == Some(chain_parent) => {
+                        chain.push(ancestor);
+                        chain_parent = ancestor;
+                    }
+                    _ => {
+                        chain.clear();
+                        break;
+                    }
+                }
+            }
+            if chain.last().copied() == actual_parent
+                && chain.iter().all(|ancestor| seen.insert(*ancestor))
+            {
+                new_activations.extend(chain);
+                parent = chain_parent;
+            }
+        }
         if actual_parent != Some(parent)
             || !validated
             || state != "pending"
@@ -4056,8 +4202,9 @@ fn validate_activation_chain(
             ));
         }
         parent = *generation;
+        new_activations.push(*generation);
     }
-    Ok(())
+    Ok(new_activations)
 }
 
 fn parse_fence_messages(transaction: &WalTransaction) -> Result<Vec<FenceMessage>, PoisonFailure> {
@@ -5820,6 +5967,7 @@ fn persist_events_and_projections(
     let mut persisted = PersistedEvents {
         direct_impacts: Vec::with_capacity(events.len()),
         dependency_events: Vec::with_capacity(events.len()),
+        initial_presence: Vec::with_capacity(events.len()),
     };
     // Pages share the source transaction. Membership reads only the final projection.
     for batch in events.chunks(JSONB_BATCH_SIZE) {
@@ -5833,6 +5981,7 @@ fn persist_events_and_projections(
         )?;
         persisted.direct_impacts.extend(batch.direct_impacts);
         persisted.dependency_events.extend(batch.dependency_events);
+        persisted.initial_presence.extend(batch.initial_presence);
     }
     Ok(persisted)
 }
@@ -6342,9 +6491,17 @@ fn fold_and_persist_projection_rows(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
 
+    let initial_presence = synced_inputs
+        .into_iter()
+        .map(|key| {
+            let present = initially_present_synced.contains(&key);
+            (key, present)
+        })
+        .collect();
     Ok(PersistedEvents {
         direct_impacts: impacts,
         dependency_events,
+        initial_presence,
     })
 }
 
