@@ -22,6 +22,8 @@ const (
 	portableSeedAssetName          = "seed.db"
 	corruptSeedAssetName           = "corrupt-seed.db"
 	seededEmptyStartupRestartIndex = 0
+	seededFloorStepPrefix          = "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-"
+	seededFloorClientKey           = "seeded-empty-startup-floor"
 )
 
 // SeededEmptyStartupCoordinatorConfig configures one React Native startup sidecar.
@@ -47,6 +49,8 @@ type SeededEmptyStartupCoordinator struct {
 	database string
 
 	clients     []seededEmptyStartupClient
+	floorSteps  map[string]scenarios.Step
+	floorWrite  scenarios.Operation
 	identities  []scenarios.NativeIdentityAlias
 	runtimeIDs  map[string]json.RawMessage
 	authTokens  map[string]string
@@ -84,6 +88,10 @@ const (
 	seededEmptyStartupStageRestartOpened
 	seededEmptyStartupStageRestartSynchronized
 	seededEmptyStartupStageRestartCaptured
+	seededEmptyStartupStageFloorOpened
+	seededEmptyStartupStageFloorWritten
+	seededEmptyStartupStageFloorSynchronized
+	seededEmptyStartupStageFloorCaptured
 )
 
 type seededEmptyStartupClient struct {
@@ -224,9 +232,19 @@ func NewSeededEmptyStartupCoordinator(config SeededEmptyStartupCoordinatorConfig
 		_ = listener.Close()
 		return nil, err
 	}
+	floorSteps := make(map[string]scenarios.Step)
+	for _, step := range config.Scenario.Steps {
+		if strings.HasPrefix(string(step.ID), seededFloorStepPrefix) {
+			floorSteps[strings.TrimPrefix(string(step.ID), seededFloorStepPrefix)] = step
+		}
+	}
+	if len(floorSteps) != 14 || floorSteps["013"].NativeBinding == nil {
+		_ = listener.Close()
+		return nil, errors.New("React Native seeded-empty-startup floor steps are invalid")
+	}
 	coordinator := &SeededEmptyStartupCoordinator{
 		config: config, listener: listener, token: token, adapter: adapter, database: database,
-		clients: clients, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
+		clients: clients, floorSteps: floorSteps, identities: append([]scenarios.NativeIdentityAlias(nil), config.Scenario.NativeIdentityAliases...),
 		runtimeIDs: make(map[string]json.RawMessage), authTokens: make(map[string]string), processes: make(map[string]actionProcessIdentity),
 		pullCursors: make(map[string][]string), nextSeq: 1,
 	}
@@ -274,6 +292,21 @@ func (c *SeededEmptyStartupCoordinator) Prepare(ctx context.Context) error {
 			return fmt.Errorf("mint React Native startup bearer token for %s: %w", client.clientID, err)
 		}
 		c.authTokens[client.key] = token
+	}
+	// The floor seed has the position of the other seeds, because no source
+	// transaction commits before the floor client runs.
+	if _, err := c.config.Artifact.StageStep(ctx, c.floorSteps["001"].Operation); err != nil {
+		return fmt.Errorf("stage React Native floor seed: %w", err)
+	}
+	floorUser := c.floorSteps["013"].NativeBinding.UserID
+	if c.config.AuthToken != "" {
+		c.authTokens[seededFloorClientKey] = c.config.AuthToken
+	} else {
+		token, err := c.config.Harness.NativeBearerToken(ctx, floorUser, time.Now())
+		if err != nil {
+			return fmt.Errorf("mint React Native floor bearer token: %w", err)
+		}
+		c.authTokens[seededFloorClientKey] = token
 	}
 	aliases := make([]scenarios.NativeIdentityAlias, 0, len(c.identities))
 	for _, alias := range c.identities {
@@ -342,7 +375,7 @@ func (c *SeededEmptyStartupCoordinator) StageCount() int {
 	if c == nil {
 		return 0
 	}
-	return 2 + len(c.clients)*3 + 3
+	return 2 + len(c.clients)*3 + 3 + 4
 }
 
 func (c *SeededEmptyStartupCoordinator) Completed() bool {
@@ -437,7 +470,7 @@ func (c *SeededEmptyStartupCoordinator) ServeHTTP(writer http.ResponseWriter, re
 		writeExchangeError(writer, http.StatusUnprocessableEntity)
 		return
 	}
-	response, err := c.advanceLocked(exchange.Sequence)
+	response, err := c.advanceLocked(request.Context(), exchange.Sequence)
 	if err != nil {
 		c.failed = err
 		writeExchangeError(writer, http.StatusUnprocessableEntity)
@@ -480,6 +513,18 @@ func (c *SeededEmptyStartupCoordinator) acceptLocked(raw json.RawMessage) error 
 		_, err := validateOpenedResult(envelope.Result)
 		return err
 	}
+	switch c.stage {
+	case seededEmptyStartupStageFloorOpened:
+		process, err := validateOpenedResult(envelope.Result)
+		c.processes[seededFloorClientKey] = process
+		return err
+	case seededEmptyStartupStageFloorWritten:
+		return validateActionResult(envelope.Result, "local-action")
+	case seededEmptyStartupStageFloorSynchronized:
+		return validateActionResult(envelope.Result, "synchronized")
+	case seededEmptyStartupStageFloorCaptured:
+		return c.validateFloorCapture(envelope.Result)
+	}
 	client := c.clients[c.client]
 	switch c.stage {
 	case seededEmptyStartupStageOpened:
@@ -510,7 +555,7 @@ func (c *SeededEmptyStartupCoordinator) acceptLocked(raw json.RawMessage) error 
 	}
 }
 
-func (c *SeededEmptyStartupCoordinator) advanceLocked(sequence uint64) (seededEmptyStartupResponse, error) {
+func (c *SeededEmptyStartupCoordinator) advanceLocked(ctx context.Context, sequence uint64) (seededEmptyStartupResponse, error) {
 	response := seededEmptyStartupResponse{SchemaVersion: 1, Sequence: sequence, State: "command"}
 	switch c.stage {
 	case seededEmptyStartupStageControlOpen:
@@ -542,14 +587,13 @@ func (c *SeededEmptyStartupCoordinator) advanceLocked(sequence uint64) (seededEm
 		}
 		c.client++
 		if c.client == len(c.clients) {
-			resolutions, err := c.resolveIdentities()
+			command, err := c.prepareFloorClient(ctx)
 			if err != nil {
 				return seededEmptyStartupResponse{}, err
 			}
-			c.result = SeededEmptyStartupCoordinatorResult{IdentityResolution: resolutions, StartupCount: len(c.clients), ResumeCount: 1, RejectedSeedCount: 1}
-			c.completed = true
-			response.State = "complete"
-			return response, nil
+			response.Command = command
+			c.stage = seededEmptyStartupStageFloorOpened
+			break
 		}
 		next := c.clients[c.client]
 		response.Command = c.command(next, "open", map[string]any{"client_key": next.key, "database_mode": "reuse", "initialization": next.initialization(), "seed_step_id": next.seedStepID()}, true)
@@ -570,10 +614,153 @@ func (c *SeededEmptyStartupCoordinator) advanceLocked(sequence uint64) (seededEm
 		next := c.clients[c.client]
 		response.Command = c.command(next, "open", map[string]any{"client_key": next.key, "database_mode": "reuse", "initialization": next.initialization(), "seed_step_id": next.seedStepID()}, true)
 		c.stage = seededEmptyStartupStageOpened
+	case seededEmptyStartupStageFloorOpened:
+		response.Command = c.floorCommand("client", "execute-step", map[string]any{"client_key": seededFloorClientKey}, []scenarios.Operation{c.floorWrite})
+		c.stage = seededEmptyStartupStageFloorWritten
+	case seededEmptyStartupStageFloorWritten:
+		call := c.floorSteps["013"].NativeBinding
+		response.Command = c.floorCommand("client", "synchronize-step", map[string]any{"client_key": seededFloorClientKey, "method": call.Method, "completion": call.Completion},
+			[]scenarios.Operation{c.floorSteps["013"].Operation, c.floorSteps["014"].Operation})
+		c.stage = seededEmptyStartupStageFloorSynchronized
+	case seededEmptyStartupStageFloorSynchronized:
+		response.Command = c.floorCommand("observer", "capture", map[string]any{
+			"client_keys": []string{seededFloorClientKey}, "sources": []string{"scope-state", "pending-mutations", "rejected-mutations", "request-trace"},
+		}, nil)
+		c.stage = seededEmptyStartupStageFloorCaptured
+	case seededEmptyStartupStageFloorCaptured:
+		// The server capture compares the server row of the bound push with the
+		// authored write, field by field.
+		if _, err := c.config.Controller.Capture(ctx, []string{seededFloorClientKey}, []string{"server-state"}); err != nil {
+			return seededEmptyStartupResponse{}, fmt.Errorf("capture React Native floor server state: %w", err)
+		}
+		resolutions, err := c.resolveIdentities()
+		if err != nil {
+			return seededEmptyStartupResponse{}, err
+		}
+		c.result = SeededEmptyStartupCoordinatorResult{IdentityResolution: resolutions, StartupCount: len(c.clients), ResumeCount: 1, RejectedSeedCount: 1}
+		c.completed = true
+		response.State = "complete"
+		return response, nil
 	default:
 		return seededEmptyStartupResponse{}, errInvalidExchange
 	}
 	return response, nil
+}
+
+// prepareFloorClient applies the authored server steps for the client whose
+// authentic seed receipt falls below the compacted floor (#207). The earlier
+// clients hold the shared scope, so they expire before compaction.
+func (c *SeededEmptyStartupCoordinator) prepareFloorClient(ctx context.Context) (*seededEmptyStartupCommand, error) {
+	for _, id := range []string{"002", "003", "004", "005", "006", "007", "008", "009", "010", "011"} {
+		step := c.floorSteps[id]
+		var observation blackbox.NativeStepObservation
+		var err error
+		if step.Operation.ContractOperation == "process" {
+			observation, err = c.config.Controller.ProcessStep(ctx, nil, step.Operation)
+		} else {
+			observation, err = c.config.Controller.ApplyStep(ctx, step.Operation)
+		}
+		if err != nil || observation.Disposition != "success" {
+			return nil, fmt.Errorf("apply React Native floor step %s: %w", id, nativeResultError(err, observation.Disposition))
+		}
+	}
+	write, err := c.config.Controller.ApplicationWrite(c.floorSteps["012"].Operation)
+	if err != nil {
+		return nil, fmt.Errorf("bind React Native floor offline write: %w", err)
+	}
+	c.floorWrite = write
+	if err := c.config.Controller.BindApplicationPush(c.floorSteps["014"].Operation); err != nil {
+		return nil, fmt.Errorf("bind React Native floor push: %w", err)
+	}
+	// Every seeded client opens the one bundled seed asset. No source
+	// transaction committed before it was staged, so it has the floor seed
+	// position.
+	return c.floorCommand("client", "open", map[string]any{
+		"client_key": seededFloorClientKey, "database_mode": "reuse", "initialization": "seed", "seed_step_id": string(c.floorSteps["001"].ID),
+	}, nil), nil
+}
+
+func (c *SeededEmptyStartupCoordinator) floorCommand(actor, name string, parameters map[string]any, operations []scenarios.Operation) *seededEmptyStartupCommand {
+	binding := c.floorSteps["013"].NativeBinding
+	runtime := seededEmptyStartupRuntime{ClientKey: seededFloorClientKey, Database: c.database + "-floor", ClientID: binding.ClientID, ServerURL: c.adapter, AuthToken: c.authTokens[seededFloorClientKey]}
+	if name == "open" {
+		seed := portableSeedAssetName
+		runtime.SeedDatabasePath = &seed
+	}
+	steps := []conformanceStep{}
+	for _, operation := range operations {
+		steps = append(steps, conformanceStep{Operation: conformanceOperation{ContractOperation: operation.ContractOperation, Name: operation.Name, Payload: copyRaw(operation.Payload)}})
+	}
+	return &seededEmptyStartupCommand{SchemaVersion: 1, Action: conformanceManifest{Action: conformanceAction{Actor: actor, Command: name, Parameters: parameters}, Steps: steps}, Runtime: runtime}
+}
+
+// validateFloorCapture requires the below-floor fallback, one pushed offline
+// mutation, and one accepted outcome with no retained or rejected intent.
+func (c *SeededEmptyStartupCoordinator) validateFloorCapture(raw json.RawMessage) error {
+	capture, err := decodeCapture(raw, []string{"client_state", "pending_mutations", "rejected_mutations", "request_trace"})
+	if err != nil {
+		return err
+	}
+	trace, err := captureTraceFromRaw(capture.Trace)
+	if err != nil {
+		return err
+	}
+	withoutPush := trace
+	withoutPush.Observations = nil
+	pushes := 0
+	for _, observation := range trace.Observations {
+		if observation.OperationClass != "push" {
+			withoutPush.Observations = append(withoutPush.Observations, observation)
+			continue
+		}
+		pushes++
+		mutations, countErr := requestInteger(observation, "mutation_count")
+		if countErr != nil || mutations != 1 {
+			return errors.New("React Native floor push does not carry the one offline mutation")
+		}
+		if err := validateSeededFloorWire(c.config.Scenario, c.floorSteps["014"].ID, observation); err != nil {
+			return err
+		}
+	}
+	if pushes != 1 {
+		return fmt.Errorf("React Native floor startup pushes=%d want 1", pushes)
+	}
+	// Renumber the remaining observations so the bootstrap validator sees one
+	// contiguous sequence without the push.
+	for index := range withoutPush.Observations {
+		withoutPush.Observations[index].Sequence = uint64(index + 1)
+	}
+	withoutPush.SequenceCheckpoint = uint64(len(withoutPush.Observations))
+	// The below-floor receipt must not continue, so the shared scope rebuilds
+	// together with the identity scope.
+	if err := validateSeededEmptyStartupBootstrapTrace(withoutPush, 1, 2, 2); err != nil {
+		return fmt.Errorf("React Native floor startup trace is invalid: %w", err)
+	}
+	if err := validateSeededFloorWire(c.config.Scenario, c.floorSteps["013"].ID, trace.Observations[0]); err != nil {
+		return err
+	}
+	state, err := decodeClientState(capture.ClientState)
+	if err != nil {
+		return err
+	}
+	pending, pendingErr := schemaQueuedMutationRawEntryCount(capture.Pending)
+	rejected, rejectedErr := schemaQueuedMutationRawEntryCount(capture.Rejected)
+	if pendingErr != nil || rejectedErr != nil || pending != 0 || rejected != 0 || state.MutationOutcomeCount != 1 {
+		return fmt.Errorf("React Native floor client pending=%d rejected=%d outcomes=%d want 0, 0, and 1", pending, rejected, state.MutationOutcomeCount)
+	}
+	return nil
+}
+
+func validateSeededFloorWire(scenario scenarios.Scenario, stepID scenarios.StepID, observed transportObservation) error {
+	for _, expected := range scenario.WireExpectations {
+		if expected.StepID == stepID {
+			if observed.StatusCode != expected.HTTPStatus || expected.Retryable {
+				return fmt.Errorf("React Native floor wire result %s differs from its authored expectation", stepID)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("React Native floor wire expectation %s is absent", stepID)
 }
 
 func (c *SeededEmptyStartupCoordinator) validateSynchronized(client seededEmptyStartupClient, raw json.RawMessage) error {
@@ -610,7 +797,7 @@ func (c *SeededEmptyStartupCoordinator) validateCapture(client seededEmptyStartu
 	if err != nil {
 		return err
 	}
-	if err := validateSeededEmptyStartupBootstrapTrace(trace, client.connectScopeProjectionLen, client.pullScopeProjectionLen); err != nil {
+	if err := validateSeededEmptyStartupBootstrapTrace(trace, client.connectScopeProjectionLen, client.pullScopeProjectionLen, client.pullScopeProjectionLen-client.connectScopeProjectionLen); err != nil {
 		return fmt.Errorf("React Native seeded-empty-startup %s trace is invalid: %w", client.clientID, err)
 	}
 	if err := validateSeededEmptyStartupPullContinuation(trace, client.pullScopeProjectionLen); err != nil {
@@ -662,11 +849,10 @@ func (c *SeededEmptyStartupCoordinator) validateResumedCapture(client seededEmpt
 	return nil
 }
 
-func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConnectScopeCount, expectedPullScopeCount uint64) error {
-	if expectedConnectScopeCount > expectedPullScopeCount {
+func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConnectScopeCount, expectedPullScopeCount, expectedRebuildScopeCount uint64) error {
+	if expectedConnectScopeCount > expectedPullScopeCount || expectedRebuildScopeCount > expectedPullScopeCount {
 		return errors.New("React Native seeded-empty-startup bootstrap scope projections are invalid")
 	}
-	expectedRebuildScopeCount := expectedPullScopeCount - expectedConnectScopeCount
 	minimumObservationCount := expectedRebuildScopeCount + 2
 	if trace.Overflowed || uint64(len(trace.Observations)) < minimumObservationCount || trace.SequenceCheckpoint != uint64(len(trace.Observations)) {
 		operations := make([]string, len(trace.Observations))
@@ -925,6 +1111,9 @@ func seededEmptyStartupClients(scenario scenarios.Scenario) ([]seededEmptyStartu
 	pullScopeProjectionLens := make(map[string]uint64)
 	clients := make([]seededEmptyStartupClient, 0)
 	for _, step := range scenario.Steps {
+		if strings.HasPrefix(string(step.ID), seededFloorStepPrefix) {
+			continue
+		}
 		if step.NativeBinding == nil || step.ExpectedOutcome.Disposition != "success" {
 			return nil, errors.New("React Native seeded-empty-startup step binding is invalid")
 		}

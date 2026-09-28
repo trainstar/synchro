@@ -93,7 +93,7 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 	seededTrace := validBootstrapTrace(testSchema())
 	seededTrace.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, seeded.connectScopeProjectionLen, "", "")
 	seededTrace.Observations[2].RequestFacts = requestFacts(1, testSchema(), 1, seeded.pullScopeProjectionLen, "", "")
-	if err := validateSeededEmptyStartupBootstrapTrace(seededTrace, seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen); err != nil {
+	if err := validateSeededEmptyStartupBootstrapTrace(seededTrace, seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen, seeded.pullScopeProjectionLen-seeded.connectScopeProjectionLen); err != nil {
 		t.Fatalf("validate seeded bootstrap trace: %v", err)
 	}
 	emptyTrace := validBootstrapTrace(testSchema())
@@ -128,20 +128,20 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 		pull,
 	}
 	emptyTrace.SequenceCheckpoint = 5
-	if err := validateSeededEmptyStartupBootstrapTrace(emptyTrace, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err != nil {
+	if err := validateSeededEmptyStartupBootstrapTrace(emptyTrace, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen, empty.pullScopeProjectionLen-empty.connectScopeProjectionLen); err != nil {
 		t.Fatalf("validate empty bootstrap trace: %v", err)
 	}
-	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen); err == nil ||
+	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen, seeded.pullScopeProjectionLen-seeded.connectScopeProjectionLen); err == nil ||
 		!strings.Contains(err.Error(), "observed 0, expected 1") {
 		t.Fatalf("seeded bootstrap connect scope mutant error = %v, expected observed 0 and expected 1", err)
 	}
 	pullMutant := validBootstrapTrace(testSchema())
 	pullMutant.Observations[0].RequestFacts = requestFacts(0, testSchema(), 0, seeded.connectScopeProjectionLen, "", "")
-	if err := validateSeededEmptyStartupBootstrapTrace(pullMutant, seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen); err == nil ||
+	if err := validateSeededEmptyStartupBootstrapTrace(pullMutant, seeded.connectScopeProjectionLen, seeded.pullScopeProjectionLen, seeded.pullScopeProjectionLen-seeded.connectScopeProjectionLen); err == nil ||
 		!strings.Contains(err.Error(), "observed 1, expected 2") {
 		t.Fatalf("seeded bootstrap pull scope mutant error = %v, expected observed 1 and expected 2", err)
 	}
-	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err == nil ||
+	if err := validateSeededEmptyStartupBootstrapTrace(validBootstrapTrace(testSchema()), empty.connectScopeProjectionLen, empty.pullScopeProjectionLen, empty.pullScopeProjectionLen-empty.connectScopeProjectionLen); err == nil ||
 		!strings.Contains(err.Error(), "operations=[connect rebuild pull] count=3 checkpoint=3 overflowed=false") ||
 		!strings.Contains(err.Error(), "expected connect plus at least 2 rebuild pages and pull with count>=4 checkpoint=count overflowed=false") {
 		t.Fatalf("incomplete empty bootstrap shape error = %v, expected observed three-operation and minimum four-operation shapes", err)
@@ -150,7 +150,7 @@ func TestSeededEmptyStartupBootstrapTraceMatchesAuthoredScopeProjections(t *test
 	duplicateRebuild.Observations = append([]transportObservation(nil), emptyTrace.Observations...)
 	duplicateRebuild.Observations[3].RequestFacts = requestFacts(1, testSchema(), 1, empty.pullScopeProjectionLen, "rebuild-b", "scope-a")
 	duplicateRebuild.Observations[3].RebuildResponseFacts = json.RawMessage(validRebuildResponseFacts())
-	if err := validateSeededEmptyStartupBootstrapTrace(duplicateRebuild, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen); err == nil ||
+	if err := validateSeededEmptyStartupBootstrapTrace(duplicateRebuild, empty.connectScopeProjectionLen, empty.pullScopeProjectionLen, empty.pullScopeProjectionLen-empty.connectScopeProjectionLen); err == nil ||
 		!strings.Contains(err.Error(), "scope identity has a page after finality") {
 		t.Fatalf("duplicate empty bootstrap rebuild error = %v, expected a page after finality", err)
 	}
