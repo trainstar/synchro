@@ -3471,7 +3471,7 @@ BEGIN
 			       expected.atttypmod,
 			       pg_catalog.format_type(expected.atttypid, expected.atttypmod) AS type_name,
 			       expected.attnotnull,
-			       expected.attgenerated <> '' AS generated,
+			       expected.attgenerated <> '' OR expected.attidentity <> '' AS generated,
 			       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
 			FROM pg_catalog.pg_attribute AS expected
 			LEFT JOIN pg_catalog.pg_attrdef AS default_value
@@ -3511,7 +3511,7 @@ BEGIN
 			END IF;
 
 			IF authored_column.generated THEN
-				-- PostgreSQL rejects a default change on a generated column.
+				-- PostgreSQL rejects a default change on a generated or identity column.
 				NULL;
 			ELSIF authored_column.default_expression IS NULL THEN
 				EXECUTE pg_catalog.format(
@@ -6397,6 +6397,21 @@ func validateSourceDML(statement string) error {
 		return errors.New("source mutation must target an independent source table")
 	}
 	return nil
+}
+
+// deadlineCloseReserve covers a normal close, which stops the adapter and
+// PostgreSQL within seconds, and a slow fast-shutdown checkpoint.
+const deadlineCloseReserve = 2 * time.Minute
+
+// CloseBeforeDeadline closes the harness a fixed reserve before deadline. A
+// test binary that reaches its -timeout panics without running cleanup, so its
+// adapter and PostgreSQL children would outlive it. The returned function
+// disarms the timer.
+func (h *Harness) CloseBeforeDeadline(deadline time.Time) (disarm func() bool) {
+	timer := time.AfterFunc(time.Until(deadline)-deadlineCloseReserve, func() {
+		_ = h.Close(context.Background())
+	})
+	return timer.Stop
 }
 
 // Close stops all owned processes and restores installed extension files.

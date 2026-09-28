@@ -409,6 +409,10 @@ func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize
 	if err != nil {
 		t.Fatalf("provision Kotlin Android conformance harness: %v", err)
 	}
+	if deadline, ok := t.Deadline(); ok {
+		disarm := harness.CloseBeforeDeadline(deadline)
+		t.Cleanup(func() { disarm() })
+	}
 	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
 	if err != nil {
 		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)

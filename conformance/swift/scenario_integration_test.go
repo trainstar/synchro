@@ -328,6 +328,10 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 	if err != nil {
 		t.Fatalf("provision Swift conformance harness: %v", err)
 	}
+	if deadline, ok := t.Deadline(); ok {
+		disarm := harness.CloseBeforeDeadline(deadline)
+		t.Cleanup(func() { disarm() })
+	}
 	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
 	if err != nil {
 		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -335,6 +339,14 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 		_ = harness.Close(closeContext)
 		t.Fatalf("create Swift native controller: %v", err)
 	}
+	// A failed reset calls t.Fatalf, so the close must be registered first.
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := controller.Close(closeContext); err != nil {
+			t.Errorf("close Swift native controller: %v", err)
+		}
+	})
 	// Each scenario resets the server when it finishes, so only the first
 	// scenario can inherit state. A target that runs before this suite, such as
 	// the warm-connect target, leaves its own state on the same instance, so the
@@ -343,13 +355,6 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancelReset()
 		resetSwiftPerformanceServer(t, resetContext, harness)
-	})
-	t.Cleanup(func() {
-		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		if err := controller.Close(closeContext); err != nil {
-			t.Errorf("close Swift native controller: %v", err)
-		}
 	})
 
 	databaseDirectory := t.TempDir()

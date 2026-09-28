@@ -2979,25 +2979,33 @@ fn mark_generation_validated(
     Ok(())
 }
 
-/// Preserve the activation when a replacement slot can start after this transaction commits.
+/// Queue the activation while no slot is bound and report whether it was queued.
+/// The initial slot binding replays each queued request. A slot can start
+/// before this transaction commits, so a direct message would reach that slot
+/// as a second activation of the same generation.
 fn queue_registry_activation_if_unbound(
     client: &mut SpiClient<'_>,
     generation: i64,
-) -> Result<(), spi::Error> {
-    client.update(
-        "WITH unbound AS (
-             SELECT singleton
-             FROM synchro.sync_runtime_state
-             WHERE singleton AND active_slot_name IS NULL
-             FOR UPDATE
-         )
-         INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
-         SELECT $1 FROM unbound
-         ON CONFLICT (registry_generation) DO NOTHING",
-        None,
-        &[generation.into()],
-    )?;
-    Ok(())
+) -> Result<bool, spi::Error> {
+    client
+        .update(
+            "WITH unbound AS (
+                 SELECT singleton
+                 FROM synchro.sync_runtime_state
+                 WHERE singleton AND active_slot_name IS NULL
+                 FOR UPDATE
+             ), queued AS (
+                 INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
+                 SELECT $1 FROM unbound
+                 ON CONFLICT (registry_generation) DO NOTHING
+             )
+             SELECT EXISTS (SELECT 1 FROM unbound) AS queued",
+            None,
+            &[generation.into()],
+        )?
+        .first()
+        .get_by_name::<bool, &str>("queued")
+        .map(|queued| queued.unwrap_or(false))
 }
 
 fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
@@ -3028,7 +3036,9 @@ fn emit_registry_activation_when_ready(
     if crate::schema::generation_requires_projection_bootstrap(client, generation)? {
         return Ok(());
     }
-    queue_registry_activation_if_unbound(client, generation)?;
+    if queue_registry_activation_if_unbound(client, generation)? {
+        return Ok(());
+    }
     emit_registry_activation(client, generation)
 }
 
