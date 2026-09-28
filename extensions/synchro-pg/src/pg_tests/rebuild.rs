@@ -76,6 +76,7 @@
         setup_test_tables();
         register_shared_scope("global", true);
         register_client("user1", "client1");
+        register_client("user1", "client2");
         let record_id = "34343434-3434-3434-3434-343434343434";
 
         Spi::run_with_args(
@@ -108,7 +109,9 @@
         .unwrap();
         assert_eq!(removed, Some(1));
 
-        let response = rebuild_client("user1", "client1", "global", None, 100);
+        // A second client stages a new session. The first client's session
+        // would reuse its staged snapshot.
+        let response = rebuild_client("user1", "client2", "global", None, 100);
         assert_eq!(
             response["error"]["code"].as_str(),
             Some("sync_integrity_failure")
@@ -239,6 +242,7 @@
     fn test_rebuild_rejects_membership_of_soft_deleted_row() {
         setup_test_tables();
         register_client("u1", "c1");
+        register_client("u1", "c2");
         let live = "bde10000-0000-0000-0000-000000000001";
         let deleted = "bde10000-1111-1111-1111-111111111111";
         for (record_id, title) in [(live, "Live"), (deleted, "Deleted")] {
@@ -295,7 +299,8 @@
         .unwrap();
         assert_eq!(aligned, Some(1));
 
-        let response = rebuild_client("u1", "c1", "user:u1", None, 100);
+        // A second client stages a new session from the changed state.
+        let response = rebuild_client("u1", "c2", "user:u1", None, 100);
         assert_eq!(
             response["error"]["code"].as_str(),
             Some("sync_integrity_failure"),
