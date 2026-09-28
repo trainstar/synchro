@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -210,6 +211,138 @@ func TestRealRegistrationsCommittedBeforeActivationActivateInOrder(t *testing.T)
 			if !slices.Equal(buckets, []string{expected.bucket}) {
 				t.Fatalf("%s membership = %v, want [%s]; %s", expected.table, buckets, expected.bucket, harness.FailureDiagnostics())
 			}
+		}
+	})
+}
+
+// TestRealRegistrationDuringInitialSlotBindingActivatesOnce proves that a
+// registration that commits after the replacement slot starts, and before the
+// worker binds that slot, activates exactly once. Application migrations can
+// run while a new worker creates and binds its first slot.
+func TestRealRegistrationDuringInitialSlotBindingActivatesOnce(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	admin := openIssue49Admin(t, ctx, harness)
+	reinstall, err := harness.ReinstallExtension(ctx)
+	if err != nil {
+		t.Fatalf("reinstall extension: %v", err)
+	}
+	// The worker binds its new slot with a row lock on the progress row. This
+	// table lock holds the worker between slot creation and binding, and it has
+	// no transaction ID, so slot creation does not wait for it.
+	binding, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin binding hold: %v", err)
+	}
+	defer binding.Rollback()
+	var holderPID int
+	var unbound bool
+	if err := binding.QueryRowContext(ctx, "SELECT pg_catalog.pg_backend_pid()").Scan(&holderPID); err != nil {
+		t.Fatalf("observe binding hold backend: %v", err)
+	}
+	if _, err := binding.ExecContext(ctx, "LOCK TABLE synchro.sync_wal_progress IN EXCLUSIVE MODE"); err != nil {
+		t.Fatalf("hold worker slot binding: %v", err)
+	}
+	if err := binding.QueryRowContext(ctx,
+		"SELECT active_slot_name IS NULL FROM synchro.sync_runtime_state WHERE singleton",
+	).Scan(&unbound); err != nil || !unbound {
+		t.Fatalf("replacement worker bound its slot before the binding hold: unbound=%t err=%v", unbound, err)
+	}
+	workerHeld := false
+	deadline := time.Now().Add(60 * time.Second)
+	for !workerHeld && time.Now().Before(deadline) {
+		if err := admin.QueryRowContext(ctx, `
+			SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)
+			   AND EXISTS (
+				SELECT 1 FROM pg_catalog.pg_stat_activity worker
+				WHERE worker.backend_type = 'synchro WAL consumer'
+				  AND $2 = ANY(pg_catalog.pg_blocking_pids(worker.pid))
+			)`, harness.Names().ReplicationSlot, holderPID,
+		).Scan(&workerHeld); err != nil {
+			t.Fatalf("observe held slot binding: %v", err)
+		}
+		if !workerHeld {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !workerHeld {
+		t.Fatalf("replacement worker did not create its slot and wait to bind it; %s", harness.FailureDiagnostics())
+	}
+	if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
+		t.Fatalf("register while the slot binding is held: %v", err)
+	}
+	var registered []int64
+	rows, err := admin.QueryContext(ctx, "SELECT generation FROM synchro.sync_registry_generations WHERE state = 'pending' ORDER BY generation")
+	if err != nil {
+		t.Fatalf("observe committed registrations: %v", err)
+	}
+	for rows.Next() {
+		var generation int64
+		if err := rows.Scan(&generation); err != nil {
+			t.Fatalf("read committed registration: %v", err)
+		}
+		registered = append(registered, generation)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil || len(registered) == 0 {
+		t.Fatalf("committed registrations = %v, err %v", registered, err)
+	}
+	if err := binding.Commit(); err != nil {
+		t.Fatalf("release worker slot binding: %v", err)
+	}
+
+	var pending int
+	var poison string
+	deadline = time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := admin.QueryRowContext(ctx, `
+			SELECT (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'),
+			       COALESCE((SELECT string_agg(failure_class || ': ' || COALESCE(failure_detail, ''), '; ')
+			                 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'), '')`,
+		).Scan(&pending, &poison); err != nil {
+			t.Fatalf("observe registry activation: %v", err)
+		}
+		if pending == 0 || poison != "" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var activated int
+	var active int64
+	if err := admin.QueryRowContext(ctx, `
+		SELECT count(*) FILTER (WHERE state IN ('active', 'superseded') AND activation_commit_lsn IS NOT NULL),
+		       COALESCE(max(generation) FILTER (WHERE state = 'active'), 0)
+		FROM synchro.sync_registry_generations
+		WHERE generation = ANY($1)`, registered,
+	).Scan(&activated, &active); err != nil {
+		t.Fatalf("observe activated registrations: %v", err)
+	}
+
+	itemID := "00000000-0000-4000-8243-000000000001"
+	t.Run("assertion", func(t *testing.T) {
+		if poison != "" || pending != 0 || activated != len(registered) || active != registered[len(registered)-1] {
+			t.Fatalf("registration during slot binding: poison %q pending %d activated %d of %v active %d; %s",
+				poison, pending, activated, registered, active, harness.FailureDiagnostics())
+		}
+		waitForReinstalledWorker(t, ctx, harness, reinstall, registered[0]-1)
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-binding')", itemID,
+		); err != nil {
+			t.Fatalf("write after slot binding: %v", err)
+		}
+		var buckets []string
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if buckets, err = harness.Operator().ObserveMembershipBuckets(ctx, "cf_items", itemID); err != nil {
+				t.Fatalf("observe cf_items membership: %v", err)
+			}
+			if slices.Equal(buckets, []string{"user:diagnostic-user"}) {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !slices.Equal(buckets, []string{"user:diagnostic-user"}) {
+			t.Fatalf("cf_items membership = %v, want [user:diagnostic-user]; %s", buckets, harness.FailureDiagnostics())
 		}
 	})
 }

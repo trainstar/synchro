@@ -163,6 +163,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealWALObservationUsesOneSnapshot":                         "framework",
 	"TestRealWorkerStartupRetainsUnownedConfiguredSlot":             "regression",
 	"TestRealRegistrationsCommittedBeforeActivationActivateInOrder": "regression",
+	"TestRealRegistrationDuringInitialSlotBindingActivatesOnce":     "regression",
 }
 
 func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {
