@@ -727,6 +727,7 @@ The server scopes batch and mutation identity to the authenticated user and clie
 - Repeating a completed `batch_id` with the identical fingerprint returns the original HTTP status and exact canonical response body, including original time, order, rows, versions, codes, and messages. It performs no mutation work.
 - Reusing a completed batch or mutation ID for different content returns `409 idempotency_conflict` and performs no mutation work.
 - Reusing an unchanged completed mutation in a different new batch contributes its exact stored outcome without re-execution.
+- Reusing a completed `atomic_batch_rejected` mutation in a different non-atomic batch returns `400 invalid_request` and performs no mutation work.
 - Exact completed replay occurs before current client-generation and schema gates, but after authentication, protocol, structural, and permanent-retirement gates.
 - Concurrent requests with one batch identity and fingerprint serialize to one first execution. Later callers receive its exact completed response or a whole-request retryable error, never a second execution.
 
@@ -1148,7 +1149,7 @@ When more than one condition is present, the server uses this order:
 2. Apply protocol and required-runtime compatibility gates. Failure is `426 upgrade_required`.
 3. Parse and structurally validate the exact endpoint object. Connect uses `invalid_schema_reference` for its malformed schema reference; other structural failures use `invalid_request`.
 4. Reject irreversible client retirement with `409 client_retired`.
-5. For push only, perform completed batch and mutation replay lookup. Equal fingerprints replay exactly; unequal fingerprints return `409 idempotency_conflict`. An atomic request whose mutation has an equal fingerprint in a different batch returns `400 invalid_request`.
+5. For push only, perform completed batch and mutation replay lookup. Equal fingerprints replay exactly; unequal fingerprints return `409 idempotency_conflict`. An atomic request whose mutation has an equal fingerprint in a different batch returns `400 invalid_request`. A non-atomic request whose reused mutation has stored code `atomic_batch_rejected` returns `400 invalid_request`.
 6. Apply the current client-generation gate, then the current-schema gate for first execution. Connect renews an expired generation and performs its schema-action dispatch instead.
 7. For pull, validate incremental cursors. Authentic stale state becomes HTTP 200 rebuild dispatch; malformed, forged, or misbound state becomes `400 invalid_request`. For rebuild, authentic stale state becomes `409 rebuild_restart_required`; malformed, forged, or misbound state becomes `400 invalid_request`.
 8. Apply admission control. Failure is `429 retry_later`.

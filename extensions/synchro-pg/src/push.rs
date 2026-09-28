@@ -302,6 +302,21 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
                 false,
             );
         }
+        if request.atomic != Some(true)
+            && stored_mutations.values().any(|stored| {
+                stored
+                    .outcome
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("atomic_batch_rejected")
+            })
+        {
+            return push_protocol_error(
+                ProtocolErrorCode::InvalidRequest,
+                "non-atomic push request reuses an atomic batch rejection",
+                false,
+            );
+        }
 
         let generation = match check_client_generation(
             client,

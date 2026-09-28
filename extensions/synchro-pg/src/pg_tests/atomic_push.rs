@@ -359,6 +359,53 @@
     }
 
     #[pg_test]
+    fn test_non_atomic_push_rejects_atomic_batch_rejected_replay() {
+        setup_test_tables();
+        let user_id = "u1";
+        let client_id = "c1";
+        register_client(user_id, client_id);
+        let rejected_id = "a5100000-0000-4000-8000-000000000001";
+        let conflict_id = "a5100000-0000-4000-8000-000000000002";
+        let fresh_id = "a5100000-0000-4000-8000-000000000003";
+        insert_live_order(conflict_id, user_id, "committed");
+        let rejected = order_insert(user_id, "atomic-non-atomic-replay-rejected", rejected_id);
+        let conflict = order_insert(user_id, "atomic-non-atomic-replay-conflict", conflict_id);
+        let atomic = atomic_push_request(
+            user_id,
+            client_id,
+            "atomic-non-atomic-replay",
+            vec![rejected.clone(), conflict],
+        );
+
+        let atomic_response = execute_push(user_id, &atomic);
+        assert_eq!(
+            atomic_response.json["rejected"][0]["code"].as_str(),
+            Some("atomic_batch_rejected")
+        );
+        let ledgers = push_ledger_counts(user_id, client_id);
+
+        let replay = execute_push(
+            user_id,
+            &push_request(
+                user_id,
+                client_id,
+                "non-atomic-atomic-rejection-replay",
+                vec![
+                    order_insert(user_id, "atomic-non-atomic-replay-fresh", fresh_id),
+                    rejected,
+                ],
+            ),
+        );
+
+        assert_eq!(
+            replay.json["error"]["code"].as_str(),
+            Some("invalid_request")
+        );
+        assert_eq!(push_ledger_counts(user_id, client_id), ledgers);
+        assert_eq!(source_order_count(&[rejected_id, fresh_id]), 0);
+    }
+
+    #[pg_test]
     fn test_atomic_push_invalid_requests_create_no_ledger() {
         setup_test_tables();
         let user_id = "u1";
