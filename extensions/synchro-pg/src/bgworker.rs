@@ -178,6 +178,9 @@ struct DependencyEvent {
 struct PersistedEvents {
     direct_impacts: Vec<ImpactedRow>,
     dependency_events: Vec<DependencyEvent>,
+    /// Each changed synced row, in first-touch order, with whether its
+    /// captured row existed before the events of this call.
+    initial_presence: Vec<((usize, String), bool)>,
 }
 
 struct MaterializedTransaction {
@@ -3534,6 +3537,7 @@ fn materialize_transaction(
         .collect();
     let mut active_generation = generation;
     let mut effect_bases = HashMap::new();
+    let mut existed_before = HashMap::new();
     let mut segments = Vec::with_capacity(applicable_segments.len());
     let mut membership_transitions = Vec::with_capacity(activations.len());
     for (segment, applicable) in applicable_segments.iter().enumerate() {
@@ -3559,6 +3563,13 @@ fn materialize_transaction(
             registry,
             applicable,
         )?;
+        // The first touch of a row in the transaction tells whether it existed
+        // before the transaction.
+        for ((index, record_id), present) in &persisted.initial_presence {
+            existed_before
+                .entry((registry[*index].relation_id.clone(), record_id.clone()))
+                .or_insert(*present);
+        }
         if segment + 1 < registries.len() {
             align_edges_before_activation(
                 client,
@@ -3600,6 +3611,10 @@ fn materialize_transaction(
     // changed. It waits for the final projection like every other membership
     // evaluation of the transaction. It compares with the membership before the
     // transaction, and effect_bases holds that membership for every changed row.
+    // A row that the transaction inserted had no earlier membership that a
+    // client can hold, and its insert effect carries the final membership. It
+    // keeps no baseline, so the stage compares it with its final edges.
+    effect_bases.retain(|key, _| existed_before.get(key).copied().unwrap_or(true));
     crate::materialize::activate_membership_stages(
         client,
         &membership_transitions,
@@ -5871,6 +5886,7 @@ fn persist_events_and_projections(
     let mut persisted = PersistedEvents {
         direct_impacts: Vec::with_capacity(events.len()),
         dependency_events: Vec::with_capacity(events.len()),
+        initial_presence: Vec::with_capacity(events.len()),
     };
     // Pages share the source transaction. Membership reads only the final projection.
     for batch in events.chunks(JSONB_BATCH_SIZE) {
@@ -5884,6 +5900,7 @@ fn persist_events_and_projections(
         )?;
         persisted.direct_impacts.extend(batch.direct_impacts);
         persisted.dependency_events.extend(batch.dependency_events);
+        persisted.initial_presence.extend(batch.initial_presence);
     }
     Ok(persisted)
 }
@@ -6393,9 +6410,17 @@ fn fold_and_persist_projection_rows(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
 
+    let initial_presence = synced_inputs
+        .into_iter()
+        .map(|key| {
+            let present = initially_present_synced.contains(&key);
+            (key, present)
+        })
+        .collect();
     Ok(PersistedEvents {
         direct_impacts: impacts,
         dependency_events,
+        initial_presence,
     })
 }
 

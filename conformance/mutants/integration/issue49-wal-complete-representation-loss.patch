@@ -1,12 +1,12 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
-index 505d57a..8a25333 100644
+index 6ab84a7..39ec1a1 100644
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -3531,6 +3531,7 @@ fn materialize_transaction(
+@@ -3563,6 +3563,7 @@ fn materialize_transaction(
              registry,
              applicable,
          )?;
 +        persisted.direct_impacts = persisted.direct_impacts.into_iter().skip(1).collect();
-         if segment + 1 < registries.len() {
-             align_edges_before_activation(
-                 client,
+         // The first touch of a row in the transaction tells whether it existed
+         // before the transaction.
+         for ((index, record_id), present) in &persisted.initial_presence {

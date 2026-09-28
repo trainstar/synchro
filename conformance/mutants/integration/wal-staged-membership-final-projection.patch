@@ -1,9 +1,9 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
-index 41085ef..0f1cd55 100644
+index 6ab84a7..b53cc24 100644
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -3597,7 +3597,7 @@ fn materialize_transaction(
-     // transaction, and effect_bases holds that membership for every changed row.
+@@ -3617,7 +3617,7 @@ fn materialize_transaction(
+     effect_bases.retain(|key, _| existed_before.get(key).copied().unwrap_or(true));
      crate::materialize::activate_membership_stages(
          client,
 -        &membership_transitions,
@@ -11,7 +11,7 @@ index 41085ef..0f1cd55 100644
          active_generation,
          &effect_bases,
          &stream_generation,
-@@ -7161,6 +7161,22 @@ fn activate_generations(
+@@ -7237,6 +7237,22 @@ fn activate_generations(
      let Some(final_generation) = activations.last().copied() else {
          return Ok(active_generation);
      };

@@ -244,9 +244,10 @@ struct MembershipStage {
 /// several transitions. Their membership is evaluated once, with the registry
 /// of `evaluation_generation`, against the projection that the caller has
 /// already brought to its final state. `baseline` holds the buckets before the
-/// transaction of each row that the transaction changed. The caller has already
-/// written the final edges of those rows, so the changed scopes compare the
-/// staged membership with that baseline. The affected scopes are the union of
+/// transaction of each changed row that existed before the transaction. The
+/// caller has already written the final edges of the changed rows, so the
+/// changed scopes compare the staged membership with that baseline. A row that
+/// the transaction inserted has no baseline and compares with its final edges. The affected scopes are the union of
 /// the declared scopes. A transition without a declaration adds the changed
 /// scopes.
 pub(crate) fn activate_membership_stages(
