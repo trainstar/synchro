@@ -39,6 +39,8 @@
 	record-r1-benchmark \
 	test-r1-benchmark \
 	_run-r1-benchmark \
+	characterize-dataset \
+	test-conformance-dataset \
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-seed-artifact \
@@ -214,6 +216,7 @@ CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapt
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18-update-baseline
+CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS ?= $(CURDIR)/dist/conformance/synchro-pg-pg18-update-origins
 ADAPTER_TEST_URL ?=
 REPLICATION_URL = $(ADAPTER_TEST_URL)
 override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
@@ -255,6 +258,8 @@ RN_PINNED_SEED ?= clients/react-native/example/seed.db
 RN_CONSUMER_SEED ?= clients/react-native/example/verification/seed.db
 RN_ANDROID_SEED_ASSET ?= clients/react-native/example/android/app/src/main/assets/seed.db
 CLIENT_INTEGRATION_SEED ?= $(CURDIR)/.ignore/client-integration/seed.db
+# CLIENT_DATASET=1 also prepares the synthetic training dataset (conformance/dataset).
+CLIENT_DATASET ?= 0
 REFRESH_RN_SEED_OUTPUT ?= $(CURDIR)/clients/react-native/example/seed.db
 # A required gate runs its declared selection. A result stream cannot show that
 # a caller selector omitted tests, so a required gate rejects a changed selector.
@@ -360,6 +365,7 @@ help:
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
 	@echo "  record-r1-benchmark   - Record one R1 benchmark candidate"
 	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
+	@echo "  characterize-dataset  - Record complete-work samples for DATASET_SEED and DATASET_SIZE"
 	@echo "  release-stage-server  - Build Linux x64 server release components"
 	@echo "  release-stage-packages - Build signed Maven and npm release components"
 	@echo "  release-stage         - Assemble and seal already built release components"
@@ -552,6 +558,9 @@ test-conformance-faults:
 test-invariants:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./invariants -count=1
 
+test-conformance-dataset:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./dataset -count=1
+
 test-conformance-invariants: test-invariants
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./soak -count=1
 
@@ -660,7 +669,7 @@ _run-r1-benchmark:
 		mkdir "$$secrets_dir"; \
 		umask 077; \
 		for name in admin adapter observer worker operator jwt; do openssl rand -hex 32 > "$$secrets_dir/$$name-password"; done; \
-		pg_config="$$(while IFS=' =' read -r key value; do test "$$key" = pg18 || continue; value="$${value#\"}"; value="$${value%\"}"; printf '%s\n' "$$value"; break; done < "$$HOME/.pgrx/config.toml")"; \
+		pg_config="$(PGRX_PG_CONFIG)"; \
 		test -x "$$pg_config" || { echo "pgrx PostgreSQL 18 configuration is unavailable" >&2; exit 1; }; \
 		pg_bindir="$$(dirname "$$pg_config")"; \
 		$(MAKE) --no-print-directory conformance-adapter-artifact CONFORMANCE_ADAPTER_ARTIFACT_DIR="$$adapter_bundle"; \
@@ -691,6 +700,22 @@ _run-r1-benchmark:
 			-expect target_pass \
 			-- go test -tags r1benchmark -json ./blackbox/integration -count=1 -timeout=20m \
 			-run '^TestRealR1PerformanceBenchmark$$' -args --provision --install
+
+# Characterize complete correct work for one seeded dataset. The run records
+# samples and has no numerical pass or fail rule (D-06). It uses the black-box
+# SYNCHRO_CONFORMANCE_* environment of test-blackbox.
+characterize-dataset: conformance-mod-download
+	@case "$(DATASET_SEED)" in ''|*[!0-9]*) echo "DATASET_SEED must be an unsigned integer" >&2; exit 1 ;; esac
+	@case "$(DATASET_SIZE)" in s|m|l) ;; *) echo "DATASET_SIZE must be s, m, or l" >&2; exit 1 ;; esac
+	@test -n "$(DATASET_CHARACTERIZATION_RESULT)" || { echo "DATASET_CHARACTERIZATION_RESULT is required" >&2; exit 1; }
+	@result="$(abspath $(DATASET_CHARACTERIZATION_RESULT))"; repo="$(CURDIR)"; \
+		case "$$result" in "$$repo"|"$$repo"/*) echo "DATASET_CHARACTERIZATION_RESULT must be outside the repository" >&2; exit 1 ;; esac
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "dataset characterization requires a clean worktree" >&2; exit 1; }
+	cd conformance && DATASET_REVISION="$$(git rev-parse --verify HEAD)" DATASET_SEED="$(DATASET_SEED)" DATASET_SIZE="$(DATASET_SIZE)" \
+		DATASET_CHARACTERIZATION_RESULT="$(abspath $(DATASET_CHARACTERIZATION_RESULT))" \
+		GOFLAGS= GOWORK=off go run ./cmd/testresult exact -test TestRealDatasetCharacterization -expect target_pass \
+		-- go test -tags datasetcharacterization -json ./blackbox/integration -count=1 -timeout=180m \
+		-run '^TestRealDatasetCharacterization$$' -args --provision --install
 
 parse-testresult:
 	@test -n "$(TESTRESULT_TEST_NAME)" || { echo "TESTRESULT_TEST_NAME is required" >&2; exit 1; }
@@ -817,28 +842,45 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		rmdir "$$lock"; \
 		trap - EXIT HUP INT TERM
 
+# The baseline is the first update origin. Each later released origin is a
+# pinned published bundle in CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS/<version>.
 conformance-update-baseline-extension-artifact:
 	@set -eu; \
 		export LC_ALL=C; \
 		final="$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)"; \
+		origins="$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"; \
 		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
+		test ! -e "$$origins" || { echo "$$origins already exists" >&2; exit 1; }; \
 		artifact="$$(cd api/go && GOWORK=off go run ./cmd/synchro-version update-baseline-artifact)"; \
 		set -- $$artifact; \
 		test "$$#" -eq 2 || { echo "update baseline artifact must have one URL and one SHA-256 digest" >&2; exit 1; }; \
-		url="$$1"; \
-		digest="$$2"; \
+		baseline_url="$$1"; \
+		baseline_digest="$$2"; \
+		later="$$(python3 scripts/update-origins.py extensions/synchro-pg/update-origins.json extensions/synchro-pg/update-baseline.json)"; \
 		work="$$final.tmp.$$$$"; \
 		mkdir -p "$$(dirname "$$final")"; \
 		cleanup() { rm -rf "$$work"; }; \
 		trap cleanup EXIT HUP INT TERM; \
-		mkdir "$$work" "$$work/extract"; \
-		curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$$work/archive.tar.gz" "$$url"; \
-		test "$$(shasum -a 256 "$$work/archive.tar.gz" | cut -d ' ' -f 1)" = "$$digest" || { echo "update baseline archive SHA-256 differs from the pinned digest" >&2; exit 1; }; \
-		tar -xzf "$$work/archive.tar.gz" -C "$$work/extract"; \
-		manifest="$$work/extract/extension/artifact-manifest.json"; \
-		test -f "$$manifest" && test -f "$$manifest.sha256" || { echo "update baseline archive omitted the extension manifest or its digest" >&2; exit 1; }; \
-		test "$$(shasum -a 256 "$$manifest" | cut -d ' ' -f 1)" = "$$(cat "$$manifest.sha256")" || { echo "update baseline extension manifest differs from its digest" >&2; exit 1; }; \
-		mv "$$work/extract/extension" "$$final"; \
+		mkdir "$$work" "$$work/origins"; \
+		fetch() { \
+			mkdir "$$work/extract"; \
+			curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$$work/archive.tar.gz" "$$1"; \
+			test "$$(shasum -a 256 "$$work/archive.tar.gz" | cut -d ' ' -f 1)" = "$$2" || { echo "update origin archive SHA-256 differs from the pinned digest" >&2; exit 1; }; \
+			tar -xzf "$$work/archive.tar.gz" -C "$$work/extract"; \
+			manifest="$$work/extract/extension/artifact-manifest.json"; \
+			test -f "$$manifest" && test -f "$$manifest.sha256" || { echo "update origin archive omitted the extension manifest or its digest" >&2; exit 1; }; \
+			test "$$(shasum -a 256 "$$manifest" | cut -d ' ' -f 1)" = "$$(cat "$$manifest.sha256")" || { echo "update origin extension manifest differs from its digest" >&2; exit 1; }; \
+			mv "$$work/extract/extension" "$$3"; \
+			rm -rf "$$work/extract" "$$work/archive.tar.gz"; \
+		}; \
+		fetch "$$baseline_url" "$$baseline_digest" "$$work/baseline"; \
+		printf '%s\n' "$$later" | while read -r version url digest; do \
+			test -n "$$version" || continue; \
+			fetch "$$url" "$$digest" "$$work/origins/$$version"; \
+		done; \
+		mkdir -p "$$(dirname "$$origins")"; \
+		mv "$$work/origins" "$$origins"; \
+		mv "$$work/baseline" "$$final"; \
 		rm -rf "$$work"; \
 		trap - EXIT HUP INT TERM
 
@@ -847,7 +889,7 @@ test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-comp
 	cd conformance && GOFLAGS= GOWORK=off SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
 		go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=$(BLACKBOX_TIMEOUT) -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios test-conformance-dataset check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
 release-stage-server: version-check
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
@@ -2390,7 +2432,7 @@ synchrod-pg-test-start synchrod-pg-test-serve: build build-seed verify-rn-seed
 		status=$$?; test "$$status" -eq 3 || exit "$$status"; \
 	fi; \
 	echo "Preparing client integration database..."; \
-	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..); \
+	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root .. $(if $(filter 1,$(CLIENT_DATASET)),--dataset)); \
 	if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
 		seed_output="$(REFRESH_RN_SEED_OUTPUT)"; \
 		echo "Refreshing client seed database..."; \

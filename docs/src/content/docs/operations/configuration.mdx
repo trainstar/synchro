@@ -26,6 +26,10 @@ An empty publication, slot, database, or worker login makes the related readines
 
 The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction. An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement. Candidate decoding also rejects the transaction. Split the source write into smaller transactions to stay below these fixed safety limits.
 
+Each change to a registered row counts as two records: the row change and its write fence message. The first change to a relation in a decoding session can add one relation message. An application trigger that writes a registered table adds the records of its own row changes. For example, one transaction that inserts 4,999 rows into one registered table without triggers has 9,999 records and is accepted. A transaction that inserts 5,001 such rows has 10,002 records and becomes poison.
+
+Recovery of an oversized transaction uses an operator-authorized stream reset. The reset baseline reads the committed source rows, so it includes the rows of the poisoned transaction. Clients then rebuild, and later source writes materialize normally.
+
 The worker reads peeked pgoutput data one message at a time. It preserves each complete valid source transaction when a poll batch reaches its soft 16 MiB target.
 
 ### Replication slot ownership
@@ -49,6 +53,13 @@ To recover, make an explicit operator decision:
 
 PostgreSQL restarts the failed worker process.
 The new worker process then creates and binds the configured slot.
+
+### Registration transactions
+
+Separate registration transactions can commit before the worker activates an earlier one.
+The worker activates their registry generations in commit order.
+Each membership rule transition stages and activates in the generation that its own transaction created.
+A later transaction does not change a membership stage that an earlier committed transaction created.
 
 ## Publication membership
 

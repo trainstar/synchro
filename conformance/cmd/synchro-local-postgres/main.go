@@ -28,6 +28,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/dataset"
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
 )
 
@@ -649,6 +650,7 @@ func runPrepare(ctx context.Context, args []string) error {
 	flags.SetOutput(os.Stderr)
 	repoRoot := flags.String("repo-root", "", "repository root")
 	databaseURL := flags.String("database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection string")
+	withDataset := flags.Bool("dataset", false, "also prepare the synthetic training dataset and its authored seed")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("prepare flags are invalid")
 	}
@@ -710,6 +712,77 @@ func runPrepare(ctx context.Context, args []string) error {
 	}
 	if _, err := database.ExecContext(ctx, "SELECT synchro.synchro_backfill_bucket_edges()"); err != nil {
 		return fmt.Errorf("backfill client integration scope edges failed: %w", err)
+	}
+	if *withDataset {
+		return prepareDataset(ctx, database)
+	}
+	return nil
+}
+
+// prepareDataset registers the synthetic training dataset after the fixture
+// registry is active and applies its authored seed once. A later preparation
+// finds the dataset tables and changes nothing.
+func prepareDataset(ctx context.Context, database *sql.DB) error {
+	var exists bool
+	if err := database.QueryRowContext(ctx, "SELECT to_regclass('public.organizations') IS NOT NULL").Scan(&exists); err != nil {
+		return errors.New("inspect dataset tables failed")
+	}
+	if exists {
+		// Only a complete earlier preparation is reused.
+		var complete bool
+		if err := database.QueryRowContext(ctx, `
+			SELECT (SELECT count(*)
+			        FROM synchro.sync_registry registry
+			        JOIN synchro.sync_registry_generations generation
+			          ON generation.generation = registry.registry_generation AND generation.state = 'active'
+			        WHERE registry.physical_schema = 'public' AND registry.physical_relation = ANY($1)) = cardinality($1)
+			   AND EXISTS (SELECT 1 FROM public.organizations WHERE id = $2::uuid)`,
+			dataset.TableNames(), dataset.OrgA,
+		).Scan(&complete); err != nil || !complete {
+			return errors.New("an earlier dataset preparation is incomplete; prepare a new database")
+		}
+		return nil
+	}
+	if err := waitFor(ctx, database, func(ctx context.Context, database *sql.DB) (bool, error) {
+		var pending bool
+		err := database.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM synchro.sync_registry_generations WHERE state = 'pending')").Scan(&pending)
+		return !pending, err
+	}); err != nil {
+		return errors.New("fixture registry did not activate before dataset registration")
+	}
+	if _, err := database.ExecContext(ctx, dataset.SchemaSQL); err != nil {
+		return fmt.Errorf("apply dataset schema: %w", err)
+	}
+	if _, err := database.ExecContext(ctx, dataset.RegistrationSQL); err != nil {
+		return fmt.Errorf("apply dataset registration: %w", err)
+	}
+	if err := waitFor(ctx, database, func(ctx context.Context, database *sql.DB) (bool, error) {
+		var pending bool
+		err := database.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM synchro.sync_registry_generations WHERE state = 'pending')").Scan(&pending)
+		return !pending, err
+	}); err != nil {
+		return errors.New("dataset registry did not activate")
+	}
+	if _, err := database.ExecContext(ctx, dataset.AuthoredSeed.SQL); err != nil {
+		return fmt.Errorf("apply dataset authored seed: %w", err)
+	}
+	for _, grant := range dataset.AuthoredSeed.Grants {
+		if _, err := database.ExecContext(ctx, "SELECT synchro.synchro_grant_user_scope($1, $2)", grant[0], grant[1]); err != nil {
+			return fmt.Errorf("grant dataset scope: %w", err)
+		}
+	}
+	var poison sql.NullString
+	if err := waitFor(ctx, database, func(ctx context.Context, database *sql.DB) (bool, error) {
+		var pending int
+		err := database.QueryRowContext(ctx, `SELECT
+			(SELECT count(*) FROM synchro.sync_write_fences WHERE coverage = 'pending'),
+			(SELECT failure_class FROM synchro.sync_wal_poison WHERE lifecycle = 'active' LIMIT 1)`).Scan(&pending, &poison)
+		return pending == 0 || poison.Valid, err
+	}); err != nil {
+		return errors.New("dataset seed did not materialize")
+	}
+	if poison.Valid {
+		return fmt.Errorf("dataset seed poisoned the stream: %s", poison.String)
 	}
 	return nil
 }
