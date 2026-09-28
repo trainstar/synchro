@@ -1183,6 +1183,304 @@
         Spi::run("ALTER TABLE test_orders DISABLE ROW LEVEL SECURITY").unwrap();
     }
 
+    const HIDDEN_ROW_OWNER: &str = "rls-owner-a";
+    const HIDDEN_ROW_USER: &str = "rls-user-b";
+
+    /// Installs the quickstart owner policy on `test_orders`. A `test_bare_items`
+    /// row named `share:{order_id}:{user_id}` also lets that user read the order.
+    fn enable_owner_row_security_for_orders() {
+        Spi::run(
+            "DROP POLICY synchro_test_owner_all ON test_orders;
+             CREATE POLICY test_orders_owner ON test_orders
+             AS PERMISSIVE FOR ALL TO synchro_owner
+             USING (
+                 NULLIF(current_setting('synchro.user_id', true), '') IS NULL
+                 OR user_id = current_setting('synchro.user_id', true)
+                 OR EXISTS (
+                     SELECT 1 FROM test_bare_items share
+                     WHERE share.name = 'share:' || test_orders.id::text || ':'
+                         || current_setting('synchro.user_id', true)
+                 )
+             )
+             WITH CHECK (
+                 NULLIF(current_setting('synchro.user_id', true), '') IS NULL
+                 OR user_id = current_setting('synchro.user_id', true)
+             )",
+        )
+        .unwrap();
+    }
+
+    fn order_snapshot(record_id: &str) -> Value {
+        let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT to_jsonb(test_orders) FROM test_orders WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .unwrap();
+        json!({
+            "row": row.expect("hidden order row").0,
+            "version": current_row_version("test_orders", record_id),
+        })
+    }
+
+    fn assert_hidden_row_rejection(outcome: &Value) {
+        assert_eq!(outcome["status"], "rejected_terminal");
+        assert_eq!(outcome["code"], "policy_rejected");
+        assert_eq!(
+            outcome["message"],
+            "authenticated write policy rejected the mutation"
+        );
+        for member in ["server_row", "row_checksum", "server_version"] {
+            assert!(outcome.get(member).is_none(), "{member} must be absent");
+        }
+    }
+
+    #[pg_test]
+    fn test_push_rejects_stale_writes_to_rls_hidden_rows() {
+        setup_test_tables();
+        enable_owner_row_security_for_orders();
+        let (owner, user_id, client_id) = (HIDDEN_ROW_OWNER, HIDDEN_ROW_USER, "c1");
+        register_client(user_id, client_id);
+        let stale_update = "f2650000-0000-4000-8000-000000000001";
+        let stale_delete = "f2650000-0000-4000-8000-000000000002";
+        let hidden_insert = "f2650000-0000-4000-8000-000000000003";
+        let deleted = "f2650000-0000-4000-8000-000000000004";
+        let visible = "f2650000-0000-4000-8000-000000000005";
+        let hidden = [stale_update, stale_delete, hidden_insert];
+        for record_id in hidden {
+            insert_live_order(record_id, owner, "owner row");
+        }
+        // Another writer hard-deletes this row. The WAL worker has not materialized the delete.
+        let deleted_base = insert_live_order(deleted, owner, "owner row");
+        Spi::run_with_args(
+            "DELETE FROM test_orders WHERE id = $1::uuid",
+            &[deleted.into()],
+        )
+        .unwrap();
+        let deleted_version = current_row_version("test_orders", deleted);
+        let visible_version = insert_live_order(visible, user_id, "own row");
+        let before = hidden.map(order_snapshot);
+
+        let response = push_client(
+            user_id,
+            client_id,
+            "rls-hidden-stale",
+            vec![
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-stale-update",
+                    "test_orders",
+                    "update",
+                    stale_update,
+                    Some("stale-version"),
+                    Some(&[("title", json!("b-stale"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-stale-delete",
+                    "test_orders",
+                    "delete",
+                    stale_delete,
+                    Some("stale-version"),
+                    None,
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-hidden-insert",
+                    "test_orders",
+                    "insert",
+                    hidden_insert,
+                    None,
+                    Some(&[("user_id", json!(user_id)), ("title", json!("b-insert"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-deleted-update",
+                    "test_orders",
+                    "update",
+                    deleted,
+                    Some(deleted_base.as_str()),
+                    Some(&[("title", json!("b-deleted"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-visible-stale",
+                    "test_orders",
+                    "update",
+                    visible,
+                    Some("stale-version"),
+                    Some(&[("title", json!("b-visible"))]),
+                ),
+            ],
+        );
+
+        assert_eq!(response.json["accepted"], json!([]));
+        let rejected = response.json["rejected"]
+            .as_array()
+            .expect("rejected mutation array");
+        assert_eq!(rejected.len(), 5);
+        for outcome in &rejected[..3] {
+            assert_hidden_row_rejection(outcome);
+        }
+        assert!(!response.raw.contains(owner));
+
+        let deleted_outcome = &rejected[3];
+        assert_eq!(deleted_outcome["status"], "conflict");
+        assert_eq!(deleted_outcome["code"], "row_deleted");
+        assert_eq!(
+            deleted_outcome["server_version"].as_str(),
+            Some(deleted_version.as_str())
+        );
+        assert!(deleted_outcome.get("server_row").is_none());
+        assert!(deleted_outcome.get("row_checksum").is_none());
+
+        let visible_outcome = &rejected[4];
+        assert_eq!(visible_outcome["status"], "conflict");
+        assert_eq!(visible_outcome["code"], "version_conflict");
+        assert_eq!(
+            visible_outcome["server_version"].as_str(),
+            Some(visible_version.as_str())
+        );
+        assert_eq!(
+            visible_outcome["server_row"][field_id("test_orders", "title")],
+            "own row"
+        );
+
+        assert_eq!(hidden.map(order_snapshot), before);
+    }
+
+    #[pg_test]
+    fn test_push_rejects_current_writes_to_rls_hidden_rows() {
+        setup_test_tables();
+        enable_owner_row_security_for_orders();
+        let (owner, user_id, client_id) = (HIDDEN_ROW_OWNER, HIDDEN_ROW_USER, "c1");
+        register_client(user_id, client_id);
+        let current_update = "f2650000-0000-4000-8000-000000000011";
+        let current_delete = "f2650000-0000-4000-8000-000000000012";
+        let update_version = insert_live_order(current_update, owner, "owner row");
+        let delete_version = insert_live_order(current_delete, owner, "owner row");
+        let before = [current_update, current_delete].map(order_snapshot);
+
+        let response = push_client(
+            user_id,
+            client_id,
+            "rls-hidden-current",
+            vec![
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-current-update",
+                    "test_orders",
+                    "update",
+                    current_update,
+                    Some(update_version.as_str()),
+                    Some(&[("title", json!("b-current"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-current-delete",
+                    "test_orders",
+                    "delete",
+                    current_delete,
+                    Some(delete_version.as_str()),
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(response.json["accepted"], json!([]));
+        let rejected = response.json["rejected"]
+            .as_array()
+            .expect("rejected mutation array");
+        assert_eq!(rejected.len(), 2);
+        for outcome in rejected {
+            assert_hidden_row_rejection(outcome);
+        }
+        assert!(!response.raw.contains(owner));
+        assert_eq!([current_update, current_delete].map(order_snapshot), before);
+    }
+
+    #[pg_test]
+    fn test_atomic_push_rejects_rows_hidden_by_row_security() {
+        setup_test_tables();
+        enable_owner_row_security_for_orders();
+        let (owner, user_id, client_id) = (HIDDEN_ROW_OWNER, HIDDEN_ROW_USER, "c1");
+        register_client(user_id, client_id);
+        let hidden = "f2650000-0000-4000-8000-000000000021";
+        let share = "f2650000-0000-4000-8000-000000000022";
+        let own_insert = "f2650000-0000-4000-8000-000000000023";
+        let hidden_version = insert_live_order(hidden, owner, "owner row");
+        let before = order_snapshot(hidden);
+
+        // The share makes the row visible inside the group only. The rollback hides it again.
+        let reread_group = vec![
+            push_mutation(
+                (user_id, client_id),
+                "rls-atomic-share",
+                "test_bare_items",
+                "insert",
+                share,
+                None,
+                Some(&[("name", json!(format!("share:{hidden}:{user_id}")))]),
+            ),
+            push_mutation(
+                (user_id, client_id),
+                "rls-atomic-stale",
+                "test_orders",
+                "update",
+                hidden,
+                Some("stale-version"),
+                Some(&[("title", json!("b-atomic-stale"))]),
+            ),
+        ];
+        let response = execute_push(
+            user_id,
+            &atomic_push_request(user_id, client_id, "rls-atomic-reread", reread_group.clone()),
+        );
+        let failure = assert_failed_group(
+            &response,
+            &reread_group,
+            1,
+            "rejected_terminal",
+            "policy_rejected",
+        );
+        assert_hidden_row_rejection(&failure);
+        assert!(!response.raw.contains(owner));
+
+        let direct_group = vec![
+            order_insert(user_id, "rls-atomic-own", own_insert),
+            push_mutation(
+                (user_id, client_id),
+                "rls-atomic-current",
+                "test_orders",
+                "update",
+                hidden,
+                Some(hidden_version.as_str()),
+                Some(&[("title", json!("b-atomic-current"))]),
+            ),
+        ];
+        let response = execute_push(
+            user_id,
+            &atomic_push_request(user_id, client_id, "rls-atomic-direct", direct_group.clone()),
+        );
+        let failure = assert_failed_group(
+            &response,
+            &direct_group,
+            1,
+            "rejected_terminal",
+            "policy_rejected",
+        );
+        assert_hidden_row_rejection(&failure);
+        assert!(!response.raw.contains(owner));
+
+        let share_count: Option<i64> = Spi::get_one_with_args(
+            "SELECT count(*) FROM test_bare_items WHERE id = $1::uuid",
+            &[share.into()],
+        )
+        .unwrap();
+        assert_eq!(share_count, Some(0));
+        assert_eq!(source_order_count(&[own_insert]), 0);
+        assert_eq!(order_snapshot(hidden), before);
+    }
+
     #[pg_test]
     fn test_push_policy_cannot_repair_invalid_authored_value() {
         setup_test_tables();
