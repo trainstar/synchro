@@ -190,6 +190,11 @@ capture-only dependencies in the worker's current materialization transaction.
 They never read live application relations. They cannot depend on volatile
 values, session identity, session settings, temporary objects, sequence state,
 random values, wall-clock time, or dynamic SQL.
+Registration rejects a forbidden dependence that the catalog records, such as a
+call to an application function. PostgreSQL records no catalog dependency on a
+built-in function, so registration cannot detect a call to `random()`,
+`clock_timestamp()`, or `current_setting()`. A function with such a forbidden
+dependence is unsupported even when registration accepts it.
 
 The validator verifies each exact signature and return type, every declared
 dependency, required impact function, privilege, bound, and referenced field.
