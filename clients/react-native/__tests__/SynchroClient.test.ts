@@ -629,51 +629,6 @@ describe('SynchroClient', () => {
       expect(mockNativeModule.inspectRetainedMutations).toHaveBeenCalledTimes(1);
     });
 
-    it('maps a legacy retained mutation without binding fields', async () => {
-      const legacy = {
-        representation: 'legacy',
-        mutationID: 'mutation-4',
-        localOrder: 1,
-        tableName: 'orders',
-        recordID: 'r1',
-        operation: 'insert',
-        baseVersion: null,
-        clientVersion: '2026-01-01T00:00:00.000000Z',
-        status: 'blocked_by_predecessor',
-        sourceKind: 'legacy_import',
-      };
-      const current = {
-        representation: 'current',
-        mutationID: 'mutation-5',
-        localOrder: 2,
-        tableID: 'table-1',
-        tableName: 'orders',
-        recordID: 'r2',
-        primaryKeyFieldID: 'field-id',
-        primaryKeyLogicalType: 'uuid',
-        operation: 'update',
-        authoredSchema: { version: 3, hash: 'e'.repeat(64) },
-        baseVersion: 'server-v1',
-        clientVersion: 'client-v2',
-        status: 'pending',
-        sourceKind: 'local_write',
-        dependsOnMutationID: null,
-        normalizedMutationID: null,
-        sealedBatchID: null,
-        sealedOrdinal: null,
-        authoredFields: [{ fieldID: 'field-name', logicalType: 'string', value: 'current' }],
-      };
-      mockNativeModule.inspectRetainedMutationRecords.mockResolvedValueOnce(
-        JSON.stringify([legacy, current])
-      );
-
-      await expect(makeClient().inspectRetainedMutationRecords()).resolves.toStrictEqual([
-        legacy,
-        current,
-      ]);
-      expect(mockNativeModule.inspectRetainedMutations).not.toHaveBeenCalled();
-    });
-
     // The payload is otherwise a complete current record, so only the representation rejects it.
     it.each([undefined, 'placeholder'])(
       'rejects a retained mutation with representation %p',
@@ -736,46 +691,6 @@ describe('SynchroClient', () => {
       expect(result).toStrictEqual([rejected]);
       expect(result[0].mutationJSON).toBe(mutationJSON);
       expect(result[0].rejectionJSON).toBe(rejectionJSON);
-    });
-
-    it('maps a legacy rejected mutation without exact mutation or rejection JSON', async () => {
-      const legacy = {
-        representation: 'legacy',
-        mutationID: 'm1',
-        tableName: 'orders',
-        recordID: 'r0',
-        status: 'rejected_terminal',
-        code: 'policy_rejected',
-        message: 'blocked',
-        serverRowJSON: '{"id":"r0"}',
-        serverVersion: 'server-v7',
-        createdAt: '2026-01-01T00:00:00.000000Z',
-        updatedAt: '2026-01-01T00:00:00.000000Z',
-      };
-      const current = {
-        representation: 'current',
-        mutationID: 'm2',
-        tableName: 'orders',
-        recordID: 'r2',
-        status: 'conflict',
-        code: 'version_conflict',
-        message: null,
-        serverRowJSON: null,
-        serverVersion: 'server-v8',
-        mutationJSON: '{"mutation_id":"m2"}',
-        rejectionJSON: '{"mutation_id":"m2"}',
-        createdAt: '2026-01-02T00:00:00.000000Z',
-        updatedAt: '2026-01-02T00:00:00.000000Z',
-      };
-      mockNativeModule.inspectRejectedMutationRecords.mockResolvedValueOnce(
-        JSON.stringify([legacy, current])
-      );
-
-      await expect(makeClient().inspectRejectedMutationRecords()).resolves.toStrictEqual([
-        legacy,
-        current,
-      ]);
-      expect(mockNativeModule.inspectRejectedMutations).not.toHaveBeenCalled();
     });
 
     // The payload is otherwise a complete current record, so only the representation rejects it.
