@@ -645,7 +645,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
     }
   });
 
-  it('captures a current rejection in the wire shape and fails a legacy rejection', async () => {
+  it('fails a capture that holds a legacy rejection', async () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091',
       authToken: 'test-token',
@@ -665,7 +665,6 @@ describe('PublicConformanceRunner call lifecycle', () => {
         createdAt: '2026-01-01T00:00:00.000000Z',
         updatedAt: '2026-01-01T00:00:00.000000Z',
       };
-      const wire = { ...stored, mutationJSON: '{"mutation_id":"mutation-1"}', rejectionJSON: '{"mutation_id":"mutation-1"}' };
       const state = {
         schema: null,
         scope_states: [],
@@ -675,17 +674,14 @@ describe('PublicConformanceRunner call lifecycle', () => {
         rejected_mutation_count: 1,
         provenance_maintenance_work_cursor: '0',
       };
-      mockNativeModule.inspectClientStateSnapshot
-        .mockResolvedValueOnce(snapshotResult(state, { rejected_mutations: [{ representation: 'current', ...wire }] }))
-        .mockResolvedValueOnce(snapshotResult(state, { rejected_mutations: [{ representation: 'legacy', ...stored }] }));
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(
+        snapshotResult(state, { rejected_mutations: [{ representation: 'legacy', ...stored }] })
+      );
       const capture = command('observer', 'capture', 'client-a', {
         client_keys: ['client-a'],
         sources: ['rejected-mutations'],
       });
 
-      const captured = await runner.execute(capture);
-      expect(captured).toMatchObject({ kind: 'capture' });
-      expect((captured as { capture: { rejected_mutations: object[] } }).capture.rejected_mutations).toStrictEqual([wire]);
       await expect(runner.execute(capture)).rejects.toMatchObject({ code: 'capture_inspection_failed' });
     } finally {
       await runner.close();
@@ -721,7 +717,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
     }
   });
 
-  it('selects retained mutations by row from a ledger above the snapshot bound', async () => {
+  it('selects retained mutations by row from the retained records without the snapshot', async () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091',
       authToken: 'test-token',
@@ -756,7 +752,7 @@ describe('PublicConformanceRunner call lifecycle', () => {
         selected,
         retained('mutation-other-table', 'cf_other_items', 'row-a'),
       ];
-      mockNativeModule.inspectRetainedMutations.mockResolvedValueOnce(JSON.stringify(ledger));
+      mockNativeModule.inspectRetainedMutationRecords.mockResolvedValueOnce(JSON.stringify(ledger));
 
       const result = await runner.execute(command('observer', 'capture', 'client-a', {
         client_keys: ['client-a'],
@@ -769,8 +765,9 @@ describe('PublicConformanceRunner call lifecycle', () => {
       expect((result as { capture: { pending_mutations: object[] } }).capture.pending_mutations).toStrictEqual([wireMutation]);
       expect(mockNativeModule.inspectClientStateSnapshot).not.toHaveBeenCalled();
       expect(mockNativeModule.pendingChangeCount.mock.invocationCallOrder[0]).toBeLessThan(
-        mockNativeModule.inspectRetainedMutations.mock.invocationCallOrder[0]
+        mockNativeModule.inspectRetainedMutationRecords.mock.invocationCallOrder[0]
       );
+      expect(mockNativeModule.inspectRetainedMutations).not.toHaveBeenCalled();
     } finally {
       await runner.close();
     }
