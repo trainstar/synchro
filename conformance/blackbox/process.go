@@ -2085,7 +2085,7 @@ func (h *Harness) grantRunRoles(ctx context.Context) error {
 			"CREATE POLICY synchro_conformance_source ON public."+quoteIdentifier(table)+
 				" AS PERMISSIVE FOR ALL TO "+quoteIdentifier(h.sourceRole)+" USING (true) WITH CHECK (true)",
 		); err != nil {
-			return errors.New("create source-table row security policy failed")
+			return fmt.Errorf("create source-table row security policy failed: %w", err)
 		}
 		if _, err := database.ExecContext(ctx, "GRANT SELECT ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.env.Observer.Username)); err != nil {
 			return errors.New("grant observer source-table access failed")
@@ -2658,6 +2658,69 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 	return result, nil
 }
 
+// ResetScenarioServer returns the server to the authored fixture state before a
+// native scenario. It works the same on an owned server and on an attached
+// server, because every native scenario shares one database per cluster.
+func (h *Harness) ResetScenarioServer(ctx context.Context) error {
+	// A capture dependency registration stays pending while its source table
+	// holds rows, so the replayed registrations never activate unless every
+	// diagnostic source table is empty first.
+	for _, table := range diagnosticSourceTables {
+		if err := h.Source().ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return fmt.Errorf("clear diagnostic source table %s: %w", table, err)
+		}
+	}
+	reinstall, err := h.ReinstallExtension(ctx)
+	if err != nil {
+		return fmt.Errorf("reinstall extension: %w", err)
+	}
+	minimumGeneration := int64(0)
+	for phase := 0; phase < 2; phase++ {
+		deadline := time.Now().Add(90 * time.Second)
+		var ready ExtensionReinstallObservation
+		readyObserved := false
+		for time.Now().Before(deadline) {
+			ready, err = h.Operator().ObserveExtensionReinstall(ctx, reinstall.ReinstallLSN)
+			namedFreshSlot := ready.ActiveSlotName == h.names.ReplicationSlot && ready.RestartLSN != "" && ready.RestartLSNAtOrAfterReinstall
+			noSlot := ready.ActiveSlotName == "" && ready.RestartLSN == "" && !ready.SlotActive
+			slotReady := (phase == 0 && (noSlot || namedFreshSlot && !ready.SlotActive)) ||
+				(phase == 1 && namedFreshSlot && ready.SlotActive)
+			if err == nil && ready.WorkerPID > 0 && ready.WorkerPID != reinstall.PriorWorkerPID &&
+				slotReady &&
+				ready.ActiveRegistryGeneration > minimumGeneration &&
+				ready.PendingRegistryGenerationCount == 0 && ready.NoValidationFailurePoison {
+				readyObserved = true
+				break
+			}
+			time.Sleep(processPollInterval)
+		}
+		if !readyObserved {
+			// The loop exits on an unmet condition, not only on an error, so name
+			// every condition. Reporting err alone prints a nil error.
+			return fmt.Errorf("wait for extension reset phase %d: err %v worker %d prior %d slot %q want %q restartLSN %q slotActive %v restartAtOrAfter %v activeGeneration %d minimum %d pendingGenerations %d noPoison %v",
+				phase, err, ready.WorkerPID, reinstall.PriorWorkerPID,
+				ready.ActiveSlotName, h.names.ReplicationSlot,
+				ready.RestartLSN, ready.SlotActive, ready.RestartLSNAtOrAfterReinstall,
+				ready.ActiveRegistryGeneration, minimumGeneration,
+				ready.PendingRegistryGenerationCount, ready.NoValidationFailurePoison)
+		}
+		if phase == 0 {
+			minimumGeneration = ready.ActiveRegistryGeneration
+			// A scenario can transition any diagnostic source table column. The
+			// reinstall has cleared every registry generation, so this is the
+			// only point where restoring the authored column shapes invalidates
+			// no registration.
+			if err := h.Operator().RestoreDiagnosticSourceTableShapes(ctx); err != nil {
+				return err
+			}
+			if err := h.RestoreDiagnosticRegistrations(ctx); err != nil {
+				return fmt.Errorf("restore diagnostic registrations: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 func (h *Harness) dropReleasedWorkerSlot(ctx context.Context, slot string) error {
 	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
 	if err != nil {
@@ -3076,7 +3139,27 @@ func (transaction *SourceTransaction) ExecContext(ctx context.Context, statement
 }
 
 // EmitCommitMarker emits a non-DML logical message for an event-free source transaction.
-func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) (uint64, error) {
+func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) error {
+	if transaction == nil || transaction.tx == nil {
+		return errors.New("source transaction is unavailable")
+	}
+	transaction.mu.Lock()
+	defer transaction.mu.Unlock()
+	if transaction.done {
+		return errors.New("source transaction is complete")
+	}
+	var markerLSN string
+	if err := transaction.tx.QueryRowContext(ctx, `
+		SELECT pg_catalog.pg_logical_emit_message(true, 'synchro_conformance_marker', '')::text
+	`).Scan(&markerLSN); err != nil || markerLSN == "" {
+		return errors.New("emit source transaction marker failed")
+	}
+	return nil
+}
+
+// XID returns the 32-bit transaction ID that the WAL worker records as the
+// source_xid of this transaction.
+func (transaction *SourceTransaction) XID(ctx context.Context) (uint64, error) {
 	if transaction == nil || transaction.tx == nil {
 		return 0, errors.New("source transaction is unavailable")
 	}
@@ -3086,12 +3169,10 @@ func (transaction *SourceTransaction) EmitCommitMarker(ctx context.Context) (uin
 		return 0, errors.New("source transaction is complete")
 	}
 	var sourceXID uint64
-	var markerLSN string
 	if err := transaction.tx.QueryRowContext(ctx, `
-		SELECT (pg_catalog.txid_current() % 4294967296)::bigint,
-		       pg_catalog.pg_logical_emit_message(true, 'synchro_conformance_marker', '')::text
-	`).Scan(&sourceXID, &markerLSN); err != nil || sourceXID == 0 || markerLSN == "" {
-		return 0, errors.New("emit source transaction marker failed")
+		SELECT (pg_catalog.txid_current() % 4294967296)::bigint
+	`).Scan(&sourceXID); err != nil || sourceXID == 0 {
+		return 0, errors.New("read source transaction ID failed")
 	}
 	return sourceXID, nil
 }
@@ -3609,40 +3690,6 @@ END
 $restore$;
 DROP SCHEMA ` + diagnosticSourceRestoreSchemaName + ` CASCADE;
 COMMIT;`
-}
-
-// RestoreSchemaQueueFixture returns the schema-queue fixture to the column
-// shape schema.sql declares. A scenario transitions the fixture field with a
-// data definition change, and no extension reinstall reverses that change, so
-// a later scenario that binds the authored field finds it absent.
-//
-// Call this only where no registry generation exists. A generation records the
-// column set it was registered against, and dropping a column that a live
-// generation names makes the WAL consumer reject the registration.
-func (executor *OperatorExecutor) RestoreSchemaQueueFixture(ctx context.Context) error {
-	return executor.exec(ctx, `DO $$
-DECLARE
-	obsolete text;
-BEGIN
-	FOR obsolete IN
-		SELECT attname
-		FROM pg_catalog.pg_attribute
-		WHERE attrelid = 'public.cf_schema_queue'::regclass
-		  AND attnum > 0 AND NOT attisdropped
-		  AND attname LIKE 'queue\_value\_%'
-	LOOP
-		EXECUTE format('ALTER TABLE public.cf_schema_queue DROP COLUMN %I', obsolete);
-	END LOOP;
-	IF NOT EXISTS (
-		SELECT 1
-		FROM pg_catalog.pg_attribute
-		WHERE attrelid = 'public.cf_schema_queue'::regclass
-		  AND attnum > 0 AND NOT attisdropped
-		  AND attname = 'legacy_value'
-	) THEN
-		ALTER TABLE public.cf_schema_queue ADD COLUMN legacy_value TEXT NOT NULL DEFAULT '';
-	END IF;
-END $$`)
 }
 
 // GrantUserScope grants one scope to one user.

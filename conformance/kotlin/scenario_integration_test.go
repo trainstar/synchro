@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,7 +24,6 @@ func TestRealKotlinScenarios(t *testing.T) {
 		t.Run("pending-cycle", runKotlinPendingCycle)
 		t.Run("queue-replay", runKotlinQueueReplay)
 		t.Run("rebuild-requests", runKotlinRebuildRequests)
-		t.Run("rebuild-apply", runKotlinRebuildApply)
 		t.Run("rebuild-cardinality", runKotlinRebuildCardinality)
 		t.Run("forged-cursor", runKotlinForgedCursor)
 		t.Run("push-response-loss", runKotlinPushResponseLoss)
@@ -33,9 +31,6 @@ func TestRealKotlinScenarios(t *testing.T) {
 		t.Run("schema-queued-mutation", runKotlinSchemaQueuedMutation)
 		t.Run("schema-check", runKotlinSchemaCheck)
 		t.Run("dataset", runKotlinDataset)
-		// A scenario that holds a seed artifact runs last. Its artifact closes
-		// after the subtest returns, so it cannot reset the server for a
-		// successor.
 		t.Run("seeded-empty-startup", runKotlinSeededEmptyStartup)
 		t.Run("multi-scope-provenance", runKotlinMultiScopeProvenance)
 	})
@@ -45,6 +40,15 @@ func TestRealKotlinScenarios(t *testing.T) {
 func runKotlinDataset(t *testing.T) {
 	t.Helper()
 	ctx, harness, _, platform := newKotlinFixture(t, 0)
+	// A later scenario provisions a new harness, and leftover dataset tables
+	// in the publication fail its readiness check, so this scenario drops them.
+	t.Cleanup(func() {
+		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancelReset()
+		if err := harness.ResetScenarioServer(resetContext); err != nil {
+			t.Errorf("drop the Kotlin Android dataset: %v", err)
+		}
+	})
 	if err := harness.ApplySourceSetup(ctx, blackbox.SourceSetup{Name: "dataset", SchemaSQL: dataset.SchemaSQL, RegistrationSQL: dataset.RegistrationSQL, Tables: dataset.TableNames()}); err != nil {
 		t.Fatalf("register the Kotlin Android dataset: %v", err)
 	}
@@ -240,43 +244,8 @@ func runKotlinRebuildRequests(t *testing.T) {
 	}
 }
 
-func runKotlinRebuildApply(t *testing.T) {
-	t.Helper()
-	const scenarioPath = "conformance/scenarios/performance/rebuild-apply-001.json"
-	pullPageSize := kotlinRebuildApplyPageSize(t, scenarioPath)
-	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, scenarioPath, pullPageSize)
-	result, err := RunRebuildApplyScenario(ctx, scenario, controller, platform)
-	if err != nil {
-		t.Fatalf("run direct Kotlin Android rebuild-apply scenario: %v", err)
-	}
-	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
-		t.Fatalf("Kotlin Android rebuild-apply identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
-	}
-}
-
-func kotlinRebuildApplyPageSize(t *testing.T, scenarioPath string) int {
-	t.Helper()
-	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("resolve Kotlin Android rebuild-apply repository root: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, scenarioPath)
-	if err != nil {
-		t.Fatalf("load Kotlin Android rebuild-apply authored scenario: %v", err)
-	}
-	steps, err := kotlinScenarioStepMap(scenario, rebuildApplyScenarioID, 9)
-	if err != nil {
-		t.Fatalf("validate Kotlin Android rebuild-apply authored scenario: %v", err)
-	}
-	_, _, pageSize, err := rebuildApplyBindings(scenario, steps)
-	if err != nil || pageSize > 1000 {
-		t.Fatalf("read Kotlin Android rebuild-apply authored pull page size: %v", err)
-	}
-	return int(pageSize)
-}
-
+// runKotlinRebuildCardinality also proves rebuild-apply. Both scenarios author
+// one workload (scenarios.TestRebuildApplyAndCardinalityAuthorOneWorkload).
 func runKotlinRebuildCardinality(t *testing.T) {
 	t.Helper()
 	const scenarioPath = "conformance/scenarios/performance/rebuild-cardinality-001.json"
@@ -347,65 +316,6 @@ func runKotlinForgedCursor(t *testing.T) {
 	}
 }
 
-func resetKotlinPerformanceServer(t *testing.T, ctx context.Context, harness *blackbox.Harness) {
-	t.Helper()
-	// A capture dependency registration stays pending while its source table
-	// holds rows, so the replayed registrations never activate unless every
-	// diagnostic source a scenario writes is empty first.
-	for _, table := range blackbox.DiagnosticSourceTables() {
-		if err := harness.Source().ExecContext(ctx, "DELETE FROM "+table); err != nil {
-			t.Fatalf("clear Kotlin Android performance source table %s: %v", table, err)
-		}
-	}
-	reinstall, err := harness.ReinstallExtension(ctx)
-	if err != nil {
-		t.Fatalf("reset Kotlin Android performance extension state: %v", err)
-	}
-	minimumGeneration := int64(0)
-	for phase := 0; phase < 2; phase++ {
-		deadline := time.Now().Add(90 * time.Second)
-		var ready blackbox.ExtensionReinstallObservation
-		readyObserved := false
-		for time.Now().Before(deadline) {
-			ready, err = harness.Operator().ObserveExtensionReinstall(ctx, reinstall.ReinstallLSN)
-			namedFreshSlot := ready.ActiveSlotName == harness.Names().ReplicationSlot && ready.RestartLSN != "" && ready.RestartLSNAtOrAfterReinstall
-			noSlot := ready.ActiveSlotName == "" && ready.RestartLSN == "" && !ready.SlotActive
-			slotReady := (phase == 0 && (noSlot || namedFreshSlot && !ready.SlotActive)) ||
-				(phase == 1 && namedFreshSlot && ready.SlotActive)
-			if err == nil && ready.WorkerPID > 0 && ready.WorkerPID != reinstall.PriorWorkerPID && slotReady && ready.ActiveRegistryGeneration > minimumGeneration && ready.PendingRegistryGenerationCount == 0 && ready.NoValidationFailurePoison {
-				readyObserved = true
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if !readyObserved {
-			// The loop exits on an unmet condition, not only on an error, so name
-			// every condition. Reporting err alone prints a nil error.
-			t.Fatalf("wait for Kotlin Android performance extension reset phase %d: err %v worker %d prior %d slot %q want %q restartLSN %q slotActive %v restartAtOrAfter %v activeGeneration %d minimum %d pendingGenerations %d noPoison %v",
-				phase, err, ready.WorkerPID, reinstall.PriorWorkerPID,
-				ready.ActiveSlotName, harness.Names().ReplicationSlot,
-				ready.RestartLSN, ready.SlotActive, ready.RestartLSNAtOrAfterReinstall,
-				ready.ActiveRegistryGeneration, minimumGeneration,
-				ready.PendingRegistryGenerationCount, ready.NoValidationFailurePoison)
-		}
-		if phase == 0 {
-			minimumGeneration = ready.ActiveRegistryGeneration
-			// A scenario can transition any diagnostic source-table column. The
-			// reinstall has cleared every registry generation, so this is the only
-			// point where restoring authored column shapes invalidates no registration.
-			if err := harness.Operator().RestoreDiagnosticSourceTableShapes(ctx); err != nil {
-				t.Fatalf("restore Kotlin Android performance source table shapes: %v", err)
-			}
-			if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
-				t.Fatalf("restore Kotlin Android performance source registrations: %v", err)
-			}
-		}
-	}
-}
-
-// kotlinPerformanceSuiteReset resets inherited server state before the first scenario.
-var kotlinPerformanceSuiteReset sync.Once
-
 func newKotlinPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
 	ctx, harness, controller, platform := newKotlinFixture(t, pullPageSize)
@@ -463,11 +373,14 @@ func newKotlinFixture(t *testing.T, pullPageSize int) (context.Context, *blackbo
 			t.Errorf("close Kotlin Android native controller: %v", err)
 		}
 	})
-	kotlinPerformanceSuiteReset.Do(func() {
-		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancelReset()
-		resetKotlinPerformanceServer(t, resetContext, harness)
-	})
+	// An earlier scenario or target can leave state on a shared server, so
+	// every scenario starts from the authored fixture state.
+	resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
+	err = harness.ResetScenarioServer(resetContext)
+	cancelReset()
+	if err != nil {
+		t.Fatalf("reset Kotlin Android scenario server: %v", err)
+	}
 	platform, err := NewPlatform(Config{
 		ADBPath: adbPath, DeviceSerial: deviceSerial, ApplicationAPKPath: applicationAPK, InstrumentationAPKPath: instrumentationAPK,
 		ApplicationID: "com.trainstar.synchro.conformance", InstrumentationComponent: "com.trainstar.synchro.conformance.test/androidx.test.runner.AndroidJUnitRunner",
@@ -481,15 +394,6 @@ func newKotlinFixture(t *testing.T, pullPageSize int) (context.Context, *blackbo
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	t.Cleanup(cancel)
-	// The reset isolates both successful and failed scenarios.
-	t.Cleanup(func() {
-		if t.Failed() && os.Getenv("SYNCHRO_KEEP_SERVER_STATE") != "" {
-			return
-		}
-		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancelReset()
-		resetKotlinPerformanceServer(t, resetContext, harness)
-	})
 	t.Cleanup(func() {
 		restoreContext, cancelRestore := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancelRestore()

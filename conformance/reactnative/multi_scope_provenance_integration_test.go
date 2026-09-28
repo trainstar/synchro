@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/trainstar/synchro/conformance/blackbox"
 )
 
 func TestRealReactNativeMultiScopeProvenanceIOS(t *testing.T) {
@@ -41,28 +39,7 @@ func runRealReactNativeMultiScopeProvenance(t *testing.T, platform string) {
 	if err != nil {
 		t.Fatalf("load React Native multi-scope provenance scenario: %v", err)
 	}
-	environment, err := blackbox.LoadLocalEnvironment()
-	if err != nil {
-		t.Fatalf("load React Native conformance environment: %v", err)
-	}
-	provisionCtx, stopProvision := context.WithTimeout(ctx, 2*time.Minute)
-	harness, err := blackbox.Provision(provisionCtx, blackbox.HarnessConfig{Environment: environment})
-	stopProvision()
-	if err != nil {
-		t.Fatalf("provision React Native conformance harness: %v", err)
-	}
-	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
-	if err != nil {
-		_ = harness.Close(context.Background())
-		t.Fatalf("create React Native native controller: %v", err)
-	}
-	t.Cleanup(func() {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		if err := controller.Close(closeCtx); err != nil {
-			t.Errorf("close React Native native controller: %v", err)
-		}
-	})
+	harness, controller := newReactNativeScenarioHarness(t, ctx)
 	coordinator, err := NewMultiScopeProvenanceCoordinator(MultiScopeProvenanceCoordinatorConfig{Scenario: scenario, Harness: harness, Controller: controller, Platform: platform})
 	if err != nil {
 		t.Fatalf("create React Native %s multi-scope provenance coordinator: %v", platform, err)

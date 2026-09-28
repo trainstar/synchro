@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -522,4 +523,17 @@ func validateRebuildCardinalityState(expected, server, actualClient scenarios.St
 		return errors.New("Swift rebuild-cardinality identity evidence is incomplete")
 	}
 	return nil
+}
+
+func clientsInOrder(clients map[string]Client) []Client {
+	keys := make([]string, 0, len(clients))
+	for key := range clients {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]Client, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, clients[key])
+	}
+	return result
 }

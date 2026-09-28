@@ -37,21 +37,14 @@ func runRealReactNativeDataset(t *testing.T, platform string) {
 	}
 	runContext, cancelRun := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancelRun()
-	environment, err := blackbox.LoadLocalEnvironment()
-	if err != nil {
-		t.Fatalf("load React Native dataset environment: %v", err)
-	}
-	provisionContext, cancelProvision := context.WithTimeout(runContext, 2*time.Minute)
-	harness, err := blackbox.Provision(provisionContext, blackbox.HarnessConfig{Environment: environment})
-	cancelProvision()
-	if err != nil {
-		t.Fatalf("provision React Native dataset harness: %v", err)
-	}
+	harness, _ := newReactNativeScenarioHarness(t, runContext)
+	// A later scenario provisions a new harness, and leftover dataset tables
+	// in the publication fail its readiness check, so this scenario drops them.
 	t.Cleanup(func() {
-		closeContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := harness.Close(closeContext); err != nil {
-			t.Errorf("close React Native dataset harness: %v", err)
+		resetContext, cancelReset := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancelReset()
+		if err := harness.ResetScenarioServer(resetContext); err != nil {
+			t.Errorf("drop the React Native dataset: %v", err)
 		}
 	})
 	if err := harness.ApplySourceSetup(runContext, blackbox.SourceSetup{Name: "dataset", SchemaSQL: dataset.SchemaSQL, RegistrationSQL: dataset.RegistrationSQL, Tables: dataset.TableNames()}); err != nil {

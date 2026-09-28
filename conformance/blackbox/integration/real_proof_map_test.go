@@ -138,6 +138,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealHTTPHarness":                                           "framework",
 	"TestRealMutationControlMutationConservation":                   "adversarial",
 	"TestRealNativeCaptureServerObservationSignals":                 "regression",
+	"TestRealNativeMaterializationBindsEachSourceTransaction":       "regression",
 	"TestRealMutationControlProgressOrder":                          "adversarial",
 	"TestRealMutationControlScopeIsolation":                         "adversarial",
 	"TestRealMutationControlWALAcknowledgement":                     "adversarial",
