@@ -28,6 +28,7 @@
 	test-invariants \
 	test-conformance-invariants \
 	soak \
+	soak-replay \
 	test-local-postgres \
 	test-blackbox-harness \
 	test-blackbox-components \
@@ -95,6 +96,10 @@
 	test-kotlin \
 	test-kotlin-integration \
 	test-kotlin-jvm-integration \
+	test-swift-upgrade \
+	test-kotlin-upgrade \
+	test-rn-upgrade-ios \
+	test-rn-upgrade-android \
 	test-rn-unit \
 	test-rn-android-parity \
 	test-rn-ios-parity \
@@ -196,7 +201,12 @@ MUTATION_CONTROL_TEST ?=
 MUTATION_CONTROL_EXPECT ?= target_pass
 INTEGRATION_MUTANT_ID ?=
 SOAK_SEED ?= 1
-SOAK_DURATION ?= 1s
+# SOAK_OPERATIONS is the explicit seeded-stress operation budget.
+SOAK_OPERATIONS ?= 7
+SOAK_TIMEOUT ?= 35m
+# Each run creates a new seed directory here for its journals and failure wire bodies.
+SOAK_ARTIFACT_DIR ?= $(CURDIR)/.ignore/soak-evidence
+SOAK_REPLAY_JOURNAL ?=
 TESTRESULT_TEST_NAME ?=
 CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapter
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
@@ -276,6 +286,8 @@ SWIFTPM_GIT_ENV := GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_C
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
+# Installed-client cells check server rows through ADAPTER_TEST_URL with this client.
+PACKAGED_SMOKE_PSQL ?= $(if $(PGRX_PG_BIN_DIR),$(PGRX_PG_BIN_DIR)psql,psql)
 RELEASE_DIR ?=
 RELEASE_SERVER_DIR ?= $(CURDIR)/dist/release-components/server
 RELEASE_PACKAGE_DIR ?= $(CURDIR)/dist/release-components/packages
@@ -292,6 +304,14 @@ RELEASE_BUILD_RUN_ID ?= $(GITHUB_RUN_ID)
 RELEASE_BUILD_RUN_ATTEMPT ?= $(GITHUB_RUN_ATTEMPT)
 RELEASE_STAGED_ARTIFACTS ?= 0
 CLIENT_ARTIFACTS_PREPARED ?= 0
+# The published release that native upgrade tests install first.
+UPGRADE_PREDECESSOR_VERSION ?= 0.3.1
+# The commit of the published v0.3.1 tag. A moved tag fails the Swift upgrade build.
+UPGRADE_PREDECESSOR_SWIFT_REVISION ?= 234d18d0f8f1751927ca58544863688ebc2fb70a
+UPGRADE_WORK_DIR ?= $(CURDIR)/.ignore/upgrade
+# React Native builds this address into its bundle, so the port is fixed.
+UPGRADE_CONTROL_ADDRESS ?= 127.0.0.1:8095
+UPGRADE_ANDROID_PACKAGE := com.trainstar.synchro.upgrade
 RELEASE_INVENTORY := $(CURDIR)/conformance/artifacts/inventory.json
 RELEASE_SUPPORT_MATRIX := $(CURDIR)/conformance/support-matrix.json
 
@@ -330,7 +350,8 @@ help:
 	@echo "  test-conformance-scenarios - Test strict scenario loading and catalog generation"
 	@echo "  test-vectors          - Test canonical protocol 3 vectors"
 	@echo "  test-conformance-invariants - Test the invariant engine and soak driver"
-	@echo "  soak                  - Run the bounded seeded desktop soak"
+	@echo "  soak                  - Run bounded seeded stress: SOAK_SEED, SOAK_OPERATIONS, SOAK_ARTIFACT_DIR"
+	@echo "  soak-replay           - Replay one retained soak journal: SOAK_REPLAY_JOURNAL"
 	@echo "  test-conformance      - Run the independent protocol conformance suite"
 	@echo "  test-blackbox         - Run the packaged server black-box suite"
 	@echo "  test-blackbox-configured-bounds - Run the real configured-limit measurement proof"
@@ -376,6 +397,10 @@ help:
 	@echo "  test-kotlin-instrumentation - Run Android instrumentation on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-kotlin           - Run Kotlin integration tests against the local adapter"
 	@echo "  test-kotlin-jvm-integration - Run only the Kotlin JVM integration tests against the local adapter"
+	@echo "  test-swift-upgrade    - Upgrade Swift intent from the published predecessor to the candidate package"
+	@echo "  test-kotlin-upgrade   - Upgrade Kotlin intent from the published predecessor APK on KOTLIN_ANDROID_SERIAL"
+	@echo "  test-rn-upgrade-ios   - Upgrade React Native intent from the published predecessor on the booted simulator"
+	@echo "  test-rn-upgrade-android - Upgrade React Native intent from the published predecessor on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
@@ -528,9 +553,20 @@ test-conformance-invariants: test-invariants
 soak:
 	@$(WARM_CONNECT_ENV) \
 		test -n "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" || { echo "the black-box environment is required for soak: set WARM_CONNECT_ENV_FILE or export SYNCHRO_CONFORMANCE_* variables" >&2; exit 1; }; \
+		mkdir -p "$(abspath $(SOAK_ARTIFACT_DIR))"; \
 		cd conformance && GOFLAGS= GOWORK=off \
-			SOAK_SEED="$(SOAK_SEED)" SOAK_DURATION="$(SOAK_DURATION)" \
-			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=35m \
+			SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
+			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=$(SOAK_TIMEOUT) \
+			-run '^TestSoak$$' -args --provision --install
+
+# Replay reads only the retained journal and rebuilds its harness in a new cluster.
+soak-replay:
+	@test -f "$(SOAK_REPLAY_JOURNAL)" || { echo "SOAK_REPLAY_JOURNAL must name a retained soak journal" >&2; exit 1; }
+	@$(WARM_CONNECT_ENV) \
+		test -n "$${SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT:-}" || { echo "the black-box environment is required for soak-replay: set WARM_CONNECT_ENV_FILE or export SYNCHRO_CONFORMANCE_* variables" >&2; exit 1; }; \
+		cd conformance && GOFLAGS= GOWORK=off \
+			SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL="$(abspath $(SOAK_REPLAY_JOURNAL))" \
+			go run ./cmd/testresult suite -- go test -json ./blackbox/integration -count=1 -timeout=$(SOAK_TIMEOUT) \
 			-run '^TestSoak$$' -args --provision --install
 
 test-local-postgres:
@@ -572,7 +608,7 @@ test-blackbox-mutation-control:
 		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder|TestRealS02DivergentPullPaginationIsStarvationFree|\
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
 		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm|TestRealRegistryRejectsDeferrablePrimaryKey|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
-		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49WALPoisonBlocksContiguousProgress|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
+		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
 		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac; \
@@ -803,7 +839,8 @@ conformance-update-baseline-extension-artifact:
 
 test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
 	$(call declared_selection,GO_TEST_ARGS BLACKBOX_TEST_COUNT)
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=$(BLACKBOX_TIMEOUT) -args --provision --install
+	cd conformance && GOFLAGS= GOWORK=off SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
+		go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=$(BLACKBOX_TIMEOUT) -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
@@ -886,32 +923,9 @@ release-verify:
 
 release-consumer-artifacts: release-verify
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
-	@set -eu; \
-		release="$(abspath $(RELEASE_DIR))"; \
-		final="$(abspath $(RELEASE_CONSUMER_DIR))"; \
-		manifest_hash="$$(shasum -a 256 "$$release/release-manifest.json" | cut -d ' ' -f 1)"; \
-		if [ -d "$$final" ]; then \
-			test "$$(cat "$$final/.release-manifest.sha256")" = "$$manifest_hash"; \
-			exit 0; \
-		fi; \
-		stage="$$final.tmp.$$$$"; \
-		trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
-		test ! -e "$$final" || { echo "release consumer artifact path is not a directory: $$final" >&2; exit 1; }; \
-		mkdir -p "$$stage/apple/Synchro" "$$stage/maven" "$$stage/npm"; \
-		git archive --format=tar HEAD Package.swift Synchro.podspec LICENSE clients/swift/Sources \
-			| tar -xf - -C "$$stage/apple/Synchro"; \
-		test ! -e "$$stage/apple/Synchro/Package.resolved"; \
-		find "$$stage/apple/Synchro" -exec touch -t 202601010000 {} +; \
-		COPYFILE_DISABLE=1 tar -cf - -C "$$stage/apple" Synchro | gzip -n > "$$stage/apple/synchro-spm-$(VERSION).tar.gz"; \
-		python3 -m zipfile -e "$$release/artifacts/synchro-maven-$(VERSION).zip" "$$stage/maven"; \
-		cp "$$release/artifacts/trainstar-synchro-react-native-$(VERSION).tgz" "$$stage/npm/"; \
-		git clone --bare --quiet . "$$stage/source.git"; \
-		git --git-dir="$$stage/source.git" tag -f "v$(VERSION)" "$$(git rev-parse HEAD)"; \
-		git --git-dir="$$stage/source.git" tag -f "api/go/v$(VERSION)" "$$(git rev-parse HEAD)"; \
-		printf '%s\n' "$$manifest_hash" > "$$stage/.release-manifest.sha256"; \
-		mkdir -p "$$(dirname "$$final")"; \
-		mv "$$stage" "$$final"; \
-		trap - EXIT HUP INT TERM
+	@python3 scripts/release-artifacts.py consumer-inputs --release-dir "$(abspath $(RELEASE_DIR))" --version "$(VERSION)" \
+		--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
+		--repo-root "$(CURDIR)" --output "$(abspath $(RELEASE_CONSUMER_DIR))"
 
 release-run-support-cell:
 	@test -n "$(SUPPORT_CELL_ID)" || { echo "SUPPORT_CELL_ID is required" >&2; exit 1; }
@@ -1176,6 +1190,143 @@ test-kotlin-jvm-integration:
 		exit "$$parser_status"
 
 test-kotlin-integration: test-kotlin
+
+# TEST_ENV and UPGRADE_ENV carry the database URL and JWT secret, so Make
+# does not echo the commands that use them.
+UPGRADE_ENV = \
+	SYNCHRO_UPGRADE_DATABASE_URL="$(ADAPTER_TEST_URL)" \
+	SYNCHRO_TEST_URL="$(SYNCHRO_TEST_URL)" \
+	SYNCHRO_TEST_JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)" \
+	SYNCHRO_UPGRADE_CONTROL_ADDRESS="$(UPGRADE_CONTROL_ADDRESS)" \
+	SYNCHRO_UPGRADE_PREDECESSOR_VERSION="$(UPGRADE_PREDECESSOR_VERSION)" \
+	SYNCHRO_UPGRADE_CANDIDATE_VERSION="$(CURRENT_VERSION)"
+UPGRADE_TEST = GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+	-test TestNativePackageUpgrade \
+	-expect target_pass \
+	-- go test -tags nativeupgrade -json ./upgrade -count=1 -timeout=60m -run '^TestNativePackageUpgrade$$'
+
+# The published predecessor creates retained intent. The candidate artifact
+# then opens the same database file and synchronizes it.
+test-swift-upgrade: conformance-mod-download client-consumer-apple-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/swift"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work/data"; \
+		for side in predecessor candidate; do \
+			mkdir -p "$$work/$$side"; \
+			cp -R verification/consumers/upgrade/swift/Package.swift verification/consumers/upgrade/swift/Sources "$$work/$$side/"; \
+		done; \
+		$(SWIFTPM_GIT_ENV) SYNCHRO_UPGRADE_SWIFT_RELEASE="$(UPGRADE_PREDECESSOR_VERSION)" \
+			swift build --package-path "$$work/predecessor" --scratch-path "$$work/predecessor/.build" --product SynchroUpgrade; \
+		grep -F '"$(UPGRADE_PREDECESSOR_SWIFT_REVISION)"' "$$work/predecessor/Package.resolved" >/dev/null || \
+			{ echo "Swift predecessor did not resolve the published $(UPGRADE_PREDECESSOR_VERSION) tag" >&2; exit 1; }; \
+		echo "Swift predecessor resolved Synchro $(UPGRADE_PREDECESSOR_VERSION) at $(UPGRADE_PREDECESSOR_SWIFT_REVISION)"; \
+		$(SWIFTPM_GIT_ENV) SYNCHRO_SWIFT_PACKAGE_PATH="$(abspath $(CLIENT_ARTIFACT_DIR))/apple/Synchro" \
+			swift build --package-path "$$work/candidate" --scratch-path "$$work/candidate/.build" --product SynchroUpgrade; \
+		if grep -F trainstar/synchro "$$work/candidate/Package.resolved" >/dev/null 2>&1; then \
+			echo "Swift candidate resolved a published Synchro package" >&2; exit 1; \
+		fi; \
+		cd conformance; \
+		SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/swift/run-phase.sh" \
+		SYNCHRO_UPGRADE_SWIFT_PREDECESSOR="$$work/predecessor/.build/debug/SynchroUpgrade" \
+		SYNCHRO_UPGRADE_SWIFT_CANDIDATE="$$work/candidate/.build/debug/SynchroUpgrade" \
+		SYNCHRO_UPGRADE_DATA_DIR="$$work/data" \
+		$(UPGRADE_ENV) $(UPGRADE_TEST)
+
+# The candidate APK replaces the predecessor APK on one device, so Android
+# keeps the application's database as it does for a store update.
+test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
+	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/kotlin"; \
+		rm -rf "$$work"; \
+		for side in predecessor candidate; do \
+			case "$$side" in \
+				predecessor) repository=central; version="$(UPGRADE_PREDECESSOR_VERSION)"; code=1 ;; \
+				candidate) repository="$(abspath $(CLIENT_ARTIFACT_DIR))/maven"; version="$(CURRENT_VERSION)"; code=2 ;; \
+			esac; \
+			mkdir -p "$$work/$$side"; \
+			cp -R verification/consumers/upgrade/kotlin/. "$$work/$$side/"; \
+			SYNCHRO_UPGRADE_MAVEN_REPOSITORY="$$repository" \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" \
+			JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" \
+			clients/kotlin/gradlew --project-dir "$$work/$$side" --no-daemon \
+				-PsynchroVersion="$$version" -PupgradeVersionCode="$$code" \
+				:app:assembleDebug :app:dependencyInsight --dependency fit.trainstar:synchro \
+				--configuration debugRuntimeClasspath > "$$work/$$side.log"; \
+			grep -F "fit.trainstar:synchro:$$version" "$$work/$$side.log" >/dev/null || \
+				{ cat "$$work/$$side.log" >&2; echo "Kotlin $$side did not resolve Synchro $$version" >&2; exit 1; }; \
+			echo "Kotlin $$side resolved fit.trainstar:synchro:$$version from $$repository"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/run-android-phase.sh" \
+			SYNCHRO_UPGRADE_ANDROID_PACKAGE="$(UPGRADE_ANDROID_PACKAGE)" \
+			SYNCHRO_UPGRADE_ANDROID_ACTIVITY=.MainActivity \
+			SYNCHRO_UPGRADE_PREDECESSOR_APK="$$work/predecessor/app/build/outputs/apk/debug/app-debug.apk" \
+			SYNCHRO_UPGRADE_CANDIDATE_APK="$$work/candidate/app/build/outputs/apk/debug/app-debug.apk" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		"$(ANDROID_HOME)/platform-tools/adb" -s "$(KOTLIN_ANDROID_SERIAL)" uninstall "$(UPGRADE_ANDROID_PACKAGE)" >/dev/null 2>&1 || true; \
+		exit "$$status"
+
+# React Native reaches the native SDKs through the published bridge package.
+test-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifact client-consumer-rn-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
+	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/rn-android"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work"; \
+		control_url="http://$(UPGRADE_CONTROL_ADDRESS)/upgrade"; \
+		for side in predecessor candidate; do \
+			if [ "$$side" = predecessor ]; then version="$(UPGRADE_PREDECESSOR_VERSION)"; else version="$(CURRENT_VERSION)"; fi; \
+			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+				sh verification/consumers/upgrade/react-native/build-app.sh android "$$work" "$$side" "$$version" "$$control_url"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/run-android-phase.sh" \
+			SYNCHRO_UPGRADE_ANDROID_PACKAGE=com.synchroupgrade \
+			SYNCHRO_UPGRADE_ANDROID_ACTIVITY=.MainActivity \
+			SYNCHRO_UPGRADE_PREDECESSOR_APK="$$work/predecessor.apk" \
+			SYNCHRO_UPGRADE_CANDIDATE_APK="$$work/candidate.apk" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		"$(ANDROID_HOME)/platform-tools/adb" -s "$(KOTLIN_ANDROID_SERIAL)" uninstall com.synchroupgrade >/dev/null 2>&1 || true; \
+		exit "$$status"
+
+test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact client-consumer-rn-artifact
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/rn-ios"; \
+		rm -rf "$$work"; \
+		mkdir -p "$$work"; \
+		udid="$${IOS_SIMULATOR_UDID:-$$(xcrun simctl list devices booted -j | ruby -rjson -e 'device = JSON.parse(STDIN.read).fetch("devices").values.flatten.find { |item| item["state"] == "Booted" }; abort "no booted iOS simulator" unless device; puts device.fetch("udid")')}"; \
+		control_url="http://$(UPGRADE_CONTROL_ADDRESS)/upgrade"; \
+		for side in predecessor candidate; do \
+			if [ "$$side" = predecessor ]; then version="$(UPGRADE_PREDECESSOR_VERSION)"; else version="$(CURRENT_VERSION)"; fi; \
+			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
+				sh verification/consumers/upgrade/react-native/build-app.sh ios "$$work" "$$side" "$$version" "$$control_url"; \
+		done; \
+		status=0; \
+		(cd conformance && \
+			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/react-native/run-ios-phase.sh" \
+			SYNCHRO_UPGRADE_IOS_SIMULATOR="$$udid" \
+			SYNCHRO_UPGRADE_IOS_BUNDLE=dev.synchro.upgrade \
+			SYNCHRO_UPGRADE_WORK_DIR="$$work" \
+			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
+		xcrun simctl uninstall "$$udid" dev.synchro.upgrade >/dev/null 2>&1 || true; \
+		exit "$$status"
 
 test-rn-unit:
 	rm -f clients/react-native/example/artifacts/unit-test-results.json
@@ -1824,7 +1975,7 @@ test-consumer-swift-smoke: client-consumer-apple-artifact
 			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)"
 
 test-consumer-swift-ios: client-consumer-apple-artifact
-	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
 
 test-consumer-kotlin: client-consumer-kotlin-artifact
@@ -1873,7 +2024,7 @@ test-consumer-kotlin-device: client-consumer-kotlin-artifact
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../verification/consumers/kotlin/app/build/outputs/androidTest-results/connected
 
 test-consumer-kotlin-device-smoke: test-consumer-kotlin
-	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
+	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		ANDROID_HOME="$(ANDROID_HOME)" KOTLIN_ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
 		sh verification/consumers/kotlin/test-consumer-device.sh \
 			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
@@ -1890,14 +2041,14 @@ test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-art
 		sh verification/consumers/react-native/test-consumer.sh android "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)" build-only
 
 test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-artifact
-	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
+	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
 		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
 
 test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-artifact client-consumer-rn-artifact
-	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
+	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \

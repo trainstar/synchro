@@ -273,7 +273,6 @@ type PendingCycleCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -316,6 +315,11 @@ type PendingCycleCoordinator struct {
 	capturePendingRecorded  bool
 	retryPullRecorded       bool
 	materializationSignaled bool
+
+	// closing ends every barrier wait. An exchange holds mu while it waits, so
+	// Close must end those waits before it can acquire mu.
+	closing     chan struct{}
+	closingOnce sync.Once
 
 	mu        sync.Mutex
 	prepared  bool
@@ -385,9 +389,6 @@ func NewPendingCycleCoordinator(config PendingCycleCoordinatorConfig) (*PendingC
 	if err != nil {
 		return nil, err
 	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
-	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native pending-cycle coordinator auth token is required")
 	}
@@ -433,7 +434,8 @@ func NewPendingCycleCoordinator(config PendingCycleCoordinatorConfig) (*PendingC
 		runtimeIDs: make(map[string]json.RawMessage), userID: identity.userID, clientID: identity.clientID, clientKey: identity.clientID,
 		nextSeq: 1, captures: make(map[pendingCycleStage]finalCapture), states: make(map[pendingCycleStage]scenarios.PendingCycleNativeState),
 		initialPushDone: make(chan struct{}), capturePendingDone: make(chan struct{}), retryPullDone: make(chan struct{}), materializationDone: make(chan struct{}),
-		server: &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
+		closing: make(chan struct{}),
+		server:  &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second},
 	}
 	coordinator.server.Handler = coordinator
 	return coordinator, nil
@@ -613,6 +615,7 @@ func (c *PendingCycleCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	c.closingOnce.Do(func() { close(c.closing) })
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -1773,6 +1776,8 @@ func pendingCycleValidateHTTPWire(scenario scenarios.Scenario, stepID scenarios.
 	return nil
 }
 
+var errPendingCycleClosed = errors.New("React Native pending-cycle coordinator closed")
+
 func (c *PendingCycleCoordinator) waitForInitialPush(ctx context.Context) error {
 	if c == nil || ctx == nil || c.initialPushDone == nil {
 		return errCoordinatorUnavailable
@@ -1780,6 +1785,8 @@ func (c *PendingCycleCoordinator) waitForInitialPush(ctx context.Context) error 
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native pending-cycle accepted push: %w", ctx.Err())
+	case <-c.closing:
+		return errPendingCycleClosed
 	case <-c.initialPushDone:
 	}
 	c.proxyMu.Lock()
@@ -1798,6 +1805,8 @@ func (c *PendingCycleCoordinator) waitForCapturePending(ctx context.Context) err
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native pending-cycle capture-pending pull: %w", ctx.Err())
+	case <-c.closing:
+		return errPendingCycleClosed
 	case <-c.capturePendingDone:
 	}
 	return c.capturePendingResponseError()
@@ -1810,6 +1819,8 @@ func (c *PendingCycleCoordinator) waitForRetryPull(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("wait for React Native pending-cycle retry pull: %w", ctx.Err())
+	case <-c.closing:
+		return errPendingCycleClosed
 	case <-c.retryPullDone:
 	}
 	return c.retryPullResponseError()
@@ -2034,28 +2045,6 @@ func extractPendingCycleClientIdentity(scenario scenarios.Scenario) (pendingCycl
 		}
 	}
 	return pendingCycleClientIdentity{userID: payload.AuthenticatedUserID, clientID: payload.ClientID}, nil
-}
-
-func pendingCyclePullScopeCount(operation scenarios.Operation) (int, error) {
-	var payload struct {
-		Scopes []json.RawMessage `json:"scopes"`
-	}
-	if err := json.Unmarshal(operation.Payload, &payload); err != nil || len(payload.Scopes) == 0 {
-		return 0, errors.New("React Native pending-cycle pull scopes are invalid")
-	}
-	return len(payload.Scopes), nil
-}
-
-func validatePendingCycleCapture(scenario scenarios.Scenario, capture finalCapture) error {
-	if len(capture.ClientState) == 0 || len(capture.Pending) == 0 || len(capture.Rejected) == 0 || len(capture.Status) == 0 || len(capture.Provenance) == 0 || len(capture.Trace) == 0 {
-		return errors.New("React Native pending-cycle capture is incomplete")
-	}
-	for _, step := range scenario.Steps {
-		if step.ExpectedOutcome.Disposition != "success" {
-			return errors.New("React Native pending-cycle authored outcome is not successful")
-		}
-	}
-	return nil
 }
 
 // pendingCycleAuthoredObservations returns the accepted push and retry pull.

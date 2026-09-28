@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestClosedOperationClasses(t *testing.T) {
+func TestClosedOperationKeys(t *testing.T) {
 	want := []string{
 		"artifact/install-portable-seed",
 		"connect/send",
@@ -35,24 +35,6 @@ func TestClosedOperationClasses(t *testing.T) {
 	}
 	if got := OperationKeys(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("OperationKeys() = %v, want %v", got, want)
-	}
-
-	for _, key := range want {
-		class, found := LookupOperationClass(key)
-		if !found {
-			t.Fatalf("LookupOperationClass(%q) did not find a closed operation", key)
-		}
-		wantClass := OperationClassReference
-		if key == "workload/prepare" {
-			wantClass = OperationClassModelRunnerMacro
-		}
-		if class != wantClass {
-			t.Fatalf("LookupOperationClass(%q) = %q, want %q", key, class, wantClass)
-		}
-	}
-
-	if class, found := LookupOperationClass("local/start-sync"); found || class != "" {
-		t.Fatalf("LookupOperationClass accepted a removed operation: %q, %v", class, found)
 	}
 }
 

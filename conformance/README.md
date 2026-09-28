@@ -176,7 +176,13 @@ The real extension-reinstall test covers registrations committed before a replac
 Its missing-replay control acknowledges later WAL while registry activation remains blocked.
 The same cluster then proves cold reinstall recovery, readiness, and source-to-client delivery across repeated reinstalls.
 This adds the real slot-boundary proof that SQL-only activation-message checks do not establish.
-The live server soak executes response loss on push or pull and WAL-worker replay interruption.
+The live server soak is bounded seeded stress. `SOAK_OPERATIONS` sets its explicit operation budget, and each run reports its measured elapsed time.
+It executes response loss on push or pull and WAL-worker replay interruption.
+Every operation ends at a quiescent point. The soak then reads the isolated source tables directly and compares them with an independent model of the authored rows.
+It also compares the client's complete scope membership and held values with those source rows. Expected membership comes from each table's business rule, not from Synchro output.
+Each run writes its journal to a new directory under `SOAK_ARTIFACT_DIR`. A failed run also keeps its original wire bodies there before cleanup.
+The journal holds the seed, configuration, planned operations, and the terminal failure with its violations.
+Replay a retained journal in a new cluster with `make soak-replay SOAK_REPLAY_JOURNAL=<journal>`. Replay passes only when it reproduces the retained outcome exactly.
 Its in-memory client is reference state, not native process-recovery evidence.
 Native recovery remains covered by the real native scenario gates.
 

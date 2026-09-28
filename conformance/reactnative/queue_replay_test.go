@@ -557,7 +557,17 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 		"rebuildReceiptCount":             0,
 		"provenanceMaintenanceWorkCursor": "0",
 	}
-	rejected := make([]string, coordinator.rejectedCount())
+	// Without a controller, the authored identity stands in for the runtime
+	// binding that localCommand records.
+	rejected := make([]queueReplayRejection, 0, len(workloads))
+	for _, workload := range workloads {
+		rejection, err := queueReplayBoundRejection(workload.rejected)
+		if err != nil {
+			t.Fatalf("derive queue-replay authored rejection: %v", err)
+		}
+		rejected = append(rejected, rejection)
+	}
+	coordinator.rejections = append([]queueReplayRejection(nil), rejected...)
 	observations := make([]transportObservation, len(workloads)*2)
 	for index := range observations {
 		// Each wave records one response-loss attempt without a success
@@ -578,6 +588,20 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 	if err := coordinator.validateCapture(capture); err != nil {
 		t.Fatalf("validate queue-replay aggregate capture: %v", err)
 	}
+	for name, mutate := range map[string]func(*queueReplayRejection){
+		"mutation": func(value *queueReplayRejection) { value.MutationID = "00000000-0000-4000-8000-000000000999" },
+		"row":      func(value *queueReplayRejection) { value.RecordID = "other-row" },
+		"table":    func(value *queueReplayRejection) { value.TableName = "other_table" },
+		"reason":   func(value *queueReplayRejection) { value.Code = "validation_failed" },
+	} {
+		changed := append([]queueReplayRejection(nil), rejected...)
+		mutate(&changed[0])
+		capture.Rejected = queueReplayFixtureJSON(t, changed)
+		if err := coordinator.validateCapture(capture); err == nil {
+			t.Fatalf("queue-replay accepted a same-count rejection with a different %s", name)
+		}
+	}
+	capture.Rejected = queueReplayFixtureJSON(t, rejected)
 	state["mutationLedgerCount"] = *expected.Clients[0].QueueCount - 1
 	capture.ClientState = queueReplayFixtureJSON(t, state)
 	if err := coordinator.validateCapture(capture); err == nil {
@@ -956,7 +980,7 @@ func TestQueueReplayRejectsAnInvalidReplayPull(t *testing.T) {
 
 func TestNewQueueReplayCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewQueueReplayCoordinator(QueueReplayCoordinatorConfig{
-		Scenario: loadQueueReplayAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadQueueReplayAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android queue-replay coordinator was rejected: %v", err)

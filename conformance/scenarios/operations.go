@@ -134,14 +134,6 @@ var closedPayloadShapes = map[string]*payloadShape{
 	"rebuild/request-page": shapeWith(closedOperationFields["rebuild/request-page"], map[string]payloadChild{"schema": objectChild(schemaReferenceShape)}),
 }
 
-// OperationClass identifies the package that executes one closed scenario operation.
-type OperationClass string
-
-const (
-	OperationClassReference        OperationClass = "reference"
-	OperationClassModelRunnerMacro OperationClass = "model_runner_macro"
-)
-
 type operationFields struct {
 	required []string
 	optional []string
@@ -168,17 +160,6 @@ func OperationKeys() []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// LookupOperationClass returns the execution class for one closed operation key.
-func LookupOperationClass(key string) (OperationClass, bool) {
-	if _, found := closedOperationFields[key]; !found {
-		return "", false
-	}
-	if key == "workload/prepare" {
-		return OperationClassModelRunnerMacro, true
-	}
-	return OperationClassReference, true
 }
 
 // ValidateOperation validates an operation name and its closed payload shape.

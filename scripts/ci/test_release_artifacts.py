@@ -193,7 +193,10 @@ class ReleaseArtifactsTests(unittest.TestCase):
                     import io
                     archive.addfile(info, io.BytesIO(data))
 
-    def make_fixture(self, root: Path, *, unsafe_extension: bool = False, npm_version: str = VERSION) -> dict[str, object]:
+    def make_fixture(
+        self, root: Path, *, unsafe_extension: bool = False, npm_version: str = VERSION,
+        commit: str = COMMIT, root_tree: str = ROOT_TREE,
+    ) -> dict[str, object]:
         inventory = self.write_inventory(root)
         matrix = root / "support-matrix.json"
         matrix.write_text(json.dumps({"cells": [{"id": "SUP-PG-001", "policy": "required"}, {"id": "SUP-OLD-001", "policy": "excluded"}]}), encoding="utf-8")
@@ -217,7 +220,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
             executable_paths.append(relative)
         metadata = {
             "schema_version": 1,
-            "source_commit": COMMIT,
+            "source_commit": commit,
             "binaries": [
                 {"staging_path": relative, "format": "ELF64", "machine": "x86-64", "dependencies": {"tool": "ldd", "exit_code": 0, "output": ["fixture.so"]}}
                 for relative in executable_paths
@@ -230,7 +233,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
         self.make_maven(root / "maven-source", maven)
         npm = packages / f"npm/npm-{VERSION}.tgz"
         self.make_npm(npm, npm_version)
-        (packages / release_artifacts.PACKAGE_METADATA_NAME).write_text(json.dumps({"schema_version": 1, "source_commit": COMMIT}), encoding="utf-8")
+        (packages / release_artifacts.PACKAGE_METADATA_NAME).write_text(json.dumps({"schema_version": 1, "source_commit": commit}), encoding="utf-8")
         payloads = [extension, server / executable_paths[0], server / executable_paths[1], maven, npm]
         sbom = root / "external.spdx.json"
         sbom.write_text(json.dumps({
@@ -239,11 +242,11 @@ class ReleaseArtifactsTests(unittest.TestCase):
             "creationInfo": {"created": "2026-09-14T00:00:00Z", "creators": ["Tool: fixture"]},
             "files": [{"fileName": path.name, "checksums": [{"algorithm": "SHA256", "checksumValue": release_artifacts.file_sha256(path)}]} for path in payloads],
         }), encoding="utf-8")
-        release_dir = root / f"release-{VERSION}-{COMMIT}"
+        release_dir = root / f"release-{VERSION}-{commit}"
         return {
-            "release_dir": release_dir, "version": VERSION, "source_commit": COMMIT, "inventory_path": inventory,
+            "release_dir": release_dir, "version": VERSION, "source_commit": commit, "inventory_path": inventory,
             "support_matrix": matrix, "support_resolution": support, "server_dir": server, "packages_dir": packages,
-            "sbom": sbom, "repo_root": repo, "source_trees": {"repo-root": ROOT_TREE, "api/go": GO_TREE},
+            "sbom": sbom, "repo_root": repo, "source_trees": {"repo-root": root_tree, "api/go": GO_TREE},
             "candidate_ci_run_id": "12345", "candidate_ci_run_attempt": 2,
             "build_run_id": "67890", "build_run_attempt": 3,
         }
@@ -567,6 +570,109 @@ class ReleaseArtifactsTests(unittest.TestCase):
                 (output / "synchrod-pg.sha256").read_text(encoding="ascii").strip(),
                 release_artifacts.file_sha256(adapter),
             )
+
+    def git(self, repo: Path, *arguments: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", *arguments],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def sealed_source(self, root: Path) -> tuple[Path, dict[str, object]]:
+        source = root / "source"
+        for relative, text in (
+            ("Package.swift", "sealed package\n"),
+            ("Synchro.podspec", "sealed podspec\n"),
+            ("LICENSE", "sealed license\n"),
+            ("clients/swift/Sources/Synchro/Client.swift", "sealed client\n"),
+            ("clients/kotlin/Unrelated.kt", "not an Apple input\n"),
+        ):
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        self.git(source, "init", "--quiet")
+        self.git(source, "add", ".")
+        self.git(source, "commit", "--quiet", "-m", "sealed")
+        commit = self.git(source, "rev-parse", "HEAD")
+        tree = self.git(source, "rev-parse", "HEAD^{tree}")
+        arguments = self.make_fixture(root, commit=commit, root_tree=tree)
+        release_artifacts.stage_release(**arguments)
+        return source, arguments
+
+    def materialize(self, source: Path, arguments: dict[str, object], output: Path) -> None:
+        release_artifacts.materialize_consumer_inputs(
+            arguments["release_dir"], VERSION, arguments["inventory_path"], arguments["support_matrix"], source, output,
+        )
+
+    def test_consumer_inputs_use_sealed_payloads_and_sealed_source_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, arguments = self.sealed_source(root)
+            commit = str(arguments["source_commit"])
+            client = source / "clients/swift/Sources/Synchro/Client.swift"
+            client.write_text("later commit\n", encoding="utf-8")
+            self.git(source, "commit", "--quiet", "-am", "later")
+            client.write_text("uncommitted change\n", encoding="utf-8")
+            output = root / "consumer"
+            self.materialize(source, arguments, output)
+
+            release_dir = Path(arguments["release_dir"])
+            with zipfile.ZipFile(release_dir / f"artifacts/maven-{VERSION}.zip") as archive:
+                expected_maven = {info.filename: archive.read(info) for info in archive.infolist()}
+            actual_maven = {
+                path.relative_to(output / "maven").as_posix(): path.read_bytes()
+                for path in (output / "maven").rglob("*") if path.is_file()
+            }
+            self.assertEqual(actual_maven, expected_maven)
+            self.assertEqual(
+                (output / f"npm/npm-{VERSION}.tgz").read_bytes(),
+                (release_dir / f"artifacts/npm-{VERSION}.tgz").read_bytes(),
+            )
+            apple = output / "apple/Synchro"
+            self.assertEqual(
+                sorted(path.relative_to(apple).as_posix() for path in apple.rglob("*") if path.is_file()),
+                ["LICENSE", "Package.swift", "Synchro.podspec", "clients/swift/Sources/Synchro/Client.swift"],
+            )
+            self.assertEqual((apple / "clients/swift/Sources/Synchro/Client.swift").read_text(encoding="utf-8"), "sealed client\n")
+            for tag in (f"v{VERSION}", f"api/go/v{VERSION}"):
+                tagged = subprocess.run(
+                    ["git", "--git-dir", str(output / "source.git"), "rev-parse", f"{tag}^{{commit}}"],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+                self.assertEqual(tagged, commit)
+
+    def test_consumer_inputs_refuse_existing_output_without_trusting_or_deleting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, arguments = self.sealed_source(root)
+            output = root / "consumer"
+            self.materialize(source, arguments, output)
+            aar = output / f"maven/fit/trainstar/synchro/{VERSION}/synchro-{VERSION}.aar"
+            aar.write_bytes(b"changed compiler input")
+            manifest_hash = release_artifacts.file_sha256(Path(arguments["release_dir"]) / release_artifacts.MANIFEST_NAME)
+            (output / ".release-manifest.sha256").write_text(manifest_hash + "\n", encoding="ascii")
+            before = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "already exists"):
+                self.materialize(source, arguments, output)
+            self.assertEqual({path: path.read_bytes() for path in output.rglob("*") if path.is_file()}, before)
+
+    def test_consumer_inputs_reject_changed_payload_or_source_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, arguments = self.sealed_source(root)
+            release_dir = Path(arguments["release_dir"])
+            maven = release_dir / f"artifacts/maven-{VERSION}.zip"
+            original = maven.read_bytes()
+            maven.write_bytes(original + b"x")
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "payload identity"):
+                self.materialize(source, arguments, root / "changed-payload")
+            self.assertFalse((root / "changed-payload").exists())
+            maven.write_bytes(original)
+            self.git(source, "commit", "--quiet", "--amend", "-m", "rewritten")
+            self.git(source, "reflog", "expire", "--expire=now", "--all")
+            self.git(source, "gc", "--quiet", "--prune=now")
+            with self.assertRaisesRegex(release_artifacts.ReleaseError, "rev-parse failed"):
+                self.materialize(source, arguments, root / "missing-commit")
+            self.assertFalse((root / "missing-commit").exists())
 
     def test_verify_rejects_checksum_self_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

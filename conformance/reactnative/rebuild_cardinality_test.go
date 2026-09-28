@@ -50,7 +50,7 @@ func TestValidateRebuildCardinalityScenarioRejectsContractChanges(t *testing.T) 
 
 func TestNewRebuildCardinalityCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewRebuildCardinalityCoordinator(RebuildCardinalityCoordinatorConfig{
-		Scenario: loadRebuildCardinalityAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadRebuildCardinalityAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android rebuild-cardinality coordinator was rejected: %v", err)
