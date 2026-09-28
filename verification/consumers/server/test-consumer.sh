@@ -62,7 +62,12 @@ printf '%s\n' "$adapter_hash" > "$work_dir/adapter/synchrod-pg.sha256"
 "$provisioner" start --pg18-bin-dir "$pg18_bindir" --extension-artifact "$extension_dir" --adapter-artifact "$work_dir/adapter/synchrod-pg" --state-dir "$work_dir/state" --temp-parent "$work_dir" --url-file "$work_dir/admin.url" --attach-environment-file "$work_dir/attach.env" >"$work_dir/provisioner.log" 2>&1 &
 provisioner_pid=$!
 for _ in $(seq 1 90); do test -f "$work_dir/attach.env" && break; sleep 1; done
-test -f "$work_dir/attach.env"
+if [ ! -f "$work_dir/attach.env" ]; then
+  # The work directory is removed on exit, so the provisioner reason must be printed here.
+  cat "$work_dir/provisioner.log" >&2 || true
+  echo "PostgreSQL provisioner did not become ready" >&2
+  exit 1
+fi
 SYNCHRO_ATTACH_DIR=$work_dir/state
 export SYNCHRO_ATTACH_DIR
 # shellcheck disable=SC1091

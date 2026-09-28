@@ -2115,13 +2115,27 @@ func validateCaptureResult(result runnerResult) error {
 		(*result.RowMetadataCount <= maximumRunnerRecords) != (result.RowMetadataRecords != nil) ||
 		(*result.RebuildAttemptCount > maximumRunnerRecords) != *result.RebuildAttemptsTruncated ||
 		(*result.RebuildAttemptCount <= maximumRunnerRecords) != (result.RebuildAttempts != nil) ||
-		(*result.RebuildReceiptCount > maximumRunnerRecords) != *result.RebuildReceiptsTruncated ||
-		(*result.RebuildReceiptCount <= maximumRunnerRecords) != (result.RebuildReceipts != nil) ||
+		// Receipt details are bounded by (scope, rebuild) group. The count is in pages.
+		*result.RebuildReceiptsTruncated != (result.RebuildReceipts == nil) ||
+		(*result.RebuildReceiptsTruncated && *result.RebuildReceiptCount <= maximumRunnerRecords) ||
 		*result.CaptureOverflowed != truncated {
 		return errors.New("Swift runner capture detail bounds are inconsistent")
 	}
 	if len(result.ScopeStates) != boundedDetailCount(*result.ScopeStateCount, maximumRunnerRecords) || len(result.ScopeRows) != boundedDetailCount(*result.ScopeRowCount, maximumRunnerRecords) || len(result.RejectedMutations) != boundedDetailCount(*result.RejectedMutationCount, maximumRunnerRecords) || len(result.RebuildAttempts) != boundedDetailCount(*result.RebuildAttemptCount, maximumRunnerRecords) || len(result.RowMetadataRecords) != boundedDetailCount(*result.RowMetadataCount, maximumRunnerRecords) {
 		return errors.New("Swift runner capture counts do not match detail")
+	}
+	if result.RetainedMutations != nil {
+		// The runner reads the pending count and retained detail from one normalized snapshot.
+		pending := 0
+		for _, mutation := range result.RetainedMutations {
+			switch mutation.Status {
+			case "pending", "sealed", "blocked_by_predecessor":
+				pending++
+			}
+		}
+		if len(result.RetainedMutations) > *result.MutationLedgerCount || pending != *result.PendingChangeCount {
+			return errors.New("Swift runner pending count does not match retained detail")
+		}
 	}
 	if result.RebuildReceipts != nil {
 		pageCount := 0

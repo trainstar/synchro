@@ -2,12 +2,19 @@ import {
   configureInspection,
   nativeForInspection,
   parseClientStateInspection,
+  parseRejectedMutationInspection,
+  parseRetainedMutationInspection,
   parseTransportObservationSnapshot,
   SynchroClient,
 } from './SynchroClient';
 import { InvalidResponseError, mapNativeError } from './errors';
+import { assertValidSQLiteBindParams } from './sqliteValues';
 import type {
   ClientStateInspection,
+  RejectedMutationInspection,
+  RetainedMutationInspection,
+  Row,
+  SQLStatement,
   TransportObservationSnapshot,
   TransportOperationClass,
 } from './types';
@@ -45,6 +52,18 @@ export interface DurableStateInspection {
   }>;
 }
 
+/**
+ * One read-only snapshot of client state and retained details. A detail list is
+ * null when its record count exceeds the native capture bound. `applicationRows`
+ * holds the rows that the requested read statements returned inside the snapshot.
+ */
+export interface ClientStateSnapshotInspection {
+  clientState: ClientStateInspection;
+  retainedMutations: RetainedMutationInspection[] | null;
+  rejectedMutations: RejectedMutationInspection[] | null;
+  applicationRows: Row[];
+}
+
 export interface SynchroInspectionOptions {
   transportObservationCapacity?: number;
   requireNewDatabase?: boolean;
@@ -62,9 +81,22 @@ export class SynchroInspection {
     );
   }
 
-  async clientState(): Promise<ClientStateInspection> {
+  async captureSnapshot(rowStatements: SQLStatement[] = []): Promise<ClientStateSnapshotInspection> {
     try {
-      return parseClientStateInspection(parseJSON(await nativeForInspection(this.client).inspectClientState()));
+      const statements = rowStatements.map((statement) => ({
+        sql: statement.sql,
+        params: assertValidSQLiteBindParams(statement.params ?? []),
+      }));
+      const result = await nativeForInspection(this.client).inspectClientStateSnapshot(statements);
+      const snapshot = requireRecord(parseJSON(result.inspection), 'client state snapshot');
+      return {
+        clientState: parseClientStateInspection(snapshot.client_state),
+        retainedMutations:
+          nullableArray(snapshot.retained_mutations, 'retained mutations')?.map(parseRetainedMutationInspection) ?? null,
+        rejectedMutations:
+          nullableArray(snapshot.rejected_mutations, 'rejected mutations')?.map(parseRejectedMutationInspection) ?? null,
+        applicationRows: [...result.applicationRows] as Row[],
+      };
     } catch (error) {
       throw mapNativeError(error);
     }
@@ -185,6 +217,16 @@ function parseDurableState(value: unknown): DurableStateInspection {
     }
   }
   return proof as unknown as DurableStateInspection;
+}
+
+function nullableArray(value: unknown, name: string): unknown[] | null {
+  if (value === null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    throw new InvalidResponseError(`Native bridge returned invalid ${name}`);
+  }
+  return value;
 }
 
 function requireRecord(value: unknown, name: string): Record<string, unknown> {

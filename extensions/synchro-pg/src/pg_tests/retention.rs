@@ -33,6 +33,7 @@
         Spi::run(
             "UPDATE sync_clients
              SET created_at = now() - interval '30 days',
+                 generation_created_at = now() - interval '30 days',
                  last_sync_at = now() - interval '30 days',
                  last_acknowledged_at = CASE client_id
                      WHEN 'c1' THEN now()

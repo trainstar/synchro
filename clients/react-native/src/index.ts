@@ -30,6 +30,8 @@ export type {
   SchemaRef,
   AuthoredMutationField,
   PendingMutationInspection,
+  LegacyMutationInspection,
+  RetainedMutationInspection,
   RejectedMutationInspection,
   SchemaAction,
   SyncSchemaEvent,

@@ -151,6 +151,13 @@ func waitForRealShapeTable(t *testing.T, ctx context.Context, harness *blackbox.
 // are exact. Timestamps use the protocol UTC microsecond form.
 func realShapeServerRows(t *testing.T, ctx context.Context, admin *sql.DB, table realShapeTable) map[string]map[string]any {
 	t.Helper()
+	return realShapeSourceRows(t, ctx, admin, table, "source.deleted_at IS NULL")
+}
+
+// realShapeSourceRows reads the source rows that match the filter, including
+// tombstones when the filter selects them.
+func realShapeSourceRows(t *testing.T, ctx context.Context, admin *sql.DB, table realShapeTable, filter string) map[string]map[string]any {
+	t.Helper()
 	excluded := ""
 	for _, column := range table.excluded {
 		excluded += " - " + quoteRealShapeLiteral(column)
@@ -159,9 +166,9 @@ func realShapeServerRows(t *testing.T, ctx context.Context, admin *sql.DB, table
 		SELECT source.id::text,
 		       (to_jsonb(source) - 'updated_at' - 'deleted_at'%s) || jsonb_build_object(
 		           'updated_at', to_char(timezone('UTC', source.updated_at), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-		           'deleted_at', NULL)
+		           'deleted_at', to_char(timezone('UTC', source.deleted_at), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
 		FROM public.%s AS source
-		WHERE source.deleted_at IS NULL`, excluded, table.name))
+		WHERE %s`, excluded, table.name, filter))
 	if err != nil {
 		t.Fatalf("read source rows of %s: %v", table.name, err)
 	}
@@ -183,6 +190,52 @@ func realShapeServerRows(t *testing.T, ctx context.Context, admin *sql.DB, table
 		t.Fatalf("read source rows of %s: %v", table.name, err)
 	}
 	return result
+}
+
+// realShapeServerVersions reads the authoritative opaque version of each row.
+// The extension returns this value as server_version.
+func realShapeServerVersions(t *testing.T, ctx context.Context, admin *sql.DB, table realShapeTable, liveOnly bool) map[string]string {
+	t.Helper()
+	rows, err := admin.QueryContext(ctx, `
+		SELECT version.record_id, version.row_version::text
+		FROM synchro.sync_row_versions version
+		JOIN synchro.sync_registry registry ON registry.relation_id = version.relation_id
+		JOIN synchro.sync_registry_generations generation
+		  ON generation.generation = registry.registry_generation AND generation.state = 'active'
+		WHERE registry.physical_schema = 'public'
+		  AND registry.physical_relation = $1
+		  AND (NOT $2 OR NOT version.deleted)`, table.name, liveOnly)
+	if err != nil {
+		t.Fatalf("read row versions of %s: %v", table.name, err)
+	}
+	defer rows.Close()
+	versions := make(map[string]string)
+	for rows.Next() {
+		var id, version string
+		if err := rows.Scan(&id, &version); err != nil {
+			t.Fatalf("scan row version of %s: %v", table.name, err)
+		}
+		versions[id] = version
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read row versions of %s: %v", table.name, err)
+	}
+	return versions
+}
+
+// requireRealShapeSourceValues requires each named source column of one row to
+// hold the expected value. It reads the row even when it is a tombstone.
+func requireRealShapeSourceValues(t *testing.T, ctx context.Context, admin *sql.DB, table realShapeTable, id string, expected map[string]any) {
+	t.Helper()
+	row, ok := realShapeSourceRows(t, ctx, admin, table, "source.id::text = "+quoteRealShapeLiteral(id))[id]
+	if !ok {
+		t.Fatalf("source row %s.%q is missing", table.name, id)
+	}
+	for column, value := range expected {
+		if !reflect.DeepEqual(row[column], value) {
+			t.Fatalf("source %s.%q column %s = %#v, want %#v", table.name, id, column, row[column], value)
+		}
+	}
 }
 
 // applyRealShapeRecord applies one pull change, rebuild record, seed record, or
@@ -218,6 +271,14 @@ func applyRealShapeRecord(t *testing.T, state map[string]realShapeRow, table rea
 		values[name] = value
 	}
 	state[id] = realShapeRow{values: values, version: version}
+}
+
+func realShapeStateVersions(state map[string]realShapeRow) map[string]string {
+	versions := make(map[string]string, len(state))
+	for id, row := range state {
+		versions[id] = row.version
+	}
+	return versions
 }
 
 func realShapeStateValues(state map[string]realShapeRow) map[string]map[string]any {
@@ -279,7 +340,8 @@ func pullRealShapeUntilServer(
 		}
 		matched := true
 		for _, table := range tables {
-			if !reflect.DeepEqual(realShapeStateValues(states[table.name]), want[table.name]) {
+			if !reflect.DeepEqual(realShapeStateValues(states[table.name]), want[table.name]) ||
+				!reflect.DeepEqual(realShapeStateVersions(states[table.name]), realShapeServerVersions(t, ctx, admin, table, true)) {
 				matched = false
 			}
 		}
@@ -292,6 +354,9 @@ func pullRealShapeUntilServer(
 		got := realShapeStateValues(states[table.name])
 		if !reflect.DeepEqual(got, want[table.name]) {
 			t.Errorf("client rows of %s differ from the server:\n got: %#v\nwant: %#v", table.name, got, want[table.name])
+		}
+		if versions, server := realShapeStateVersions(states[table.name]), realShapeServerVersions(t, ctx, admin, table, true); !reflect.DeepEqual(versions, server) {
+			t.Errorf("client versions of %s differ from the server:\n got: %#v\nwant: %#v", table.name, versions, server)
 		}
 	}
 	t.Fatalf("pull did not reach the server state; health=%#v; %s", loadIssue49Health(t, ctx, admin), harness.FailureDiagnostics())
@@ -340,7 +405,8 @@ func realShapeRecordStates(t *testing.T, ctx context.Context, admin *sql.DB, rec
 				applyRealShapeRecord(t, states[table.name], table, "upsert", record)
 			}
 		}
-		if !reflect.DeepEqual(realShapeStateValues(states[table.name]), realShapeServerRows(t, ctx, admin, table)) {
+		if !reflect.DeepEqual(realShapeStateValues(states[table.name]), realShapeServerRows(t, ctx, admin, table)) ||
+			!reflect.DeepEqual(realShapeStateVersions(states[table.name]), realShapeServerVersions(t, ctx, admin, table, true)) {
 			matched = false
 		}
 	}
@@ -353,6 +419,7 @@ func requireRealShapeRecords(t *testing.T, ctx context.Context, admin *sql.DB, r
 	if !matched {
 		for _, table := range tables {
 			t.Errorf("%s rows of %s:\n got: %#v\nwant: %#v", source, table.name, realShapeStateValues(states[table.name]), realShapeServerRows(t, ctx, admin, table))
+			t.Errorf("%s versions of %s:\n got: %#v\nwant: %#v", source, table.name, realShapeStateVersions(states[table.name]), realShapeServerVersions(t, ctx, admin, table, true))
 		}
 		t.Fatalf("%s rows differ from the server", source)
 	}
@@ -415,13 +482,40 @@ func pushRealShapeApplied(
 				table = candidate
 			}
 		}
-		applyRealShapeRecord(t, states[table.name], table, mutation["op"].(string), outcome)
+		operation := mutation["op"].(string)
+		applyRealShapeRecord(t, states[table.name], table, operation, outcome)
 		id := mutation["pk"].(map[string]any)[table.reference.PKField].(string)
+
+		// The authored mutation is the oracle for the push effect.
+		switch operation {
+		case "insert", "update":
+			authored := make(map[string]any)
+			for fieldID, value := range mutation["columns"].(map[string]any) {
+				authored[table.names[fieldID]] = value
+			}
+			authored["deleted_at"] = nil
+			requireRealShapeSourceValues(t, ctx, admin, table, id, authored)
+		case "delete":
+			if deleted := realShapeSourceRows(t, ctx, admin, table, "source.deleted_at IS NOT NULL")[id]; deleted == nil {
+				t.Fatalf("accepted delete of %s.%q left no source tombstone", table.name, id)
+			}
+		}
+
+		// The source is the oracle for complete hydration of the returned row.
 		server := realShapeServerRows(t, ctx, admin, table)
 		row, live := states[table.name][id]
 		want, serverLive := server[id]
 		if live != serverLive || live && !reflect.DeepEqual(row.values, want) {
 			t.Fatalf("shape push outcome row of %s.%q differs from the server:\n got: %#v\nwant: %#v", table.name, id, row.values, want)
+		}
+
+		// The returned version is the new authoritative version and replaces the base.
+		version, _ := outcome["server_version"].(string)
+		if current := realShapeServerVersions(t, ctx, admin, table, false)[id]; version == "" || version != current {
+			t.Fatalf("shape push outcome version of %s.%q = %q, want the current version %q", table.name, id, version, current)
+		}
+		if base, _ := mutation["base_version"].(string); base != "" && base == version {
+			t.Fatalf("shape push outcome version of %s.%q did not change from its base %q", table.name, id, base)
 		}
 	}
 	return response
@@ -831,6 +925,7 @@ func TestRealKeyOnlyInsertCompletesSync(t *testing.T) {
 		realShapeMutation(client, defaultOnly, "insert", "00000000-0000-4000-8220-000000000002", "default-one", "", map[string]any{}),
 	}
 	first := pushRealShapeApplied(t, ctx, harness, token, admin, client, "00000000-0000-4000-8220-00000000b001", inserts, realShapeTables(tables...), states)
+	requireRealShapeSourceValues(t, ctx, admin, defaultOnly, "default-one", map[string]any{"label": "server-default"})
 	if label := states["rs_default_only"]["default-one"].values["label"]; label != "server-default" {
 		t.Fatalf("default-only insert label = %#v, want the server default", label)
 	}
@@ -986,6 +1081,7 @@ func TestRealKeyOnlyInsertOnPredecessorServer(t *testing.T) {
 	}
 	states := map[string]map[string]realShapeRow{table.name: {}}
 	pushRealShapeApplied(t, ctx, harness, token, admin, client, "00000000-0000-4000-8220-00000000b101", keyOnly["mutations"].([]map[string]any), realShapeTables(table), states)
+	requireRealShapeSourceValues(t, ctx, admin, table, "key-only", map[string]any{"label": "server-default"})
 	if label := states[table.name]["key-only"].values["label"]; label != "server-default" {
 		t.Fatalf("upgraded key-only insert label = %#v, want the server default", label)
 	}

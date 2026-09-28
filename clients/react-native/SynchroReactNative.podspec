@@ -20,4 +20,10 @@ Pod::Spec.new do |s|
   s.dependency "Synchro", "= #{s.version}"
 
   install_modules_dependencies(s)
+
+  # Test sources stay outside source_files, so production targets never compile them.
+  s.test_spec "Tests" do |test_spec|
+    test_spec.source_files = "ios-tests/**/*.swift"
+    test_spec.requires_app_host = true
+  end
 end

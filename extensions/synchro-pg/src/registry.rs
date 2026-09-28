@@ -233,6 +233,7 @@ struct CatalogFunction {
 
 #[derive(Debug, Clone)]
 struct StagedReconfiguration {
+    generation: i64,
     sync_columns: Vec<String>,
     exclude_columns: Vec<String>,
 }
@@ -580,10 +581,14 @@ fn synchro_register_table(
             fields,
             capture_fields: Vec::new(),
         };
-        if retained.is_some_and(|active| same_registration_content(active, &registration)) {
+        if let Some(active) =
+            retained.filter(|active| same_registration_content(active, &registration))
+        {
             if !affected_scopes.is_empty() {
                 pgrx::error!("affected scopes require a membership rule transition");
             }
+            // An unchanged request must not conceal drift in the live controls.
+            validate_unchanged_registration(client, active)?;
             return Ok(());
         }
 
@@ -1047,7 +1052,7 @@ fn synchro_register_membership_dependency(
         acquire_registry_write_lock(client)?;
         acquire_source_write_gate(client)?;
         let base = latest_complete_generation(client)?;
-        let registrations = load_registry_generation_entries(client, base.generation, false)?;
+        let registrations = load_registry_generation_entries(client, base.generation, true, false)?;
         let dependency = registered_relation_for_dependency_reference(
             client,
             &registrations,
@@ -2951,17 +2956,21 @@ fn create_next_generation(
     Ok(new_generation)
 }
 
+/// Validate the pending generation and record its source requirement in one
+/// checked update. Every registration path uses this writer.
 fn mark_generation_validated(
     client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
+    let requirement = crate::schema::evaluate_source_requirement(client, generation)?;
     let count = client
         .update(
             "UPDATE synchro.sync_registry_generations
-             SET validated = true
-             WHERE generation = $1 AND state = 'pending' AND NOT validated",
+             SET validated = true, source_requirement = $2
+             WHERE generation = $1 AND state = 'pending' AND NOT validated
+               AND source_requirement IS NULL",
             None,
-            &[generation.into()],
+            &[generation.into(), requirement.into()],
         )?
         .len();
     if count != 1 {
@@ -3008,9 +3017,10 @@ fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Resu
     Ok(())
 }
 
-/// Class 3 generations remain pending until the operator has staged and
-/// verified an exported-snapshot projection bootstrap. Other generations keep
-/// the normal commit-ordered WAL activation path.
+/// A pending path with a recorded or unknown bootstrap requirement remains
+/// pending until the operator has staged and verified an exported-snapshot
+/// projection bootstrap. Other generations keep the normal commit-ordered WAL
+/// activation path.
 fn emit_registry_activation_when_ready(
     client: &mut SpiClient<'_>,
     generation: i64,
@@ -4689,6 +4699,7 @@ fn load_catalog_for_registrations(
 
     let staged_rows = client.select(
         "SELECT registry.relation_id::text AS relation_id,
+                registry.registry_generation,
                 registry.sync_columns, registry.exclude_columns
          FROM synchro.sync_registry registry
          JOIN synchro.sync_registry_generations generation
@@ -4709,6 +4720,9 @@ fn load_catalog_for_registrations(
         staged_reconfigurations
             .entry(relation_id)
             .or_insert(StagedReconfiguration {
+                generation: row
+                    .get_by_name::<i64, &str>("registry_generation")?
+                    .unwrap_or_else(|| pgrx::error!("staged registry generation is missing")),
                 sync_columns: row
                     .get_by_name::<Vec<String>, &str>("sync_columns")?
                     .unwrap_or_default(),
@@ -4903,7 +4917,7 @@ pub(crate) fn load_registry_generation_from_client(
     client: &SpiClient<'_>,
     generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    load_registry_generation_entries(client, generation, true)
+    load_registry_generation_entries(client, generation, true, true)
 }
 
 /// Load prior metadata for the transaction that activates a validated generation.
@@ -4913,8 +4927,8 @@ pub(crate) fn load_registry_generation_for_activation(
     active_generation: i64,
     final_generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    load_registry_generation_entries(client, final_generation, true)?;
-    load_registry_generation_entries(client, active_generation, false)
+    load_registry_generation_entries(client, final_generation, true, true)?;
+    load_registry_generation_entries(client, active_generation, true, false)
 }
 
 /// Load the active decoder registry after a committed registration transaction.
@@ -4952,12 +4966,16 @@ pub(crate) fn load_registry_generation_for_worker(
     }
 }
 
-fn load_registry_generation_entries(
+/// Load one stored generation. `require_validated` rejects a generation that
+/// its validation writer has not recorded. `validate_capture_controls` checks
+/// the live catalog against the stored definition.
+pub(crate) fn load_registry_generation_entries(
     client: &SpiClient<'_>,
     generation: i64,
+    require_validated: bool,
     validate_capture_controls: bool,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    validate_complete_generation(client, generation)?;
+    validate_generation_identity(client, generation, require_validated)?;
     let rows = client.select(
         "SELECT registry_generation,
                  relation_id::text AS relation_id,
@@ -5015,7 +5033,7 @@ fn load_registry_generation_entries(
     }
     let catalog = load_catalog_for_registrations(client, generation, &registrations)?;
     for registration in &registrations {
-        validate_loaded_registration_from_catalog(registration, &catalog)?;
+        validate_loaded_registration_from_catalog(client, registration, &catalog)?;
     }
     let dependencies =
         load_membership_dependencies_from_catalog(client, generation, &registrations, &catalog)?;
@@ -5507,10 +5525,6 @@ fn load_membership_dependencies_from_catalog(
     Ok(dependencies)
 }
 
-fn validate_complete_generation(client: &SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
-    validate_generation_identity(client, generation, true)
-}
-
 fn validate_generation_identity(
     client: &SpiClient<'_>,
     generation: i64,
@@ -5981,19 +5995,22 @@ fn capture_triggers_match_catalog(
     found_guard && found_fence && found_truncate
 }
 
+/// Return the pending generation whose staged column set owns this relation's
+/// live catalog.
 fn staged_reconfiguration_owns_live_catalog_from_catalog(
     registration: &TableRegistration,
     catalog: &GenerationCatalog,
-) -> Result<bool, spi::Error> {
+) -> Result<Option<i64>, spi::Error> {
     let Some(staged) = catalog
         .staged_reconfigurations
         .get(&registration.relation_id)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     if staged.sync_columns.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
+    let staged_generation = staged.generation;
     let actual = catalog
         .columns
         .get(&registration.physical_relation_oid)
@@ -6008,7 +6025,7 @@ fn staged_reconfiguration_owns_live_catalog_from_catalog(
         .chain(staged.exclude_columns.iter())
         .map(String::as_str)
         .collect::<std::collections::HashSet<_>>();
-    Ok(staged == actual)
+    Ok((staged == actual).then_some(staged_generation))
 }
 
 fn validate_registration_metadata_from_catalog(
@@ -6166,20 +6183,53 @@ pub(crate) fn validate_loaded_registration(
         registration.registry_generation,
         std::slice::from_ref(registration),
     )?;
-    validate_loaded_registration_from_catalog(registration, &catalog)
+    validate_loaded_registration_from_catalog(client, registration, &catalog)
+}
+
+/// Validate a stored registration against the live catalog before a
+/// registration call reports that nothing changed.
+fn validate_unchanged_registration(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+) -> Result<(), spi::Error> {
+    let catalog = load_catalog_for_registrations(
+        client,
+        registration.registry_generation,
+        std::slice::from_ref(registration),
+    )?;
+    validate_loaded_registration_from_catalog(client, registration, &catalog)
 }
 
 fn validate_loaded_registration_from_catalog(
+    client: &SpiClient<'_>,
     registration: &TableRegistration,
     catalog: &GenerationCatalog,
 ) -> Result<(), spi::Error> {
-    if staged_reconfiguration_owns_live_catalog_from_catalog(registration, catalog)? {
+    if let Some(staged_generation) =
+        staged_reconfiguration_owns_live_catalog_from_catalog(registration, catalog)?
+    {
         // A pending validated generation staged this relation's live shape,
         // so the loaded registration mismatches the catalog by design until
-        // activation. True drift stays detectable because tolerance requires
-        // the staged shape to match the catalog exactly. Issue #43.
-        return Ok(());
+        // activation. The staged registration must still match every live
+        // identity, privilege, key, trigger, and publication control. Issue #43.
+        let staged = load_registry_generation_entries(client, staged_generation, true, false)?
+            .into_iter()
+            .find(|staged| staged.relation_id == registration.relation_id)
+            .unwrap_or_else(|| pgrx::error!("staged registration is missing"));
+        let staged_catalog = load_catalog_for_registrations(
+            client,
+            staged_generation,
+            std::slice::from_ref(&staged),
+        )?;
+        return validate_live_registration_from_catalog(&staged, &staged_catalog);
     }
+    validate_live_registration_from_catalog(registration, catalog)
+}
+
+fn validate_live_registration_from_catalog(
+    registration: &TableRegistration,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
     validate_registration_metadata_from_catalog(registration, catalog)?;
     validate_capture_triggers_from_catalog(registration, catalog)?;
     validate_publication_membership_from_catalog(registration.physical_relation_oid, catalog)?;

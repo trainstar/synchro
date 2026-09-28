@@ -99,7 +99,7 @@
     {
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
       "path": "conformance/scenarios/server/registry-reload-001.json",
-      "sha256": "a05dca1b97629744df327d1a0c89d0e2bd9eef1d13c1fdf7e2e3f9598d934720"
+      "sha256": "7832466b8681d3641783abdb7aac9e393fce8695dbe991b49998b616dce027f5"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",

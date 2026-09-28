@@ -209,6 +209,7 @@ Each journey uses a fresh local PostgreSQL instance.
 The corpus rejects missing scenario runners before execution.
 
 Release builds distributions once. Package checks and publication use the identical sealed payloads.
+Artifact digests identify the sealed bytes, not the source. Builds are not reproducible, so no gate compares a rebuilt artifact with a sealed digest.
 
 Maven bundles contain only version-specific artifacts, signatures, and checksums.
 Maven Central owns repository-level version metadata.

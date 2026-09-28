@@ -1132,15 +1132,7 @@ fn fields_compatible(
     authored.type_name == current.type_name
         && (!authored.nullable || current.nullable)
         && (!authored.writable || current.writable)
-        && (authored.type_name != "decimal"
-            || (authored.precision.is_some()
-                && authored.scale.is_some()
-                && current.precision.is_some()
-                && current.scale.is_some()
-                && current.precision.unwrap() >= authored.precision.unwrap()
-                && current.scale.unwrap() >= authored.scale.unwrap()
-                && current.precision.unwrap() - current.scale.unwrap()
-                    >= authored.precision.unwrap() - authored.scale.unwrap()))
+        && (authored.type_name != "decimal" || authored.decimal_domain_within(current))
 }
 
 fn evaluate_mutation(

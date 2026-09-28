@@ -146,7 +146,7 @@ final class Issue49RequirementProofTests: XCTestCase {
                 1
             )
 
-            let observed = try client.inspectPendingMutations()
+            let observed = try client.inspectPendingMutations().currentRecords()
             XCTAssertTrue(
                 queueMatches(observed, operation: operation),
                 "\(operation.rawValue) observed \(observed.map { "\($0.tableName):\($0.operation.rawValue):\($0.status.rawValue)" })"
@@ -186,7 +186,7 @@ final class Issue49RequirementProofTests: XCTestCase {
             ).rowsAffected,
             1
         )
-        let beforeRestart = try XCTUnwrap(first.inspectPendingMutations().only)
+        let beforeRestart = try XCTUnwrap(first.inspectPendingMutations().currentRecords().only)
         XCTAssertEqual(beforeRestart.baseVersion, authoritativeVersion)
         XCTAssertEqual(beforeRestart.operation, .update)
         XCTAssertTrue(beforeRestart.authoredFields.contains { field in
@@ -195,7 +195,7 @@ final class Issue49RequirementProofTests: XCTestCase {
         try await first.close()
 
         let reopened = try SynchroClient(config: config)
-        let afterRestart = try XCTUnwrap(reopened.inspectPendingMutations().only)
+        let afterRestart = try XCTUnwrap(reopened.inspectPendingMutations().currentRecords().only)
         XCTAssertEqual(observation(afterRestart), observation(beforeRestart))
         XCTAssertEqual(
             try reopened.queryOne("SELECT name FROM categories WHERE id = ?", params: [category.seededID])?["name"] as? String,
@@ -203,7 +203,7 @@ final class Issue49RequirementProofTests: XCTestCase {
         )
 
         XCTAssertThrowsError(try reopened.execute("DELETE FROM _synchro_pending_changes"))
-        XCTAssertEqual(try reopened.inspectPendingMutations().map(observation), [observation(beforeRestart)])
+        XCTAssertEqual(try reopened.inspectPendingMutations().currentRecords().map(observation), [observation(beforeRestart)])
         try await reopened.close()
     }
 
@@ -225,7 +225,7 @@ final class Issue49RequirementProofTests: XCTestCase {
             )?["name"] as? String,
             "Seed Category"
         )
-        XCTAssertTrue(try baseline.inspectPendingMutations().isEmpty)
+        XCTAssertTrue(try baseline.inspectPendingMutations().currentRecords().isEmpty)
 
         XCTAssertEqual(
             try baseline.execute(
@@ -234,7 +234,7 @@ final class Issue49RequirementProofTests: XCTestCase {
             ).rowsAffected,
             1
         )
-        XCTAssertEqual(try baseline.inspectPendingMutations().count, 1)
+        XCTAssertEqual(try baseline.inspectPendingMutations().currentRecords().count, 1)
         try await baseline.close()
 
         XCTAssertThrowsError(
@@ -443,7 +443,7 @@ final class Issue49RequirementProofTests: XCTestCase {
             )
         }
         _ = try database.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["protected-local-intent", "protected"])
-        let protectedMutation = try XCTUnwrap(try ChangeTracker(database: database).inspectPendingMutations().only)
+        let protectedMutation = try XCTUnwrap(try ChangeTracker(database: database).inspectPendingMutations().currentRecords().only)
 
         let attempt = try processor.beginScopeRebuild(
             scopeID: targetScope,
@@ -457,7 +457,7 @@ final class Issue49RequirementProofTests: XCTestCase {
         for retained in ["shared", "protected", "local-only"] {
             XCTAssertNotNil(try database.queryOne("SELECT id FROM orders WHERE id = ?", params: [retained]))
         }
-        XCTAssertEqual(try ChangeTracker(database: database).inspectPendingMutations().map(\.mutationID), [protectedMutation.mutationID])
+        XCTAssertEqual(try ChangeTracker(database: database).inspectPendingMutations().currentRecords().map(\.mutationID), [protectedMutation.mutationID])
         XCTAssertEqual(
             try database.readTransaction { try SynchroMeta.getScope($0, scopeID: otherScope)?.cursor },
             "other-stable"
@@ -578,7 +578,7 @@ final class Issue49RequirementProofTests: XCTestCase {
             try reopened.readTransaction { try SynchroMeta.getScope($0, scopeID: otherScope)?.cursor },
             "other-stable"
         )
-        XCTAssertEqual(try ChangeTracker(database: reopened).inspectPendingMutations().map(\.mutationID), [protectedMutation.mutationID])
+        XCTAssertEqual(try ChangeTracker(database: reopened).inspectPendingMutations().currentRecords().map(\.mutationID), [protectedMutation.mutationID])
         try reopened.close()
 
         let finalReopen = try SynchroDatabase(path: path)

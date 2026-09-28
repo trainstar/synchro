@@ -43,6 +43,7 @@ android {
   defaultConfig {
     minSdkVersion getExtOrDefault("minSdkVersion")
     targetSdkVersion getExtOrDefault("targetSdkVersion")
+    testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
   }
 
   sourceSets {
@@ -83,4 +84,7 @@ dependencies {
   implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3"
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0"
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0"
+
+  androidTestImplementation "androidx.test.ext:junit:1.1.5"
+  androidTestImplementation "androidx.test:runner:1.5.2"
 }

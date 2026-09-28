@@ -349,6 +349,34 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
     }
 }
 
+/// Durable client facts that one read-only database snapshot produced.
+///
+/// `retainedMutations` is present only when `capture.mutationLedgerCount`
+/// is at most the record limit. `rejectedMutations` is present only when
+/// `capture.rejectedMutationCount` is at most the record limit.
+@_spi(Inspection)
+public struct ClientStateSnapshotInspection: Sendable, Equatable {
+    public let capture: ClientStateCaptureInspection
+    public let pendingChangeCount: Int
+    public let retainedMutations: [RetainedMutationInspection]?
+    public let rejectedMutations: [RejectedMutationInspection]?
+    public let blockingFailure: SyncFailure?
+
+    public init(
+        capture: ClientStateCaptureInspection,
+        pendingChangeCount: Int,
+        retainedMutations: [RetainedMutationInspection]?,
+        rejectedMutations: [RejectedMutationInspection]?,
+        blockingFailure: SyncFailure?
+    ) {
+        self.capture = capture
+        self.pendingChangeCount = pendingChangeCount
+        self.retainedMutations = retainedMutations
+        self.rejectedMutations = rejectedMutations
+        self.blockingFailure = blockingFailure
+    }
+}
+
 @_spi(Inspection)
 public struct RowMetadataInspection: Sendable, Equatable {
     public let tableName: String
@@ -499,6 +527,98 @@ public struct PendingMutationInspection: Sendable, Equatable {
         self.sealedBatchID = sealedBatchID
         self.sealedOrdinal = sealedOrdinal
         self.authoredFields = authoredFields
+    }
+}
+
+/// A retained mutation that the pre-ledger queue imported.
+///
+/// The old queue did not store a table ID, primary-key binding, authored
+/// schema, or authored field values. This record has only the stored fields.
+public struct LegacyMutationInspection: Sendable, Equatable {
+    public let mutationID: String
+    public let localOrder: Int64
+    public let tableName: String
+    public let recordID: String
+    public let operation: Operation
+    public let baseVersion: String?
+    public let clientVersion: String
+    public let status: LocalMutationStatus
+    public let sourceKind: String
+
+    public init(
+        mutationID: String,
+        localOrder: Int64,
+        tableName: String,
+        recordID: String,
+        operation: Operation,
+        baseVersion: String?,
+        clientVersion: String,
+        status: LocalMutationStatus,
+        sourceKind: String
+    ) {
+        self.mutationID = mutationID
+        self.localOrder = localOrder
+        self.tableName = tableName
+        self.recordID = recordID
+        self.operation = operation
+        self.baseVersion = baseVersion
+        self.clientVersion = clientVersion
+        self.status = status
+        self.sourceKind = sourceKind
+    }
+}
+
+/// One retained local mutation in its stored representation.
+public enum RetainedMutationInspection: Sendable, Equatable {
+    case current(PendingMutationInspection)
+    case legacy(LegacyMutationInspection)
+
+    public var mutationID: String {
+        switch self {
+        case .current(let mutation): return mutation.mutationID
+        case .legacy(let mutation): return mutation.mutationID
+        }
+    }
+
+    public var localOrder: Int64 {
+        switch self {
+        case .current(let mutation): return mutation.localOrder
+        case .legacy(let mutation): return mutation.localOrder
+        }
+    }
+
+    public var tableName: String {
+        switch self {
+        case .current(let mutation): return mutation.tableName
+        case .legacy(let mutation): return mutation.tableName
+        }
+    }
+
+    public var recordID: String {
+        switch self {
+        case .current(let mutation): return mutation.recordID
+        case .legacy(let mutation): return mutation.recordID
+        }
+    }
+
+    public var operation: Operation {
+        switch self {
+        case .current(let mutation): return mutation.operation
+        case .legacy(let mutation): return mutation.operation
+        }
+    }
+
+    public var status: LocalMutationStatus {
+        switch self {
+        case .current(let mutation): return mutation.status
+        case .legacy(let mutation): return mutation.status
+        }
+    }
+
+    /// The current record, or nil for a legacy import.
+    public var current: PendingMutationInspection? {
+        guard case .current(let mutation) = self else { return nil }
+        return mutation
     }
 }
 

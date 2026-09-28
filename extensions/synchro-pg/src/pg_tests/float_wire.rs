@@ -309,6 +309,7 @@
                 }))
                 .unwrap(),
                 message_lsn: commit_lsn,
+                event_boundary: u64::try_from(offset).unwrap() + 1,
             });
             record_ids.push(record_id);
         }

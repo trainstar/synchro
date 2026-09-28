@@ -112,7 +112,7 @@ class InspectionTests {
 
         val restartedClient = SynchroClient(config, context)
         try {
-            val inspections = restartedClient.inspectPendingMutations()
+            val inspections = restartedClient.inspectPendingMutations().currentRecords()
             assertEquals(listOf("o1", "o2"), inspections.map { it.recordID })
             assertEquals(inspections.map { it.localOrder }.sorted(), inspections.map { it.localOrder })
             assertEquals(LocalMutationStatus.SUPERSEDED_BEFORE_SEND, inspections[0].status)
@@ -252,7 +252,7 @@ class InspectionTests {
                 "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
                 arrayOf("o1", "authored", "2026-01-01T00:00:00.000000Z"),
             )
-            val mutationID = firstClient.inspectPendingMutations().single().mutationID
+            val mutationID = firstClient.inspectPendingMutations().currentRecords().single().mutationID
             exactMutationJSON = mutationJSON.replace("m1", mutationID)
             exactRejectionJSON = rejectionJSON.replace("m1", mutationID)
             firstClient.close()
@@ -353,7 +353,7 @@ class InspectionTests {
             assertEquals(2, capture.mutationLedgerCount)
             assertEquals(1, capture.mutationOutcomeCount)
             assertEquals(1, reopened.retainedMutationCount())
-            assertEquals(listOf("retained"), reopened.inspectRetainedMutations().map { it.recordID })
+            assertEquals(listOf("retained"), reopened.inspectRetainedMutations().currentRecords().map { it.recordID })
         } finally {
             reopened.close()
             context.deleteDatabase(config.dbPath)
@@ -457,6 +457,49 @@ class InspectionTests {
             assertEquals(inspection.scopeStates, proof.scopeStates())
             assertEquals(inspection.scopeRows, proof.scopeRows())
             assertEquals(inspection.rebuildAttempts, proof.rebuildAttempts())
+        } finally {
+            client.close()
+            context.deleteDatabase(config.dbPath)
+        }
+    }
+
+    @Test
+    fun snapshotReadsCountsDetailsAndApplicationRowsTogether() {
+        val config = prepareClientConfig()
+        val client = SynchroClient(config, context)
+        try {
+            client.execute(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf("o1", "first", "2026-01-01T00:00:00.000000Z"),
+            )
+            client.execute(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf("o2", "second", "2026-01-01T00:00:01.000000Z"),
+            )
+            val proof = SynchroInspection(client)
+            var rows: List<Row> = emptyList()
+            val snapshot = proof.captureSnapshot(maximumRecords = 8) { capture, transaction ->
+                assertEquals(2, capture.applicationRowCount)
+                rows = transaction.query("SELECT id, title FROM orders ORDER BY id")
+            }
+
+            assertEquals(listOf(mapOf("id" to "o1", "title" to "first"), mapOf("id" to "o2", "title" to "second")), rows)
+            assertEquals(2, snapshot.capture.mutationLedgerCount)
+            val retained = requireNotNull(snapshot.retainedMutations).currentRecords()
+            assertEquals(listOf("o1", "o2"), retained.map { it.recordID })
+            assertEquals(listOf(LocalMutationStatus.PENDING, LocalMutationStatus.PENDING), retained.map { it.status })
+            assertEquals(
+                listOf(AnyCodable("first"), AnyCodable("second")),
+                retained.map { mutation -> mutation.authoredFields.single { it.fieldID == "title" }.value },
+            )
+            assertEquals(2, snapshot.pendingChangeCount)
+            assertEquals(emptyList<RejectedMutationInspection>(), snapshot.rejectedMutations)
+            assertEquals(null, snapshot.blockingFailure)
+            assertEquals(snapshot, proof.captureSnapshot(maximumRecords = 8) { _, _ -> })
+
+            val bounded = proof.captureSnapshot(maximumRecords = 1) { _, _ -> }
+            assertEquals(null, bounded.retainedMutations)
+            assertEquals(emptyList<RejectedMutationInspection>(), bounded.rejectedMutations)
         } finally {
             client.close()
             context.deleteDatabase(config.dbPath)

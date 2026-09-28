@@ -17,6 +17,11 @@ public final class ApplicationTransaction {
         self.writeExecutor = writeExecutor
     }
 
+    /// A view for an inspection snapshot. The caller keeps the connection read-only.
+    convenience init(readOnlyDatabase database: GRDB.Database) {
+        self.init(database: database)
+    }
+
     @discardableResult
     public func execute(
         _ sql: String,

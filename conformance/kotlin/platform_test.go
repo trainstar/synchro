@@ -3,6 +3,7 @@ package kotlin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1133,4 +1134,48 @@ func temporaryUnavailablePushDispatchPayload() json.RawMessage {
 		"request":{"client_id":"client-a","client_generation":1,"batch_id":"batch-a","schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"mutations":[]},
 		"delivery":"transport_failure","commit_lsn":"1","end_lsn":"2"
 	}`)
+}
+
+func TestCaptureBoundsRebuildReceiptsByGroupNotPage(t *testing.T) {
+	pages := maximumRecords + 1
+	proofs := json.RawMessage(fmt.Sprintf(`[{"rebuild_id_fingerprint":%q,"page_count":%d,"returned_record_count":3,"request_chain_valid":true,"records_in_canonical_order":true,"row_checksums_valid":true,"scope_checksum_valid":true,"final_checksum_matches_local":true}]`, testDigest, pages))
+	oneLargeGroup := restartInvariantCaptureFixture("process-a", testDigest)
+	oneLargeGroup.RebuildReceiptCount = &pages
+	oneLargeGroup.RebuildReceiptProofs = proofs
+	if err := validateCapturedClientState(oneLargeGroup); err != nil {
+		t.Fatalf("one complete receipt group with many pages was rejected: %v", err)
+	}
+	if restartCaptureExceedsDetailBounds(oneLargeGroup) {
+		t.Fatal("one complete receipt group was treated as bounded detail")
+	}
+
+	truncated := oneLargeGroup
+	truncated.RebuildReceipts = nil
+	truncated.RebuildReceiptProofs = nil
+	if err := validateCapturedClientState(truncated); err != nil {
+		t.Fatalf("truncated receipt groups beyond the page bound were rejected: %v", err)
+	}
+	if !restartCaptureExceedsDetailBounds(truncated) {
+		t.Fatal("truncated receipt groups were treated as complete detail")
+	}
+
+	smallTruncated := restartInvariantCaptureFixture("process-a", testDigest)
+	smallTruncated.RebuildReceipts = nil
+	smallTruncated.RebuildReceiptProofs = nil
+	if err := validateCapturedClientState(smallTruncated); err == nil {
+		t.Fatal("receipt group truncation within the page bound was accepted")
+	}
+
+	mixedPresence := oneLargeGroup
+	mixedPresence.RebuildReceipts = nil
+	if err := validateCapturedClientState(mixedPresence); err == nil {
+		t.Fatal("receipt facts without matching proofs were accepted")
+	}
+
+	bound := maximumRecords
+	mismatchedPages := oneLargeGroup
+	mismatchedPages.RebuildReceiptCount = &bound
+	if err := validateCapturedClientState(mismatchedPages); err == nil {
+		t.Fatal("receipt page-count mismatch was accepted")
+	}
 }
