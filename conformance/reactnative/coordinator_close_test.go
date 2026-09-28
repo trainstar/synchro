@@ -104,35 +104,57 @@ func TestCloseEndsBlockedExchangeBarrierWithExpiredContext(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			exchange := test.setup(t)
 			stage := exchange.stage()
+			// The exchange context is cancelled only by cleanup, so a failed
+			// Close cannot leave the exchange goroutine or the mutex held.
+			exchangeContext, cancelExchange := context.WithCancel(context.Background())
 			locked := make(chan struct{})
-			advanced := make(chan error, 1)
+			advanceDone := make(chan struct{})
+			var advanceErr error
 			go func() {
+				defer close(advanceDone)
 				exchange.mu.Lock()
 				close(locked)
-				err := exchange.advance(context.Background())
+				advanceErr = exchange.advance(exchangeContext)
 				exchange.mu.Unlock()
-				advanced <- err
 			}()
 			<-locked
 			expired, cancel := context.WithCancel(context.Background())
 			cancel()
-			closed := make(chan error, 1)
-			go func() { closed <- exchange.close(expired) }()
+			closeDone := make(chan struct{})
+			go func() {
+				defer close(closeDone)
+				_ = exchange.close(expired)
+			}()
+			t.Cleanup(func() {
+				cancelExchange()
+				_ = exchange.listener.Close()
+				for _, done := range []chan struct{}{advanceDone, closeDone} {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("coordinator goroutine did not stop within the cleanup bound")
+					}
+				}
+			})
 			select {
-			case err := <-advanced:
-				if err == nil {
+			case <-advanceDone:
+				if advanceErr == nil {
 					t.Fatal("blocked exchange advanced after Close")
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("Close did not end the blocked exchange barrier wait")
 			}
 			select {
-			case <-closed:
+			case <-closeDone:
 			case <-time.After(5 * time.Second):
 				t.Fatal("Close did not return after the blocked exchange ended")
 			}
 			if got := exchange.stage(); got != stage {
 				t.Fatalf("stage after closed exchange = %v, want %v", got, stage)
+			}
+			// A deadline bounds Accept if Close left the listener open.
+			if tcp, ok := exchange.listener.(*net.TCPListener); ok {
+				_ = tcp.SetDeadline(time.Now().Add(time.Second))
 			}
 			if connection, err := exchange.listener.Accept(); !errors.Is(err, net.ErrClosed) {
 				if connection != nil {

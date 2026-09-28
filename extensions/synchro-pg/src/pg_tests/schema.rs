@@ -2082,6 +2082,9 @@
 
     #[pg_test]
     fn test_added_nonempty_table_is_class_3_with_bootstrap() {
+        // Class 3 affects every committed scope, so no dblink test may have
+        // committed clients while this test reads them.
+        lock_committed_scope_state(false);
         setup_test_tables();
         register_client("nonempty-table-user", "nonempty-table-client");
         Spi::run(
@@ -2690,10 +2693,15 @@
         )
         .expect("activation must fail before it removes a filtered publication member");
         assert_eq!(orders_capture_state(), before);
-        assert!(crate::registry::load_registry()
-            .unwrap()
-            .iter()
-            .any(|entry| entry.table_name == "test_orders"));
+        let active_orders: Option<i64> = Spi::get_one(
+            "SELECT count(*)
+             FROM sync_registry registry
+             JOIN sync_registry_generations generation
+               ON generation.generation = registry.registry_generation
+             WHERE generation.state = 'active' AND registry.table_name = 'test_orders'",
+        )
+        .unwrap();
+        assert_eq!(active_orders, Some(1));
     }
 
     #[pg_test]
@@ -3722,7 +3730,23 @@
         .expect("dblink asynchronous query result")
     }
 
+    // The renewal race commits a client through dblink and deletes it before
+    // its test transaction ends. It holds this lock exclusively for that whole
+    // time. A test that asserts on every committed scope holds it shared.
+    const COMMITTED_SCOPE_STATE_LOCK: i64 = 0x5359_4e43_5343_4f50;
+
+    fn lock_committed_scope_state(exclusive: bool) {
+        let statement = if exclusive {
+            "SELECT pg_advisory_xact_lock($1)"
+        } else {
+            "SELECT pg_advisory_xact_lock_shared($1)"
+        };
+        Spi::run_with_args(statement, &[COMMITTED_SCOPE_STATE_LOCK.into()])
+            .expect("lock committed scope state");
+    }
+
     fn run_connect_generation_renewal_race(rebuild: bool) {
+        lock_committed_scope_state(true);
         let user_id = if rebuild {
             "concurrent-rebuild-user"
         } else {
