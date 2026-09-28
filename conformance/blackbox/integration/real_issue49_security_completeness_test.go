@@ -302,6 +302,37 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		"ALTER TABLE public.cf_items DROP CONSTRAINT cf_items_pkey",
 		"ALTER TABLE public.cf_items ADD PRIMARY KEY (id) DEFERRABLE",
 	})
+	if _, err := admin.ExecContext(ctx, `
+		CREATE TABLE public.security49_identity_drift (
+			id uuid PRIMARY KEY,
+			counter integer NOT NULL,
+			updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+			deleted_at timestamptz
+		);
+		ALTER TABLE public.security49_identity_drift ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY synchro_owner_all ON public.security49_identity_drift
+			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
+		GRANT SELECT, INSERT, UPDATE ON TABLE public.security49_identity_drift TO synchro_owner;
+		GRANT SELECT ON TABLE public.security49_identity_drift TO synchro_worker;
+		CREATE FUNCTION public.security49_identity_drift_membership(p_id uuid)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER
+		SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC SELECT 'user:diagnostic-user'::text; END;
+		REVOKE ALL ON FUNCTION public.security49_identity_drift_membership FROM PUBLIC;
+		GRANT EXECUTE ON FUNCTION public.security49_identity_drift_membership
+			TO synchro_owner, synchro_worker;
+		SELECT synchro.synchro_register_table(
+			'public.security49_identity_drift',
+			'public.security49_identity_drift_membership',
+			'single_scope',
+			'id', 'updated_at', 'deleted_at', 'enabled')`); err != nil {
+		t.Fatalf("create registered identity drift fixture: %v", err)
+	}
+	waitForIssue49CanonicalHealth(t, ctx, admin, true)
+	identityDrift := security49HealthDuringTransaction(t, ctx, admin, []string{
+		"ALTER TABLE public.security49_identity_drift ALTER COLUMN counter ADD GENERATED ALWAYS AS IDENTITY",
+	})
 
 	if _, err := admin.ExecContext(ctx, `
 		ALTER TABLE public.cf_items RENAME TO cf_items_registered_oid;
@@ -361,6 +392,9 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		}
 		if deferrableDrift["ready"] != false || issue49HealthChecks(t, deferrableDrift)["relation_identity"] != "failed" {
 			t.Fatalf("deferrable primary-key drift did not fail relation identity: %#v", deferrableDrift)
+		}
+		if identityDrift["ready"] != false || issue49HealthChecks(t, identityDrift)["relation_identity"] != "failed" {
+			t.Fatalf("database-generated writable field drift did not fail relation identity: %#v", identityDrift)
 		}
 		if registeredOID != persistedOID || replacementOID == persistedOID || OIDDrift["ready"] != false ||
 			issue49HealthChecks(t, OIDDrift)["relation_identity"] != "failed" {

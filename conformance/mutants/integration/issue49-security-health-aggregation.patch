@@ -5,8 +5,8 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1105
-+-- synchro-pg/src/health.rs:1106
+--- synchro-pg/src/health.rs:1135
++-- synchro-pg/src/health.rs:1136
  -- synchro_pg::health::synchro_health_detail
  CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
@@ -14,8 +14,8 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1098
-+-- synchro-pg/src/health.rs:1099
+--- synchro-pg/src/health.rs:1128
++-- synchro-pg/src/health.rs:1129
  -- synchro_pg::health::synchro_readiness
  CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
