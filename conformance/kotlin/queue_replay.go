@@ -108,7 +108,7 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		if err != nil {
 			return QueueReplayResult{}, err
 		}
-		if replayed.Completion != "idle" || push.StatusCode != 200 || push.Retryable == nil || *push.Retryable {
+		if replayed.Completion != "idle" || push.StatusCode != 200 || push.Retryable != nil {
 			return QueueReplayResult{}, fmt.Errorf("Kotlin Android queue-replay replay for step %s did not complete successfully", stepID)
 		}
 		capturedOutcomes, err := queueCapturedOutcomeCounts(ctx, platform, client)

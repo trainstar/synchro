@@ -889,7 +889,7 @@ func validateMultiScopeProvenanceCall(scenario scenarios.Scenario, call *multiSc
 		return errors.New("Swift multi-scope provenance connect generation differs from the authored operation")
 	}
 	for _, observation := range observations {
-		if observation.StatusCode != 200 || observation.Retryable || observation.ErrorCode != nil {
+		if observation.StatusCode != 200 || observation.Retryable != nil || observation.ErrorCode != nil {
 			return errors.New("Swift multi-scope provenance call contains an unsuccessful transport response")
 		}
 	}

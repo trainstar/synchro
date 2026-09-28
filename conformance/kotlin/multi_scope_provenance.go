@@ -761,7 +761,7 @@ func validateMultiScopeProvenanceCall(scenario scenarios.Scenario, call *multiSc
 		return errors.New("connect generation differs from authored operation")
 	}
 	for _, observation := range observations {
-		if observation.StatusCode != 200 || observation.Retryable == nil || *observation.Retryable || observation.ErrorCode != nil {
+		if observation.StatusCode != 200 || observation.Retryable != nil || observation.ErrorCode != nil {
 			return errors.New("call contains an unsuccessful transport response")
 		}
 	}

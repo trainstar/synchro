@@ -137,8 +137,8 @@ private final class ExternalConnection {
     private var handle: OpaquePointer?
     private var holdsWriteLock = false
 
-    init(path: String) throws {
-        let code = sqlite3_open_v2(path, &handle, SQLITE_OPEN_READWRITE, nil)
+    init(path: String, flags: Int32 = SQLITE_OPEN_READWRITE) throws {
+        let code = sqlite3_open_v2(path, &handle, flags, nil)
         guard code == SQLITE_OK else {
             let failure = SQLiteFailure(code: code, message: Self.message(handle))
             let closeCode = sqlite3_close(handle)
@@ -207,7 +207,7 @@ private final class ExternalConnection {
         }
     }
 
-    private func strings(_ sql: String, binding value: String?) throws -> [String] {
+    func strings(_ sql: String, binding value: String?) throws -> [String] {
         var statement: OpaquePointer?
         let prepared = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
         guard prepared == SQLITE_OK else {
@@ -540,6 +540,64 @@ final class SynchroModuleTransactionTests: XCTestCase {
 
         requireSettledOnce([inspect, snapshot, close])
         XCTAssertEqual(deprecated.settlementCount, 1)
+    }
+
+    func testRetainedInspectionMapsAcceptedLegacyImportWithStoredFieldsOnly() throws {
+        // A version-five queue row stored no mutation identity, binding, or field values.
+        let legacy = try ExternalConnection(path: databasePath, flags: SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+        try legacy.execute("""
+            CREATE TABLE _grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY);
+            INSERT INTO _grdb_migrations (identifier) VALUES ('synchro_v1'), ('synchro_v2_buckets'), ('synchro_v3_scopes'),
+                ('synchro_v4_scope_integrity'), ('synchro_v5_rejected_mutations');
+            CREATE TABLE _synchro_pending_changes (record_id TEXT NOT NULL, table_name TEXT NOT NULL, operation TEXT NOT NULL,
+                base_updated_at TEXT, client_updated_at TEXT NOT NULL, PRIMARY KEY (table_name, record_id));
+            CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO _synchro_meta (key, value) VALUES ('sync_lock', '0'), ('checkpoint', '0');
+            CREATE TABLE _synchro_scopes (scope_id TEXT PRIMARY KEY, cursor TEXT, checksum TEXT,
+                generation INTEGER NOT NULL DEFAULT 0, local_checksum INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE _synchro_scope_rows (scope_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL,
+                checksum INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (scope_id, table_name, record_id));
+            CREATE TABLE _synchro_rejected_mutations (mutation_id TEXT PRIMARY KEY, table_name TEXT NOT NULL, record_id TEXT NOT NULL,
+                status TEXT NOT NULL, code TEXT NOT NULL, message TEXT, server_row_json TEXT, server_version TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE _synchro_bucket_members (bucket_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL,
+                checksum INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (bucket_id, table_name, record_id));
+            CREATE TABLE _synchro_bucket_checkpoints (bucket_id TEXT PRIMARY KEY, checkpoint INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO _synchro_pending_changes VALUES ('r1', 'orders', 'create', NULL, '2026-01-01T00:00:00.000000Z');
+            """)
+        try legacy.close()
+        try initializeModule()
+        let external = try openExternalConnection()
+        // The import assigns the mutation identity, so the test reads the stored value.
+        let mutationIDs = try external.strings("SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = 'r1'", binding: nil)
+        let expected: NSDictionary = [
+            "representation": "legacy",
+            "mutationID": try XCTUnwrap(mutationIDs.count == 1 ? mutationIDs.first : nil),
+            "localOrder": 1,
+            "tableName": "orders",
+            "recordID": "r1",
+            "operation": "insert",
+            "baseVersion": NSNull(),
+            "clientVersion": "2026-01-01T00:00:00.000000Z",
+            "status": "blocked_by_predecessor",
+            "sourceKind": "legacy_import",
+        ]
+
+        let inspect = settle("inspect retained records") {
+            module.inspectRetainedMutationRecords($0.resolve, reject: $0.reject)
+        }
+        let records = try XCTUnwrap((try resolvedValue(inspect) as? String)?.data(using: .utf8))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: records) as? NSArray, [expected])
+        let snapshot = settle("snapshot") {
+            module.inspectClientStateSnapshot([], resolve: $0.resolve, reject: $0.reject)
+        }
+        let result = try XCTUnwrap(try resolvedValue(snapshot) as? [String: Any])
+        let json = try XCTUnwrap((result["inspection"] as? String)?.data(using: .utf8))
+        let inspection = try XCTUnwrap(try JSONSerialization.jsonObject(with: json) as? [String: Any])
+        XCTAssertEqual(inspection["retained_mutations"] as? NSArray, [expected])
+        let close = try closeModule()
+
+        requireSettledOnce([inspect, snapshot, close])
     }
 
     // MARK: - Bridge calls

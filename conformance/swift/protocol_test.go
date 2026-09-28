@@ -169,7 +169,7 @@ func TestValidateRunnerResponseAcceptsLargeAggregateCounts(t *testing.T) {
 // validPullRunnerResponse is a complete passed response. Each negative below
 // starts from it and changes one fact, so a rejection can come only from the
 // check for that fact.
-const validPullRunnerResponse = `{"schema_version":1,"outcome":"passed","result":{"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[{"sequence":1,"operation_class":"pull","status_code":200,"retryable":false,"duration_nanoseconds":1,"cursor_fingerprints":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":1,"limit":1},"pull_response_facts":{"change_count":1,"has_more":false,"rebuild_scope_count":0,"checksum_count":1,"scope_cursor_fingerprints":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"scope_cursor_fingerprints_complete":true}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
+const validPullRunnerResponse = `{"schema_version":1,"outcome":"passed","result":{"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[{"sequence":1,"operation_class":"pull","status_code":200,"retryable":null,"duration_nanoseconds":1,"cursor_fingerprints":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":1,"limit":1},"pull_response_facts":{"change_count":1,"has_more":false,"rebuild_scope_count":0,"checksum_count":1,"scope_cursor_fingerprints":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"scope_cursor_fingerprints_complete":true}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
 
 type runnerResponseParts struct {
 	envelope    map[string]any
@@ -306,7 +306,7 @@ func TestValidateRunnerResponseValidatesRawTransportObservations(t *testing.T) {
 }
 
 func TestValidateRunnerResponseAcceptsPushMutationCount(t *testing.T) {
-	data := `{"schema_version":1,"outcome":"passed","result":{"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[{"sequence":1,"operation_class":"push","status_code":200,"retryable":false,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mutation_count":2}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
+	data := `{"schema_version":1,"outcome":"passed","result":{"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[{"sequence":1,"operation_class":"push","status_code":200,"retryable":null,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mutation_count":2}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
 	result, err := validateRunnerResponse([]byte(data))
 	if err != nil {
 		t.Fatalf("valid push observation rejected: %v", err)
@@ -476,6 +476,7 @@ func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
 	// Each call returns new values, so a mutation of one snapshot cannot change another.
 	accepted := func() *transportObservationSnapshot {
 		errorCode := "temporary_unavailable"
+		retryable := true
 		complete := true
 		pullClientGeneration := int64(1)
 		scopeSetVersion := int64(1)
@@ -493,7 +494,7 @@ func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
 				OperationClass:      "pull",
 				StatusCode:          503,
 				ErrorCode:           &errorCode,
-				Retryable:           true,
+				Retryable:           &retryable,
 				DurationNanoseconds: 1,
 				RequestFacts: &transportRequestFacts{
 					ClientGeneration: &pullClientGeneration,
@@ -552,6 +553,7 @@ func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
 		t.Fatalf("accept observations: %v", err)
 	}
 	*input.Observations[0].ErrorCode = "changed"
+	*input.Observations[0].Retryable = false
 	input.Observations[0].CursorFingerprints[0] = "changed"
 	*input.Observations[1].RequestFacts.ScopeFingerprint = "changed"
 	*input.Observations[1].RebuildResponseFacts.ResponseBodySHA256 = "changed"
@@ -566,6 +568,7 @@ func TestRunnerProcessRetainsImmutableNestedObservations(t *testing.T) {
 		t.Fatalf("read observations: %v, %d", err, len(returned))
 	}
 	*returned[0].ErrorCode = "returned mutation"
+	*returned[0].Retryable = false
 	returned[0].CursorFingerprints[0] = "returned mutation"
 	*returned[1].RequestFacts.ScopeFingerprint = "returned mutation"
 	*returned[1].RebuildResponseFacts.ResponseBodySHA256 = "returned mutation"

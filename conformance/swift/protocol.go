@@ -217,7 +217,7 @@ type transportObservation struct {
 	OperationClass             string
 	StatusCode                 int
 	ErrorCode                  *string
-	Retryable                  bool
+	Retryable                  *bool
 	DurationNanoseconds        uint64
 	CursorFingerprints         []string
 	CursorFingerprintsComplete *bool
@@ -374,14 +374,14 @@ func (o *transportObservation) UnmarshalJSON(data []byte) error {
 	if err := decoder.Decode(&raw); err != nil || requireDecoderEOF(decoder) != nil {
 		return errors.New("decode transport observation failed")
 	}
-	if raw.Sequence == nil || raw.OperationClass == nil || raw.StatusCode == nil || raw.Retryable == nil || raw.DurationNanoseconds == nil {
+	if raw.Sequence == nil || raw.OperationClass == nil || raw.StatusCode == nil || raw.DurationNanoseconds == nil {
 		return errors.New("transport observation is incomplete")
 	}
 	o.Sequence = *raw.Sequence
 	o.OperationClass = *raw.OperationClass
 	o.StatusCode = *raw.StatusCode
 	o.ErrorCode = cloneOptionalString(raw.ErrorCode)
-	o.Retryable = *raw.Retryable
+	o.Retryable = cloneOptionalBool(raw.Retryable)
 	o.DurationNanoseconds = *raw.DurationNanoseconds
 	if raw.CursorFingerprints != nil {
 		o.CursorFingerprints = append([]string(nil), (*raw.CursorFingerprints)...)
@@ -1177,19 +1177,15 @@ func validateTransportObservation(observation transportObservation) error {
 	if observation.DurationNanoseconds == 0 {
 		return errors.New("runner transport observation duration is invalid")
 	}
-	if observation.StatusCode == 0 {
-		if observation.ErrorCode != nil || !observation.Retryable {
-			return errors.New("runner transport failure facts are invalid")
-		}
-	} else if observation.StatusCode >= 200 && observation.StatusCode < 300 {
-		if observation.ErrorCode != nil || observation.Retryable {
-			return errors.New("runner transport success facts are invalid")
+	if observation.StatusCode == 0 || observation.StatusCode >= 200 && observation.StatusCode < 300 {
+		if observation.ErrorCode != nil || observation.Retryable != nil {
+			return errors.New("runner transport observation has error facts the server did not send")
 		}
 	} else {
 		if observation.ErrorCode == nil || !validTransportErrorCode(*observation.ErrorCode) {
 			return errors.New("runner transport failure code is invalid")
 		}
-		if !transportErrorRetryable(*observation.ErrorCode) && observation.Retryable {
+		if observation.Retryable == nil || !transportErrorRetryable(*observation.ErrorCode) && *observation.Retryable {
 			return errors.New("runner transport failure retryability is invalid")
 		}
 	}
@@ -1232,6 +1228,13 @@ func (p *runnerProcess) acceptRunnerIdentity(result runnerResult) error {
 	p.processID = result.ProcessID
 	p.databaseIdentityFingerprint = result.DatabaseIdentityFingerprint
 	return nil
+}
+
+// wireRetryable states one observation in wire contract terms. A status of
+// zero is the retryable transport_failure case, and a success has no server
+// retryability.
+func wireRetryable(observation transportObservation) bool {
+	return observation.StatusCode == 0 || observation.Retryable != nil && *observation.Retryable
 }
 
 func transportErrorRetryable(code string) bool {
@@ -1362,6 +1365,7 @@ func cloneTransportObservations(values []transportObservation) []transportObserv
 func cloneTransportObservation(value transportObservation) transportObservation {
 	copy := value
 	copy.ErrorCode = cloneOptionalString(value.ErrorCode)
+	copy.Retryable = cloneOptionalBool(value.Retryable)
 	copy.CursorFingerprints = append([]string(nil), value.CursorFingerprints...)
 	copy.CursorFingerprintsComplete = cloneOptionalBool(value.CursorFingerprintsComplete)
 	if value.RequestFacts != nil {

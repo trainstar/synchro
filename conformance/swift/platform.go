@@ -1295,7 +1295,7 @@ func (p *Platform) BeginCall(ctx context.Context, client Client, callID, method 
 		if err != nil {
 			return CallResult{}, err
 		}
-		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable {
+		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable != nil {
 			return CallResult{}, errors.New("Swift staged call setup connect did not succeed")
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
@@ -1627,7 +1627,8 @@ func validateOperationTransportFacts(operation scenarios.Operation, observation 
 	if operation.ContractOperation != observation.OperationClass {
 		return errors.New("Swift transport observation does not match the requested operation")
 	}
-	if observation.OperationClass == "push" {
+	switch observation.OperationClass {
+	case "push":
 		var payload struct {
 			Request struct {
 				Mutations []json.RawMessage `json:"mutations"`
@@ -1635,6 +1636,13 @@ func validateOperationTransportFacts(operation scenarios.Operation, observation 
 		}
 		if err := json.Unmarshal(operation.Payload, &payload); err != nil || observation.RequestFacts == nil || observation.RequestFacts.MutationCount == nil || *observation.RequestFacts.MutationCount != len(payload.Request.Mutations) {
 			return errors.New("Swift push request mutation facts do not match the authored operation")
+		}
+	case "pull", "rebuild":
+		var payload struct {
+			Limit int `json:"limit"`
+		}
+		if err := json.Unmarshal(operation.Payload, &payload); err != nil || observation.RequestFacts == nil || observation.RequestFacts.Limit == nil || *observation.RequestFacts.Limit != payload.Limit {
+			return errors.New("Swift request limit does not match the authored operation")
 		}
 	}
 	return nil
@@ -1770,7 +1778,7 @@ func transportStepObservation(observation transportObservation) (StepObservation
 	wire := &WireFacts{
 		HTTPStatus: observation.StatusCode,
 		ErrorCode:  cloneOptionalString(observation.ErrorCode),
-		Retryable:  observation.Retryable,
+		Retryable:  wireRetryable(observation),
 	}
 	return StepObservation{Disposition: "success", Wire: wire}, nil
 }

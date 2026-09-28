@@ -281,7 +281,7 @@ func validateWarmConnectCall(scenario scenarios.Scenario, result Synchronization
 
 func validateWarmConnectTransportStep(id scenarios.StepID, observation transportObservation) error {
 	facts := observation.RequestFacts
-	if facts == nil || observation.StatusCode != 200 || observation.ErrorCode != nil || observation.Retryable || observation.DurationNanoseconds == 0 || observation.DurationNanoseconds > uint64(warmConnectMaximumSafeInteger) {
+	if facts == nil || observation.StatusCode != 200 || observation.ErrorCode != nil || observation.Retryable != nil || observation.DurationNanoseconds == 0 || observation.DurationNanoseconds > uint64(warmConnectMaximumSafeInteger) {
 		return fmt.Errorf("Swift warm-connect step %s has invalid transport evidence", id)
 	}
 	if !warmConnectRequestIntegersArePortable(facts) {

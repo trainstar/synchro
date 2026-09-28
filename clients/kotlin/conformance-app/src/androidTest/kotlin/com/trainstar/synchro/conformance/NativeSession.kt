@@ -628,13 +628,12 @@ private class ClientSession(private val context: Context) : Closeable {
         return buildJsonObject {
             put("observations", buildJsonArray {
                 snapshot.observations.forEach { value ->
-                    val (derivedErrorCode, retryable) = transportFailureFacts(value.statusCode, value.operationClass)
                     add(buildJsonObject {
                         put("sequence", value.sequence)
                         put("operation_class", value.operationClass.name.lowercase(Locale.US))
                         put("status_code", value.statusCode)
-                        put("error_code", (value.errorCode ?: derivedErrorCode)?.let(::JsonPrimitive) ?: JsonNull)
-                        put("retryable", retryable)
+                        put("error_code", value.errorCode?.let(::JsonPrimitive) ?: JsonNull)
+                        put("retryable", value.retryable?.let(::JsonPrimitive) ?: JsonNull)
                         put("duration_nanoseconds", value.durationNanoseconds)
                         value.cursorFingerprints?.let { fingerprints ->
                             put("cursor_fingerprints", buildJsonArray {
@@ -653,25 +652,6 @@ private class ClientSession(private val context: Context) : Closeable {
             put("overflowed", snapshot.overflowed)
             put("sequence_checkpoint", snapshot.sequenceCheckpoint)
         }
-    }
-
-    private fun transportFailureFacts(
-        statusCode: Int,
-        operationClass: TransportOperationClass,
-    ): Pair<String?, Boolean> = when {
-        statusCode == 0 -> null to true
-        statusCode in 200..299 -> null to false
-        statusCode == 400 -> "invalid_request" to false
-        statusCode == 401 -> "auth_required" to false
-        statusCode == 409 && operationClass == TransportOperationClass.REBUILD -> "rebuild_restart_required" to false
-        statusCode == 409 && operationClass == TransportOperationClass.PUSH -> "idempotency_conflict" to false
-        statusCode == 409 -> "client_generation_expired" to false
-        statusCode == 422 -> "schema_mismatch" to false
-        statusCode == 426 -> "upgrade_required" to false
-        statusCode == 429 -> "retry_later" to true
-        statusCode == 500 -> "sync_integrity_failure" to false
-        statusCode == 503 -> "capture_pending" to true
-        else -> "invalid_response" to false
     }
 
     private suspend fun dispatchMethod(client: SynchroClient, method: String) {

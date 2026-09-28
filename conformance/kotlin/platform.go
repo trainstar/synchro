@@ -1311,7 +1311,7 @@ func (p *Platform) BeginCall(ctx context.Context, request CallRequest) (ClientCa
 		if err != nil {
 			return ClientCallResult{}, err
 		}
-		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable == nil || *connect[0].Retryable {
+		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable != nil {
 			return ClientCallResult{}, errors.New("Kotlin Android staged call setup connect did not succeed")
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
@@ -2364,9 +2364,7 @@ func mapTransportObservation(observation TransportObservation) (StepObservation,
 	if observation.ErrorCode != nil {
 		facts.ErrorCode = clonePointer(observation.ErrorCode)
 	}
-	if observation.Retryable != nil {
-		facts.Retryable = *observation.Retryable
-	}
+	facts.Retryable = wireRetryable(observation)
 	if observation.RequestFacts != nil && observation.RequestFacts.MutationCount != nil {
 		value := *observation.RequestFacts.MutationCount
 		facts.MutationCount = &value
@@ -2382,7 +2380,7 @@ func mapTransportOperations(operations []scenarios.Operation, observations []Tra
 			return nil, err
 		}
 		implicitConnect := observations[0]
-		if operationClass == "connect" || validateTransportObservation(implicitConnect) != nil || implicitConnect.StatusCode != http.StatusOK || implicitConnect.ErrorCode != nil || implicitConnect.Retryable == nil || *implicitConnect.Retryable {
+		if operationClass == "connect" || validateTransportObservation(implicitConnect) != nil || implicitConnect.StatusCode != http.StatusOK || implicitConnect.ErrorCode != nil || implicitConnect.Retryable != nil {
 			return nil, errors.New("Kotlin Android implicit connect observation is invalid")
 		}
 		observations = observations[1:]

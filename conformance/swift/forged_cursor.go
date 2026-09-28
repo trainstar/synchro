@@ -248,7 +248,7 @@ func validateForgedCursorTransport(scenario scenarios.Scenario, observations []t
 			return errors.New("Swift forged-cursor transport order differs from the authored call")
 		}
 		if index == 0 {
-			if observed.StatusCode != http.StatusOK || observed.ErrorCode != nil || observed.Retryable {
+			if observed.StatusCode != http.StatusOK || observed.ErrorCode != nil || observed.Retryable != nil {
 				return errors.New("Swift forged-cursor setup connect did not succeed")
 			}
 			continue
