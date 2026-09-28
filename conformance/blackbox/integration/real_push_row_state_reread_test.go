@@ -20,6 +20,12 @@ func TestRealPushRowStateRereadYieldsToDirectWriter(t *testing.T) {
 	client := connectRealProtocolClient(t, ctx, harness, token, "row-state-reread-client")
 	table := requireRealTable(t, client, "cf_items")
 	ownerField := loadRealProtocolFieldID(t, ctx, harness, "cf_items", "owner_id")
+	var detectableWait bool
+	if err := admin.QueryRowContext(ctx,
+		"SELECT current_setting('deadlock_timeout')::interval >= interval '200 milliseconds'",
+	).Scan(&detectableWait); err != nil || !detectableWait {
+		t.Fatalf("deadlock_timeout is too short to observe a reread lock wait: %v", err)
+	}
 	recordID := "00000000-0000-4000-8e65-000000000001"
 	if _, err := admin.ExecContext(ctx, `
 		INSERT INTO public.cf_items (id, owner_id, value)
@@ -106,7 +112,26 @@ func TestRealPushRowStateRereadYieldsToDirectWriter(t *testing.T) {
 		t.Fatalf("release reread gate: %v", err)
 	}
 	gateHeld = false
-	contended := <-pushed
+	// A blocking reread waits on the writer for deadlock_timeout before PostgreSQL aborts
+	// either transaction. Both aborts produce the same 503, so the wait itself is the signal.
+	var contended pushResult
+	for received := false; !received; {
+		select {
+		case contended = <-pushed:
+			received = true
+		default:
+			var waited bool
+			if err := admin.QueryRowContext(ctx,
+				"SELECT $2::int = ANY (pg_catalog.pg_blocking_pids($1::int))",
+				pushPID, writerPID).Scan(&waited); err != nil {
+				t.Fatal(err)
+			}
+			if waited {
+				t.Fatal("push reread waited on the direct writer row lock")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	failure, _ := contended.body["error"].(map[string]any)
 	if contended.err != nil || contended.status != http.StatusServiceUnavailable ||
 		failure["code"] != "temporary_unavailable" || failure["retryable"] != true {
