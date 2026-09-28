@@ -61,9 +61,18 @@ printf '%s\n' "$adapter_hash" > "$work_dir/adapter/synchrod-pg.sha256"
 
 "$provisioner" start --pg18-bin-dir "$pg18_bindir" --extension-artifact "$extension_dir" --adapter-artifact "$work_dir/adapter/synchrod-pg" --state-dir "$work_dir/state" --temp-parent "$work_dir" --url-file "$work_dir/admin.url" --attach-environment-file "$work_dir/attach.env" >"$work_dir/provisioner.log" 2>&1 &
 provisioner_pid=$!
-for _ in $(seq 1 90); do test -f "$work_dir/attach.env" && break; sleep 1; done
+for _ in $(seq 1 90); do
+  test -f "$work_dir/attach.env" && break
+  kill -0 "$provisioner_pid" 2>/dev/null || break
+  sleep 1
+done
 if [ ! -f "$work_dir/attach.env" ]; then
-  # The work directory is removed on exit, so the provisioner reason must be printed here.
+  # A blocked provisioner, for example one that waits for the installation lock
+  # of another cluster on the same PostgreSQL binaries, names the cause only
+  # when it stops. The work directory is removed on exit, so print it here.
+  kill "$provisioner_pid" 2>/dev/null || true
+  wait "$provisioner_pid" 2>/dev/null || true
+  provisioner_pid=
   cat "$work_dir/provisioner.log" >&2 || true
   echo "PostgreSQL provisioner did not become ready" >&2
   exit 1
