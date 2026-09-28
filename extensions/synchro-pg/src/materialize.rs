@@ -376,28 +376,6 @@ pub(crate) fn activate_membership_stages(
     Ok(())
 }
 
-/// The registry test helper activates generations without WAL row events, so
-/// every row keeps its current edges as its prior membership.
-#[cfg(any(test, feature = "pg_test"))]
-pub(crate) fn activate_staged_membership_generations(
-    client: &mut SpiClient<'_>,
-    transitions: &[(i64, i64)],
-    evaluation_generation: i64,
-    stream_generation: &str,
-    activation_commit_lsn: &str,
-    activation_end_lsn: &str,
-) -> Result<(), String> {
-    activate_membership_stages(
-        client,
-        transitions,
-        evaluation_generation,
-        &std::collections::HashMap::new(),
-        stream_generation,
-        activation_commit_lsn,
-        activation_end_lsn,
-    )
-}
-
 /// Record the membership before the transaction of the changed rows of the
 /// staged tables. A row without buckets keeps one row with a null bucket.
 fn stage_membership_baseline(
