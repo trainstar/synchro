@@ -353,8 +353,10 @@ func replaySoakJournal(t *testing.T, ctx context.Context, path string, catalog *
 	if err != nil {
 		t.Fatalf("create soak replay harness: %v", err)
 	}
-	t.Cleanup(func() { closeLiveSoakHarness(t, harness) })
+	// The harness holds the shared installation lock, so it closes before any
+	// later cluster in the same test provisions.
 	replayed, replayErr := soak.ReplayRun(ctx, path, catalog, harness)
+	closeLiveSoakHarness(t, harness)
 	if readErr == nil {
 		if replayErr != nil {
 			t.Fatalf("sealed soak journal replay failed: %v", replayErr)
