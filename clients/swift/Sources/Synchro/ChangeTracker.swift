@@ -760,7 +760,27 @@ final class ChangeTracker: @unchecked Sendable {
                 )
             }
         }
+        try blockUnsentDependentsOfBlockedPredecessors(db)
         try blockUnsentGroupMembers(db)
+    }
+
+    /// Blocks each unsealed mutation whose predecessor is blocked, because that
+    /// predecessor can never become accepted. Each pass reaches one more link of a chain.
+    private func blockUnsentDependentsOfBlockedPredecessors(_ db: GRDB.Database) throws {
+        repeat {
+            try db.execute(
+                sql: """
+                    UPDATE _synchro_pending_changes
+                    SET lifecycle_state = 'blocked_by_predecessor', updated_at = ?
+                    WHERE lifecycle_state = 'unsealed'
+                      AND dependency_mutation_id IN (
+                          SELECT mutation_id FROM _synchro_pending_changes
+                          WHERE lifecycle_state IN ('blocked_by_predecessor', 'legacy_blocked')
+                      )
+                    """,
+                arguments: [SynchroDateCoding.now()]
+            )
+        } while db.changesCount > 0
     }
 
     /// Normalizes the trailing run of each same-row chain.

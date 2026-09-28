@@ -486,6 +486,59 @@ final class AtomicWriteGroupTests: XCTestCase {
 
     // MARK: - Group blocking
 
+    func testDependentUpdatesAfterBlockedPredecessorBecomeBlockedBeforeSelection() throws {
+        try insertOrder(id: "d1", address: "a")
+        let predecessorID = try mutationID(recordID: "d1", operation: "insert")
+        try db.writeTransaction { connection in
+            try connection.execute(
+                sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor' WHERE mutation_id = ?",
+                arguments: [predecessorID]
+            )
+        }
+        for address in ["b", "c", "d"] {
+            _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: [address, "d1"])
+        }
+
+        XCTAssertEqual(try tracker.pendingChanges(limit: 100).count, 0)
+
+        let dependents = try db.query(
+            "SELECT mutation_id, lifecycle_state, dependency_mutation_id FROM _synchro_pending_changes WHERE operation = 'update' ORDER BY local_order",
+            params: nil
+        )
+        XCTAssertEqual(dependents.count, 3)
+        XCTAssertTrue(dependents.allSatisfy { ($0["lifecycle_state"] as String?) == "blocked_by_predecessor" })
+        XCTAssertEqual(
+            dependents.map { $0["dependency_mutation_id"] as String? },
+            [predecessorID] + dependents.dropLast().map { $0["mutation_id"] as String? }
+        )
+    }
+
+    func testGroupMemberAfterLegacyBlockedPredecessorBlocksTheWholeGroup() throws {
+        try insertOrder(id: "d1", address: "a")
+        let predecessorID = try mutationID(recordID: "d1", operation: "insert")
+        try db.writeTransaction { connection in
+            try connection.execute(
+                sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'legacy_blocked' WHERE mutation_id = ?",
+                arguments: [predecessorID]
+            )
+        }
+        try atomicWrite { transaction in
+            try transaction.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["b", "d1"])
+            try insertOrder(transaction, id: "g1", address: "a")
+        }
+
+        XCTAssertEqual(try tracker.pendingChanges(limit: 100).count, 0)
+
+        let states = try db.query(
+            "SELECT record_id, lifecycle_state, dependency_mutation_id FROM _synchro_pending_changes WHERE lifecycle_state <> 'legacy_blocked' ORDER BY local_order",
+            params: nil
+        )
+        XCTAssertEqual(states.map { $0["record_id"] as String }, ["d1", "g1"])
+        XCTAssertTrue(states.allSatisfy { ($0["lifecycle_state"] as String?) == "blocked_by_predecessor" })
+        XCTAssertEqual(states[0]["dependency_mutation_id"] as String?, predecessorID)
+        XCTAssertNil(states[1]["dependency_mutation_id"] as String?)
+    }
+
     func testBlockingOneUnsentMemberBlocksTheWholeGroup() throws {
         try insertOrder(id: "d1", address: "a")
         try atomicWrite { transaction in
