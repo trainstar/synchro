@@ -1210,19 +1210,19 @@
         .unwrap();
     }
 
-    fn order_snapshot(record_id: &str) -> Value {
+    fn row_snapshot(table_name: &str, record_id: &str) -> Value {
         let row: Option<pgrx::JsonB> = Spi::get_one_with_args(
-            "SELECT to_jsonb(test_orders) FROM test_orders WHERE id = $1::uuid",
+            &format!("SELECT to_jsonb(source) FROM {table_name} source WHERE id = $1::uuid"),
             &[record_id.into()],
         )
         .unwrap();
         json!({
-            "row": row.expect("hidden order row").0,
-            "version": current_row_version("test_orders", record_id),
+            "row": row.expect("source row").0,
+            "version": current_row_version(table_name, record_id),
         })
     }
 
-    fn assert_hidden_row_rejection(outcome: &Value) {
+    fn assert_policy_rejection(outcome: &Value) {
         assert_eq!(outcome["status"], "rejected_terminal");
         assert_eq!(outcome["code"], "policy_rejected");
         assert_eq!(
@@ -1258,7 +1258,7 @@
         .unwrap();
         let deleted_version = current_row_version("test_orders", deleted);
         let visible_version = insert_live_order(visible, user_id, "own row");
-        let before = hidden.map(order_snapshot);
+        let before = hidden.map(|id| row_snapshot("test_orders", id));
 
         let response = push_client(
             user_id,
@@ -1319,7 +1319,7 @@
             .expect("rejected mutation array");
         assert_eq!(rejected.len(), 5);
         for outcome in &rejected[..3] {
-            assert_hidden_row_rejection(outcome);
+            assert_policy_rejection(outcome);
         }
         assert!(!response.raw.contains(owner));
 
@@ -1345,7 +1345,7 @@
             "own row"
         );
 
-        assert_eq!(hidden.map(order_snapshot), before);
+        assert_eq!(hidden.map(|id| row_snapshot("test_orders", id)), before);
     }
 
     #[pg_test]
@@ -1358,7 +1358,7 @@
         let current_delete = "f2650000-0000-4000-8000-000000000012";
         let update_version = insert_live_order(current_update, owner, "owner row");
         let delete_version = insert_live_order(current_delete, owner, "owner row");
-        let before = [current_update, current_delete].map(order_snapshot);
+        let before = [current_update, current_delete].map(|id| row_snapshot("test_orders", id));
 
         let response = push_client(
             user_id,
@@ -1392,10 +1392,10 @@
             .expect("rejected mutation array");
         assert_eq!(rejected.len(), 2);
         for outcome in rejected {
-            assert_hidden_row_rejection(outcome);
+            assert_policy_rejection(outcome);
         }
         assert!(!response.raw.contains(owner));
-        assert_eq!([current_update, current_delete].map(order_snapshot), before);
+        assert_eq!([current_update, current_delete].map(|id| row_snapshot("test_orders", id)), before);
     }
 
     #[pg_test]
@@ -1408,7 +1408,7 @@
         let share = "f2650000-0000-4000-8000-000000000022";
         let own_insert = "f2650000-0000-4000-8000-000000000023";
         let hidden_version = insert_live_order(hidden, owner, "owner row");
-        let before = order_snapshot(hidden);
+        let before = row_snapshot("test_orders", hidden);
 
         // The share makes the row visible inside the group only. The rollback hides it again.
         let reread_group = vec![
@@ -1442,7 +1442,7 @@
             "rejected_terminal",
             "policy_rejected",
         );
-        assert_hidden_row_rejection(&failure);
+        assert_policy_rejection(&failure);
         assert!(!response.raw.contains(owner));
 
         let direct_group = vec![
@@ -1468,7 +1468,7 @@
             "rejected_terminal",
             "policy_rejected",
         );
-        assert_hidden_row_rejection(&failure);
+        assert_policy_rejection(&failure);
         assert!(!response.raw.contains(owner));
 
         let share_count: Option<i64> = Spi::get_one_with_args(
@@ -1478,7 +1478,275 @@
         .unwrap();
         assert_eq!(share_count, Some(0));
         assert_eq!(source_order_count(&[own_insert]), 0);
-        assert_eq!(order_snapshot(hidden), before);
+        assert_eq!(row_snapshot("test_orders", hidden), before);
+    }
+
+    /// Installs a shared-read deployment policy on `test_orders`. Only the owner can write a row.
+    /// A `test_bare_items` row named `share:{order_id}:{user_id}` lets that user read the order.
+    fn enable_shared_read_owner_write_for_orders() {
+        Spi::run(
+            "DROP POLICY synchro_test_owner_all ON test_orders;
+             CREATE POLICY test_orders_owner_write ON test_orders
+             AS PERMISSIVE FOR ALL TO synchro_owner
+             USING (
+                 NULLIF(current_setting('synchro.user_id', true), '') IS NULL
+                 OR user_id = current_setting('synchro.user_id', true)
+             )
+             WITH CHECK (
+                 NULLIF(current_setting('synchro.user_id', true), '') IS NULL
+                 OR user_id = current_setting('synchro.user_id', true)
+             );
+             CREATE POLICY test_orders_member_read ON test_orders
+             AS PERMISSIVE FOR SELECT TO synchro_owner
+             USING (
+                 EXISTS (
+                     SELECT 1 FROM test_bare_items share
+                     WHERE share.name = 'share:' || test_orders.id::text || ':'
+                         || current_setting('synchro.user_id', true)
+                 )
+             )",
+        )
+        .unwrap();
+    }
+
+    fn share_order(record_id: &str, user_id: &str) {
+        Spi::run_with_args(
+            "INSERT INTO test_bare_items (name) VALUES ('share:' || $1 || ':' || $2)",
+            &[record_id.into(), user_id.into()],
+        )
+        .unwrap();
+    }
+
+    /// Counts the orders that the push role can read for `user_id` without a row lock.
+    fn readable_order_count(user_id: &str, record_ids: &[&str]) -> i64 {
+        Spi::run_with_args(
+            "SELECT set_config('synchro.user_id', $1, true)",
+            &[user_id.into()],
+        )
+        .unwrap();
+        Spi::run("SET LOCAL ROLE synchro_owner").unwrap();
+        let count = source_order_count(record_ids);
+        Spi::run("RESET ROLE").unwrap();
+        count
+    }
+
+    #[pg_test]
+    fn test_push_rejects_rls_write_denials_on_readable_rows() {
+        setup_test_tables();
+        enable_shared_read_owner_write_for_orders();
+        let (owner, user_id, client_id) = (HIDDEN_ROW_OWNER, HIDDEN_ROW_USER, "c1");
+        register_client(user_id, client_id);
+        let shared_update = "f2650000-0000-4000-8000-000000000031";
+        let shared_delete = "f2650000-0000-4000-8000-000000000032";
+        let foreign_insert = "f2650000-0000-4000-8000-000000000033";
+        let own_transfer = "f2650000-0000-4000-8000-000000000034";
+        let update_version = insert_live_order(shared_update, owner, "owner row");
+        let delete_version = insert_live_order(shared_delete, owner, "owner row");
+        let own_version = insert_live_order(own_transfer, user_id, "own row");
+        share_order(shared_update, user_id);
+        share_order(shared_delete, user_id);
+        assert_eq!(
+            readable_order_count(user_id, &[shared_update, shared_delete, own_transfer]),
+            3
+        );
+        let existing = [shared_update, shared_delete, own_transfer];
+        let before = existing.map(|id| row_snapshot("test_orders", id));
+
+        let response = push_client(
+            user_id,
+            client_id,
+            "rls-write-denials",
+            vec![
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-shared-update",
+                    "test_orders",
+                    "update",
+                    shared_update,
+                    Some(update_version.as_str()),
+                    Some(&[("title", json!("b-shared"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-shared-delete",
+                    "test_orders",
+                    "delete",
+                    shared_delete,
+                    Some(delete_version.as_str()),
+                    None,
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-foreign-insert",
+                    "test_orders",
+                    "insert",
+                    foreign_insert,
+                    None,
+                    Some(&[("user_id", json!(owner)), ("title", json!("b-foreign"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "rls-own-transfer",
+                    "test_orders",
+                    "update",
+                    own_transfer,
+                    Some(own_version.as_str()),
+                    Some(&[("user_id", json!(owner))]),
+                ),
+            ],
+        );
+
+        assert_eq!(response.json["accepted"], json!([]));
+        let rejected = response.json["rejected"]
+            .as_array()
+            .expect("rejected mutation array");
+        assert_eq!(rejected.len(), 4);
+        for outcome in rejected {
+            assert_policy_rejection(outcome);
+        }
+        assert!(!response.raw.contains(owner));
+        assert_eq!(
+            existing.map(|id| row_snapshot("test_orders", id)),
+            before
+        );
+        assert_eq!(source_order_count(&[foreign_insert]), 0);
+    }
+
+    #[pg_test]
+    fn test_push_rejects_zero_row_writes_on_locked_rows() {
+        setup_test_tables();
+        let (user_id, client_id) = (HIDDEN_ROW_USER, "c1");
+        register_client(user_id, client_id);
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION public.test_orders_write_veto()
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF (TG_OP = 'INSERT' AND NEW.title = 'vetoed')
+                    OR (TG_OP = 'UPDATE' AND OLD.title = 'locked') THEN
+                     RETURN NULL;
+                 END IF;
+                 RETURN NEW;
+             END
+             $$;
+             CREATE TRIGGER test_orders_write_veto
+             BEFORE INSERT OR UPDATE ON public.test_orders
+             FOR EACH ROW EXECUTE FUNCTION public.test_orders_write_veto();
+             CREATE POLICY test_bare_items_keep ON test_bare_items
+             AS RESTRICTIVE FOR DELETE TO synchro_owner
+             USING (name NOT LIKE 'keep:%')",
+        )
+        .unwrap();
+        let locked_update = "f2650000-0000-4000-8000-000000000041";
+        let locked_delete = "f2650000-0000-4000-8000-000000000042";
+        let vetoed_insert = "f2650000-0000-4000-8000-000000000043";
+        let kept_item = "f2650000-0000-4000-8000-000000000044";
+        let update_version = insert_live_order(locked_update, user_id, "locked");
+        let delete_version = insert_live_order(locked_delete, user_id, "locked");
+        Spi::run_with_args(
+            "INSERT INTO test_bare_items (id, name) VALUES ($1::uuid, 'keep:item')",
+            &[kept_item.into()],
+        )
+        .unwrap();
+        let item_version = current_row_version("test_bare_items", kept_item);
+        let orders = [locked_update, locked_delete];
+        let before = (
+            orders.map(|id| row_snapshot("test_orders", id)),
+            row_snapshot("test_bare_items", kept_item),
+        );
+
+        let response = push_client(
+            user_id,
+            client_id,
+            "zero-row-writes",
+            vec![
+                push_mutation(
+                    (user_id, client_id),
+                    "zero-row-update",
+                    "test_orders",
+                    "update",
+                    locked_update,
+                    Some(update_version.as_str()),
+                    Some(&[("title", json!("b-update"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "zero-row-soft-delete",
+                    "test_orders",
+                    "delete",
+                    locked_delete,
+                    Some(delete_version.as_str()),
+                    None,
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "zero-row-insert",
+                    "test_orders",
+                    "insert",
+                    vetoed_insert,
+                    None,
+                    Some(&[("user_id", json!(user_id)), ("title", json!("vetoed"))]),
+                ),
+                push_mutation(
+                    (user_id, client_id),
+                    "zero-row-hard-delete",
+                    "test_bare_items",
+                    "delete",
+                    kept_item,
+                    Some(item_version.as_str()),
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(response.json["accepted"], json!([]));
+        let rejected = response.json["rejected"]
+            .as_array()
+            .expect("rejected mutation array");
+        assert_eq!(rejected.len(), 4);
+        for outcome in rejected {
+            assert_policy_rejection(outcome);
+        }
+        assert_eq!(
+            (
+                orders.map(|id| row_snapshot("test_orders", id)),
+                row_snapshot("test_bare_items", kept_item),
+            ),
+            before
+        );
+        assert_eq!(source_order_count(&[vetoed_insert]), 0);
+    }
+
+    #[pg_test]
+    fn test_atomic_push_fails_group_on_rls_write_denial() {
+        setup_test_tables();
+        enable_shared_read_owner_write_for_orders();
+        let (owner, user_id, client_id) = (HIDDEN_ROW_OWNER, HIDDEN_ROW_USER, "c1");
+        register_client(user_id, client_id);
+        let own_insert = "f2650000-0000-4000-8000-000000000051";
+        let foreign_insert = "f2650000-0000-4000-8000-000000000052";
+        let group = vec![
+            order_insert(user_id, "rls-atomic-own-insert", own_insert),
+            push_mutation(
+                (user_id, client_id),
+                "rls-atomic-foreign-insert",
+                "test_orders",
+                "insert",
+                foreign_insert,
+                None,
+                Some(&[("user_id", json!(owner)), ("title", json!("b-foreign"))]),
+            ),
+        ];
+
+        let response = execute_push(
+            user_id,
+            &atomic_push_request(user_id, client_id, "rls-atomic-denial", group.clone()),
+        );
+
+        let failure =
+            assert_failed_group(&response, &group, 1, "rejected_terminal", "policy_rejected");
+        assert_policy_rejection(&failure);
+        assert_eq!(source_order_count(&[own_insert, foreign_insert]), 0);
+        assert_eq!(group_fence_count(&group), 0);
     }
 
     #[pg_test]
