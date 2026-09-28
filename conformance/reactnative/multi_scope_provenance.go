@@ -609,7 +609,7 @@ func (c *MultiScopeProvenanceCoordinator) finishLocked(ctx context.Context) erro
 	if err != nil {
 		return err
 	}
-	records, scopes, err := c.runtimeRecords(captures[0].StateFacts, resolutions)
+	records, scopes, err := c.runtimeRecords(resolutions)
 	if err != nil {
 		return err
 	}
@@ -736,14 +736,13 @@ func (c *MultiScopeProvenanceCoordinator) runtimeIdentity(alias scenarios.Native
 type multiScopeProvenanceRecord struct {
 	tableName string
 	recordID  string
-	checksum  string
 	row       map[string]json.RawMessage
 }
 
 // runtimeRecords binds each authored source row and each authored scope to its
 // runtime identity. The application row keeps the authored field values, and
 // only the primary key takes its runtime value.
-func (c *MultiScopeProvenanceCoordinator) runtimeRecords(server scenarios.StateFacts, resolutions []blackbox.NativeIdentityResolution) (map[string]multiScopeProvenanceRecord, map[string]string, error) {
+func (c *MultiScopeProvenanceCoordinator) runtimeRecords(resolutions []blackbox.NativeIdentityResolution) (map[string]multiScopeProvenanceRecord, map[string]string, error) {
 	resolved := make(map[string]blackbox.NativeIdentityResolution, len(resolutions))
 	for _, resolution := range resolutions {
 		resolved[resolution.Alias] = resolution
@@ -801,26 +800,14 @@ func (c *MultiScopeProvenanceCoordinator) runtimeRecords(server scenarios.StateF
 	}
 	scopes := make(map[string]string)
 	for _, alias := range c.config.Scenario.NativeIdentityAliases {
-		resolution := resolved[alias.Alias]
-		var authored, runtime string
-		switch alias.Kind {
-		case "scope":
-			if json.Unmarshal(resolution.AuthoredValue, &authored) != nil || json.Unmarshal(resolution.RuntimeValue, &runtime) != nil {
-				return nil, nil, fmt.Errorf("React Native multi-scope provenance scope alias %s is unresolved", alias.Alias)
-			}
-			scopes[authored] = runtime
-		case "checksum":
-			row, err := multiScopeProvenanceRuntimeRow(c.config.Scenario, server, alias)
-			if err != nil {
-				return nil, nil, err
-			}
-			record, found := records[row.CanonicalWireJSON]
-			if !found || json.Unmarshal(resolution.RuntimeValue, &runtime) != nil || runtime == "" {
-				return nil, nil, fmt.Errorf("React Native multi-scope provenance checksum alias %s has no authored record", alias.Alias)
-			}
-			record.checksum = runtime
-			records[row.CanonicalWireJSON] = record
+		if alias.Kind != "scope" {
+			continue
 		}
+		var authored, runtime string
+		if json.Unmarshal(resolved[alias.Alias].AuthoredValue, &authored) != nil || json.Unmarshal(resolved[alias.Alias].RuntimeValue, &runtime) != nil {
+			return nil, nil, fmt.Errorf("React Native multi-scope provenance scope alias %s is unresolved", alias.Alias)
+		}
+		scopes[authored] = runtime
 	}
 	return records, scopes, nil
 }
@@ -1169,7 +1156,7 @@ func validateMultiScopeProvenanceContents(expected scenarios.ClientDurabilityFac
 				return fmt.Errorf("authored scope %s has no runtime binding", authoredScope)
 			}
 			wantProvenance = append(wantProvenance, multiScopeProvenanceRowKey(clientScopeRow{
-				ScopeID: scopeID, TableName: record.tableName, RecordID: record.recordID, Checksum: record.checksum, Generation: generations[scopeID],
+				ScopeID: scopeID, TableName: record.tableName, RecordID: record.recordID, Generation: generations[scopeID],
 			}))
 		}
 	}
@@ -1220,8 +1207,10 @@ func validateMultiScopeProvenanceContents(expected scenarios.ClientDurabilityFac
 	return nil
 }
 
+// multiScopeProvenanceRowKey names the authored provenance facts of one scope
+// row. The authored model declares no row checksum, so the key omits it.
 func multiScopeProvenanceRowKey(row clientScopeRow) string {
-	return fmt.Sprintf("%s/%s/%s/%s/%d", row.ScopeID, row.TableName, row.RecordID, row.Checksum, row.Generation)
+	return fmt.Sprintf("%s/%s/%s/%d", row.ScopeID, row.TableName, row.RecordID, row.Generation)
 }
 
 // multiScopeProvenanceRowSet encodes each row with sorted field names and
