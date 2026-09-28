@@ -764,8 +764,10 @@ internal class PushProcessor(
 
     /**
      * Normalization creates a new immutable record and never edits a source intent.
-     * A chain merges only consecutive entries with an equal atomic group, and
-     * no group equals no group. With [atomicGroupID], only that group is normalized.
+     * Only the trailing run of a same-row chain merges. A run is a maximal sequence
+     * with an equal atomic group, and no group equals no group. A merged record
+     * gets the next local order, so an earlier run would move after a later capture.
+     * With [atomicGroupID], only the trailing run of that group is normalized.
      */
     private fun normalizeUnsealedChains(db: SQLiteDatabase, atomicGroupID: String? = null) {
         data class LogicalRow(
@@ -798,40 +800,28 @@ internal class PushProcessor(
                 row.pkLogicalType,
                 row.recordID,
             )
-            var runStart = 0
-            while (runStart < chain.size) {
-                val runGroupID = chain[runStart].atomicGroupID
-                val runEnd = (runStart until chain.size).firstOrNull { chain[it].atomicGroupID != runGroupID } ?: chain.size
-                val run = chain.subList(runStart, runEnd)
-                val deleteIndex = run.indexOfFirst { it.operation == "delete" }
-                val selected = atomicGroupID == null || runGroupID == atomicGroupID
-                val start = runStart
-                runStart = runEnd
-                if (!selected) continue
-                if (run.map { SchemaRef(it.authoredSchemaVersion, it.authoredSchemaHash) }.toSet().size != 1) {
-                    // A newer authored schema cannot be folded into its predecessor.
-                    // The predecessor stays sendable and the successor stays dependent.
-                    continue
+            val runGroupID = chain.last().atomicGroupID
+            val runStart = chain.indexOfLast { it.atomicGroupID != runGroupID } + 1
+            val run = chain.subList(runStart, chain.size)
+            val selected = atomicGroupID == null || runGroupID == atomicGroupID
+            // A newer authored schema cannot be folded into its predecessor.
+            // The predecessor stays sendable and the successor stays dependent.
+            val oneSchema = run.map { SchemaRef(it.authoredSchemaVersion, it.authoredSchemaHash) }.toSet().size == 1
+            if (selected && run.size > 1 && oneSchema) {
+                val runDeleteIndex = run.indexOfFirst { it.operation == "delete" }
+                // A merged delete gets the next local order. Thus it merges only when no capture follows it.
+                when {
+                    runDeleteIndex < 0 && run.first().operation in setOf("insert", "update") ->
+                        normalizeChain(db, run, run.first().operation, mergedValues(db, run))
+                    runDeleteIndex < 0 -> throw SynchroError.InvalidResponse("unknown local mutation operation")
+                    run.first().operation == "insert" -> cancelBeforeSend(db, run.take(runDeleteIndex + 1))
+                    runDeleteIndex == run.lastIndex -> normalizeChain(db, run, "delete", emptyList())
                 }
-                if (deleteIndex < 0) {
-                    if (run.size > 1) {
-                        when (val operation = run.first().operation) {
-                            "insert", "update" -> normalizeChain(db, run, operation, mergedValues(db, run))
-                            else -> throw SynchroError.InvalidResponse("unknown local mutation operation")
-                        }
-                    }
-                    continue
-                }
-                val sources = run.take(deleteIndex + 1)
-                if (sources.size > 1) {
-                    if (sources.first().operation == "insert") {
-                        cancelBeforeSend(db, sources)
-                    } else {
-                        normalizeChain(db, sources, "delete", emptyList())
-                    }
-                }
-                blockAfterDelete(db, chain.drop(start + deleteIndex + 1))
-                break
+            }
+            // A delete has no resurrection. Every later capture of the row can never be sent.
+            val deleteIndex = chain.indexOfFirst { it.operation == "delete" }
+            if (atomicGroupID == null && deleteIndex >= 0) {
+                blockAfterDelete(db, chain.drop(deleteIndex + 1))
             }
         }
     }

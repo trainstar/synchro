@@ -1941,6 +1941,106 @@ class PushProcessorTests {
     }
 
     @Test
+    fun conflictBeforeALaterGroupMemberKeepsTheGroupValueLocal() = runTest {
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        installServerRow(database, "server", "sv-start")
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("first", "o1"))
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("second", "o1"))
+        client.atomicWriteTransaction { transaction ->
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("grouped", "o1"))
+        }
+        val groupMemberID = database.queryOne(
+            "SELECT mutation_id FROM _synchro_pending_changes WHERE atomic_group_id IS NOT NULL",
+        )!!.getValue("mutation_id") as String
+        val serverRow = JsonObject(
+            localTable.columns.associate { column ->
+                column.fieldID to when (column.fieldID) {
+                    "id" -> JsonPrimitive("o1")
+                    "title" -> JsonPrimitive("server changed")
+                    "updated_at" -> JsonPrimitive("2026-01-01T01:00:00.000000Z")
+                    else -> JsonNull
+                }
+            },
+        )
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val sealed = pushJSON.decodeFromString<PushRequest>(request.body.readUtf8())
+                val rejected = sealed.mutations.map { mutation ->
+                    makeRejectedMutation(
+                        mutationID = mutation.mutationID,
+                        schema = localTable,
+                        pk = mutation.pk,
+                        status = MutationStatus.CONFLICT,
+                        code = MutationRejectionCode.VERSION_CONFLICT,
+                        message = "server changed",
+                        serverRow = serverRow,
+                        serverVersion = "sv-conflict",
+                    )
+                }
+                return MockResponse().setBody(
+                    wireJSON.encodeToString(
+                        PushResponse(sealed.batchID, "2026-01-01T01:00:00.000000Z", emptyList(), rejected),
+                    ),
+                )
+            }
+        }
+        server.start()
+        try {
+            processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable))
+
+            assertEquals(1, server.requestCount)
+            assertEquals("grouped", database.queryOne("SELECT title FROM orders WHERE id = 'o1'")!!["title"])
+            assertEquals("blocked_by_predecessor", lifecycleState(database, groupMemberID))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun acceptedDeleteBeforeALaterCaptureKeepsTheLaterValueLocal() = runTest {
+        val (database, _, processor) = environment()
+        installServerRow(database, "server", "sv-start")
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("first", "o1"))
+        database.execute("DELETE FROM orders WHERE id = ?", arrayOf("o1"))
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("later local", "o1"))
+        val laterID = database.queryOne(
+            "SELECT mutation_id FROM _synchro_pending_changes ORDER BY local_order DESC LIMIT 1",
+        )!!.getValue("mutation_id") as String
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val sealed = pushJSON.decodeFromString<PushRequest>(request.body.readUtf8())
+                val accepted = sealed.mutations.map { mutation ->
+                    if (mutation.op == Operation.DELETE) {
+                        makeAcceptedMutation(mutation.mutationID, localTable, mutation.pk, MutationStatus.APPLIED, null, "sv-deleted")
+                    } else {
+                        accepted(mutation.mutationID, "first", "sv-first")
+                    }
+                }
+                return MockResponse().setBody(
+                    wireJSON.encodeToString(
+                        PushResponse(sealed.batchID, "2026-01-01T01:00:00.000000Z", accepted, emptyList()),
+                    ),
+                )
+            }
+        }
+        server.start()
+        try {
+            repeat(3) {
+                processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable))
+            }
+
+            assertEquals("later local", database.queryOne("SELECT title FROM orders WHERE id = 'o1'")?.get("title"))
+            assertEquals("blocked_by_predecessor", lifecycleState(database, laterID))
+            assertEquals(2, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun groupWaitsWhileOneMemberHasNoBaseVersion() = runTest {
         val (database, _, processor) = environment()
         val client = clientFor(database)
