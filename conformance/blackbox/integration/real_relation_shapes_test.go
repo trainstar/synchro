@@ -676,7 +676,8 @@ func TestRealEmptyTextKeyCompletesSync(t *testing.T) {
 }
 
 // TestRealIncludePrimaryKeyCompletesSync proves that a scalar primary key with
-// INCLUDE columns completes sync, and that a composite key stays rejected.
+// INCLUDE columns completes sync and seed continuation, and that a composite
+// key stays rejected. The table uses the portable scope, so a seed can export it.
 func TestRealIncludePrimaryKeyCompletesSync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -689,7 +690,7 @@ func TestRealIncludePrimaryKeyCompletesSync(t *testing.T) {
 		note text,
 		updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
 		deleted_at timestamptz,
-		PRIMARY KEY (id) INCLUDE (value, note))`, "text", realShapeUserScope)
+		PRIMARY KEY (id) INCLUDE (value, note))`, "text", "cf:global")
 	createRealShapeTable(t, ctx, admin, "rs_composite_keys", `(
 		id text,
 		part text,
@@ -706,12 +707,12 @@ func TestRealIncludePrimaryKeyCompletesSync(t *testing.T) {
 	waitForIssue49CanonicalHealth(t, ctx, admin, true)
 
 	client := connectRealProtocolClient(t, ctx, harness, token, "include-key-client")
-	rebuildRealShapeOtherScope(t, ctx, harness, token, client, realShapeUserScope, "00000000-0000-4000-8211-00000000e010")
-	states := rebuildRealShapeRows(t, ctx, harness, token, admin, client, realShapeUserScope, "00000000-0000-4000-8211-00000000c010", tables)
+	rebuildRealShapeOtherScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8211-00000000e010")
+	states := rebuildRealShapeRows(t, ctx, harness, token, admin, client, "cf:global", "00000000-0000-4000-8211-00000000c010", tables)
 	execRealShape(t, ctx, admin, "INSERT INTO public.rs_include_keys (id, value, note) VALUES ('source-a', 'alpha', NULL), ('source-b', 'bravo', 'note-b')")
 	execRealShape(t, ctx, admin, "UPDATE public.rs_include_keys SET value = 'alpha-updated', note = 'note-a' WHERE id = 'source-a'")
 	execRealShape(t, ctx, admin, "DELETE FROM public.rs_include_keys WHERE id = 'source-b'")
-	pullRealShapeUntilServer(t, ctx, harness, token, admin, client, realShapeUserScope, tables, states)
+	pullRealShapeUntilServer(t, ctx, harness, token, admin, client, "cf:global", tables, states)
 
 	pushRealShapeApplied(t, ctx, harness, token, admin, client, "00000000-0000-4000-8211-00000000b011", []map[string]any{
 		realShapeMutation(client, table, "insert", "00000000-0000-4000-8211-000000000011", "pushed-c", "", map[string]any{"value": "charlie", "note": nil}),
@@ -720,8 +721,22 @@ func TestRealIncludePrimaryKeyCompletesSync(t *testing.T) {
 	pushRealShapeApplied(t, ctx, harness, token, admin, client, "00000000-0000-4000-8211-00000000b012", []map[string]any{
 		realShapeMutation(client, table, "delete", "00000000-0000-4000-8211-000000000013", "pushed-c", states["rs_include_keys"]["pushed-c"].version, nil),
 	}, realShapeTables(tables...), states)
-	pullRealShapeUntilServer(t, ctx, harness, token, admin, client, realShapeUserScope, tables, states)
-	rebuildRealShapeRows(t, ctx, harness, token, admin, client, realShapeUserScope, "00000000-0000-4000-8211-00000000c011", tables)
+	pullRealShapeUntilServer(t, ctx, harness, token, admin, client, "cf:global", tables, states)
+	rebuildRealShapeRows(t, ctx, harness, token, admin, client, "cf:global", "00000000-0000-4000-8211-00000000c011", tables)
+
+	seedStates, receipt := exportRealShapeSeed(t, ctx, admin, "cf:global", tables)
+	seeded := connectRealSeededShapeClient(t, ctx, harness, token, "include-key-seeded-client", "cf:global", receipt)
+	rebuildRealShapeOtherScope(t, ctx, harness, token, seeded, "cf:global", "00000000-0000-4000-8211-00000000e011")
+	execRealShape(t, ctx, admin, "UPDATE public.rs_include_keys SET value = 'alpha-after-seed' WHERE id = 'source-a'")
+	pullRealShapeUntilServer(t, ctx, harness, token, admin, seeded, "cf:global", tables, seedStates)
+
+	pushRealShapeApplied(t, ctx, harness, token, admin, seeded, "00000000-0000-4000-8211-00000000b013", []map[string]any{
+		realShapeMutation(seeded, table, "delete", "00000000-0000-4000-8211-000000000014", "source-a", seedStates["rs_include_keys"]["source-a"].version, nil),
+	}, realShapeTables(tables...), seedStates)
+	pullRealShapeUntilServer(t, ctx, harness, token, admin, client, "cf:global", tables, states)
+	if _, present := states["rs_include_keys"]["source-a"]; present {
+		t.Fatalf("pull kept the deleted INCLUDE key row: %#v", states)
+	}
 }
 
 // realWideDefinition returns a table with the key, the two lifecycle fields,
@@ -955,6 +970,7 @@ func TestRealKeyOnlyInsertCompletesSync(t *testing.T) {
 
 	pushRealShapeApplied(t, ctx, harness, token, admin, client, "00000000-0000-4000-8220-00000000b003", []map[string]any{
 		realShapeMutation(client, keyOnly, "delete", "00000000-0000-4000-8220-000000000004", "key-one", states["rs_key_only"]["key-one"].version, nil),
+		realShapeMutation(client, defaultOnly, "delete", "00000000-0000-4000-8220-000000000005", "default-one", states["rs_default_only"]["default-one"].version, nil),
 	}, realShapeTables(tables...), states)
 	pullRealShapeUntilServer(t, ctx, harness, token, admin, client, realShapeUserScope, tables, states)
 	rebuildRealShapeRows(t, ctx, harness, token, admin, client, realShapeUserScope, "00000000-0000-4000-8220-00000000c001", tables)
