@@ -765,8 +765,8 @@ conformance-update-baseline-extension-artifact:
 		rm -rf "$$work"; \
 		trap - EXIT HUP INT TERM
 
-test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components
-	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
+test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-components build-local-postgres
+	cd conformance && SYNCHRO_LOCAL_POSTGRES_BINARY="$(LOCAL_POSTGRES_BINARY)" GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=20m -args --provision --install
 
 test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 

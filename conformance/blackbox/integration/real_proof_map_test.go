@@ -136,6 +136,7 @@ var serverProofBindings = []serverProofBinding{
 }
 
 var nonScenarioRealTests = map[string]string{
+	"TestRealAttachedDatabaseResetRestoresFreshState":       "framework",
 	"TestRealExtensionReinstallRebindsWorkerSlot":           "regression",
 	"TestRealHTTPHarness":                                   "framework",
 	"TestRealMutationControlMutationConservation":           "adversarial",
