@@ -34,7 +34,6 @@ const admissionInsertStatement = `
 // count from an independent pgoutput decoding session.
 type admissionTransaction struct {
 	name      string
-	firstID   int
 	rows      int
 	xid       string
 	records   int64
@@ -155,7 +154,7 @@ func commitAdmissionTransaction(t *testing.T, ctx context.Context, admin *sql.DB
 		t.Fatalf("begin %s admission transaction: %v", name, err)
 	}
 	defer transaction.Rollback()
-	result := admissionTransaction{name: name, firstID: firstID, rows: rows}
+	result := admissionTransaction{name: name, rows: rows}
 	if err := transaction.QueryRowContext(ctx, "SELECT pg_current_xact_id()::text").Scan(&result.xid); err != nil {
 		t.Fatalf("read %s admission transaction identity: %v", name, err)
 	}

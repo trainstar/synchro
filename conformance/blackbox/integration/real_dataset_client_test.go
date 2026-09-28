@@ -671,6 +671,37 @@ func (runtime *datasetRuntime) push(client *datasetClient, mutations []map[strin
 	return response.Accepted, response.Rejected, elapsed
 }
 
+// requireAuthoredOutcome checks one applied push. Each submitted field must
+// hold its authored wire value in the source row and in the canonical push
+// outcome. The outcome must also equal the source in the fields that the
+// server fills, such as the owner and the parent chain.
+func (runtime *datasetRuntime) requireAuthoredOutcome(expected expectedState, client *datasetClient, tableName, id string, columns map[string]string, row map[string]json.RawMessage) {
+	runtime.t.Helper()
+	table, _ := dataset.LookupTable(tableName)
+	manifest := client.Tables[tableName]
+	source := expected.rows[tableName+"/"+id]
+	if source == nil || len(row) != len(table.Columns) {
+		runtime.t.Fatalf("push outcome row %s/%s has %d fields or no source row", tableName, id, len(row))
+	}
+	submitted := 0
+	for _, column := range table.Columns {
+		if err := dataset.CompareWire(column.Type, row[manifest.FieldIDs[column.Name]], source[column.Name]); err != nil {
+			runtime.t.Fatalf("push outcome %s/%s field %s differs from the source: %v", tableName, id, column.Name, err)
+		}
+		authored, ok := columns[column.Name]
+		if !ok {
+			continue
+		}
+		submitted++
+		if err := dataset.CompareWire(column.Type, json.RawMessage(authored), source[column.Name]); err != nil {
+			runtime.t.Fatalf("push %s/%s submitted field %s is not applied: %v", tableName, id, column.Name, err)
+		}
+	}
+	if submitted != len(columns) {
+		runtime.t.Fatalf("push %s/%s submitted %d fields, and %d are table columns", tableName, id, len(columns), submitted)
+	}
+}
+
 // mutation builds one wire mutation from wire column values keyed by name.
 func (client *datasetClient) mutation(t *testing.T, tableName, id, op, baseVersion string, columns map[string]string) map[string]any {
 	t.Helper()

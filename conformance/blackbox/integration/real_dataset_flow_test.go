@@ -40,7 +40,7 @@ func TestRealDatasetAuthoredFlow(t *testing.T) {
 		t.Fatalf("authored push outcome: accepted=%+v rejected=%+v", accepted, rejected)
 	}
 	runtime.waitMaterialized(time.Minute)
-	requireDatasetOutcomeRow(t, runtime, clients[push.User], push.Table, push.ID, accepted[0].ServerRow)
+	runtime.requireAuthoredOutcome(runtime.expected(), clients[push.User], push.Table, push.ID, push.Columns, accepted[0].ServerRow)
 
 	requireDatasetCheckpoint(t, runtime, clients, dataset.AuthoredInitial)
 
@@ -87,21 +87,6 @@ func requireDatasetManifest(t *testing.T, client *datasetClient) {
 			if manifest.Types[column.Name] != column.Type {
 				t.Fatalf("dataset manifest field %s.%s type = %q, want %q", table.Name, column.Name, manifest.Types[column.Name], column.Type)
 			}
-		}
-	}
-}
-
-func requireDatasetOutcomeRow(t *testing.T, runtime *datasetRuntime, client *datasetClient, tableName, id string, row map[string]json.RawMessage) {
-	t.Helper()
-	table, _ := dataset.LookupTable(tableName)
-	manifest := client.Tables[tableName]
-	source := runtime.expected().rows[tableName+"/"+id]
-	if source == nil || len(row) != len(table.Columns) {
-		t.Fatalf("push outcome row %s/%s has %d fields or no source row", tableName, id, len(row))
-	}
-	for _, column := range table.Columns {
-		if err := dataset.CompareWire(column.Type, row[manifest.FieldIDs[column.Name]], source[column.Name]); err != nil {
-			t.Fatalf("push outcome field %s: %v", column.Name, err)
 		}
 	}
 }

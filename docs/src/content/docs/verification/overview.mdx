@@ -53,10 +53,10 @@ Each support cell with the `required` policy requires packaged connect, push, pu
 
 Each installed client runs against the synthetic training dataset in `conformance/dataset`. The fixture prepares it with `CLIENT_DATASET=1`, or with `synchro-local-postgres prepare --dataset`. The dataset has the table shapes that failed the first 0.3.1 consumer: stored generated columns and `AFTER ROW` triggers that write other registered tables.
 
-Each installed client pushes a program, a workout, a workout exercise, and exercise sets. It then writes a set change offline, is killed, and resumes. While the client is dead, the harness inserts two sets in one statement and writes a new program title on the server. The cell passes only when these conditions are true:
+Each installed client pushes a program, a workout, a workout exercise, and exercise sets. It then changes one set and deletes another set offline, is killed, and resumes. While the client is dead, the harness inserts two sets in one statement and writes a new program title, program settings, and workout `external_ref` on the server. The cell passes only when these conditions are true:
 
-- PostgreSQL holds the exact authored rows, including the values that server triggers fill.
-- The client reads the catalog exercise, the remote title, the sets, and the `workouts.total_volume_kg` rollup through its public query path.
+- PostgreSQL holds the exact authored rows, including the values that server triggers fill and the soft-deleted set.
+- The client reads these values through its public query path: the catalog exercise and its muscle-group array, the program title and JSON settings, an int64 above 2^53, the live sets, and the `workouts.total_volume_kg` rollup.
 - Each value equals a value that the harness authored by hand.
 
 An empty queue alone does not pass a cell, because rejection or deletion also empties a queue.

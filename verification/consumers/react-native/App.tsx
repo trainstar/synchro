@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { SafeAreaView, Text } from 'react-native';
-import { SynchroClient } from '@trainstar/synchro-react-native';
+import { SynchroClient, type SQLiteInt64 } from '@trainstar/synchro-react-native';
 import { packagedSmokeConfig } from './packagedSmokeConfig';
 
 const client = new SynchroClient({
@@ -68,9 +68,7 @@ async function syncAndWaitForScheduledPullRetry() {
 
 type SmokePhase = 'initial' | 'resume';
 
-const OBSERVED_FIELDS = ['exercise_name', 'program_title', 'total_volume_kg', 'sets'] as const;
-
-type ObservedRows = Record<(typeof OBSERVED_FIELDS)[number], string>;
+type ObservedRows = Record<string, string>;
 
 interface AppPhaseResult {
   schema_version: 1;
@@ -81,17 +79,33 @@ interface AppPhaseResult {
   error: string | null;
 }
 
+// Reports each observation column as the text of the value that the public
+// query path returned. An INTEGER outside the safe range arrives tagged.
 async function observe(): Promise<ObservedRows> {
   const row = await client.queryOne(packagedSmokeConfig.observe_sql);
-  const observed: Partial<ObservedRows> = {};
-  for (const field of OBSERVED_FIELDS) {
-    const value = row?.[field];
-    if (typeof value !== 'string') {
-      throw new Error(`packaged ${field} is missing from the local query path`);
-    }
-    observed[field] = value;
+  if (row === null) {
+    throw new Error('packaged observation row is missing');
   }
-  return observed as ObservedRows;
+  const observed: ObservedRows = {};
+  for (const [field, value] of Object.entries(row)) {
+    if (field === 'converged') {
+      continue;
+    }
+    if (typeof value === 'string') {
+      observed[field] = value;
+    } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+      observed[field] = String(value);
+    } else if (isInt64(value)) {
+      observed[field] = value.value;
+    } else {
+      throw new Error(`packaged ${field} has an unexpected value type`);
+    }
+  }
+  return observed;
+}
+
+function isInt64(value: unknown): value is SQLiteInt64 {
+  return typeof value === 'object' && value !== null && (value as SQLiteInt64).type === 'int64';
 }
 
 async function executeAll(statements: readonly string[]) {
@@ -159,7 +173,7 @@ async function runPackagedSmokePhase(): Promise<AppPhaseResult> {
       await awaitConvergence();
       await executeAll(packagedSmokeConfig.durable_sql);
       pendingChangeCount = await client.pendingChangeCount();
-      if (pendingChangeCount !== 1) {
+      if (pendingChangeCount !== packagedSmokeConfig.durable_sql.length) {
         throw new Error('durable packaged work was not queued');
       }
       observed = await observe();

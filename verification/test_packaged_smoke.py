@@ -26,17 +26,23 @@ from verification import packaged_smoke
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REMOTE_NAME = "Server authored fixture \u00e9\u4e16"
 # Hand-authored from the training dataset rows that the consumer and harness write.
+# The apps report each value as text, so the JSON values are JSON text here.
 INITIAL_OBSERVED = {
     "exercise_name": "Back Squat",
+    "exercise_muscle_groups": '["quadriceps","glutes"]',
     "program_title": 'Packaged Block \u2705 "consumer"',
+    "program_settings": '{"deload_week":4}',
+    "external_ref": "9007199254740993",
     "total_volume_kg": "1343.25",
-    "sets": "1:5:100,2:5:102.5,3:8:110.25",
+    "sets": "2:5:102.5,3:8:110.25",
 }
 RESUME_OBSERVED = {
     **INITIAL_OBSERVED,
     "program_title": REMOTE_NAME,
-    "total_volume_kg": "2260",
-    "sets": "1:5:100,2:5:102.5,3:8:110.25,4:2:120,5:1:125.5",
+    "program_settings": '{"phases": ["base", "peak"], "deload_week": 5}',
+    "external_ref": "9007199254740995",
+    "total_volume_kg": "1760",
+    "sets": "2:5:102.5,3:8:110.25,4:2:120,5:1:125.5",
 }
 
 
@@ -259,7 +265,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             output = directory / "cell.json"
             packaged_smoke.write_json(initial, {
                 "schema_version": 1, "phase": "initial", "status": "passed",
-                "pid": 101, "pending_change_count": 1, "observed": INITIAL_OBSERVED,
+                "pid": 101, "pending_change_count": 2, "observed": INITIAL_OBSERVED,
             })
             packaged_smoke.write_json(resume, {
                 "schema_version": 1, "phase": "resume", "status": "passed",
@@ -319,7 +325,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "schema_version": 1,
                 "phase": "initial",
                 "status": "passed",
-                "pending_change_count": 1,
+                "pending_change_count": 2,
                 "observed": INITIAL_OBSERVED,
                 "error": None,
             }
@@ -378,7 +384,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "schema_version": 1,
                 "phase": "initial",
                 "status": "passed",
-                "pending_change_count": 1,
+                "pending_change_count": 2,
                 "observed": INITIAL_OBSERVED,
                 "error": None,
             })
@@ -413,7 +419,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "schema_version": 1,
                 "phase": "initial",
                 "status": "passed",
-                "pending_change_count": 1,
+                "pending_change_count": 2,
                 "observed": INITIAL_OBSERVED,
                 "error": None,
             }
@@ -469,7 +475,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "schema_version": 1,
                 "phase": "initial",
                 "status": "passed",
-                "pending_change_count": 1,
+                "pending_change_count": 2,
                 "observed": INITIAL_OBSERVED,
                 "error": None,
             }
@@ -498,7 +504,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     "phase": "initial",
                     "status": "passed",
                     "pid": 101,
-                    "pending_change_count": 1,
+                    "pending_change_count": 2,
                     "observed": INITIAL_OBSERVED,
                 },
             )
@@ -527,7 +533,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             artifact = directory / "artifact.bin"
             packaged_smoke.write_json(initial, {
                 "schema_version": 1, "phase": "initial", "status": "passed",
-                "pid": 101, "pending_change_count": 1, "observed": INITIAL_OBSERVED,
+                "pid": 101, "pending_change_count": 2, "observed": INITIAL_OBSERVED,
             })
             packaged_smoke.write_json(resume, {
                 "schema_version": 1, "phase": "resume", "status": "passed",
@@ -556,13 +562,17 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             resume = directory / "resume.json"
             packaged_smoke.write_json(initial, {
                 "schema_version": 1, "phase": "initial", "status": "passed",
-                "pid": 101, "pending_change_count": 1, "observed": INITIAL_OBSERVED,
+                "pid": 101, "pending_change_count": 2, "observed": INITIAL_OBSERVED,
             })
             cell_id = packaged_smoke.required_cells(REPO_ROOT)[0]
             for observed, server_name, error in (
                 ({**RESUME_OBSERVED, "program_title": INITIAL_OBSERVED["program_title"]}, REMOTE_NAME, "dataset state: row.program_title"),
                 ({**RESUME_OBSERVED, "total_volume_kg": "1708.75"}, REMOTE_NAME, "dataset state: row.total_volume_kg"),
                 ({**RESUME_OBSERVED, "sets": INITIAL_OBSERVED["sets"]}, REMOTE_NAME, "dataset state: row.sets"),
+                ({**RESUME_OBSERVED, "sets": "1:5:100," + RESUME_OBSERVED["sets"]}, REMOTE_NAME, "dataset state: row.sets"),
+                ({**RESUME_OBSERVED, "external_ref": "9007199254740996"}, REMOTE_NAME, "dataset state: row.external_ref"),
+                ({**RESUME_OBSERVED, "program_settings": '{"deload_week":5,"phases":["peak","base"]}'}, REMOTE_NAME, "dataset state: row.program_settings"),
+                ({**RESUME_OBSERVED, "exercise_muscle_groups": '"quadriceps,glutes"'}, REMOTE_NAME, "dataset state: row.exercise_muscle_groups"),
                 (RESUME_OBSERVED, INITIAL_OBSERVED["program_title"], "server verification does not confirm"),
             ):
                 with self.subTest(error=error):
@@ -610,17 +620,22 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "    assert all(set_id in sql for set_id in state['remote_set_ids']), sql\n"
                 "    if state['row']['program']['title'] == variables['authored_title']:\n"
                 "        state['row']['program']['title'] = variables['remote_title']\n"
+                "        state['row']['program']['settings'] = json.loads(variables['remote_settings'])\n"
+                "        state['row']['workout']['external_ref'] = variables['remote_external_ref']\n"
                 "        state['row']['workout']['total_volume_kg'] = '1708.75'\n"
                 "        print(variables['remote_title'])\n"
+                "        print(variables['remote_external_ref'])\n"
                 "        print('1708.75')\n"
                 "    path.write_text(json.dumps(state))\n"
             ), encoding="utf-8")
             fake_psql.chmod(0o755)
 
-            def server_state(title: str, durable: bool, remote: bool, total: str) -> None:
+            def server_state(title: str, durable: bool, remote: bool, total: str, deleted: bool | None = None) -> None:
                 row = packaged_smoke.expected_server_rows(
-                    config, title, packaged_smoke.consumer_sets(config, durable=durable, remote=remote), total,
+                    config, title, packaged_smoke.consumer_sets(config, durable=durable, remote=remote), total, remote,
                 )
+                if deleted is not None:
+                    row["sets"][0]["deleted"] = deleted
                 packaged_smoke.write_json(state_path, {
                     "program_id": config["program_id"], "entry_id": config["entry_id"],
                     "remote_set_ids": config["remote_set_ids"], "row": row,
@@ -632,7 +647,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             server = directory / "server.json"
             with mock.patch.dict(os.environ, environment):
                 server_state(authored_title, durable=True, remote=False, total="1343.25")
-                with self.assertRaisesRegex(packaged_smoke.EvidenceError, r"exactly the initial upload before resume: row.sets\[2\].reps"):
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, r"exactly the initial upload before resume: row.sets\[0\].deleted, row.sets\[2\].reps$"):
                     packaged_smoke.author_remote_value(config_path, remote)
                 self.assertFalse(remote.exists())
 
@@ -644,17 +659,23 @@ class PackagedSmokeStructureTests(unittest.TestCase):
 
                 # The remote rows are present, but the resumed upload is absent.
                 server_state(remote_title, durable=False, remote=True, total="1708.75")
-                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value: row.sets\\[2\\].reps, row.workout.total_volume_kg"):
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value: row.sets\\[0\\].deleted, row.sets\\[2\\].reps, row.workout.total_volume_kg$"):
                     packaged_smoke.verify_server_state(config_path, remote, server)
                 # The resumed upload is present, but the rollup did not include it.
                 server_state(remote_title, durable=True, remote=True, total="1708.75")
                 with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value: row.workout.total_volume_kg"):
                     packaged_smoke.verify_server_state(config_path, remote, server)
+                # The update is uploaded, but the soft delete is absent.
+                server_state(remote_title, durable=True, remote=True, total="2260", deleted=False)
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value: row.sets\\[0\\].deleted, row.workout.total_volume_kg$"):
+                    packaged_smoke.verify_server_state(config_path, remote, server)
                 self.assertFalse(server.exists())
 
-                server_state(remote_title, durable=True, remote=True, total="2260")
+                server_state(remote_title, durable=True, remote=True, total="1760")
                 packaged_smoke.verify_server_state(config_path, remote, server)
-                packaged_smoke.validate_server_verification(server, remote_title, {"set_index": 3, "reps": 8})
+                packaged_smoke.validate_server_verification(
+                    server, remote_title, {"set_index": 3, "reps": 8, "deleted_set_index": 1},
+                )
 
     def test_server_completion_rejects_changed_digest_and_equal_pid(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-server.") as raw_directory:

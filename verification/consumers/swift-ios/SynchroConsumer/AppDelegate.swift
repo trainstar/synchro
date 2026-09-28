@@ -27,27 +27,13 @@ private struct PackagedSmokeConfig: Decodable {
     }
 }
 
-private struct PackagedSmokeObserved: Encodable {
-    let exerciseName: String
-    let programTitle: String
-    let totalVolumeKg: String
-    let sets: String
-
-    enum CodingKeys: String, CodingKey {
-        case exerciseName = "exercise_name"
-        case programTitle = "program_title"
-        case totalVolumeKg = "total_volume_kg"
-        case sets
-    }
-}
-
 private struct PackagedSmokePhaseResult: Encodable {
     let schemaVersion = 1
     let phase: String
     let status = "passed"
     let pid: Int32
     let pendingChangeCount: Int
-    let observed: PackagedSmokeObserved
+    let observed: [String: String]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -198,7 +184,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 _ = try client.execute(statement)
             }
             let pending = try client.pendingChangeCount()
-            guard pending == 1 else {
+            guard pending == smoke.durableSQL.count else {
                 throw CocoaError(.fileWriteUnknown)
             }
             try writePhaseResult(
@@ -250,27 +236,30 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         }
     }
 
-    private func observe(_ client: SynchroClient, _ smoke: PackagedSmokeConfig) throws -> PackagedSmokeObserved {
-        guard let row = try client.queryOne(smoke.observeSQL),
-              let exerciseName = row["exercise_name"] as? String,
-              let programTitle = row["program_title"] as? String,
-              let totalVolumeKg = row["total_volume_kg"] as? String,
-              let sets = row["sets"] as? String
-        else {
+    // Reports each observation column as the text of the value that the
+    // public query path returned. An INTEGER value arrives as an Int64.
+    private func observe(_ client: SynchroClient, _ smoke: PackagedSmokeConfig) throws -> [String: String] {
+        guard let row = try client.queryOne(smoke.observeSQL) else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        return PackagedSmokeObserved(
-            exerciseName: exerciseName,
-            programTitle: programTitle,
-            totalVolumeKg: totalVolumeKg,
-            sets: sets
-        )
+        var observed: [String: String] = [:]
+        for field in row.columnNames where field != "converged" {
+            switch row[field] {
+            case let value as String:
+                observed[field] = value
+            case let value as Int64:
+                observed[field] = String(value)
+            default:
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+        return observed
     }
 
     private func writePhaseResult(
         phase: String,
         pendingCount: Int,
-        observed: PackagedSmokeObserved,
+        observed: [String: String],
         documents: URL
     ) throws {
         let result = PackagedSmokePhaseResult(
