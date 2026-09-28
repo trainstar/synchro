@@ -27,7 +27,7 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
          RETURN OLD;
      END IF;
      IF TG_OP = 'DELETE'
-@@ -2088,7 +2080,7 @@ AS 'MODULE_PATHNAME', 'synchro_health_detail_wrapper';
+@@ -2115,7 +2107,7 @@ AS 'MODULE_PATHNAME', 'synchro_health_detail_wrapper';
  /* </end connected objects> */
  
  /* <begin connected objects> */
@@ -36,12 +36,12 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
  -- synchro_pg::compaction::synchro_inject_client_retention_expiry
  CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
  	"p_user_id" TEXT, /* core::option::Option<&str> */
-@@ -2535,7 +2527,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2538,7 +2530,7 @@ CREATE FUNCTION "synchro_capture_fence"()
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1981
-+-- synchro-pg/src/lib.rs:1973
+--- synchro-pg/src/lib.rs:1987
++-- synchro-pg/src/lib.rs:1979
  -- finalize
  
  DO $roles$
