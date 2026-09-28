@@ -17,6 +17,7 @@ use synchro_core::fingerprint::{batch_fingerprint, mutation_fingerprint, normali
 use crate::client::{acquire_client_identity_lock, PROTOCOL_VERSION};
 use crate::pull::{pg_quote_ident, synced_row_projection_sql};
 use crate::registry::{qualified_relation_name, FieldRegistration, PushPolicy, TableRegistration};
+use crate::spi_helpers::is_lower_uuid;
 
 const FINGERPRINT_ALGORITHM: &str = "sha256";
 const FINGERPRINT_VERSION: i64 = 1;
@@ -1043,6 +1044,12 @@ pub(crate) fn load_authored_manifests(
 }
 
 fn load_ever_synced_tables(client: &SpiClient<'_>, table_ids: &HashSet<String>) -> HashSet<String> {
+    // A value that is not a canonical UUID cannot match a logical ID.
+    let table_ids = table_ids
+        .iter()
+        .filter(|table_id| is_lower_uuid(table_id))
+        .cloned()
+        .collect::<Vec<_>>();
     if table_ids.is_empty() {
         return HashSet::new();
     }
@@ -1053,7 +1060,7 @@ fn load_ever_synced_tables(client: &SpiClient<'_>, table_ids: &HashSet<String>) 
             WHERE kind = 'table'
                AND logical_id = ANY($1::uuid[])",
             None,
-            &[table_ids.iter().cloned().collect::<Vec<_>>().into()],
+            &[table_ids.into()],
         )
         .unwrap_or_else(|_| pgrx::error!("loading push table identities failed"));
     rows.into_iter()

@@ -689,6 +689,35 @@
     }
 
     #[pg_test]
+    fn test_push_unknown_non_uuid_table_is_not_synced() {
+        setup_test_tables();
+        let user_id = "u1";
+        let client_id = "c1";
+        register_client(user_id, client_id);
+        let mut mutation = push_mutation(
+            (user_id, client_id),
+            "non-uuid-table",
+            "test_orders",
+            "insert",
+            "80000000-0000-4000-8000-000000000008",
+            None,
+            Some(&[("user_id", json!(user_id))]),
+        );
+        mutation["table"] = json!("tbl_unknown");
+
+        let response = push_client(user_id, client_id, "non-uuid-table", vec![mutation]);
+
+        assert_eq!(response.json["accepted"], json!([]));
+        assert_eq!(
+            response.json["rejected"][0]["mutation_id"],
+            json!(mutation_id(user_id, client_id, "non-uuid-table"))
+        );
+        assert_eq!(response.json["rejected"][0]["table"], "tbl_unknown");
+        assert_eq!(response.json["rejected"][0]["status"], "rejected_terminal");
+        assert_eq!(response.json["rejected"][0]["code"], "table_not_synced");
+    }
+
+    #[pg_test]
     fn test_push_conflict_ledger_persists_its_conflict_code() {
         setup_test_tables();
         let user_id = "u1";

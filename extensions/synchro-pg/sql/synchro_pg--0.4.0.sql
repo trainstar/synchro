@@ -2260,7 +2260,7 @@ AS 'MODULE_PATHNAME', 'synchro_pull_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/push.rs:131
+-- synchro-pg/src/push.rs:132
 -- synchro_pg::push::synchro_push
 CREATE  FUNCTION "synchro_push"(
 	"p_user_id" TEXT, /* &str */
