@@ -6374,6 +6374,21 @@ func validateSourceDML(statement string) error {
 	return nil
 }
 
+// deadlineCloseReserve covers a normal close, which stops the adapter and
+// PostgreSQL within seconds, and a slow fast-shutdown checkpoint.
+const deadlineCloseReserve = 2 * time.Minute
+
+// CloseBeforeDeadline closes the harness a fixed reserve before deadline. A
+// test binary that reaches its -timeout panics without running cleanup, so its
+// adapter and PostgreSQL children would outlive it. The returned function
+// disarms the timer.
+func (h *Harness) CloseBeforeDeadline(deadline time.Time) (disarm func() bool) {
+	timer := time.AfterFunc(time.Until(deadline)-deadlineCloseReserve, func() {
+		_ = h.Close(context.Background())
+	})
+	return timer.Stop
+}
+
 // Close stops all owned processes and restores installed extension files.
 // It returns every cleanup failure after attempting each reverse-order step.
 func (h *Harness) Close(ctx context.Context) error {
