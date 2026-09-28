@@ -142,10 +142,19 @@ class DatabaseMigrationTests {
     }
 
     @Test
-    fun versionSixRejectionWithoutExactJSONIsInspectedAsLegacy() {
+    fun versionThreeRejectionWithoutExactJSONIsInspectedAsLegacy() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val path = context.getDatabasePath("synchro_legacy_rejection_${UUID.randomUUID()}.sqlite").absolutePath
         val legacy = SQLiteDatabase.openOrCreateDatabase(path, null)
+        legacy.execSQL(
+            """
+            CREATE TABLE _synchro_pending_changes (
+                record_id TEXT NOT NULL, table_name TEXT NOT NULL, operation TEXT NOT NULL,
+                base_updated_at TEXT, client_updated_at TEXT NOT NULL,
+                PRIMARY KEY (table_name, record_id)
+            )
+            """.trimIndent(),
+        )
         legacy.execSQL("CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         legacy.execSQL("INSERT INTO _synchro_meta VALUES ('sync_lock', '0')")
         createLegacyScopeTables(legacy)
@@ -166,7 +175,7 @@ class DatabaseMigrationTests {
             )
             """.trimIndent(),
         )
-        legacy.execSQL("PRAGMA user_version = 6")
+        legacy.execSQL("PRAGMA user_version = 3")
         legacy.close()
 
         val client = SynchroClient(
