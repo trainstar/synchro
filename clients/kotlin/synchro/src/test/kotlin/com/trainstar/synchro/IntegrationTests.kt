@@ -500,4 +500,48 @@ class IntegrationTests {
             clientB.close()
         }
     }
+
+    /**
+     * The fixture trigger gives the customer insert an order with the same ID. Thus the grouped
+     * order insert conflicts, and after the group rollback no row exists for the order.
+     */
+    @Test
+    fun testAtomicGroupConflictWithoutServerRowRemovesTheLocalRow() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val client = SynchroClient(makeConfig(userID = userID), context)
+        val rowID = UUID.randomUUID().toString()
+        val updatedAt = "2026-01-11T00:00:00.000Z"
+
+        try {
+            client.start()
+            client.atomicWriteTransaction { transaction ->
+                transaction.execute(
+                    "INSERT INTO customers (id, user_id, name, balance, is_active, market_segment, created_at, updated_at) VALUES (?, ?, 'shadow parent', 0, 1, 'test-shadow-order', ?, ?)",
+                    arrayOf(rowID, userID, updatedAt, updatedAt),
+                )
+                transaction.execute(
+                    "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+                    arrayOf(rowID, rowID, userID, """{"street":"Shadow Way"}""", updatedAt, updatedAt),
+                )
+            }
+            waitForCondition(timeoutMs = 30_000) {
+                client.syncNow()
+                client.pendingChangeCount() == 0
+            }
+
+            val rejections = client.inspectRejectedMutations().associateBy { it.tableName }
+            assertEquals(setOf("customers", "orders"), rejections.keys)
+            assertEquals(MutationRejectionCode.ATOMIC_BATCH_REJECTED, rejections.getValue("customers").code)
+            val order = rejections.getValue("orders")
+            assertEquals(MutationStatus.CONFLICT, order.status)
+            assertEquals(MutationRejectionCode.ROW_ALREADY_EXISTS, order.code)
+            assertNull(order.serverRowJSON)
+            assertNull(order.serverVersion)
+            assertNull(client.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf(rowID)))
+            assertEquals("shadow parent", client.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(rowID))?.get("name"))
+        } finally {
+            client.stop()
+            client.close()
+        }
+    }
 }

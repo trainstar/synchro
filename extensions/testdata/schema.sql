@@ -144,6 +144,26 @@ CREATE TRIGGER test_set_order_user_id
 BEFORE INSERT OR UPDATE OF customer_id ON orders
 FOR EACH ROW EXECUTE FUNCTION test_set_order_user_id();
 
+-- A customer with this segment gets an order with the same ID in the same
+-- transaction. A later insert of that order in one atomic push conflicts, and
+-- after the group rollback no row exists for the order.
+CREATE OR REPLACE FUNCTION test_insert_shadow_order()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO public.orders (id, customer_id, user_id, updated_at)
+    VALUES (NEW.id, NEW.id, NEW.user_id, NEW.updated_at);
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS test_insert_shadow_order ON customers;
+CREATE TRIGGER test_insert_shadow_order
+AFTER INSERT ON customers
+FOR EACH ROW WHEN (NEW.market_segment = 'test-shadow-order')
+EXECUTE FUNCTION test_insert_shadow_order();
+
 CREATE TABLE IF NOT EXISTS line_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     order_id UUID NOT NULL REFERENCES orders(id),

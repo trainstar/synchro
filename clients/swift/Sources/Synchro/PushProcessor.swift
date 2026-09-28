@@ -1017,9 +1017,8 @@ final class PushProcessor: @unchecked Sendable {
                     later: later
                 )
             }
-            let hasAuthoritativeAbsence = outcome.serverRow == nil
-                && outcome.status == .conflict
-                && (outcome.code == .rowDeleted || outcome.code == .rowNotFound)
+            // A conflict gives the authoritative state. No row means true absence or a fence-only delete for every code.
+            let hasAuthoritativeAbsence = outcome.serverRow == nil && outcome.status == .conflict
             let canApply = currentTable != nil
                 && (outcome.serverRow == nil || projection != nil)
                 && patches != nil

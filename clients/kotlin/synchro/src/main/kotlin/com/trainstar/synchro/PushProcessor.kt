@@ -1123,9 +1123,8 @@ internal class PushProcessor(
             } else {
                 null
             }
-            val hasAuthoritativeAbsence = row == null &&
-                outcome.status == MutationStatus.CONFLICT &&
-                outcome.code in setOf(MutationRejectionCode.ROW_DELETED, MutationRejectionCode.ROW_NOT_FOUND)
+            // A conflict gives the authoritative state. No row means true absence or a fence-only delete for every code.
+            val hasAuthoritativeAbsence = row == null && outcome.status == MutationStatus.CONFLICT
             val canApply = current != null &&
                 (row == null || projection != null) &&
                 patches != null &&
