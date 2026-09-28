@@ -1,8 +1,11 @@
+@file:OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
+
 package com.trainstar.synchro
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
+import com.trainstar.synchro.inspection.SynchroInspection
 import java.util.UUID
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
@@ -13,6 +16,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -134,6 +138,85 @@ class DatabaseMigrationTests {
             assertEquals("legacy_sealed", database.queryOne("SELECT source_kind FROM _synchro_pending_changes WHERE mutation_id = ?", arrayOf(mutationID))?.get("source_kind"))
         } finally {
             server.shutdown()
+        }
+    }
+
+    @Test
+    fun versionThreeRejectionWithoutExactJSONIsInspectedAsLegacy() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val path = context.getDatabasePath("synchro_legacy_rejection_${UUID.randomUUID()}.sqlite").absolutePath
+        val legacy = SQLiteDatabase.openOrCreateDatabase(path, null)
+        legacy.execSQL(
+            """
+            CREATE TABLE _synchro_pending_changes (
+                record_id TEXT NOT NULL, table_name TEXT NOT NULL, operation TEXT NOT NULL,
+                base_updated_at TEXT, client_updated_at TEXT NOT NULL,
+                PRIMARY KEY (table_name, record_id)
+            )
+            """.trimIndent(),
+        )
+        legacy.execSQL("CREATE TABLE _synchro_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        legacy.execSQL("INSERT INTO _synchro_meta VALUES ('sync_lock', '0')")
+        createLegacyScopeTables(legacy)
+        legacy.execSQL(
+            """
+            CREATE TABLE _synchro_rejected_mutations (
+                mutation_id TEXT PRIMARY KEY, table_name TEXT NOT NULL, record_id TEXT NOT NULL,
+                status TEXT NOT NULL, code TEXT NOT NULL, message TEXT, server_row_json TEXT,
+                server_version TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
+        legacy.execSQL(
+            """
+            INSERT INTO _synchro_rejected_mutations VALUES (
+                'm1', 'orders', 'r0', 'rejected_terminal', 'policy_rejected', 'blocked', '{"id":"r0"}',
+                'server-v7', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z'
+            )
+            """.trimIndent(),
+        )
+        legacy.execSQL("PRAGMA user_version = 3")
+        legacy.close()
+
+        val client = SynchroClient(
+            SynchroConfig(
+                dbPath = path,
+                serverURL = "http://localhost:8080",
+                authProvider = { "test-token" },
+                clientID = "legacy-device",
+                appVersion = "1.0.0",
+            ),
+            context,
+        )
+        try {
+            // The old rejection table stored no mutation or rejection JSON, so inspection reports none.
+            val expected = RetainedRejectionInspection.Legacy(
+                LegacyRejectionInspection(
+                    mutationID = "m1",
+                    tableName = "orders",
+                    recordID = "r0",
+                    status = MutationStatus.REJECTED_TERMINAL,
+                    code = MutationRejectionCode.POLICY_REJECTED,
+                    message = "blocked",
+                    serverRowJSON = """{"id":"r0"}""",
+                    serverVersion = "server-v7",
+                    createdAt = "2026-01-01T00:00:00.000000Z",
+                    updatedAt = "2026-01-01T00:00:00.000000Z",
+                ),
+            )
+            assertEquals(listOf(expected), client.inspectRejectedMutationRecords())
+            // The deprecated method keeps its published result: a legacy rejection cannot be inspected.
+            assertThrows(SynchroError.InvalidResponse::class.java) { client.inspectRejectedMutations() }
+            val snapshot = SynchroInspection(client).captureSnapshot(maximumRecords = 8) { _, _ -> }
+            assertEquals(1, snapshot.capture.rejectedMutationCount)
+            assertEquals(listOf(expected), snapshot.rejectedMutations)
+
+            SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { database ->
+                database.execSQL("UPDATE _synchro_rejected_mutations SET mutation_json = '{}' WHERE mutation_id = 'm1'")
+            }
+            assertThrows(SynchroError.InvalidResponse::class.java) { client.inspectRejectedMutationRecords() }
+        } finally {
+            client.close()
         }
     }
 

@@ -25,9 +25,19 @@ from verification import packaged_smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REMOTE_NAME = "Server authored fixture \u00e9\u4e16"
-DURABLE = '{"street":"Packaged Durable"}'
-INITIAL_OBSERVED = {"customer_name": "Packaged Consumer", "ship_address": DURABLE}
-RESUME_OBSERVED = {"customer_name": REMOTE_NAME, "ship_address": '{"street": "Packaged Durable"}'}
+# Hand-authored from the training dataset rows that the consumer and harness write.
+INITIAL_OBSERVED = {
+    "exercise_name": "Back Squat",
+    "program_title": 'Packaged Block \u2705 "consumer"',
+    "total_volume_kg": "1343.25",
+    "sets": "1:5:100,2:5:102.5,3:8:110.25",
+}
+RESUME_OBSERVED = {
+    **INITIAL_OBSERVED,
+    "program_title": REMOTE_NAME,
+    "total_volume_kg": "2260",
+    "sets": "1:5:100,2:5:102.5,3:8:110.25,4:2:120,5:1:125.5",
+}
 
 
 class PackagedSmokeStructureTests(unittest.TestCase):
@@ -53,9 +63,9 @@ class PackagedSmokeStructureTests(unittest.TestCase):
     def convergence_records(self, directory: Path, server_name: str = REMOTE_NAME) -> tuple[Path, Path]:
         remote = directory / "remote.json"
         server = directory / "server.json"
-        packaged_smoke.write_json(remote, {"schema_version": 1, "customer_name": REMOTE_NAME})
+        packaged_smoke.write_json(remote, {"schema_version": 1, "remote_value": REMOTE_NAME})
         packaged_smoke.write_json(server, packaged_smoke.server_verification(
-            server_name, {"order_ship_address": {"street": "Packaged Durable"}},
+            server_name, packaged_smoke.CLIENT_RESUMED_WRITE,
         ))
         return remote, server
 
@@ -550,9 +560,10 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             })
             cell_id = packaged_smoke.required_cells(REPO_ROOT)[0]
             for observed, server_name, error in (
-                ({**RESUME_OBSERVED, "customer_name": "Packaged Consumer"}, REMOTE_NAME, "expected customer name"),
-                ({**RESUME_OBSERVED, "ship_address": '{"street":"Packaged Initial"}'}, REMOTE_NAME, "durable ship address"),
-                (RESUME_OBSERVED, "Packaged Consumer", "server verification does not confirm"),
+                ({**RESUME_OBSERVED, "program_title": INITIAL_OBSERVED["program_title"]}, REMOTE_NAME, "dataset state: row.program_title"),
+                ({**RESUME_OBSERVED, "total_volume_kg": "1708.75"}, REMOTE_NAME, "dataset state: row.total_volume_kg"),
+                ({**RESUME_OBSERVED, "sets": INITIAL_OBSERVED["sets"]}, REMOTE_NAME, "dataset state: row.sets"),
+                (RESUME_OBSERVED, INITIAL_OBSERVED["program_title"], "server verification does not confirm"),
             ):
                 with self.subTest(error=error):
                     packaged_smoke.write_json(resume, {
@@ -573,12 +584,16 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             config_path = directory / "config.json"
             config = {
                 "schema_version": 1, "user_id": "user-1",
-                "customer_id": "00000000-0000-4000-8000-000000000001",
-                "order_id": "00000000-0000-4000-8000-000000000002",
+                "program_id": "00000000-0000-4000-8000-000000000001",
+                "workout_id": "00000000-0000-4000-8000-000000000002",
+                "entry_id": "00000000-0000-4000-8000-000000000003",
+                "set_ids": ["00000000-0000-4000-8000-00000000001%d" % index for index in range(3)],
+                "remote_set_ids": ["00000000-0000-4000-8000-00000000002%d" % index for index in range(2)],
             }
             packaged_smoke.write_json(config_path, config)
             state_path = directory / "server-state.json"
             fake_psql = directory / "psql"
+            # The fake server applies the remote transaction only to the exact authored title.
             fake_psql.write_text(f"#!{sys.executable}\n" + (
                 "import json, sys\n"
                 "from pathlib import Path\n"
@@ -588,53 +603,58 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 f"path = Path({str(state_path)!r})\n"
                 "state = json.loads(path.read_text())\n"
                 "sql = sys.stdin.read()\n"
-                "if sql.startswith('SELECT'):\n"
-                "    assert variables['order_id'] == state['order_id'] and variables['customer_id'] == state['customer_id']\n"
+                "assert variables['program_id'] == state['program_id'] and variables['entry_id'] == state['entry_id']\n"
+                "if sql.startswith('SELECT json_build_object'):\n"
                 "    print(json.dumps(state['row']))\n"
-                "elif sql.startswith('UPDATE'):\n"
-                "    if state['row']['customer_name'] == variables['authored_name']:\n"
-                "        state['row']['customer_name'] = variables['remote_name']\n"
-                "        print(variables['remote_name'])\n"
+                "elif sql.startswith('BEGIN'):\n"
+                "    assert all(set_id in sql for set_id in state['remote_set_ids']), sql\n"
+                "    if state['row']['program']['title'] == variables['authored_title']:\n"
+                "        state['row']['program']['title'] = variables['remote_title']\n"
+                "        state['row']['workout']['total_volume_kg'] = '1708.75'\n"
+                "        print(variables['remote_title'])\n"
+                "        print('1708.75')\n"
                 "    path.write_text(json.dumps(state))\n"
             ), encoding="utf-8")
             fake_psql.chmod(0o755)
 
-            def server_state(name: str, street: str) -> None:
+            def server_state(title: str, durable: bool, remote: bool, total: str) -> None:
+                row = packaged_smoke.expected_server_rows(
+                    config, title, packaged_smoke.consumer_sets(config, durable=durable, remote=remote), total,
+                )
                 packaged_smoke.write_json(state_path, {
-                    "order_id": config["order_id"], "customer_id": config["customer_id"],
-                    "row": {
-                        "customer_name": name, "customer_user_id": "user-1", "order_user_id": "user-1",
-                        "ship_address": {"street": street},
-                    },
+                    "program_id": config["program_id"], "entry_id": config["entry_id"],
+                    "remote_set_ids": config["remote_set_ids"], "row": row,
                 })
 
+            authored_title = INITIAL_OBSERVED["program_title"]
             environment = {"ADAPTER_TEST_URL": "postgresql://fixture", "PACKAGED_SMOKE_PSQL": str(fake_psql)}
             remote = directory / "remote.json"
             server = directory / "server.json"
             with mock.patch.dict(os.environ, environment):
-                server_state("Packaged Consumer", "Packaged Durable")
-                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "exactly the initial upload"):
+                server_state(authored_title, durable=True, remote=False, total="1343.25")
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, r"exactly the initial upload before resume: row.sets\[2\].reps"):
                     packaged_smoke.author_remote_value(config_path, remote)
                 self.assertFalse(remote.exists())
 
-                server_state("Packaged Consumer", "Packaged Initial")
+                server_state(authored_title, durable=False, remote=False, total="1343.25")
                 packaged_smoke.author_remote_value(config_path, remote)
-                remote_name = packaged_smoke.load_remote_value(remote)
-                self.assertNotEqual(remote_name, "Packaged Consumer")
-                self.assertEqual(packaged_smoke.load_json(state_path, "state")["row"]["customer_name"], remote_name)
+                remote_title = packaged_smoke.load_remote_value(remote)
+                self.assertNotEqual(remote_title, authored_title)
+                self.assertEqual(packaged_smoke.load_json(state_path, "state")["row"]["program"]["title"], remote_title)
 
-                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value"):
+                # The remote rows are present, but the resumed upload is absent.
+                server_state(remote_title, durable=False, remote=True, total="1708.75")
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value: row.sets\\[2\\].reps, row.workout.total_volume_kg"):
                     packaged_smoke.verify_server_state(config_path, remote, server)
-                server_state("Packaged Consumer", "Packaged Durable")
-                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value"):
+                # The resumed upload is present, but the rollup did not include it.
+                server_state(remote_title, durable=True, remote=True, total="1708.75")
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value: row.workout.total_volume_kg"):
                     packaged_smoke.verify_server_state(config_path, remote, server)
                 self.assertFalse(server.exists())
 
-                server_state(remote_name, "Packaged Durable")
+                server_state(remote_title, durable=True, remote=True, total="2260")
                 packaged_smoke.verify_server_state(config_path, remote, server)
-                packaged_smoke.validate_server_verification(
-                    server, remote_name, {"order_ship_address": {"street": "Packaged Durable"}},
-                )
+                packaged_smoke.validate_server_verification(server, remote_title, {"set_index": 3, "reps": 8})
 
     def test_server_completion_rejects_changed_digest_and_equal_pid(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-server.") as raw_directory:
@@ -649,7 +669,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             }
             remote = directory / "remote.json"
             server = directory / "server.json"
-            packaged_smoke.write_json(remote, {"schema_version": 1, "customer_name": REMOTE_NAME})
+            packaged_smoke.write_json(remote, {"schema_version": 1, "remote_value": REMOTE_NAME})
             packaged_smoke.write_json(server, packaged_smoke.server_verification(REMOTE_NAME, packaged_smoke.SERVER_OFFLINE_WRITE))
             initial_path, resume_path = directory / "initial.json", directory / "resume.json"
             cell_path = directory / "cell.json"

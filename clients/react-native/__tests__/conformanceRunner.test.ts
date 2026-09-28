@@ -645,6 +645,53 @@ describe('PublicConformanceRunner call lifecycle', () => {
     }
   });
 
+  it('captures a current rejection in the wire shape and fails a legacy rejection', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091',
+      authToken: 'test-token',
+      appVersion: '1.0.0',
+    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      const stored = {
+        mutationID: 'mutation-1',
+        tableName: 'cf_items',
+        recordID: 'row-a',
+        status: 'rejected_terminal',
+        code: 'policy_rejected',
+        message: 'blocked',
+        serverRowJSON: null,
+        serverVersion: null,
+        createdAt: '2026-01-01T00:00:00.000000Z',
+        updatedAt: '2026-01-01T00:00:00.000000Z',
+      };
+      const wire = { ...stored, mutationJSON: '{"mutation_id":"mutation-1"}', rejectionJSON: '{"mutation_id":"mutation-1"}' };
+      const state = {
+        schema: null,
+        scope_states: [],
+        scope_rows: [],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        rejected_mutation_count: 1,
+        provenance_maintenance_work_cursor: '0',
+      };
+      mockNativeModule.inspectClientStateSnapshot
+        .mockResolvedValueOnce(snapshotResult(state, { rejected_mutations: [{ representation: 'current', ...wire }] }))
+        .mockResolvedValueOnce(snapshotResult(state, { rejected_mutations: [{ representation: 'legacy', ...stored }] }));
+      const capture = command('observer', 'capture', 'client-a', {
+        client_keys: ['client-a'],
+        sources: ['rejected-mutations'],
+      });
+
+      const captured = await runner.execute(capture);
+      expect(captured).toMatchObject({ kind: 'capture' });
+      expect((captured as { capture: { rejected_mutations: object[] } }).capture.rejected_mutations).toStrictEqual([wire]);
+      await expect(runner.execute(capture)).rejects.toMatchObject({ code: 'capture_inspection_failed' });
+    } finally {
+      await runner.close();
+    }
+  });
+
   it('fails a capture whose retained ledger exceeds the snapshot bound', async () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091',

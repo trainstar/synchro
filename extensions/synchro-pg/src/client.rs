@@ -87,9 +87,11 @@ pub(crate) fn load_client_connect_state(
 
     let rows = client
         .select(
-            "SELECT bucket_subs, scope_set_version, client_generation
+            "SELECT bucket_subs, scope_set_version, client_generation,
+                    is_active AND (generation_expires_at IS NULL OR generation_expires_at > now())
+                        AS current
              FROM sync_clients
-             WHERE user_id = $1 AND client_id = $2 AND is_active = true",
+             WHERE user_id = $1 AND client_id = $2",
             None,
             &[user_id.into(), client_id.into()],
         )
@@ -109,6 +111,11 @@ pub(crate) fn load_client_connect_state(
             .get_by_name::<i64, &str>("client_generation")
             .unwrap_or(None)
             .unwrap_or(1);
+        // A bound client that compaction deactivated or whose generation
+        // expired renews through connect, like push.
+        if row.get_by_name::<bool, &str>("current").unwrap_or(None) != Some(true) {
+            return Err(client_generation_expired_response(client_generation));
+        }
 
         Ok(ClientConnectState {
             bucket_subs,

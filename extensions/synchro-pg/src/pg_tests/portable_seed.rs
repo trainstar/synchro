@@ -492,12 +492,65 @@ fn test_private_scope_is_revocable_for_one_user() {
         .unwrap_or(false);
     assert!(held, "user does not hold its own private scope: {first}");
     let held_version = first["scope_set_version"].as_i64().expect("scope set version");
+    let record_id = "e5000000-0000-4000-8000-000000000001";
+    Spi::run_with_args(
+        "INSERT INTO test_orders (id, user_id, title) VALUES ($1::uuid, 'private-user', 'held')",
+        &[record_id.into()],
+    )
+    .unwrap();
+    insert_edge("test_orders", record_id, "user:private-user");
+    insert_changelog("user:private-user", "test_orders", record_id, 1);
 
     Spi::run_with_args(
         "SELECT synchro_revoke_user_scope($1, $2)",
         &["private-user".into(), "user:private-user".into()],
     )
     .unwrap();
+    Spi::run_with_args(
+        "SELECT synchro_grant_user_scope($1, $2)",
+        &["private-user".into(), "team:late-grant".into()],
+    )
+    .unwrap();
+
+    // Until the next connect, pull and rebuild serve the stored assignment:
+    // the revoked scope stays readable and the new grant is not served.
+    let pulled = pull_client(
+        "private-user",
+        "private-client",
+        held_version,
+        json!({
+            "user:private-user": scope_cursor_ref("private-user", "private-client", "user:private-user", 0)
+        }),
+        100,
+    );
+    assert!(pulled.get("error").is_none(), "{pulled}");
+    assert_eq!(pulled["scope_updates"], json!({ "add": [], "remove": [] }), "{pulled}");
+    let changes = pulled["changes"].as_array().expect("pull changes");
+    assert_eq!(changes.len(), 1, "{pulled}");
+    assert_eq!(changes[0]["scope"].as_str(), Some("user:private-user"));
+    assert_eq!(changes[0]["op"].as_str(), Some("upsert"));
+    assert_eq!(
+        changes[0]["pk"][field_id("test_orders", "id")].as_str(),
+        Some(record_id)
+    );
+    assert_eq!(
+        changes[0]["row"][field_id("test_orders", "title")].as_str(),
+        Some("held")
+    );
+    let rebuilt = rebuild_client("private-user", "private-client", "user:private-user", None, 100);
+    assert!(rebuilt.get("error").is_none(), "{rebuilt}");
+    let records = rebuilt["records"].as_array().expect("rebuild records");
+    assert_eq!(records.len(), 1, "{rebuilt}");
+    assert_eq!(
+        records[0]["pk"][field_id("test_orders", "id")].as_str(),
+        Some(record_id)
+    );
+    assert_eq!(
+        records[0]["row"][field_id("test_orders", "title")].as_str(),
+        Some("held")
+    );
+    let early = rebuild_client("private-user", "private-client", "team:late-grant", None, 100);
+    assert_eq!(early["error"]["code"].as_str(), Some("invalid_request"), "{early}");
 
     let revoked = connect_client(
         "private-user",

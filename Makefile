@@ -39,6 +39,8 @@
 	record-r1-benchmark \
 	test-r1-benchmark \
 	_run-r1-benchmark \
+	characterize-dataset \
+	test-conformance-dataset \
 	parse-testresult \
 	conformance-adapter-artifact \
 	conformance-seed-artifact \
@@ -56,6 +58,7 @@
 	test-release-artifacts \
 	test-release-publish \
 	test-server-consumer-helper \
+	test-consumer-server \
 	test-consumer-go \
 	lint-go \
 	lint-rn \
@@ -188,13 +191,18 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
-RN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
 RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
 RN_IOS_BUILD_ARGS ?=
 # AGP selects connected devices through ANDROID_SERIAL. Without one serial it
 # uses every online device, so a device gate requires exactly one serial.
 REQUIRE_ONE_ANDROID_SERIAL = case "$(KOTLIN_ANDROID_SERIAL)" in ''|*[[:space:],]*) echo "Set KOTLIN_ANDROID_SERIAL to exactly one booted Android device." >&2; exit 1 ;; esac
 RN_ANDROID_DETOX_CONFIG ?= android.emu.release
+# One Maven repository receives the Kotlin SDK publication and serves every React Native Android
+# build, including the Detox APK builds. A stale same-version SDK in the default Maven local
+# repository then cannot enter a build. It is repository configuration, not a test selector.
+SYNCHRO_MAVEN_REPO ?= $(CURDIR)/clients/kotlin/build/maven-repository
+override SYNCHRO_MAVEN_REPO := $(abspath $(SYNCHRO_MAVEN_REPO))
+export SYNCHRO_MAVEN_REPO
 PGRX_PG ?= pg18
 PGRX_PG_CONFIG ?= $(shell awk -F'"' '/^$(PGRX_PG)[[:space:]]*=/ { print $$2 }' $(HOME)/.pgrx/config.toml)
 PGRX_PG_BIN_DIR ?= $(dir $(PGRX_PG_CONFIG))
@@ -214,6 +222,7 @@ CONFORMANCE_ADAPTER_ARTIFACT_DIR ?= $(CURDIR)/dist/conformance/synchrod-pg-adapt
 CONFORMANCE_SEED_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-seed
 CONFORMANCE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18
 CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT ?= $(CURDIR)/dist/conformance/synchro-pg-pg18-update-baseline
+CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS ?= $(CURDIR)/dist/conformance/synchro-pg-pg18-update-origins
 ADAPTER_TEST_URL ?=
 REPLICATION_URL = $(ADAPTER_TEST_URL)
 override R1_BENCHMARK_BASELINE := $(CURDIR)/conformance/blackbox/integration/testdata/r1-benchmark-baseline.json
@@ -255,6 +264,8 @@ RN_PINNED_SEED ?= clients/react-native/example/seed.db
 RN_CONSUMER_SEED ?= clients/react-native/example/verification/seed.db
 RN_ANDROID_SEED_ASSET ?= clients/react-native/example/android/app/src/main/assets/seed.db
 CLIENT_INTEGRATION_SEED ?= $(CURDIR)/.ignore/client-integration/seed.db
+# CLIENT_DATASET=1 also prepares the synthetic training dataset (conformance/dataset).
+CLIENT_DATASET ?= 0
 REFRESH_RN_SEED_OUTPUT ?= $(CURDIR)/clients/react-native/example/seed.db
 # A required gate runs its declared selection. A result stream cannot show that
 # a caller selector omitted tests, so a required gate rejects a changed selector.
@@ -360,6 +371,7 @@ help:
 	@echo "  test-blackbox-mutation-control - Run one structured real mutation control"
 	@echo "  record-r1-benchmark   - Record one R1 benchmark candidate"
 	@echo "  test-r1-benchmark     - Compare R1 benchmark results with the tracked baseline"
+	@echo "  characterize-dataset  - Record complete-work samples for DATASET_SEED and DATASET_SIZE"
 	@echo "  release-stage-server  - Build Linux x64 server release components"
 	@echo "  release-stage-packages - Build signed Maven and npm release components"
 	@echo "  release-stage         - Assemble and seal already built release components"
@@ -367,6 +379,7 @@ help:
 	@echo "  release-consumer-artifacts - Prepare sealed payloads for package consumers"
 	@echo "  test-release-publish  - Test publication identity and recovery state"
 	@echo "  test-server-consumer-helper - Run server packaged-consumer helper unit tests"
+	@echo "  test-consumer-server  - Run the SUP-PG-LINUX-X64-001 lifecycle with locally built server artifacts"
 	@echo "  test-consumer-go      - Resolve and compile the public Go module consumer"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
@@ -407,7 +420,7 @@ help:
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
 	@echo "  test-rn-ios-parity     - Compile the iOS implementation against the generated TurboModule spec"
 	@echo "  test-rn-native-parity  - Compile both native implementations against one TurboModule spec"
-	@echo "  test-rn-bridge-transactions - Run the native bridge transaction tests on iOS and one Android device"
+	@echo "  test-rn-bridge-transactions - Run the native bridge transaction tests on iOS and KOTLIN_ANDROID_SERIAL"
 	@echo "  build-rn-bridge-transactions-android - Build the Android bridge transaction test APK without a device"
 	@echo "  build-rn-bridge-transactions-ios - Build the iOS bridge transaction test target for the host simulator architecture"
 	@echo "  test-rn-warm-connect-control - Run the exact React Native warm-connect negative control"
@@ -437,7 +450,7 @@ help:
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
 	@echo "  release-pods-check    - Validate Apple package metadata surfaces"
-	@echo "  release-kotlin-local  - Publish Kotlin SDK to mavenLocal"
+	@echo "  release-kotlin-local  - Publish Kotlin SDK to SYNCHRO_MAVEN_REPO"
 	@echo "  release-npm-dry-run   - Dry-run npm pack for the React Native package"
 	@echo "  client-consumer-artifacts - Stage Apple, Kotlin, and React Native consumer artifacts"
 	@echo "  local-consumer-artifacts - Build local-consumer artifacts for RN, Kotlin, and Apple"
@@ -552,6 +565,9 @@ test-conformance-faults:
 test-invariants:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./invariants -count=1
 
+test-conformance-dataset:
+	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./dataset -count=1
+
 test-conformance-invariants: test-invariants
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -- go test -json ./soak -count=1
 
@@ -614,7 +630,7 @@ test-blackbox-mutation-control:
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
 		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm|TestRealRegistryRejectsDeferrablePrimaryKey|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
 		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
-		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline) ;; \
+		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline|TestRealTransactionMembershipUsesFinalProjectionAcrossActivations) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac; \
 	case "$$assertion" in assertion|assertion\#[0-9][0-9]) ;; *) echo "MUTATION_CONTROL_TEST does not name a supported assertion" >&2; exit 1 ;; esac; \
@@ -660,7 +676,7 @@ _run-r1-benchmark:
 		mkdir "$$secrets_dir"; \
 		umask 077; \
 		for name in admin adapter observer worker operator jwt; do openssl rand -hex 32 > "$$secrets_dir/$$name-password"; done; \
-		pg_config="$$(while IFS=' =' read -r key value; do test "$$key" = pg18 || continue; value="$${value#\"}"; value="$${value%\"}"; printf '%s\n' "$$value"; break; done < "$$HOME/.pgrx/config.toml")"; \
+		pg_config="$(PGRX_PG_CONFIG)"; \
 		test -x "$$pg_config" || { echo "pgrx PostgreSQL 18 configuration is unavailable" >&2; exit 1; }; \
 		pg_bindir="$$(dirname "$$pg_config")"; \
 		$(MAKE) --no-print-directory conformance-adapter-artifact CONFORMANCE_ADAPTER_ARTIFACT_DIR="$$adapter_bundle"; \
@@ -691,6 +707,22 @@ _run-r1-benchmark:
 			-expect target_pass \
 			-- go test -tags r1benchmark -json ./blackbox/integration -count=1 -timeout=20m \
 			-run '^TestRealR1PerformanceBenchmark$$' -args --provision --install
+
+# Characterize complete correct work for one seeded dataset. The run records
+# samples and has no numerical pass or fail rule (D-06). It uses the black-box
+# SYNCHRO_CONFORMANCE_* environment of test-blackbox.
+characterize-dataset: conformance-mod-download
+	@case "$(DATASET_SEED)" in ''|*[!0-9]*) echo "DATASET_SEED must be an unsigned integer" >&2; exit 1 ;; esac
+	@case "$(DATASET_SIZE)" in s|m|l) ;; *) echo "DATASET_SIZE must be s, m, or l" >&2; exit 1 ;; esac
+	@test -n "$(DATASET_CHARACTERIZATION_RESULT)" || { echo "DATASET_CHARACTERIZATION_RESULT is required" >&2; exit 1; }
+	@result="$(abspath $(DATASET_CHARACTERIZATION_RESULT))"; repo="$(CURDIR)"; \
+		case "$$result" in "$$repo"|"$$repo"/*) echo "DATASET_CHARACTERIZATION_RESULT must be outside the repository" >&2; exit 1 ;; esac
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "dataset characterization requires a clean worktree" >&2; exit 1; }
+	cd conformance && DATASET_REVISION="$$(git rev-parse --verify HEAD)" DATASET_SEED="$(DATASET_SEED)" DATASET_SIZE="$(DATASET_SIZE)" \
+		DATASET_CHARACTERIZATION_RESULT="$(abspath $(DATASET_CHARACTERIZATION_RESULT))" \
+		GOFLAGS= GOWORK=off go run ./cmd/testresult exact -test TestRealDatasetCharacterization -expect target_pass \
+		-- go test -tags datasetcharacterization -json ./blackbox/integration -count=1 -timeout=180m \
+		-run '^TestRealDatasetCharacterization$$' -args --provision --install
 
 parse-testresult:
 	@test -n "$(TESTRESULT_TEST_NAME)" || { echo "TESTRESULT_TEST_NAME is required" >&2; exit 1; }
@@ -817,28 +849,45 @@ conformance-pg18-extension-artifact conformance-pg18-extension-test-artifact:
 		rmdir "$$lock"; \
 		trap - EXIT HUP INT TERM
 
+# The baseline is the first update origin. Each later released origin is a
+# pinned published bundle in CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS/<version>.
 conformance-update-baseline-extension-artifact:
 	@set -eu; \
 		export LC_ALL=C; \
 		final="$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)"; \
+		origins="$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"; \
 		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
+		test ! -e "$$origins" || { echo "$$origins already exists" >&2; exit 1; }; \
 		artifact="$$(cd api/go && GOWORK=off go run ./cmd/synchro-version update-baseline-artifact)"; \
 		set -- $$artifact; \
 		test "$$#" -eq 2 || { echo "update baseline artifact must have one URL and one SHA-256 digest" >&2; exit 1; }; \
-		url="$$1"; \
-		digest="$$2"; \
+		baseline_url="$$1"; \
+		baseline_digest="$$2"; \
+		later="$$(python3 scripts/update-origins.py extensions/synchro-pg/update-origins.json extensions/synchro-pg/update-baseline.json)"; \
 		work="$$final.tmp.$$$$"; \
 		mkdir -p "$$(dirname "$$final")"; \
 		cleanup() { rm -rf "$$work"; }; \
 		trap cleanup EXIT HUP INT TERM; \
-		mkdir "$$work" "$$work/extract"; \
-		curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$$work/archive.tar.gz" "$$url"; \
-		test "$$(shasum -a 256 "$$work/archive.tar.gz" | cut -d ' ' -f 1)" = "$$digest" || { echo "update baseline archive SHA-256 differs from the pinned digest" >&2; exit 1; }; \
-		tar -xzf "$$work/archive.tar.gz" -C "$$work/extract"; \
-		manifest="$$work/extract/extension/artifact-manifest.json"; \
-		test -f "$$manifest" && test -f "$$manifest.sha256" || { echo "update baseline archive omitted the extension manifest or its digest" >&2; exit 1; }; \
-		test "$$(shasum -a 256 "$$manifest" | cut -d ' ' -f 1)" = "$$(cat "$$manifest.sha256")" || { echo "update baseline extension manifest differs from its digest" >&2; exit 1; }; \
-		mv "$$work/extract/extension" "$$final"; \
+		mkdir "$$work" "$$work/origins"; \
+		fetch() { \
+			mkdir "$$work/extract"; \
+			curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --output "$$work/archive.tar.gz" "$$1"; \
+			test "$$(shasum -a 256 "$$work/archive.tar.gz" | cut -d ' ' -f 1)" = "$$2" || { echo "update origin archive SHA-256 differs from the pinned digest" >&2; exit 1; }; \
+			tar -xzf "$$work/archive.tar.gz" -C "$$work/extract"; \
+			manifest="$$work/extract/extension/artifact-manifest.json"; \
+			test -f "$$manifest" && test -f "$$manifest.sha256" || { echo "update origin archive omitted the extension manifest or its digest" >&2; exit 1; }; \
+			test "$$(shasum -a 256 "$$manifest" | cut -d ' ' -f 1)" = "$$(cat "$$manifest.sha256")" || { echo "update origin extension manifest differs from its digest" >&2; exit 1; }; \
+			mv "$$work/extract/extension" "$$3"; \
+			rm -rf "$$work/extract" "$$work/archive.tar.gz"; \
+		}; \
+		fetch "$$baseline_url" "$$baseline_digest" "$$work/baseline"; \
+		printf '%s\n' "$$later" | while read -r version url digest; do \
+			test -n "$$version" || continue; \
+			fetch "$$url" "$$digest" "$$work/origins/$$version"; \
+		done; \
+		mkdir -p "$$(dirname "$$origins")"; \
+		mv "$$work/origins" "$$origins"; \
+		mv "$$work/baseline" "$$final"; \
 		rm -rf "$$work"; \
 		trap - EXIT HUP INT TERM
 
@@ -847,7 +896,7 @@ test-blackbox: conformance-mod-download test-blackbox-harness test-blackbox-comp
 	cd conformance && GOFLAGS= GOWORK=off SOAK_SEED="$(SOAK_SEED)" SOAK_OPERATIONS="$(SOAK_OPERATIONS)" SOAK_ARTIFACT_DIR="$(abspath $(SOAK_ARTIFACT_DIR))" SOAK_REPLAY_JOURNAL= \
 		go run ./cmd/testresult suite -- go test $(GO_TEST_ARGS) -json ./blackbox/integration -count=$(BLACKBOX_TEST_COUNT) -timeout=$(BLACKBOX_TIMEOUT) -args --provision --install
 
-test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
+test-conformance: conformance-mod-download test-conformance-testresult test-conformance-imports test-conformance-contract test-conformance-drivers test-conformance-scenarios test-conformance-dataset check-conformance-catalog test-vectors test-conformance-faults test-invariants test-conformance-invariants test-blackbox-harness
 
 release-stage-server: version-check
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(CURRENT_VERSION)" || { echo "VERSION=$(CURRENT_VERSION) is required" >&2; exit 1; }
@@ -992,6 +1041,24 @@ test-release-publish: test-python-runner
 
 test-server-consumer-helper:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
+
+# The same server lifecycle as release-run-support-cell SUP-PG-LINUX-X64-001, with
+# locally built adapter, seed, and provisioner and the conformance extension artifact.
+test-consumer-server: build-local-postgres
+	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact
+	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in PGRX_PG_BIN_DIR" >&2; exit 1; }
+	@set -eu; \
+		mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)" "$(PACKAGED_SMOKE_CELL_DIR)"; \
+		work="$$(mktemp -d "$(PACKAGED_SMOKE_TMP_ROOT)/synchro-server-artifacts.XXXXXX")"; \
+		trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
+		python3 scripts/release-artifacts.py archive-extension --source "$(CONFORMANCE_EXTENSION_ARTIFACT)" --output "$$work/extension.tar.gz"; \
+		$(MAKE) --no-print-directory build BINARY="$$work/synchrod-pg" build-seed SEED_BINARY="$$work/synchro-seed"; \
+		result="$(PACKAGED_SMOKE_CELL_DIR)/SUP-PG-LINUX-X64-001.json"; \
+		python3 verification/packaged_smoke.py begin-cell --repo-root "$(CURDIR)" --cell SUP-PG-LINUX-X64-001 --output "$$result"; \
+		hashes="$$(shasum -a 256 "$$work/extension.tar.gz" "$$work/synchrod-pg" "$$work/synchro-seed" | cut -d ' ' -f 1 | tr '\n' ' ')"; \
+		sh verification/consumers/server/test-consumer.sh "$(PGRX_PG_BIN_DIR)" "$$work/extension.tar.gz" \
+			"$(abspath $(LOCAL_POSTGRES_BINARY))" "$$work/synchrod-pg" "$$work/synchro-seed" \
+			"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" SUP-PG-LINUX-X64-001 "$$result" "$$hashes"
 
 .PHONY: server-consumer-smoke-phase
 server-consumer-smoke-phase:
@@ -1342,7 +1409,7 @@ test-rn-unit:
 test-rn-android-parity: rn-seed-asset release-kotlin-local
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
 
 test-rn-ios-parity: rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && xcodebuild -quiet -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/parity ONLY_ACTIVE_ARCH=YES clean build
@@ -1370,27 +1437,23 @@ test-rn-bridge-transactions-ios: rn-ios-pods
 build-rn-bridge-transactions-ios: rn-ios-pods
 	cd clients/react-native/example && xcodebuild build-for-testing -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/bridge-transactions ARCHS="$$(uname -m)" $(RN_IOS_BUILD_ARGS)
 
-# Pass GRADLE_TEST_ARGS='--rerun-tasks -Dmaven.repo.local=<owned path>' so release-kotlin-local
-# publishes and this build resolves the Kotlin SDK in one owned Maven local repository.
-# AGP selects connected devices only from ANDROID_SERIAL or --serial. It splits ANDROID_SERIAL at commas.
 test-rn-bridge-transactions-android: release-kotlin-local
+	$(call declared_selection,GRADLE_TEST_ARGS)
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	@test -n "$(RN_ANDROID_SERIAL)" || (echo "Set RN_ANDROID_SERIAL to one booted Android device."; exit 1)
-	@case "$(RN_ANDROID_SERIAL)" in *[,[:space:]]*) echo "Set RN_ANDROID_SERIAL to exactly one device serial."; exit 1;; esac
+	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	rm -rf clients/react-native/android/build/outputs/androidTest-results/connected
 	@status=0; \
-		(cd clients/react-native/example/android && ANDROID_SERIAL="$(RN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
+		(cd clients/react-native/example/android && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/react-native/android/build/outputs/androidTest-results/connected) || status=$$?; \
 		exit "$$status"
 
-# Compiles the bridge test APK only. It installs and runs nothing. Pass the same owned
-# -Dmaven.repo.local through GRADLE_TEST_ARGS as for test-rn-bridge-transactions-android.
+# Compiles the bridge test APK only. It installs and runs nothing.
 build-rn-bridge-transactions-android: release-kotlin-local
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	@test -d clients/react-native/example/node_modules/@react-native/gradle-plugin || (echo "React Native dependencies are missing. Run yarn install --immutable in clients/react-native."; exit 1)
-	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:assembleDebugAndroidTest
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:assembleDebugAndroidTest
 
 test-rn-warm-connect-control: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
@@ -1901,8 +1964,8 @@ release-pods-check: version-check
 release-kotlin-local: version-check
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew $(GRADLE_TEST_ARGS) :synchro:publishToMavenLocal
-	@echo "Published to mavenLocal."
+	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :synchro:publishToMavenLocal
+	@echo "Published to $(SYNCHRO_MAVEN_REPO)."
 
 release-npm-dry-run: version-check
 	cd clients/react-native && corepack enable
@@ -2096,7 +2159,7 @@ test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-
 
 test-client-platforms:
 	@test -n "$(SUPPORT_CELL_ID)" || (echo "SUPPORT_CELL_ID is required" >&2; exit 1)
-	@case "$(SUPPORT_CELL_ID)" in SUP-PG-*) echo "$(SUPPORT_CELL_ID) is a server cell. Run make release-run-support-cell SUPPORT_CELL_ID=$(SUPPORT_CELL_ID)." >&2; exit 1 ;; esac
+	@case "$(SUPPORT_CELL_ID)" in SUP-PG-*) echo "$(SUPPORT_CELL_ID) is a server cell. Run make test-consumer-server or make release-run-support-cell SUPPORT_CELL_ID=$(SUPPORT_CELL_ID)." >&2; exit 1 ;; esac
 	@mkdir -p "$(PACKAGED_SMOKE_CELL_DIR)" "$(PACKAGED_SMOKE_TMP_ROOT)"
 	@python3 verification/packaged_smoke.py begin-cell \
 		--repo-root "$(CURDIR)" \
@@ -2155,18 +2218,31 @@ generate-pg-sql:
 	perl -0pi -e 's/\n+\z/\n/' extensions/synchro-pg/sql/synchro_pg--$(CURRENT_VERSION).sql
 
 # A released update script is immutable. Its bytes must equal its content at
-# the tag of its target version. The check fails when no released script is found.
+# the tag of its target version. The update baseline and the update origins
+# record every released update target, so a missing release tag fails. Only the
+# current unreleased version may lack a tag.
 check-released-update-scripts:
 	@set -eu; \
+		origins="$$(python3 scripts/update-origins.py extensions/synchro-pg/update-origins.json extensions/synchro-pg/update-baseline.json)"; \
+		origins="$$(printf '%s\n' "$$origins" | cut -d ' ' -f 1)"; \
+		released=" $$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' extensions/synchro-pg/update-baseline.json) $$(echo $$origins) "; \
 		checked=0; \
 		for script in extensions/synchro-pg/sql/synchro_pg--*--*.sql; do \
 			target="$${script##*--}"; target="$${target%.sql}"; \
-			git rev-parse -q --verify "refs/tags/v$$target^{commit}" >/dev/null || continue; \
+			case "$$released" in \
+			*" $$target "*) ;; \
+			*) test "$$target" = "$(CURRENT_VERSION)" || { echo "update script targets a version that is neither released nor current: $$script" >&2; exit 1; }; continue ;; \
+			esac; \
+			git rev-parse -q --verify "refs/tags/v$$target^{commit}" >/dev/null || { echo "release tag v$$target is missing. Fetch the release tags." >&2; exit 1; }; \
 			git cat-file -e "v$$target:$$script" 2>/dev/null || { echo "released update script is absent at v$$target: $$script" >&2; exit 1; }; \
 			git show "v$$target:$$script" | cmp -s - "$$script" || { echo "released update script differs from v$$target: $$script" >&2; exit 1; }; \
 			checked=$$((checked + 1)); \
 		done; \
-		test "$$checked" -gt 0 || { echo "no released update script was checked. Fetch the release tags." >&2; exit 1; }; \
+		for version in $$origins; do \
+			set -- extensions/synchro-pg/sql/synchro_pg--*--"$$version".sql; \
+			test -f "$$1" || { echo "released update origin $$version has no update script" >&2; exit 1; }; \
+		done; \
+		test "$$checked" -gt 0 || { echo "no released update script was checked" >&2; exit 1; }; \
 		echo "$$checked released update scripts match their release tags"
 
 check-pg-sql:
@@ -2390,7 +2466,7 @@ synchrod-pg-test-start synchrod-pg-test-serve: build build-seed verify-rn-seed
 		status=$$?; test "$$status" -eq 3 || exit "$$status"; \
 	fi; \
 	echo "Preparing client integration database..."; \
-	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root ..); \
+	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root .. $(if $(filter 1,$(CLIENT_DATASET)),--dataset)); \
 	if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
 		seed_output="$(REFRESH_RN_SEED_OUTPUT)"; \
 		echo "Refreshing client seed database..."; \

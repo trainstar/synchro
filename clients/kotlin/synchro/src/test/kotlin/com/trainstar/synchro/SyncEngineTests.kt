@@ -2839,6 +2839,11 @@ class SyncEngineTests {
         var pushCallCount = 0
         var connectCallCount = 0
         var shouldFailNextPush = false
+        // Controlled clocks keep the persisted backoff deadline out of wall-clock time.
+        val firstTiming = BlockingRetryTiming(1_000L)
+        val restartTiming = BlockingRetryTiming(1_000L)
+
+        lateinit var persistedBackoff: DurableBackoffRecord
 
         val handler: (RecordedRequest) -> MockResponse = { request ->
             val path = request.path ?: ""
@@ -2877,6 +2882,7 @@ class SyncEngineTests {
             dbName = dbName,
             clientID = clientID,
             maxRetryAttempts = 0,
+            retryTiming = firstTiming,
             handler = handler
         )
         installTestSchema(
@@ -2903,6 +2909,8 @@ class SyncEngineTests {
             assertTrue(tracker.hasPendingChanges())
             val rejectedBeforeRestart = db1.readTransaction { conn -> SynchroMeta.listRejectedMutations(conn) }
             assertTrue(rejectedBeforeRestart.isEmpty())
+            persistedBackoff = requireNotNull(DurableBackoffStore.load(db1))
+            assertEquals(RetryOperation.PUSHING, persistedBackoff.resumeState)
         } finally {
             engine1.stop()
             db1.close()
@@ -2912,6 +2920,7 @@ class SyncEngineTests {
             dbName = dbName,
             clientID = clientID,
             maxRetryAttempts = 0,
+            retryTiming = restartTiming,
             handler = handler
         )
         installTestSchema(
@@ -2921,9 +2930,13 @@ class SyncEngineTests {
             tables = listOf(ordersLocalSchemaTable(includeNotes = false))
         )
         try {
-            val initialSyncCompleted = CountDownLatch(1)
-            engine2.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.countDown() }))
-            assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
+            val initialSyncCompleted = CompletableDeferred<Unit>()
+            engine2.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.complete(Unit) }))
+            // The restarted engine waits for the persisted deadline before it retries the push.
+            assertEquals(persistedBackoff.nextRetryAtMs, restartTiming.awaitNextSleep(2, TimeUnit.SECONDS))
+            assertEquals(1, pushCallCount)
+            restartTiming.releaseAt(persistedBackoff.nextRetryAtMs)
+            initialSyncCompleted.await()
 
             val tracker = ChangeTracker(db2)
             assertFalse(tracker.hasPendingChanges())

@@ -8,7 +8,7 @@ private struct RebuildReceiptGroupKey: Hashable {
 
 public final class SynchroClient: @unchecked Sendable {
     private let config: SynchroConfig
-    private let database: SynchroDatabase
+    let database: SynchroDatabase
     private let httpClient: HttpClient
     private let schemaManager: SchemaManager
     private let changeTracker: ChangeTracker
@@ -171,28 +171,78 @@ public final class SynchroClient: @unchecked Sendable {
         syncEngine.getSyncStatus()
     }
 
-    public func inspectPendingMutations() throws -> [RetainedMutationInspection] {
+    /// Returns the unresolved queue records.
+    ///
+    /// Deprecated: use `inspectRetainedMutationRecords()`. This method keeps
+    /// its published behavior. It throws `SynchroError.invalidResponse` when the
+    /// queue holds a legacy import, because a legacy record has no current binding.
+    public func inspectPendingMutations() throws -> [PendingMutationInspection] {
         try changeTracker.inspectPendingMutations()
     }
 
-    public func inspectRetainedMutations() throws -> [RetainedMutationInspection] {
+    /// Returns every retained queue record, including local terminal states.
+    ///
+    /// Deprecated: use `inspectRetainedMutationRecords()`. This method keeps
+    /// its published behavior. It throws `SynchroError.invalidResponse` when the
+    /// queue holds a legacy import, because a legacy record has no current binding.
+    public func inspectRetainedMutations() throws -> [PendingMutationInspection] {
         try changeTracker.inspectRetainedMutations()
     }
 
+    /// Returns every retained queue record in its stored representation.
+    /// A legacy import is a `.legacy` record with only its stored fields.
+    public func inspectRetainedMutationRecords() throws -> [RetainedMutationInspection] {
+        try changeTracker.inspectRetainedMutationRecords()
+    }
+
+    /// Returns the retained terminal outcomes.
+    ///
+    /// Deprecated: use `inspectRejectedMutationRecords()`. This method keeps
+    /// its published behavior. It throws `SynchroError.invalidResponse` when a
+    /// legacy rejection is present, because a legacy rejection has no exact JSON.
     public func inspectRejectedMutations() throws -> [RejectedMutationInspection] {
+        try inspectRejectedMutationRecords().map { record in
+            guard let rejection = record.current else {
+                throw SynchroError.invalidResponse(message: "retained rejection has no complete durable mutation")
+            }
+            return rejection
+        }
+    }
+
+    /// Returns the retained terminal outcomes in their stored representation.
+    /// A legacy rejection is a `.legacy` record with only its stored fields.
+    public func inspectRejectedMutationRecords() throws -> [RetainedRejectionInspection] {
         try database.readTransaction(Self.inspectRejectedMutations)
     }
 
-    private static func inspectRejectedMutations(_ db: GRDB.Database) throws -> [RejectedMutationInspection] {
+    private static func inspectRejectedMutations(_ db: GRDB.Database) throws -> [RetainedRejectionInspection] {
         try SynchroMeta.listRejectedMutations(db).map { rejected in
             guard let status = MutationStatus(rawValue: rejected.status),
                   status == .conflict || status == .rejectedTerminal,
-                  let code = MutationRejectionCode(rawValue: rejected.code),
+                  let code = MutationRejectionCode(rawValue: rejected.code) else {
+                throw SynchroError.invalidResponse(message: "retained rejection is invalid")
+            }
+            // A rejection stored before the mutation ledger has no exact JSON and no ledger row.
+            if rejected.mutationJSON == nil, rejected.rejectedJSON == nil, rejected.localOrder == nil {
+                return .legacy(LegacyRejectionInspection(
+                    mutationID: rejected.mutationID,
+                    tableName: rejected.tableName,
+                    recordID: rejected.recordID,
+                    status: status,
+                    code: code,
+                    message: rejected.message,
+                    serverRowJSON: rejected.serverRowJSON,
+                    serverVersion: rejected.serverVersion,
+                    createdAt: rejected.createdAt,
+                    updatedAt: rejected.updatedAt
+                ))
+            }
+            guard let localOrder = rejected.localOrder,
                   let mutationJSON = rejected.mutationJSON,
                   let rejectionJSON = rejected.rejectedJSON,
                   let mutationData = mutationJSON.data(using: .utf8),
                   let rejectionData = rejectionJSON.data(using: .utf8) else {
-                throw SynchroError.invalidResponse(message: "retained rejection is invalid")
+                throw SynchroError.invalidResponse(message: "retained rejection has no complete durable mutation")
             }
             let decoder = JSONDecoder.synchroDecoder()
             let mutation: Mutation
@@ -211,9 +261,9 @@ public final class SynchroClient: @unchecked Sendable {
                   rejection.code == code else {
                 throw SynchroError.invalidResponse(message: "retained rejection identity is inconsistent")
             }
-            return RejectedMutationInspection(
+            return .current(RejectedMutationInspection(
                 mutationID: rejected.mutationID,
-                localOrder: rejected.localOrder,
+                localOrder: localOrder,
                 tableName: rejected.tableName,
                 recordID: rejected.recordID,
                 status: status,
@@ -227,7 +277,7 @@ public final class SynchroClient: @unchecked Sendable {
                 rejection: rejection,
                 createdAt: rejected.createdAt,
                 updatedAt: rejected.updatedAt
-            )
+            ))
         }
     }
 

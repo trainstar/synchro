@@ -1,7 +1,7 @@
 package com.trainstar.synchro.inspection
 
-import com.trainstar.synchro.RejectedMutationInspection
 import com.trainstar.synchro.RetainedMutationInspection
+import com.trainstar.synchro.RetainedRejectionInspection
 import com.trainstar.synchro.SchemaRef
 import com.trainstar.synchro.SyncFailure
 
@@ -74,7 +74,7 @@ data class ClientStateSnapshotInspection(
     val capture: ClientStateCaptureInspection,
     val pendingChangeCount: Int,
     val retainedMutations: List<RetainedMutationInspection>?,
-    val rejectedMutations: List<RejectedMutationInspection>?,
+    val rejectedMutations: List<RetainedRejectionInspection>?,
     val blockingFailure: SyncFailure?,
 )
 

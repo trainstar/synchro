@@ -54,7 +54,9 @@ export const mockNativeModule: Record<string, jest.Mock> = {
   ),
   inspectPendingMutations: jest.fn().mockResolvedValue('[]'),
   inspectRetainedMutations: jest.fn().mockResolvedValue('[]'),
+  inspectRetainedMutationRecords: jest.fn().mockResolvedValue('[]'),
   inspectRejectedMutations: jest.fn().mockResolvedValue('[]'),
+  inspectRejectedMutationRecords: jest.fn().mockResolvedValue('[]'),
   inspectClientStateSnapshot: jest.fn().mockResolvedValue({
     inspection:
       '{"client_state":{"schema":null,"scope_states":[],"scope_rows":[],"rebuild_attempts":[],"application_row_count":0,"mutation_ledger_count":0,"mutation_outcome_count":0,"sealed_batch_count":0,"rejected_mutation_count":0,"scope_state_count":0,"scope_row_count":0,"provenance_count":0,"row_metadata_count":0,"rebuild_attempt_count":0,"rebuild_receipt_count":0,"provenance_maintenance_work_cursor":"0"},"retained_mutations":[],"rejected_mutations":[]}',

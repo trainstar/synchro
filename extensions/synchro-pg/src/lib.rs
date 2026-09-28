@@ -1100,6 +1100,7 @@ CREATE TABLE IF NOT EXISTS sync_wal_transactions (
     commit_timestamp TIMESTAMPTZ NOT NULL,
     materialized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     replay_count BIGINT NOT NULL DEFAULT 0 CHECK (replay_count >= 0),
+    content_hash_format SMALLINT NOT NULL CHECK (content_hash_format IN (1, 2)),
     PRIMARY KEY (stream_generation, commit_lsn),
     UNIQUE (stream_generation, end_lsn),
     CHECK (end_lsn >= commit_lsn)
@@ -3341,10 +3342,10 @@ mod tests {
                 "INSERT INTO sync_wal_transactions (
                      stream_generation, commit_lsn, end_lsn, source_xid,
                      registry_generation, event_count, effect_count, content_hash,
-                     commit_timestamp
+                     content_hash_format, commit_timestamp
                  ) VALUES (
                      $1, $2::pg_lsn, $2::pg_lsn, $3::xid,
-                     $4, 1, 1, decode(repeat('00', 32), 'hex'), now()
+                     $4, 1, 1, decode(repeat('00', 32), 'hex'), 2, now()
                  )",
                 None,
                 &[

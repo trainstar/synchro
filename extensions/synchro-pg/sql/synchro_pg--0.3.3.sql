@@ -1071,6 +1071,7 @@ CREATE TABLE IF NOT EXISTS sync_wal_transactions (
     commit_timestamp TIMESTAMPTZ NOT NULL,
     materialized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     replay_count BIGINT NOT NULL DEFAULT 0 CHECK (replay_count >= 0),
+    content_hash_format SMALLINT NOT NULL CHECK (content_hash_format IN (1, 2)),
     PRIMARY KEY (stream_generation, commit_lsn),
     UNIQUE (stream_generation, end_lsn),
     CHECK (end_lsn >= commit_lsn)
@@ -1997,7 +1998,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_stream_reset_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:131
+-- synchro-pg/src/client.rs:138
 -- synchro_pg::client::synchro_connect
 CREATE  FUNCTION "synchro_connect"(
 	"p_user_id" TEXT, /* &str */
@@ -2358,7 +2359,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:760
+-- synchro-pg/src/bgworker.rs:770
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2464,7 +2465,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1934
+-- synchro-pg/src/lib.rs:1935
 -- finalize
 
 DO $roles$

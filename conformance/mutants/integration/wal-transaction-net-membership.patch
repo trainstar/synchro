@@ -1,0 +1,69 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+index 505d57a..7ddf9fd 100644
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -3511,8 +3511,7 @@ fn materialize_transaction(
+         })
+         .collect();
+     let mut active_generation = generation;
+-    let mut effect_bases = HashMap::new();
+-    let mut segments = Vec::with_capacity(applicable_segments.len());
++    let mut effect_count = 0i64;
+     for (segment, applicable) in applicable_segments.iter().enumerate() {
+         let registry = &registries[segment];
+         if let Some(group) = segment.checked_sub(1).map(|group| &groups[group]) {
+@@ -3531,15 +3530,6 @@ fn materialize_transaction(
+             registry,
+             applicable,
+         )?;
+-        if segment + 1 < registries.len() {
+-            align_edges_before_activation(
+-                client,
+-                transaction,
+-                registry,
+-                &persisted.direct_impacts,
+-                &mut effect_bases,
+-            )?;
+-        }
+         // A relation that a later generation removes has no final projection.
+         persisted.direct_impacts.retain_mut(|impact| {
+             let relation_id = registry[impact.registration_index].relation_id.as_str();
+@@ -3551,23 +3541,22 @@ fn materialize_transaction(
+                 None => false,
+             }
+         });
+-        segments.push((segment_dependencies[segment].as_slice(), persisted));
++        let impacts = collect_membership_impacts(
++            client,
++            projection_target,
++            transaction,
++            evaluation_registry,
++            vec![(segment_dependencies[segment].as_slice(), persisted)],
++        )?;
++        effect_count += materialize_impacts(
++            client,
++            projection_target,
++            transaction,
++            evaluation_registry,
++            impacts,
++            &HashMap::new(),
++        )?;
+     }
+-    let impacts = collect_membership_impacts(
+-        client,
+-        projection_target,
+-        transaction,
+-        evaluation_registry,
+-        segments,
+-    )?;
+-    let effect_count = materialize_impacts(
+-        client,
+-        projection_target,
+-        transaction,
+-        evaluation_registry,
+-        impacts,
+-        &effect_bases,
+-    )?;
+ 
+     client
+         .update(

@@ -33,6 +33,8 @@ export type {
   LegacyMutationInspection,
   RetainedMutationInspection,
   RejectedMutationInspection,
+  LegacyRejectionInspection,
+  RetainedRejectionInspection,
   SchemaAction,
   SyncSchemaEvent,
   SyncMutationEvent,

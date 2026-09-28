@@ -2979,25 +2979,33 @@ fn mark_generation_validated(
     Ok(())
 }
 
-/// Preserve the activation when a replacement slot can start after this transaction commits.
+/// Queue the activation while no slot is bound and report whether it was queued.
+/// The initial slot binding replays each queued request. A slot can start
+/// before this transaction commits, so a direct message would reach that slot
+/// as a second activation of the same generation.
 fn queue_registry_activation_if_unbound(
     client: &mut SpiClient<'_>,
     generation: i64,
-) -> Result<(), spi::Error> {
-    client.update(
-        "WITH unbound AS (
-             SELECT singleton
-             FROM synchro.sync_runtime_state
-             WHERE singleton AND active_slot_name IS NULL
-             FOR UPDATE
-         )
-         INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
-         SELECT $1 FROM unbound
-         ON CONFLICT (registry_generation) DO NOTHING",
-        None,
-        &[generation.into()],
-    )?;
-    Ok(())
+) -> Result<bool, spi::Error> {
+    client
+        .update(
+            "WITH unbound AS (
+                 SELECT singleton
+                 FROM synchro.sync_runtime_state
+                 WHERE singleton AND active_slot_name IS NULL
+                 FOR UPDATE
+             ), queued AS (
+                 INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
+                 SELECT $1 FROM unbound
+                 ON CONFLICT (registry_generation) DO NOTHING
+             )
+             SELECT EXISTS (SELECT 1 FROM unbound) AS queued",
+            None,
+            &[generation.into()],
+        )?
+        .first()
+        .get_by_name::<bool, &str>("queued")
+        .map(|queued| queued.unwrap_or(false))
 }
 
 fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
@@ -3028,7 +3036,9 @@ fn emit_registry_activation_when_ready(
     if crate::schema::generation_requires_projection_bootstrap(client, generation)? {
         return Ok(());
     }
-    queue_registry_activation_if_unbound(client, generation)?;
+    if queue_registry_activation_if_unbound(client, generation)? {
+        return Ok(());
+    }
     emit_registry_activation(client, generation)
 }
 
@@ -4811,21 +4821,32 @@ fn validate_generation_entries(
     Ok(())
 }
 
+// A stage moves forward only from a parent generation that this transaction
+// created. A committed parent already has an activation message in WAL, so the
+// worker must find that parent's stage unchanged when it activates it.
 fn carry_pending_membership_stage(
     client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
     client.update(
         "WITH lineage AS (
-             SELECT parent_generation
-             FROM synchro.sync_registry_generations
-             WHERE generation = $1 AND state = 'pending'
+             SELECT generation.parent_generation,
+                    parent.xmin = pg_catalog.xid(pg_catalog.pg_current_xact_id())
+                        AS parent_in_transaction
+             FROM synchro.sync_registry_generations generation
+             JOIN synchro.sync_registry_generations parent
+               ON parent.generation = generation.parent_generation
+             WHERE generation.generation = $1 AND generation.state = 'pending'
          ), candidate_stages AS (
              SELECT stage.target_relation_ids, stage.affected_scopes
              FROM lineage
              JOIN synchro.sync_registry_membership_stages stage
-               ON stage.registry_generation IN ($1, lineage.parent_generation)
-              AND stage.state = 'pending'
+               ON stage.state = 'pending'
+              AND (
+                  stage.registry_generation = $1
+                  OR (lineage.parent_in_transaction
+                      AND stage.registry_generation = lineage.parent_generation)
+              )
          ), candidate_targets AS (
              SELECT DISTINCT target_relation_id
              FROM candidate_stages stage
@@ -4867,9 +4888,12 @@ fn carry_pending_membership_stage(
     client.update(
         "DELETE FROM synchro.sync_registry_membership_stages stage
          USING synchro.sync_registry_generations generation
+         JOIN synchro.sync_registry_generations parent
+           ON parent.generation = generation.parent_generation
          WHERE generation.generation = $1
            AND stage.registry_generation = generation.parent_generation
-           AND stage.state = 'pending'",
+           AND stage.state = 'pending'
+           AND parent.xmin = pg_catalog.xid(pg_catalog.pg_current_xact_id())",
         None,
         &[generation.into()],
     )?;

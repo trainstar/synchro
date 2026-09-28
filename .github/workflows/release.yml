@@ -614,7 +614,7 @@ jobs:
           print(urllib.parse.urlunsplit((value.scheme, auth + "@" + value.netloc, value.path, value.query, "")))
           PY
           )"
-          DATABASE_URL="$admin_url" dist/release-provisioner/synchro-local-postgres prepare --repo-root "$GITHUB_WORKSPACE"
+          DATABASE_URL="$admin_url" dist/release-provisioner/synchro-local-postgres prepare --repo-root "$GITHUB_WORKSPACE" --dataset
           DATABASE_URL="$adapter_url" JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")" LISTEN_ADDR=127.0.0.1:8091 \
             nohup "$work/adapter/synchrod-pg" > "$work/adapter.log" 2>&1 &
           echo "$!" > "$work/adapter.pid"
@@ -772,7 +772,7 @@ jobs:
             echo "SYNCHRO_TEST_URL=$SYNCHRO_TEST_URL"
             echo "WARM_CONNECT_ENV_FILE=$WARM_CONNECT_ENV_FILE"
           } >> "$GITHUB_ENV"
-          make synchrod-pg-test-start
+          make synchrod-pg-test-start CLIENT_DATASET=1
 
       - name: Run Apple package lifecycle
         run: |

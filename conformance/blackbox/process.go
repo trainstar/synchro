@@ -108,6 +108,18 @@ type HarnessConfig struct {
 	// UpdateExtension then updates the extension to the environment bundle.
 	UpdateBaselineExtensionArtifact string
 	UpdateBaselineExtensionVersion  string
+	// SourceSetup adds one more independent source schema and registration.
+	SourceSetup *SourceSetup
+}
+
+// SourceSetup is an independent source schema that provisioning applies after
+// the diagnostic registration. Tables receive the same run-role grants as the
+// diagnostic source tables.
+type SourceSetup struct {
+	Name            string
+	SchemaSQL       string
+	RegistrationSQL string
+	Tables          []string
 }
 
 // HarnessNames are the nonsecret isolated PostgreSQL object names.
@@ -1552,8 +1564,6 @@ func (h *Harness) restartPostgres(ctx context.Context) error {
 }
 
 func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Signal) error {
-	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
-	defer cancel()
 	if h.postgres == nil {
 		return errors.New("PostgreSQL process is unavailable")
 	}
@@ -1567,6 +1577,8 @@ func (h *Harness) restartOwnedPostgres(ctx context.Context, shutdown syscall.Sig
 			return err
 		}
 	}
+	stopContext, cancel := context.WithTimeout(context.Background(), processCleanupStageTimeout(h.config.ShutdownTimeout))
+	defer cancel()
 	if err := h.postgres.StopPostmaster(stopContext, h.config.ShutdownTimeout, shutdown); err != nil {
 		return err
 	}
@@ -1863,12 +1875,21 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 	if err != nil {
 		return false, err
 	}
+	setup := h.config.SourceSetup
 	if existing {
+		if setup != nil {
+			return false, errors.New("additional source setup requires a new source schema")
+		}
 		h.sourceReady = true
 		return true, nil
 	}
 	if err := h.executeSourceScript(ctx, "schema.sql", diagnosticSchemaSQL); err != nil {
 		return false, err
+	}
+	if setup != nil {
+		if err := h.executeSourceScript(ctx, setup.Name+" schema", setup.SchemaSQL); err != nil {
+			return false, err
+		}
 	}
 	if err := h.grantWorkerReplicationSourceAccess(ctx); err != nil {
 		return false, err
@@ -1876,8 +1897,46 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 	if err := h.executeSourceScript(ctx, "register-diagnostic.sql", diagnosticRegistrationSQL); err != nil {
 		return false, err
 	}
+	if setup != nil {
+		// A second registration transaction starts after the worker activates
+		// the first one, as a separate application migration would.
+		if err := h.waitForRegistryActivation(ctx); err != nil {
+			return false, err
+		}
+		if err := h.executeSourceScript(ctx, setup.Name+" registration", setup.RegistrationSQL); err != nil {
+			return false, err
+		}
+	}
 	h.sourceReady = true
 	return false, nil
+}
+
+func (h *Harness) waitForRegistryActivation(ctx context.Context) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect for registry activation wait failed")
+	}
+	defer database.Close()
+	waitContext, cancel := context.WithTimeout(ctx, h.config.StartupTimeout)
+	defer cancel()
+	return waitUntil(waitContext, func(ctx context.Context) (bool, error) {
+		var pending bool
+		if err := database.QueryRowContext(ctx,
+			"SELECT EXISTS (SELECT 1 FROM synchro.sync_registry_generations WHERE state = 'pending')",
+		).Scan(&pending); err != nil {
+			return false, errors.New("observe registry activation failed")
+		}
+		return !pending, nil
+	})
+}
+
+// sourceTables lists the diagnostic tables and any additional setup tables.
+func (h *Harness) sourceTables() []string {
+	tables := append([]string(nil), diagnosticSourceTables...)
+	if h.config.SourceSetup != nil {
+		tables = append(tables, h.config.SourceSetup.Tables...)
+	}
+	return tables
 }
 
 func (h *Harness) diagnosticSourceSchemaExists(ctx context.Context) (bool, error) {
@@ -1911,7 +1970,7 @@ func (h *Harness) grantWorkerReplicationSourceAccess(ctx context.Context) error 
 	if _, err := database.ExecContext(ctx, "GRANT USAGE ON SCHEMA public TO "+quoteIdentifier(h.worker.Username)); err != nil {
 		return errors.New("grant worker replication schema access failed")
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		if _, err := database.ExecContext(
 			ctx,
 			"GRANT SELECT ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.worker.Username),
@@ -1979,7 +2038,7 @@ func (h *Harness) grantRunRoles(ctx context.Context) error {
 	if _, err := database.ExecContext(ctx, "GRANT USAGE ON SCHEMA public TO "+quoteIdentifier(h.sourceRole)); err != nil {
 		return errors.New("grant source schema access failed")
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		if _, err := database.ExecContext(ctx, "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."+quoteIdentifier(table)+" TO "+quoteIdentifier(h.sourceRole)); err != nil {
 			return errors.New("grant source-table access failed")
 		}
@@ -2071,7 +2130,7 @@ func (h *Harness) verifyRunRoleSeparation(ctx context.Context, database *sql.DB)
 	).Scan(&adapterDebug); err != nil || adapterDebug {
 		return errors.New("isolated adapter can execute operator debug")
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		var sourceWrite, observerRead, observerWrite, adapterAccess, workerRead, workerWrite bool
 		if err := database.QueryRowContext(ctx, "SELECT has_table_privilege($1, $2, 'INSERT,UPDATE,DELETE')", h.sourceRole, "public."+table).Scan(&sourceWrite); err != nil || !sourceWrite {
 			return errors.New("source role lacks source-table write access")
@@ -2092,7 +2151,7 @@ func (h *Harness) verifyRunRoleSeparation(ctx context.Context, database *sql.DB)
 			return errors.New("worker replication login can write source tables")
 		}
 	}
-	for _, table := range diagnosticSourceTables {
+	for _, table := range h.sourceTables() {
 		var operatorAccess bool
 		if err := database.QueryRowContext(ctx, "SELECT has_table_privilege($1, $2, 'SELECT,INSERT,UPDATE,DELETE')", h.env.Operator.Username, "public."+table).Scan(&operatorAccess); err != nil || operatorAccess {
 			return errors.New("operator role can access source tables directly")
@@ -3412,7 +3471,7 @@ BEGIN
 			       expected.atttypmod,
 			       pg_catalog.format_type(expected.atttypid, expected.atttypmod) AS type_name,
 			       expected.attnotnull,
-			       expected.attgenerated <> '' AS generated,
+			       expected.attgenerated <> '' OR expected.attidentity <> '' AS generated,
 			       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
 			FROM pg_catalog.pg_attribute AS expected
 			LEFT JOIN pg_catalog.pg_attrdef AS default_value
@@ -3452,7 +3511,7 @@ BEGIN
 			END IF;
 
 			IF authored_column.generated THEN
-				-- PostgreSQL rejects a default change on a generated column.
+				-- PostgreSQL rejects a default change on a generated or identity column.
 				NULL;
 			ELSIF authored_column.default_expression IS NULL THEN
 				EXECUTE pg_catalog.format(
@@ -5269,12 +5328,40 @@ func (executor *OperatorExecutor) ObserveExtensionReinstall(ctx context.Context,
 }
 
 // RunWALReplayRestartControl forces a worker exit after durable materialization and before acknowledgement.
-func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context, recordID string) (observation WALReplayRestartObservation, returnedErr error) {
+func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context, recordID string) (WALReplayRestartObservation, error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
 		return WALReplayRestartObservation{}, errors.New("operator executor is unavailable")
 	}
-	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+	return executor.RunWALTransactionReplayRestart(ctx, []string{recordID}, func(ctx context.Context) error {
+		return (&SourceExecutor{harness: executor.harness}).ExecContext(
+			ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+			recordID,
+			"diagnostic-user",
+			"restart-before-acknowledgement",
+		)
+	})
+}
+
+// RunWALTransactionReplayRestart runs commit while the worker cannot record a
+// transaction. It then forces a worker exit after durable materialization and
+// before acknowledgement, so the restarted worker replays that transaction.
+// recordIDs name the cf_items rows that the committed transaction writes.
+func (executor *OperatorExecutor) RunWALTransactionReplayRestart(
+	ctx context.Context,
+	recordIDs []string,
+	commit func(context.Context) error,
+) (observation WALReplayRestartObservation, returnedErr error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return WALReplayRestartObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || commit == nil || len(recordIDs) == 0 || len(recordIDs) > 16 {
 		return WALReplayRestartObservation{}, errors.New("WAL replay restart identity is invalid")
+	}
+	for _, recordID := range recordIDs {
+		if !diagnosticUUIDPattern.MatchString(recordID) {
+			return WALReplayRestartObservation{}, errors.New("WAL replay restart identity is invalid")
+		}
 	}
 	harness := executor.harness
 	database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
@@ -5316,14 +5403,8 @@ func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context
 	if _, err := lockTransaction.ExecContext(ctx, "LOCK TABLE synchro.sync_wal_transactions IN ACCESS EXCLUSIVE MODE"); err != nil {
 		return WALReplayRestartObservation{}, errors.New("lock WAL replay materialization failed")
 	}
-	if err := (&SourceExecutor{harness: harness}).ExecContext(
-		ctx,
-		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
-		recordID,
-		"diagnostic-user",
-		"restart-before-acknowledgement",
-	); err != nil {
-		return WALReplayRestartObservation{}, errors.New("commit WAL replay restart source row failed")
+	if err := commit(ctx); err != nil {
+		return WALReplayRestartObservation{}, errors.New("commit WAL replay restart source transaction failed")
 	}
 
 	var workerPID int64
@@ -5382,18 +5463,21 @@ func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context
 
 	materializedContext, materializedCancel := context.WithTimeout(ctx, 20*time.Second)
 	err = waitUntil(materializedContext, func(attemptContext context.Context) (bool, error) {
-		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		pipeline, err := executor.ObserveWALRecords(attemptContext, recordIDs)
 		if err != nil {
 			return false, err
 		}
-		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", recordIDs)
 		if err != nil {
 			return false, err
 		}
 		observation.BeforeRestart = pipeline
 		observation.BeforeStages = stages
-		return len(pipeline.Records) == 1 &&
-			pipeline.Records[0].FenceCoverage == "materialized" &&
+		materialized := len(pipeline.Records) > 0
+		for _, record := range pipeline.Records {
+			materialized = materialized && record.FenceCoverage == "materialized"
+		}
+		return materialized &&
 			!pipeline.ContiguousAcknowledged &&
 			pipeline.AcknowledgedEndLSN == observation.PriorProgress.AcknowledgedEndLSN &&
 			pipeline.SlotConfirmedFlushLSN == observation.PriorProgress.SlotConfirmedFlushLSN &&
@@ -5454,17 +5538,17 @@ func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context
 
 	replayedContext, replayedCancel := context.WithTimeout(ctx, 20*time.Second)
 	err = waitUntil(replayedContext, func(attemptContext context.Context) (bool, error) {
-		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		pipeline, err := executor.ObserveWALRecords(attemptContext, recordIDs)
 		if err != nil {
 			return false, err
 		}
-		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", recordIDs)
 		if err != nil {
 			return false, err
 		}
 		observation.AfterRestart = pipeline
 		observation.AfterStages = stages
-		return len(pipeline.Records) == 1 && pipeline.ContiguousAcknowledged &&
+		return len(pipeline.Records) > 0 && pipeline.ContiguousAcknowledged &&
 			pipeline.AcknowledgementMatchesObservedEnd && pipeline.SlotMatchesObservedEnd, nil
 	})
 	replayedCancel()
@@ -6313,6 +6397,21 @@ func validateSourceDML(statement string) error {
 		return errors.New("source mutation must target an independent source table")
 	}
 	return nil
+}
+
+// deadlineCloseReserve covers a normal close, which stops the adapter and
+// PostgreSQL within seconds, and a slow fast-shutdown checkpoint.
+const deadlineCloseReserve = 2 * time.Minute
+
+// CloseBeforeDeadline closes the harness a fixed reserve before deadline. A
+// test binary that reaches its -timeout panics without running cleanup, so its
+// adapter and PostgreSQL children would outlive it. The returned function
+// disarms the timer.
+func (h *Harness) CloseBeforeDeadline(deadline time.Time) (disarm func() bool) {
+	timer := time.AfterFunc(time.Until(deadline)-deadlineCloseReserve, func() {
+		_ = h.Close(context.Background())
+	})
+	return timer.Stop
 }
 
 // Close stops all owned processes and restores installed extension files.

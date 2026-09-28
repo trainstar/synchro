@@ -11,7 +11,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import java.io.File
-import java.time.Instant
 
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,7 +51,6 @@ class MainActivity : Activity() {
         check(config.getInt("schema_version") == 1)
         val phase = config.getString("phase")
         check(phase == "initial" || phase == "resume")
-        val orderID = config.getString("order_id")
         val client = SynchroClient(
             SynchroConfig(
                 dbPath = "consumer.db",
@@ -69,93 +67,70 @@ class MainActivity : Activity() {
             this,
         )
 
+        val observeSQL = config.getString("observe_sql")
         if (phase == "initial") {
             runAndWaitForScheduledPullRetry(client) {
                 client.start()
             }
             // start() can return before the first cycle applies the server
-            // schema, and the customers insert requires that schema. The
+            // schema, and the dataset inserts require that schema. The
             // public status reaches Ready when the schema is applied.
             awaitReadyStatus(client)
-            val timestamp = Instant.now().toString()
-            client.execute(
-                "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
-                arrayOf(
-                    config.getString("customer_id"),
-                    config.getString("user_id"),
-                    AUTHORED_CUSTOMER_NAME,
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            client.execute(
-                "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-                arrayOf(
-                    orderID,
-                    config.getString("customer_id"),
-                    config.getString("user_id"),
-                    """{"street":"Packaged Initial"}""",
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            runAndWaitForScheduledPullRetry(client) {
-                client.syncNow()
-            }
-            check(client.pendingChangeCount() == 0)
-            client.execute(
-                "UPDATE orders SET ship_address = ?, updated_at = ? WHERE id = ?",
-                arrayOf("""{"street":"Packaged Durable"}""", Instant.now().toString(), orderID),
-            )
+            statements(config, "initial_sql").forEach { client.execute(it) }
+            awaitConvergence(client, observeSQL)
+            statements(config, "durable_sql").forEach { client.execute(it) }
             val pending = client.pendingChangeCount()
             check(pending == 1)
-            writePhaseResult(phase, pending, observe(client, config))
+            writePhaseResult(phase, pending, observe(client, observeSQL))
             return
         }
 
-        val durable = client.queryOne(
-            "SELECT ship_address FROM orders WHERE id = ?",
-            arrayOf(orderID),
-        )?.get("ship_address")
         val pendingBeforeResume = client.pendingChangeCount()
-        check(durable == """{"street":"Packaged Durable"}""" && pendingBeforeResume > 0)
+        check(pendingBeforeResume > 0)
         runAndWaitForScheduledPullRetry(client) {
             client.start()
         }
         // syncNow before the engine publishes connectionReady throws, so the
         // resume waits for the public Ready status first.
         awaitReadyStatus(client)
-        // The harness authors a remote customer name while this process is dead.
-        // Only ordinary synchronization can deliver it to the local query path.
-        val deadline = System.nanoTime() + 90_000_000_000L
-        var pendingAfterResume = client.pendingChangeCount()
-        var observed = observe(client, config)
-        while (pendingAfterResume != 0 || observed.getString("customer_name") == AUTHORED_CUSTOMER_NAME) {
-            check(System.nanoTime() < deadline) { "resumed client did not converge within 90 seconds" }
-            runAndWaitForScheduledPullRetry(client) {
-                client.syncNow()
-            }
-            pendingAfterResume = client.pendingChangeCount()
-            observed = observe(client, config)
-            if (pendingAfterResume != 0 || observed.getString("customer_name") == AUTHORED_CUSTOMER_NAME) {
-                delay(500)
-            }
-        }
+        // The harness authors remote rows while this process is dead. Only
+        // ordinary synchronization can deliver them to the local query path.
+        awaitConvergence(client, observeSQL)
+        val pendingAfterResume = client.pendingChangeCount()
+        val observed = observe(client, observeSQL)
         client.stop()
         client.close()
         writePhaseResult(phase, pendingAfterResume, observed)
     }
 
-    private fun observe(client: SynchroClient, config: JSONObject): JSONObject {
-        val customerName = client.queryOne(
-            "SELECT name FROM customers WHERE id = ?",
-            arrayOf(config.getString("customer_id")),
-        )?.get("name") as String
-        val shipAddress = client.queryOne(
-            "SELECT ship_address FROM orders WHERE id = ?",
-            arrayOf(config.getString("order_id")),
-        )?.get("ship_address") as String
-        return JSONObject().put("customer_name", customerName).put("ship_address", shipAddress)
+    private fun statements(config: JSONObject, name: String): List<String> {
+        val values = config.getJSONArray(name)
+        return (0 until values.length()).map { values.getString(it) }
+    }
+
+    // Waits until the queue is empty and the pulled server total equals the
+    // sum of the local sets. Only a server rollup and a pull can make them equal.
+    private suspend fun awaitConvergence(client: SynchroClient, observeSQL: String) {
+        val deadline = System.nanoTime() + 90_000_000_000L
+        while (true) {
+            runAndWaitForScheduledPullRetry(client) {
+                client.syncNow()
+            }
+            if (client.pendingChangeCount() == 0 && client.queryOne(observeSQL)?.get("converged") == "1") {
+                return
+            }
+            check(System.nanoTime() < deadline) { "client did not converge within 90 seconds" }
+            delay(500)
+        }
+    }
+
+    private fun observe(client: SynchroClient, observeSQL: String): JSONObject {
+        val row = checkNotNull(client.queryOne(observeSQL))
+        val observed = JSONObject()
+        for (field in OBSERVED_FIELDS) {
+            observed.put(field, row[field] as String)
+        }
+        return observed
     }
 
     private suspend fun runAndWaitForScheduledPullRetry(
@@ -217,6 +192,6 @@ class MainActivity : Activity() {
     }
 
     private companion object {
-        const val AUTHORED_CUSTOMER_NAME = "Packaged Consumer"
+        val OBSERVED_FIELDS = listOf("exercise_name", "program_title", "total_volume_kg", "sets")
     }
 }

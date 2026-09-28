@@ -57,46 +57,16 @@ func TestRealSameTableMembershipPropagatesSiblingChanges(t *testing.T) {
 	}
 	waitForSameTableMembershipFunction(t, ctx, admin)
 
-	const activeNoteFields = `
-		FROM synchro.sync_registry registry
-		JOIN synchro.sync_registry_generations generation
-		  ON generation.generation = registry.registry_generation AND generation.state = 'active'
-		JOIN synchro.sync_registry_fields field
-		  ON field.registry_generation = registry.registry_generation
-		 AND field.relation_id = registry.relation_id
-		WHERE registry.physical_schema = 'public'
-		  AND registry.physical_relation = 'cf_document_notes'`
-	var tableID, documentFieldID string
-	if err := admin.QueryRowContext(ctx,
-		"SELECT registry.table_id::text, field.field_id::text"+activeNoteFields+" AND field.physical_column = 'document_id'",
-	).Scan(&tableID, &documentFieldID); err != nil {
-		t.Fatalf("load note registration identity: %v", err)
+	createNoteSiblingImpact(t, ctx, admin)
+	// The membership function reads the author field, so a declaration without it is rejected atomically.
+	before := loadReleaseRegistrySnapshot(t, ctx, admin)
+	if err := declareNoteSiblingImpact(ctx, admin, "id", "document_id", "deleted_at"); err == nil {
+		t.Fatal("self-impact declaration without a read own field was accepted")
 	}
-	if _, err := admin.ExecContext(ctx, fmt.Sprintf(`
-		CREATE FUNCTION public.cf_document_notes_team_impact(p_old_row jsonb, p_new_row jsonb)
-		RETURNS SETOF synchro.synchro_row_ref
-		LANGUAGE SQL STABLE SECURITY INVOKER
-		SET search_path = pg_catalog, synchro
-		BEGIN ATOMIC
-			SELECT ROW('%[1]s'::uuid, 'string', pg_catalog.to_jsonb(peer.record_id))::synchro.synchro_row_ref
-			FROM synchro_projection.cf_document_notes AS peer
-			WHERE NOT peer.deleted
-			  AND peer.document_id #>> '{}' IN (p_old_row ->> '%[2]s', p_new_row ->> '%[2]s');
-		END;
-		REVOKE ALL ON FUNCTION public.cf_document_notes_team_impact(jsonb, jsonb) FROM PUBLIC;
-		GRANT EXECUTE ON FUNCTION public.cf_document_notes_team_impact(jsonb, jsonb)
-			TO synchro_owner, synchro_worker`, tableID, documentFieldID),
-	); err != nil {
-		t.Fatalf("create sibling impact function: %v", err)
+	if after := loadReleaseRegistrySnapshot(t, ctx, admin); after != before {
+		t.Fatalf("rejected self-impact declaration changed registry state: before=%#v after=%#v", before, after)
 	}
-	if _, err := admin.ExecContext(ctx, `
-		SELECT synchro.synchro_register_membership_dependency(
-			'cf_document_notes', 'cf_document_notes', 'public.cf_document_notes_team_impact',
-			(SELECT array_agg(field.field_id::text ORDER BY field.field_id)`+activeNoteFields+`
-			   AND field.physical_column = ANY(ARRAY['id', 'document_id', 'author_id', 'deleted_at'])),
-			1000
-		)`,
-	); err != nil {
+	if err := declareNoteSiblingImpact(ctx, admin, "id", "document_id", "author_id", "deleted_at"); err != nil {
 		t.Fatalf("register self-impact declaration: %v", err)
 	}
 	waitForReleaseImpactRegistration(t, ctx, admin, "cf_document_notes_team_impact")
@@ -270,4 +240,57 @@ func waitForSameTableMembershipFunction(t *testing.T, ctx context.Context, admin
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("sibling-dependent membership function did not activate")
+}
+
+const activeNoteFields = `
+	FROM synchro.sync_registry registry
+	JOIN synchro.sync_registry_generations generation
+	  ON generation.generation = registry.registry_generation AND generation.state = 'active'
+	JOIN synchro.sync_registry_fields field
+	  ON field.registry_generation = registry.registry_generation
+	 AND field.relation_id = registry.relation_id
+	WHERE registry.physical_schema = 'public'
+	  AND registry.physical_relation = 'cf_document_notes'`
+
+// createNoteSiblingImpact creates the impact function that names every live
+// note on the old and new document of a changed note.
+func createNoteSiblingImpact(t *testing.T, ctx context.Context, admin *sql.DB) {
+	t.Helper()
+	var tableID, documentFieldID string
+	if err := admin.QueryRowContext(ctx,
+		"SELECT registry.table_id::text, field.field_id::text"+activeNoteFields+" AND field.physical_column = 'document_id'",
+	).Scan(&tableID, &documentFieldID); err != nil {
+		t.Fatalf("load note registration identity: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf(`
+		CREATE FUNCTION public.cf_document_notes_team_impact(p_old_row jsonb, p_new_row jsonb)
+		RETURNS SETOF synchro.synchro_row_ref
+		LANGUAGE SQL STABLE SECURITY INVOKER
+		SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC
+			SELECT ROW('%[1]s'::uuid, 'string', pg_catalog.to_jsonb(peer.record_id))::synchro.synchro_row_ref
+			FROM synchro_projection.cf_document_notes AS peer
+			WHERE NOT peer.deleted
+			  AND peer.document_id #>> '{}' IN (p_old_row ->> '%[2]s', p_new_row ->> '%[2]s');
+		END;
+		REVOKE ALL ON FUNCTION public.cf_document_notes_team_impact(jsonb, jsonb) FROM PUBLIC;
+		GRANT EXECUTE ON FUNCTION public.cf_document_notes_team_impact(jsonb, jsonb)
+			TO synchro_owner, synchro_worker`, tableID, documentFieldID),
+	); err != nil {
+		t.Fatalf("create sibling impact function: %v", err)
+	}
+}
+
+// declareNoteSiblingImpact declares the same-table impact of notes with the
+// fields of the named physical columns.
+func declareNoteSiblingImpact(ctx context.Context, admin *sql.DB, columns ...string) error {
+	_, err := admin.ExecContext(ctx, `
+		SELECT synchro.synchro_register_membership_dependency(
+			'cf_document_notes', 'cf_document_notes', 'public.cf_document_notes_team_impact',
+			(SELECT array_agg(field.field_id::text ORDER BY field.field_id)`+activeNoteFields+`
+			   AND field.physical_column = ANY($1::text[])),
+			1000
+		)`, columns,
+	)
+	return err
 }

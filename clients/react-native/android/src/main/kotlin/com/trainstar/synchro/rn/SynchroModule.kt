@@ -428,6 +428,10 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         private var terminal = false
         private var terminalCompletion: CompletableDeferred<Unit>? = null
 
+        // A cancelled receive can drop an operation that its sender already handed over.
+        // The session owns each submitted operation until its completion settles.
+        private val outstanding = mutableSetOf<TransactionOp>()
+
         @Synchronized
         fun abort(cause: Throwable) {
             if (terminal) return
@@ -436,12 +440,51 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             operations.close(cause)
         }
 
+        /**
+         * Ends the session after its transaction returns. Each operation that the loop did not
+         * complete, received or not, settles with the abort cause. A rollback settles successfully.
+         */
         @Synchronized
-        fun completeNormally(): Boolean {
-            if (terminal) return false
-            terminal = true
-            operations.close()
+        fun end() {
+            if (!terminal) {
+                terminal = true
+                operations.close()
+            }
+            outstanding.toList().forEach(::settleUnrun)
+        }
+
+        /** Submits one operation. A session that already ended settles it at once. */
+        suspend fun <T> perform(op: TransactionOp, deferred: CompletableDeferred<T>): T {
+            if (submit(op)) {
+                try {
+                    operations.send(op)
+                } catch (_: Exception) {
+                    // The channel closed or dropped the operation. The session settles it when it ends.
+                }
+            }
+            return deferred.await()
+        }
+
+        @Synchronized
+        fun submit(op: TransactionOp): Boolean {
+            if (terminal) {
+                settleUnrun(op)
+                return false
+            }
+            outstanding += op
             return true
+        }
+
+        private fun settleUnrun(op: TransactionOp) {
+            outstanding -= op
+            when (op) {
+                is TransactionOp.Rollback -> op.deferred.complete(Unit)
+                else -> op.deferred.completeExceptionally(abortCause ?: TransactionAbortedException())
+            }
+        }
+
+        private fun release(deferred: CompletableDeferred<*>) {
+            outstanding.removeAll { it.deferred === deferred }
         }
 
         /**
@@ -474,6 +517,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
          */
         @Synchronized
         fun acceptTerminal(completion: CompletableDeferred<Unit>): Boolean {
+            release(completion)
             terminalCompletion = completion
             if (terminal) return false
             terminal = true
@@ -495,6 +539,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
         @Synchronized
         fun <T> complete(deferred: CompletableDeferred<T>, value: T) {
+            release(deferred)
             val cause = abortCause
             if (cause == null) {
                 deferred.complete(value)
@@ -505,16 +550,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
         @Synchronized
         fun <T> completeExceptionally(deferred: CompletableDeferred<T>, error: Throwable) {
+            release(deferred)
             deferred.completeExceptionally(abortCause ?: error)
         }
     }
 
     internal sealed class TransactionOp {
-        data class Query(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableArray>) : TransactionOp()
-        data class QueryOne(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap?>) : TransactionOp()
-        data class Execute(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap>) : TransactionOp()
-        class Commit(val deferred: CompletableDeferred<Unit>) : TransactionOp()
-        class Rollback(val deferred: CompletableDeferred<Unit>) : TransactionOp()
+        abstract val deferred: CompletableDeferred<*>
+
+        class Query(val sql: String, val params: Array<Any?>, override val deferred: CompletableDeferred<WritableArray>) : TransactionOp()
+        class QueryOne(val sql: String, val params: Array<Any?>, override val deferred: CompletableDeferred<WritableMap?>) : TransactionOp()
+        class Execute(val sql: String, val params: Array<Any?>, override val deferred: CompletableDeferred<WritableMap>) : TransactionOp()
+        class Commit(override val deferred: CompletableDeferred<Unit>) : TransactionOp()
+        class Rollback(override val deferred: CompletableDeferred<Unit>) : TransactionOp()
     }
 
     internal class TransactionRollbackException : Exception("rollback")
@@ -585,7 +633,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 session.rejectBegin(e)
                 session.finishTerminal(e)
             } finally {
-                session.completeNormally()
+                session.end()
                 sessions.remove(txID, session)
             }
         }
@@ -674,8 +722,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         scope.launch {
             try {
                 val deferred = CompletableDeferred<WritableArray>()
-                session.operations.send(TransactionOp.Query(sql, parseParams(params), deferred))
-                promise.resolve(deferred.await())
+                promise.resolve(session.perform(TransactionOp.Query(sql, parseParams(params), deferred), deferred))
             } catch (e: Exception) {
                 rejectWithError(promise, e)
             }
@@ -691,8 +738,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         scope.launch {
             try {
                 val deferred = CompletableDeferred<WritableMap?>()
-                session.operations.send(TransactionOp.QueryOne(sql, parseParams(params), deferred))
-                promise.resolve(deferred.await())
+                promise.resolve(session.perform(TransactionOp.QueryOne(sql, parseParams(params), deferred), deferred))
             } catch (e: Exception) {
                 rejectWithError(promise, e)
             }
@@ -712,8 +758,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         scope.launch {
             try {
                 val deferred = CompletableDeferred<WritableMap>()
-                session.operations.send(TransactionOp.Execute(sql, parseParams(params), deferred))
-                promise.resolve(deferred.await())
+                promise.resolve(session.perform(TransactionOp.Execute(sql, parseParams(params), deferred), deferred))
             } catch (e: Exception) {
                 rejectWithError(promise, e)
             }
@@ -729,8 +774,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         scope.launch {
             try {
                 val deferred = CompletableDeferred<Unit>()
-                session.operations.send(TransactionOp.Commit(deferred))
-                deferred.await()
+                session.perform(TransactionOp.Commit(deferred), deferred)
                 promise.resolve(null)
             } catch (e: Exception) {
                 rejectWithError(promise, e)
@@ -745,16 +789,10 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         scope.launch {
-            val deferred = CompletableDeferred<Unit>()
             try {
-                session.operations.send(TransactionOp.Rollback(deferred))
-            } catch (e: Exception) {
-                // The session ended before it received this rollback.
-                promise.resolve(null)
-                return@launch
-            }
-            try {
-                deferred.await()
+                // A session that ends before it runs this rollback settles it successfully.
+                val deferred = CompletableDeferred<Unit>()
+                session.perform(TransactionOp.Rollback(deferred), deferred)
                 promise.resolve(null)
             } catch (e: Exception) {
                 rejectWithError(promise, e)
@@ -1005,7 +1043,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectPendingMutations().map(::retainedMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectPendingMutations().map(::pendingMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1018,7 +1056,20 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::retainedMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::pendingMutationJson)).toString())
+        } catch (e: Exception) {
+            rejectWithError(promise, e)
+        }
+    }
+
+    @ReactMethod
+    override fun inspectRetainedMutationRecords(promise: Promise) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            promise.resolve(JSONArray(c.inspectRetainedMutationRecords().map(::retainedMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1032,6 +1083,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
         try {
             promise.resolve(JSONArray(c.inspectRejectedMutations().map(::rejectedMutationJson)).toString())
+        } catch (e: Exception) {
+            rejectWithError(promise, e)
+        }
+    }
+
+    @ReactMethod
+    override fun inspectRejectedMutationRecords(promise: Promise) {
+        val c = client ?: run {
+            promise.reject("NOT_CONNECTED", "Client not initialized")
+            return
+        }
+        try {
+            promise.resolve(JSONArray(c.inspectRejectedMutationRecords().map(::retainedRejectionJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -1055,7 +1119,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             val inspection = JSONObject().apply {
                 put("client_state", clientStateJson(snapshot.capture))
                 put("retained_mutations", snapshot.retainedMutations?.let { JSONArray(it.map(::retainedMutationJson)) } ?: JSONObject.NULL)
-                put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::rejectedMutationJson)) } ?: JSONObject.NULL)
+                put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::retainedRejectionJson)) } ?: JSONObject.NULL)
             }
             promise.resolve(Arguments.createMap().apply {
                 putString("inspection", inspection.toString())
@@ -1475,7 +1539,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
 
     private fun retainedMutationJson(value: RetainedMutationInspection): JSONObject = when (value) {
-        is RetainedMutationInspection.Current -> pendingMutationJson(value.mutation)
+        is RetainedMutationInspection.Current -> pendingMutationJson(value.mutation).put("representation", "current")
         is RetainedMutationInspection.Legacy -> JSONObject().apply {
             put("representation", "legacy")
             put("mutationID", value.mutation.mutationID)
@@ -1491,7 +1555,6 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     private fun pendingMutationJson(mutation: PendingMutationInspection): JSONObject = JSONObject().apply {
-        put("representation", "current")
         put("mutationID", mutation.mutationID)
         put("localOrder", mutation.localOrder)
         put("tableID", mutation.tableID)
@@ -1519,6 +1582,23 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                 put("value", anyCodableToJsonValue(field.value.value))
             }
         }))
+    }
+
+    private fun retainedRejectionJson(value: RetainedRejectionInspection): JSONObject = when (value) {
+        is RetainedRejectionInspection.Current -> rejectedMutationJson(value.rejection).put("representation", "current")
+        is RetainedRejectionInspection.Legacy -> JSONObject().apply {
+            put("representation", "legacy")
+            put("mutationID", value.rejection.mutationID)
+            put("tableName", value.rejection.tableName)
+            put("recordID", value.rejection.recordID)
+            put("status", mutationStatusWireValue(value.rejection.status))
+            put("code", mutationRejectionCodeWireValue(value.rejection.code))
+            put("message", value.rejection.message ?: JSONObject.NULL)
+            put("serverRowJSON", value.rejection.serverRowJSON ?: JSONObject.NULL)
+            put("serverVersion", value.rejection.serverVersion ?: JSONObject.NULL)
+            put("createdAt", value.rejection.createdAt)
+            put("updatedAt", value.rejection.updatedAt)
+        }
     }
 
     private fun rejectedMutationJson(mutation: RejectedMutationInspection): JSONObject = JSONObject().apply {

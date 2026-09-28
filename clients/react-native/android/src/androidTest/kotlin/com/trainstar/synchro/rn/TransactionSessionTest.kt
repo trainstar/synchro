@@ -3,13 +3,19 @@ package com.trainstar.synchro.rn
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.trainstar.synchro.ExecResult
+import com.facebook.react.bridge.WritableMap
 import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.channels.ChannelResult
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -51,7 +57,8 @@ private class ReceivedTerminal {
 
 /**
  * Direct tests of the production TransactionSession and one terminal-only run of the actual loop.
- * These tests select the order of the session calls. They do not claim a physical Channel schedule.
+ * Most tests select the order of the session calls. The dropped-operation test forces a physical
+ * Channel schedule.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(AndroidJUnit4::class)
@@ -164,6 +171,61 @@ class TransactionSessionTest {
             result.loopFailure is SynchroModule.TransactionRollbackException,
         )
         result.requireOwnedUntilFinish()
+    }
+
+    /**
+     * Forces the Channel prompt-cancellation schedule on the actual session channel. The sender
+     * hands the operation to a waiting receive. The receive is cancelled, as the idle timeout
+     * cancels it, before its blocked thread resumes it. The channel then drops the operation.
+     */
+    @Test
+    fun operationDroppedByCancelledReceiveSettlesWhenTransactionEnds() {
+        val session = acceptedSession()
+        val receiverThread = Executors.newSingleThreadExecutor()
+        val receiverBlocked = CountDownLatch(1)
+        val releaseReceiver = CountDownLatch(1)
+        val deferred = CompletableDeferred<WritableMap>()
+        val operation = SynchroModule.TransactionOp.Execute("UPDATE items SET name = 'dropped'", emptyArray(), deferred)
+        val timeout = SessionError("idle timeout")
+        val delivered = AtomicReference<ChannelResult<SynchroModule.TransactionOp>?>()
+        try {
+            runBlocking {
+                withTimeout(TimeUnit.SECONDS.toMillis(GUARD_SECONDS)) {
+                    val receive = async(receiverThread.asCoroutineDispatcher()) {
+                        delivered.set(session.operations.receiveCatching())
+                    }
+                    // The receive suspends before this task runs, because the executor has one thread.
+                    receiverThread.execute {
+                        receiverBlocked.countDown()
+                        releaseReceiver.await()
+                    }
+                    assertTrue(receiverBlocked.await(GUARD_SECONDS, TimeUnit.SECONDS))
+                    assertTrue(session.submit(operation))
+                    // The receive waits, so the rendezvous transfer completes and send returns.
+                    session.operations.send(operation)
+                    receive.cancel()
+                    releaseReceiver.countDown()
+                    receive.join()
+                    assertTrue(receive.isCancelled)
+                    assertEquals("the forced schedule delivered the operation", null, delivered.get())
+                }
+            }
+            assertFalse(deferred.isCompleted)
+
+            // The job does this on idle timeout: it aborts in its catch and ends in its finally.
+            session.abort(timeout)
+            session.end()
+
+            assertTrue("dropped operation lost its completion owner", deferred.isCompleted)
+            assertSame(timeout, deferred.getCompletionExceptionOrNull())
+            val late = CompletableDeferred<WritableMap>()
+            assertFalse(session.submit(SynchroModule.TransactionOp.Execute("SELECT 1", emptyArray(), late)))
+            assertSame(timeout, late.getCompletionExceptionOrNull())
+        } finally {
+            releaseReceiver.countDown()
+            receiverThread.shutdown()
+            assertTrue(receiverThread.awaitTermination(GUARD_SECONDS, TimeUnit.SECONDS))
+        }
     }
 
     private fun acceptedSession(): SynchroModule.TransactionSession {

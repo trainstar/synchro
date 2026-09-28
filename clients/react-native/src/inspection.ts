@@ -2,8 +2,8 @@ import {
   configureInspection,
   nativeForInspection,
   parseClientStateInspection,
-  parseRejectedMutationInspection,
   parseRetainedMutationInspection,
+  parseRetainedRejectionInspection,
   parseTransportObservationSnapshot,
   SynchroClient,
 } from './SynchroClient';
@@ -11,8 +11,8 @@ import { InvalidResponseError, mapNativeError } from './errors';
 import { assertValidSQLiteBindParams } from './sqliteValues';
 import type {
   ClientStateInspection,
-  RejectedMutationInspection,
   RetainedMutationInspection,
+  RetainedRejectionInspection,
   Row,
   SQLStatement,
   TransportObservationSnapshot,
@@ -60,7 +60,7 @@ export interface DurableStateInspection {
 export interface ClientStateSnapshotInspection {
   clientState: ClientStateInspection;
   retainedMutations: RetainedMutationInspection[] | null;
-  rejectedMutations: RejectedMutationInspection[] | null;
+  rejectedMutations: RetainedRejectionInspection[] | null;
   applicationRows: Row[];
 }
 
@@ -94,7 +94,7 @@ export class SynchroInspection {
         retainedMutations:
           nullableArray(snapshot.retained_mutations, 'retained mutations')?.map(parseRetainedMutationInspection) ?? null,
         rejectedMutations:
-          nullableArray(snapshot.rejected_mutations, 'rejected mutations')?.map(parseRejectedMutationInspection) ?? null,
+          nullableArray(snapshot.rejected_mutations, 'rejected mutations')?.map(parseRetainedRejectionInspection) ?? null,
         applicationRows: [...result.applicationRows] as Row[],
       };
     } catch (error) {
