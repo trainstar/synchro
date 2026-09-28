@@ -292,6 +292,15 @@ class PushProcessorTests {
         }
     }
 
+    private fun idOperationAndTitle(request: PushRequest): List<Triple<String, Operation, String>> =
+        request.mutations.map { mutation ->
+            Triple(
+                mutation.pk.getValue("id").jsonPrimitive.content,
+                mutation.op,
+                mutation.columns!!.getValue("title").jsonPrimitive.content,
+            )
+        }
+
     private suspend fun pushUntilEmpty(processor: PushProcessor, server: MockWebServer, batchSize: Int) {
         var pushes = 0
         while (
@@ -1935,6 +1944,59 @@ class PushProcessorTests {
             assertEquals(listOf(null, true, null), requests.map { it.atomic })
             assertFalse(tracker.hasPendingChanges())
             assertEquals("after", database.queryOne("SELECT title FROM orders WHERE id = 'o1'")!!["title"])
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun ungroupedNormalizedMutationKeepsItsFirstSourceOrder() = runTest {
+        val (database, tracker, processor) = environment()
+        insertOrder(database, "parent", "a")
+        insertOrder(database, "child", "a")
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("b", "parent"))
+        val bodies = mutableListOf<String>()
+        val server = MockWebServer()
+        server.dispatcher = acceptingDispatcher(bodies)
+        server.start()
+        try {
+            pushUntilEmpty(processor, server, batchSize = 100)
+
+            val request = pushJSON.decodeFromString<PushRequest>(bodies.single())
+            assertNull(request.atomic)
+            assertEquals(
+                listOf(Triple("parent", Operation.INSERT, "b"), Triple("child", Operation.INSERT, "a")),
+                idOperationAndTitle(request),
+            )
+            assertFalse(tracker.hasPendingChanges())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun atomicGroupSealsANormalizedMutationAtItsFirstSourceOrder() = runTest {
+        val (database, tracker, processor) = environment()
+        val client = clientFor(database)
+        client.atomicWriteTransaction { transaction ->
+            transaction.insertOrder("parent", "a")
+            transaction.insertOrder("child", "a")
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("b", "parent"))
+        }
+        val bodies = mutableListOf<String>()
+        val server = MockWebServer()
+        server.dispatcher = acceptingDispatcher(bodies)
+        server.start()
+        try {
+            pushUntilEmpty(processor, server, batchSize = 100)
+
+            val request = pushJSON.decodeFromString<PushRequest>(bodies.single())
+            assertEquals(true, request.atomic)
+            assertEquals(
+                listOf(Triple("parent", Operation.INSERT, "b"), Triple("child", Operation.INSERT, "a")),
+                idOperationAndTitle(request),
+            )
+            assertFalse(tracker.hasPendingChanges())
         } finally {
             server.shutdown()
         }
