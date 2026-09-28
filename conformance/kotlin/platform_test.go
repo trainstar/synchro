@@ -789,6 +789,11 @@ func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
 	if _, err := mapTransportOperations(operations, observations, Result{}); err == nil {
 		t.Fatal("failed implicit connect passed transport mapping")
 	}
+	observations[0].StatusCode = http.StatusOK
+	limit = 50
+	if _, err := mapTransportOperations(operations, observations, Result{}); err == nil {
+		t.Fatal("pull with a limit other than the authored limit passed transport mapping")
+	}
 }
 
 func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {

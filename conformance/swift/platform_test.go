@@ -576,6 +576,10 @@ func TestGroupedRequestsMatchTransportObservationsExactly(t *testing.T) {
 	if _, err := mapTransportOperations(operations, []transportObservation{observations[1], observations[0]}, runnerResult{}); err == nil {
 		t.Fatal("out-of-order grouped observations were accepted")
 	}
+	pull := RequestOperations{{ContractOperation: "pull", Name: "request-page", Payload: json.RawMessage(`{"scopes":[{"scope_id":"scope-a","cursor_source":"none"}],"limit":1}`)}}
+	if _, err := mapTransportOperations(pull, observations[:1], runnerResult{}); err == nil {
+		t.Fatal("a connect observation was accepted for a requested pull")
+	}
 }
 
 func TestCursorSourcesBindToExactDurableFingerprints(t *testing.T) {
@@ -631,12 +635,12 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 		{
 			ContractOperation: "rebuild",
 			Name:              "request-page",
-			Payload:           json.RawMessage(`{"scope_id":"scope-a","rebuild_id":"00000000-0000-4000-8000-000000000001","cursor_source":"none"}`),
+			Payload:           json.RawMessage(`{"scope_id":"scope-a","rebuild_id":"00000000-0000-4000-8000-000000000001","cursor_source":"none","limit":100}`),
 		},
 		{
 			ContractOperation: "pull",
 			Name:              "request-page",
-			Payload:           json.RawMessage(`{"scopes":[{"scope_id":"scope-a","cursor_source":"local_checkpoint"}]}`),
+			Payload:           json.RawMessage(`{"scopes":[{"scope_id":"scope-a","cursor_source":"local_checkpoint"}],"limit":100}`),
 		},
 	}
 	observations := []transportObservation{
@@ -667,6 +671,11 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 		t.Fatalf("bind grouped rebuild checkpoint: %v", err)
 	}
 
+	limit = 50
+	if _, err := mapTransportOperations(operations, observations, runnerResult{}); err == nil {
+		t.Fatal("pull with a limit other than the authored limit passed")
+	}
+	limit = 100
 	observations[1].CursorFingerprints[0] = cursorFingerprint("different")
 	if _, err := mapTransportOperations(operations, observations, runnerResult{}); err == nil {
 		t.Fatal("pull cursor unrelated to preceding rebuild passed")

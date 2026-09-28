@@ -1627,7 +1627,8 @@ func validateOperationTransportFacts(operation scenarios.Operation, observation 
 	if operation.ContractOperation != observation.OperationClass {
 		return errors.New("Swift transport observation does not match the requested operation")
 	}
-	if observation.OperationClass == "push" {
+	switch observation.OperationClass {
+	case "push":
 		var payload struct {
 			Request struct {
 				Mutations []json.RawMessage `json:"mutations"`
@@ -1635,6 +1636,13 @@ func validateOperationTransportFacts(operation scenarios.Operation, observation 
 		}
 		if err := json.Unmarshal(operation.Payload, &payload); err != nil || observation.RequestFacts == nil || observation.RequestFacts.MutationCount == nil || *observation.RequestFacts.MutationCount != len(payload.Request.Mutations) {
 			return errors.New("Swift push request mutation facts do not match the authored operation")
+		}
+	case "pull", "rebuild":
+		var payload struct {
+			Limit int `json:"limit"`
+		}
+		if err := json.Unmarshal(operation.Payload, &payload); err != nil || observation.RequestFacts == nil || observation.RequestFacts.Limit == nil || *observation.RequestFacts.Limit != payload.Limit {
+			return errors.New("Swift request limit does not match the authored operation")
 		}
 	}
 	return nil
