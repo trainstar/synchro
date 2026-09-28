@@ -134,29 +134,37 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			}
 			t.Logf("extension catalog snapshot lines: updated=%d clean=%d", len(catalogs.Updated), len(catalogs.Clean))
 
-			var retainedState, retainedClass, retainedFieldID string
-			var pendingGenerations int64
-			deadline := time.Now().Add(60 * time.Second)
-			for {
+			// Without a recorded source requirement, the generation waits for the
+			// operator bootstrap and then activates as Class 3.
+			retainedGenerationState := func() (state, class string, pending int64) {
+				t.Helper()
 				if err := admin.QueryRowContext(ctx, `
 					SELECT generation.state,
 					       COALESCE((SELECT transition_class FROM synchro.sync_schema_manifest
 					                 ORDER BY schema_version DESC LIMIT 1), ''),
 					       (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending')
 					FROM synchro.sync_registry_generations generation
-					WHERE generation.generation = $1`, retainedGeneration).Scan(
-					&retainedState, &retainedClass, &pendingGenerations); err != nil {
+					WHERE generation.generation = $1`, retainedGeneration).Scan(&state, &class, &pending); err != nil {
 					t.Fatalf("observe retained generation after the update: %v", err)
 				}
-				if retainedState != "pending" || time.Now().After(deadline) {
-					break
-				}
+				return state, class, pending
+			}
+			if state, _, pending := retainedGenerationState(); state != "pending" || pending != 1 {
+				t.Fatalf("retained generation from %s activated without a bootstrap: state=%q pending=%d", origin.version, state, pending)
+			}
+			if _, err := harness.Operator().RunProjectionBootstrap(ctx, retainedGeneration); err != nil {
+				t.Fatalf("bootstrap the retained generation from %s: %v; %s", origin.version, err, harness.FailureDiagnostics())
+			}
+			retainedState, retainedClass, pendingGenerations := retainedGenerationState()
+			for deadline := time.Now().Add(30 * time.Second); retainedState == "pending" && time.Now().Before(deadline); {
 				time.Sleep(50 * time.Millisecond)
+				retainedState, retainedClass, pendingGenerations = retainedGenerationState()
 			}
 			if retainedState != "active" || retainedClass != "class_3" || pendingGenerations != 0 {
-				t.Fatalf("retained generation from %s after the update: state=%q class=%q pending=%d, want active class_3 with no pending generation; health=%#v",
-					origin.version, retainedState, retainedClass, pendingGenerations, loadIssue49Health(t, ctx, admin))
+				t.Fatalf("retained generation from %s after the bootstrap: state=%q class=%q pending=%d, want active class_3 with no pending generation",
+					origin.version, retainedState, retainedClass, pendingGenerations)
 			}
+			var retainedFieldID string
 			if err := admin.QueryRowContext(ctx, `
 				SELECT field.field_id::text
 				FROM synchro.sync_registry_fields field
