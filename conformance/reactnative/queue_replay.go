@@ -9,7 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"slices"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -250,13 +250,23 @@ type queueReplayWorkload struct {
 	dropPush scenarios.Operation
 }
 
-// queueReplayRejection is the runtime identity and reason of one authored
-// rejected mutation.
+// queueReplayRejection is the runtime row, reason, and authored column values
+// of one authored rejected write. The native SDK assigns its own mutation ID to
+// a local write, so the expected identity is the row and the authored content.
 type queueReplayRejection struct {
-	MutationID string `json:"mutationID"`
-	TableName  string `json:"tableName"`
-	RecordID   string `json:"recordID"`
-	Code       string `json:"code"`
+	TableName string
+	RecordID  string
+	Code      string
+	Values    []json.RawMessage
+}
+
+// queueReplayObservedRejection is one retained rejection detail from the device.
+type queueReplayObservedRejection struct {
+	MutationID   string `json:"mutationID"`
+	TableName    string `json:"tableName"`
+	RecordID     string `json:"recordID"`
+	Code         string `json:"code"`
+	MutationJSON string `json:"mutationJSON"`
 }
 
 type queueReplayResponseLoss struct {
@@ -1185,7 +1195,7 @@ func (c *QueueReplayCoordinator) localCommand() (*conformanceCommand, error) {
 			return nil, fmt.Errorf("bind React Native queue-replay local write %d for step %s: %w", c.localIndex+offset+1, workload.step.ID, err)
 		}
 		if bytes.Equal(authored.Payload, workload.rejected.Payload) {
-			rejection, err := queueReplayBoundRejection(operation)
+			rejection, err := queueReplayBoundRejection(authored, operation)
 			if err != nil {
 				return nil, fmt.Errorf("bind React Native queue-replay rejected write for step %s: %w", workload.step.ID, err)
 			}
@@ -1472,40 +1482,100 @@ func (c *QueueReplayCoordinator) validateCaptureAggregate(capture finalCapture) 
 }
 
 // validateRejectedMutationDetails binds each retained rejection to one authored
-// rejected write by mutation ID, runtime row, and reason. The next schema
-// removes that write's field, so the contract reason is schema_incompatible.
+// rejected write. The row and reason must match. The retained mutation body must
+// carry the reported mutation ID, the row, and every authored column value. The
+// next schema removes that write's field, so the contract reason is
+// schema_incompatible.
 func (c *QueueReplayCoordinator) validateRejectedMutationDetails(raw json.RawMessage) error {
-	var observed []queueReplayRejection
+	var observed []queueReplayObservedRejection
 	if json.Unmarshal(raw, &observed) != nil || observed == nil {
 		return errors.New("React Native queue-replay rejected mutation details are invalid")
 	}
-	if len(c.rejections) != c.rejectedCount() {
-		return fmt.Errorf("React Native queue-replay bound rejections=%d want=%d", len(c.rejections), c.rejectedCount())
+	if len(c.rejections) != c.rejectedCount() || len(observed) != len(c.rejections) {
+		return fmt.Errorf("React Native queue-replay rejected details=%d bound rejections=%d want=%d", len(observed), len(c.rejections), c.rejectedCount())
 	}
-	expected := append([]queueReplayRejection(nil), c.rejections...)
-	sortRejections := func(values []queueReplayRejection) {
-		sort.Slice(values, func(left, right int) bool { return values[left].MutationID < values[right].MutationID })
+	expected := make(map[string]queueReplayRejection, len(c.rejections))
+	for _, rejection := range c.rejections {
+		expected[rejection.TableName+"\x00"+rejection.RecordID] = rejection
 	}
-	sortRejections(expected)
-	sortRejections(observed)
-	if !slices.Equal(observed, expected) {
-		return fmt.Errorf("React Native queue-replay rejected mutations %+v want %+v", observed, expected)
+	seenRows := make(map[string]struct{}, len(observed))
+	seenMutations := make(map[string]struct{}, len(observed))
+	for _, rejection := range observed {
+		row := rejection.TableName + "\x00" + rejection.RecordID
+		want, found := expected[row]
+		if _, duplicate := seenRows[row]; !found || duplicate {
+			return fmt.Errorf("React Native queue-replay rejected row %s/%s is not one authored rejected write", rejection.TableName, rejection.RecordID)
+		}
+		seenRows[row] = struct{}{}
+		if rejection.Code != want.Code {
+			return fmt.Errorf("React Native queue-replay rejected row %s reason = %q, want %q", rejection.RecordID, rejection.Code, want.Code)
+		}
+		var body struct {
+			MutationID string                     `json:"mutation_id"`
+			PK         map[string]json.RawMessage `json:"pk"`
+			Columns    map[string]json.RawMessage `json:"columns"`
+		}
+		if json.Unmarshal([]byte(rejection.MutationJSON), &body) != nil || body.MutationID == "" || body.MutationID != rejection.MutationID ||
+			!containsJSONValue(body.PK, json.RawMessage(strconv.Quote(rejection.RecordID))) {
+			return fmt.Errorf("React Native queue-replay rejected mutation %s does not retain its own identity and row", rejection.MutationID)
+		}
+		if _, duplicate := seenMutations[rejection.MutationID]; duplicate {
+			return fmt.Errorf("React Native queue-replay rejected mutation %s repeats", rejection.MutationID)
+		}
+		seenMutations[rejection.MutationID] = struct{}{}
+		for _, value := range want.Values {
+			if !containsJSONValue(body.Columns, value) {
+				return fmt.Errorf("React Native queue-replay rejected mutation %s lost an authored value", rejection.MutationID)
+			}
+		}
 	}
 	return nil
 }
 
-func queueReplayBoundRejection(operation scenarios.Operation) (queueReplayRejection, error) {
-	var payload struct {
-		MutationID string            `json:"mutation_id"`
-		TableID    string            `json:"table_id"`
-		PK         map[string]string `json:"pk"`
+func containsJSONValue(values map[string]json.RawMessage, want json.RawMessage) bool {
+	for _, value := range values {
+		if nativeJSONEqual(value, want) {
+			return true
+		}
 	}
-	if json.Unmarshal(operation.Payload, &payload) != nil || payload.MutationID == "" || payload.TableID == "" || len(payload.PK) != 1 {
+	return false
+}
+
+func nativeJSONEqual(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
+}
+
+// queueReplayBoundRejection reads the runtime row and the runtime values of the
+// authored columns. The binding appends support columns after the authored
+// ones, so the authored write decides how many leading values are authored.
+func queueReplayBoundRejection(authored, operation scenarios.Operation) (queueReplayRejection, error) {
+	var authoredPayload struct {
+		Columns []json.RawMessage `json:"columns"`
+	}
+	if json.Unmarshal(authored.Payload, &authoredPayload) != nil || len(authoredPayload.Columns) == 0 {
+		return queueReplayRejection{}, errors.New("authored rejected write columns are invalid")
+	}
+	var payload struct {
+		TableID string            `json:"table_id"`
+		PK      map[string]string `json:"pk"`
+		Columns json.RawMessage   `json:"columns"`
+	}
+	if json.Unmarshal(operation.Payload, &payload) != nil || payload.TableID == "" || len(payload.PK) != 1 {
 		return queueReplayRejection{}, errors.New("bound rejected write identity is invalid")
 	}
-	rejection := queueReplayRejection{MutationID: payload.MutationID, TableName: payload.TableID, Code: "schema_incompatible"}
+	rejection := queueReplayRejection{TableName: payload.TableID, Code: "schema_incompatible"}
 	for _, recordID := range payload.PK {
 		rejection.RecordID = recordID
+	}
+	var list []struct {
+		Value json.RawMessage `json:"value"`
+	}
+	if json.Unmarshal(payload.Columns, &list) != nil || len(list) < len(authoredPayload.Columns) {
+		return queueReplayRejection{}, errors.New("bound rejected write columns are invalid")
+	}
+	for _, column := range list[:len(authoredPayload.Columns)] {
+		rejection.Values = append(rejection.Values, column.Value)
 	}
 	return rejection, nil
 }

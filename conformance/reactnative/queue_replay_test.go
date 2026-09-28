@@ -557,17 +557,17 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 		"rebuildReceiptCount":             0,
 		"provenanceMaintenanceWorkCursor": "0",
 	}
-	// Without a controller, the authored identity stands in for the runtime
-	// binding that localCommand records.
-	rejected := make([]queueReplayRejection, 0, len(workloads))
-	for _, workload := range workloads {
-		rejection, err := queueReplayBoundRejection(workload.rejected)
+	// Without a controller, the authored write stands in for the runtime
+	// binding that localCommand records. The device assigns its own mutation IDs.
+	rejected := make([]queueReplayObservedRejection, 0, len(workloads))
+	for index, workload := range workloads {
+		rejection, err := queueReplayBoundRejection(workload.rejected, workload.rejected)
 		if err != nil {
 			t.Fatalf("derive queue-replay authored rejection: %v", err)
 		}
-		rejected = append(rejected, rejection)
+		coordinator.rejections = append(coordinator.rejections, rejection)
+		rejected = append(rejected, queueReplayRejectionDetail(t, fmt.Sprintf("00000000-0000-4000-8000-%012d", index+1), rejection.RecordID, rejection))
 	}
-	coordinator.rejections = append([]queueReplayRejection(nil), rejected...)
 	observations := make([]transportObservation, len(workloads)*2)
 	for index := range observations {
 		// Each wave records one response-loss attempt without a success
@@ -588,18 +588,29 @@ func TestQueueReplayFinalCaptureValidatesAuthoredAggregateCounts(t *testing.T) {
 	if err := coordinator.validateCapture(capture); err != nil {
 		t.Fatalf("validate queue-replay aggregate capture: %v", err)
 	}
-	for name, mutate := range map[string]func(*queueReplayRejection){
-		"mutation": func(value *queueReplayRejection) { value.MutationID = "00000000-0000-4000-8000-000000000999" },
-		"row":      func(value *queueReplayRejection) { value.RecordID = "other-row" },
-		"table":    func(value *queueReplayRejection) { value.TableName = "other_table" },
-		"reason":   func(value *queueReplayRejection) { value.Code = "validation_failed" },
+	for name, mutate := range map[string]func(*queueReplayObservedRejection){
+		"row":    func(value *queueReplayObservedRejection) { value.RecordID = "other-row" },
+		"table":  func(value *queueReplayObservedRejection) { value.TableName = "other_table" },
+		"reason": func(value *queueReplayObservedRejection) { value.Code = "validation_failed" },
+		"retained mutation identity": func(value *queueReplayObservedRejection) {
+			value.MutationID = "00000000-0000-4000-8000-000000000999"
+		},
+		"retained authored value": func(value *queueReplayObservedRejection) {
+			value.MutationJSON = strings.ReplaceAll(value.MutationJSON, "workload-", "changed-")
+		},
 	} {
-		changed := append([]queueReplayRejection(nil), rejected...)
+		changed := append([]queueReplayObservedRejection(nil), rejected...)
 		mutate(&changed[0])
 		capture.Rejected = queueReplayFixtureJSON(t, changed)
 		if err := coordinator.validateCapture(capture); err == nil {
 			t.Fatalf("queue-replay accepted a same-count rejection with a different %s", name)
 		}
+	}
+	duplicated := append([]queueReplayObservedRejection(nil), rejected...)
+	duplicated[1] = duplicated[0]
+	capture.Rejected = queueReplayFixtureJSON(t, duplicated)
+	if err := coordinator.validateCapture(capture); err == nil {
+		t.Fatal("queue-replay accepted one rejected row twice in place of another")
 	}
 	capture.Rejected = queueReplayFixtureJSON(t, rejected)
 	state["mutationLedgerCount"] = *expected.Clients[0].QueueCount - 1
@@ -1024,4 +1035,16 @@ func cloneQueueReplayScenario(scenario scenarios.Scenario) scenarios.Scenario {
 		panic(err)
 	}
 	return clone
+}
+
+// queueReplayRejectionDetail builds one device rejection detail whose retained
+// mutation body carries mutationID, the row, and the authored values.
+func queueReplayRejectionDetail(t *testing.T, mutationID, recordID string, rejection queueReplayRejection) queueReplayObservedRejection {
+	t.Helper()
+	columns := make(map[string]json.RawMessage, len(rejection.Values))
+	for index, value := range rejection.Values {
+		columns[fmt.Sprintf("field-%d", index)] = value
+	}
+	body := queueReplayFixtureJSON(t, map[string]any{"mutation_id": mutationID, "pk": map[string]string{"id": recordID}, "columns": columns})
+	return queueReplayObservedRejection{MutationID: mutationID, TableName: rejection.TableName, RecordID: recordID, Code: rejection.Code, MutationJSON: string(body)}
 }
