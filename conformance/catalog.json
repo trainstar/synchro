@@ -97,6 +97,11 @@
       "sha256": "151a3062ac852aad68d9137423e9039c5709544fdc1d6017215efc3acf9be0a6"
     },
     {
+      "scenario_id": "SCN-PUSH-UNIT-CONSTRAINTS-001",
+      "path": "conformance/scenarios/server/push-unit-constraints-001.json",
+      "sha256": "e8020c7b57f4df5d3404fc79e563520a51eec0cb2286e4eff027aac34f82a3ae"
+    },
+    {
       "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
       "path": "conformance/scenarios/server/rebuild-forged-cursor-001.json",
       "sha256": "c1b1b9fd795f363a4e148ab89145e8c78103d036ebe3e428790b9009e574b015"

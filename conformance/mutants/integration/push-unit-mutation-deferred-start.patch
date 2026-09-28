@@ -1,0 +1,24 @@
+diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
+--- a/extensions/synchro-pg/src/lib.rs
++++ b/extensions/synchro-pg/src/lib.rs
+@@ -641,7 +641,7 @@ BEGIN
+     validation_failed := false;
+     BEGIN
+         IF p_push_unit THEN
+-            SET CONSTRAINTS ALL DEFERRED;
++            NULL;
+         END IF;
+         EXECUTE p_sql INTO applied USING p_data, p_record_id;
+         applied := COALESCE(applied, false);
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+@@ -612,7 +612,7 @@ BEGIN
+     validation_failed := false;
+     BEGIN
+         IF p_push_unit THEN
+-            SET CONSTRAINTS ALL DEFERRED;
++            NULL;
+         END IF;
+         EXECUTE p_sql INTO applied USING p_data, p_record_id;
+         applied := COALESCE(applied, false);

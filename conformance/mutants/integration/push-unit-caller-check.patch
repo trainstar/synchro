@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -147,7 +147,7 @@ fn require_no_pending_deferred_trigger_events(client: &SpiClient<'_>) {
+             .map(pg_sys::Oid::from)
+             .unwrap_or_else(|| pgrx::error!("deferred trigger relation is invalid"));
+         // A deferred check uses current user authority, which is synchro_owner here.
+-        if unsafe { pg_sys::AfterTriggerPendingOnRel(relation_oid) } {
++        if unsafe { pg_sys::AfterTriggerPendingOnRel(relation_oid) } && relation_oid == pg_sys::InvalidOid {
+             ereport!(
+                 ERROR,
+                 PgSqlErrorCode::ERRCODE_INVALID_TRANSACTION_STATE,

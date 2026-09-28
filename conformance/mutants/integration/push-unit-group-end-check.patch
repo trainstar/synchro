@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1950,7 +1950,7 @@ fn evaluate_atomic_group(
+         }
+         let constraints_valid = client
+             .select(
+-                "SELECT synchro_check_push_constraints() AS valid",
++                "SELECT true AS valid",
+                 None,
+                 &[],
+             )

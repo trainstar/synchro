@@ -1,0 +1,24 @@
+diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
+--- a/extensions/synchro-pg/src/lib.rs
++++ b/extensions/synchro-pg/src/lib.rs
+@@ -646,7 +646,7 @@ BEGIN
+         EXECUTE p_sql INTO applied USING p_data, p_record_id;
+         applied := COALESCE(applied, false);
+         IF p_push_unit THEN
+-            SET CONSTRAINTS ALL IMMEDIATE;
++            NULL;
+         END IF;
+     EXCEPTION
+         WHEN data_exception OR integrity_constraint_violation THEN
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+@@ -617,7 +617,7 @@ BEGIN
+         EXECUTE p_sql INTO applied USING p_data, p_record_id;
+         applied := COALESCE(applied, false);
+         IF p_push_unit THEN
+-            SET CONSTRAINTS ALL IMMEDIATE;
++            NULL;
+         END IF;
+     EXCEPTION
+         WHEN data_exception OR integrity_constraint_violation THEN

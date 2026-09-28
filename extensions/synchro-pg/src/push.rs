@@ -60,6 +60,7 @@ struct EvaluationContext<'a> {
     registry: &'a HashMap<String, TableRegistration>,
     ever_synced_tables: &'a HashSet<String>,
     has_write_protect: bool,
+    mutation_is_push_unit: bool,
 }
 
 type TableIndex<'a> = HashMap<String, &'a TableSchema>;
@@ -126,6 +127,34 @@ enum DmlOutcome {
     Applied,
     NotApplied,
     ValidationFailed,
+}
+
+fn require_no_pending_deferred_trigger_events(client: &SpiClient<'_>) {
+    let relations = client
+        .select(
+            "SELECT DISTINCT tgrelid::bigint AS relation_oid
+             FROM pg_catalog.pg_trigger
+             WHERE tgdeferrable",
+            None,
+            &[],
+        )
+        .unwrap_or_else(|_| pgrx::error!("checking pending deferred trigger events failed"));
+    for relation in relations {
+        let relation_oid = relation
+            .get_by_name::<i64, &str>("relation_oid")
+            .unwrap_or_else(|_| pgrx::error!("reading deferred trigger relation failed"))
+            .and_then(|oid| u32::try_from(oid).ok())
+            .map(pg_sys::Oid::from)
+            .unwrap_or_else(|| pgrx::error!("deferred trigger relation is invalid"));
+        // A deferred check uses current user authority, which is synchro_owner here.
+        if unsafe { pg_sys::AfterTriggerPendingOnRel(relation_oid) } {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_INVALID_TRANSACTION_STATE,
+                "synchro_push requires a transaction without pending deferred trigger events"
+            );
+        }
+    }
 }
 
 /// Push canonical Protocol 3 mutations through one transactional extension path.
@@ -412,8 +441,10 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             registry: &registry,
             ever_synced_tables: &ever_synced_tables,
             has_write_protect,
+            mutation_is_push_unit: request.atomic != Some(true),
         };
 
+        require_no_pending_deferred_trigger_events(client);
         // This claim and every later source write remain in the same SPI transaction.
         claim_batch_ledger(client, p_user_id, &request, &fingerprints)
             .unwrap_or_else(|_| pgrx::error!("claiming push batch ledger failed"));
@@ -1201,6 +1232,7 @@ fn evaluate_mutation(
     let registry = context.registry;
     let ever_synced_tables = context.ever_synced_tables;
     let has_write_protect = context.has_write_protect;
+    let mutation_is_push_unit = context.mutation_is_push_unit;
     let (pk_field_id, pk_value) = mutation_primary_key(mutation);
     let outcome_schema = submitted_schema.clone();
     let authored_tables = authored_tables.get(&mutation.authored_schema);
@@ -1438,6 +1470,7 @@ fn evaluate_mutation(
                 &record_id,
                 table_reg,
                 &dml_data,
+                mutation_is_push_unit,
             ) {
                 DmlOutcome::ValidationFailed => validation_evaluation(
                     mutation,
@@ -1525,11 +1558,24 @@ fn evaluate_mutation(
                     &record_id,
                     table_reg,
                     &dml_data,
+                    mutation_is_push_unit,
                 )
             } else if table_reg.has_deleted_at {
-                push_soft_delete(client, &mutation.mutation_id, &record_id, table_reg)
+                push_soft_delete(
+                    client,
+                    &mutation.mutation_id,
+                    &record_id,
+                    table_reg,
+                    mutation_is_push_unit,
+                )
             } else {
-                push_hard_delete(client, &mutation.mutation_id, &record_id, table_reg)
+                push_hard_delete(
+                    client,
+                    &mutation.mutation_id,
+                    &record_id,
+                    table_reg,
+                    mutation_is_push_unit,
+                )
             };
             match dml_outcome {
                 DmlOutcome::ValidationFailed => validation_evaluation(
@@ -1890,6 +1936,9 @@ fn evaluate_atomic_group(
     context: &EvaluationContext<'_>,
 ) -> Vec<EvaluatedMutation> {
     let evaluated = run_in_subtransaction(|| {
+        client
+            .update("SET CONSTRAINTS ALL DEFERRED", None, &[])
+            .unwrap_or_else(|_| pgrx::error!("deferring atomic group constraints failed"));
         let mut evaluated = Vec::with_capacity(request.mutations.len());
         for mutation in &request.mutations {
             let evaluation = evaluate_mutation(client, user_id, mutation, context);
@@ -1898,6 +1947,27 @@ fn evaluate_atomic_group(
             if !applied {
                 return (evaluated, false);
             }
+        }
+        let constraints_valid = client
+            .select(
+                "SELECT synchro_check_push_constraints() AS valid",
+                None,
+                &[],
+            )
+            .unwrap_or_else(|_| pgrx::error!("checking atomic group constraints failed"))
+            .first()
+            .get_by_name::<bool, &str>("valid")
+            .unwrap_or_else(|_| pgrx::error!("reading atomic group constraint result failed"))
+            .unwrap_or_else(|| pgrx::error!("atomic group constraint result is missing"));
+        if !constraints_valid {
+            let failure = evaluated
+                .last()
+                .map(push_constraint_validation_evaluation)
+                .unwrap_or_else(|| pgrx::error!("atomic group has no last mutation"));
+            *evaluated
+                .last_mut()
+                .unwrap_or_else(|| pgrx::error!("atomic group has no last mutation")) = failure;
+            return (evaluated, false);
         }
         (evaluated, true)
     });
@@ -1922,6 +1992,23 @@ fn evaluate_atomic_group(
             }
         })
         .collect()
+}
+
+fn push_constraint_validation_evaluation(evaluation: &EvaluatedMutation) -> EvaluatedMutation {
+    terminal_evaluation(
+        &evaluation.mutation,
+        evaluation.outcome_schema.clone(),
+        "validation_failed",
+        "mutation failed physical validation",
+        EvaluationTarget {
+            table_id: evaluation.table_id.clone(),
+            primary_key_field_id: evaluation.primary_key_field_id.clone(),
+            primary_key_type: evaluation.primary_key_type.clone(),
+            primary_key_value: evaluation.primary_key_value.clone(),
+            row_identity: evaluation.row_identity.clone(),
+        },
+        None,
+    )
 }
 
 /// Runs `body` in one internal subtransaction. `body` returns its value and whether to keep its writes.
@@ -2401,6 +2488,7 @@ fn push_insert(
     record_id: &str,
     table_reg: &TableRegistration,
     data: &serde_json::Value,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let object = data
         .as_object()
@@ -2432,7 +2520,14 @@ fn push_insert(
         table = qualified_relation_name(&table_reg.physical_schema, &table_reg.physical_relation),
         pk = pg_quote_ident(&table_reg.pk_column),
     );
-    execute_push_dml(client, mutation_id, &sql, data, record_id)
+    execute_push_dml(
+        client,
+        mutation_id,
+        &sql,
+        data,
+        record_id,
+        mutation_is_push_unit,
+    )
 }
 
 fn push_update(
@@ -2441,6 +2536,7 @@ fn push_update(
     record_id: &str,
     table_reg: &TableRegistration,
     data: &serde_json::Value,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let object = data
         .as_object()
@@ -2470,7 +2566,14 @@ fn push_update(
         pk = pg_quote_ident(&table_reg.pk_column),
         pk_type = table_reg.pk_type,
     );
-    execute_push_dml(client, mutation_id, &sql, data, record_id)
+    execute_push_dml(
+        client,
+        mutation_id,
+        &sql,
+        data,
+        record_id,
+        mutation_is_push_unit,
+    )
 }
 
 fn push_soft_delete(
@@ -2478,6 +2581,7 @@ fn push_soft_delete(
     mutation_id: &str,
     record_id: &str,
     table_reg: &TableRegistration,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let updated_at = if table_reg.has_updated_at {
         format!(", {} = now()", pg_quote_ident(&table_reg.updated_at_col))
@@ -2499,6 +2603,7 @@ fn push_soft_delete(
         &sql,
         &serde_json::Value::Object(serde_json::Map::new()),
         record_id,
+        mutation_is_push_unit,
     )
 }
 
@@ -2507,6 +2612,7 @@ fn push_hard_delete(
     mutation_id: &str,
     record_id: &str,
     table_reg: &TableRegistration,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let sql = format!(
         "DELETE FROM {} WHERE {} = $2::{} RETURNING true AS applied",
@@ -2520,6 +2626,7 @@ fn push_hard_delete(
         &sql,
         &serde_json::Value::Object(serde_json::Map::new()),
         record_id,
+        mutation_is_push_unit,
     )
 }
 
@@ -2529,17 +2636,19 @@ fn execute_push_dml(
     sql: &str,
     data: &serde_json::Value,
     record_id: &str,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     set_push_mutation_id(client, mutation_id);
     let outcome = client
         .update(
             "SELECT applied, validation_failed
-             FROM synchro_execute_push_dml($1, $2::jsonb, $3)",
+             FROM synchro_execute_push_dml($1, $2::jsonb, $3, $4)",
             None,
             &[
                 sql.into(),
                 pgrx::JsonB(data.clone()).into(),
                 record_id.into(),
+                mutation_is_push_unit.into(),
             ],
         )
         .unwrap_or_else(|_| pgrx::error!("executing push source DML failed"))

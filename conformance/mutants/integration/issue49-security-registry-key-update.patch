@@ -13,12 +13,12 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
      RETURN NEW;
  END;
  $$;
-@@ -2511,7 +2508,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2535,7 +2532,7 @@ CREATE FUNCTION "synchro_capture_fence"()
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1960
-+-- synchro-pg/src/lib.rs:1957
+--- synchro-pg/src/lib.rs:1981
++-- synchro-pg/src/lib.rs:1978
  -- finalize
  
  DO $roles$

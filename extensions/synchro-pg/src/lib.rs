@@ -629,7 +629,8 @@ FOR EACH ROW EXECUTE FUNCTION synchro_reject_push_mutation_ledger_mutation();
 CREATE OR REPLACE FUNCTION synchro_execute_push_dml(
     p_sql TEXT,
     p_data JSONB,
-    p_record_id TEXT
+    p_record_id TEXT,
+    p_push_unit BOOLEAN
 )
 RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN)
 LANGUAGE plpgsql
@@ -639,14 +640,34 @@ BEGIN
     applied := false;
     validation_failed := false;
     BEGIN
+        IF p_push_unit THEN
+            SET CONSTRAINTS ALL DEFERRED;
+        END IF;
         EXECUTE p_sql INTO applied USING p_data, p_record_id;
         applied := COALESCE(applied, false);
+        IF p_push_unit THEN
+            SET CONSTRAINTS ALL IMMEDIATE;
+        END IF;
     EXCEPTION
         WHEN data_exception OR integrity_constraint_violation THEN
             applied := false;
             validation_failed := true;
     END;
     RETURN NEXT;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION synchro_check_push_constraints()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    SET CONSTRAINTS ALL IMMEDIATE;
+    RETURN true;
+EXCEPTION
+    WHEN data_exception OR integrity_constraint_violation THEN
+        RETURN false;
 END;
 $$;
 
