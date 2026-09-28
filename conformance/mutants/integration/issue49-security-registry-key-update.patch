@@ -18,8 +18,8 @@ index aeafc6d..147c953 100644
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1934
-+-- synchro-pg/src/lib.rs:1931
+--- synchro-pg/src/lib.rs:1935
++-- synchro-pg/src/lib.rs:1932
  -- finalize
  
  DO $roles$

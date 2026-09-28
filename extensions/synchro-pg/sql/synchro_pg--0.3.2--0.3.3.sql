@@ -15,3 +15,12 @@ WHERE singleton;
 -- needs a verified bootstrap before activation.
 ALTER TABLE synchro.sync_registry_generations
     ADD COLUMN source_requirement SMALLINT CHECK (source_requirement IN (0, 1, 2));
+
+-- Format 2 transaction fingerprints bind the row boundary of each logical
+-- message. Records from earlier releases keep format 1, which the worker
+-- accepts only for those records.
+ALTER TABLE synchro.sync_wal_transactions
+    ADD COLUMN content_hash_format SMALLINT NOT NULL DEFAULT 1
+        CHECK (content_hash_format IN (1, 2));
+ALTER TABLE synchro.sync_wal_transactions
+    ALTER COLUMN content_hash_format DROP DEFAULT;

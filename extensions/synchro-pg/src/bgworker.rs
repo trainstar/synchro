@@ -319,7 +319,14 @@ enum FenceTarget<'a> {
     },
 }
 
-fn transaction_content_hash(transaction: &WalTransaction) -> [u8; 32] {
+/// Format 2 binds the row boundary of each logical message, because the
+/// boundary selects the registry generation of each row event. A transaction
+/// record from an earlier release keeps format 1, which omits the boundary. The
+/// worker of that release applied one generation to every row event.
+const TRANSACTION_HASH_FORMAT: i16 = 2;
+const LEGACY_TRANSACTION_HASH_FORMAT: i16 = 1;
+
+fn transaction_content_hash(transaction: &WalTransaction, format: i16) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hash_u64(&mut hasher, u64::from(transaction.xid));
     hash_u64(&mut hasher, transaction.final_lsn);
@@ -344,6 +351,9 @@ fn transaction_content_hash(transaction: &WalTransaction) -> [u8; 32] {
         hash_u64(&mut hasher, message.message_lsn);
         hash_bytes(&mut hasher, message.prefix.as_bytes());
         hash_bytes(&mut hasher, &message.content);
+        if format != LEGACY_TRANSACTION_HASH_FORMAT {
+            hash_u64(&mut hasher, message.event_boundary);
+        }
     }
     hasher.finalize().into()
 }
@@ -2066,7 +2076,10 @@ fn materialize_candidate(
                 0..u64::MAX,
             )
             .map_err(candidate_failure)?;
-            let content_hash = transaction_content_hash(transaction);
+            // A candidate rejects every registry activation, so the message
+            // boundary cannot select a generation there.
+            let content_hash =
+                transaction_content_hash(transaction, LEGACY_TRANSACTION_HASH_FORMAT);
             if existing_candidate_transaction(
                 client,
                 bootstrap,
@@ -3350,8 +3363,7 @@ fn materialize_transaction(
     let generation = active_registry_generation(client)
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
 
-    let content_hash = transaction_content_hash(transaction);
-    if existing_transaction(client, &stream_generation, transaction, &content_hash)? {
+    if existing_transaction(client, &stream_generation, transaction)? {
         reconcile_replay_counts(client, &stream_generation, transaction)?;
         repair_same_position_poison(client, &stream_generation, transaction.commit_lsn)?;
         return Ok(MaterializedTransaction {
@@ -3360,6 +3372,7 @@ fn materialize_transaction(
     }
 
     validate_progress_order(client, &stream_generation, transaction)?;
+    let content_hash = transaction_content_hash(transaction, TRANSACTION_HASH_FORMAT);
     let markers = parse_registry_activations(transaction)?;
     let activations: Vec<i64> = markers.iter().map(|marker| marker.0).collect();
     let groups = if activation_requires_bootstrap(
@@ -3457,10 +3470,10 @@ fn materialize_transaction(
             "INSERT INTO synchro.sync_wal_transactions (
                  stream_generation, commit_lsn, end_lsn, source_xid,
                  registry_generation, event_count, effect_count, content_hash,
-                 commit_timestamp
+                 content_hash_format, commit_timestamp
              ) VALUES (
                  $1, $2::pg_lsn, $3::pg_lsn, $4::xid,
-                 $5, $6, 0, $7,
+                 $5, $6, 0, $7, $9,
                  '2000-01-01 00:00:00+00'::timestamptz + ($8::bigint * interval '1 microsecond')
              )",
             None,
@@ -3475,6 +3488,7 @@ fn materialize_transaction(
                     .into(),
                 content_hash.to_vec().into(),
                 transaction.commit_timestamp.into(),
+                TRANSACTION_HASH_FORMAT.into(),
             ],
         )
         .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
@@ -3604,16 +3618,20 @@ pub(super) fn materialize_transaction_for_test(
         .map_err(|failure| failure.class.to_string())
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+pub(super) fn legacy_transaction_content_hash_for_test(transaction: &WalTransaction) -> Vec<u8> {
+    transaction_content_hash(transaction, LEGACY_TRANSACTION_HASH_FORMAT).to_vec()
+}
+
 fn existing_transaction(
     client: &SpiClient<'_>,
     stream_generation: &str,
     transaction: &WalTransaction,
-    content_hash: &[u8; 32],
 ) -> Result<bool, PoisonFailure> {
     let rows = client
         .select(
             "SELECT end_lsn::text AS end_lsn, source_xid::text AS source_xid,
-                    event_count, content_hash
+                    event_count, content_hash, content_hash_format
              FROM synchro.sync_wal_transactions
              WHERE stream_generation = $1 AND commit_lsn = $2::pg_lsn",
             None,
@@ -3642,6 +3660,15 @@ fn existing_transaction(
         .get_by_name::<Vec<u8>, &str>("content_hash")
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
         .unwrap_or_default();
+    let content_hash = match row
+        .get_by_name::<i16, &str>("content_hash_format")
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+    {
+        Some(format @ (LEGACY_TRANSACTION_HASH_FORMAT | TRANSACTION_HASH_FORMAT)) => {
+            transaction_content_hash(transaction, format)
+        }
+        _ => return Err(failure("validation_failed", transaction.commit_lsn)),
+    };
     if end_lsn != Some(transaction.end_lsn)
         || source_xid != Some(transaction.xid)
         || event_count < 0
