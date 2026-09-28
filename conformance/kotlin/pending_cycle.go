@@ -582,11 +582,50 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 	if result, processErr := controller.ProcessStep(ctx, nil, step.Materialize); processErr != nil || result.Disposition != "success" {
 		return Result{}, fmt.Errorf("materialize Kotlin Android pending-cycle %s: %w", name, kotlinResultError(processErr, result.Disposition))
 	}
-	snapshot, err := platform.scenarioSnapshot(ctx, client)
+	snapshot, err := awaitKotlinPendingCycleReady(ctx, platform, client, state, observation.Sequence)
 	if err != nil {
 		return Result{}, fmt.Errorf("capture Kotlin Android pending-cycle synchronized %s: %w", name, err)
 	}
 	return snapshot, nil
+}
+
+// A start that resumes a future backoff deadline returns before its cycle runs.
+// The push is then observed while the rebuild and pull of the cycle still run.
+func awaitKotlinPendingCycleReady(ctx context.Context, platform *Platform, client Client, state *platformClient, pushSequence uint64) (Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	for {
+		// Read transport first, so ready is sampled after that response arrived.
+		if _, err := state.session.Execute(ctx, Request{Operation: "transport-snapshot"}); err != nil {
+			return Result{}, fmt.Errorf("poll Kotlin Android pending-cycle transport: %w", err)
+		}
+		observations, err := state.session.ObservationsAfter(pushSequence)
+		if err != nil {
+			return Result{}, err
+		}
+		snapshot, err := platform.scenarioSnapshot(ctx, client)
+		if err != nil {
+			return Result{}, err
+		}
+		if snapshot.Status == nil || *snapshot.Status == "error" || *snapshot.Status == "stopped" {
+			return Result{}, errors.New("Kotlin Android pending-cycle synchronization is unavailable")
+		}
+		// Ready also occurs between push and pull, so require the terminal pull.
+		if *snapshot.Status == "ready" && snapshot.Failure == nil && len(observations) > 0 {
+			last := observations[len(observations)-1]
+			if last.OperationClass == "pull" && last.StatusCode == 200 && last.Retryable != nil && !*last.Retryable && last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore {
+				if snapshot.PendingChangeCount == nil || *snapshot.PendingChangeCount != 0 {
+					return Result{}, errors.New("Kotlin Android pending-cycle synchronization retained pending mutations")
+				}
+				return snapshot, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle ready state: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func kotlinPendingCycleServerVersion(target scenarios.PendingCycleNativeTarget, snapshot Result) (string, error) {
