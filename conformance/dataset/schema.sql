@@ -163,7 +163,7 @@ CREATE INDEX workout_media_workout_id_idx ON workout_media (workout_id);
 -- Same-row BEFORE trigger: denormalized lowercase search text. The builtin
 -- pg_c_utf8 collation makes the Unicode case mapping independent of the
 -- database locale.
-CREATE FUNCTION exercises_search_text() RETURNS trigger
+CREATE OR REPLACE FUNCTION exercises_search_text() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 BEGIN
     NEW.search_text := lower((NEW.name || ' ' || array_to_string(NEW.muscle_groups, ' ')) COLLATE pg_c_utf8);
@@ -176,7 +176,7 @@ BEFORE INSERT OR UPDATE OF name, muscle_groups ON exercises
 FOR EACH ROW EXECUTE FUNCTION exercises_search_text();
 
 -- Same-row BEFORE triggers: copy the parent chain onto child rows.
-CREATE FUNCTION workout_exercises_parent() RETURNS trigger
+CREATE OR REPLACE FUNCTION workout_exercises_parent() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 BEGIN
     SELECT workout.program_id INTO STRICT NEW.program_id
@@ -189,7 +189,7 @@ CREATE TRIGGER workout_exercises_parent
 BEFORE INSERT OR UPDATE OF workout_id ON workout_exercises
 FOR EACH ROW EXECUTE FUNCTION workout_exercises_parent();
 
-CREATE FUNCTION exercise_sets_parent() RETURNS trigger
+CREATE OR REPLACE FUNCTION exercise_sets_parent() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 BEGIN
     SELECT parent.workout_id, parent.program_id INTO STRICT NEW.workout_id, NEW.program_id
@@ -202,7 +202,7 @@ CREATE TRIGGER exercise_sets_parent
 BEFORE INSERT OR UPDATE OF workout_exercise_id ON exercise_sets
 FOR EACH ROW EXECUTE FUNCTION exercise_sets_parent();
 
-CREATE FUNCTION workout_media_size() RETURNS trigger
+CREATE OR REPLACE FUNCTION workout_media_size() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 BEGIN
     NEW.byte_size := octet_length(NEW.body);
@@ -217,7 +217,7 @@ FOR EACH ROW EXECUTE FUNCTION workout_media_size();
 -- Different-row AFTER triggers. A set change recomputes its workout volume.
 -- A workout change touches its program. The set trigger name sorts before
 -- synchro_capture_fence, and the workout trigger name sorts after it.
-CREATE FUNCTION exercise_sets_rollup() RETURNS trigger
+CREATE OR REPLACE FUNCTION exercise_sets_rollup() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 DECLARE
     target uuid := CASE WHEN TG_OP = 'DELETE' THEN OLD.workout_id ELSE NEW.workout_id END;
@@ -238,7 +238,7 @@ CREATE TRIGGER exercise_sets_rollup
 AFTER INSERT OR UPDATE OF reps, weight_kg, deleted_at OR DELETE ON exercise_sets
 FOR EACH ROW EXECUTE FUNCTION exercise_sets_rollup();
 
-CREATE FUNCTION workouts_touch_program() RETURNS trigger
+CREATE OR REPLACE FUNCTION workouts_touch_program() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 BEGIN
     UPDATE programs SET updated_at = clock_timestamp()

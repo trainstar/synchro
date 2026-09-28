@@ -1911,6 +1911,40 @@ func (h *Harness) applyIndependentSourceSetup(ctx context.Context) (bool, error)
 	return false, nil
 }
 
+// ApplySourceSetup registers one more independent source schema on a ready
+// harness. A native scenario suite shares one attached database, so a setup
+// that one scenario needs cannot be applied at provisioning. The setup tables
+// must be unregistered. The call drops any earlier copy of them first.
+func (h *Harness) ApplySourceSetup(ctx context.Context, setup SourceSetup) error {
+	if h == nil || ctx == nil || !h.sourceReady {
+		return errors.New("isolated source setup is unavailable")
+	}
+	if setup.Name == "" || setup.SchemaSQL == "" || setup.RegistrationSQL == "" || len(setup.Tables) == 0 {
+		return errors.New("isolated source setup is incomplete")
+	}
+	tables := make([]string, 0, len(setup.Tables))
+	for _, table := range setup.Tables {
+		tables = append(tables, "public."+quoteIdentifier(table))
+	}
+	if err := h.executeSourceScript(ctx, setup.Name+" reset", "DROP TABLE IF EXISTS "+strings.Join(tables, ", ")+" CASCADE"); err != nil {
+		return err
+	}
+	if err := h.executeSourceScript(ctx, setup.Name+" schema", setup.SchemaSQL); err != nil {
+		return err
+	}
+	grants := "GRANT SELECT ON TABLE " + strings.Join(tables, ", ") + " TO " + quoteIdentifier(h.worker.Username)
+	if err := h.executeSourceScript(ctx, setup.Name+" worker grants", grants); err != nil {
+		return err
+	}
+	if err := h.waitForRegistryActivation(ctx); err != nil {
+		return err
+	}
+	if err := h.executeSourceScript(ctx, setup.Name+" registration", setup.RegistrationSQL); err != nil {
+		return err
+	}
+	return h.waitForRegistryActivation(ctx)
+}
+
 func (h *Harness) waitForRegistryActivation(ctx context.Context) error {
 	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
 	if err != nil {
