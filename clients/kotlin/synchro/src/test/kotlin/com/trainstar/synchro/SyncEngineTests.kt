@@ -100,35 +100,43 @@ class SyncEngineTests {
     }
 
     @Test
-    fun testCallbackRegistrationAndCancellation() = runBlocking {
-        val (engine, _) = makeSyncEngine()
+    fun testCanceledListenersReceiveNoLaterStimulus() = runTest {
+        val (engine, db) = makeIntegrationEnv(handler = ::conflictServerResponse)
 
-        val statusUpdates = mutableListOf<String>()
-        val cancellable1 = engine.onStatusChange { status ->
-            when (status) {
-                is SyncStatus.Error -> statusUpdates.add("error")
-                is SyncStatus.Stopped -> statusUpdates.add("stopped")
-                else -> Unit
-            }
+        val canceledStatuses = mutableListOf<String>()
+        val canceledConflicts = mutableListOf<String>()
+        val liveStatuses = mutableListOf<String>()
+        val liveConflicts = mutableListOf<String>()
+        val statusListener = engine.onStatusChange { canceledStatuses.add(it.state.wireName) }
+        val conflictListener = engine.onConflict { canceledConflicts.add(it.recordID) }
+        engine.onStatusChange { liveStatuses.add(it.state.wireName) }
+        engine.onConflict { liveConflicts.add(it.recordID) }
+
+        engine.stop()
+        assertEquals(listOf("stopped"), canceledStatuses)
+
+        statusListener.cancel()
+        conflictListener.cancel()
+        canceledStatuses.clear()
+        liveStatuses.clear()
+
+        // Each live listener proves that the post-cancel stimulus occurred.
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z")
+            )
+            engine.syncNow()
+        } finally {
+            engine.stop()
         }
 
-        val conflictEvents = mutableListOf<String>()
-        val cancellable2 = engine.onConflict { event ->
-            conflictEvents.add(event.recordID)
-        }
-
-        // Stop triggers a status update
-        engine.stop()
-        assertEquals(listOf("stopped"), statusUpdates)
-
-        // Cancel callbacks
-        cancellable1.cancel()
-        cancellable2.cancel()
-
-        // After cancel, no more updates
-        statusUpdates.clear()
-        engine.stop()
-        assertTrue(statusUpdates.isEmpty())
+        assertEquals(listOf("w1"), liveConflicts)
+        assertTrue(liveStatuses.contains("ready"))
+        assertEquals("stopped", liveStatuses.last())
+        assertEquals(emptyList<String>(), canceledStatuses)
+        assertEquals(emptyList<String>(), canceledConflicts)
     }
 
     @Test
