@@ -4,6 +4,7 @@ package swift
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/dataset"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -36,8 +38,26 @@ func TestRealSwiftScenarios(t *testing.T) {
 		{"multi-scope-provenance", runSwiftMultiScopeProvenance},
 		{"schema-queued-mutation", runSwiftSchemaQueuedMutation},
 		{"schema-check", runSwiftSchemaCheck},
+		{"dataset", runSwiftDataset},
 	} {
 		t.Run(scenario.name, func(t *testing.T) { scenario.run(t) })
+	}
+}
+
+// runSwiftDataset runs the authored training dataset flow through Swift clients.
+func runSwiftDataset(t *testing.T) {
+	t.Helper()
+	ctx, harness, _, platform := newSwiftFixture(t, 0)
+	if err := harness.ApplySourceSetup(ctx, blackbox.SourceSetup{Name: "dataset", SchemaSQL: dataset.SchemaSQL, RegistrationSQL: dataset.RegistrationSQL, Tables: dataset.TableNames()}); err != nil {
+		t.Fatalf("register the Swift dataset: %v", err)
+	}
+	source, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open the Swift dataset source: %v", err)
+	}
+	defer source.Close()
+	if err := dataset.RunNativeFlow(ctx, source, &DatasetPlatform{Platform: platform}, t.Logf); err != nil {
+		t.Fatalf("run the Swift dataset flow: %v", err)
 	}
 }
 
@@ -311,6 +331,22 @@ var swiftPerformanceSuiteReset sync.Once
 
 func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize int) (context.Context, scenarios.Scenario, *blackbox.Harness, *blackbox.NativeController, *Platform) {
 	t.Helper()
+	ctx, harness, controller, platform := newSwiftFixture(t, pullPageSize)
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, filepath.Join("conformance", "scenarios", scenarioPath))
+	if err != nil {
+		t.Fatalf("load Swift performance scenario %s: %v", scenarioPath, err)
+	}
+	return ctx, scenario, harness, controller, platform
+}
+
+// newSwiftFixture provisions the shared server and one direct Swift platform.
+// Its cleanups reset the server whether or not the scenario passes.
+func newSwiftFixture(t *testing.T, pullPageSize int) (context.Context, *blackbox.Harness, *blackbox.NativeController, *Platform) {
+	t.Helper()
 	if !*warmConnectProvision || !*warmConnectInstall {
 		t.Fatal("TestRealSwiftScenarios requires --provision --install")
 	}
@@ -376,16 +412,8 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 	if err != nil {
 		t.Fatalf("create Swift direct platform: %v", err)
 	}
-	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("resolve repository root: %v", err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	t.Cleanup(cancel)
-	scenario, err := scenarios.LoadFile(ctx, repositoryRoot, filepath.Join("conformance", "scenarios", scenarioPath))
-	if err != nil {
-		t.Fatalf("load Swift performance scenario %s: %v", scenarioPath, err)
-	}
 	// The reset runs as a cleanup so a scenario that fails still restores server
 	// state. A trailing call never runs after t.Fatalf, which leaves every later
 	// scenario running against the failed scenario's state.
@@ -414,7 +442,7 @@ func newSwiftPerformanceFixture(t *testing.T, scenarioPath string, pullPageSize 
 			t.Errorf("close Swift direct platform: %v", err)
 		}
 	})
-	return ctx, scenario, harness, controller, platform
+	return ctx, harness, controller, platform
 }
 
 // newSwiftPerformanceArtifact builds a portable seed artifact for a scenario
