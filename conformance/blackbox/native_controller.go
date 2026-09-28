@@ -3367,10 +3367,15 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 	if len(binding.Events) == 0 {
 		return resolveNativeEmptyRuntimeTransaction(ctx, database, binding)
 	}
-	if binding.SourceXID == 0 {
+	// A controller source commit records its transaction ID. An accepted
+	// application push commits in the adapter, so it has none, and its
+	// identity binds through the push records instead.
+	var sourceXID any
+	if binding.SourceXID != 0 {
+		sourceXID = fmt.Sprintf("%d", binding.SourceXID)
+	} else if !binding.ApplicationPush {
 		return errors.New("native source transaction has no source transaction ID")
 	}
-	sourceXID := fmt.Sprintf("%d", binding.SourceXID)
 	type runtimeIdentity struct {
 		stream   string
 		commit   string
@@ -3400,7 +3405,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND event.operation = $2
 				  AND (fence.new_capture_key = $3::jsonb OR fence.old_capture_key = $3::jsonb)
-				  AND transaction.source_xid = $4::xid
+				  AND ($4::xid IS NULL OR transaction.source_xid = $4::xid)
 				ORDER BY event.commit_lsn DESC
 				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
@@ -3417,7 +3422,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
 				  AND event.operation = $3
-				  AND transaction.source_xid = $4::xid
+				  AND ($4::xid IS NULL OR transaction.source_xid = $4::xid)
 				ORDER BY event.commit_lsn DESC
 				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
