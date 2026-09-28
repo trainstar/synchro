@@ -2557,18 +2557,20 @@ mod tests {
                 generation,
             )?;
             let mut source_generation = active_generation;
+            let mut transitions = Vec::with_capacity(generations.len());
             for target_generation in generations {
-                crate::materialize::activate_staged_membership_generation(
-                    client,
-                    source_generation,
-                    target_generation,
-                    &stream_generation,
-                    "0/1",
-                    "0/2",
-                )
-                .expect("activate staged test membership generation");
+                transitions.push((source_generation, target_generation));
                 source_generation = target_generation;
             }
+            crate::materialize::activate_staged_membership_generations(
+                client,
+                &transitions,
+                generation,
+                &stream_generation,
+                "0/1",
+                "0/2",
+            )
+            .expect("activate staged test membership generation");
             crate::registry::load_registry_generation_from_client(client, generation)?;
             client.update(
                 "UPDATE sync_registry_generations

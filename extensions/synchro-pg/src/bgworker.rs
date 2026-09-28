@@ -3530,9 +3530,15 @@ fn materialize_transaction(
     let mut active_generation = generation;
     let mut effect_bases = HashMap::new();
     let mut segments = Vec::with_capacity(applicable_segments.len());
+    let mut membership_transitions = Vec::with_capacity(activations.len());
     for (segment, applicable) in applicable_segments.iter().enumerate() {
         let registry = &registries[segment];
         if let Some(group) = segment.checked_sub(1).map(|group| &groups[group]) {
+            let mut source_generation = active_generation;
+            for target_generation in &group.generations {
+                membership_transitions.push((source_generation, *target_generation));
+                source_generation = *target_generation;
+            }
             active_generation = activate_generations(
                 client,
                 active_generation,
@@ -3585,6 +3591,18 @@ fn materialize_transaction(
         impacts,
         &effect_bases,
     )?;
+    // A membership rule stage replaces the edges of rows that no source event
+    // changed. It waits for the final projection like every other membership
+    // evaluation of the transaction.
+    crate::materialize::activate_staged_membership_generations(
+        client,
+        &membership_transitions,
+        active_generation,
+        &stream_generation,
+        &format_lsn(transaction.commit_lsn),
+        &format_lsn(transaction.end_lsn),
+    )
+    .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
 
     client
         .update(
@@ -7141,21 +7159,6 @@ fn activate_generations(
     let Some(final_generation) = activations.last().copied() else {
         return Ok(active_generation);
     };
-    let stream_generation =
-        active_stream_generation(client).map_err(|_| failure("validation_failed", commit_lsn))?;
-    let mut source_generation = active_generation;
-    for generation in activations {
-        crate::materialize::activate_staged_membership_generation(
-            client,
-            source_generation,
-            *generation,
-            &stream_generation,
-            &format_lsn(commit_lsn),
-            &format_lsn(end_lsn),
-        )
-        .map_err(|_| failure("scope_evaluation_failed", commit_lsn))?;
-        source_generation = *generation;
-    }
     crate::registry::remove_retired_capture_configuration(
         client,
         active_generation,

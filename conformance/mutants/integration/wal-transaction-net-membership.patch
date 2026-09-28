@@ -1,18 +1,18 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
-index 505d57a..7ddf9fd 100644
+index f7b4858..c33043d 100644
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -3511,8 +3511,7 @@ fn materialize_transaction(
+@@ -3528,8 +3528,7 @@ fn materialize_transaction(
          })
          .collect();
      let mut active_generation = generation;
 -    let mut effect_bases = HashMap::new();
 -    let mut segments = Vec::with_capacity(applicable_segments.len());
 +    let mut effect_count = 0i64;
+     let mut membership_transitions = Vec::with_capacity(activations.len());
      for (segment, applicable) in applicable_segments.iter().enumerate() {
          let registry = &registries[segment];
-         if let Some(group) = segment.checked_sub(1).map(|group| &groups[group]) {
-@@ -3531,15 +3530,6 @@ fn materialize_transaction(
+@@ -3554,15 +3553,6 @@ fn materialize_transaction(
              registry,
              applicable,
          )?;
@@ -28,7 +28,7 @@ index 505d57a..7ddf9fd 100644
          // A relation that a later generation removes has no final projection.
          persisted.direct_impacts.retain_mut(|impact| {
              let relation_id = registry[impact.registration_index].relation_id.as_str();
-@@ -3551,23 +3541,22 @@ fn materialize_transaction(
+@@ -3574,23 +3564,22 @@ fn materialize_transaction(
                  None => false,
              }
          });
@@ -64,6 +64,6 @@ index 505d57a..7ddf9fd 100644
 -        impacts,
 -        &effect_bases,
 -    )?;
- 
-     client
-         .update(
+     // A membership rule stage replaces the edges of rows that no source event
+     // changed. It waits for the final projection like every other membership
+     // evaluation of the transaction.
