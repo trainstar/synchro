@@ -403,6 +403,49 @@ data class RejectedMutationInspection(
     val updatedAt: String,
 )
 
+/**
+ * A retained rejection that a database from before the mutation ledger stored.
+ * The old rejection table did not store the exact mutation or rejection JSON,
+ * so this record has only the stored fields.
+ */
+data class LegacyRejectionInspection(
+    val mutationID: String,
+    val tableName: String,
+    val recordID: String,
+    val status: MutationStatus,
+    val code: MutationRejectionCode,
+    val message: String?,
+    val serverRowJSON: String?,
+    val serverVersion: String?,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+/** One retained rejection in its stored representation. */
+sealed interface RetainedRejectionInspection {
+    val mutationID: String
+    val tableName: String
+    val recordID: String
+    val status: MutationStatus
+    val code: MutationRejectionCode
+
+    data class Current(val rejection: RejectedMutationInspection) : RetainedRejectionInspection {
+        override val mutationID: String get() = rejection.mutationID
+        override val tableName: String get() = rejection.tableName
+        override val recordID: String get() = rejection.recordID
+        override val status: MutationStatus get() = rejection.status
+        override val code: MutationRejectionCode get() = rejection.code
+    }
+
+    data class Legacy(val rejection: LegacyRejectionInspection) : RetainedRejectionInspection {
+        override val mutationID: String get() = rejection.mutationID
+        override val tableName: String get() = rejection.tableName
+        override val recordID: String get() = rejection.recordID
+        override val status: MutationStatus get() = rejection.status
+        override val code: MutationRejectionCode get() = rejection.code
+    }
+}
+
 data class ConflictEvent(
     val table: String,
     val recordID: String,

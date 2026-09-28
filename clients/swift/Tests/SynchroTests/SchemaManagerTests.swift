@@ -1197,7 +1197,7 @@ final class SchemaManagerTests: XCTestCase {
                 "UPDATE orders SET ship_address = NULL WHERE id = 'pending'", params: nil
             ))
             let rows = try database.query("SELECT * FROM orders ORDER BY id", params: nil)
-            let pending = try ChangeTracker(database: database).inspectPendingMutations().currentRecords()
+            let pending = try ChangeTracker(database: database).inspectPendingMutations()
             let values = try database.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id", params: nil)
             let versions = try database.query("SELECT * FROM _synchro_row_versions", params: nil)
             let provenance = try database.query("SELECT * FROM _synchro_scope_rows", params: nil)
@@ -1247,7 +1247,7 @@ final class SchemaManagerTests: XCTestCase {
             XCTAssertEqual(try recoveredManager.recoverMigrationIfNeeded()?.phase, .applied)
             XCTAssertEqual(try recovered.query("PRAGMA schema_version", params: nil), schemaVersion)
             XCTAssertNil(try recoveredManager.activeMigration())
-            XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations().currentRecords(), pending)
+            XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations(), pending)
             XCTAssertEqual(try recovered.query(
                 "SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id", params: nil
             ), values)
@@ -1271,7 +1271,7 @@ final class SchemaManagerTests: XCTestCase {
             XCTAssertNil(try recovered.queryOne("SELECT ship_address FROM orders WHERE id = 'pending'", params: nil)?["ship_address"] as String?)
             XCTAssertEqual(try recovered.queryOne("SELECT note FROM local_events", params: nil)?["note"] as String?, "NOT NULL,  changed")
             XCTAssertThrowsError(try recovered.execute("UPDATE orders SET local_note = NULL WHERE id = 'pending'", params: nil))
-            XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations().currentRecords().count, pending.count + 1)
+            XCTAssertEqual(try ChangeTracker(database: recovered).inspectPendingMutations().count, pending.count + 1)
         }
     }
 
@@ -1309,7 +1309,7 @@ final class SchemaManagerTests: XCTestCase {
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES ('o1', 'offline', 'u1', '2026-01-01T00:00:00.000000Z')",
             params: nil
         )
-        let pendingBefore = try ChangeTracker(database: database).inspectPendingMutations().currentRecords()
+        let pendingBefore = try ChangeTracker(database: database).inspectPendingMutations()
 
         _ = try manager.prepareMigration(
             targetManifest: targetManifest,
@@ -1350,7 +1350,7 @@ final class SchemaManagerTests: XCTestCase {
             "dark"
         )
         XCTAssertEqual(
-            try ChangeTracker(database: recoveredDatabase).inspectPendingMutations().currentRecords(),
+            try ChangeTracker(database: recoveredDatabase).inspectPendingMutations(),
             pendingBefore
         )
         XCTAssertNil(try recoveredManager.activeMigration())

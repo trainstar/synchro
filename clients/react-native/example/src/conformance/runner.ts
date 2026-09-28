@@ -16,6 +16,7 @@ import type {
   PendingMutationInspection,
   RetainedMutationInspection,
   RejectedMutationInspection,
+  RetainedRejectionInspection,
   Row,
   SQLiteBindValue,
   SyncEvent,
@@ -128,7 +129,7 @@ export type ConformanceActionResult =
 
 export interface ConformanceCapture {
   application_rows?: Row[];
-  pending_mutations?: Omit<PendingMutationInspection, 'representation'>[];
+  pending_mutations?: PendingMutationInspection[];
   rejected_mutations?: RejectedMutationInspection[];
   client_state?: ClientStateInspection;
   durable_proof?: RawDurableProof;
@@ -549,10 +550,12 @@ export class PublicConformanceRunner {
         }
         case 'rejected-mutations': {
           const captured = await state();
-          capture.rejected_mutations = capturedDetail(
-            captured.rejectedMutations,
-            captured.clientState.rejectedMutationCount,
-            'rejected-mutations'
+          capture.rejected_mutations = currentRejections(
+            capturedDetail(
+              captured.rejectedMutations,
+              captured.clientState.rejectedMutationCount,
+              'rejected-mutations'
+            )
           );
           break;
         }
@@ -1044,16 +1047,26 @@ function describeBoundFailure(error: unknown): string {
 
 // The harness capture has only the current record shape, as in the native runners.
 // A legacy import fails the capture instead of reaching the harness with invented bindings.
-function currentMutations(
-  values: RetainedMutationInspection[]
-): Omit<PendingMutationInspection, 'representation'>[] {
+function currentMutations(values: RetainedMutationInspection[]): PendingMutationInspection[] {
   return values.map((value) => {
     if (value.representation !== 'current') {
       throw new ConformanceCommandError('capture_inspection_failed');
     }
-    const mutation: Partial<PendingMutationInspection> = { ...value };
+    const mutation: PendingMutationInspection & { representation?: 'current' } = { ...value };
     delete mutation.representation;
-    return mutation as Omit<PendingMutationInspection, 'representation'>;
+    return mutation;
+  });
+}
+
+// A legacy rejection has no exact mutation or rejection, so it fails the capture.
+function currentRejections(values: RetainedRejectionInspection[]): RejectedMutationInspection[] {
+  return values.map((value) => {
+    if (value.representation !== 'current') {
+      throw new ConformanceCommandError('capture_inspection_failed');
+    }
+    const rejection: RejectedMutationInspection & { representation?: 'current' } = { ...value };
+    delete rejection.representation;
+    return rejection;
   });
 }
 

@@ -1,4 +1,5 @@
 import XCTest
+import GRDB
 @testable @_spi(Inspection) import Synchro
 
 final class InspectionTests: XCTestCase {
@@ -112,7 +113,7 @@ final class InspectionTests: XCTestCase {
         try await firstClient.close()
 
         let restartedClient = try SynchroClient(config: config)
-        let inspections = try restartedClient.inspectPendingMutations().currentRecords()
+        let inspections = try restartedClient.inspectPendingMutations()
 
         XCTAssertEqual(inspections.map(\.recordID), ["o1", "o2"])
         XCTAssertEqual(inspections.map(\.localOrder), inspections.map(\.localOrder).sorted())
@@ -144,7 +145,7 @@ final class InspectionTests: XCTestCase {
             "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
             params: ["o1", "authored", "2026-01-01T00:00:00.000000Z"]
         )
-        let pending = try XCTUnwrap(firstClient.inspectPendingMutations().currentRecords().first)
+        let pending = try XCTUnwrap(firstClient.inspectPendingMutations().first)
         let mutationID = pending.mutationID
         let mutation = Mutation(
             mutationID: mutationID,
@@ -208,18 +209,18 @@ final class InspectionTests: XCTestCase {
         XCTAssertEqual(rejected.mutationJSON, mutationJSON)
         XCTAssertEqual(rejected.rejectionJSON, rejectionJSON)
 
-        let retainedBeforeClear = try XCTUnwrap(restartedClient.inspectRetainedMutations().currentRecords().first)
+        let retainedBeforeClear = try XCTUnwrap(restartedClient.inspectRetainedMutations().first)
         XCTAssertEqual(retainedBeforeClear.status, .serverRejected)
 
         try restartedClient.clearRejectedMutations()
 
         XCTAssertTrue(try restartedClient.inspectRejectedMutations().isEmpty)
-        XCTAssertEqual(try restartedClient.inspectRetainedMutations().currentRecords(), [retainedBeforeClear])
+        XCTAssertEqual(try restartedClient.inspectRetainedMutations(), [retainedBeforeClear])
         try await restartedClient.close()
 
         let afterClearRestart = try SynchroClient(config: config)
         XCTAssertTrue(try afterClearRestart.inspectRejectedMutations().isEmpty)
-        XCTAssertEqual(try afterClearRestart.inspectRetainedMutations().currentRecords(), [retainedBeforeClear])
+        XCTAssertEqual(try afterClearRestart.inspectRetainedMutations(), [retainedBeforeClear])
         XCTAssertEqual(try afterClearRestart.inspectCurrentSchema(), pending.authoredSchema)
         try await afterClearRestart.close()
         removeDatabase(at: config.dbPath)
@@ -464,7 +465,7 @@ final class InspectionTests: XCTestCase {
                 title = try transaction.queryOne("SELECT title FROM orders WHERE id = 'o1'")?["title"]
             }
             try assertOneGeneration(snapshot.capture)
-            let rejected = try XCTUnwrap(snapshot.rejectedMutations)
+            let rejected = try XCTUnwrap(snapshot.rejectedMutations).currentRecords()
             let retained = try XCTUnwrap(snapshot.retainedMutations)
             XCTAssertEqual(rejected.count, snapshot.capture.rejectedMutationCount)
             XCTAssertEqual(retained.map(\.mutationID), [rejection.mutationID])
@@ -489,6 +490,45 @@ final class InspectionTests: XCTestCase {
         removeDatabase(at: config.dbPath)
     }
 
+    /// Commits a transition directly after the first transaction of the snapshot ends.
+    /// The client writer runs queued work in order. The commit of that transaction queues the
+    /// transition, so a snapshot split into a second transaction reads the transition.
+    func testSnapshotKeepsOneStateWhenATransitionFollowsItsFirstTransaction() async throws {
+        let config = try prepareClientConfig()
+        let client = try SynchroClient(config: config)
+        _ = try client.execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            params: ["o1", "before", "2026-01-01T00:00:00.000000Z"]
+        )
+        let inspection = SynchroInspection(client: client)
+        let transition = expectation(description: "transition committed")
+        let trigger = TransitionAfterCommit(pool: client.database.dbPool, committed: transition)
+        client.database.dbPool.add(transactionObserver: trigger, extent: .nextTransaction)
+
+        var rows: [String] = []
+        let snapshot = try inspection.captureSnapshot(maximumRecords: 8) { _, transaction in
+            rows = try transaction.query("SELECT id FROM orders ORDER BY id").map { $0["id"] }
+        }
+        await fulfillment(of: [transition], timeout: 30)
+
+        XCTAssertEqual(rows, ["o1"])
+        XCTAssertEqual(snapshot.capture.applicationRowCount, 1)
+        XCTAssertEqual(snapshot.capture.scopeStateCount, 0)
+        XCTAssertEqual(snapshot.capture.scopeStates, [])
+        XCTAssertEqual(try XCTUnwrap(snapshot.retainedMutations).map(\.recordID), ["o1"])
+
+        var laterRows: [String] = []
+        let later = try inspection.captureSnapshot(maximumRecords: 8) { _, transaction in
+            laterRows = try transaction.query("SELECT id FROM orders ORDER BY id").map { $0["id"] }
+        }
+        XCTAssertEqual(laterRows, ["o1", "o2"])
+        XCTAssertEqual(later.capture.applicationRowCount, 2)
+        XCTAssertEqual(later.capture.scopeStates.map(\.scopeID), ["probe-scope"])
+
+        try await client.close()
+        removeDatabase(at: config.dbPath)
+    }
+
     private func assertOneGeneration(_ capture: ClientStateCaptureInspection) throws {
         XCTAssertFalse(capture.overflowed)
         XCTAssertEqual(capture.scopeStateCount, capture.scopeStates.count)
@@ -507,7 +547,7 @@ final class InspectionTests: XCTestCase {
     private func rejectionFixture(
         _ client: SynchroClient
     ) throws -> (mutationID: String, mutationJSON: String, rejectionJSON: String) {
-        let pending = try XCTUnwrap(client.inspectPendingMutations().currentRecords().first)
+        let pending = try XCTUnwrap(client.inspectPendingMutations().first)
         let mutation = Mutation(
             mutationID: pending.mutationID,
             table: pending.tableID,
@@ -963,5 +1003,32 @@ final class InspectionTests: XCTestCase {
         for suffix in ["", "-journal", "-wal", "-shm"] {
             try? fileManager.removeItem(atPath: path + suffix)
         }
+    }
+}
+
+/// Queues one sync-locked transition on the writer when the observed transaction commits.
+private final class TransitionAfterCommit: TransactionObserver, @unchecked Sendable {
+    private let pool: DatabasePool
+    private let committed: XCTestExpectation
+
+    init(pool: DatabasePool, committed: XCTestExpectation) {
+        self.pool = pool
+        self.committed = committed
+    }
+
+    func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool { false }
+    func databaseDidChange(with event: DatabaseEvent) {}
+    func databaseDidRollback(_ db: Database) {}
+
+    func databaseDidCommit(_ db: Database) {
+        pool.asyncWrite({ db in
+            try SynchroMeta.setSyncLock(db, locked: true)
+            try db.execute(sql: "INSERT INTO orders (id, title, updated_at) VALUES ('o2', 'after', '2026-01-02T00:00:00.000000Z')")
+            try SynchroMeta.upsertScope(db, scopeID: "probe-scope", cursor: nil, checksum: nil, generation: 1, localChecksum: "")
+            try SynchroMeta.setSyncLock(db, locked: false)
+        }, completion: { [committed] _, result in
+            if case .failure(let error) = result { XCTFail("transition failed: \(error)") }
+            committed.fulfill()
+        })
     }
 }

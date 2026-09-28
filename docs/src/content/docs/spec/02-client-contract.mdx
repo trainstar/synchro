@@ -953,18 +953,28 @@ semantics:
 - `getSyncStatus()` for the current typed state and bounded diagnostics
 - `observeSyncStatus(...)` for typed state changes
 - `observeSyncEvents(...)` for typed sync events
-- `inspectPendingMutations()` for durable unresolved queue records
-- `inspectRetainedMutations()` for all durable queue records, which include
+- `inspectRetainedMutationRecords()` for all durable queue records, which include
   local terminal states such as `exceeds_push_limit`
-- `inspectRejectedMutations()` for durable terminal outcomes and authored data
+- `inspectRejectedMutationRecords()` for durable terminal outcomes and authored data
 - an explicit policy operation to clear retained rejected records
 
-Each pending or retained record is either a current record or a legacy record.
+The deprecated `inspectPendingMutations()`, `inspectRetainedMutations()`, and
+`inspectRejectedMutations()` keep their published signatures and behavior. They
+return current records only, and they fail when a legacy record is present.
+
+Each retained record is either a current record or a legacy record.
 A current record has its table ID, primary-key binding, authored schema, and
 authored field values. A legacy record comes from a queue that existed before the
 mutation ledger. It has only the fields that the old queue stored. Its binding
 fields and authored values are absent, and the SDK does not fill them with
 placeholder values. A record with only some bindings fails inspection.
+
+Each rejected record is also either a current record or a legacy record. A
+current rejected record has its exact mutation JSON and rejection JSON. A legacy
+rejected record comes from a rejection table that existed before the mutation
+ledger. It has only the fields that the old table stored. Its mutation JSON and
+rejection JSON are absent. A record with only one of the two JSON values fails
+inspection.
 
 An application transaction callback must return before the application calls a
 sync lifecycle method. A client rejects this call before it acquires a lifecycle

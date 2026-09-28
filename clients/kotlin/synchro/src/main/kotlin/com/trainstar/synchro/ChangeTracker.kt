@@ -63,8 +63,8 @@ internal data class LedgerValue(
 
 internal class ChangeTracker(private val database: SynchroDatabase) {
 
-    internal fun inspectPendingMutations(): List<RetainedMutationInspection> =
-        database.readTransaction { db -> inspectMutations(db, includeTerminal = false) }
+    internal fun inspectPendingMutations(): List<PendingMutationInspection> =
+        database.readTransaction { db -> inspectMutations(db, includeTerminal = false) }.map(::currentMutation)
 
     /**
      * Returns every mutation the client retains, including one the server
@@ -72,8 +72,15 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
      * pending set, so a caller that needs the complete retained ledger reads
      * this instead.
      */
-    internal fun inspectRetainedMutations(): List<RetainedMutationInspection> =
+    internal fun inspectRetainedMutations(): List<PendingMutationInspection> =
+        inspectRetainedMutationRecords().map(::currentMutation)
+
+    internal fun inspectRetainedMutationRecords(): List<RetainedMutationInspection> =
         database.readTransaction { db -> inspectMutations(db, includeTerminal = true) }
+
+    private fun currentMutation(record: RetainedMutationInspection): PendingMutationInspection =
+        (record as? RetainedMutationInspection.Current)?.mutation
+            ?: throw SynchroError.InvalidResponse("stored mutation cannot be inspected")
 
     internal fun retainedMutationCount(): Int = database.readTransaction { db ->
         db.rawQuery(

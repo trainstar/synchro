@@ -1453,14 +1453,14 @@ class PushProcessorTests {
                     arrayOf(oversize),
                 ).isEmpty(),
             )
-            val retained = tracker.inspectRetainedMutations().currentRecords().single { it.mutationID == oversize }
+            val retained = tracker.inspectRetainedMutations().single { it.mutationID == oversize }
             assertEquals(LocalMutationStatus.EXCEEDS_PUSH_LIMIT, retained.status)
             assertEquals(
                 AnyCodable("b".repeat(atLimit + 1)),
                 retained.authoredFields.single { it.fieldID == "title" }.value,
             )
             assertEquals(4, tracker.retainedMutationCount())
-            assertFalse(tracker.inspectPendingMutations().currentRecords().any { it.mutationID == oversize })
+            assertFalse(tracker.inspectPendingMutations().any { it.mutationID == oversize })
             assertTrue(database.readTransaction { SynchroMeta.listRejectedMutations(it) }.isEmpty())
         } finally {
             server.shutdown()
@@ -1704,7 +1704,7 @@ class PushProcessorTests {
                             arrayOf(big),
                         ).isEmpty(),
                     )
-                    val retained = tracker.inspectRetainedMutations().currentRecords().single { it.mutationID == big }
+                    val retained = tracker.inspectRetainedMutations().single { it.mutationID == big }
                     assertEquals(LocalMutationStatus.EXCEEDS_PUSH_LIMIT, retained.status)
                     assertEquals(AnyCodable(title), retained.authoredFields.single { it.fieldID == "title" }.value)
                     assertEquals(AnyCodable(score), retained.authoredFields.single { it.fieldID == "score" }.value)
@@ -1769,7 +1769,7 @@ class PushProcessorTests {
             assertEquals("exceeds_push_limit", lifecycleState(database, insert))
             assertEquals(
                 LocalMutationStatus.EXCEEDS_PUSH_LIMIT,
-                tracker.inspectRetainedMutations().currentRecords().single { it.mutationID == insert }.status,
+                tracker.inspectRetainedMutations().single { it.mutationID == insert }.status,
             )
             assertTrue(database.query("SELECT 1 FROM _synchro_push_batches").isEmpty())
         } finally {

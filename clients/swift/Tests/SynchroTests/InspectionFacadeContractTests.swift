@@ -163,8 +163,8 @@ final class InspectionFacadeContractTests: XCTestCase {
         if type == Optional<[RetainedMutationInspection]>.self {
             return TypeShape(name: "array", nullable: true, element: TypeShape(name: "RetainedMutationInspection", nullable: false))
         }
-        if type == Optional<[RejectedMutationInspection]>.self {
-            return TypeShape(name: "array", nullable: true, element: TypeShape(name: "RejectedMutationInspection", nullable: false))
+        if type == Optional<[RetainedRejectionInspection]>.self {
+            return TypeShape(name: "array", nullable: true, element: TypeShape(name: "RetainedRejectionInspection", nullable: false))
         }
         if type == Optional<SyncFailure>.self { return TypeShape(name: "SyncFailure", nullable: true) }
         if type == [ScopeStateInspection].self {

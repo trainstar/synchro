@@ -200,7 +200,7 @@ private final class ExternalConnection {
         }
     }
 
-    private func execute(_ sql: String) throws {
+    func execute(_ sql: String) throws {
         let code = sqlite3_exec(handle, sql, nil, nil, nil)
         guard code == SQLITE_OK else {
             throw SQLiteFailure(code: code, message: Self.message(handle))
@@ -492,6 +492,54 @@ final class SynchroModuleTransactionTests: XCTestCase {
         requireSettledOnce(commits + [snapshot, close])
         XCTAssertEqual(try external.names(id: firstID), ["first"])
         XCTAssertEqual(try external.rowCount(), 2)
+    }
+
+    func testRejectedInspectionMapsLegacyRejectionWithStoredFieldsOnly() throws {
+        try initializeModule()
+        let external = try openExternalConnection()
+        // A rejection stored before the mutation ledger has no exact mutation or rejection JSON.
+        try external.execute("""
+            INSERT INTO _synchro_rejected_mutations
+                (mutation_id, table_name, record_id, status, code, message, server_row_json, server_version, created_at, updated_at)
+            VALUES ('m1', 'orders', 'r0', 'rejected_terminal', 'policy_rejected', 'blocked', '{"id":"r0"}', 'server-v7',
+                '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')
+            """)
+        let expected: NSDictionary = [
+            "representation": "legacy",
+            "mutationID": "m1",
+            "tableName": "orders",
+            "recordID": "r0",
+            "status": "rejected_terminal",
+            "code": "policy_rejected",
+            "message": "blocked",
+            "serverRowJSON": #"{"id":"r0"}"#,
+            "serverVersion": "server-v7",
+            "createdAt": "2026-01-01T00:00:00.000000Z",
+            "updatedAt": "2026-01-01T00:00:00.000000Z",
+        ]
+
+        let inspect = settle("inspect rejected records") {
+            module.inspectRejectedMutationRecords($0.resolve, reject: $0.reject)
+        }
+        let records = try XCTUnwrap((try resolvedValue(inspect) as? String)?.data(using: .utf8))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: records) as? NSArray, [expected])
+        // The deprecated method keeps its published result: a legacy rejection cannot be inspected.
+        let deprecated = settle("inspect rejected") {
+            module.inspectRejectedMutations($0.resolve, reject: $0.reject)
+        }
+        XCTAssertEqual(deprecated.resolutions.count, 0)
+        XCTAssertEqual(deprecated.rejections.count, 1)
+        let snapshot = settle("snapshot") {
+            module.inspectClientStateSnapshot([], resolve: $0.resolve, reject: $0.reject)
+        }
+        let result = try XCTUnwrap(try resolvedValue(snapshot) as? [String: Any])
+        let json = try XCTUnwrap((result["inspection"] as? String)?.data(using: .utf8))
+        let inspection = try XCTUnwrap(try JSONSerialization.jsonObject(with: json) as? [String: Any])
+        XCTAssertEqual(inspection["rejected_mutations"] as? NSArray, [expected])
+        let close = try closeModule()
+
+        requireSettledOnce([inspect, snapshot, close])
+        XCTAssertEqual(deprecated.settlementCount, 1)
     }
 
     // MARK: - Bridge calls

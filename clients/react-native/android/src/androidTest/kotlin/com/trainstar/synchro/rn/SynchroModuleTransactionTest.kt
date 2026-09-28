@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -37,6 +38,12 @@ private const val SETTLEMENT_TIMEOUT_SECONDS = 60L
 private const val COLUMNS_JSON = """[{"name":"id","type":"TEXT","primaryKey":true},{"name":"name","type":"TEXT"}]"""
 private const val INSERT_SQL = "INSERT INTO bridge_items (id, name) VALUES (?, ?)"
 private const val SELECT_NAME_SQL = "SELECT name FROM bridge_items WHERE id = ?"
+private const val LEGACY_REJECTION_SQL = """
+    INSERT INTO _synchro_rejected_mutations
+        (mutation_id, table_name, record_id, status, code, message, server_row_json, server_version, created_at, updated_at)
+    VALUES ('m1', 'orders', 'r0', 'rejected_terminal', 'policy_rejected', 'blocked', '{"id":"r0"}', 'server-v7',
+        '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')
+"""
 
 /**
  * Module events: these tests call neither start nor stop, and they register no bridge observer.
@@ -288,6 +295,45 @@ class SynchroModuleTransactionTest {
         assertEquals(2L, external.rowCount())
     }
 
+    @Test
+    fun rejectedInspectionMapsLegacyRejectionWithStoredFieldsOnly() {
+        initializeModule()
+        val external = openExternalConnection()
+        // A rejection stored before the mutation ledger has no exact mutation or rejection JSON.
+        external.execute(LEGACY_REJECTION_SQL)
+        val expected = JSONObject()
+            .put("representation", "legacy")
+            .put("mutationID", "m1")
+            .put("tableName", "orders")
+            .put("recordID", "r0")
+            .put("status", "rejected_terminal")
+            .put("code", "policy_rejected")
+            .put("message", "blocked")
+            .put("serverRowJSON", """{"id":"r0"}""")
+            .put("serverVersion", "server-v7")
+            .put("createdAt", "2026-01-01T00:00:00.000000Z")
+            .put("updatedAt", "2026-01-01T00:00:00.000000Z")
+
+        val inspect = settle("inspect rejected records") { module.inspectRejectedMutationRecords(it) }
+        val records = JSONArray(inspect.resolvedValue() as String)
+        assertEquals(1, records.length())
+        assertEquals(expected.toMap(), records.getJSONObject(0).toMap())
+        // The deprecated method keeps its published result: a legacy rejection cannot be inspected.
+        val deprecated = settle("inspect rejected") { module.inspectRejectedMutations(it) }
+        assertEquals(0, deprecated.resolutions.size)
+        assertEquals(1, deprecated.rejections.size)
+        val snapshot = settle("snapshot") { module.inspectClientStateSnapshot(JavaOnlyArray.of(), it) }
+        val inspection = JSONObject((snapshot.resolvedValue() as ReadableMap).getString("inspection")!!)
+        val snapshotRecords = inspection.getJSONArray("rejected_mutations")
+        assertEquals(1, snapshotRecords.length())
+        assertEquals(expected.toMap(), snapshotRecords.getJSONObject(0).toMap())
+        val close = closeModule()
+
+        requireSettledOnce(listOf(inspect, snapshot, close))
+    }
+
+    private fun JSONObject.toMap(): Map<String, Any?> = keys().asSequence().associateWith { get(it) }
+
     private fun initializeModule() {
         val config = JavaOnlyMap.of(
             "dbPath", databaseName,
@@ -484,6 +530,8 @@ private class ExternalConnection(private val path: String) : AutoCloseable {
             buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
         }
     }
+
+    fun execute(sql: String) = onThread { openDatabase().execSQL(sql) }
 
     fun rowCount(): Long = onThread {
         DatabaseUtils.longForQuery(openDatabase(), "SELECT count(*) FROM bridge_items", null)
