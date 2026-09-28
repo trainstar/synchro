@@ -20,8 +20,8 @@ use crate::registry::{
 };
 use crate::spi_helpers::{jsonb_batches, jsonb_payload_parameters, required_record_id};
 use crate::wal_decoder::{
-    ColumnInfo, RelationKey, TupleImage, TupleValue, WalDecoder, WalEvent, WalTransaction,
-    BEGIN_MSG, MAX_TRANSACTION_BYTES,
+    ColumnInfo, DecodeError, RelationKey, TupleImage, TupleValue, WalDecoder, WalEvent,
+    WalTransaction, BEGIN_MSG, MAX_TRANSACTION_BYTES,
 };
 
 const BATCH_SIZE: i32 = 500;
@@ -595,6 +595,9 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
             break;
         }
+        if BackgroundWorker::sighup_received() {
+            reload_worker_configuration();
+        }
         if let Err(error) = acquire_worker_poll_gate() {
             if !poll_gate_failure_logged {
                 log!("synchro WAL poll gate blocked: {error}");
@@ -618,6 +621,14 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     }
 
     let _ = heartbeat("stopped", identity.worker_role_oid);
+}
+
+fn reload_worker_configuration() {
+    unsafe {
+        // SAFETY: The worker is outside a transaction, as PostgreSQL requires for a configuration reload.
+        std::ptr::addr_of_mut!(pg_sys::ConfigReloadPending).write_volatile(0);
+        pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
+    }
 }
 
 fn poll_worker_once(
@@ -2008,7 +2019,7 @@ fn poll_candidate_and_process(
     )
     .map_err(|error| match error {
         PeekDecodeError::Read => "peeking candidate WAL failed".to_string(),
-        PeekDecodeError::Decode { .. } => "decoding candidate WAL failed".to_string(),
+        PeekDecodeError::Decode { error, .. } => decode_failure_detail(&error),
         PeekDecodeError::Identity { .. } => {
             "candidate WAL transaction identity is invalid".to_string()
         }
@@ -3118,9 +3129,10 @@ fn poll_and_process(
                     lsn,
                     pending_final_lsn,
                     pending_commit_timestamp,
+                    error,
                 } => PollFailure::Poison(PoisonFailure {
                     class: "decode_failed",
-                    detail: "WAL decoder rejected a replication message".to_string(),
+                    detail: decode_failure_detail(&error),
                     commit_lsn: pending_final_lsn.unwrap_or(lsn),
                     relation_id: None,
                     commit_timestamp: pending_commit_timestamp,
@@ -3243,12 +3255,30 @@ struct PeekedTransactions {
     transactions: Vec<WalTransaction>,
 }
 
+fn decode_failure_detail(error: &DecodeError) -> String {
+    match error {
+        DecodeError::UnexpectedEof => {
+            "WAL decoder found a truncated replication message".to_string()
+        }
+        DecodeError::InvalidMessage(_) => {
+            "WAL decoder rejected a malformed replication message".to_string()
+        }
+        DecodeError::TransactionTooLarge {
+            max_bytes,
+            max_records,
+        } => format!(
+            "WAL source transaction exceeds the decode limit of {max_bytes} bytes or {max_records} payload records"
+        ),
+    }
+}
+
 enum PeekDecodeError {
     Read,
     Decode {
         lsn: u64,
         pending_final_lsn: Option<u64>,
         pending_commit_timestamp: Option<i64>,
+        error: DecodeError,
     },
     Identity {
         transaction: Box<WalTransaction>,
@@ -3327,10 +3357,11 @@ fn peek_and_decode(
                     let completed =
                         staged_decoder
                             .feed(data)
-                            .map_err(|_| PeekDecodeError::Decode {
+                            .map_err(|error| PeekDecodeError::Decode {
                                 lsn,
                                 pending_final_lsn: failure_context.map(|context| context.0),
                                 pending_commit_timestamp: failure_context.map(|context| context.1),
+                                error,
                             })?;
                     (tuple_table, sql_xid, data_len, completed)
                 };
@@ -6863,15 +6894,23 @@ fn record_oldest_unmaterialized_commit(
             activate_worker_role_in_transaction(client, worker_role_oid)?;
             client
                 .update(
-                    "UPDATE synchro.sync_wal_worker_state
-                     SET oldest_unmaterialized_commit_timestamp = CASE
-                             WHEN $1::bigint IS NULL THEN NULL
-                             ELSE '2000-01-01 00:00:00+00'::timestamptz
-                                  + ($1::bigint * interval '1 microsecond')
-                         END,
+                    "UPDATE synchro.sync_wal_worker_state w
+                     SET oldest_unmaterialized_commit_timestamp = observed.commit_timestamp,
                          wal_observed_at = now(),
                          updated_at = now()
-                     WHERE worker_id = $2",
+                     FROM (
+                         SELECT CASE
+                                    WHEN $1::bigint IS NULL THEN NULL
+                                    ELSE '2000-01-01 00:00:00+00'::timestamptz
+                                         + ($1::bigint * interval '1 microsecond')
+                                END AS commit_timestamp
+                     ) observed
+                     WHERE w.worker_id = $2
+                       AND (
+                           w.wal_observed_at IS NULL
+                           OR w.oldest_unmaterialized_commit_timestamp
+                              IS DISTINCT FROM observed.commit_timestamp
+                       )",
                     None,
                     &[commit_timestamp.into(), WORKER_ID.into()],
                 )
@@ -7022,6 +7061,7 @@ fn load_active_poison_state(
 }
 
 fn heartbeat(state: &str, worker_role_oid: pg_sys::Oid) -> Result<(), String> {
+    let max_worker_heartbeat_age_seconds = crate::MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC.get();
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
             activate_worker_role_in_transaction(client, worker_role_oid)?;
@@ -7034,9 +7074,20 @@ fn heartbeat(state: &str, worker_role_oid: pg_sys::Oid) -> Result<(), String> {
                          materialized_end_lsn = p.materialized_end_lsn,
                          heartbeat_at = now(), updated_at = now()
                      FROM synchro.sync_wal_progress p
-                     WHERE w.worker_id = $2 AND p.singleton = true",
+                     WHERE w.worker_id = $2 AND p.singleton = true
+                       AND (
+                           w.state IS DISTINCT FROM $1
+                           OR w.registry_generation IS DISTINCT FROM p.registry_generation
+                           OR w.materialized_commit_lsn IS DISTINCT FROM p.materialized_commit_lsn
+                           OR w.materialized_end_lsn IS DISTINCT FROM p.materialized_end_lsn
+                           OR w.heartbeat_at <= now() - ($3::integer * interval '500 milliseconds')
+                       )",
                     None,
-                    &[state.into(), WORKER_ID.into()],
+                    &[
+                        state.into(),
+                        WORKER_ID.into(),
+                        max_worker_heartbeat_age_seconds.into(),
+                    ],
                 )
                 .map_err(|_| "updating worker heartbeat failed".to_string())?;
             Ok(())
@@ -7193,6 +7244,35 @@ fn run_replication_transaction<R, E, F: FnOnce() -> Result<R, E> + UnwindSafe + 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_failure_details_are_fixed_and_distinct() {
+        let details = [
+            decode_failure_detail(&DecodeError::UnexpectedEof),
+            decode_failure_detail(&DecodeError::InvalidMessage(
+                "synchro-decoded-value-marker".to_string(),
+            )),
+            decode_failure_detail(&DecodeError::TransactionTooLarge {
+                max_bytes: 16_777_216,
+                max_records: 10_000,
+            }),
+        ];
+
+        assert_eq!(
+            details[0],
+            "WAL decoder found a truncated replication message"
+        );
+        assert_eq!(
+            details[1],
+            "WAL decoder rejected a malformed replication message"
+        );
+        assert_eq!(
+            details[2],
+            "WAL source transaction exceeds the decode limit of 16777216 bytes or 10000 payload records"
+        );
+        assert_eq!(details.iter().collect::<HashSet<_>>().len(), 3);
+        assert!(!details[1].contains("synchro-decoded-value-marker"));
+    }
 
     #[test]
     fn startup_slot_reconciliation_covers_every_boundary() {

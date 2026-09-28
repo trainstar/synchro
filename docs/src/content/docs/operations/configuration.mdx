@@ -7,6 +7,8 @@ Set Synchro GUCs in `postgresql.conf` or with the equivalent PostgreSQL configur
 
 Reload PostgreSQL after a `SIGHUP` setting changes. Restart PostgreSQL after a `postmaster` setting changes.
 
+The WAL worker applies a reloaded `SIGHUP` setting before its next poll.
+
 Use [server setup](/synchro/getting-started/server-setup/) for PostgreSQL 18
 installation, role separation, logical WAL prerequisites, and the first
 registration. Do not place application rows or internal diagnostics in a
@@ -24,7 +26,25 @@ readiness endpoint.
 
 An empty publication, slot, database, or worker login makes the related readiness check fail.
 
-The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction. An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement. Candidate decoding also rejects the transaction. Split the source write into smaller transactions to stay below these fixed safety limits.
+The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction.
+Each captured row change uses two payload records.
+One record is the row change.
+One record is its `synchro_fence` logical message.
+Other pgoutput messages in the transaction also use payload records.
+Relation metadata is one example.
+Thus, one source transaction can capture at most 5,000 row changes.
+An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement.
+Candidate decoding also rejects the transaction.
+Split the source write into smaller transactions to stay below these fixed safety limits.
+
+A `decode_failed` poison has one of these fixed `failure_detail` values:
+
+- `WAL decoder found a truncated replication message`
+- `WAL decoder rejected a malformed replication message`
+- `WAL source transaction exceeds the decode limit of 16777216 bytes or 10000 payload records`
+
+An operator reads the value at `observations.poison` in `synchro_health_detail()`.
+The oversized transaction detail names both limits.
 
 The worker reads peeked pgoutput data one message at a time. It preserves each complete valid source transaction when a poll batch reaches its soft 16 MiB target.
 
@@ -98,6 +118,12 @@ must provide and cancel `JWKSContext` itself.
 | `synchro.max_worker_heartbeat_age_seconds` | `SIGHUP` | `30` | Limits the accepted worker heartbeat age. |
 | `synchro.max_wal_lag_bytes` | `SIGHUP` | `67108864` (64 MiB) | Limits current WAL beyond acknowledged WAL. |
 | `synchro.max_wal_lag_seconds` | `SIGHUP` | `30` | Limits the oldest unmaterialized registered write age. |
+
+The WAL worker writes its heartbeat when its state or its copied progress changes.
+Otherwise, it writes the heartbeat when the heartbeat age reaches half of `synchro.max_worker_heartbeat_age_seconds`.
+Thus, the heartbeat check can fail when one worker poll takes more than about half of the limit.
+A long storage flush is one example.
+Set a limit that is more than two times the longest poll time on your server.
 
 Each readiness limit must be a positive integer. A zero value makes its readiness check fail with `invalid_limit`.
 
