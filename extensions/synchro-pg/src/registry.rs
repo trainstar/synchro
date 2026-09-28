@@ -2979,103 +2979,33 @@ fn mark_generation_validated(
     Ok(())
 }
 
-/// Queue the activation while no slot is bound, so the initial slot binding
-/// can replay it. The request records the confirmed flush position of the
-/// configured slot when that slot decodes this transaction. The binding replay
-/// skips such a request, because the slot already has its direct message.
+/// Queue the activation while no slot is bound and report whether it was queued.
+/// The initial slot binding replays each queued request. A slot can start
+/// before this transaction commits, so a direct message would reach that slot
+/// as a second activation of the same generation.
 fn queue_registry_activation_if_unbound(
     client: &mut SpiClient<'_>,
     generation: i64,
-) -> Result<(), spi::Error> {
-    let unbound = client
+) -> Result<bool, spi::Error> {
+    client
         .update(
-            "SELECT singleton
-             FROM synchro.sync_runtime_state
-             WHERE singleton AND active_slot_name IS NULL
-             FOR UPDATE",
+            "WITH unbound AS (
+                 SELECT singleton
+                 FROM synchro.sync_runtime_state
+                 WHERE singleton AND active_slot_name IS NULL
+                 FOR UPDATE
+             ), queued AS (
+                 INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
+                 SELECT $1 FROM unbound
+                 ON CONFLICT (registry_generation) DO NOTHING
+             )
+             SELECT EXISTS (SELECT 1 FROM unbound) AS queued",
             None,
-            &[],
+            &[generation.into()],
         )?
-        .len()
-        == 1;
-    if !unbound {
-        return Ok(());
-    }
-    let decoding_slot_lsn = configured_slot_decoding_transaction(client)?;
-    client.update(
-        "INSERT INTO synchro.sync_registry_activation_requests (
-             registry_generation, decoding_slot_lsn
-         )
-         VALUES ($1, $2::pg_lsn)
-         ON CONFLICT (registry_generation) DO NOTHING",
-        None,
-        &[generation.into(), decoding_slot_lsn.into()],
-    )?;
-    Ok(())
-}
-
-/// Return the confirmed flush position of the configured slot when that slot
-/// decodes the current transaction, which already has a transaction ID.
-///
-/// Slot creation waits for every transaction that runs when it starts. An
-/// absent slot, or a creation that this transaction blocks, therefore reaches
-/// its consistent point after this commit and does not decode it. A logical
-/// slot with a confirmed flush position reached its consistent point before
-/// this commit and decodes it. Any other creation is still in progress, so the
-/// call waits until one of these outcomes is certain.
-fn configured_slot_decoding_transaction(
-    client: &mut SpiClient<'_>,
-) -> Result<Option<String>, spi::Error> {
-    let slot = crate::REPLICATION_SLOT_GUC
-        .get()
-        .and_then(|value| value.to_str().ok().map(String::from))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "synchro_slot".to_string());
-    loop {
-        let rows = client.select(
-            "SELECT slot.confirmed_flush_lsn::text AS confirmed_flush_lsn,
-                    slot.slot_type = 'logical' AS logical,
-                    slot.active_pid
-             FROM pg_catalog.pg_replication_slots slot
-             WHERE slot.slot_name = $1",
-            None,
-            &[slot.as_str().into()],
-        )?;
-        let Some(row) = rows.into_iter().next() else {
-            return Ok(None);
-        };
-        let logical = row.get_by_name::<bool, &str>("logical")?.unwrap_or(false);
-        if let Some(confirmed_flush_lsn) = row.get_by_name::<String, &str>("confirmed_flush_lsn")? {
-            return Ok(logical.then_some(confirmed_flush_lsn));
-        }
-        let Some(creator) = row.get_by_name::<i32, &str>("active_pid")? else {
-            return Ok(None);
-        };
-        if !logical {
-            return Ok(None);
-        }
-        let blocked = client
-            .select(
-                "WITH RECURSIVE blockers(pid) AS (
-                     SELECT $1::integer
-                     UNION
-                     SELECT pg_catalog.unnest(pg_catalog.pg_blocking_pids(blockers.pid))
-                     FROM blockers
-                 )
-                 SELECT EXISTS (
-                     SELECT 1 FROM blockers WHERE pid = pg_catalog.pg_backend_pid()
-                 ) AS blocked",
-                None,
-                &[creator.into()],
-            )?
-            .first()
-            .get_by_name::<bool, &str>("blocked")?
-            .unwrap_or(false);
-        if blocked {
-            return Ok(None);
-        }
-        client.select("SELECT pg_catalog.pg_sleep(0.01)", None, &[])?;
-    }
+        .first()
+        .get_by_name::<bool, &str>("queued")
+        .map(|queued| queued.unwrap_or(false))
 }
 
 fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
@@ -3106,7 +3036,9 @@ fn emit_registry_activation_when_ready(
     if crate::schema::generation_requires_projection_bootstrap(client, generation)? {
         return Ok(());
     }
-    queue_registry_activation_if_unbound(client, generation)?;
+    if queue_registry_activation_if_unbound(client, generation)? {
+        return Ok(());
+    }
     emit_registry_activation(client, generation)
 }
 
