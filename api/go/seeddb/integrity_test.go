@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -314,16 +316,6 @@ func TestSchemaManifestRejectsRehashedSemanticMutants(t *testing.T) {
 			},
 		},
 		{
-			name: "class-2 compatibility floor does not extend parent lineage",
-			mutate: func(env *manifestEnvelope) {
-				env.SchemaVersion = 2
-				env.Manifest.SchemaVersion = 2
-				env.Manifest.TransitionClass = "class_2"
-				env.Manifest.CompatibilityFloor = 2
-				env.Manifest.ParentSchema = &schemaRef{Version: 1, Hash: strings.Repeat("1", 64)}
-			},
-		},
-		{
 			name: "index name is duplicated",
 			mutate: func(env *manifestEnvelope) {
 				env.Manifest.Tables[0].Indexes[1].Name = env.Manifest.Tables[0].Indexes[0].Name
@@ -445,6 +437,43 @@ func TestManifestHashCanonicalizesSemanticallyUnorderedCollections(t *testing.T)
 			t.Fatal("export manifest accepted noncanonical scope order")
 		}
 	})
+}
+
+func TestSchemaManifestCompatibilityFloorFollowsAuthoredLineageCases(t *testing.T) {
+	data, err := os.ReadFile("../../../conformance/schema/manifest-lineage-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Cases []struct {
+			Case               string `json:"case"`
+			SchemaVersion      int64  `json:"schema_version"`
+			ParentVersion      *int64 `json:"parent_version"`
+			TransitionClass    string `json:"transition_class"`
+			CompatibilityFloor int64  `json:"compatibility_floor"`
+			Valid              bool   `json:"valid"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil || len(document.Cases) == 0 {
+		t.Fatalf("decode authored lineage cases: cases=%d err=%v", len(document.Cases), err)
+	}
+	for _, test := range document.Cases {
+		t.Run(test.Case, func(t *testing.T) {
+			env := validManifestEnvelope(t)
+			env.SchemaVersion = test.SchemaVersion
+			env.Manifest.SchemaVersion = test.SchemaVersion
+			env.Manifest.TransitionClass = test.TransitionClass
+			env.Manifest.CompatibilityFloor = test.CompatibilityFloor
+			env.Manifest.ParentSchema = nil
+			if test.ParentVersion != nil {
+				env.Manifest.ParentSchema = &schemaRef{Version: *test.ParentVersion, Hash: strings.Repeat("1", 64)}
+			}
+			rehashSchemaManifest(t, &env)
+			if err := env.validate(); (err == nil) != test.Valid {
+				t.Fatalf("valid=%t, want %t: %v", err == nil, test.Valid, err)
+			}
+		})
+	}
 }
 
 func validManifestEnvelope(t *testing.T) manifestEnvelope {

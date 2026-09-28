@@ -1,0 +1,17 @@
+{
+  "description": "Authored compatibility-floor lineage cases for schema manifest validation. The Rust core validator and the Go seed verifier consume these cases.",
+  "cases": [
+    {"case": "initial floor equals its version", "schema_version": 8, "parent_version": null, "transition_class": "initial", "compatibility_floor": 8, "valid": true},
+    {"case": "initial floor is older than its version", "schema_version": 8, "parent_version": null, "transition_class": "initial", "compatibility_floor": 7, "valid": false},
+    {"case": "class 2 floor equals the parent version", "schema_version": 8, "parent_version": 7, "transition_class": "class_2", "compatibility_floor": 7, "valid": true},
+    {"case": "class 2 floor is older than the parent version", "schema_version": 8, "parent_version": 5, "transition_class": "class_2", "compatibility_floor": 3, "valid": true},
+    {"case": "class 2 floor is newer than the parent version", "schema_version": 8, "parent_version": 5, "transition_class": "class_2", "compatibility_floor": 6, "valid": false},
+    {"case": "class 2 floor equals its own version", "schema_version": 8, "parent_version": 7, "transition_class": "class_2", "compatibility_floor": 8, "valid": false},
+    {"case": "class 2 floor is newer than its own version", "schema_version": 8, "parent_version": 7, "transition_class": "class_2", "compatibility_floor": 9, "valid": false},
+    {"case": "class 2 floor is zero", "schema_version": 8, "parent_version": 7, "transition_class": "class_2", "compatibility_floor": 0, "valid": false},
+    {"case": "class 3 floor equals its version", "schema_version": 8, "parent_version": 7, "transition_class": "class_3", "compatibility_floor": 8, "valid": true},
+    {"case": "class 3 floor equals the parent version", "schema_version": 8, "parent_version": 7, "transition_class": "class_3", "compatibility_floor": 7, "valid": false},
+    {"case": "class 4 floor equals its version", "schema_version": 8, "parent_version": 7, "transition_class": "class_4", "compatibility_floor": 8, "valid": true},
+    {"case": "class 4 floor equals the parent version", "schema_version": 8, "parent_version": 7, "transition_class": "class_4", "compatibility_floor": 7, "valid": false}
+  ]
+}

@@ -387,6 +387,21 @@ pub struct ColumnSchema {
     pub scale: Option<i32>,
 }
 
+impl ColumnSchema {
+    /// Reports whether every value of this decimal field is also a value of
+    /// `wider` without rounding or truncation. Both the fractional digits and
+    /// the integer digits must fit. Schema classification and push
+    /// compatibility use this one rule.
+    pub fn decimal_domain_within(&self, wider: &ColumnSchema) -> bool {
+        match (self.precision, self.scale, wider.precision, wider.scale) {
+            (Some(precision), Some(scale), Some(wider_precision), Some(wider_scale)) => {
+                wider_scale >= scale && wider_precision - wider_scale >= precision - scale
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexSchema {
@@ -523,6 +538,16 @@ impl SchemaManifest {
             || self.compatibility_floor > self.schema_version
             || (!matches!(self.transition_class, SchemaTransitionClass::Class2)
                 && self.compatibility_floor != self.schema_version)
+        {
+            return Err(ContractViolation::InvalidSchemaManifest);
+        }
+        // A Class 2 floor keeps the parent's compatibility boundary. It cannot
+        // name a version newer than the parent.
+        if matches!(self.transition_class, SchemaTransitionClass::Class2)
+            && self
+                .parent_schema
+                .as_ref()
+                .is_some_and(|parent| self.compatibility_floor > parent.version)
         {
             return Err(ContractViolation::InvalidSchemaManifest);
         }
@@ -2817,6 +2842,78 @@ mod tests {
         }
     }
 
+    #[derive(Deserialize)]
+    struct LineageCase {
+        case: String,
+        schema_version: i64,
+        parent_version: Option<i64>,
+        transition_class: SchemaTransitionClass,
+        compatibility_floor: i64,
+        valid: bool,
+    }
+
+    #[test]
+    fn manifest_compatibility_floor_follows_authored_lineage_cases() {
+        #[derive(Deserialize)]
+        struct LineageCases {
+            cases: Vec<LineageCase>,
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/schema/manifest-lineage-v1.json");
+        let cases: LineageCases =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(!cases.cases.is_empty());
+        for case in cases.cases {
+            let mut manifest = minimal_manifest();
+            manifest.schema_version = case.schema_version;
+            manifest.parent_schema = case.parent_version.map(|version| SchemaRef {
+                version,
+                hash: HASH_B.into(),
+            });
+            manifest.transition_class = case.transition_class;
+            manifest.compatibility_floor = case.compatibility_floor;
+            assert_eq!(manifest.validate().is_ok(), case.valid, "{}", case.case);
+        }
+    }
+
+    #[test]
+    fn decimal_domain_inclusion_requires_fractional_and_integer_digits() {
+        let decimal = |precision: Option<i32>, scale: Option<i32>| ColumnSchema {
+            field_id: "fld_amount".into(),
+            name: "amount".into(),
+            type_name: "decimal".into(),
+            nullable: true,
+            writable: true,
+            precision,
+            scale,
+        };
+        for (narrow, wide, included) in [
+            ((10, 2), (10, 2), true),
+            ((10, 2), (11, 3), true),
+            ((10, 2), (12, 2), true),
+            ((10, 2), (11, 2), true),
+            ((10, 2), (10, 3), false),
+            ((10, 2), (10, 1), false),
+            ((10, 2), (9, 2), false),
+            ((10, 2), (12, 5), false),
+            ((1, 0), (1, 1), false),
+            ((1, 1), (2, 1), true),
+        ] {
+            assert_eq!(
+                decimal(Some(narrow.0), Some(narrow.1))
+                    .decimal_domain_within(&decimal(Some(wide.0), Some(wide.1))),
+                included,
+                "decimal({}, {}) within decimal({}, {})",
+                narrow.0,
+                narrow.1,
+                wide.0,
+                wide.1
+            );
+        }
+        assert!(!decimal(None, Some(2)).decimal_domain_within(&decimal(Some(10), Some(2))));
+        assert!(!decimal(Some(10), Some(2)).decimal_domain_within(&decimal(Some(10), None)));
+    }
+
     #[test]
     fn manifest_validation_covers_lineage_fields_lifecycle_and_indexes() {
         let base = minimal_manifest();
@@ -2826,11 +2923,6 @@ mod tests {
         initial.parent_schema = None;
         initial.transition_class = SchemaTransitionClass::Initial;
         assert_eq!(initial.validate(), Ok(()));
-
-        let mut class_two = base.clone();
-        class_two.transition_class = SchemaTransitionClass::Class2;
-        class_two.compatibility_floor = 7;
-        assert_eq!(class_two.validate(), Ok(()));
 
         let mut invalid_manifests = Vec::new();
         let mut value = base.clone();
@@ -2842,12 +2934,6 @@ mod tests {
         let mut value = base.clone();
         value.parent_schema.as_mut().unwrap().version = value.schema_version;
         invalid_manifests.push(value);
-        for floor in [0, 7, 9] {
-            let mut value = base.clone();
-            value.compatibility_floor = floor;
-            invalid_manifests.push(value);
-        }
-
         for field in ["table_id", "relation_id", "name", "primary_key_field_id"] {
             let mut value = base.clone();
             match field {
@@ -3205,11 +3291,6 @@ mod tests {
         let mut missing_affected = connect_response(SchemaAction::RebuildLocal);
         missing_affected.affected_scopes = None;
         assert!(missing_affected.validate().is_err());
-
-        let mut class_two_floor_above_version = minimal_manifest();
-        class_two_floor_above_version.transition_class = SchemaTransitionClass::Class2;
-        class_two_floor_above_version.compatibility_floor = 9;
-        assert!(class_two_floor_above_version.validate().is_err());
     }
 
     #[test]
