@@ -176,6 +176,9 @@ func TestRealIssue50ActiveWALIntakeBounds(t *testing.T) {
 				!poison.WorkerBlocked || !poison.ReadinessBlocked || !poison.PoisonCheckFailed {
 				t.Fatalf("Issue 50 oversized transaction did not persist a blocking decode poison: %#v", poison)
 			}
+			if poison.FailureDetail != "WAL source transaction exceeds the decode limit of 16777216 bytes or 10000 payload records" {
+				t.Fatalf("Issue 50 oversized transaction detail = %q", poison.FailureDetail)
+			}
 			if transactions != 0 || events != 0 || capturedRows != 0 || changes != 0 {
 				t.Fatalf("Issue 50 oversized transaction partially materialized: transactions=%d events=%d captured_rows=%d changes=%d", transactions, events, capturedRows, changes)
 			}

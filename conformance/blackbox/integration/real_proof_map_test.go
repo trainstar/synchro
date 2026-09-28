@@ -145,6 +145,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealS17InvalidPushShapesDoNoDurableWork":           "adversarial",
 	"TestRealS20PushMutationCountBoundsAreAtomic":           "adversarial",
 	"TestRealWALPipeline":                                   "regression",
+	"TestRealWorkerIdleWritesFollowHeartbeatLimit":          "regression",
 	"TestRealIssue50ActiveWALIntakeBounds":                  "regression",
 	"TestRealIssue50ValidTransactionsCrossSoftBatchTarget":  "regression",
 	"TestRealWALSkipsUnpublishedGeneratedColumns":           "regression",

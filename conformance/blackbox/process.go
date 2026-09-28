@@ -339,6 +339,7 @@ type WALProgressOrderObservation struct {
 // WALPoisonObservation is bounded evidence for one blocking source transaction.
 type WALPoisonObservation struct {
 	FailureClass              string
+	FailureDetail             string
 	RelationID                string
 	RelationIDMatchesRegistry bool
 	CommitLSN                 string
@@ -5452,6 +5453,7 @@ func (executor *OperatorExecutor) ObserveBlockingPoison(ctx context.Context, lat
 			SELECT synchro.synchro_health_detail() AS value
 		)
 		SELECT poison.failure_class,
+		       health.value->'observations'->'poison'->>'failure_detail',
 		       poison.relation_id::text,
 		       EXISTS (
 			       SELECT 1
@@ -5482,6 +5484,7 @@ func (executor *OperatorExecutor) ObserveBlockingPoison(ctx context.Context, lat
 		CROSS JOIN health
 		WHERE progress.singleton AND worker.worker_id = 'synchro_wal_consumer'`, laterRecordID).Scan(
 		&observation.FailureClass,
+		&observation.FailureDetail,
 		&relationID,
 		&observation.RelationIDMatchesRegistry,
 		&observation.CommitLSN,
