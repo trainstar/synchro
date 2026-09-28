@@ -147,18 +147,22 @@ func TestSoakFaultRequiresActualResponseLoss(t *testing.T) {
 	}
 }
 
-func TestSoakWALRestartRequiresOnceOnlyMaterialization(t *testing.T) {
+func soakValidWALRestartObservation() blackbox.WALReplayRestartObservation {
 	before := blackbox.WALRecordObservation{RecordID: "record", CommitLSN: "0/1", EndLSN: "0/2", RowVersion: "version", FenceCoverage: "materialized"}
 	after := before
 	after.ReplayCount = 1
 	stages := blackbox.WALRecordStageObservation{FenceCount: 1, EventCount: 1, ProjectionCount: 1, CapturedCount: 1, EdgeCount: 1, ChangeCount: 1}
-	valid := blackbox.WALReplayRestartObservation{
+	return blackbox.WALReplayRestartObservation{
 		PriorProgress:                     blackbox.WALProgressObservation{SlotMatchesProgress: true},
 		WorkerExitedBeforeAcknowledgement: true, WorkerRestarted: true,
 		BeforeRestart: blackbox.WALPipelineObservation{Records: []blackbox.WALRecordObservation{before}},
 		AfterRestart:  blackbox.WALPipelineObservation{Records: []blackbox.WALRecordObservation{after}, WorkerRunning: true, ContiguousAcknowledged: true, AcknowledgementMatchesObservedEnd: true, SlotMatchesObservedEnd: true, AcknowledgedEndLSN: "0/2"},
 		BeforeStages:  stages, AfterStages: stages,
 	}
+}
+
+func TestSoakWALRestartRequiresOnceOnlyMaterialization(t *testing.T) {
+	valid := soakValidWALRestartObservation()
 	if err := validateSoakWALRestart(valid); err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +180,73 @@ func TestSoakWALRestartRequiresOnceOnlyMaterialization(t *testing.T) {
 			t.Fatal("false WAL recovery was accepted")
 		}
 	}
+}
+
+// Each WAL restart failure keeps its own identity through the journal, so
+// replay of one failure cannot reproduce another at the same operation. A
+// failure that no check identified stays inconclusive.
+func TestSoakWALRestartFailuresKeepDistinctReplayIdentities(t *testing.T) {
+	valid := soakValidWALRestartObservation()
+	catalog, err := faults.LoadCatalog(context.Background(), soakRepositoryRoot)
+	if err != nil {
+		t.Fatalf("load soak fault catalog: %v", err)
+	}
+	plan, err := soak.Generate(1, soak.Config{OperationCount: 7, FaultRate: 100}, catalog)
+	if err != nil {
+		t.Fatalf("generate soak plan: %v", err)
+	}
+	retain := func(name string, failure error) soak.OperationFact {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name+".jsonl")
+		if _, err := soak.Run(context.Background(), plan, soakFailingHarness{err: failure}, path); err == nil {
+			t.Fatalf("%s failure completed", name)
+		}
+		journal, err := soak.ReadJournal(path)
+		if !errors.Is(err, soak.ErrJournalUnsealed) || len(journal.OperationFacts) == 0 {
+			t.Fatalf("read %s journal: %v", name, err)
+		}
+		return journal.OperationFacts[len(journal.OperationFacts)-1]
+	}
+	identified := map[string]func(*blackbox.WALReplayRestartObservation){
+		"replay-boundary-missing": func(v *blackbox.WALReplayRestartObservation) { v.WorkerRestarted = false },
+		"acknowledgement-invalid": func(v *blackbox.WALReplayRestartObservation) { v.AfterRestart.AcknowledgedEndLSN = "0/3" },
+		"durable-result-changed":  func(v *blackbox.WALReplayRestartObservation) { v.AfterStages.EdgeCount++ },
+	}
+	facts := make(map[string]soak.OperationFact, len(identified))
+	for class, mutate := range identified {
+		candidate := valid
+		mutate(&candidate)
+		fact := retain(class, validateSoakWALRestart(candidate))
+		if fact.FailureStage != "wal-restart" || fact.FailureClass != class {
+			t.Fatalf("%s failure retained identity %q/%q", class, fact.FailureStage, fact.FailureClass)
+		}
+		again := retain(class+"-again", validateSoakWALRestart(candidate))
+		if outcome := soak.CompareReplay(&fact, &again); outcome != soak.ReplayReproduced {
+			t.Fatalf("%s replay of the same failure = %s, want reproduced", class, outcome)
+		}
+		facts[class] = fact
+	}
+	for retainedClass, retained := range facts {
+		for replayedClass, replayed := range facts {
+			if retainedClass != replayedClass {
+				if outcome := soak.CompareReplay(&retained, &replayed); outcome != soak.ReplayDiverged {
+					t.Fatalf("replay of %s compared %s against retained %s, want diverged", replayedClass, outcome, retainedClass)
+				}
+			}
+		}
+	}
+	unidentified := fmt.Errorf("execute soak WAL process death: %w", errors.New("operator control failed"))
+	retained := retain("unidentified", unidentified)
+	replayed := retain("unidentified-again", unidentified)
+	if outcome := soak.CompareReplay(&retained, &replayed); outcome != soak.ReplayInconclusive {
+		t.Fatalf("unidentified harness failure replay = %s, want inconclusive", outcome)
+	}
+}
+
+type soakFailingHarness struct{ err error }
+
+func (h soakFailingHarness) Execute(context.Context, soak.Operation) (soak.ObservationCapture, error) {
+	return soak.ObservationCapture{}, h.err
 }
 
 // TestSoak runs bounded seeded stress with an explicit operation budget. It

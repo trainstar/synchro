@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -67,9 +66,7 @@ type liveSoakHarness struct {
 	schemaTransition      uint64
 	controlApplied        bool
 	controlRow            string
-	// stage names the operation step in progress for a stable failure identity.
-	stage         string
-	authoredTable map[string]any
+	authoredTable         map[string]any
 	// authored is the independent model of every source row the workload
 	// authored, keyed by table name and record ID.
 	authored map[string]soakAuthoredRow
@@ -342,30 +339,10 @@ func (h *liveSoakHarness) Close(ctx context.Context) error {
 	return closeErr
 }
 
-// Execute runs one operation. Each failure carries the operation step that
-// failed and a bounded class, so replay compares identities, not error text.
+// Execute runs one operation. Only a check that names one specific failure
+// returns a soak.StageError. Every other error stays unidentified, so replay of
+// that failure is inconclusive instead of matching a different failure.
 func (h *liveSoakHarness) Execute(ctx context.Context, operation soak.Operation) (soak.ObservationCapture, error) {
-	h.stage = "operation-" + string(operation.Kind)
-	capture, err := h.execute(ctx, operation)
-	if err != nil {
-		return soak.ObservationCapture{}, soakStageError(h.stage, err)
-	}
-	return capture, nil
-}
-
-func soakStageError(stage string, err error) error {
-	class := "rejected"
-	var network net.Error
-	switch {
-	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
-		class = "timeout"
-	case errors.As(err, &network):
-		class = "transport"
-	}
-	return &soak.StageError{Stage: stage, Class: class, Err: err}
-}
-
-func (h *liveSoakHarness) execute(ctx context.Context, operation soak.Operation) (soak.ObservationCapture, error) {
 	if ctx == nil {
 		return soak.ObservationCapture{}, errors.New("live soak operation context is required")
 	}
@@ -451,18 +428,15 @@ func (h *liveSoakHarness) execute(ctx context.Context, operation soak.Operation)
 		}
 		wires = append(wires, wire)
 	case soak.OperationProcessDeath:
-		h.stage = "wal-restart"
 		if err := h.executeProcessDeath(ctx); err != nil {
 			return soak.ObservationCapture{}, err
 		}
 		// The restart row reaches the client only through pull, so drain to
 		// reach the quiescent point that the source comparison requires.
-		h.stage = "process-death-drain"
 		if err := h.drainPulls(ctx); err != nil {
 			return soak.ObservationCapture{}, err
 		}
 		if h.controlRow != "" {
-			h.stage = "delivered-row-control"
 			if err := h.applyDeliveredRowControl("cf_items", h.controlRow); err != nil {
 				return soak.ObservationCapture{}, err
 			}
@@ -506,7 +480,6 @@ func (h *liveSoakHarness) execute(ctx context.Context, operation soak.Operation)
 		}
 	}
 	sort.Slice(wires, func(i, j int) bool { return wires[i].Sequence < wires[j].Sequence })
-	h.stage = "capture"
 	capture, err := h.capture(ctx, operation, wires, h.faultActivation)
 	if err != nil {
 		return soak.ObservationCapture{}, err
@@ -1711,7 +1684,13 @@ func (h *liveSoakHarness) authoredSourceRow(row soakAuthoredRow) (soak.SourceRow
 	return soak.SourceRow{TableID: table.ID, PrimaryKey: pk, ScopeIDs: []string{row.scope}, Fields: fields}, nil
 }
 
+// validateSoakWALRestart names each semantic failure with a bounded identity,
+// so replay distinguishes a missing boundary, a wrong acknowledgement, and a
+// changed durable result at the same operation.
 func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) error {
+	failure := func(class, message string) error {
+		return &soak.StageError{Stage: "wal-restart", Class: class, Err: errors.New(message)}
+	}
 	if !observation.WorkerExitedBeforeAcknowledgement || !observation.WorkerRestarted ||
 		!observation.PriorProgress.SlotMatchesProgress ||
 		len(observation.BeforeRestart.Records) != 1 || len(observation.AfterRestart.Records) != 1 ||
@@ -1719,7 +1698,7 @@ func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) er
 		!observation.AfterRestart.WorkerRunning || observation.AfterRestart.BlockingPoison ||
 		!observation.AfterRestart.ContiguousAcknowledged ||
 		!observation.AfterRestart.AcknowledgementMatchesObservedEnd || !observation.AfterRestart.SlotMatchesObservedEnd {
-		return errors.New("soak WAL restart lacks an observed replay boundary")
+		return failure("replay-boundary-missing", "soak WAL restart lacks an observed replay boundary")
 	}
 	before := observation.BeforeRestart.Records[0]
 	after := observation.AfterRestart.Records[0]
@@ -1729,14 +1708,14 @@ func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) er
 		observation.BeforeRestart.AcknowledgedEndLSN != observation.PriorProgress.AcknowledgedEndLSN ||
 		observation.BeforeRestart.SlotConfirmedFlushLSN != observation.PriorProgress.SlotConfirmedFlushLSN ||
 		observation.AfterRestart.AcknowledgedEndLSN != before.EndLSN {
-		return errors.New("soak WAL restart acknowledgement is invalid")
+		return failure("acknowledgement-invalid", "soak WAL restart acknowledgement is invalid")
 	}
 	after.ReplayCount = before.ReplayCount
 	expectedStages := blackbox.WALRecordStageObservation{
 		FenceCount: 1, EventCount: 1, ProjectionCount: 1, CapturedCount: 1, EdgeCount: 1, ChangeCount: 1,
 	}
 	if before != after || observation.BeforeStages != expectedStages || observation.AfterStages != expectedStages {
-		return errors.New("soak WAL replay changed its durable result")
+		return failure("durable-result-changed", "soak WAL replay changed its durable result")
 	}
 	return nil
 }

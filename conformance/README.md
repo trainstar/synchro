@@ -193,7 +193,7 @@ It also compares the client's complete scope membership and every held synced fi
 Each run writes its journal to a new directory under `SOAK_ARTIFACT_DIR`. A failed run also keeps its original wire bodies there before cleanup.
 The journal holds the seed, configuration, planned operations, and one bounded terminal failure identity.
 A violation failure keeps the violation count, a digest of the complete violation set, and a bounded sample. Violation evidence uses stable authored table and field names, not per-cluster runtime IDs.
-A harness failure keeps the failed operation step and a failure class.
+A harness failure keeps a stage and failure class only when a specific check names it, such as a missing WAL replay boundary, a wrong acknowledgement, or a changed durable result. Other harness failures keep no identity.
 Replay a retained journal in a new cluster with `make soak-replay SOAK_REPLAY_JOURNAL=<journal>`. Replay passes only when it reproduces that identity. A failure without a precise identity makes replay inconclusive, and replay fails.
 Its in-memory client is reference state, not native process-recovery evidence.
 Native recovery remains covered by the real native scenario gates.

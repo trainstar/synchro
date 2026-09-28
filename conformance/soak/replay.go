@@ -1,9 +1,6 @@
 package soak
 
-import (
-	"errors"
-	"fmt"
-)
+import "fmt"
 
 // StageError identifies a harness failure by the operation stage that failed
 // and a bounded failure class. Replay compares these instead of error text,
@@ -33,9 +30,6 @@ const (
 	// so equal failure codes cannot show that replay reached the same behavior.
 	ReplayInconclusive ReplayOutcome = "inconclusive"
 )
-
-// ErrReplayInconclusive reports a retained failure that replay cannot confirm.
-var ErrReplayInconclusive = errors.New("soak replay is inconclusive")
 
 // CompareReplay compares the retained terminal failure with the replayed one.
 // A nil retained fact means the retained run completed.
