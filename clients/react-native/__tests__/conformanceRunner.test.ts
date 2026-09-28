@@ -520,60 +520,63 @@ describe('PublicConformanceRunner call lifecycle', () => {
       authToken: 'test-token',
       appVersion: '1.0.0',
     });
-    await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
-    mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
-      schema: { version: 1, hash: 'a'.repeat(64) },
-      scope_states: [],
-      scope_rows: [{
-        scope_id: 'scope-runtime',
-        table_name: 'cf_items',
-        record_id: 'runtime-row-a',
-        checksum: 'checksum-runtime',
-        generation: 1,
-      }],
-      rebuild_attempts: [],
-      ...CLIENT_STATE_COUNTS,
-      provenance_maintenance_work_cursor: '1',
-    }, durableDetails({
-      row_metadata: {
-        table_name: 'cf_items',
-        record_id: 'runtime-row-a',
-        server_version: 'version-runtime',
-        row_checksum: '{"sha256":"checksum-runtime"}',
-      },
-      rebuild_receipts: [{
-        rebuild_id_fingerprint: 'b'.repeat(64),
-        page_count: 1,
-        returned_record_count: 0,
-        request_chain_expected: ['final'],
-        request_chain_observed: ['final'],
-        record_identities_hex: [],
-        received_row_checksums: [],
-        computed_row_checksums: [],
-        computed_scope_checksum: 'checksum-runtime',
-        final_scope_checksum: 'checksum-runtime',
-        stored_scope_checksum: 'checksum-runtime',
-        local_scope_checksum: 'different-checksum',
-      }],
-    })));
-
-    await expect(
-      runner.execute(command('observer', 'capture', 'client-a', {
-        client_keys: ['client-a'],
-        sources: ['durable-proof'],
-      }))
-    ).resolves.toMatchObject({
-      kind: 'capture',
-      capture: {
-        durable_proof: {
-          row_metadata: { record_id: 'runtime-row-a', server_version: 'version-runtime' },
-          rebuild_receipt_proofs: [{ page_count: 1 }],
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
+        schema: { version: 1, hash: 'a'.repeat(64) },
+        scope_states: [],
+        scope_rows: [{
+          scope_id: 'scope-runtime',
+          table_name: 'cf_items',
+          record_id: 'runtime-row-a',
+          checksum: 'checksum-runtime',
+          generation: 1,
+        }],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        provenance_maintenance_work_cursor: '1',
+      }, durableDetails({
+        row_metadata: {
+          table_name: 'cf_items',
+          record_id: 'runtime-row-a',
+          server_version: 'version-runtime',
+          row_checksum: '{"sha256":"checksum-runtime"}',
         },
-      },
-    });
-    expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
-    expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([]);
-    await runner.close();
+        rebuild_receipts: [{
+          rebuild_id_fingerprint: 'b'.repeat(64),
+          page_count: 1,
+          returned_record_count: 0,
+          request_chain_expected: ['final'],
+          request_chain_observed: ['final'],
+          record_identities_hex: [],
+          received_row_checksums: [],
+          computed_row_checksums: [],
+          computed_scope_checksum: 'checksum-runtime',
+          final_scope_checksum: 'checksum-runtime',
+          stored_scope_checksum: 'checksum-runtime',
+          local_scope_checksum: 'different-checksum',
+        }],
+      })));
+
+      await expect(
+        runner.execute(command('observer', 'capture', 'client-a', {
+          client_keys: ['client-a'],
+          sources: ['durable-proof'],
+        }))
+      ).resolves.toMatchObject({
+        kind: 'capture',
+        capture: {
+          durable_proof: {
+            row_metadata: { record_id: 'runtime-row-a', server_version: 'version-runtime' },
+            rebuild_receipt_proofs: [{ page_count: 1 }],
+          },
+        },
+      });
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([]);
+    } finally {
+      await runner.close();
+    }
   });
 
   it('reads every inspection source from one normalized snapshot', async () => {
@@ -582,71 +585,74 @@ describe('PublicConformanceRunner call lifecycle', () => {
       authToken: 'test-token',
       appVersion: '1.0.0',
     });
-    await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
-    const current = {
-      representation: 'current',
-      mutationID: 'mutation-1',
-      localOrder: 1,
-      tableID: 'table-1',
-      tableName: 'cf_items',
-      recordID: 'row-a',
-      primaryKeyFieldID: 'field-id',
-      primaryKeyLogicalType: 'string',
-      operation: 'insert',
-      authoredSchema: { version: 1, hash: 'a'.repeat(64) },
-      baseVersion: null,
-      clientVersion: 'client-v1',
-      status: 'pending',
-      sourceKind: 'local_write',
-      dependsOnMutationID: null,
-      normalizedMutationID: null,
-      sealedBatchID: null,
-      sealedOrdinal: null,
-      authoredFields: [],
-    };
-    mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce({
-      ...snapshotResult({
-        schema: null,
-        scope_states: [],
-        scope_rows: [],
-        rebuild_attempts: [],
-        ...CLIENT_STATE_COUNTS,
-        mutation_ledger_count: 1,
-        provenance_maintenance_work_cursor: '0',
-      }, { retained_mutations: [current], row_metadata: [], rebuild_receipts: [] }),
-      applicationRows: [{ id: 'row-a', name: 'first' }],
-    });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      const current = {
+        representation: 'current',
+        mutationID: 'mutation-1',
+        localOrder: 1,
+        tableID: 'table-1',
+        tableName: 'cf_items',
+        recordID: 'row-a',
+        primaryKeyFieldID: 'field-id',
+        primaryKeyLogicalType: 'string',
+        operation: 'insert',
+        authoredSchema: { version: 1, hash: 'a'.repeat(64) },
+        baseVersion: null,
+        clientVersion: 'client-v1',
+        status: 'pending',
+        sourceKind: 'local_write',
+        dependsOnMutationID: null,
+        normalizedMutationID: null,
+        sealedBatchID: null,
+        sealedOrdinal: null,
+        authoredFields: [],
+      };
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce({
+        ...snapshotResult({
+          schema: null,
+          scope_states: [],
+          scope_rows: [],
+          rebuild_attempts: [],
+          ...CLIENT_STATE_COUNTS,
+          mutation_ledger_count: 1,
+          provenance_maintenance_work_cursor: '0',
+        }, { retained_mutations: [current], row_metadata: [], rebuild_receipts: [] }),
+        applicationRows: [{ id: 'row-a', name: 'first' }],
+      });
 
-    const result = await runner.execute(command('observer', 'capture', 'client-a', {
-      client_keys: ['client-a'],
-      sources: ['application-rows', 'pending-mutations', 'rejected-mutations', 'scope-state', 'provenance'],
-      row_selectors: [{ table_name: 'cf_items', primary_key_field: 'id', primary_key: 'row-a' }],
-    }));
+      const result = await runner.execute(command('observer', 'capture', 'client-a', {
+        client_keys: ['client-a'],
+        sources: ['application-rows', 'pending-mutations', 'rejected-mutations', 'scope-state', 'provenance'],
+        row_selectors: [{ table_name: 'cf_items', primary_key_field: 'id', primary_key: 'row-a' }],
+      }));
 
-    const wireMutation: Record<string, unknown> = { ...current };
-    delete wireMutation.representation;
-    expect(result).toMatchObject({
-      kind: 'capture',
-      capture: {
-        application_rows: [{ id: 'row-a', name: 'first' }],
-        pending_mutations: [wireMutation],
-        rejected_mutations: [],
-        client_state: { mutationLedgerCount: 1 },
-        provenance: [],
-      },
-    });
-    expect((result as { capture: { pending_mutations: object[] } }).capture.pending_mutations[0]).not.toHaveProperty('representation');
-    expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
-    expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([
-      { sql: 'SELECT * FROM "cf_items" WHERE "id" = ?', params: ['row-a'] },
-    ]);
-    expect(mockNativeModule.query).not.toHaveBeenCalled();
-    expect(mockNativeModule.inspectRetainedMutations).not.toHaveBeenCalled();
-    expect(mockNativeModule.inspectRejectedMutations).not.toHaveBeenCalled();
-    expect(mockNativeModule.pendingChangeCount.mock.invocationCallOrder[0]).toBeLessThan(
-      mockNativeModule.inspectClientStateSnapshot.mock.invocationCallOrder[0]
-    );
-    await runner.close();
+      const wireMutation: Record<string, unknown> = { ...current };
+      delete wireMutation.representation;
+      expect(result).toMatchObject({
+        kind: 'capture',
+        capture: {
+          application_rows: [{ id: 'row-a', name: 'first' }],
+          pending_mutations: [wireMutation],
+          rejected_mutations: [],
+          client_state: { mutationLedgerCount: 1 },
+          provenance: [],
+        },
+      });
+      expect((result as { capture: { pending_mutations: object[] } }).capture.pending_mutations[0]).not.toHaveProperty('representation');
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([
+        { sql: 'SELECT * FROM "cf_items" WHERE "id" = ?', params: ['row-a'] },
+      ]);
+      expect(mockNativeModule.query).not.toHaveBeenCalled();
+      expect(mockNativeModule.inspectRetainedMutations).not.toHaveBeenCalled();
+      expect(mockNativeModule.inspectRejectedMutations).not.toHaveBeenCalled();
+      expect(mockNativeModule.pendingChangeCount.mock.invocationCallOrder[0]).toBeLessThan(
+        mockNativeModule.inspectClientStateSnapshot.mock.invocationCallOrder[0]
+      );
+    } finally {
+      await runner.close();
+    }
   });
 
   it('fails a capture whose retained ledger exceeds the snapshot bound', async () => {
@@ -655,24 +661,27 @@ describe('PublicConformanceRunner call lifecycle', () => {
       authToken: 'test-token',
       appVersion: '1.0.0',
     });
-    await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
-    mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
-      schema: null,
-      scope_states: [],
-      scope_rows: [],
-      rebuild_attempts: [],
-      ...CLIENT_STATE_COUNTS,
-      mutation_ledger_count: 513,
-      provenance_maintenance_work_cursor: '0',
-    }, { retained_mutations: null, row_metadata: [], rebuild_receipts: [] }));
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
+        schema: null,
+        scope_states: [],
+        scope_rows: [],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        mutation_ledger_count: 513,
+        provenance_maintenance_work_cursor: '0',
+      }, { retained_mutations: null, row_metadata: [], rebuild_receipts: [] }));
 
-    await expect(
-      runner.execute(command('observer', 'capture', 'client-a', {
-        client_keys: ['client-a'],
-        sources: ['pending-mutations'],
-      }))
-    ).rejects.toMatchObject({ code: 'execution_failed' });
-    await runner.close();
+      await expect(
+        runner.execute(command('observer', 'capture', 'client-a', {
+          client_keys: ['client-a'],
+          sources: ['pending-mutations'],
+        }))
+      ).rejects.toMatchObject({ code: 'execution_failed' });
+    } finally {
+      await runner.close();
+    }
   });
 
   it('rejects malformed durable proof facts', async () => {
@@ -681,29 +690,32 @@ describe('PublicConformanceRunner call lifecycle', () => {
       authToken: 'test-token',
       appVersion: '1.0.0',
     });
-    await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
-    mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
-      schema: null,
-      scope_states: [],
-      scope_rows: [{
-        scope_id: 'scope-runtime',
-        table_name: 'cf_items',
-        record_id: 'runtime-row-a',
-        checksum: 'checksum-runtime',
-        generation: 1,
-      }],
-      rebuild_attempts: [],
-      ...CLIENT_STATE_COUNTS,
-      provenance_maintenance_work_cursor: '0',
-    }, { row_metadata: [{}], rebuild_receipts: [] }));
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
+        schema: null,
+        scope_states: [],
+        scope_rows: [{
+          scope_id: 'scope-runtime',
+          table_name: 'cf_items',
+          record_id: 'runtime-row-a',
+          checksum: 'checksum-runtime',
+          generation: 1,
+        }],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        provenance_maintenance_work_cursor: '0',
+      }, { row_metadata: [{}], rebuild_receipts: [] }));
 
-    await expect(
-      runner.execute(command('observer', 'capture', 'client-a', {
-        client_keys: ['client-a'],
-        sources: ['durable-proof'],
-      }))
-    ).rejects.toMatchObject({ code: 'capture_inspection_failed' });
-    await runner.close();
+      await expect(
+        runner.execute(command('observer', 'capture', 'client-a', {
+          client_keys: ['client-a'],
+          sources: ['durable-proof'],
+        }))
+      ).rejects.toMatchObject({ code: 'capture_inspection_failed' });
+    } finally {
+      await runner.close();
+    }
   });
 
   it('captures bootstrap rebuild proof before any scope row exists', async () => {
@@ -712,35 +724,38 @@ describe('PublicConformanceRunner call lifecycle', () => {
       authToken: 'test-token',
       appVersion: '1.0.0',
     });
-    await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
-    mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
-      schema: { version: 1, hash: 'a'.repeat(64) },
-      scope_states: [],
-      scope_rows: [],
-      rebuild_attempts: [],
-      ...CLIENT_STATE_COUNTS,
-      provenance_maintenance_work_cursor: '1',
-    }, durableDetails({
-      row_metadata: null,
-      rebuild_receipts: [],
-    })));
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create', seed_step_id: null }));
+      mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
+        schema: { version: 1, hash: 'a'.repeat(64) },
+        scope_states: [],
+        scope_rows: [],
+        rebuild_attempts: [],
+        ...CLIENT_STATE_COUNTS,
+        provenance_maintenance_work_cursor: '1',
+      }, durableDetails({
+        row_metadata: null,
+        rebuild_receipts: [],
+      })));
 
-    await expect(
-      runner.execute(command('observer', 'capture', 'client-a', {
-        client_keys: ['client-a'],
-        sources: ['durable-proof'],
-        durable_proof_identity: {
-          table_name: 'cf_items',
-          record_id: 'bootstrap-absent-row',
-        },
-      }))
-    ).resolves.toMatchObject({
-      kind: 'capture',
-      capture: { durable_proof: { row_metadata: null, rebuild_receipt_proofs: [] } },
-    });
-    expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
-    expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([]);
-    await runner.close();
+      await expect(
+        runner.execute(command('observer', 'capture', 'client-a', {
+          client_keys: ['client-a'],
+          sources: ['durable-proof'],
+          durable_proof_identity: {
+            table_name: 'cf_items',
+            record_id: 'bootstrap-absent-row',
+          },
+        }))
+      ).resolves.toMatchObject({
+        kind: 'capture',
+        capture: { durable_proof: { row_metadata: null, rebuild_receipt_proofs: [] } },
+      });
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.inspectClientStateSnapshot).toHaveBeenCalledWith([]);
+    } finally {
+      await runner.close();
+    }
   });
 });
 
