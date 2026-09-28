@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -266,25 +265,57 @@ func TestSoak(t *testing.T) {
 		}
 	})
 
-	// A delivered row is dropped while the client's scope metadata is forged to
-	// match. Only the independent source comparison can detect it. The retained
-	// journal must then replay the same failure in a new cluster.
-	t.Run("omitted-delivery-replays-after-cleanup", func(t *testing.T) {
-		plan, err := soak.Generate(seed, coverage(soakControlOmitDelivery), catalog)
+	// Each delivered-row control changes the delivered WAL-restart row while the
+	// client's row digest and scope metadata are forged to match. Only the
+	// independent source comparison can detect it.
+	runDeliveredRowControl := func(t *testing.T, control, name string, rule invariants.RuleID) (soak.RunResult, string) {
+		t.Helper()
+		plan, err := soak.Generate(seed, coverage(control), catalog)
 		if err != nil {
-			t.Fatalf("generate omitted delivery control plan: %v", err)
+			t.Fatalf("generate %s control plan: %v", name, err)
 		}
-		result, journal, runErr := runRetainedSoak(ctx, plan, evidence, "omitted-delivery")
+		result, journal, runErr := runRetainedSoak(ctx, plan, evidence, name)
 		if !errors.Is(runErr, soak.ErrInvariantViolation) || len(result.Violations) == 0 {
-			t.Fatalf("omitted delivery control error = %v, violations = %#v", runErr, result.Violations)
+			t.Fatalf("%s control error = %v, violations = %#v", name, runErr, result.Violations)
 		}
 		for _, violation := range result.Violations {
-			if violation.Family != soak.InvariantSourceState || violation.RuleID != soak.RuleSourceStateMembership {
-				t.Fatalf("omitted delivery was judged by %s/%s, want only the source-state membership rule", violation.Family, violation.RuleID)
+			if violation.Family != soak.InvariantSourceState || violation.RuleID != rule {
+				t.Fatalf("%s was judged by %s/%s, want only %s", name, violation.Family, violation.RuleID, rule)
 			}
 		}
-		replaySoakJournal(t, ctx, journal, catalog)
+		return result, journal
+	}
+
+	t.Run("omitted-delivery-fails", func(t *testing.T) {
+		runDeliveredRowControl(t, soakControlOmitDelivery, "omitted-delivery", soak.RuleSourceStateMembership)
 	})
+
+	// A wrong held value replays as the same logical failure in a new cluster,
+	// although that cluster allocates different runtime table and field IDs.
+	// The same defect on another field has a different identity.
+	t.Run("wrong-value-replays-in-a-new-cluster", func(t *testing.T) {
+		wrongValue, journal := runDeliveredRowControl(t, soakControlWrongValue, "wrong-value", soak.RuleSourceStateValueMismatch)
+		if field := violationEvidence(wrongValue.Violations[0], "field"); field != "value" {
+			t.Fatalf("wrong-value control named field %q, want value", field)
+		}
+		replaySoakJournal(t, ctx, journal, catalog)
+		wrongOwner, _ := runDeliveredRowControl(t, soakControlWrongOwner, "wrong-owner", soak.RuleSourceStateValueMismatch)
+		if field := violationEvidence(wrongOwner.Violations[0], "field"); field != "owner_id" {
+			t.Fatalf("wrong-owner control named field %q, want owner_id", field)
+		}
+		if outcome := soak.CompareReplay(wrongValue.Failure, wrongOwner.Failure); outcome != soak.ReplayDiverged {
+			t.Fatalf("a wrong value on another field compared as %s, want diverged", outcome)
+		}
+	})
+}
+
+func violationEvidence(violation invariants.Violation, name string) string {
+	for _, field := range violation.Evidence {
+		if field.Name == name {
+			return field.Value
+		}
+	}
+	return ""
 }
 
 // runRetainedSoak runs one plan in its own cluster. The journal is written to
@@ -306,8 +337,8 @@ func runRetainedSoak(ctx context.Context, plan soak.Plan, evidence, name string)
 }
 
 // replaySoakJournal rebuilds the retained plan in a new cluster and requires
-// the same outcome: success for a sealed journal, or the same failed operation,
-// failure code, and violations for a failed journal.
+// the same outcome: success for a sealed journal, or the same failure identity
+// for a failed journal. An unidentified failure is inconclusive and fails.
 func replaySoakJournal(t *testing.T, ctx context.Context, path string, catalog *faults.Catalog) {
 	t.Helper()
 	journal, readErr := soak.ReadJournal(path)
@@ -336,11 +367,17 @@ func replaySoakJournal(t *testing.T, ctx context.Context, path string, catalog *
 		t.Fatalf("unsealed soak journal has no terminal failure fact")
 	}
 	original := facts[len(facts)-1]
-	if replayed.Failure == nil || !reflect.DeepEqual(mustMarshalJSON(*replayed.Failure), mustMarshalJSON(original)) {
-		t.Fatalf("soak replay did not reproduce the retained failure: retained=%s replayed=%v error=%v",
-			mustMarshalJSON(original), replayed.Failure, replayErr)
+	switch outcome := soak.CompareReplay(&original, replayed.Failure); outcome {
+	case soak.ReplayReproduced:
+		t.Logf("replay reproduced retained failure at operation %d with code %s, stage %q, and %d violations",
+			original.Sequence, original.FailureCode, original.FailureStage, original.ViolationCount)
+	case soak.ReplayInconclusive:
+		t.Fatalf("soak replay is inconclusive: the retained %s failure at operation %d has no precise identity; replay error: %v",
+			original.FailureCode, original.Sequence, replayErr)
+	default:
+		t.Fatalf("soak replay did not reproduce the retained failure: retained=%s replayed=%s error=%v",
+			mustMarshalJSON(original), mustMarshalJSON(replayed.Failure), replayErr)
 	}
-	t.Logf("replay reproduced retained failure at operation %d with code %s and %d violations", original.Sequence, original.FailureCode, len(original.Violations))
 }
 
 func hasChecksumRowDigestViolation(violations []invariants.Violation) bool {

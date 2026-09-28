@@ -133,8 +133,9 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 	started := time.Now()
 	defer func() { result.Elapsed = time.Since(started) }()
 	fail := func(sequence uint64, code string, runErr error, violations []invariants.Violation) error {
-		result.Failure = &OperationFact{Sequence: sequence, Status: "failed", FailureCode: code, Violations: violations}
-		return recordRunFailure(writer, *result.Failure, runErr)
+		fact := failureFact(sequence, code, runErr, violations)
+		result.Failure = &fact
+		return recordRunFailure(writer, fact, runErr)
 	}
 	for index, operation := range plan.Operations {
 		if err := ctx.Err(); err != nil {
@@ -200,7 +201,7 @@ func recordRunFailure(writer *journalWriter, fact OperationFact, runErr error) e
 	if writer == nil {
 		return runErr
 	}
-	if recordErr := writer.RecordFailure(fact.Sequence, fact.FailureCode, fact.Violations); recordErr != nil {
+	if recordErr := writer.RecordFailure(fact); recordErr != nil {
 		return errors.Join(runErr, fmt.Errorf("record soak failure fact: %w", recordErr))
 	}
 	return runErr

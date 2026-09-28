@@ -179,10 +179,12 @@ This adds the real slot-boundary proof that SQL-only activation-message checks d
 The live server soak is bounded seeded stress. `SOAK_OPERATIONS` sets its explicit operation budget, and each run reports its measured elapsed time.
 It executes response loss on push or pull and WAL-worker replay interruption.
 Every operation ends at a quiescent point. The soak then reads the isolated source tables directly and compares them with an independent model of the authored rows.
-It also compares the client's complete scope membership and held values with those source rows. Expected membership comes from each table's business rule, not from Synchro output.
+It also compares the client's complete scope membership and every held synced field, in wire form, with those source rows. Expected membership comes from each table's business rule, not from Synchro output.
 Each run writes its journal to a new directory under `SOAK_ARTIFACT_DIR`. A failed run also keeps its original wire bodies there before cleanup.
-The journal holds the seed, configuration, planned operations, and the terminal failure with its violations.
-Replay a retained journal in a new cluster with `make soak-replay SOAK_REPLAY_JOURNAL=<journal>`. Replay passes only when it reproduces the retained outcome exactly.
+The journal holds the seed, configuration, planned operations, and one bounded terminal failure identity.
+A violation failure keeps the violation count, a digest of the complete violation set, and a bounded sample. Violation evidence uses stable authored table and field names, not per-cluster runtime IDs.
+A harness failure keeps the failed operation step and a failure class.
+Replay a retained journal in a new cluster with `make soak-replay SOAK_REPLAY_JOURNAL=<journal>`. Replay passes only when it reproduces that identity. A failure without a precise identity makes replay inconclusive, and replay fails.
 Its in-memory client is reference state, not native process-recovery evidence.
 Native recovery remains covered by the real native scenario gates.
 

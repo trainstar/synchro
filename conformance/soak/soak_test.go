@@ -420,8 +420,8 @@ func TestNegativeControlKnownCheckerViolation(t *testing.T) {
 	if fact.Status != "failed" || fact.ObservationSequence != 0 || fact.FailureCode != "invariant-violation" {
 		t.Fatalf("violation fact = %#v, want failed invariant-violation fact", fact)
 	}
-	if result.Failure == nil || string(mustJSON(fact)) != string(mustJSON(*result.Failure)) || len(fact.Violations) == 0 ||
-		string(mustJSON(fact.Violations)) != string(mustJSON(result.Violations)) {
+	if result.Failure == nil || string(mustJSON(fact)) != string(mustJSON(*result.Failure)) || fact.ViolationCount != len(result.Violations) ||
+		fact.ViolationDigest != failureFact(fact.Sequence, fact.FailureCode, nil, result.Violations).ViolationDigest {
 		t.Fatalf("journal failure fact %#v does not retain the run failure %#v", fact, result.Failure)
 	}
 }
