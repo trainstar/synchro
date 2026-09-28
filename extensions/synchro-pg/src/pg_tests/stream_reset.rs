@@ -225,8 +225,14 @@
                  'stream_generation', runtime.stream_generation,
                  'active_slot', runtime.active_slot_name,
                  'checkpoint_count', (SELECT count(*) FROM synchro.sync_client_checkpoints),
-                 'event_count', (SELECT count(*) FROM synchro.sync_wal_events),
-                 'effect_count', (SELECT count(*) FROM synchro.sync_changelog),
+                 'event_count', (
+                     SELECT count(*) FROM synchro.sync_wal_events event
+                     WHERE event.stream_generation = runtime.stream_generation
+                 ),
+                 'effect_count', (
+                     SELECT count(*) FROM synchro.sync_changelog effect
+                     WHERE effect.stream_generation = runtime.stream_generation
+                 ),
                  'captured_matches_stage', captured.row_data = staged.row_data,
                  'stale_key_absent', NOT captured.row_data ? 'title',
                  'source_reset_id', captured.source_reset_id,

@@ -198,7 +198,7 @@ class Issue49RequirementProofTests {
                     ).rowsAffected,
                 )
 
-                val observed = client.inspectPendingMutations()
+                val observed = client.inspectPendingMutations().currentRecords()
                 assertTrue(queueMatches(observed, operation))
                 assertEquals(fixtures.size, client.pendingChangeCount())
 
@@ -232,7 +232,7 @@ class Issue49RequirementProofTests {
                 arrayOf("Offline category", "2026-02-02T00:00:00.000000Z", category.seededID),
             ).rowsAffected,
         )
-        val beforeRestart = first.inspectPendingMutations().single()
+        val beforeRestart = first.inspectPendingMutations().currentRecords().single()
         assertEquals(authoritativeVersion, beforeRestart.baseVersion)
         assertEquals(Operation.UPDATE, beforeRestart.operation)
         assertTrue(beforeRestart.authoredFields.any { it.value.value == "Offline category" })
@@ -240,7 +240,7 @@ class Issue49RequirementProofTests {
 
         val reopened = SynchroClient(config, context)
         try {
-            val afterRestart = reopened.inspectPendingMutations().single()
+            val afterRestart = reopened.inspectPendingMutations().currentRecords().single()
             assertEquals(observation(beforeRestart), observation(afterRestart))
             assertEquals(
                 "Offline category",
@@ -253,7 +253,7 @@ class Issue49RequirementProofTests {
             assertThrows(Exception::class.java) {
                 reopened.execute("DELETE FROM _synchro_pending_changes")
             }
-            assertEquals(listOf(observation(beforeRestart)), reopened.inspectPendingMutations().map(::observation))
+            assertEquals(listOf(observation(beforeRestart)), reopened.inspectPendingMutations().currentRecords().map(::observation))
         } finally {
             reopened.close()
             context.deleteDatabase(databaseName)
@@ -272,7 +272,7 @@ class Issue49RequirementProofTests {
                 arrayOf(fixtures.last().seededID),
             )?.get("name"),
         )
-        assertTrue(baseline.inspectPendingMutations().isEmpty())
+        assertTrue(baseline.inspectPendingMutations().currentRecords().isEmpty())
 
         assertEquals(
             1,
@@ -281,7 +281,7 @@ class Issue49RequirementProofTests {
                 arrayOf("Unauthorized queued seed intent", fixtures.last().seededID),
             ).rowsAffected,
         )
-        assertEquals(1, baseline.inspectPendingMutations().size)
+        assertEquals(1, baseline.inspectPendingMutations().currentRecords().size)
         baseline.close()
 
         assertThrows(Exception::class.java) {

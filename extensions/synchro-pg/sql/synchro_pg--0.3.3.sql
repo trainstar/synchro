@@ -73,7 +73,11 @@ CREATE TABLE IF NOT EXISTS sync_registry_generations (
         (state = 'pending' AND activation_commit_lsn IS NULL AND activation_end_lsn IS NULL AND activated_at IS NULL)
         OR (state IN ('active', 'superseded') AND validated AND activated_at IS NOT NULL)
     ),
-    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn)
+    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn),
+    -- Validation records whether the edge from the parent needs source values:
+    -- 0 direct, 1 projection bootstrap, 2 bootstrap with client data. NULL is
+    -- unknown and needs a verified bootstrap before activation.
+    source_requirement SMALLINT CHECK (source_requirement IN (0, 1, 2))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_registry_one_active
     ON sync_registry_generations ((state)) WHERE state = 'active';
@@ -81,9 +85,10 @@ INSERT INTO sync_registry_generations (
     stream_generation,
     state,
     validated,
-    activated_at
+    activated_at,
+    source_requirement
 )
-SELECT stream_generation, 'active', true, now()
+SELECT stream_generation, 'active', true, now(), 0
 FROM sync_runtime_state
 WHERE singleton = true
   AND NOT EXISTS (SELECT 1 FROM sync_registry_generations);
@@ -2013,7 +2018,7 @@ AS 'MODULE_PATHNAME', 'synchro_contract_info_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/schema.rs:147
+-- synchro-pg/src/schema.rs:148
 -- synchro_pg::schema::synchro_debug
 CREATE  FUNCTION "synchro_debug"(
 	"p_user_id" TEXT, /* &str */
@@ -2129,7 +2134,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:274
+-- synchro-pg/src/registry.rs:275
 -- synchro_pg::registry::synchro_prepare_projection_view
 CREATE  FUNCTION "synchro_prepare_projection_view"(
 	"p_relation_name" TEXT, /* &str */
@@ -2281,7 +2286,7 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:746
+-- synchro-pg/src/registry.rs:751
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2294,7 +2299,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1027
+-- synchro-pg/src/registry.rs:1032
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2321,7 +2326,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:428
+-- synchro-pg/src/registry.rs:429
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2374,7 +2379,7 @@ AS 'MODULE_PATHNAME', 'synchro_revoke_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/schema.rs:42
+-- synchro-pg/src/schema.rs:43
 -- synchro_pg::schema::synchro_schema_manifest
 CREATE  FUNCTION "synchro_schema_manifest"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2419,7 +2424,7 @@ AS 'MODULE_PATHNAME', 'synchro_stage_stream_reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/schema.rs:58
+-- synchro-pg/src/schema.rs:59
 -- synchro_pg::schema::synchro_tables
 CREATE  FUNCTION "synchro_tables"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2439,7 +2444,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:981
+-- synchro-pg/src/registry.rs:986
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */
@@ -2459,7 +2464,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1929
+-- synchro-pg/src/lib.rs:1934
 -- finalize
 
 DO $roles$

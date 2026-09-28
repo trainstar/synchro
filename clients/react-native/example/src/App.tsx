@@ -416,7 +416,11 @@ function StandardApp() {
         );
         return rows[0]?.name;
       });
-      update('writeTx', value === 'txtest');
+      const committed = await client.queryOne(
+        'SELECT name FROM test_items WHERE id = ? AND note IS ?',
+        [recordID, null]
+      );
+      update('writeTx', value === 'txtest' && committed?.name === 'txtest');
     } catch {
       update('writeTx', false);
     }
@@ -426,23 +430,31 @@ function StandardApp() {
     try {
       await ensureLocalTable();
       const rollbackID = uuid();
+      let insertObserved = false;
+      let rejected = false;
       try {
         await client.writeTransaction(async (tx) => {
-          await tx.execute(
+          const inserted = await tx.execute(
             'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
             [rollbackID, 'should-not-persist', null]
           );
+          const observed = await tx.queryOne(
+            'SELECT name FROM test_items WHERE id = ?',
+            [rollbackID]
+          );
+          insertObserved =
+            inserted.rowsAffected === 1 && observed?.name === 'should-not-persist';
           throw new Error('intentional rollback');
         });
       } catch {
-        // expected
+        rejected = true;
       }
 
       const row = await client.queryOne(
         'SELECT * FROM test_items WHERE id = ?',
         [rollbackID]
       );
-      update('rollbackTx', row === null);
+      update('rollbackTx', insertObserved && rejected && row === null);
     } catch {
       update('rollbackTx', false);
     }

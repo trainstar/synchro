@@ -456,6 +456,61 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	if err := validateCaptureResult(duplicatedReceipts); err == nil {
 		t.Fatal("duplicated rebuild receipt was accepted")
 	}
+
+	// One (scope, rebuild) group with more pages than the record bound is complete detail.
+	largePages := maximumRunnerRecords + 1
+	oneLargeGroup := multiPage
+	oneLargeGroup.RebuildReceiptCount = &largePages
+	oneLargeGroup.RebuildReceipts = append([]rebuildReceiptRecord(nil), multiPage.RebuildReceipts...)
+	oneLargeGroup.RebuildReceipts[0].PageCount = largePages
+	if err := validateCaptureResult(oneLargeGroup); err != nil {
+		t.Fatalf("one complete receipt group with many pages was rejected: %v", err)
+	}
+	truncatedPresent := oneLargeGroup
+	truncatedPresent.RebuildReceiptsTruncated = &truncatedValue
+	truncatedPresent.CaptureOverflowed = &truncatedValue
+	if err := validateCaptureResult(truncatedPresent); err == nil {
+		t.Fatal("truncated receipt groups with present detail were accepted")
+	}
+	smallTruncated := multiPage
+	smallTruncated.RebuildReceipts = nil
+	smallTruncated.RebuildReceiptsTruncated = &truncatedValue
+	smallTruncated.CaptureOverflowed = &truncatedValue
+	if err := validateCaptureResult(smallTruncated); err == nil {
+		t.Fatal("receipt group truncation within the page bound was accepted")
+	}
+	largeTruncated := smallTruncated
+	largeTruncated.RebuildReceiptCount = &largePages
+	if err := validateCaptureResult(largeTruncated); err != nil {
+		t.Fatalf("truncated receipt groups beyond the page bound were rejected: %v", err)
+	}
+
+	schema := schemaRef{Version: 1, Hash: digest}
+	retained := func(id string, status string) retainedMutation {
+		return retainedMutation{MutationID: id, LocalOrder: 1, TableID: "table-items", TableName: "items", RecordID: "row-a", PrimaryKeyFieldID: "field-id", PrimaryKeyLogicalType: "string", Operation: "insert", AuthoredSchema: schema, ClientVersion: "2026-01-01T00:00:00.000000Z", Status: status, SourceKind: "local"}
+	}
+	three := 3
+	normalizedPending := 1
+	normalized := complete
+	normalized.MutationLedgerCount = &three
+	normalized.PendingChangeCount = &normalizedPending
+	normalized.RetainedMutations = []retainedMutation{retained("m1", "superseded_before_send"), retained("m2", "superseded_before_send"), retained("m3", "pending")}
+	if err := validateCaptureResult(normalized); err != nil {
+		t.Fatalf("normalized retained snapshot was rejected: %v", err)
+	}
+	// The pre-normalization ledger with a post-normalization pending count is a mixed state.
+	two := 2
+	mixed := normalized
+	mixed.MutationLedgerCount = &two
+	mixed.RetainedMutations = []retainedMutation{retained("m1", "pending"), retained("m2", "pending")}
+	if err := validateCaptureResult(mixed); err == nil {
+		t.Fatal("pending count from another ledger state was accepted")
+	}
+	overfull := normalized
+	overfull.MutationLedgerCount = &two
+	if err := validateCaptureResult(overfull); err == nil {
+		t.Fatal("more retained detail than ledger rows was accepted")
+	}
 }
 
 func TestOperationWindowsUseMonotonicProvenanceMaintenanceCursorDelta(t *testing.T) {

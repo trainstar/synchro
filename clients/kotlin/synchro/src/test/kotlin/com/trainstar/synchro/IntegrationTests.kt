@@ -568,7 +568,7 @@ class IntegrationTests {
             assertEquals("exceeds_push_limit", ledgerState(database, oversizeID))
             assertEquals(
                 LocalMutationStatus.EXCEEDS_PUSH_LIMIT,
-                clientA.inspectRetainedMutations().single { it.recordID == oversizeID }.status,
+                clientA.inspectRetainedMutations().currentRecords().single { it.recordID == oversizeID }.status,
             )
 
             clientB.start()

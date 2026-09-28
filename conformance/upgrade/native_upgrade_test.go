@@ -435,7 +435,6 @@ type serverSchema struct {
 	hash        string
 	tableIDs    map[string]string
 	pkFieldIDs  map[string]string
-	fieldIDs    map[string]map[string]string
 	fieldTypes  map[string]map[string]string
 	fieldColumn map[string]string
 }
@@ -444,8 +443,7 @@ func loadServerSchema(ctx context.Context, t *testing.T, database *sql.DB) serve
 	t.Helper()
 	schema := serverSchema{
 		tableIDs: map[string]string{}, pkFieldIDs: map[string]string{},
-		fieldIDs: map[string]map[string]string{}, fieldTypes: map[string]map[string]string{},
-		fieldColumn: map[string]string{},
+		fieldTypes: map[string]map[string]string{}, fieldColumn: map[string]string{},
 	}
 	if err := database.QueryRowContext(ctx, `SELECT schema_version, schema_hash FROM synchro.sync_schema_manifest ORDER BY schema_version DESC LIMIT 1`).Scan(&schema.version, &schema.hash); err != nil {
 		t.Fatalf("read current server schema manifest: %v", err)
@@ -466,11 +464,9 @@ func loadServerSchema(ctx context.Context, t *testing.T, database *sql.DB) serve
 		}
 		schema.tableIDs[table] = tableID
 		schema.pkFieldIDs[table] = pkFieldID
-		if schema.fieldIDs[table] == nil {
-			schema.fieldIDs[table] = map[string]string{}
+		if schema.fieldTypes[table] == nil {
 			schema.fieldTypes[table] = map[string]string{}
 		}
-		schema.fieldIDs[table][column] = fieldID
 		schema.fieldTypes[table][column] = portableType
 		schema.fieldColumn[fieldID] = table + "." + column
 	}

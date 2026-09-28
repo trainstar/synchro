@@ -9,7 +9,7 @@ import android.os.Process
 import android.util.Base64
 import com.trainstar.synchro.AnyCodable
 import com.trainstar.synchro.Operation
-import com.trainstar.synchro.PendingMutationInspection
+import com.trainstar.synchro.RetainedMutationInspection
 import com.trainstar.synchro.RejectedMutationInspection
 import com.trainstar.synchro.SchemaRef
 import com.trainstar.synchro.SynchroClient
@@ -533,7 +533,7 @@ private class ClientSession(private val context: Context) : Closeable {
         rowsAffected: Int? = null,
         applicationRows: JsonArray? = null,
         captureState: ClientStateCaptureInspection? = null,
-        retainedMutations: List<PendingMutationInspection>? = null,
+        retainedMutations: List<RetainedMutationInspection>? = null,
         retainedMutationCount: Int? = null,
         rejectedMutations: List<RejectedMutationInspection>? = null,
         durableStateFingerprint: String? = null,
@@ -562,7 +562,9 @@ private class ClientSession(private val context: Context) : Closeable {
         }
         val rebuildAttempts = capture.rebuildAttempts.takeUnless { capture.rebuildAttemptsTruncated }
         val rebuildReceiptProofs = capture.rebuildReceipts.takeUnless { capture.rebuildReceiptsTruncated }
-        require(pending?.all { it.authoredFields.size <= MAXIMUM_FIELDS } != false) { "inspection fields are too large" }
+        require(pending?.all { it !is RetainedMutationInspection.Current || it.mutation.authoredFields.size <= MAXIMUM_FIELDS } != false) {
+            "inspection fields are too large"
+        }
         return buildJsonObject {
             put("status", client.getSyncStatus().state.wireName)
             rowsAffected?.let { put("rows_affected", it) }
@@ -692,8 +694,13 @@ private class ClientSession(private val context: Context) : Closeable {
         }
     }
 
-    private fun normalizePending(values: List<PendingMutationInspection>): JsonArray = buildJsonArray {
-        values.sortedBy { it.localOrder }.forEach { value ->
+    // The runner wire has only the current record shape. A legacy record fails
+    // the capture instead of reaching the harness with invented bindings.
+    private fun normalizePending(values: List<RetainedMutationInspection>): JsonArray = buildJsonArray {
+        values.map { value ->
+            (value as? RetainedMutationInspection.Current)?.mutation
+                ?: throw IllegalStateException("legacy retained mutation is outside the runner wire")
+        }.sortedBy { it.localOrder }.forEach { value ->
             add(buildJsonObject {
                 put("mutation_id", value.mutationID)
                 put("local_order", value.localOrder)
