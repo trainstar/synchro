@@ -655,7 +655,7 @@
     }
 
     #[pg_test]
-    fn worker_slot_binding_selects_reuse_replace_or_fail() {
+    fn worker_slot_binding_selects_reuse_create_or_fail() {
         let unbound = crate::bgworker::WorkerStartupIdentity {
             runtime: crate::bgworker::WorkerRuntimeIdentity {
                 stream_generation: "unbound-generation".to_string(),
@@ -672,25 +672,16 @@
         };
 
         assert_eq!(
-            crate::bgworker::slot_binding_decision(
-                &unbound,
-                crate::bgworker::ExistingWorkerSlot::Inactive,
-            ),
-            crate::bgworker::SlotBindingDecision::Replace,
+            crate::bgworker::slot_binding_decision(&unbound, false),
+            crate::bgworker::SlotBindingDecision::Create,
         );
         assert_eq!(
-            crate::bgworker::slot_binding_decision(
-                &bound,
-                crate::bgworker::ExistingWorkerSlot::Inactive,
-            ),
-            crate::bgworker::SlotBindingDecision::Reuse,
-        );
-        assert_eq!(
-            crate::bgworker::slot_binding_decision(
-                &unbound,
-                crate::bgworker::ExistingWorkerSlot::Active,
-            ),
+            crate::bgworker::slot_binding_decision(&unbound, true),
             crate::bgworker::SlotBindingDecision::Fail,
+        );
+        assert_eq!(
+            crate::bgworker::slot_binding_decision(&bound, true),
+            crate::bgworker::SlotBindingDecision::Reuse,
         );
     }
 

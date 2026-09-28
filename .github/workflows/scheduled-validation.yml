@@ -26,7 +26,7 @@ jobs:
     env:
       GOWORK: 'off'
       SOAK_SEED: ${{ matrix.seed }}
-      SOAK_DURATION: 2m
+      SOAK_OPERATIONS: '24'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -46,7 +46,15 @@ jobs:
           expected-postgresql-version: '18.3'
 
       - name: Run wider live seeded stateful validation
-        run: make soak
+        run: make soak SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
+
+      - name: Retain seeded stress replay evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: soak-evidence-${{ matrix.seed }}-${{ github.sha }}
+          path: ${{ runner.temp }}/soak-evidence
+          if-no-files-found: error
 
   broad-mutation:
     name: broad core mutation search

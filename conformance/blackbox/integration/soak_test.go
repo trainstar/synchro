@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -177,6 +179,10 @@ func TestSoakWALRestartRequiresOnceOnlyMaterialization(t *testing.T) {
 	}
 }
 
+// TestSoak runs bounded seeded stress with an explicit operation budget. It
+// retains each journal and each failed run's wire bodies in a new directory
+// under SOAK_ARTIFACT_DIR. With SOAK_REPLAY_JOURNAL set, it only replays that
+// retained journal in a new cluster.
 func TestSoak(t *testing.T) {
 	if strings.TrimSpace(os.Getenv("SYNCHRO_CONFORMANCE_ADAPTER_ARTIFACT")) == "" {
 		t.Skip("the black-box environment is not configured")
@@ -184,86 +190,157 @@ func TestSoak(t *testing.T) {
 	if !*provision || !*install {
 		t.Fatal("TestSoak requires --provision --install")
 	}
-	seed, err := parseSoakSeed(os.Getenv("SOAK_SEED"))
-	if err != nil {
-		t.Fatal(err)
+	if os.Getenv("SOAK_DURATION") != "" {
+		t.Fatal("SOAK_DURATION is retired because it only estimated an operation count; set SOAK_OPERATIONS")
 	}
-	duration, err := parseSoakDuration(os.Getenv("SOAK_DURATION"))
-	if err != nil {
-		t.Fatal(err)
+	ctx := context.Background()
+	if deadline, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-time.Minute))
+		defer cancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), duration*6+15*time.Minute)
-	defer cancel()
 	catalog, err := faults.LoadCatalog(ctx, soakRepositoryRoot)
 	if err != nil {
 		t.Fatalf("load soak fault catalog: %v", err)
 	}
+	if journal := os.Getenv("SOAK_REPLAY_JOURNAL"); journal != "" {
+		t.Run("replay", func(t *testing.T) { replaySoakJournal(t, ctx, journal, catalog) })
+		return
+	}
+	seed, err := parseSoakSeed(os.Getenv("SOAK_SEED"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := parseSoakOperations(os.Getenv("SOAK_OPERATIONS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactRoot := os.Getenv("SOAK_ARTIFACT_DIR")
+	if artifactRoot == "" {
+		t.Fatal("SOAK_ARTIFACT_DIR is required so failure evidence survives test cleanup")
+	}
+	if err := os.MkdirAll(artifactRoot, 0o700); err != nil {
+		t.Fatalf("create soak artifact root: %v", err)
+	}
+	evidence, err := os.MkdirTemp(artifactRoot, fmt.Sprintf("seed-%d-", seed))
+	if err != nil {
+		t.Fatalf("create soak evidence directory: %v", err)
+	}
+	t.Logf("soak evidence directory: %s", evidence)
+	coverage := func(control string) soak.Config {
+		return soak.Config{
+			OperationCount: soak.MinimumCoverageOperations,
+			Users:          []string{soakUserID},
+			Clients:        []string{soakClientID},
+			Scopes:         []string{soakPrivateScope, soakSharedScope},
+			Control:        control,
+		}
+	}
 
 	t.Run("live", func(t *testing.T) {
-		config, err := soak.ConfigForDuration(duration)
-		if err != nil {
-			t.Fatalf("configure live soak: %v", err)
-		}
-		config.Users = []string{soakUserID}
-		config.Clients = []string{soakClientID}
-		config.Scopes = []string{soakPrivateScope, soakSharedScope}
+		config := coverage("")
+		config.OperationCount = operations
+		config.FaultRate = soak.DefaultFaultRate
 		plan, err := soak.Generate(seed, config, catalog)
 		if err != nil {
 			t.Fatalf("generate live soak plan: %v", err)
 		}
-		harness, err := newLiveSoakHarness(ctx, seed, false)
+		result, journal, err := runRetainedSoak(ctx, plan, evidence, "live")
+		t.Logf("live soak seed=%d operations=%d/%d elapsed=%s journal=%s", seed, result.OperationsExecuted, len(plan.Operations), result.Elapsed, journal)
 		if err != nil {
-			t.Fatalf("create live soak harness: %v", err)
-		}
-		t.Cleanup(func() { closeLiveSoakHarness(t, harness) })
-		result, err := soak.Run(ctx, plan, harness, t.TempDir()+"/live-soak.jsonl")
-		if err != nil {
-			t.Fatalf("run live soak: %v; operations %d/%d; violations: %#v", err, result.OperationsExecuted, len(plan.Operations), result.Violations)
+			t.Fatalf("run live soak: %v; replay with make soak-replay SOAK_REPLAY_JOURNAL=%s", err, journal)
 		}
 		if result.OperationsExecuted != len(plan.Operations) || len(result.Violations) != 0 {
 			t.Fatalf("live soak result = operations %d/%d, violations %d", result.OperationsExecuted, len(plan.Operations), len(result.Violations))
 		}
 	})
 
-	t.Run("checksum-corruption-replays-from-seed", func(t *testing.T) {
-		config := soak.Config{
-			OperationCount: soak.MinimumCoverageOperations,
-			Users:          []string{soakUserID},
-			Clients:        []string{soakClientID},
-			Scopes:         []string{soakPrivateScope, soakSharedScope},
-			FaultRate:      0,
-		}
-		plan, err := soak.Generate(seed, config, catalog)
+	t.Run("checksum-corruption-fails", func(t *testing.T) {
+		plan, err := soak.Generate(seed, coverage(soakControlChecksum), catalog)
 		if err != nil {
-			t.Fatalf("generate checksum replay plan: %v", err)
+			t.Fatalf("generate checksum control plan: %v", err)
 		}
-		journalPath := t.TempDir() + "/checksum-corruption.jsonl"
-		firstHarness, err := newLiveSoakHarness(ctx, seed, true)
-		if err != nil {
-			t.Fatalf("create checksum fault harness: %v", err)
-		}
-		first, firstErr := soak.Run(ctx, plan, firstHarness, journalPath)
-		closeLiveSoakHarness(t, firstHarness)
-		if !errors.Is(firstErr, soak.ErrInvariantViolation) {
-			t.Fatalf("checksum fault error = %v, want ErrInvariantViolation", firstErr)
-		}
-		if !hasChecksumRowDigestViolation(first.Violations) {
-			t.Fatalf("checksum fault violations = %#v", first.Violations)
-		}
-
-		replayHarness, err := newLiveSoakHarness(ctx, seed, true)
-		if err != nil {
-			t.Fatalf("create checksum replay harness: %v", err)
-		}
-		t.Cleanup(func() { closeLiveSoakHarness(t, replayHarness) })
-		replayed, replayErr := soak.ReplayRun(ctx, journalPath, catalog, replayHarness)
-		if !errors.Is(replayErr, soak.ErrInvariantViolation) {
-			t.Fatalf("checksum replay error = %v, want ErrInvariantViolation", replayErr)
-		}
-		if !reflect.DeepEqual(first.Violations, replayed.Violations) {
-			t.Fatalf("checksum replay violations differ: first=%#v replay=%#v", first.Violations, replayed.Violations)
+		result, _, runErr := runRetainedSoak(ctx, plan, evidence, "checksum-corruption")
+		if !errors.Is(runErr, soak.ErrInvariantViolation) || !hasChecksumRowDigestViolation(result.Violations) {
+			t.Fatalf("checksum control error = %v, violations = %#v", runErr, result.Violations)
 		}
 	})
+
+	// A delivered row is dropped while the client's scope metadata is forged to
+	// match. Only the independent source comparison can detect it. The retained
+	// journal must then replay the same failure in a new cluster.
+	t.Run("omitted-delivery-replays-after-cleanup", func(t *testing.T) {
+		plan, err := soak.Generate(seed, coverage(soakControlOmitDelivery), catalog)
+		if err != nil {
+			t.Fatalf("generate omitted delivery control plan: %v", err)
+		}
+		result, journal, runErr := runRetainedSoak(ctx, plan, evidence, "omitted-delivery")
+		if !errors.Is(runErr, soak.ErrInvariantViolation) || len(result.Violations) == 0 {
+			t.Fatalf("omitted delivery control error = %v, violations = %#v", runErr, result.Violations)
+		}
+		for _, violation := range result.Violations {
+			if violation.Family != soak.InvariantSourceState || violation.RuleID != soak.RuleSourceStateMembership {
+				t.Fatalf("omitted delivery was judged by %s/%s, want only the source-state membership rule", violation.Family, violation.RuleID)
+			}
+		}
+		replaySoakJournal(t, ctx, journal, catalog)
+	})
+}
+
+// runRetainedSoak runs one plan in its own cluster. The journal is written to
+// the evidence directory, and a failed run keeps its wire bodies there before
+// the cluster and attachment root are removed.
+func runRetainedSoak(ctx context.Context, plan soak.Plan, evidence, name string) (soak.RunResult, string, error) {
+	journal := filepath.Join(evidence, name+".jsonl")
+	harness, err := newLiveSoakHarness(ctx, plan.Seed, plan.Config.Control)
+	if err != nil {
+		return soak.RunResult{}, journal, fmt.Errorf("create %s soak harness: %w", name, err)
+	}
+	result, runErr := soak.Run(ctx, plan, harness, journal)
+	if runErr != nil {
+		runErr = errors.Join(runErr, harness.retainWire(filepath.Join(evidence, name+"-wire")))
+	}
+	closeContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return result, journal, errors.Join(runErr, harness.Close(closeContext))
+}
+
+// replaySoakJournal rebuilds the retained plan in a new cluster and requires
+// the same outcome: success for a sealed journal, or the same failed operation,
+// failure code, and violations for a failed journal.
+func replaySoakJournal(t *testing.T, ctx context.Context, path string, catalog *faults.Catalog) {
+	t.Helper()
+	journal, readErr := soak.ReadJournal(path)
+	if readErr != nil && !errors.Is(readErr, soak.ErrJournalUnsealed) {
+		t.Fatalf("read retained soak journal: %v", readErr)
+	}
+	plan, err := soak.ReplayPlan(journal, catalog)
+	if err != nil {
+		t.Fatalf("rebuild retained soak plan: %v", err)
+	}
+	harness, err := newLiveSoakHarness(ctx, plan.Seed, plan.Config.Control)
+	if err != nil {
+		t.Fatalf("create soak replay harness: %v", err)
+	}
+	t.Cleanup(func() { closeLiveSoakHarness(t, harness) })
+	replayed, replayErr := soak.ReplayRun(ctx, path, catalog, harness)
+	if readErr == nil {
+		if replayErr != nil {
+			t.Fatalf("sealed soak journal replay failed: %v", replayErr)
+		}
+		t.Logf("replayed sealed soak journal seed=%d operations=%d elapsed=%s", plan.Seed, replayed.OperationsExecuted, replayed.Elapsed)
+		return
+	}
+	facts := journal.OperationFacts
+	if len(facts) == 0 || facts[len(facts)-1].Status != "failed" {
+		t.Fatalf("unsealed soak journal has no terminal failure fact")
+	}
+	original := facts[len(facts)-1]
+	if replayed.Failure == nil || !reflect.DeepEqual(mustMarshalJSON(*replayed.Failure), mustMarshalJSON(original)) {
+		t.Fatalf("soak replay did not reproduce the retained failure: retained=%s replayed=%v error=%v",
+			mustMarshalJSON(original), replayed.Failure, replayErr)
+	}
+	t.Logf("replay reproduced retained failure at operation %d with code %s and %d violations", original.Sequence, original.FailureCode, len(original.Violations))
 }
 
 func hasChecksumRowDigestViolation(violations []invariants.Violation) bool {

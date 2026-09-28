@@ -101,6 +101,11 @@ func TestCheckMutationConservationCatchesEachRule(t *testing.T) {
 		{name: "outcome server row", ruleID: RuleMutationOutcomeServerRow, mutate: mutateMutationOutcome(func(outcome map[string]any) {
 			outcome["server_row"] = map[string]any{mutationOwnerFieldID: "wrong", mutationValueFieldID: "value-a"}
 		})},
+		{name: "conflict without authoritative row", ruleID: RuleMutationOutcomeServerRow, mutate: func(t *testing.T, observation *Observation) {
+			response := decodeFixtureObject(t, observation.WireExchanges[0].ResponseBody)
+			response["rejected"].([]any)[0].(map[string]any)["server_row"] = map[string]any{}
+			observation.WireExchanges[0].ResponseBody = marshalFixture(t, response)
+		}},
 		{name: "outcome server version", ruleID: RuleMutationOutcomeServerVersion, mutate: mutateMutationOutcome(func(outcome map[string]any) {
 			outcome["server_version"] = "not-a-uuid"
 		})},
@@ -166,8 +171,11 @@ func mutationConservationFixture(t *testing.T) Observation {
 			outcome["status"] = "applied"
 			accepted = append(accepted, outcome)
 		} else {
+			// A conflict returns the existing row, whose value differs from the
+			// rejected authored value.
 			outcome["status"] = "conflict"
 			outcome["code"] = "row_already_exists"
+			outcome["server_row"] = map[string]any{mutationOwnerFieldID: "diagnostic-user", mutationValueFieldID: "existing-" + value}
 			rejected = append(rejected, outcome)
 		}
 	}

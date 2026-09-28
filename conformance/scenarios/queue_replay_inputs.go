@@ -62,7 +62,10 @@ type QueueReplayWorkload struct {
 
 // QueueReplayInputs contains only inputs. Each platform retains its own execution and capture.
 type QueueReplayInputs struct {
-	Local      []Operation
+	Local []Operation
+	// Rejected is the local write in Local whose field the next schema removes.
+	// The server must reject it with terminal schema_incompatible.
+	Rejected   Operation
 	Publish    Operation
 	DropPush   Operation
 	BatchID    string
@@ -156,6 +159,7 @@ func BuildQueueReplayInputs(step Step, current QueueReplaySchema, commitLSN uint
 	}
 	rejectedField, acceptedField := writable[0], writable[1]
 	local := make([]Operation, 0, parameters.RecordCount)
+	var rejected Operation
 	wire := make([]map[string]any, 0, parameters.RecordCount)
 	for _, kind := range parameters.MutationKinds {
 		fieldIDs := append([]string(nil), kind.FieldIDs...)
@@ -198,6 +202,9 @@ func BuildQueueReplayInputs(step Step, current QueueReplaySchema, commitLSN uint
 				return QueueReplayInputs{}, fmt.Errorf("validate queue-replay local write %d: %w", ordinal+1, err)
 			}
 			local = append(local, operation)
+			if ordinal+1 == parameters.RecordCount {
+				rejected = operation
+			}
 			wire = append(wire, map[string]any{
 				"mutation_id": mutationID, "table": table.TableID, "pk": pk, "authored_schema": schema,
 				"op": kind.Operation, "client_version": parameters.ClientVersion, "columns": wireColumns,
@@ -232,7 +239,7 @@ func BuildQueueReplayInputs(step Step, current QueueReplaySchema, commitLSN uint
 	if err := ValidateOperation(push); err != nil {
 		return QueueReplayInputs{}, fmt.Errorf("validate queue-replay push: %w", err)
 	}
-	return QueueReplayInputs{Local: local, Publish: publish, DropPush: push, BatchID: batchID, NextSchema: next}, nil
+	return QueueReplayInputs{Local: local, Rejected: rejected, Publish: publish, DropPush: push, BatchID: batchID, NextSchema: next}, nil
 }
 
 func validateQueueReplaySchema(schema QueueReplaySchema) error {

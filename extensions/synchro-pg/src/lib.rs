@@ -325,7 +325,6 @@ CREATE TABLE sync_membership_dependencies (
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     FOREIGN KEY (registry_generation, target_relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
-    CHECK (dependency_relation_id <> target_relation_id),
     CHECK (
         (dependency_registration_kind = 'synced'
          AND cardinality(dependency_field_ids) > 0)

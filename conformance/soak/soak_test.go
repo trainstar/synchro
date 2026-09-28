@@ -197,8 +197,8 @@ func TestGeneratorRejectsShortCoverageConfiguration(t *testing.T) {
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("short configuration error = %v, want ErrInvalidConfig", err)
 	}
-	if _, err := ConfigForDuration(0); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("zero duration error = %v, want ErrInvalidConfig", err)
+	if _, err := Generate(1, Config{OperationCount: MinimumCoverageOperations, Control: "has space"}, testCatalog(t)); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid control error = %v, want ErrInvalidConfig", err)
 	}
 }
 
@@ -419,6 +419,10 @@ func TestNegativeControlKnownCheckerViolation(t *testing.T) {
 	fact := journal.OperationFacts[result.OperationsExecuted-1]
 	if fact.Status != "failed" || fact.ObservationSequence != 0 || fact.FailureCode != "invariant-violation" {
 		t.Fatalf("violation fact = %#v, want failed invariant-violation fact", fact)
+	}
+	if result.Failure == nil || string(mustJSON(fact)) != string(mustJSON(*result.Failure)) || len(fact.Violations) == 0 ||
+		string(mustJSON(fact.Violations)) != string(mustJSON(result.Violations)) {
+		t.Fatalf("journal failure fact %#v does not retain the run failure %#v", fact, result.Failure)
 	}
 }
 
@@ -800,6 +804,7 @@ func captureForOperation(operation Operation, processID string) ObservationCaptu
 		Clients:             clients,
 		CursorPositions:     positions,
 		ServerRowIdentities: serverRows,
+		SourceState:         stableSourceState(operation),
 	}
 	switch operation.Kind {
 	case OperationPush:
@@ -838,6 +843,17 @@ func captureForOperation(operation Operation, processID string) ObservationCaptu
 		bindFixtureTransport(operation, &capture.WireExchanges[index])
 	}
 	return capture
+}
+
+// stableSourceState matches the two rows that stableDurableCapture places in
+// both client scopes.
+func stableSourceState(operation Operation) *SourceStateObservation {
+	scopes := []string{operation.ScopeID, otherScope(operation.ScopeID)}
+	rows := []SourceRow{
+		{TableID: stableTableID, PrimaryKey: json.RawMessage(`"row-authored"`), ScopeIDs: scopes, Fields: map[string]json.RawMessage{stableValueFieldID: json.RawMessage(`"value-authored"`)}},
+		{TableID: stableTableID, PrimaryKey: json.RawMessage(`"row-existing"`), ScopeIDs: scopes, Fields: map[string]json.RawMessage{stableValueFieldID: json.RawMessage(`"value-existing"`)}},
+	}
+	return &SourceStateObservation{Authored: rows, Source: append([]SourceRow(nil), rows...)}
 }
 
 func bindFixtureTransport(operation Operation, exchange *invariants.WireExchangeObservation) {

@@ -482,3 +482,14 @@ func hasCommandSuffix(commands [][]string, suffix []string) bool {
 	}
 	return false
 }
+
+func TestDatabaseFamilySelectsDestinationSidecarsAndSeedCandidates(t *testing.T) {
+	listing := ".\n..\nclient-db\nclient-db-wal\nclient-db-shm\nclient-db-journal\n.client-db.seed-1f2e\n.client-db.seed-1f2e-wal\nclient-db2\nother-db\n"
+	want := []string{"client-db", "client-db-wal", "client-db-shm", "client-db-journal", ".client-db.seed-1f2e", ".client-db.seed-1f2e-wal"}
+	if got := databaseFamily(listing, "client-db"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("database family = %#v, want %#v", got, want)
+	}
+	if got := databaseFamily(".\n..\n", "client-db"); len(got) != 0 {
+		t.Fatalf("empty storage family = %#v", got)
+	}
+}

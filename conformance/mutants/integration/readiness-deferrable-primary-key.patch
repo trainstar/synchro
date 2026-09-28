@@ -1,8 +1,9 @@
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+index 983d484..dd22698 100644
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -189,7 +189,7 @@ const READINESS_SQL: &str = r#"
-                 AND primary_attribute.attnum = ANY(primary_index.indkey)
+@@ -189,7 +189,7 @@ SELECT
+                 AND primary_attribute.attnum = primary_index.indkey[0]
                 WHERE primary_index.indrelid = registry.physical_relation_oid
                   AND primary_index.indisprimary
 -                 AND primary_index.indimmediate

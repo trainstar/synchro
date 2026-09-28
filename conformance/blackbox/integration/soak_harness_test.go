@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,14 @@ const (
 	soakPrivateScope   = "user:diagnostic-user"
 	soakSharedScope    = "cf:global"
 	soakBodyLimit      = int64(1 << 20)
+
+	// soakControlChecksum corrupts one held row digest after the pull control.
+	soakControlChecksum = "checksum-corruption"
+	// soakControlOmitDelivery drops the delivered WAL-restart row and forges
+	// matching scope metadata, so only the source comparison can detect it.
+	soakControlOmitDelivery = "omit-delivered-row"
+	// The WAL restart control authors this exact private row.
+	soakProcessDeathValue = "restart-before-acknowledgement"
 )
 
 type liveSoakHarness struct {
@@ -39,16 +48,22 @@ type liveSoakHarness struct {
 	native   *blackbox.NativeController
 	recorder *blackbox.Recorder
 	client   blackbox.Client
+	observer *sql.DB
 	seed     uint64
 	root     string
+	control  string
 
 	mu                    sync.Mutex
 	closed                bool
 	identitySequence      uint64
 	clientVersionSequence uint64
 	schemaTransition      uint64
-	corruptNextChecksum   bool
+	controlApplied        bool
+	omitDeliveredRow      string
 	authoredTable         map[string]any
+	// authored is the independent model of every source row the workload
+	// authored, keyed by table name and record ID.
+	authored map[string]soakAuthoredRow
 
 	protocol            soakProtocolClient
 	manifest            vectors.Manifest
@@ -103,6 +118,10 @@ type soakHeldRow struct {
 	Memberships map[string]struct{}
 }
 
+type soakAuthoredRow struct {
+	table, id, scope, value string
+}
+
 type soakRecordedCall struct {
 	metadata blackbox.ExchangeMetadata
 	sequence uint64
@@ -112,7 +131,10 @@ type soakRecordedCall struct {
 	clientID string
 }
 
-func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) (*liveSoakHarness, error) {
+func newLiveSoakHarness(ctx context.Context, seed uint64, control string) (*liveSoakHarness, error) {
+	if control != "" && control != soakControlChecksum && control != soakControlOmitDelivery {
+		return nil, fmt.Errorf("soak control %q is unsupported", control)
+	}
 	environment, err := blackbox.LoadEnvironment()
 	if err != nil {
 		return nil, fmt.Errorf("load soak environment: %w", err)
@@ -134,6 +156,15 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 	if err != nil {
 		return nil, fmt.Errorf("create soak native controller: %w", err)
 	}
+	observer, err := server.OpenObserver(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open soak source observer: %w", err)
+	}
+	defer func() {
+		if cleanupServer {
+			_ = observer.Close()
+		}
+	}()
 	attachmentRoot, err := os.MkdirTemp("", "synchro-soak-attachments-")
 	if err != nil {
 		return nil, fmt.Errorf("create soak attachment root: %w", err)
@@ -160,9 +191,11 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 		native:              native,
 		recorder:            recorder,
 		client:              (blackbox.Client{BaseURL: server.AdapterURL(), Tokens: tokenProvider}).WithRecorder(recorder, soakBodyLimit),
+		observer:            observer,
 		seed:                seed,
 		root:                attachmentRoot,
-		corruptNextChecksum: corruptChecksum,
+		control:             control,
+		authored:            make(map[string]soakAuthoredRow),
 		rows:                make(map[string]soakHeldRow),
 		scopeRows:           make(map[string]map[string]struct{}),
 		authoritativeDigest: make(map[string][32]byte),
@@ -283,10 +316,13 @@ func (h *liveSoakHarness) Close(ctx context.Context) error {
 	h.closed = true
 	h.mu.Unlock()
 	var closeErr error
+	if h.observer != nil {
+		closeErr = h.observer.Close()
+	}
 	if h.native != nil {
-		closeErr = h.native.Close(ctx)
+		closeErr = errors.Join(closeErr, h.native.Close(ctx))
 	} else if h.server != nil {
-		closeErr = h.server.Close(ctx)
+		closeErr = errors.Join(closeErr, h.server.Close(ctx))
 	}
 	if h.root != "" {
 		closeErr = errors.Join(closeErr, os.RemoveAll(h.root))
@@ -382,6 +418,17 @@ func (h *liveSoakHarness) Execute(ctx context.Context, operation soak.Operation)
 	case soak.OperationProcessDeath:
 		if err := h.executeProcessDeath(ctx); err != nil {
 			return soak.ObservationCapture{}, err
+		}
+		// The restart row reaches the client only through pull, so drain to
+		// reach the quiescent point that the source comparison requires.
+		if err := h.drainPulls(ctx); err != nil {
+			return soak.ObservationCapture{}, err
+		}
+		if h.omitDeliveredRow != "" {
+			if err := h.omitHeldRow("cf_items", h.omitDeliveredRow); err != nil {
+				return soak.ObservationCapture{}, err
+			}
+			h.omitDeliveredRow = ""
 		}
 		h.faultActivation = &soak.FaultActivationObservation{
 			ControlID: string(operation.FaultPlan.ControlID), Target: operation.FaultPlan.Injection.Target,
@@ -491,9 +538,9 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 		return soak.ObservationCapture{}, fmt.Errorf("capture soak server state: %w", err)
 	}
 	serverState := facts[0].StateFacts
-	// The native controller knows authored row aliases only. Keep its independent
-	// ledger and stream projection, and omit scope families it cannot observe for
-	// direct protocol rows.
+	// The native controller projects authored row aliases only, so its row and
+	// membership families do not describe direct protocol rows. The complete
+	// row and membership claim comes from captureSourceState instead.
 	serverState.Rows = nil
 	serverState.Scopes = nil
 	serverState.RowScopeEdges = nil
@@ -502,6 +549,10 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 		return soak.ObservationCapture{}, err
 	}
 	client, err := h.captureClient()
+	if err != nil {
+		return soak.ObservationCapture{}, err
+	}
+	sourceState, err := h.captureSourceState(ctx)
 	if err != nil {
 		return soak.ObservationCapture{}, err
 	}
@@ -514,6 +565,7 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 		WireExchanges:   wires,
 		CursorPositions: positions,
 		FaultActivation: activation,
+		SourceState:     &sourceState,
 	}
 	if operation.Kind == soak.OperationPull || operation.Kind == soak.OperationRebuild {
 		capture.ServerRowIdentities = make([]invariants.ServerRowIdentityObservation, 0)
@@ -828,8 +880,14 @@ func (h *liveSoakHarness) submitInsert(ctx context.Context, scopeID, label strin
 	mutationID := h.nextUUID(label + "-mutation")
 	batchID := h.nextUUID(label + "-batch")
 	clientVersion := h.nextClientVersion()
+	value := fmt.Sprintf("soak-%d-%s", h.seed, label)
 	pk := map[string]any{table.PrimaryKeyField: recordID}
-	columns := map[string]any{table.ValueField: fmt.Sprintf("soak-%d-%s", h.seed, label)}
+	columns := map[string]any{table.ValueField: value}
+	// The installed write policy allows the owner to write private rows and
+	// rejects writes to the read-only shared scope.
+	if scopeID != soakSharedScope {
+		h.author(tableName, recordID, scopeID, value)
+	}
 	payload := map[string]any{
 		"client_id":         soakClientID,
 		"client_generation": h.protocol.Generation,
@@ -1012,9 +1070,11 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 	}
 	if operation.ScopeID == soakSharedScope {
 		recordID := h.nextUUID("pull-control-record")
+		value := fmt.Sprintf("soak-%d-pull-control", h.seed)
+		h.author("cf_global_items", recordID, soakSharedScope, value)
 		if err := h.server.Source().ExecContext(ctx,
 			"INSERT INTO cf_global_items (id, value) VALUES ($1, $2)",
-			recordID, fmt.Sprintf("soak-%d-pull-control", h.seed)); err != nil {
+			recordID, value); err != nil {
 			return nil, fmt.Errorf("insert soak shared pull control row: %w", err)
 		}
 		if err := h.waitForWALRecord(ctx, "cf_global_items", recordID); err != nil {
@@ -1066,7 +1126,7 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 	if err != nil {
 		return nil, err
 	}
-	if h.corruptNextChecksum {
+	if h.control == soakControlChecksum && !h.controlApplied {
 		keys := make([]string, 0, len(h.rows))
 		for key := range h.rows {
 			keys = append(keys, key)
@@ -1078,7 +1138,7 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 		row := h.rows[keys[0]]
 		row.Digest[0] ^= 1
 		h.rows[keys[0]] = row
-		h.corruptNextChecksum = false
+		h.controlApplied = true
 	}
 	ackWire, err := h.wireFromCall(operation, ackCall, false, false, false)
 	if err != nil {
@@ -1357,11 +1417,120 @@ func (h *liveSoakHarness) transitionSchema(ctx context.Context) (soakRecordedCal
 
 func (h *liveSoakHarness) executeProcessDeath(ctx context.Context) error {
 	recordID := h.nextUUID("process-death")
+	h.author("cf_items", recordID, soakPrivateScope, soakProcessDeathValue)
 	observation, err := h.server.Operator().RunWALReplayRestartControl(ctx, recordID)
 	if err != nil {
 		return fmt.Errorf("execute soak WAL process death: %w", err)
 	}
-	return validateSoakWALRestart(observation)
+	if err := validateSoakWALRestart(observation); err != nil {
+		return err
+	}
+	if h.control == soakControlOmitDelivery && !h.controlApplied {
+		h.omitDeliveredRow = recordID
+	}
+	return nil
+}
+
+func (h *liveSoakHarness) author(table, id, scope, value string) {
+	h.authored[table+"\x00"+id] = soakAuthoredRow{table: table, id: id, scope: scope, value: value}
+}
+
+// omitHeldRow removes one delivered row and forges matching scope metadata.
+func (h *liveSoakHarness) omitHeldRow(tableName, recordID string) error {
+	table := h.protocol.Tables[tableName]
+	pk, err := json.Marshal(recordID)
+	if err != nil {
+		return err
+	}
+	identity, err := vectors.RowIdentity(h.manifest, table.ID, pk)
+	if err != nil {
+		return fmt.Errorf("compute omitted soak row identity: %w", err)
+	}
+	row, found := h.rows[string(identity)]
+	if !found {
+		return errors.New("soak omission control has no delivered row")
+	}
+	delete(h.rows, string(identity))
+	h.rebuildScopeIndex()
+	for scopeID := range row.Memberships {
+		if _, present := h.authoritativeDigest[scopeID]; !present {
+			continue
+		}
+		entries, err := h.scopeDigestEntries(scopeID)
+		if err != nil {
+			return err
+		}
+		forged, err := vectors.ScopeDigest(h.manifest.Hash(), scopeID, entries)
+		if err != nil {
+			return fmt.Errorf("forge omitted soak scope digest: %w", err)
+		}
+		h.authoritativeDigest[scopeID] = forged
+	}
+	h.controlApplied = true
+	return nil
+}
+
+// captureSourceState reads every live workload row directly from the isolated
+// source tables. Scope membership comes from the authored business rule of each
+// table, not from Synchro membership output.
+func (h *liveSoakHarness) captureSourceState(ctx context.Context) (soak.SourceStateObservation, error) {
+	const maximumRows = 10000
+	rows, err := h.observer.QueryContext(ctx, `
+		SELECT 'cf_items', id::text, 'user:' || owner_id, value FROM public.cf_items WHERE deleted_at IS NULL
+		UNION ALL
+		SELECT 'cf_global_items', id::text, 'cf:global', value FROM public.cf_global_items WHERE deleted_at IS NULL
+		LIMIT 10001`)
+	if err != nil {
+		return soak.SourceStateObservation{}, fmt.Errorf("read soak source rows: %w", err)
+	}
+	defer rows.Close()
+	var state soak.SourceStateObservation
+	for rows.Next() {
+		var row soakAuthoredRow
+		if err := rows.Scan(&row.table, &row.id, &row.scope, &row.value); err != nil {
+			return soak.SourceStateObservation{}, fmt.Errorf("scan soak source row: %w", err)
+		}
+		source, err := h.sourceRow(row)
+		if err != nil {
+			return soak.SourceStateObservation{}, err
+		}
+		state.Source = append(state.Source, source)
+	}
+	if err := rows.Err(); err != nil {
+		return soak.SourceStateObservation{}, fmt.Errorf("read soak source rows: %w", err)
+	}
+	if len(state.Source) > maximumRows {
+		return soak.SourceStateObservation{}, errors.New("soak source rows exceed their bound")
+	}
+	keys := make([]string, 0, len(h.authored))
+	for key := range h.authored {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		authored, err := h.sourceRow(h.authored[key])
+		if err != nil {
+			return soak.SourceStateObservation{}, err
+		}
+		state.Authored = append(state.Authored, authored)
+	}
+	return state, nil
+}
+
+func (h *liveSoakHarness) sourceRow(row soakAuthoredRow) (soak.SourceRow, error) {
+	table, found := h.protocol.Tables[row.table]
+	if !found {
+		return soak.SourceRow{}, fmt.Errorf("soak source table %q is not installed", row.table)
+	}
+	pk, pkErr := json.Marshal(row.id)
+	value, valueErr := json.Marshal(row.value)
+	if pkErr != nil || valueErr != nil {
+		return soak.SourceRow{}, errors.New("encode soak source row failed")
+	}
+	return soak.SourceRow{
+		TableID: table.ID, PrimaryKey: pk, ScopeIDs: []string{row.scope},
+		Fields: map[string]json.RawMessage{table.ValueField: value},
+	}, nil
 }
 
 func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) error {
@@ -1781,13 +1950,22 @@ func parseSoakSeed(raw string) (uint64, error) {
 	return seed, nil
 }
 
-func parseSoakDuration(raw string) (time.Duration, error) {
+func parseSoakOperations(raw string) (int, error) {
 	if strings.TrimSpace(raw) == "" {
-		return time.Second, nil
+		return soak.MinimumCoverageOperations, nil
 	}
-	duration, err := time.ParseDuration(raw)
-	if err != nil || duration <= 0 || duration > soak.MaximumSoakDuration {
-		return 0, fmt.Errorf("SOAK_DURATION must be greater than zero and at most %s", soak.MaximumSoakDuration)
+	operations, err := strconv.Atoi(raw)
+	if err != nil || operations < soak.MinimumCoverageOperations || operations > soak.MaximumOperationCount {
+		return 0, fmt.Errorf("SOAK_OPERATIONS must be an integer from %d to %d", soak.MinimumCoverageOperations, soak.MaximumOperationCount)
 	}
-	return duration, nil
+	return operations, nil
+}
+
+// retainWire copies the original recorder bodies into caller-owned evidence
+// before cleanup removes the attachment root.
+func (h *liveSoakHarness) retainWire(destination string) error {
+	if h == nil || h.root == "" {
+		return nil
+	}
+	return os.CopyFS(destination, os.DirFS(h.root))
 }

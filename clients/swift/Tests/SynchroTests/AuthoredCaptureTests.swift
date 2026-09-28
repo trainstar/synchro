@@ -259,9 +259,70 @@ final class AuthoredCaptureTests: XCTestCase {
         )
     }
 
-    func testInsertWithoutAnAuthoredWritableFieldAborts() throws {
+    /// D-01: an insert that authors only its key is a key-only create. The
+    /// row keeps its local defaults, and the insert captures no authored field.
+    func testKeyOnlyInsertCapturesAnInsertWithNoAuthoredField() throws {
         let db = try makeEnvironment()
-        XCTAssertThrowsError(
+        defer { closeAndRemove(db) }
+        try db.applicationAuthoredWriteTransaction(
+            tableName: "authored_rows",
+            operation: "insert",
+            columnNames: ["id"]
+        ) { transaction in
+            try transaction.execute(
+                "INSERT INTO authored_rows (id, updated_at) VALUES (?, ?)",
+                params: ["row-1", "2026-01-01T00:00:00.000000Z"]
+            )
+        }
+        XCTAssertEqual(try storedRow(db, id: "row-1"), [nil, "default", ""])
+        try assertLedger(db, expectedOperations: ["insert"], expectedFields: [[]])
+    }
+
+    /// An insert without its own capture context did not come through the SDK.
+    /// Its authored fields are unknown, so it aborts before any row or intent.
+    func testInsertWithoutItsOwnCaptureContextAborts() throws {
+        let db = try makeEnvironment()
+        defer { closeAndRemove(db) }
+        XCTAssertThrowsError(try db.writeTransaction { connection in
+            try connection.execute(
+                sql: "INSERT INTO authored_rows (id, body, updated_at) VALUES (?, ?, ?)",
+                arguments: ["row-1", "unauthored", "2026-01-01T00:00:00.000000Z"]
+            )
+        }) { error in
+            XCTAssertTrue(
+                String(describing: error).contains("synced insert has no authored capture context"),
+                "\(error)"
+            )
+        }
+        XCTAssertNil(try storedRow(db, id: "row-1"))
+        try assertLedger(db, expectedOperations: [], expectedFields: [])
+    }
+
+    /// An install from an earlier release keeps its earlier INSERT trigger, which
+    /// aborts a key-only insert. Migration v18 regenerates the trigger. D-01.
+    func testUpgradeRegeneratesTheKeyOnlyInsertCapture() throws {
+        var db = try makeEnvironment()
+        var isOpen = true
+        defer { if isOpen { closeAndRemove(db) } }
+        let current = SQLiteSchema.generateCDCTriggers(table: authoredTable)
+        let earlierGuard = "SELECT CASE WHEN NOT (EXISTS (SELECT 1 FROM _synchro_capture_context AS context JOIN _synchro_capture_fields AS field ON field.statement_token = context.statement_token AND field.table_name = context.table_name WHERE context.table_name = 'authored_rows' AND field.column_name IN ('body', 'default_value', 'support_value'))) THEN RAISE(ABORT, 'synced insert has no authored writable fields') END;"
+        // The earlier trigger also aborted an insert that authored no writable field.
+        let earlier = current.map { statement -> String in
+            guard statement.contains("AFTER INSERT ON"), let begin = statement.range(of: "BEGIN") else { return statement }
+            return statement.replacingCharacters(in: begin, with: "BEGIN " + earlierGuard)
+        }
+        XCTAssertNotEqual(earlier, current)
+        let localSchema = try String(decoding: JSONEncoder().encode([authoredTable]), as: UTF8.self)
+        try db.writeTransaction { connection in
+            try SynchroMeta.set(connection, key: .localSchema, value: localSchema)
+            for statement in earlier {
+                try connection.execute(sql: statement)
+            }
+            try connection.execute(
+                sql: "DELETE FROM grdb_migrations WHERE identifier = 'synchro_v18_key_only_insert_capture'"
+            )
+        }
+        func insertKeyOnly(_ db: SynchroDatabase, id: String) throws {
             try db.applicationAuthoredWriteTransaction(
                 tableName: "authored_rows",
                 operation: "insert",
@@ -269,15 +330,31 @@ final class AuthoredCaptureTests: XCTestCase {
             ) { transaction in
                 try transaction.execute(
                     "INSERT INTO authored_rows (id, updated_at) VALUES (?, ?)",
-                    params: ["row-1", "2026-01-01T00:00:00.000000Z"]
+                    params: [id, "2026-01-01T00:00:00.000000Z"]
                 )
             }
-        )
-        let rows = try db.readTransaction { connection in
-            try Int.fetchOne(connection, sql: "SELECT COUNT(*) FROM authored_rows")
         }
-        XCTAssertEqual(rows, 0)
-        try assertLedger(db, expectedOperations: [], expectedFields: [])
+        XCTAssertThrowsError(try insertKeyOnly(db, id: "before-upgrade"))
+        try db.close()
+        isOpen = false
+
+        db = try reopen(db.path)
+        isOpen = true
+        let installed = try db.readTransaction { connection in
+            try String.fetchOne(
+                connection,
+                sql: "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = '_synchro_cdc_insert_authored_rows'"
+            )
+        }
+        let expected = try XCTUnwrap(current.first { $0.contains("AFTER INSERT ON") })
+        func normalized(_ statement: String?) -> String? {
+            statement?.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+        XCTAssertEqual(normalized(installed), normalized(expected))
+        try insertKeyOnly(db, id: "after-upgrade")
+        XCTAssertNil(try storedRow(db, id: "before-upgrade"))
+        XCTAssertEqual(try storedRow(db, id: "after-upgrade"), [nil, "default", ""])
+        try assertLedger(db, expectedOperations: ["insert"], expectedFields: [[]])
     }
 
     /// Issue #219: an ordinary statement installs no UPDATE context, so a

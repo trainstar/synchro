@@ -276,6 +276,11 @@ func fetchRealSchemaTableReference(ctx context.Context, adapterURL, tableName st
 	if err != nil {
 		return realSchemaTableReference{}, errors.New("read schema response failed")
 	}
+	return parseRealSchemaTableReference(body, tableName)
+}
+
+// parseRealSchemaTableReference reads one table from a schema manifest envelope.
+func parseRealSchemaTableReference(body []byte, tableName string) (realSchemaTableReference, error) {
 	var envelope struct {
 		Manifest json.RawMessage `json:"manifest"`
 	}

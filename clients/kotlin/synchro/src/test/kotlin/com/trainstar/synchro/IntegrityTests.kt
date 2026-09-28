@@ -252,7 +252,7 @@ class IntegrityTests {
             }
         }
 
-        assertEquals(90, executed)
+        assertEquals(91, executed)
     }
 
     @Test
