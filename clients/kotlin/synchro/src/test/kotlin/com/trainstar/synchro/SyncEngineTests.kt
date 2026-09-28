@@ -2071,20 +2071,26 @@ class SyncEngineTests {
 
     @Test
     fun testStartupPushesChangeCapturedBeforeResumedPullBackoff() = runTest {
-        assertStartupPushesChangeCapturedBeforeResumedBackoff(RetryOperation.PULLING)
+        assertStartupCompletesCycleAfterResumedBackoff(RetryOperation.PULLING, captureChange = true)
     }
 
     @Test
     fun testStartupPushesChangeCapturedBeforeResumedRebuildBackoff() = runTest {
-        assertStartupPushesChangeCapturedBeforeResumedBackoff(RetryOperation.REBUILDING)
+        assertStartupCompletesCycleAfterResumedBackoff(RetryOperation.REBUILDING, captureChange = true)
     }
 
-    // The large debounce proves that the start itself pushes the captured change.
-    private suspend fun assertStartupPushesChangeCapturedBeforeResumedBackoff(resumeState: String) {
+    @Test
+    fun testStartupPullsAfterResumedRebuildBackoff() = runTest {
+        assertStartupCompletesCycleAfterResumedBackoff(RetryOperation.REBUILDING, captureChange = false)
+    }
+
+    // The large debounce proves that the start itself completes the cycle.
+    private suspend fun assertStartupCompletesCycleAfterResumedBackoff(resumeState: String, captureChange: Boolean) {
         val timing = BlockingRetryTiming(1_000L)
         val connectCalls = AtomicInteger()
         val failResumedOperation = AtomicBoolean(false)
         val pushedRecordIDs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val requestPaths = java.util.Collections.synchronizedList(mutableListOf<String>())
         val retryable503 = {
             MockResponse()
                 .setResponseCode(503)
@@ -2097,6 +2103,7 @@ class SyncEngineTests {
             syncInterval = 3_600.0,
             retryTiming = timing,
         ) { request ->
+            requestPaths += request.path!!.substringAfterLast("/sync/")
             when {
                 request.path!!.endsWith("/sync/connect") -> {
                     mockResponse(if (connectCalls.incrementAndGet() == 1) connectJSON else connectResumeJSON)
@@ -2143,20 +2150,33 @@ class SyncEngineTests {
             assertEquals(resumeState, requireNotNull(DurableBackoffStore.load(db)).resumeState)
 
             engine.stop()
-            db.execute(
-                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
-                arrayOf("captured-while-stopped", "Stopped Street", "u1", "2026-01-01T10:00:00.000000Z"),
-            )
-            assertTrue(ChangeTracker(db).hasPendingChanges())
+            if (captureChange) {
+                db.execute(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                    arrayOf("captured-while-stopped", "Stopped Street", "u1", "2026-01-01T10:00:00.000000Z"),
+                )
+            }
+            assertEquals(captureChange, ChangeTracker(db).hasPendingChanges())
             failResumedOperation.set(false)
 
+            val restartRequestIndex = requestPaths.size
             val initialSyncCompleted = CountDownLatch(1)
-            engine.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.countDown() }))
+            var restartPathsAtCompletion = emptyList<String>()
+            engine.start(
+                SyncOptions(initialSyncCompleted = {
+                    restartPathsAtCompletion = synchronized(requestPaths) { requestPaths.drop(restartRequestIndex) }
+                    initialSyncCompleted.countDown()
+                }),
+            )
             timing.awaitNextSleep(2, TimeUnit.SECONDS)
             timing.releaseAt(61_000L)
 
             assertTrue(initialSyncCompleted.await(5, TimeUnit.SECONDS))
-            assertEquals(listOf("captured-while-stopped"), synchronized(pushedRecordIDs) { pushedRecordIDs.toList() })
+            val resumedPath = if (resumeState == RetryOperation.REBUILDING) "rebuild" else "pull"
+            assertEquals(listOf("connect", resumedPath), restartPathsAtCompletion.take(2))
+            assertEquals("pull", restartPathsAtCompletion.drop(2).lastOrNull())
+            val expectedPushedRecordIDs = if (captureChange) listOf("captured-while-stopped") else emptyList()
+            assertEquals(expectedPushedRecordIDs, synchronized(pushedRecordIDs) { pushedRecordIDs.toList() })
             assertFalse(ChangeTracker(db).hasPendingChanges())
             assertNull(DurableBackoffStore.load(db))
         } finally {
