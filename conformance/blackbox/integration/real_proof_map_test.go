@@ -146,6 +146,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealIssue50ValidTransactionsCrossSoftBatchTarget":  "regression",
 	"TestRealWALSkipsUnpublishedGeneratedColumns":           "regression",
 	"TestRealWALCapturesPublishedStoredGeneratedColumn":     "regression",
+	"TestRealPushAcceptsSourceFilledInsertAndTriggerWrites": "regression",
 	"TestRealWALRestoresSlotPositionAfterImmediateShutdown": "regression",
 	"TestRealWALRestoresSlotPositionAfterBackendCrash":      "regression",
 	"TestRealWALObservationUsesOneSnapshot":                 "framework",

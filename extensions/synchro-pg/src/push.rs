@@ -58,7 +58,6 @@ struct EvaluationContext<'a> {
     current_tables: &'a TableIndex<'a>,
     registry: &'a HashMap<String, TableRegistration>,
     ever_synced_tables: &'a HashSet<String>,
-    required_insert_columns: &'a HashMap<u32, HashSet<String>>,
     has_write_protect: bool,
 }
 
@@ -382,8 +381,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             .map(|mutation| mutation.table.clone())
             .collect::<HashSet<_>>();
         let ever_synced_tables = load_ever_synced_tables(client, &historically_synced_table_ids);
-        let required_insert_columns =
-            load_required_insert_columns(client, &request.mutations, &registry);
         let has_write_protect = check_write_protect_exists(client);
         let evaluation_context = EvaluationContext {
             submitted_schema: &request.schema,
@@ -391,7 +388,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             current_tables,
             registry: &registry,
             ever_synced_tables: &ever_synced_tables,
-            required_insert_columns: &required_insert_columns,
             has_write_protect,
         };
 
@@ -1056,70 +1052,6 @@ fn load_ever_synced_tables(client: &SpiClient<'_>, table_ids: &HashSet<String>) 
         .collect()
 }
 
-fn load_required_insert_columns(
-    client: &SpiClient<'_>,
-    mutations: &[Mutation],
-    registry: &HashMap<String, TableRegistration>,
-) -> HashMap<u32, HashSet<String>> {
-    let relation_ids = mutations
-        .iter()
-        .filter(|mutation| mutation.op == Operation::Insert)
-        .filter_map(|mutation| registry.get(&mutation.table))
-        .map(|registration| registration.physical_relation_oid)
-        .collect::<HashSet<_>>();
-    if relation_ids.is_empty() {
-        return HashMap::new();
-    }
-    let relation_ids = relation_ids.into_iter().collect::<Vec<_>>();
-    let relations = relation_ids
-        .iter()
-        .map(|relation_id| serde_json::json!({ "physical_relation_oid": relation_id }))
-        .collect::<Vec<_>>();
-    let rows = client
-        .select(
-            "WITH relations AS (
-                 SELECT physical_relation_oid::oid AS physical_relation_oid
-                 FROM jsonb_to_recordset($1::jsonb) AS relation(
-                     physical_relation_oid bigint
-                 )
-             )
-             SELECT attribute.attrelid::bigint AS physical_relation_oid,
-                    attribute.attname::text AS attname
-             FROM pg_catalog.pg_attribute attribute
-             JOIN relations ON relations.physical_relation_oid = attribute.attrelid
-             LEFT JOIN pg_catalog.pg_attrdef default_value
-               ON default_value.adrelid = attribute.attrelid
-              AND default_value.adnum = attribute.attnum
-             WHERE attribute.attnum > 0
-               AND NOT attribute.attisdropped
-               AND attribute.attnotnull
-               AND default_value.adbin IS NULL",
-            None,
-            &[pgrx::JsonB(serde_json::Value::Array(relations)).into()],
-        )
-        .unwrap_or_else(|_| pgrx::error!("loading required insert columns failed"));
-    let mut required = relation_ids
-        .into_iter()
-        .map(|relation_id| (relation_id, HashSet::new()))
-        .collect::<HashMap<_, _>>();
-    for row in rows {
-        let relation_id = row
-            .get_by_name::<i64, &str>("physical_relation_oid")
-            .unwrap_or_else(|_| pgrx::error!("reading required insert relation failed"))
-            .map(|relation_id| relation_id as u32)
-            .unwrap_or_else(|| pgrx::error!("required insert relation is missing"));
-        let column = row
-            .get_by_name::<String, &str>("attname")
-            .unwrap_or_else(|_| pgrx::error!("reading required insert column failed"))
-            .unwrap_or_else(|| pgrx::error!("required insert column is missing"));
-        required
-            .get_mut(&relation_id)
-            .unwrap_or_else(|| pgrx::error!("required insert relation is unknown"))
-            .insert(column);
-    }
-    required
-}
-
 fn all_mutation_field_ids(mutation: &Mutation) -> Vec<String> {
     let mut fields = mutation
         .pk
@@ -1222,7 +1154,6 @@ fn evaluate_mutation(
     let current_tables = context.current_tables;
     let registry = context.registry;
     let ever_synced_tables = context.ever_synced_tables;
-    let required_insert_columns = context.required_insert_columns;
     let has_write_protect = context.has_write_protect;
     let pk_field_id = mutation
         .pk
@@ -1430,20 +1361,6 @@ fn evaluate_mutation(
     } else {
         serde_json::Value::Object(serde_json::Map::new())
     };
-    if mutation.op == Operation::Insert
-        && !has_required_insert_columns(required_insert_columns, table_reg, &dml_data)
-    {
-        return validation_evaluation(
-            mutation,
-            outcome_schema,
-            table_reg,
-            &pk_field_id,
-            &pk_value,
-            None,
-            "required push insert field is missing",
-        );
-    }
-
     let row_identity = logical_row_identity(table_reg, &pk_value);
     let existing = load_existing_record(client, &record_id, table_reg);
 
@@ -2201,7 +2118,7 @@ fn load_current_server_row_json(
         })
 }
 
-fn load_current_fence_version(
+pub(crate) fn load_current_fence_version(
     client: &SpiClient<'_>,
     mutation: &Mutation,
     table_reg: &TableRegistration,
@@ -2213,30 +2130,21 @@ fn load_current_fence_version(
                     row_version::text AS row_version, coverage
              FROM sync_write_fences
              WHERE transaction_xid = pg_current_xact_id()
-               AND mutation_id = $1 AND relation_id = $2::uuid",
+               AND mutation_id = $1
+               AND relation_id = $2::uuid
+               AND (old_record_id = $3 OR new_record_id = $3)
+             ORDER BY dml_ordinal",
             None,
             &[
                 mutation.mutation_id.as_str().into(),
                 table_reg.relation_id.as_str().into(),
+                record_id.into(),
             ],
         )
         .unwrap_or_else(|_| pgrx::error!("loading push write fence failed"));
-    if rows.len() != 1 {
+    if rows.is_empty() {
         return None;
     }
-    let row = rows.first();
-    let operation = row
-        .get_by_name::<String, &str>("operation")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence operation failed"))?;
-    let old_record_id = row
-        .get_by_name::<String, &str>("old_record_id")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence old identity failed"));
-    let new_record_id = row
-        .get_by_name::<String, &str>("new_record_id")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence new identity failed"));
-    let coverage = row
-        .get_by_name::<String, &str>("coverage")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence coverage failed"))?;
     let expected = match mutation.op {
         Operation::Insert => ("insert", None, Some(record_id)),
         Operation::Update => ("update", Some(record_id), Some(record_id)),
@@ -2246,15 +2154,37 @@ fn load_current_fence_version(
         Operation::Delete => ("delete", Some(record_id), None),
         Operation::Upsert => pgrx::error!("push upsert passed contract validation"),
     };
-    if operation != expected.0
-        || old_record_id.as_deref() != expected.1
-        || new_record_id.as_deref() != expected.2
-        || coverage != "pending"
-    {
-        return None;
+    let mut version = None;
+    for (index, row) in rows.into_iter().enumerate() {
+        let operation = row
+            .get_by_name::<String, &str>("operation")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence operation failed"))?;
+        let old_record_id = row
+            .get_by_name::<String, &str>("old_record_id")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence old identity failed"));
+        let new_record_id = row
+            .get_by_name::<String, &str>("new_record_id")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence new identity failed"));
+        let coverage = row
+            .get_by_name::<String, &str>("coverage")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence coverage failed"))?;
+        let identities_match = if index == 0 {
+            operation == expected.0
+                && old_record_id.as_deref() == expected.1
+                && new_record_id.as_deref() == expected.2
+        } else {
+            operation == "update"
+                && old_record_id.as_deref() == Some(record_id)
+                && new_record_id.as_deref() == Some(record_id)
+        };
+        if !identities_match || coverage != "pending" {
+            return None;
+        }
+        version = row
+            .get_by_name::<String, &str>("row_version")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence failed"));
     }
-    row.get_by_name::<String, &str>("row_version")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence failed"))
+    version
 }
 
 fn build_dml_data(
@@ -2297,28 +2227,6 @@ fn sql_wire_value(field: &FieldRegistration, value: &serde_json::Value) -> serde
         }
         _ => value.clone(),
     }
-}
-
-fn has_required_insert_columns(
-    required_insert_columns: &HashMap<u32, HashSet<String>>,
-    table_reg: &TableRegistration,
-    data: &serde_json::Value,
-) -> bool {
-    let object = data
-        .as_object()
-        .unwrap_or_else(|| pgrx::error!("push insert payload is not an object"));
-    let required = required_insert_columns
-        .get(&table_reg.physical_relation_oid)
-        .unwrap_or_else(|| pgrx::error!("required insert metadata is missing"));
-    for name in required {
-        if name == &table_reg.pk_column {
-            continue;
-        }
-        if !object.contains_key(name) {
-            return false;
-        }
-    }
-    true
 }
 
 fn push_insert(

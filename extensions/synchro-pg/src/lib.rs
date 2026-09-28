@@ -2326,6 +2326,7 @@ mod tests {
     include!("pg_tests/health.rs");
     include!("pg_tests/stream_reset.rs");
     include!("pg_tests/capture_fence_order.rs");
+    include!("pg_tests/push_source_writes.rs");
 
     // -----------------------------------------------------------------------
     // Shared test setup
