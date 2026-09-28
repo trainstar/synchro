@@ -189,6 +189,87 @@ func TestRealRegistryRejectsDeferrablePrimaryKey(t *testing.T) {
 	})
 }
 
+// TestRealRegistryRejectsDatabaseGeneratedPushKey proves SYNC-REGISTRY-002
+// for an identity ALWAYS key and an enabled push policy.
+func TestRealRegistryRejectsDatabaseGeneratedPushKey(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	admin := openIssue49Admin(t, ctx, harness)
+	waitForIssue49CanonicalHealth(t, ctx, admin, true)
+
+	const relation = "database_generated"
+	if _, err := admin.ExecContext(ctx, `
+		CREATE SCHEMA key_types;
+		GRANT USAGE ON SCHEMA key_types TO synchro_owner, synchro_worker;
+		CREATE TABLE key_types.database_generated (
+			id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			owner_id text NOT NULL,
+			value text NOT NULL,
+			updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+			deleted_at timestamptz
+		);
+		ALTER TABLE key_types.database_generated ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY synchro_owner_all ON key_types.database_generated
+			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
+		GRANT SELECT, INSERT, UPDATE ON TABLE key_types.database_generated TO synchro_owner;
+		GRANT SELECT ON TABLE key_types.database_generated TO synchro_worker;
+		CREATE FUNCTION key_types.database_generated_membership(p_id bigint)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER
+		SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC SELECT 'user:key-types'::text; END;
+		REVOKE ALL ON FUNCTION key_types.database_generated_membership FROM PUBLIC;
+		GRANT EXECUTE ON FUNCTION key_types.database_generated_membership
+			TO synchro_owner, synchro_worker`); err != nil {
+		t.Fatalf("create database-generated key relation: %v", err)
+	}
+
+	t.Run("assertion", func(t *testing.T) {
+		beforeEnabled := latestRegistryGeneration(t, ctx, admin)
+		_, enabledErr := admin.ExecContext(ctx, `
+			SELECT synchro.synchro_register_table(
+				'key_types.database_generated',
+				'key_types.database_generated_membership',
+				'single_scope',
+				'id', 'updated_at', 'deleted_at', 'enabled')`)
+		afterEnabled := latestRegistryGeneration(t, ctx, admin)
+		enabledRows, _ := registryKeyTypeRows(t, ctx, admin, afterEnabled, relation)
+		if enabledErr == nil || afterEnabled != beforeEnabled || enabledRows != 0 {
+			t.Fatalf(
+				"database-generated push key registered: error=%v generation=%d->%d rows=%d",
+				enabledErr,
+				beforeEnabled,
+				afterEnabled,
+				enabledRows,
+			)
+		}
+
+		if _, err := admin.ExecContext(ctx, `
+			REVOKE INSERT, UPDATE ON TABLE key_types.database_generated FROM synchro_owner`); err != nil {
+			t.Fatalf("make database-generated key relation read-only: %v", err)
+		}
+		beforeReadOnly := latestRegistryGeneration(t, ctx, admin)
+		_, readOnlyErr := admin.ExecContext(ctx, `
+			SELECT synchro.synchro_register_table(
+				'key_types.database_generated',
+				'key_types.database_generated_membership',
+				'single_scope',
+				'id', 'updated_at', 'deleted_at', 'read_only')`)
+		afterReadOnly := latestRegistryGeneration(t, ctx, admin)
+		readOnlyRows, _ := registryKeyTypeRows(t, ctx, admin, afterReadOnly, relation)
+		if readOnlyErr != nil || afterReadOnly <= beforeReadOnly || readOnlyRows != 1 {
+			t.Fatalf(
+				"read-only database-generated key did not register: error=%v generation=%d->%d rows=%d",
+				readOnlyErr,
+				beforeReadOnly,
+				afterReadOnly,
+				readOnlyRows,
+			)
+		}
+	})
+}
+
 func latestRegistryGeneration(t *testing.T, ctx context.Context, admin *sql.DB) int64 {
 	t.Helper()
 	var generation int64
