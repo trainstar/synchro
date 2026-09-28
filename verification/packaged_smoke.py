@@ -41,8 +41,10 @@ APP_RESULT_READ_TIMEOUT_SECONDS = 5.0
 DATASET_ORGANIZATION_ID = "00000001-0000-4000-8000-000000000001"
 DATASET_EXERCISE_ID = "00000004-0000-4000-8000-000000000001"
 DATASET_EXERCISE_NAME = "Back Squat"
-# The installed consumer writes these rows through its public SQL path. The
-# harness writes REMOTE_SETS and a new program title while the consumer is dead.
+DATASET_EXERCISE_MUSCLE_GROUPS = ["quadriceps", "glutes"]
+# The installed consumer writes these rows through its public SQL path. While
+# the consumer is dead, the harness writes REMOTE_SETS, a new program title and
+# settings, and a new workout external_ref.
 AUTHORED_PROGRAM = {
     "title": 'Packaged Block \u2705 "consumer"',
     "description": "",
@@ -69,22 +71,35 @@ CLIENT_SETS = (
     (2, 5, "102.5", "8", "9007199254740993", "2026-09-14T06:45:00.000000Z", "solid"),
     (3, 3, "110.25", "8.5", None, None, '\u65b0\u8a18\u9332 \U0001f389 "PR"'),
 )
-# The offline update that the consumer queues before it is killed.
+# The consumer queues one update and one delete offline before it is killed.
+# The client converts the delete of a table with deleted_at into a soft delete.
 DURABLE_SET_INDEX = 3
 DURABLE_REPS = 8
+DELETED_SET_INDEX = 1
+DURABLE_PENDING_CHANGES = 2
 REMOTE_SETS = (
     (4, 2, "120", "9", None, None, "server \u00e9\u4e16"),
     (5, 1, "125.5", "9.5", None, None, ""),
 )
+# Odd values above 2^53 change when a platform reads them through a double.
+REMOTE_EXTERNAL_REF = "9007199254740995"
+REMOTE_SETTINGS = {"deload_week": 5, "phases": ["base", "peak"]}
 # Hand-computed sums of reps * weight_kg. Only the server rollup trigger
 # writes workouts.total_volume_kg, and only a pull delivers it to the client.
 INITIAL_TOTAL_VOLUME_KG = "1343.25"  # 5 * 100 + 5 * 102.5 + 3 * 110.25
 REMOTE_TOTAL_VOLUME_KG = "1708.75"  # 1343.25 + 2 * 120 + 1 * 125.5
-FINAL_TOTAL_VOLUME_KG = "2260"  # 1708.75 + (8 - 3) * 110.25
-INITIAL_OBSERVED_SETS = "1:5:100,2:5:102.5,3:8:110.25"
-FINAL_OBSERVED_SETS = "1:5:100,2:5:102.5,3:8:110.25,4:2:120,5:1:125.5"
-CLIENT_RESUMED_WRITE = {"set_index": DURABLE_SET_INDEX, "reps": DURABLE_REPS}
-OBSERVED_FIELDS = ("exercise_name", "program_title", "total_volume_kg", "sets")
+FINAL_TOTAL_VOLUME_KG = "1760"  # 1708.75 + (8 - 3) * 110.25 - 5 * 100
+# The observed sets are the live local rows, so the deleted set 1 is absent.
+INITIAL_OBSERVED_SETS = "2:5:102.5,3:8:110.25"
+FINAL_OBSERVED_SETS = "2:5:102.5,3:8:110.25,4:2:120,5:1:125.5"
+CLIENT_RESUMED_WRITE = {"set_index": DURABLE_SET_INDEX, "reps": DURABLE_REPS, "deleted_set_index": DELETED_SET_INDEX}
+# Each app reports every observation column except converged as text.
+# The harness compares the JSON columns as parsed JSON values.
+OBSERVED_FIELDS = (
+    "exercise_name", "exercise_muscle_groups", "program_title", "program_settings",
+    "external_ref", "total_volume_kg", "sets",
+)
+JSON_OBSERVED_FIELDS = ("exercise_muscle_groups", "program_settings")
 # The server consumer uploads this customer insert only after the adapter restarts.
 SERVER_OFFLINE_WRITE = {"customer_id": "00000000-0000-4000-8000-000000000118", "customer_name": "Packaged server offline"}
 
@@ -444,8 +459,8 @@ def await_app_result(
     if result["status"] != "passed":
         raise EvidenceError(f"{phase} application reported failure: {result['error']}")
     pending_count = required_integer(result["pending_change_count"], f"{phase} application pending count")
-    if phase == "initial" and pending_count != 1:
-        raise EvidenceError("initial application did not report one durable pending change")
+    if phase == "initial" and pending_count != DURABLE_PENDING_CHANGES:
+        raise EvidenceError("initial application did not report its durable pending changes")
     if phase == "resume" and pending_count != 0:
         raise EvidenceError("resume application did not report a drained durable queue")
     write_json(
@@ -539,24 +554,27 @@ def server_rows(config: dict[str, object]) -> dict[str, object]:
     return value
 
 
-def consumer_sets(config: dict[str, object], durable: bool, remote: bool) -> list[tuple[str, tuple]]:
-    """Return the authored (set_id, values) rows of one consumer state."""
+def consumer_sets(config: dict[str, object], durable: bool, remote: bool) -> list[tuple[str, tuple, bool]]:
+    """Return the authored (set_id, values, deleted) rows of one consumer state."""
     result = []
     for set_id, values in zip(config["set_ids"], CLIENT_SETS):
         if durable and values[0] == DURABLE_SET_INDEX:
             values = (values[0], DURABLE_REPS, *values[2:])
-        result.append((str(set_id), values))
+        result.append((str(set_id), values, durable and values[0] == DELETED_SET_INDEX))
     if remote:
-        result.extend((str(set_id), values) for set_id, values in zip(config["remote_set_ids"], REMOTE_SETS))
+        result.extend((str(set_id), values, False) for set_id, values in zip(config["remote_set_ids"], REMOTE_SETS))
     return result
 
 
-def expected_server_rows(config: dict[str, object], title: str, sets: list[tuple[str, tuple]], total: str) -> dict[str, object]:
+def expected_server_rows(config: dict[str, object], title: str, sets: list[tuple[str, tuple, bool]], total: str, remote: bool) -> dict[str, object]:
     ids = dataset_ids(config)
-    live = {"owner_id": str(config["user_id"]), "deleted": False}
+    owner = str(config["user_id"])
+    live = {"owner_id": owner, "deleted": False}
+    program = {**AUTHORED_PROGRAM, "settings": REMOTE_SETTINGS} if remote else AUTHORED_PROGRAM
+    workout = {**AUTHORED_WORKOUT, "external_ref": REMOTE_EXTERNAL_REF} if remote else AUTHORED_WORKOUT
     return {
-        "program": {**AUTHORED_PROGRAM, "title": title, "organization_id": DATASET_ORGANIZATION_ID, **live},
-        "workout": {**AUTHORED_WORKOUT, "program_id": ids["program_id"], "total_volume_kg": total, **live},
+        "program": {**program, "title": title, "organization_id": DATASET_ORGANIZATION_ID, **live},
+        "workout": {**workout, "program_id": ids["program_id"], "total_volume_kg": total, **live},
         # The server BEFORE triggers copy the parent chain onto each child row.
         "entry": {
             **AUTHORED_ENTRY, "workout_id": ids["workout_id"], "program_id": ids["program_id"],
@@ -566,9 +584,10 @@ def expected_server_rows(config: dict[str, object], title: str, sets: list[tuple
             {
                 "id": set_id, "workout_id": ids["workout_id"], "program_id": ids["program_id"],
                 "set_index": index, "reps": reps, "weight_kg": weight, "rpe": rpe,
-                "duration_ms": duration, "completed_at": completed, "note": note, **live,
+                "duration_ms": duration, "completed_at": completed, "note": note,
+                "owner_id": owner, "deleted": deleted,
             }
-            for set_id, (index, reps, weight, rpe, duration, completed, note) in sets
+            for set_id, (index, reps, weight, rpe, duration, completed, note), deleted in sets
         ],
     }
 
@@ -615,9 +634,10 @@ def client_statements(config: dict[str, object]) -> dict[str, object]:
     program, workout, entry = AUTHORED_PROGRAM, AUTHORED_WORKOUT, AUTHORED_ENTRY
     sets = ", ".join(
         f"({sql_literal(set_id)}, {ids['entry_id']}, NULL, NULL, {user}, {set_values_sql(values)}, {stamp}, {stamp}, NULL)"
-        for set_id, values in consumer_sets(config, durable=False, remote=False)
+        for set_id, values, _ in consumer_sets(config, durable=False, remote=False)
     )
     durable_id = sql_literal(config["set_ids"][DURABLE_SET_INDEX - 1])
+    deleted_id = sql_literal(config["set_ids"][DELETED_SET_INDEX - 1])
     live_sets = f"FROM exercise_sets WHERE workout_exercise_id = {ids['entry_id']} AND deleted_at IS NULL"
     return {
         "initial_sql": [
@@ -637,12 +657,16 @@ def client_statements(config: dict[str, object]) -> dict[str, object]:
         ],
         "durable_sql": [
             f"UPDATE exercise_sets SET reps = {DURABLE_REPS}, updated_at = {sql_literal(DURABLE_TIMESTAMP)} WHERE id = {durable_id}",
+            f"DELETE FROM exercise_sets WHERE id = {deleted_id}",
         ],
         # converged is '1' when the pulled server total equals the sum of the
         # local live sets. It compares two local values and holds no expected one.
         "observe_sql": (
             f"SELECT (SELECT name FROM exercises WHERE id = {sql_literal(DATASET_EXERCISE_ID)}) AS exercise_name, "
+            f"(SELECT muscle_groups FROM exercises WHERE id = {sql_literal(DATASET_EXERCISE_ID)}) AS exercise_muscle_groups, "
             f"(SELECT title FROM programs WHERE id = {ids['program_id']}) AS program_title, "
+            f"(SELECT settings FROM programs WHERE id = {ids['program_id']}) AS program_settings, "
+            f"(SELECT external_ref FROM workouts WHERE id = {ids['workout_id']}) AS external_ref, "
             f"(SELECT total_volume_kg FROM workouts WHERE id = {ids['workout_id']}) AS total_volume_kg, "
             "(SELECT group_concat(set_index || ':' || reps || ':' || weight_kg, ',') FROM "
             f"(SELECT set_index, reps, weight_kg {live_sets} ORDER BY set_index)) AS sets, "
@@ -664,7 +688,7 @@ def author_remote_value(config_path: Path, output: Path) -> None:
     # The durable offline write must still be absent, or the resume cannot prove its own upload.
     require_server_rows(
         config,
-        expected_server_rows(config, AUTHORED_PROGRAM["title"], consumer_sets(config, durable=False, remote=False), INITIAL_TOTAL_VOLUME_KG),
+        expected_server_rows(config, AUTHORED_PROGRAM["title"], consumer_sets(config, durable=False, remote=False), INITIAL_TOTAL_VOLUME_KG, remote=False),
         "server does not hold exactly the initial upload before resume",
     )
     remote_title = f"Server authored {uuid.uuid4()} \u00e9\u4e16"
@@ -679,16 +703,22 @@ def author_remote_value(config_path: Path, output: Path) -> None:
         f"""BEGIN;
 INSERT INTO public.exercise_sets (id, workout_exercise_id, owner_id, set_index, reps, weight_kg, rpe, duration_ms, completed_at, note)
 VALUES {sets};
-UPDATE public.programs SET title = :'remote_title', updated_at = clock_timestamp()
+UPDATE public.programs SET title = :'remote_title', settings = :'remote_settings'::jsonb, updated_at = clock_timestamp()
 WHERE id = :'program_id'::uuid AND title = :'authored_title'
 RETURNING title;
+UPDATE public.workouts SET external_ref = :'remote_external_ref'::bigint, updated_at = clock_timestamp()
+WHERE id = :'workout_id'::uuid
+RETURNING external_ref::text;
 SELECT trim_scale(total_volume_kg)::text FROM public.workouts WHERE id = :'workout_id'::uuid;
 COMMIT;
 """,
-        {**dataset_ids(config), "remote_title": remote_title, "authored_title": str(AUTHORED_PROGRAM["title"])},
+        {
+            **dataset_ids(config), "remote_title": remote_title, "authored_title": str(AUTHORED_PROGRAM["title"]),
+            "remote_settings": json.dumps(REMOTE_SETTINGS, separators=(",", ":"), sort_keys=True), "remote_external_ref": REMOTE_EXTERNAL_REF,
+        },
     )
-    if rows != [remote_title, REMOTE_TOTAL_VOLUME_KG]:
-        raise EvidenceError("server did not author exactly the remote sets and program title")
+    if rows != [remote_title, REMOTE_EXTERNAL_REF, REMOTE_TOTAL_VOLUME_KG]:
+        raise EvidenceError("server did not author exactly the remote sets, program, and workout values")
     write_json(output, {"schema_version": 1, "remote_value": remote_title})
 
 
@@ -710,7 +740,7 @@ def verify_server_state(config_path: Path, remote_path: Path, output: Path) -> N
     remote_title = load_remote_value(remote_path)
     require_server_rows(
         config,
-        expected_server_rows(config, remote_title, consumer_sets(config, durable=True, remote=True), FINAL_TOTAL_VOLUME_KG),
+        expected_server_rows(config, remote_title, consumer_sets(config, durable=True, remote=True), FINAL_TOTAL_VOLUME_KG, remote=True),
         "server does not hold exactly the resumed upload and the remote value",
     )
     write_json(output, server_verification(remote_title, CLIENT_RESUMED_WRITE))
@@ -725,8 +755,10 @@ def validate_server_verification(path: Path, remote_value: str, resumed_write: d
         raise EvidenceError("server verification does not confirm the resumed upload and remote value")
 
 
-def require_observed(phase: dict[str, object], label: str, expected: dict[str, str]) -> None:
-    observed = validate_observed(phase["observed"], label)
+def require_observed(phase: dict[str, object], label: str, expected: dict[str, object]) -> None:
+    observed: dict[str, object] = dict(validate_observed(phase["observed"], label))
+    for field in JSON_OBSERVED_FIELDS:
+        observed[field] = json_value(str(observed[field]), f"{label} {field}")
     if observed != expected:
         raise EvidenceError(f"{label} consumer did not read the authored dataset state: {', '.join(differing_fields(observed, expected))}")
 
@@ -750,14 +782,17 @@ def complete_cell(
     remote_title = load_remote_value(remote_path)
     initial_observed = {
         "exercise_name": DATASET_EXERCISE_NAME,
+        "exercise_muscle_groups": DATASET_EXERCISE_MUSCLE_GROUPS,
         "program_title": str(AUTHORED_PROGRAM["title"]),
+        "program_settings": AUTHORED_PROGRAM["settings"],
+        "external_ref": AUTHORED_WORKOUT["external_ref"],
         "total_volume_kg": INITIAL_TOTAL_VOLUME_KG,
         "sets": INITIAL_OBSERVED_SETS,
     }
     require_observed(initial, "initial", initial_observed)
     require_observed(resume, "resume", {
-        **initial_observed, "program_title": remote_title,
-        "total_volume_kg": FINAL_TOTAL_VOLUME_KG, "sets": FINAL_OBSERVED_SETS,
+        **initial_observed, "program_title": remote_title, "program_settings": REMOTE_SETTINGS,
+        "external_ref": REMOTE_EXTERNAL_REF, "total_volume_kg": FINAL_TOTAL_VOLUME_KG, "sets": FINAL_OBSERVED_SETS,
     })
     validate_server_verification(server_path, remote_title, CLIENT_RESUMED_WRITE)
     initial_pid = required_integer(initial["pid"], "initial pid", 1)

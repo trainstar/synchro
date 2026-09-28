@@ -78,9 +78,10 @@ class MainActivity : Activity() {
             awaitReadyStatus(client)
             statements(config, "initial_sql").forEach { client.execute(it) }
             awaitConvergence(client, observeSQL)
-            statements(config, "durable_sql").forEach { client.execute(it) }
+            val durableSQL = statements(config, "durable_sql")
+            durableSQL.forEach { client.execute(it) }
             val pending = client.pendingChangeCount()
-            check(pending == 1)
+            check(pending == durableSQL.size)
             writePhaseResult(phase, pending, observe(client, observeSQL))
             return
         }
@@ -124,11 +125,21 @@ class MainActivity : Activity() {
         }
     }
 
+    // Reports each observation column as the text of the value that the
+    // public query path returned. An INTEGER value arrives as a Long.
     private fun observe(client: SynchroClient, observeSQL: String): JSONObject {
         val row = checkNotNull(client.queryOne(observeSQL))
         val observed = JSONObject()
-        for (field in OBSERVED_FIELDS) {
-            observed.put(field, row[field] as String)
+        for ((field, value) in row) {
+            if (field == "converged") continue
+            observed.put(
+                field,
+                when (value) {
+                    is String -> value
+                    is Long -> value.toString()
+                    else -> error("observation $field has an unexpected value type")
+                },
+            )
         }
         return observed
     }
@@ -189,9 +200,5 @@ class MainActivity : Activity() {
         val temporary = File(filesDir, ".$phase-result.json.tmp")
         temporary.writeText(result.toString())
         check(temporary.renameTo(destination))
-    }
-
-    private companion object {
-        val OBSERVED_FIELDS = listOf("exercise_name", "program_title", "total_volume_kg", "sets")
     }
 }
