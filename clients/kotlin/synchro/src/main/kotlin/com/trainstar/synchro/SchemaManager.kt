@@ -480,8 +480,15 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         val kept = target.columns.mapNotNull { column ->
             sourceColumns[column.fieldID]?.takeIf { it.logicalType == column.logicalType }?.let { it.name to column.name }
         }
+        val keptTargets = kept.map { it.second }.toSet()
+        // A required target field without a kept value has no local value to
+        // hold, so such a row cannot exist in the target shape.
+        val representable = target.columns.none { column ->
+            !column.nullable && !column.isPrimaryKey && column.sqliteDefaultSQL.isNullOrEmpty() &&
+                column.name !in keptTargets
+        }
         val primaryKey = sourceColumns[source.primaryKeyFieldID]
-        if (source.primaryKeyFieldID != target.primaryKeyFieldID || primaryKey == null ||
+        if (!representable || source.primaryKeyFieldID != target.primaryKeyFieldID || primaryKey == null ||
             kept.none { it.first == primaryKey.name }
         ) {
             return ProtectedRows(emptyList(), emptyList())

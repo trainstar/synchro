@@ -509,7 +509,15 @@ final class SchemaManager: @unchecked Sendable {
             }
             return (match.name, column.name)
         }
-        guard source.primaryKeyFieldID == target.primaryKeyFieldID,
+        let keptTargets = Set(kept.map(\.target))
+        // A required target field without a kept value has no local value to
+        // hold, so such a row cannot exist in the target shape.
+        let representable = !target.columns.contains { column in
+            !column.nullable && !column.isPrimaryKey && (column.sqliteDefaultSQL ?? "").isEmpty
+                && !keptTargets.contains(column.name)
+        }
+        guard representable,
+              source.primaryKeyFieldID == target.primaryKeyFieldID,
               let primaryKey = sourceColumns[source.primaryKeyFieldID],
               kept.contains(where: { $0.source == primaryKey.name }) else {
             return ProtectedRows(columns: [], rows: [])
