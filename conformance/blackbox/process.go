@@ -3471,7 +3471,7 @@ BEGIN
 			       expected.atttypmod,
 			       pg_catalog.format_type(expected.atttypid, expected.atttypmod) AS type_name,
 			       expected.attnotnull,
-			       expected.attgenerated <> '' AS generated,
+			       expected.attgenerated <> '' OR expected.attidentity <> '' AS generated,
 			       pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid) AS default_expression
 			FROM pg_catalog.pg_attribute AS expected
 			LEFT JOIN pg_catalog.pg_attrdef AS default_value
@@ -3511,7 +3511,7 @@ BEGIN
 			END IF;
 
 			IF authored_column.generated THEN
-				-- PostgreSQL rejects a default change on a generated column.
+				-- PostgreSQL rejects a default change on a generated or identity column.
 				NULL;
 			ELSIF authored_column.default_expression IS NULL THEN
 				EXECUTE pg_catalog.format(
