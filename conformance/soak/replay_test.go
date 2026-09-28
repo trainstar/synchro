@@ -62,7 +62,7 @@ func TestRunRetainsHarnessFailureStageAndClass(t *testing.T) {
 	if !errors.Is(err, ErrJournalUnsealed) {
 		t.Fatalf("read failed journal: %v", err)
 	}
-	retained := journal.OperationFacts[len(journal.OperationFacts)-1]
+	retained := terminalFailureFact(t, journal)
 	if retained.FailureStage != "wal-restart" || retained.FailureClass != "rejected" {
 		t.Fatalf("retained failure identity = %#v", retained)
 	}
@@ -86,7 +86,7 @@ func TestRunRetainsHarnessFailureStageAndClass(t *testing.T) {
 		t.Fatal("failing harness completed")
 	}
 	journal, _ = ReadJournal(unidentified)
-	fact := journal.OperationFacts[len(journal.OperationFacts)-1]
+	fact := terminalFailureFact(t, journal)
 	replayed, _ := ReplayRun(context.Background(), unidentified, catalog, failingHarness{err: errors.New("unclassified")})
 	if got := CompareReplay(&fact, replayed.Failure); got != ReplayInconclusive {
 		t.Fatalf("unidentified failure replay outcome = %s, want inconclusive", got)
@@ -112,7 +112,7 @@ func TestRunRetainsTerminalFactAboveTheViolationSample(t *testing.T) {
 	if !errors.Is(err, ErrJournalUnsealed) {
 		t.Fatalf("read large violation journal: %v", err)
 	}
-	retained := journal.OperationFacts[len(journal.OperationFacts)-1]
+	retained := terminalFailureFact(t, journal)
 	if retained.Status != "failed" || retained.ViolationCount != len(result.Violations) || len(retained.Violations) != MaximumFailureViolationSample {
 		t.Fatalf("retained fact count = %d sample = %d, want %d and %d", retained.ViolationCount, len(retained.Violations), len(result.Violations), MaximumFailureViolationSample)
 	}
@@ -124,6 +124,16 @@ func TestRunRetainsTerminalFactAboveTheViolationSample(t *testing.T) {
 	if got := CompareReplay(&retained, replayed.Failure); got != ReplayDiverged {
 		t.Fatalf("different violation set replay outcome = %s, want diverged", got)
 	}
+}
+
+// terminalFailureFact returns the retained terminal failure fact. A failed run
+// that could not record it fails the test instead of indexing an empty journal.
+func terminalFailureFact(t *testing.T, journal Journal) OperationFact {
+	t.Helper()
+	if len(journal.OperationFacts) == 0 || journal.OperationFacts[len(journal.OperationFacts)-1].Status != "failed" {
+		t.Fatalf("failed run journal has no terminal failure fact: %d facts", len(journal.OperationFacts))
+	}
+	return journal.OperationFacts[len(journal.OperationFacts)-1]
 }
 
 type failingHarness struct{ err error }
