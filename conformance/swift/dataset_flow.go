@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/trainstar/synchro/conformance/dataset"
 )
@@ -41,8 +42,14 @@ func (d *DatasetPlatform) Write(ctx context.Context, key string, write dataset.L
 	if err != nil {
 		return err
 	}
-	action := runnerLocalAction{Operation: "insert", TableName: write.Table, PrimaryKeyField: "id", PrimaryKey: primaryKey, Fields: write.Columns}
-	for name := range write.Columns {
+	action := runnerLocalAction{Operation: "insert", TableName: write.Table, PrimaryKeyField: "id", PrimaryKey: primaryKey, Fields: map[string]json.RawMessage{}}
+	for name, raw := range write.Columns {
+		action.Fields[name] = raw
+		// The runner command holds only portable JSON integers. A wider int64
+		// travels as text, and the INTEGER column affinity stores the integer.
+		if integer, err := strconv.ParseInt(string(raw), 10, 64); err == nil && (integer > warmConnectMaximumSafeInteger || integer < -warmConnectMaximumSafeInteger) {
+			action.Fields[name] = json.RawMessage(`{"type":"string","value":"` + string(raw) + `"}`)
+		}
 		action.AuthoredColumns = append(action.AuthoredColumns, name)
 	}
 	sort.Strings(action.AuthoredColumns)

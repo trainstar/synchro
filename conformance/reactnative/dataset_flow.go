@@ -16,9 +16,6 @@ import (
 	"github.com/trainstar/synchro/conformance/dataset"
 )
 
-// maximumSafeJSONInteger is the largest integer a JavaScript number holds exactly.
-const maximumSafeJSONInteger = 1<<53 - 1
-
 // DatasetCoordinator serves the authored dataset flow to one React Native app.
 // The flow runs on the host. Each platform call becomes one device command.
 type DatasetCoordinator struct {
@@ -213,7 +210,7 @@ func (c *DatasetCoordinator) Write(ctx context.Context, key string, write datase
 	for name, raw := range write.Columns {
 		columns[name] = raw
 		// A JavaScript number cannot hold every int64, so the bridge takes a tag.
-		if integer, err := strconv.ParseInt(string(raw), 10, 64); err == nil && (integer > maximumSafeJSONInteger || integer < -maximumSafeJSONInteger) {
+		if integer, err := strconv.ParseInt(string(raw), 10, 64); err == nil && (integer > int64(warmConnectMaximumSafeInteger) || integer < -int64(warmConnectMaximumSafeInteger)) {
 			columns[name] = map[string]string{"type": "int64", "value": string(raw)}
 		}
 	}
