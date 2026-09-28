@@ -317,7 +317,7 @@ reads.
 
 The registry stores the function OID, schema, name, `max_scopes`, and the
 SHA-256 of `pg_get_functiondef` in UTF-8. The server computes the definition
-with `search_path` set to `pg_catalog, synchro`, because the text of
+with `search_path` set to `pg_catalog, synchro, pg_temp`, because the text of
 `pg_get_functiondef` depends on `search_path`. Registration computes the hash
 before and after it checks the rules. It rejects the function when the two
 hashes differ, so the stored hash identifies the checked definition. Connect
