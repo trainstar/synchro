@@ -64,6 +64,20 @@ client.inspectRetainedMutations().forEach { record ->
 Swift releases also failed inspection when a legacy import was present. A caller
 that reads current-record fields must now match the current case.
 
+`inspectRejectedMutations()` and the `rejectedMutations` list of the inspection
+snapshot return `RetainedRejectionInspection` values on the same model:
+
+- A current record holds a `RejectedMutationInspection` with the exact mutation
+  JSON and rejection JSON.
+- A legacy record holds a `LegacyRejectionInspection`. It comes from a rejection
+  table that existed before the mutation ledger. It has only the stored fields.
+  The mutation JSON and rejection JSON are absent.
+
+A record with only one of the two JSON values fails inspection. Earlier releases
+returned `[RejectedMutationInspection]` and `List<RejectedMutationInspection>`, and
+failed inspection when a legacy rejection was present. React Native returns the
+same records with `representation: "current"` or `representation: "legacy"`.
+
 ## React Native boundary
 
 React Native exposes the same product surface as the native SDKs, but it must remain a bridge.
