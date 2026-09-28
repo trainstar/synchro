@@ -298,8 +298,8 @@ fn synchro_register_assignment_function(p_function: &str, p_max_scopes: default!
     }
 
     Spi::connect_mut(|client| {
-        let function = resolve_assignment_function(client, actor, p_function)?;
-        let definition_sha256 = lower_hex(&registered_function_fingerprint(client, function.oid)?);
+        let (function, fingerprint) = resolve_assignment_function(client, actor, p_function)?;
+        let definition_sha256 = lower_hex(&fingerprint);
         client.update(
             "INSERT INTO sync_assignment_function (
                  singleton, function_oid, function_schema, function_name,

@@ -309,9 +309,12 @@ and pull run as that role.
 The registry stores the function OID, schema, name, `max_scopes`, and the
 SHA-256 of `pg_get_functiondef` in UTF-8. The server computes the definition
 with `search_path` set to `pg_catalog, synchro`, because the text of
-`pg_get_functiondef` depends on `search_path`. Connect and pull call the function
-once with the canonical user ID. Before the call, the server confirms that the
-OID exists and that the definition hash is unchanged. Each result must be
+`pg_get_functiondef` depends on `search_path`. Registration computes the hash
+before and after it checks the rules. It rejects the function when the two
+hashes differ, so the stored hash identifies the checked definition. Connect
+and pull call the function once with the canonical user ID. Before the call,
+the server confirms that the OID exists and that the definition hash is
+unchanged. Each result must be
 non-null, must be nonempty after trim, and must not start with `user:`. More
 than `max_scopes` distinct results is a failure. A failure aborts the connect
 or pull transaction and returns `500 sync_integrity_failure`. Health reports a

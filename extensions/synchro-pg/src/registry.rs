@@ -1717,14 +1717,19 @@ pub(crate) fn resolve_assignment_function(
     client: &SpiClient<'_>,
     actor: pg_sys::Oid,
     identity: &str,
-) -> Result<RegisteredFunction, spi::Error> {
+) -> Result<(RegisteredFunction, Vec<u8>), spi::Error> {
     let text_type_oid = pg_sys::TEXTOID.to_u32();
     let function = resolve_scope_function(client, identity, text_type_oid, "assignment")?;
+    let fingerprint_before = registered_function_fingerprint(client, function.oid)?;
     validate_actor_owns_function(client, actor, function.oid)?;
     validate_function_execute_acl(client, &function, &["synchro_owner"])?;
     validate_function_calls_only_pg_catalog(client, &function)?;
     validate_assignment_function_relations(client, &function)?;
-    Ok(function)
+    let fingerprint_after = registered_function_fingerprint(client, function.oid)?;
+    if fingerprint_before != fingerprint_after {
+        pgrx::error!("assignment function changed during registration");
+    }
+    Ok((function, fingerprint_after))
 }
 
 /// Resolves a deterministic SQL function that maps one argument to a set of
