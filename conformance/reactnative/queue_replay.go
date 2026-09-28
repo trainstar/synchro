@@ -453,7 +453,7 @@ func (c *QueueReplayCoordinator) ExchangeCount() int {
 func (c *QueueReplayCoordinator) exchangeCountLocked() int {
 	count := 14 // main open/bootstrap/captures, nine successor-proof commands, complete response
 	for _, workload := range c.steps {
-		count += queueReplayLocalBatchCount(workload) + 10 // stop, write batches, restart, schema check, begin loss, push barrier, await loss, trace, restart, begin replay, await replay
+		count += queueReplayLocalBatchCount(workload) + 11 // stop, write batches, rejected-write capture, restart, schema check, begin loss, push barrier, await loss, trace, restart, begin replay, await replay
 	}
 	if len(c.steps) > 1 {
 		count += len(c.steps) - 1 // retain the prior replay trace before each later restart

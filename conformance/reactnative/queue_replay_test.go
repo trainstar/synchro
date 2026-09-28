@@ -263,6 +263,7 @@ func TestQueueReplayAuthoredFlowServesExactlyExchangeCount(t *testing.T) {
 			want = append(want, exchange{actor: "client", command: "execute-steps", state: "command", localOperations: workload.local[start:end], measured: true})
 		}
 		want = append(want,
+			exchange{actor: "observer", command: "capture", state: "command"},
 			exchange{actor: "client", command: "open", state: "command", databaseMode: "reuse"},
 			exchange{actor: "client", command: "synchronize-step", state: "command"},
 			exchange{actor: "client", command: "begin-call", state: "command"},
