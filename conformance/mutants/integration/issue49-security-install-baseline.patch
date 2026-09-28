@@ -12,12 +12,12 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
  CREATE TABLE IF NOT EXISTS sync_runtime_state (
      singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
      stream_generation TEXT NOT NULL,
-@@ -2511,7 +2515,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2535,7 +2539,7 @@ CREATE FUNCTION "synchro_capture_fence"()
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1960
-+-- synchro-pg/src/lib.rs:1964
+--- synchro-pg/src/lib.rs:1981
++-- synchro-pg/src/lib.rs:1985
  -- finalize
  
  DO $roles$

@@ -1030,6 +1030,15 @@
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-mutation-group" }]
     },
     {
+      "id": "SYNC-ATOMICITY-003",
+      "title": "Push unit constraint boundary",
+      "category": "data-correctness",
+      "statement": "Each push unit starts with every deferrable constraint deferred and checks every deferrable constraint before it ends, a failed unit-end check rolls back only that unit with validation_failed, and a call with a pending deferrable trigger event in the calling transaction fails before the batch claim without firing that event.",
+      "required_proof_types": ["server-black-box", "fault-injection"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#push-unit-constraint-boundary" }]
+    },
+    {
       "id": "SYNC-QUEUE-005",
       "title": "Atomic group capture and selection",
       "category": "local-metadata",

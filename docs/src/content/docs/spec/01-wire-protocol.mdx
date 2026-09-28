@@ -515,7 +515,7 @@ Every mutation requires `mutation_id`, `table`, one-field typed `pk`, `authored_
 
 Empty `columns`, unknown operations, duplicate mutation IDs, duplicate field members, and presence-matrix violations make the whole request `400 invalid_request`.
 
-The server inspects every submitted field after structural validation. A known current primary-key, generated, version, creation-time, update-time, deletion-time, or other non-writable field produces terminal `validation_failed`. An invalid value or failed current domain constraint also produces terminal `validation_failed`. A retained authored table or field that cannot be represented by the current manifest produces terminal `schema_incompatible`. The server MUST NOT remove any submitted field and report the mutation as applied.
+The server inspects every submitted field after structural validation. A known current primary-key, generated, version, creation-time, update-time, deletion-time, or other non-writable field produces terminal `validation_failed`. An invalid value or failed current domain constraint also produces terminal `validation_failed`. The server checks every deferrable constraint at the end of each push unit. A push unit is one mutation of a non-atomic request or the complete group of an atomic request. A failed check at the unit end rolls back that unit and also produces terminal `validation_failed`. A retained authored table or field that cannot be represented by the current manifest produces terminal `schema_incompatible`. The server MUST NOT remove any submitted field and report the mutation as applied.
 
 ### Response example
 
@@ -684,7 +684,7 @@ Terminal codes have one meaning:
 - `schema_incompatible`: preserved authored table or field identity cannot be represented by the current synced schema.
 - `table_not_synced`: the target has never been a synced table in this contract.
 - `policy_rejected`: deterministic authenticated write policy denies the mutation.
-- `validation_failed`: a known current field is non-writable, a value is invalid, or a current domain constraint fails.
+- `validation_failed`: a known current field is non-writable, a value is invalid, a current domain constraint fails, or a deferrable constraint fails at the end of its push unit.
 - `atomic_batch_rejected`: another mutation in the same atomic batch did not apply. Only an atomic batch response contains this code.
 
 The complete conflict matrix after structural, schema, policy, and value validation is:
@@ -709,9 +709,10 @@ A request with `atomic: true` applies all of its mutations or none of them. The 
 - Two mutations have the same `table` and the same canonical `pk`.
 - A `mutation_id` already has a ledger row from a different batch.
 
-The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the response is an ordinary all-applied response. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
+The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the server checks every deferrable constraint of the group. If every mutation applies and the check passes, the response is an ordinary all-applied response. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
 
 - The failing mutation keeps its evaluated status and code.
+- If the constraint check at the end of the group fails, the last mutation is the failing mutation. It has `rejected_terminal` with `validation_failed`.
 - A failing `conflict` carries the committed row state that the server reads after the rollback.
 - Every other mutation has `rejected_terminal`, code `atomic_batch_rejected`, and message `atomic batch rejected`. It has no `server_row`, `row_checksum`, `server_version`, or `retryable`, and its `outcome_schema` is the request `schema`.
 - `accepted` is empty, and `rejected` contains every outcome in request order.

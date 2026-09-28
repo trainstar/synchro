@@ -243,13 +243,16 @@ First execution of an atomic batch occurs inside the first-execution
 transaction:
 
 1. The server opens one internal subtransaction after the batch ledger claim
-   and before the first mutation evaluation.
+   and before the first mutation evaluation. The subtransaction starts with
+   every deferrable constraint deferred.
 2. It evaluates each mutation in request order with the ordinary evaluation.
 3. It stops at the first outcome that is not `applied`.
-4. If every outcome is `applied`, it releases the subtransaction. The response
-   is the ordinary all-applied response.
+4. If every outcome is `applied`, it checks every deferrable constraint. If the
+   check passes, it releases the subtransaction. The response is the ordinary
+   all-applied response.
 5. Otherwise, it rolls back and releases the subtransaction, and then builds
-   the failed-group response.
+   the failed-group response. A failed check at step 4 gives
+   `validation_failed` to the last mutation.
 
 The failed-group response has these outcomes:
 
@@ -272,6 +275,45 @@ An operational error inside the subtransaction aborts the complete request as
 for every batch. The ledger stores every outcome of a completed atomic batch,
 and exact replay returns its stored response. The accepted-write epoch
 advances only when the subtransaction is released with applied writes.
+
+### Push unit constraint checks
+
+A push unit is one mutation of a non-atomic request. The push unit of an
+atomic request is its complete group. PostgreSQL runs the check of a deferred
+constraint when the transaction commits. The adapter runs `synchro_push` as
+one statement in its own transaction. Without a unit boundary, a failed
+deferred check fails the complete request after every mutation outcome exists.
+
+The server applies these rules in the first-execution transaction:
+
+1. Before the first unit, the server verifies that no relation with a
+   deferrable trigger has a pending trigger event in the calling transaction.
+   If one has, the call fails with SQLSTATE `25000` before the batch ledger
+   claim. The server never fires that event. A trigger function runs with the
+   authority of the current user, and the current user in `synchro_push` is
+   `synchro_owner`. ADR 005 gives that authority to no runtime role.
+2. Each unit starts with `SET CONSTRAINTS ALL DEFERRED` in its
+   subtransaction. Each unit therefore has the same constraint mode at each
+   position in the request.
+3. Each unit ends with `SET CONSTRAINTS ALL IMMEDIATE` in its subtransaction,
+   after all of its source writes. A data exception or an integrity
+   constraint violation at this point rolls back the unit. The unit then gets
+   `rejected_terminal` with `validation_failed`, as for a failed immediate
+   constraint.
+4. In an atomic request, a failed check at the unit end gives
+   `validation_failed` to the last mutation of the group. Every other
+   mutation gets `atomic_batch_rejected`.
+
+Thus, every constraint holds at the end of each unit. A
+`DEFERRABLE INITIALLY IMMEDIATE` constraint is also checked at the unit end,
+not at the end of each statement. A constraint that is not deferrable is
+checked at each statement, as before. An error of another class at a unit end
+is an operational failure of the complete request.
+
+After a first execution of `synchro_push`, every deferrable constraint of the
+calling transaction is in `IMMEDIATE` mode. PostgreSQL has no statement that
+restores the declared initial mode in a transaction. The adapter commits each
+call immediately, so this mode has no effect on an adapter request.
 
 ### Exact mutation shapes
 
@@ -491,6 +533,13 @@ Rejected because whitespace and object order are transport details, while omitti
 ### All-or-nothing semantic acceptance
 
 Rejected as the default because independent valid mutations must commit beside terminal semantic rejections. The default atomic guarantee is durability of writes and outcomes, not uniform semantic success. A client requests uniform semantic success only with an explicit atomic batch.
+
+### One top-level transaction for each push unit
+
+A separate top-level transaction for each push unit keeps the declared
+constraint modes exactly. It needs procedure transaction control. It also
+breaks the first-execution transaction boundary, because the request ledger
+and every outcome must commit in one transaction.
 
 ### Per-mutation retryable outcomes
 

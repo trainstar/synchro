@@ -225,6 +225,66 @@ BEGIN
 END
 $grant$;
 
+DROP FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT);
+
+CREATE FUNCTION synchro.synchro_execute_push_dml(
+    p_sql TEXT,
+    p_data JSONB,
+    p_record_id TEXT,
+    p_push_unit BOOLEAN
+)
+RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    applied := false;
+    validation_failed := false;
+    BEGIN
+        IF p_push_unit THEN
+            SET CONSTRAINTS ALL DEFERRED;
+        END IF;
+        EXECUTE p_sql INTO applied USING p_data, p_record_id;
+        applied := COALESCE(applied, false);
+        IF p_push_unit THEN
+            SET CONSTRAINTS ALL IMMEDIATE;
+        END IF;
+    EXCEPTION
+        WHEN data_exception OR integrity_constraint_violation THEN
+            applied := false;
+            validation_failed := true;
+    END;
+    RETURN NEXT;
+END;
+$$;
+ALTER FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
+    SECURITY DEFINER;
+ALTER FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
+    SET search_path = pg_catalog, synchro;
+ALTER FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
+    OWNER TO synchro_owner;
+REVOKE EXECUTE ON FUNCTION synchro.synchro_execute_push_dml(TEXT, JSONB, TEXT, BOOLEAN)
+    FROM PUBLIC;
+
+CREATE FUNCTION synchro.synchro_check_push_constraints()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    SET CONSTRAINTS ALL IMMEDIATE;
+    RETURN true;
+EXCEPTION
+    WHEN data_exception OR integrity_constraint_violation THEN
+        RETURN false;
+END;
+$$;
+ALTER FUNCTION synchro.synchro_check_push_constraints() SECURITY DEFINER;
+ALTER FUNCTION synchro.synchro_check_push_constraints()
+    SET search_path = pg_catalog, synchro;
+ALTER FUNCTION synchro.synchro_check_push_constraints() OWNER TO synchro_owner;
+REVOKE EXECUTE ON FUNCTION synchro.synchro_check_push_constraints() FROM PUBLIC;
+
 UPDATE synchro.sync_extension_build
 SET installed_fingerprint = synchro.synchro_build_fingerprint(),
     installed_at = pg_catalog.now()

@@ -131,6 +131,8 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-SCOPE-ASSIGNMENT-BOUND-001", "OBL-SCOPE-ASSIGNMENT-BOUND-PG-LINUX-X64-001", []string{"TestRealScopeAssignmentBoundFailsClosed"}},
 	{"SCN-ATOMIC-GROUP-001", "OBL-ATOMIC-GROUP-PG-LINUX-X64-001", []string{"TestRealAtomicGroupAppliesAllOrNone"}},
 	{"SCN-ATOMIC-GROUP-001", "OBL-ATOMIC-GROUP-FAULT-LINUX-X64-001", []string{"TestRealAtomicGroupAppliesAllOrNone"}},
+	{"SCN-PUSH-UNIT-CONSTRAINTS-001", "OBL-PUSH-UNIT-CONSTRAINTS-PG-LINUX-X64-001", []string{"TestRealPushUnitConstraintBoundary"}},
+	{"SCN-PUSH-UNIT-CONSTRAINTS-001", "OBL-PUSH-UNIT-CONSTRAINTS-FAULT-LINUX-X64-001", []string{"TestRealPushUnitConstraintBoundary"}},
 }
 
 var nonScenarioRealTests = map[string]string{
