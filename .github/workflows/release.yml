@@ -377,7 +377,10 @@ jobs:
             RELEASE_CANDIDATE_CI_RUN_ID="${{ needs.candidate.outputs.candidate_ci_run_id }}" \
             RELEASE_CANDIDATE_CI_RUN_ATTEMPT="${{ needs.candidate.outputs.candidate_ci_run_attempt }}"
 
-      - name: Verify sealed release
+      # release-stage verifies the sealed bytes it writes. A restored candidate
+      # needs its own verification after the artifact transfer.
+      - name: Verify restored sealed release
+        if: needs.candidate.outputs.mode == 'recovery'
         run: make release-verify VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
 
       - name: Upload sealed release

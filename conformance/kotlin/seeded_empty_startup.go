@@ -223,6 +223,15 @@ func rejectKotlinSeedStartupMutants(ctx context.Context, platform *Platform, cli
 		if removeErr != nil {
 			return nil, removeErr
 		}
+		// A later create-mode open deletes the destination, so the device files
+		// are observed before any other setup can hide a publication.
+		family, err := platform.DatabaseFamily(ctx, client)
+		if err != nil {
+			return nil, err
+		}
+		if len(family) != 0 {
+			return nil, fmt.Errorf("Kotlin Android seeded-startup %s control left device database files %v", control.name, family)
+		}
 		observed = append(observed, control.name)
 	}
 	return observed, nil

@@ -49,7 +49,7 @@ func TestValidateRebuildApplyScenarioRejectsContractChanges(t *testing.T) {
 
 func TestNewRebuildApplyCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewRebuildApplyCoordinator(RebuildApplyCoordinatorConfig{
-		Scenario: loadRebuildApplyAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadRebuildApplyAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android rebuild-apply coordinator was rejected: %v", err)
@@ -147,6 +147,60 @@ func TestValidateRebuildApplyCaptureDistinguishesActiveAndTerminalAttempts(t *te
 			capture := rebuildApplyCaptureFixture(t, workload)
 			if err := coordinator.validateCapture(capture); err != nil {
 				t.Fatalf("validate active and terminal rebuild attempt counts: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRebuildApplyCaptureRequiresReceiptPredicatesAndCompletion(t *testing.T) {
+	scenario := loadRebuildApplyAuthoredScenario(t)
+	step := scenario.Steps[3]
+	var workload rebuildApplyWorkload
+	if err := json.Unmarshal(step.Operation.Payload, &workload); err != nil {
+		t.Fatalf("decode rebuild-apply workload: %v", err)
+	}
+	coordinator := func() *RebuildApplyCoordinator {
+		return &RebuildApplyCoordinator{
+			expected: rebuildApplyExpectedState(scenario), steps: []scenarios.Step{step}, workloads: []rebuildApplyWorkload{workload},
+		}
+	}
+	if err := coordinator().validateCapture(rebuildApplyCaptureFixture(t, workload)); err != nil {
+		t.Fatalf("valid rebuild-apply capture rejected: %v", err)
+	}
+	withReceipt := func(member string, value any) func(*finalCapture) {
+		return func(capture *finalCapture) {
+			var proof map[string]any
+			if err := json.Unmarshal(capture.DurableProof, &proof); err != nil {
+				t.Fatalf("decode rebuild-apply proof fixture: %v", err)
+			}
+			proof["rebuild_receipt_proofs"].([]any)[0].(map[string]any)[member] = value
+			capture.DurableProof = marshalRebuildApplyFixture(t, proof)
+		}
+	}
+	withEvents := func(events ...any) func(*finalCapture) {
+		return func(capture *finalCapture) {
+			capture.Events = marshalRebuildApplyFixture(t, append([]any{}, events...))
+		}
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*finalCapture)
+	}{
+		{name: "request chain invalid", change: withReceipt("request_chain_valid", false)},
+		{name: "records out of canonical order", change: withReceipt("records_in_canonical_order", false)},
+		{name: "row checksums invalid", change: withReceipt("row_checksums_valid", false)},
+		{name: "scope checksum invalid", change: withReceipt("scope_checksum_valid", false)},
+		{name: "final checksum differs", change: withReceipt("final_checksum_matches_local", false)},
+		{name: "returned records differ", change: withReceipt("returned_record_count", workload.RecordCount+1)},
+		{name: "completion event absent", change: withEvents()},
+		{name: "completion event for another scope", change: withEvents(map[string]any{"type": "rebuild_completed", "scope_id": "scope-b", "rebuild_id": "rebuild-a"})},
+		{name: "completion event without receipt", change: withEvents(map[string]any{"type": "rebuild_completed", "scope_id": "scope-a", "rebuild_id": "rebuild-b"})},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capture := rebuildApplyCaptureFixture(t, workload)
+			test.change(&capture)
+			if err := coordinator().validateCapture(capture); err == nil {
+				t.Fatal("changed rebuild-apply capture passed validation")
 			}
 		})
 	}
@@ -403,7 +457,7 @@ func rebuildApplyCaptureFixture(t *testing.T, workload rebuildApplyWorkload) fin
 	proof := map[string]any{
 		"row_metadata": nil,
 		"rebuild_receipt_proofs": []any{map[string]any{
-			"rebuild_id_fingerprint": strings.Repeat("e", 64), "page_count": pages,
+			"rebuild_id_fingerprint": hashFingerprint("rebuild-a"), "page_count": pages,
 			"returned_record_count": workload.RecordCount, "request_chain_valid": true,
 			"records_in_canonical_order": true, "row_checksums_valid": true,
 			"scope_checksum_valid": true, "final_checksum_matches_local": true,
@@ -414,8 +468,10 @@ func rebuildApplyCaptureFixture(t *testing.T, workload rebuildApplyWorkload) fin
 		Pending:     marshalRebuildApplyFixture(t, []any{}),
 		Rejected:    marshalRebuildApplyFixture(t, []any{}),
 		Status:      marshalRebuildApplyFixture(t, map[string]any{"state": "ready", "retry_at": nil, "operation": nil, "failure": nil}),
-		Events:      marshalRebuildApplyFixture(t, []any{map[string]any{"type": "rebuild_completed"}}),
-		Provenance:  marshalRebuildApplyFixture(t, scopeRows),
+		Events: marshalRebuildApplyFixture(t, []any{map[string]any{
+			"type": "rebuild_completed", "scope_id": "scope-a", "rebuild_id": "rebuild-a",
+		}}),
+		Provenance: marshalRebuildApplyFixture(t, scopeRows),
 		Trace: marshalRebuildApplyFixture(t, map[string]any{
 			"observations": observations, "overflowed": false, "sequenceCheckpoint": pages + 2,
 		}),

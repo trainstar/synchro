@@ -44,6 +44,15 @@ Use one of these modes when the adapter validates bearer tokens:
 the handler lifetime. Cancel it during server shutdown. `JWTUserClaim` selects
 the canonical user claim and defaults to `sub`.
 
+The adapter checks the token signature and algorithm. It rejects a token with
+a past `exp` or a future `nbf`. It does not require `exp`, and it does not check
+`aud` or `iss`. The user claim must be a nonempty string. Every rejected token
+returns `401 auth_required`.
+
+A key set refreshes every hour. When a token names an unknown `kid`, the
+adapter also fetches the key set again, at most once in five minutes. Publish a
+new key before the identity provider signs tokens with it.
+
 ```go
 jwksContext, cancelJWKS := context.WithCancel(context.Background())
 defer cancelJWKS()
@@ -90,6 +99,11 @@ client. An operator can grant or revoke an existing scope for one user with
 The next connect reconciles a grant or revoke. An added scope has a null cursor
 and rebuilds. A removed scope causes local provenance cleanup. A client cannot
 invent, grant, or retain an unassigned scope.
+
+Until that connect, pull and rebuild use the client's prior assignment. A
+revoked scope stays readable to an already connected client until it connects
+again. Registration or removal of a shared scope reaches active clients on
+their next pull.
 
 ## Read next
 

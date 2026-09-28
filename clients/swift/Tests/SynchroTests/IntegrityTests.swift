@@ -231,7 +231,7 @@ final class IntegrityTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(executed, 90)
+        XCTAssertEqual(executed, 91)
     }
 
     func testScopeDigestRejectsMalformedRowIdentities() throws {
