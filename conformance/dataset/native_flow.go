@@ -260,7 +260,10 @@ func waitNativeMaterialized(ctx context.Context, source *sql.DB) error {
 }
 
 // requireNativeCheckpoint compares every local row and value of each client
-// with the hand-written checkpoint and the canonical source values.
+// with the hand-written checkpoint and the canonical source values. A live
+// local row must be one of the hand-written rows. A local row whose deleted_at
+// is set is a source tombstone that a pull delivered. It must match a deleted
+// source row exactly, and it never stands in for a live row.
 func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform NativePlatform, clients map[string]string, selectors []RowRef, checkpoint Checkpoint, logf func(string, ...any)) error {
 	sourceRows, err := readNativeSourceRows(ctx, source)
 	if err != nil {
@@ -270,6 +273,7 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 	for _, selector := range selectors {
 		tables[selector.ID] = selector.Table
 	}
+	var problems []string
 	delivered := make(map[string]bool, len(checkpoint.Values))
 	for _, user := range AuthoredUsers {
 		expected := map[string]bool{}
@@ -284,7 +288,6 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 		if err != nil {
 			return fmt.Errorf("capture %s: %w", user, err)
 		}
-		logf("dataset local rows %s (%s): %d", user, clients[user], total)
 		local := make(map[string]map[string]json.RawMessage, len(rows))
 		for _, row := range rows {
 			var id string
@@ -294,53 +297,60 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 			local[id] = row
 		}
 		if total != len(local) {
-			return fmt.Errorf("%w: %s holds %d local rows, %d of them authored", ErrNativeMismatch, user, total, len(local))
+			problems = append(problems, fmt.Sprintf("%s holds %d local rows, %d of them authored", user, total, len(local)))
 		}
-		for id := range expected {
-			if local[id] == nil {
-				return fmt.Errorf("%w: %s lacks %s/%s", ErrNativeMismatch, user, tables[id], id)
-			}
-		}
-		for id := range local {
-			if !expected[id] {
-				return fmt.Errorf("%w: %s holds %s/%s outside its scopes", ErrNativeMismatch, user, tables[id], id)
-			}
+		tombstones := 0
+		for id, row := range local {
 			table, _ := LookupTable(tables[id])
-			row := local[id]
+			tombstone := string(bytes.TrimSpace(row["deleted_at"])) != "null"
+			switch {
+			case tombstone && sourceRows[id]["deleted_at"] == nil:
+				problems = append(problems, fmt.Sprintf("%s holds a tombstone of live source row %s/%s", user, table.Name, id))
+			case tombstone:
+				tombstones++
+			case !expected[id]:
+				problems = append(problems, fmt.Sprintf("%s holds live row %s/%s outside its scopes", user, table.Name, id))
+			}
 			if len(row) != len(table.Columns) {
-				return fmt.Errorf("%w: %s %s/%s has %d local columns, want %d", ErrNativeMismatch, user, table.Name, id, len(row), len(table.Columns))
+				problems = append(problems, fmt.Sprintf("%s %s/%s has %d local columns, want %d", user, table.Name, id, len(row), len(table.Columns)))
 			}
 			for _, column := range table.Columns {
-				raw, found := row[column.Name]
-				if !found {
-					return fmt.Errorf("%w: %s %s/%s lacks column %s", ErrNativeMismatch, user, table.Name, id, column.Name)
+				wire, err := localWire(column.Type, row[column.Name])
+				if err == nil {
+					err = CompareWire(column.Type, wire, sourceRows[id][column.Name])
 				}
-				wire, err := localWire(column.Type, raw)
 				if err != nil {
-					return fmt.Errorf("%w: %s %s/%s.%s: %v", ErrNativeMismatch, user, table.Name, id, column.Name, err)
-				}
-				if err := CompareWire(column.Type, wire, sourceRows[id][column.Name]); err != nil {
-					return fmt.Errorf("%w: %s %s/%s.%s: %v", ErrNativeMismatch, user, table.Name, id, column.Name, err)
+					problems = append(problems, fmt.Sprintf("%s %s/%s.%s: %v", user, table.Name, id, column.Name, err))
 				}
 			}
 		}
+		for id := range expected {
+			if row := local[id]; row == nil || string(bytes.TrimSpace(row["deleted_at"])) != "null" {
+				problems = append(problems, fmt.Sprintf("%s lacks live row %s/%s", user, tables[id], id))
+			}
+		}
+		logf("dataset local rows %s (%s): %d, %d of them tombstones", user, clients[user], total, tombstones)
 		for _, value := range checkpoint.Values {
 			row := local[value.ID]
-			if row == nil {
+			if row == nil || !expected[value.ID] {
 				continue
 			}
 			column, _ := lookupColumn(value.Table, value.Column)
 			wire, err := localWire(column.Type, row[value.Column])
 			if err != nil || !bytes.Equal(wire, []byte(value.Wire)) {
-				return fmt.Errorf("%w: %s %s/%s.%s = %s, hand-written %s", ErrNativeMismatch, user, value.Table, value.ID, value.Column, wire, value.Wire)
+				problems = append(problems, fmt.Sprintf("%s %s/%s.%s = %s, hand-written %s", user, value.Table, value.ID, value.Column, wire, value.Wire))
 			}
 			delivered[value.Table+"/"+value.ID+"/"+value.Column] = true
 		}
 	}
 	for _, value := range checkpoint.Values {
 		if !delivered[value.Table+"/"+value.ID+"/"+value.Column] {
-			return fmt.Errorf("%w: no client holds hand-written value %s/%s.%s", ErrNativeMismatch, value.Table, value.ID, value.Column)
+			problems = append(problems, fmt.Sprintf("no client holds hand-written value %s/%s.%s", value.Table, value.ID, value.Column))
 		}
+	}
+	if len(problems) != 0 {
+		sort.Strings(problems)
+		return fmt.Errorf("%w:\n%s", ErrNativeMismatch, strings.Join(problems, "\n"))
 	}
 	return nil
 }
