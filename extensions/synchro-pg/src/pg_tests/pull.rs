@@ -344,6 +344,73 @@
     }
 
     #[pg_test]
+    fn test_pull_integrity_failure_preserves_scope_assignment_state() {
+        setup_test_tables();
+        register_client("u1", "c1");
+        let client_state = || -> Value {
+            Spi::get_one_with_args::<pgrx::JsonB>(
+                "SELECT jsonb_build_object(
+                     'bucket_subs', bucket_subs,
+                     'scope_set_version', scope_set_version
+                 )
+                 FROM sync_clients
+                 WHERE user_id = $1 AND client_id = $2",
+                &["u1".into(), "c1".into()],
+            )
+            .unwrap()
+            .expect("client assignment state")
+            .0
+        };
+        let assignment_history = || -> Value {
+            Spi::get_one_with_args::<pgrx::JsonB>(
+                "SELECT COALESCE(
+                     jsonb_agg(to_jsonb(history) ORDER BY scope_set_version, scope_id),
+                     '[]'::jsonb
+                 )
+                 FROM sync_client_scope_history AS history
+                 WHERE user_id = $1 AND client_id = $2",
+                &["u1".into(), "c1".into()],
+            )
+            .unwrap()
+            .expect("client assignment history")
+            .0
+        };
+        let client_before = client_state();
+        let history_before = assignment_history();
+        let record_id = "14151515-1415-4415-8415-141514151415";
+
+        Spi::run("SELECT synchro_grant_user_scope('u1', 'team:alpha')").unwrap();
+        Spi::run_with_args(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ($1::uuid, 'u1', 'missing projection after assignment')",
+            &[record_id.into()],
+        )
+        .unwrap();
+        insert_edge("test_orders", record_id, "user:u1");
+        insert_changelog("user:u1", "test_orders", record_id, 1);
+        Spi::run_with_args(
+            "DELETE FROM sync_captured_projections WHERE record_id = $1",
+            &[record_id.into()],
+        )
+        .unwrap();
+
+        let response = pull_client(
+            "u1",
+            "c1",
+            1,
+            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
+            100,
+        );
+
+        assert_eq!(
+            response["error"]["code"].as_str(),
+            Some("sync_integrity_failure")
+        );
+        assert_eq!(client_state(), client_before);
+        assert_eq!(assignment_history(), history_before);
+    }
+
+    #[pg_test]
     fn test_bucket_checksum_rejects_relation_table_mismatch() {
         setup_test_tables();
         let record_id = "15151515-1515-1515-1515-151515151515";

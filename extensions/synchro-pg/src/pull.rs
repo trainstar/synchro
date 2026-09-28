@@ -145,20 +145,6 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                 Ok(cursors) => cursors,
                 Err(err_json) => return err_json,
             };
-        // The adapter runs pull as one autocommit statement, so an error
-        // response commits earlier writes. This write follows the last
-        // request validation so that an invalid pull writes nothing.
-        if server_scopes != client_state.bucket_subs {
-            crate::client::persist_pull_scope_transition(
-                client,
-                p_user_id,
-                &request.client_id,
-                client_state.client_generation,
-                &client_state.bucket_subs,
-                &server_scopes,
-                scope_set_version,
-            );
-        }
         let mut stale_scopes = scope_updates
             .add
             .iter()
@@ -199,6 +185,18 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
 
             if let Err(err) = response.validate_for_active_scopes(&active_scopes_before_update) {
                 pgrx::error!("invalid pull response: {}", err);
+            }
+
+            if server_scopes != client_state.bucket_subs {
+                crate::client::persist_pull_scope_transition(
+                    client,
+                    p_user_id,
+                    &request.client_id,
+                    client_state.client_generation,
+                    &client_state.bucket_subs,
+                    &server_scopes,
+                    scope_set_version,
+                );
             }
 
             return pgrx::JsonB(serde_json::to_value(response).unwrap());
@@ -320,6 +318,18 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
             &boundary.stream_generation,
         ) {
             pgrx::error!("acknowledging scope positions: {}", error);
+        }
+
+        if server_scopes != client_state.bucket_subs {
+            crate::client::persist_pull_scope_transition(
+                client,
+                p_user_id,
+                &request.client_id,
+                client_state.client_generation,
+                &client_state.bucket_subs,
+                &server_scopes,
+                scope_set_version,
+            );
         }
 
         pgrx::JsonB(serde_json::to_value(response).unwrap())
