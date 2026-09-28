@@ -182,7 +182,6 @@ jobs:
       RUST_TOOLCHAIN: '1.92.0'
       PGRX_TARGET_DIR: ${{ github.workspace }}/.pgrx-target
       SOAK_SEED: '20260914'
-      SOAK_DURATION: '5s'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
