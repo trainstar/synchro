@@ -1696,6 +1696,26 @@ final class SyncEngineTests: XCTestCase {
 
     // The large debounce proves that the start itself pushes the captured change.
     func testStartupReplaysRebuildBackoffThenPushesCapturedChange() async throws {
+        try await assertStartupResumesRebuildBackoff(
+            capturedRecordIDs: ["w1"],
+            expectedCalls: ["connect", "rebuild", "push", "pull"]
+        )
+    }
+
+    // A rebuild is a middle stage of the cycle, so the pull must follow it.
+    func testStartupPullsAfterResumedRebuildBackoffWithoutPendingChanges() async throws {
+        try await assertStartupResumesRebuildBackoff(
+            capturedRecordIDs: [],
+            expectedCalls: ["connect", "rebuild", "pull"]
+        )
+    }
+
+    private func assertStartupResumesRebuildBackoff(
+        capturedRecordIDs: [String],
+        expectedCalls: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
         let dbPath = tempDBPath()
         let clientID = "recovered-rebuild-device"
         let database = try SynchroDatabase(path: dbPath)
@@ -1724,10 +1744,12 @@ final class SyncEngineTests: XCTestCase {
             pageLimit: 100,
             syncedTables: [ordersLocalSchemaTable(includeNotes: false)]
         )
-        _ = try database.execute(
-            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
-            params: ["w1", "offline", "u1", "2026-01-01T10:00:00.000Z"]
-        )
+        for recordID in capturedRecordIDs {
+            _ = try database.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                params: [recordID, "offline", "u1", "2026-01-01T10:00:00.000Z"]
+            )
+        }
         let request = RebuildRequest(
             clientID: clientID,
             clientGeneration: attempt.clientGeneration,
@@ -1786,13 +1808,17 @@ final class SyncEngineTests: XCTestCase {
         }
         try await engine.start()
 
-        XCTAssertEqual(callLog.withLock { $0 }, ["connect", "rebuild", "pull", "push", "pull"])
-        XCTAssertEqual(replayedRequestJSON.withLock { $0 }, requestJSON)
-        XCTAssertEqual(pushedRecordIDs.withLock { $0 }, ["w1"])
-        XCTAssertTrue(try ChangeTracker(database: recoveredDatabase).inspectPendingMutations().isEmpty)
+        XCTAssertEqual(callLog.withLock { $0 }, expectedCalls, file: file, line: line)
+        XCTAssertEqual(replayedRequestJSON.withLock { $0 }, requestJSON, file: file, line: line)
+        XCTAssertEqual(pushedRecordIDs.withLock { $0 }, capturedRecordIDs, file: file, line: line)
+        XCTAssertTrue(
+            try ChangeTracker(database: recoveredDatabase).inspectPendingMutations().isEmpty,
+            file: file,
+            line: line
+        )
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
-        })
+        }, file: file, line: line)
     }
 
     func testStopRetainsDurableBackoffRecord() async throws {

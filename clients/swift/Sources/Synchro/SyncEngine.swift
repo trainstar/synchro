@@ -993,18 +993,9 @@ final class SyncEngine: @unchecked Sendable {
             let requestBody = Data(backoff.workIdentity.utf8)
             let request = try decodeBackoffRequest(RebuildRequest.self, body: requestBody)
             try await rebuildScope(scopeID: request.scope, replayRequestBody: requestBody)
-            try await rebuildAssignedScopesNeedingCursor()
             try schemaManager.finishAppliedMigrationIfPossible()
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            try transition(to: .pulling, lifecycleGeneration: lifecycleGeneration)
-            try await runPullLoop(lifecycleGeneration: lifecycleGeneration)
-            if getSyncStatus() == .rebuilding {
-                try schemaManager.finishAppliedMigrationIfPossible()
-            }
-            try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            if try changeTracker.hasPendingChanges() {
-                try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
-            }
+            try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
         }
     }
 
