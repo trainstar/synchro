@@ -250,6 +250,7 @@ Correctness checks currently enforce contract, integration, scenario, fault, zer
 
 Synchro has no numeric performance guarantee. Performance budgets remain deferred.
 `make characterize-dataset` records complete-work samples for a seeded dataset without a performance verdict.
+The R1 definition now derives its Linux host identity from `/etc/machine-id`. The tracked R1 baseline was recorded under an earlier definition, so a comparison with it is unavailable. `make test-r1-benchmark` rejects that definition mismatch.
 
 ## Failure And Recovery
 

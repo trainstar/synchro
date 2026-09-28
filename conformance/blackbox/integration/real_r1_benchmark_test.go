@@ -91,9 +91,11 @@ type r1BenchmarkResult struct {
 }
 
 type r1BenchmarkEnvironment struct {
-	GOOS                      string `json:"goos"`
-	GOARCH                    string `json:"goarch"`
-	LogicalCPUs               int    `json:"logical_cpu_count"`
+	GOOS        string `json:"goos"`
+	GOARCH      string `json:"goarch"`
+	LogicalCPUs int    `json:"logical_cpu_count"`
+	// On Linux this digest covers /etc/machine-id, a host installation
+	// identity. The field keeps its format v1 name.
 	HardwareFingerprintSHA256 string `json:"hardware_fingerprint_sha256"`
 	AdapterSHA256             string `json:"adapter_sha256"`
 	ExtensionManifestSHA256   string `json:"extension_manifest_sha256"`
@@ -422,9 +424,11 @@ func loadR1HardwareFingerprint() (string, error) {
 		}
 		identity = string(match[1])
 	case "linux":
-		data, err := os.ReadFile("/sys/class/dmi/id/product_uuid")
+		// The machine ID identifies the host installation and is readable
+		// without root, unlike the DMI product UUID.
+		data, err := os.ReadFile("/etc/machine-id")
 		if err != nil {
-			return "", fmt.Errorf("read Linux hardware identity: %w", err)
+			return "", fmt.Errorf("read Linux host identity: %w", err)
 		}
 		identity = strings.TrimSpace(string(data))
 	default:
