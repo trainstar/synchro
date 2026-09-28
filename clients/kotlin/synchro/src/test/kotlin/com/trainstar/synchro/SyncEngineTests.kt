@@ -1064,10 +1064,13 @@ class SyncEngineTests {
             )
             SynchroMeta.setInt64(connection, MetaKey.SCOPE_SET_VERSION, 1)
             SynchroMeta.setInt64(connection, MetaKey.CLIENT_GENERATION, 1)
+            // A persistent extra trigger fails the exact trigger-set check before
+            // the assignment. A temporary trigger is outside the main schema, so
+            // valid DDL completes and the fault occurs at binding installation.
             connection.execSQL(
                 """
-                CREATE TRIGGER fail_connect_binding_install
-                BEFORE INSERT ON _synchro_scopes
+                CREATE TEMP TRIGGER fail_connect_binding_install
+                BEFORE INSERT ON main._synchro_scopes
                 WHEN NEW.scope_id = 'orders:added'
                 BEGIN
                     SELECT RAISE(ABORT, 'forced connect binding failure');
@@ -1085,11 +1088,11 @@ class SyncEngineTests {
                 )
             )
 
-        try {
-            engine.installConnectResponse(response)
-            fail("expected connect installation to fail")
-        } catch (_: Exception) {
-        }
+        val failure = runCatching { engine.installConnectResponse(response) }.exceptionOrNull()
+        assertTrue(
+            "connect installation must fail at the forced binding fault, got $failure",
+            failure?.message?.contains("forced connect binding failure") == true,
+        )
 
         val columnNames = db.readTransaction { connection ->
             buildSet {
