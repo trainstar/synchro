@@ -40,8 +40,8 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1987
-+-- synchro-pg/src/lib.rs:1979
+--- synchro-pg/src/lib.rs:1999
++-- synchro-pg/src/lib.rs:1991
  -- finalize
  
  DO $roles$
