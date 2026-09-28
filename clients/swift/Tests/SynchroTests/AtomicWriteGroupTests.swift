@@ -585,6 +585,28 @@ final class AtomicWriteGroupTests: XCTestCase {
         XCTAssertEqual(states, ["blocked_by_predecessor", "blocked_by_predecessor"])
     }
 
+    func testInsertAndDeleteBeforeAGroupOfTheSameRowCancelAndBlockTheGroup() throws {
+        try insertOrder(id: "a1", address: "a")
+        _ = try db.execute(
+            "UPDATE orders SET deleted_at = ? WHERE id = ?",
+            params: ["2026-01-01T10:30:00.000Z", "a1"]
+        )
+        try atomicWrite { transaction in
+            try transaction.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["after delete", "a1"])
+            try insertOrder(transaction, id: "g1", address: "grouped")
+        }
+
+        // The push path seals from one selection pass.
+        XCTAssertEqual(try db.writeTransaction { try tracker.pendingChanges($0, limit: 100) }.count, 0)
+
+        XCTAssertEqual(try ledgerStates(), [
+            "a1 insert cancelled_before_send",
+            "a1 delete cancelled_before_send",
+            "a1 update blocked_by_predecessor",
+            "g1 insert blocked_by_predecessor",
+        ])
+    }
+
     func testMemberThatDependsOnABlockedEntryBlocksTheGroupAndItsDependents() throws {
         try insertOrder(id: "r1", address: "a")
         _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["b", "r1"])
@@ -649,6 +671,14 @@ final class AtomicWriteGroupTests: XCTestCase {
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
             params: [id, address, "u1", "2026-01-01T10:00:00.000Z"]
         )
+    }
+
+    /// Gives each ledger entry in local order as its record ID, operation, and lifecycle state.
+    private func ledgerStates() throws -> [String] {
+        try db.query(
+            "SELECT record_id, operation, lifecycle_state FROM _synchro_pending_changes ORDER BY local_order",
+            params: nil
+        ).map { "\($0["record_id"] as String) \($0["operation"] as String) \($0["lifecycle_state"] as String)" }
     }
 
     /// Inserts a row and records it as synced with no pending change.
