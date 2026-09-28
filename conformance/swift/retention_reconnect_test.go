@@ -172,23 +172,23 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 		},
 	}}
 	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err != nil {
-		t.Fatalf("validate floor-equal retention resume: %v", err)
+		t.Fatalf("validate compacted-scope retention resume: %v", err)
 	}
 	call.transportObservations[1].PullResponseFacts.RebuildScopeCount = 1
 	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err == nil {
-		t.Fatal("floor-equal retention resume accepted a rebuild")
+		t.Fatal("compacted-scope retention resume accepted a rebuild")
 	}
 	after.ScopeStates[0].Generation = 2
 	call.transportObservations[1].PullResponseFacts.RebuildScopeCount = 0
 	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err == nil {
-		t.Fatal("floor-equal retention resume accepted a changed identity scope generation")
+		t.Fatal("compacted-scope retention resume accepted a changed identity scope generation")
 	}
 	after.ScopeStates[0].Generation = 1
 	changedIdentityCursor := "changed-identity-cursor"
 	after.ScopeStates[0].Cursor = &changedIdentityCursor
 	call.transportObservations[1].PullResponseFacts.ScopeCursorFingerprints = retentionReconnectCursorFingerprints(after.ScopeStates...)
 	if err := validateRetentionReconnectFloorResume(before, restarted, after, call, runtimeScope); err != nil {
-		t.Fatalf("floor-equal retention resume rejected an opaque identity cursor advance: %v", err)
+		t.Fatalf("compacted-scope retention resume rejected an opaque identity cursor advance: %v", err)
 	}
 }
 

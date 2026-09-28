@@ -172,8 +172,8 @@ func runKotlinPushResponseLoss(t *testing.T) {
 
 func runKotlinRetentionReconnect(t *testing.T) {
 	t.Helper()
-	ctx, scenario, _, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/retention-reconnect-001.json", 1)
-	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
+	ctx, scenario, harness, controller, platform := newKotlinPerformanceFixture(t, "conformance/scenarios/server/retention-reconnect-001.json", 1)
+	result, err := RunRetentionReconnectScenario(ctx, scenario, controller, harness.Operator(), platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "retention-reconnect-client-a"})
 	if err != nil {
 		t.Fatalf("run direct Kotlin Android retention-reconnect scenario: %v", err)
 	}

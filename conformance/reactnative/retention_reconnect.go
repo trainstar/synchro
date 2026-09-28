@@ -1223,7 +1223,7 @@ func (c *RetentionReconnectCoordinator) floorScopes(capture finalCapture) ([]cli
 		}
 	}
 	if floor.ScopeID == "" || identity.ScopeID == "" || floor.Cursor == nil || *floor.Cursor == "" {
-		return nil, errors.New("React Native retention-reconnect compacted floor cursor is absent")
+		return nil, errors.New("React Native retention-reconnect durable cursor after compaction is absent")
 	}
 	return []clientScopeState{floor, identity}, nil
 }
@@ -1252,7 +1252,7 @@ func (c *RetentionReconnectCoordinator) validateRestartCapture(capture finalCapt
 		return err
 	}
 	if !reflect.DeepEqual(before, after) {
-		return errors.New("React Native retention-reconnect restart changed the durable floor cursor")
+		return errors.New("React Native retention-reconnect restart changed the durable cursor")
 	}
 	if !sameJSONValue(c.finalCapture.Pending, capture.Pending) || !sameJSONValue(c.finalCapture.Rejected, capture.Rejected) {
 		return errors.New("React Native retention-reconnect restart changed the durable queue")
@@ -1287,7 +1287,7 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 		}
 	}
 	if err := validateReadyStatus(capture.Status); err != nil {
-		return fmt.Errorf("React Native retention-reconnect floor resume status is invalid: %w", err)
+		return fmt.Errorf("React Native retention-reconnect compacted-scope resume status is invalid: %w", err)
 	}
 	trace, err := retentionReconnectTrace(capture.Trace)
 	if err != nil {
@@ -1301,14 +1301,14 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 		switch observed.OperationClass {
 		case "connect":
 			if err := validateTraceOperation(observed, "connect"); err != nil {
-				return fmt.Errorf("React Native retention-reconnect floor resume connect is invalid: %w", err)
+				return fmt.Errorf("React Native retention-reconnect compacted-scope resume connect is invalid: %w", err)
 			}
 			connects++
 		case "rebuild":
-			return errors.New("React Native retention-reconnect floor-equal cursor entered rebuild")
+			return errors.New("React Native retention-reconnect compacted-scope resume entered rebuild")
 		case "pull":
 			if err := validateTraceOperation(observed, "pull"); err != nil {
-				return fmt.Errorf("React Native retention-reconnect floor resume pull is invalid: %w", err)
+				return fmt.Errorf("React Native retention-reconnect compacted-scope resume pull is invalid: %w", err)
 			}
 			response, responseErr := decodePullResponseFacts(observed.PullResponseFacts)
 			if responseErr != nil || observed.CursorFingerprintsComplete == nil || !*observed.CursorFingerprintsComplete ||
@@ -1316,13 +1316,13 @@ func (c *RetentionReconnectCoordinator) validateFloorResumeCapture(capture final
 				*response.ChangeCount != 0 || *response.HasMore || *response.RebuildScopeCount != 0 ||
 				*response.ChecksumCount != uint64(len(resumed)) || !*response.ScopeCursorFingerprintsComplete ||
 				!reflect.DeepEqual(response.ScopeCursorFingerprints, responseFingerprints) {
-				return errors.New("React Native retention-reconnect floor-equal pull is invalid")
+				return errors.New("React Native retention-reconnect compacted-scope resume pull is invalid")
 			}
 			pulls++
 		}
 	}
 	if connects != 1 || pulls != 1 {
-		return fmt.Errorf("React Native retention-reconnect floor resume observed %d connects and %d pulls, want 1 each", connects, pulls)
+		return fmt.Errorf("React Native retention-reconnect compacted-scope resume observed %d connects and %d pulls, want 1 each", connects, pulls)
 	}
 	return nil
 }
@@ -1788,72 +1788,10 @@ func (c *RetentionReconnectCoordinator) validateResumedCheckpointAtFloor(ctx con
 	if err != nil {
 		return fmt.Errorf("observe React Native retention-reconnect floor: %w", err)
 	}
-	return requireCheckpointAtOrAboveFloor(floor, checkpoint)
-}
-
-func requireCheckpointAtOrAboveFloor(floor, checkpoint string) error {
-	floorPosition, floorErr := parseStreamPosition(floor)
-	checkpointPosition, checkpointErr := parseStreamPosition(checkpoint)
-	if floorErr != nil || checkpointErr != nil || compareStreamPositions(checkpointPosition, floorPosition) < 0 {
-		return fmt.Errorf("React Native retention-reconnect resumed checkpoint %q is not at or above the retention floor %q", checkpoint, floor)
+	if err := blackbox.RequireCheckpointAtOrAboveFloor(floor, checkpoint); err != nil {
+		return fmt.Errorf("React Native retention-reconnect %w", err)
 	}
 	return nil
-}
-
-// streamPosition orders kind|commit_lsn|event_ordinal|effect_ordinal. A
-// generation start precedes every commit. At one commit, each effect precedes
-// the transaction end.
-type streamPosition struct {
-	rank, lsn, event, effect uint64
-}
-
-func parseStreamPosition(value string) (streamPosition, error) {
-	parts := strings.Split(value, "|")
-	if len(parts) != 4 {
-		return streamPosition{}, errors.New("stream position is malformed")
-	}
-	if parts[0] == "generation_start" && parts[1] == "" && parts[2] == "" && parts[3] == "" {
-		return streamPosition{}, nil
-	}
-	high, low, found := strings.Cut(parts[1], "/")
-	upper, upperErr := strconv.ParseUint(high, 16, 32)
-	lower, lowerErr := strconv.ParseUint(low, 16, 32)
-	if !found || upperErr != nil || lowerErr != nil {
-		return streamPosition{}, errors.New("stream position LSN is malformed")
-	}
-	position := streamPosition{lsn: upper<<32 | lower}
-	switch {
-	case parts[0] == "transaction_end" && parts[2] == "" && parts[3] == "":
-		position.rank = 2
-	case parts[0] == "effect":
-		event, eventErr := strconv.ParseUint(parts[2], 10, 64)
-		effect, effectErr := strconv.ParseUint(parts[3], 10, 64)
-		if eventErr != nil || effectErr != nil {
-			return streamPosition{}, errors.New("stream position ordinal is malformed")
-		}
-		position.rank, position.event, position.effect = 1, event, effect
-	default:
-		return streamPosition{}, errors.New("stream position kind is malformed")
-	}
-	return position, nil
-}
-
-func compareStreamPositions(left, right streamPosition) int {
-	if (left.rank == 0) != (right.rank == 0) {
-		if left.rank == 0 {
-			return -1
-		}
-		return 1
-	}
-	for _, pair := range [][2]uint64{{left.lsn, right.lsn}, {left.rank, right.rank}, {left.event, right.event}, {left.effect, right.effect}} {
-		if pair[0] != pair[1] {
-			if pair[0] < pair[1] {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
 }
 
 func validateRetentionReconnectCompaction(server scenarios.StateFacts, rebuild scenarios.Operation) error {
