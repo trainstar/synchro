@@ -3594,8 +3594,11 @@ class SyncEngineTests {
                 rejectedID,
                 db.readTransaction { connection -> SynchroMeta.listRejectedMutations(connection).single().mutationID },
             )
-            assertTrue(db.query("SELECT id FROM orders").isEmpty())
-            assertTrue(db.query("PRAGMA table_info(orders)").map { it.getValue("name") }.contains("notes"))
+            // The blocked intent keeps its row visible across the reset (#267).
+            assertEquals(
+                listOf(mapOf("id" to "queued", "ship_address" to "Queue Street", "notes" to null)),
+                db.query("SELECT id, ship_address, notes FROM orders"),
+            )
             assertTrue(db.readTransaction { connection -> SynchroMeta.getClientState(connection).failure == null })
             assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
         } finally {

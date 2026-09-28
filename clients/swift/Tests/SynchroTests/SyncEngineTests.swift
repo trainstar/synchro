@@ -3268,6 +3268,11 @@ final class SyncEngineTests: XCTestCase {
         )
         XCTAssertTrue(try database.query("PRAGMA table_info(orders)", params: nil)
             .contains { ($0["name"] as String?) == "notes" })
+        // The retained rejection keeps its row visible across the reset (#267).
+        XCTAssertEqual(
+            try database.queryOne("SELECT ship_address FROM orders WHERE id = 'rejected-order'", params: nil)?["ship_address"] as String?,
+            "retained"
+        )
         XCTAssertEqual(connectCount.withLock { $0 }, 3)
         XCTAssertEqual(pushCount.withLock { $0 }, 2)
     }
