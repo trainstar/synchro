@@ -2,12 +2,19 @@ import {
   configureInspection,
   nativeForInspection,
   parseClientStateInspection,
+  parseRejectedMutationInspection,
+  parseRetainedMutationInspection,
   parseTransportObservationSnapshot,
   SynchroClient,
 } from './SynchroClient';
 import { InvalidResponseError, mapNativeError } from './errors';
+import { assertValidSQLiteBindParams } from './sqliteValues';
 import type {
   ClientStateInspection,
+  RejectedMutationInspection,
+  RetainedMutationInspection,
+  Row,
+  SQLStatement,
   TransportObservationSnapshot,
   TransportOperationClass,
 } from './types';
@@ -45,6 +52,22 @@ export interface DurableStateInspection {
   }>;
 }
 
+export type RowMetadataInspection = NonNullable<DurableStateInspection['row_metadata']>;
+
+/**
+ * One read-only snapshot of client state. A detail list is null when its record
+ * count exceeds the native capture bound. `applicationRows` holds the rows that the
+ * requested read statements returned inside the same snapshot.
+ */
+export interface ClientStateSnapshotInspection {
+  clientState: ClientStateInspection;
+  retainedMutations: RetainedMutationInspection[] | null;
+  rejectedMutations: RejectedMutationInspection[] | null;
+  rowMetadata: RowMetadataInspection[] | null;
+  rebuildReceipts: DurableStateInspection['rebuild_receipts'] | null;
+  applicationRows: Row[];
+}
+
 export interface SynchroInspectionOptions {
   transportObservationCapacity?: number;
   requireNewDatabase?: boolean;
@@ -62,22 +85,17 @@ export class SynchroInspection {
     );
   }
 
-  async clientState(): Promise<ClientStateInspection> {
+  async captureSnapshot(rowStatements: SQLStatement[] = []): Promise<ClientStateSnapshotInspection> {
     try {
-      return parseClientStateInspection(parseJSON(await nativeForInspection(this.client).inspectClientState()));
-    } catch (error) {
-      throw mapNativeError(error);
-    }
-  }
-
-  async durableState(tableName: string, recordID: string): Promise<DurableStateInspection> {
-    if (tableName.length === 0 || recordID.length === 0) {
-      throw new InvalidResponseError('Durable-state identity is invalid');
-    }
-    try {
-      return parseDurableState(
-        parseJSON(await nativeForInspection(this.client).inspectDurableState(tableName, recordID))
-      );
+      const statements = rowStatements.map((statement) => ({
+        sql: statement.sql,
+        params: assertValidSQLiteBindParams(statement.params ?? []),
+      }));
+      const result = await nativeForInspection(this.client).inspectClientStateSnapshot(statements);
+      return {
+        ...parseSnapshot(parseJSON(result.inspection)),
+        applicationRows: [...result.applicationRows] as Row[],
+      };
     } catch (error) {
       throw mapNativeError(error);
     }
@@ -143,48 +161,65 @@ function parseJSON(source: string): unknown {
   }
 }
 
-function parseDurableState(value: unknown): DurableStateInspection {
-  const proof = requireRecord(value, 'durable state');
+function parseSnapshot(value: unknown): Omit<ClientStateSnapshotInspection, 'applicationRows'> {
+  const snapshot = requireRecord(value, 'client state snapshot');
+  const retained = nullableArray(snapshot.retained_mutations, 'retained mutations');
+  const rejected = nullableArray(snapshot.rejected_mutations, 'rejected mutations');
+  const metadata = nullableArray(snapshot.row_metadata, 'row metadata');
+  const receipts = nullableArray(snapshot.rebuild_receipts, 'rebuild receipts');
+  metadata?.forEach(requireRowMetadata);
+  receipts?.forEach(requireRebuildReceipt);
+  return {
+    clientState: parseClientStateInspection(snapshot.client_state),
+    retainedMutations: retained?.map(parseRetainedMutationInspection) ?? null,
+    rejectedMutations: rejected?.map(parseRejectedMutationInspection) ?? null,
+    rowMetadata: metadata as RowMetadataInspection[] | null,
+    rebuildReceipts: receipts as DurableStateInspection['rebuild_receipts'] | null,
+  };
+}
+
+function nullableArray(value: unknown, name: string): unknown[] | null {
+  if (value === null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    throw new InvalidResponseError(`Native bridge returned invalid ${name}`);
+  }
+  return value;
+}
+
+function requireRowMetadata(value: unknown): void {
+  const metadata = requireRecord(value, 'row metadata');
   if (
-    Object.keys(proof).length !== 2 ||
-    !Object.prototype.hasOwnProperty.call(proof, 'row_metadata') ||
-    !Array.isArray(proof.rebuild_receipts)
+    Object.keys(metadata).length !== 4 ||
+    typeof metadata.table_name !== 'string' ||
+    typeof metadata.record_id !== 'string' ||
+    typeof metadata.server_version !== 'string' ||
+    (metadata.row_checksum !== null && typeof metadata.row_checksum !== 'string')
   ) {
-    throw new InvalidResponseError('Native bridge returned invalid durable state');
+    throw new InvalidResponseError('Native bridge returned invalid row metadata');
   }
-  if (proof.row_metadata !== null) {
-    const metadata = requireRecord(proof.row_metadata, 'row metadata');
-    if (
-      Object.keys(metadata).length !== 4 ||
-      typeof metadata.table_name !== 'string' ||
-      typeof metadata.record_id !== 'string' ||
-      typeof metadata.server_version !== 'string' ||
-      (metadata.row_checksum !== null && typeof metadata.row_checksum !== 'string')
-    ) {
-      throw new InvalidResponseError('Native bridge returned invalid row metadata');
-    }
+}
+
+function requireRebuildReceipt(value: unknown): void {
+  const receipt = requireRecord(value, 'rebuild receipt');
+  if (
+    Object.keys(receipt).length !== 12 ||
+    typeof receipt.rebuild_id_fingerprint !== 'string' ||
+    !isNonnegativeSafeInteger(receipt.page_count) ||
+    !isNonnegativeSafeInteger(receipt.returned_record_count) ||
+    !isStringArray(receipt.request_chain_expected) ||
+    !isStringArray(receipt.request_chain_observed) ||
+    !isStringArray(receipt.record_identities_hex) ||
+    !isStringArray(receipt.received_row_checksums) ||
+    !isStringArray(receipt.computed_row_checksums) ||
+    !isNullableString(receipt.computed_scope_checksum) ||
+    !isNullableString(receipt.final_scope_checksum) ||
+    !isNullableString(receipt.stored_scope_checksum) ||
+    !isNullableString(receipt.local_scope_checksum)
+  ) {
+    throw new InvalidResponseError('Native bridge returned invalid rebuild receipt');
   }
-  for (const receiptValue of proof.rebuild_receipts) {
-    const receipt = requireRecord(receiptValue, 'rebuild receipt');
-    if (
-      Object.keys(receipt).length !== 12 ||
-      typeof receipt.rebuild_id_fingerprint !== 'string' ||
-      !isNonnegativeSafeInteger(receipt.page_count) ||
-      !isNonnegativeSafeInteger(receipt.returned_record_count) ||
-      !isStringArray(receipt.request_chain_expected) ||
-      !isStringArray(receipt.request_chain_observed) ||
-      !isStringArray(receipt.record_identities_hex) ||
-      !isStringArray(receipt.received_row_checksums) ||
-      !isStringArray(receipt.computed_row_checksums) ||
-      !isNullableString(receipt.computed_scope_checksum) ||
-      !isNullableString(receipt.final_scope_checksum) ||
-      !isNullableString(receipt.stored_scope_checksum) ||
-      !isNullableString(receipt.local_scope_checksum)
-    ) {
-      throw new InvalidResponseError('Native bridge returned invalid rebuild receipt');
-    }
-  }
-  return proof as unknown as DurableStateInspection;
 }
 
 function requireRecord(value: unknown, name: string): Record<string, unknown> {

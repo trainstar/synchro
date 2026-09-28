@@ -287,16 +287,10 @@
     [self.impl inspectRejectedMutations:resolve reject:reject];
 }
 
-- (void)inspectClientState:(RCTPromiseResolveBlock)resolve
-                    reject:(RCTPromiseRejectBlock)reject {
-    [self.impl inspectClientState:resolve reject:reject];
-}
-
-- (void)inspectDurableState:(NSString *)tableName
-                       recordID:(NSString *)recordID
-                        resolve:(RCTPromiseResolveBlock)resolve
-                         reject:(RCTPromiseRejectBlock)reject {
-    [self.impl inspectDurableState:tableName recordID:recordID resolve:resolve reject:reject];
+- (void)inspectClientStateSnapshot:(NSArray *)rowStatements
+                           resolve:(RCTPromiseResolveBlock)resolve
+                            reject:(RCTPromiseRejectBlock)reject {
+    [self.impl inspectClientStateSnapshot:rowStatements resolve:resolve reject:reject];
 }
 
 - (void)inspectTransportObservations:(RCTPromiseResolveBlock)resolve
@@ -465,10 +459,7 @@ RCT_EXTERN_METHOD(inspectRetainedMutations:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(inspectRejectedMutations:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
-RCT_EXTERN_METHOD(inspectClientState:(RCTPromiseResolveBlock)resolve
-                  reject:(RCTPromiseRejectBlock)reject)
-RCT_EXTERN_METHOD(inspectDurableState:(NSString *)tableName
-                  recordID:(NSString *)recordID
+RCT_EXTERN_METHOD(inspectClientStateSnapshot:(NSArray *)rowStatements
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(inspectTransportObservations:(RCTPromiseResolveBlock)resolve

@@ -374,7 +374,7 @@ function parseNativeArray(json: string, name: string): unknown[] {
   return value;
 }
 
-function parseRetainedMutationInspection(
+export function parseRetainedMutationInspection(
   value: unknown,
   index: number
 ): RetainedMutationInspection {
@@ -457,7 +457,7 @@ function parseRetainedMutationInspection(
   };
 }
 
-function parseRejectedMutationInspection(
+export function parseRejectedMutationInspection(
   value: unknown,
   index: number
 ): RejectedMutationInspection {

@@ -8,6 +8,9 @@ import android.util.Base64
 import android.os.Process
 import com.facebook.react.bridge.*
 import com.trainstar.synchro.*
+import com.trainstar.synchro.inspection.ClientStateCaptureInspection
+import com.trainstar.synchro.inspection.RebuildReceiptInspection
+import com.trainstar.synchro.inspection.RowMetadataInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import com.trainstar.synchro.inspection.TransportObservationSnapshot
@@ -405,13 +408,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            val nativeStatements = (0 until statements.size()).map { i ->
-                val item = statements.getMap(i) ?: throw IllegalArgumentException("Invalid SQL statement at index $i")
-                val sql = item.getString("sql") ?: throw IllegalArgumentException("Missing SQL at index $i")
-                val params = if (item.hasKey("params")) item.getArray("params") else null
-                SQLStatement(sql, params?.let { parseParams(it) } ?: emptyArray())
-            }
-            val total = c.executeBatch(nativeStatements)
+            val total = c.executeBatch(parseStatements(statements))
             val map = Arguments.createMap().apply {
                 putInt("totalRowsAffected", total)
             }
@@ -1042,110 +1039,33 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Reads client state, retained details, and the requested application rows from one read-only snapshot. */
     @ReactMethod
-    override fun inspectClientState(promise: Promise) {
+    override fun inspectClientStateSnapshot(rowStatements: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
         try {
-            val inspection = SynchroInspection(c)
-            val capture = inspection.captureState(maximumRecords = 512)
-            val schema: Any = capture.schema?.let {
-                JSONObject().put("version", it.version).put("hash", it.hash)
-            } ?: JSONObject.NULL
-            val scopeStates = JSONArray(capture.scopeStates.map { value ->
-                JSONObject().apply {
-                    put("scope_id", value.scopeID)
-                    put("cursor", value.cursor ?: JSONObject.NULL)
-                    put("checksum", value.checksum ?: JSONObject.NULL)
-                    put("local_checksum", value.localChecksum)
-                    put("generation", value.generation)
+            val statements = parseStatements(rowStatements)
+            val rows = mutableListOf<Row>()
+            val snapshot = SynchroInspection(c).captureSnapshot(maximumRecords = 512) { _, transaction ->
+                for (statement in statements) {
+                    rows += transaction.query(statement.sql, statement.params)
                 }
+            }
+            val capture = snapshot.capture
+            val inspection = JSONObject().apply {
+                put("client_state", clientStateJson(capture))
+                put("retained_mutations", snapshot.retainedMutations?.let { JSONArray(it.map(::retainedMutationJson)) } ?: JSONObject.NULL)
+                put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::rejectedMutationJson)) } ?: JSONObject.NULL)
+                put("row_metadata", if (capture.rowMetadataTruncated) JSONObject.NULL else JSONArray(capture.rowMetadata.map(::rowMetadataJson)))
+                put("rebuild_receipts", if (capture.rebuildReceiptsTruncated) JSONObject.NULL else JSONArray(capture.rebuildReceipts.map(::rebuildReceiptJson)))
+            }
+            promise.resolve(Arguments.createMap().apply {
+                putString("inspection", inspection.toString())
+                putArray("applicationRows", rowsToWritableArray(rows))
             })
-            val scopeRows = JSONArray(capture.scopeRows.map { value ->
-                JSONObject().apply {
-                    put("scope_id", value.scopeID)
-                    put("table_name", value.tableName)
-                    put("record_id", value.recordID)
-                    put("checksum", value.checksum)
-                    put("generation", value.generation)
-                }
-            })
-            val attempts = JSONArray(capture.rebuildAttempts.map { value ->
-                JSONObject().apply {
-                    put("scope_id", value.scopeID)
-                    put("rebuild_id", value.rebuildID)
-                    put("client_generation", value.clientGeneration)
-                    put("schema_version", value.schemaVersion)
-                    put("schema_hash", value.schemaHash)
-                    put("generation", value.generation)
-                    put("cursor", value.cursor ?: JSONObject.NULL)
-                    put("page_limit", value.pageLimit)
-                }
-            })
-            promise.resolve(JSONObject().apply {
-                put("schema", schema)
-                put("scope_states", scopeStates)
-                put("scope_rows", scopeRows)
-                put("rebuild_attempts", attempts)
-                put("application_row_count", capture.applicationRowCount)
-                put("mutation_ledger_count", capture.mutationLedgerCount)
-                put("mutation_outcome_count", capture.mutationOutcomeCount)
-                put("sealed_batch_count", capture.sealedBatchCount)
-                put("rejected_mutation_count", capture.rejectedMutationCount)
-                put("scope_state_count", capture.scopeStateCount)
-                put("scope_row_count", capture.scopeRowCount)
-                put("provenance_count", capture.provenanceCount)
-                put("row_metadata_count", capture.rowMetadataCount)
-                put("rebuild_attempt_count", capture.rebuildAttemptCount)
-                put("rebuild_receipt_count", capture.rebuildReceiptCount)
-                put(
-                    "provenance_maintenance_work_cursor",
-                    capture.provenanceMaintenanceWorkCursor.toString(),
-                )
-            }.toString())
-        } catch (error: Exception) {
-            rejectWithError(promise, error)
-        }
-    }
-
-    @ReactMethod
-    override fun inspectDurableState(tableName: String, recordID: String, promise: Promise) {
-        val c = client ?: run {
-            promise.reject("NOT_CONNECTED", "Client not initialized")
-            return
-        }
-        try {
-            val inspection = SynchroInspection(c)
-            val metadataJson: Any = inspection.rowMetadata(tableName, recordID)?.let { value ->
-                JSONObject().apply {
-                    put("table_name", value.tableName)
-                    put("record_id", value.recordID)
-                    put("server_version", value.serverVersion)
-                    put("row_checksum", value.rowChecksum ?: JSONObject.NULL)
-                }
-            } ?: JSONObject.NULL
-            val receipts = JSONArray(inspection.rebuildReceipts().map { value ->
-                JSONObject().apply {
-                    put("rebuild_id_fingerprint", value.rebuildIDFingerprint)
-                    put("page_count", value.pageCount)
-                    put("returned_record_count", value.returnedRecordCount)
-                    put("request_chain_expected", JSONArray(value.requestChainExpected))
-                    put("request_chain_observed", JSONArray(value.requestChainObserved))
-                    put("record_identities_hex", JSONArray(value.recordIdentitiesHex))
-                    put("received_row_checksums", JSONArray(value.receivedRowChecksums))
-                    put("computed_row_checksums", JSONArray(value.computedRowChecksums))
-                    put("computed_scope_checksum", value.computedScopeChecksum ?: JSONObject.NULL)
-                    put("final_scope_checksum", value.finalScopeChecksum ?: JSONObject.NULL)
-                    put("stored_scope_checksum", value.storedScopeChecksum ?: JSONObject.NULL)
-                    put("local_scope_checksum", value.localScopeChecksum ?: JSONObject.NULL)
-                }
-            })
-            promise.resolve(JSONObject().apply {
-                put("row_metadata", metadataJson)
-                put("rebuild_receipts", receipts)
-            }.toString())
         } catch (error: Exception) {
             rejectWithError(promise, error)
         }
@@ -1448,6 +1368,94 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             failure.metadata.forEach { (key, value) -> put(key, value) }
         })
     }
+
+    private fun clientStateJson(capture: ClientStateCaptureInspection): JSONObject {
+        val schema: Any = capture.schema?.let {
+            JSONObject().put("version", it.version).put("hash", it.hash)
+        } ?: JSONObject.NULL
+        val scopeStates = JSONArray(capture.scopeStates.map { value ->
+            JSONObject().apply {
+                put("scope_id", value.scopeID)
+                put("cursor", value.cursor ?: JSONObject.NULL)
+                put("checksum", value.checksum ?: JSONObject.NULL)
+                put("local_checksum", value.localChecksum)
+                put("generation", value.generation)
+            }
+        })
+        val scopeRows = JSONArray(capture.scopeRows.map { value ->
+            JSONObject().apply {
+                put("scope_id", value.scopeID)
+                put("table_name", value.tableName)
+                put("record_id", value.recordID)
+                put("checksum", value.checksum)
+                put("generation", value.generation)
+            }
+        })
+        val attempts = JSONArray(capture.rebuildAttempts.map { value ->
+            JSONObject().apply {
+                put("scope_id", value.scopeID)
+                put("rebuild_id", value.rebuildID)
+                put("client_generation", value.clientGeneration)
+                put("schema_version", value.schemaVersion)
+                put("schema_hash", value.schemaHash)
+                put("generation", value.generation)
+                put("cursor", value.cursor ?: JSONObject.NULL)
+                put("page_limit", value.pageLimit)
+            }
+        })
+        return JSONObject().apply {
+            put("schema", schema)
+            put("scope_states", scopeStates)
+            put("scope_rows", scopeRows)
+            put("rebuild_attempts", attempts)
+            put("application_row_count", capture.applicationRowCount)
+            put("mutation_ledger_count", capture.mutationLedgerCount)
+            put("mutation_outcome_count", capture.mutationOutcomeCount)
+            put("sealed_batch_count", capture.sealedBatchCount)
+            put("rejected_mutation_count", capture.rejectedMutationCount)
+            put("scope_state_count", capture.scopeStateCount)
+            put("scope_row_count", capture.scopeRowCount)
+            put("provenance_count", capture.provenanceCount)
+            put("row_metadata_count", capture.rowMetadataCount)
+            put("rebuild_attempt_count", capture.rebuildAttemptCount)
+            put("rebuild_receipt_count", capture.rebuildReceiptCount)
+            put(
+                "provenance_maintenance_work_cursor",
+                capture.provenanceMaintenanceWorkCursor.toString(),
+            )
+        }
+    }
+
+    private fun rowMetadataJson(value: RowMetadataInspection): JSONObject = JSONObject().apply {
+        put("table_name", value.tableName)
+        put("record_id", value.recordID)
+        put("server_version", value.serverVersion)
+        put("row_checksum", value.rowChecksum ?: JSONObject.NULL)
+    }
+
+    private fun rebuildReceiptJson(value: RebuildReceiptInspection): JSONObject =
+        JSONObject().apply {
+            put("rebuild_id_fingerprint", value.rebuildIDFingerprint)
+            put("page_count", value.pageCount)
+            put("returned_record_count", value.returnedRecordCount)
+            put("request_chain_expected", JSONArray(value.requestChainExpected))
+            put("request_chain_observed", JSONArray(value.requestChainObserved))
+            put("record_identities_hex", JSONArray(value.recordIdentitiesHex))
+            put("received_row_checksums", JSONArray(value.receivedRowChecksums))
+            put("computed_row_checksums", JSONArray(value.computedRowChecksums))
+            put("computed_scope_checksum", value.computedScopeChecksum ?: JSONObject.NULL)
+            put("final_scope_checksum", value.finalScopeChecksum ?: JSONObject.NULL)
+            put("stored_scope_checksum", value.storedScopeChecksum ?: JSONObject.NULL)
+            put("local_scope_checksum", value.localScopeChecksum ?: JSONObject.NULL)
+        }
+
+    private fun parseStatements(statements: ReadableArray): List<SQLStatement> =
+        (0 until statements.size()).map { i ->
+            val item = statements.getMap(i) ?: throw IllegalArgumentException("Invalid SQL statement at index $i")
+            val sql = item.getString("sql") ?: throw IllegalArgumentException("Missing SQL at index $i")
+            val params = if (item.hasKey("params")) item.getArray("params") else null
+            SQLStatement(sql, params?.let { parseParams(it) } ?: emptyArray())
+        }
 
     private fun retainedMutationJson(value: RetainedMutationInspection): JSONObject = when (value) {
         is RetainedMutationInspection.Current -> pendingMutationJson(value.mutation)
