@@ -1,6 +1,9 @@
 package com.trainstar.synchro.inspection
 
+import com.trainstar.synchro.RejectedMutationInspection
+import com.trainstar.synchro.RetainedMutationInspection
 import com.trainstar.synchro.SchemaRef
+import com.trainstar.synchro.SyncFailure
 
 /** A bounded read-only view of one durable server scope. */
 @SynchroProofApi
@@ -58,6 +61,21 @@ data class ClientStateCaptureInspection(
     val rebuildAttemptCount: Int,
     val rebuildReceiptCount: Int,
     val provenanceMaintenanceWorkCursor: Long,
+)
+
+/**
+ * Durable client facts from one read-only database snapshot. [retainedMutations]
+ * is present only when `capture.mutationLedgerCount` is at most the record limit.
+ * [rejectedMutations] is present only when `capture.rejectedMutationCount` is at
+ * most the record limit.
+ */
+@SynchroProofApi
+data class ClientStateSnapshotInspection(
+    val capture: ClientStateCaptureInspection,
+    val pendingChangeCount: Int,
+    val retainedMutations: List<RetainedMutationInspection>?,
+    val rejectedMutations: List<RejectedMutationInspection>?,
+    val blockingFailure: SyncFailure?,
 )
 
 /** A bounded read-only view of an unfinished rebuild. */

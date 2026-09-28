@@ -8,6 +8,7 @@ import android.app.Application
 import android.database.sqlite.SQLiteDatabase
 import android.os.Bundle
 import com.trainstar.synchro.inspection.ClientStateCaptureInspection
+import com.trainstar.synchro.inspection.ClientStateSnapshotInspection
 import com.trainstar.synchro.inspection.RebuildAttemptInspection
 import com.trainstar.synchro.inspection.RebuildReceiptInspection
 import com.trainstar.synchro.inspection.RowMetadataInspection
@@ -151,7 +152,7 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
 
     fun getSyncStatus(): SyncStatus = syncEngine.getSyncStatus()
 
-    fun inspectPendingMutations(): List<PendingMutationInspection> =
+    fun inspectPendingMutations(): List<RetainedMutationInspection> =
         changeTracker.inspectPendingMutations()
 
     /**
@@ -160,32 +161,33 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
      * pending set, so an application that reports the complete retained
      * ledger reads this instead.
      */
-    fun inspectRetainedMutations(): List<PendingMutationInspection> =
+    fun inspectRetainedMutations(): List<RetainedMutationInspection> =
         changeTracker.inspectRetainedMutations()
 
     /** Returns the exact number of mutations retained for local reconciliation. */
     fun retainedMutationCount(): Int = changeTracker.retainedMutationCount()
 
     fun inspectRejectedMutations(): List<RejectedMutationInspection> =
-        database.readTransaction { db ->
-            SynchroMeta.listRejectedMutations(db).map { rejected ->
-                RejectedMutationInspection(
-                    mutationID = rejected.mutationID,
-                    tableName = rejected.tableName,
-                    recordID = rejected.recordID,
-                    status = rejected.status.asRejectedMutationStatus(),
-                    code = rejected.code.asMutationRejectionCode(),
-                    message = rejected.message,
-                    serverRowJSON = rejected.serverRowJson,
-                    serverVersion = rejected.serverVersion,
-                    mutationJSON = rejected.mutationJSON
-                        ?: throw SynchroError.InvalidResponse("retained rejection lacks its exact mutation JSON"),
-                    rejectionJSON = rejected.rejectionJSON
-                        ?: throw SynchroError.InvalidResponse("retained rejection lacks its exact rejection JSON"),
-                    createdAt = rejected.createdAt,
-                    updatedAt = rejected.updatedAt,
-                )
-            }
+        database.readTransaction(::inspectRejectedMutations)
+
+    private fun inspectRejectedMutations(db: SQLiteDatabase): List<RejectedMutationInspection> =
+        SynchroMeta.listRejectedMutations(db).map { rejected ->
+            RejectedMutationInspection(
+                mutationID = rejected.mutationID,
+                tableName = rejected.tableName,
+                recordID = rejected.recordID,
+                status = rejected.status.asRejectedMutationStatus(),
+                code = rejected.code.asMutationRejectionCode(),
+                message = rejected.message,
+                serverRowJSON = rejected.serverRowJson,
+                serverVersion = rejected.serverVersion,
+                mutationJSON = rejected.mutationJSON
+                    ?: throw SynchroError.InvalidResponse("retained rejection lacks its exact mutation JSON"),
+                rejectionJSON = rejected.rejectionJSON
+                    ?: throw SynchroError.InvalidResponse("retained rejection lacks its exact rejection JSON"),
+                createdAt = rejected.createdAt,
+                updatedAt = rejected.updatedAt,
+            )
         }
 
     fun clearRejectedMutations() {
@@ -260,75 +262,115 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     internal fun inspectClientStateCapture(maximumRecords: Int): ClientStateCaptureInspection {
         require(maximumRecords in 0 until Int.MAX_VALUE) { "inspection record limit is invalid" }
         return database.stateInspectionTransaction { db, provenanceMaintenanceWork ->
-            val scopeStateCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scopes")
-            val scopeRowCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scope_rows")
-            val rebuildAttemptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_attempts")
-            val rebuildReceiptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts")
-            val rebuildReceiptGroupCount = inspectionCount(
-                db,
-                "SELECT COUNT(*) FROM (SELECT scope_id, rebuild_id FROM _synchro_rebuild_page_receipts GROUP BY scope_id, rebuild_id)",
-            )
-            val rowMetadataCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_row_versions")
-            val scopeStates = if (maximumRecords == 0) emptyList() else {
-                inspectScopeStates(db, maximumRecords, truncate = true)
-            }
-            val scopeRows = if (maximumRecords == 0) emptyList() else {
-                inspectScopeRows(db, maximumRecords, truncate = true)
-            }
-            val rebuildAttempts = if (maximumRecords == 0) emptyList() else {
-                inspectRebuildAttempts(db, maximumRecords, truncate = true)
-            }
-            val rebuildReceipts = if (maximumRecords == 0) emptyList() else {
-                inspectRebuildReceipts(db, maximumRecords, limitGroups = true)
-            }
-            val rowMetadata = if (maximumRecords == 0) emptyList() else {
-                SynchroMeta.listRowMetadata(db, maximumRecords, truncate = true).map {
-                    RowMetadataInspection(it.tableName, it.recordID, it.serverVersion, it.rowChecksumJSON)
-                }
-            }
-            val scopeStatesTruncated = scopeStateCount > maximumRecords
-            val scopeRowsTruncated = scopeRowCount > maximumRecords
-            val rebuildAttemptsTruncated = rebuildAttemptCount > maximumRecords
-            val rebuildReceiptsTruncated = rebuildReceiptGroupCount > maximumRecords
-            val rowMetadataTruncated = rowMetadataCount > maximumRecords
-            val provenanceCount = inspectionCount(
-                db,
-                "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)",
-            )
-            ClientStateCaptureInspection(
-                schema = inspectCurrentSchema(db),
-                scopeStates = scopeStates,
-                scopeStatesTruncated = scopeStatesTruncated,
-                scopeRows = scopeRows,
-                scopeRowsTruncated = scopeRowsTruncated,
-                rebuildAttempts = rebuildAttempts,
-                rebuildAttemptsTruncated = rebuildAttemptsTruncated,
-                rebuildReceipts = rebuildReceipts.take(maximumRecords),
-                rebuildReceiptsTruncated = rebuildReceiptsTruncated,
-                rowMetadata = rowMetadata,
-                rowMetadataTruncated = rowMetadataTruncated,
-                overflowed = scopeStatesTruncated ||
-                    scopeRowsTruncated ||
-                    rebuildAttemptsTruncated ||
-                    rebuildReceiptsTruncated ||
-                    rowMetadataTruncated,
-                applicationRowCount = inspectApplicationRowCount(db),
-                mutationLedgerCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_pending_changes"),
-                mutationOutcomeCount = inspectionCount(
-                    db,
-                    "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state IN ('accepted', 'conflict', 'rejected_terminal')",
-                ),
-                sealedBatchCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_push_batches"),
-                rejectedMutationCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
-                scopeStateCount = scopeStateCount,
-                scopeRowCount = scopeRowCount,
-                provenanceCount = provenanceCount,
-                rowMetadataCount = rowMetadataCount,
-                rebuildAttemptCount = rebuildAttemptCount,
-                rebuildReceiptCount = rebuildReceiptCount,
-                provenanceMaintenanceWorkCursor = provenanceMaintenanceWork,
-            )
+            inspectClientStateCapture(db, maximumRecords, provenanceMaintenanceWork)
         }
+    }
+
+    /**
+     * Reads counts, details, and application rows from one read-only snapshot.
+     * [readApplicationRows] runs inside that snapshot. The blocking failure is the
+     * engine status at snapshot time, because Kotlin does not store it durably.
+     */
+    internal fun inspectClientStateSnapshot(
+        maximumRecords: Int,
+        readApplicationRows: (ClientStateCaptureInspection, ApplicationReadTransaction) -> Unit,
+    ): ClientStateSnapshotInspection {
+        require(maximumRecords in 0 until Int.MAX_VALUE) { "inspection record limit is invalid" }
+        return database.stateInspectionTransaction { db, provenanceMaintenanceWork ->
+            val capture = inspectClientStateCapture(db, maximumRecords, provenanceMaintenanceWork)
+            val snapshot = ClientStateSnapshotInspection(
+                capture = capture,
+                pendingChangeCount = changeTracker.pendingChangeCount(db),
+                retainedMutations = if (capture.mutationLedgerCount <= maximumRecords) {
+                    changeTracker.inspectMutations(db, includeTerminal = true)
+                } else {
+                    null
+                },
+                rejectedMutations = if (capture.rejectedMutationCount <= maximumRecords) {
+                    inspectRejectedMutations(db)
+                } else {
+                    null
+                },
+                blockingFailure = (syncEngine.getSyncStatus() as? SyncStatus.Error)?.failure,
+            )
+            database.applicationRead(db) { transaction -> readApplicationRows(capture, transaction) }
+            snapshot
+        }
+    }
+
+    private fun inspectClientStateCapture(
+        db: SQLiteDatabase,
+        maximumRecords: Int,
+        provenanceMaintenanceWork: Long,
+    ): ClientStateCaptureInspection {
+        val scopeStateCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scopes")
+        val scopeRowCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_scope_rows")
+        val rebuildAttemptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_attempts")
+        val rebuildReceiptCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rebuild_page_receipts")
+        val rebuildReceiptGroupCount = inspectionCount(
+            db,
+            "SELECT COUNT(*) FROM (SELECT scope_id, rebuild_id FROM _synchro_rebuild_page_receipts GROUP BY scope_id, rebuild_id)",
+        )
+        val rowMetadataCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_row_versions")
+        val scopeStates = if (maximumRecords == 0) emptyList() else {
+            inspectScopeStates(db, maximumRecords, truncate = true)
+        }
+        val scopeRows = if (maximumRecords == 0) emptyList() else {
+            inspectScopeRows(db, maximumRecords, truncate = true)
+        }
+        val rebuildAttempts = if (maximumRecords == 0) emptyList() else {
+            inspectRebuildAttempts(db, maximumRecords, truncate = true)
+        }
+        val rebuildReceipts = if (maximumRecords == 0) emptyList() else {
+            inspectRebuildReceipts(db, maximumRecords, limitGroups = true)
+        }
+        val rowMetadata = if (maximumRecords == 0) emptyList() else {
+            SynchroMeta.listRowMetadata(db, maximumRecords, truncate = true).map {
+                RowMetadataInspection(it.tableName, it.recordID, it.serverVersion, it.rowChecksumJSON)
+            }
+        }
+        val scopeStatesTruncated = scopeStateCount > maximumRecords
+        val scopeRowsTruncated = scopeRowCount > maximumRecords
+        val rebuildAttemptsTruncated = rebuildAttemptCount > maximumRecords
+        val rebuildReceiptsTruncated = rebuildReceiptGroupCount > maximumRecords
+        val rowMetadataTruncated = rowMetadataCount > maximumRecords
+        val provenanceCount = inspectionCount(
+            db,
+            "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)",
+        )
+        return ClientStateCaptureInspection(
+            schema = inspectCurrentSchema(db),
+            scopeStates = scopeStates,
+            scopeStatesTruncated = scopeStatesTruncated,
+            scopeRows = scopeRows,
+            scopeRowsTruncated = scopeRowsTruncated,
+            rebuildAttempts = rebuildAttempts,
+            rebuildAttemptsTruncated = rebuildAttemptsTruncated,
+            rebuildReceipts = rebuildReceipts.take(maximumRecords),
+            rebuildReceiptsTruncated = rebuildReceiptsTruncated,
+            rowMetadata = rowMetadata,
+            rowMetadataTruncated = rowMetadataTruncated,
+            overflowed = scopeStatesTruncated ||
+                scopeRowsTruncated ||
+                rebuildAttemptsTruncated ||
+                rebuildReceiptsTruncated ||
+                rowMetadataTruncated,
+            applicationRowCount = inspectApplicationRowCount(db),
+            mutationLedgerCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_pending_changes"),
+            mutationOutcomeCount = inspectionCount(
+                db,
+                "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state IN ('accepted', 'conflict', 'rejected_terminal')",
+            ),
+            sealedBatchCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_push_batches"),
+            rejectedMutationCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_rejected_mutations"),
+            scopeStateCount = scopeStateCount,
+            scopeRowCount = scopeRowCount,
+            provenanceCount = provenanceCount,
+            rowMetadataCount = rowMetadataCount,
+            rebuildAttemptCount = rebuildAttemptCount,
+            rebuildReceiptCount = rebuildReceiptCount,
+            provenanceMaintenanceWorkCursor = provenanceMaintenanceWork,
+        )
     }
 
     internal fun inspectProvenanceMaintenanceWorkCursor(): Long =

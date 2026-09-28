@@ -112,7 +112,7 @@ final class InspectionTests: XCTestCase {
         try await firstClient.close()
 
         let restartedClient = try SynchroClient(config: config)
-        let inspections = try restartedClient.inspectPendingMutations()
+        let inspections = try restartedClient.inspectPendingMutations().currentRecords()
 
         XCTAssertEqual(inspections.map(\.recordID), ["o1", "o2"])
         XCTAssertEqual(inspections.map(\.localOrder), inspections.map(\.localOrder).sorted())
@@ -144,7 +144,7 @@ final class InspectionTests: XCTestCase {
             "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
             params: ["o1", "authored", "2026-01-01T00:00:00.000000Z"]
         )
-        let pending = try XCTUnwrap(firstClient.inspectPendingMutations().first)
+        let pending = try XCTUnwrap(firstClient.inspectPendingMutations().currentRecords().first)
         let mutationID = pending.mutationID
         let mutation = Mutation(
             mutationID: mutationID,
@@ -208,18 +208,18 @@ final class InspectionTests: XCTestCase {
         XCTAssertEqual(rejected.mutationJSON, mutationJSON)
         XCTAssertEqual(rejected.rejectionJSON, rejectionJSON)
 
-        let retainedBeforeClear = try XCTUnwrap(restartedClient.inspectRetainedMutations().first)
+        let retainedBeforeClear = try XCTUnwrap(restartedClient.inspectRetainedMutations().currentRecords().first)
         XCTAssertEqual(retainedBeforeClear.status, .serverRejected)
 
         try restartedClient.clearRejectedMutations()
 
         XCTAssertTrue(try restartedClient.inspectRejectedMutations().isEmpty)
-        XCTAssertEqual(try restartedClient.inspectRetainedMutations(), [retainedBeforeClear])
+        XCTAssertEqual(try restartedClient.inspectRetainedMutations().currentRecords(), [retainedBeforeClear])
         try await restartedClient.close()
 
         let afterClearRestart = try SynchroClient(config: config)
         XCTAssertTrue(try afterClearRestart.inspectRejectedMutations().isEmpty)
-        XCTAssertEqual(try afterClearRestart.inspectRetainedMutations(), [retainedBeforeClear])
+        XCTAssertEqual(try afterClearRestart.inspectRetainedMutations().currentRecords(), [retainedBeforeClear])
         XCTAssertEqual(try afterClearRestart.inspectCurrentSchema(), pending.authoredSchema)
         try await afterClearRestart.close()
         removeDatabase(at: config.dbPath)
@@ -377,6 +377,11 @@ final class InspectionTests: XCTestCase {
     func testAtomicStateCaptureRejectsMixedCommittedGenerations() async throws {
         let config = try prepareClientConfig()
         let client = try SynchroClient(config: config)
+        _ = try client.execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            params: ["o1", "authored", "2026-01-01T00:00:00.000000Z"]
+        )
+        let rejection = try rejectionFixture(client)
         let database = try SynchroDatabase(path: config.dbPath)
         let inspection = SynchroInspection(client: client)
         let writerStarted = expectation(description: "writer started")
@@ -387,8 +392,34 @@ final class InspectionTests: XCTestCase {
                     try db.execute(sql: "DELETE FROM _synchro_rebuild_attempts")
                     try SynchroMeta.clearAllScopeRows(db)
                     try SynchroMeta.clearAllScopes(db)
-                    guard generation.isMultiple(of: 2) else { return }
+                    try SynchroMeta.clearRejectedMutations(db)
+                    guard generation.isMultiple(of: 2) else {
+                        try db.execute(
+                            sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'unsealed' WHERE mutation_id = ?",
+                            arguments: [rejection.mutationID]
+                        )
+                        try db.execute(sql: "UPDATE orders SET title = 'odd' WHERE id = 'o1'")
+                        return
+                    }
                     let value = Int64(generation)
+                    try db.execute(
+                        sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'rejected' WHERE mutation_id = ?",
+                        arguments: [rejection.mutationID]
+                    )
+                    try SynchroMeta.upsertRejectedMutation(
+                        db,
+                        mutationID: rejection.mutationID,
+                        tableName: "orders",
+                        recordID: "o1",
+                        status: "rejected_terminal",
+                        code: "policy_rejected",
+                        message: "gen-\(generation)",
+                        serverRow: nil,
+                        serverVersion: nil,
+                        mutationJSON: rejection.mutationJSON,
+                        rejectedJSON: rejection.rejectionJSON
+                    )
+                    try db.execute(sql: "UPDATE orders SET title = ? WHERE id = 'o1'", arguments: ["gen-\(generation)"])
                     try SynchroMeta.upsertScope(
                         db,
                         scopeID: "scope",
@@ -426,17 +457,28 @@ final class InspectionTests: XCTestCase {
 
         for _ in 1...200 {
             let capture = try inspection.captureState(maximumRecords: 1)
-            XCTAssertFalse(capture.overflowed)
-            XCTAssertEqual(capture.scopeStateCount, capture.scopeStates.count)
-            XCTAssertEqual(capture.scopeRowCount, capture.scopeRows.count)
-            XCTAssertEqual(capture.rebuildAttemptCount, capture.rebuildAttempts.count)
-            if let scope = capture.scopeStates.first {
-                let row = try XCTUnwrap(capture.scopeRows.first)
-                let attempt = try XCTUnwrap(capture.rebuildAttempts.first)
-                XCTAssertEqual(scope.generation, row.generation)
-                XCTAssertEqual(scope.generation, attempt.generation)
-                XCTAssertEqual(scope.cursor, row.recordID.replacingOccurrences(of: "order-", with: "cursor-"))
-                XCTAssertEqual(scope.cursor, attempt.cursor)
+            try assertOneGeneration(capture)
+
+            var title: String?
+            let snapshot = try inspection.captureSnapshot(maximumRecords: 1) { _, transaction in
+                title = try transaction.queryOne("SELECT title FROM orders WHERE id = 'o1'")?["title"]
+            }
+            try assertOneGeneration(snapshot.capture)
+            let rejected = try XCTUnwrap(snapshot.rejectedMutations)
+            let retained = try XCTUnwrap(snapshot.retainedMutations)
+            XCTAssertEqual(rejected.count, snapshot.capture.rejectedMutationCount)
+            XCTAssertEqual(retained.map(\.mutationID), [rejection.mutationID])
+            if let scope = snapshot.capture.scopeStates.first {
+                let generation = "gen-\(scope.generation)"
+                XCTAssertEqual(rejected.map(\.message), [generation])
+                XCTAssertEqual(retained.map(\.status), [.serverRejected])
+                XCTAssertEqual(snapshot.pendingChangeCount, 0)
+                XCTAssertEqual(title, generation)
+            } else {
+                XCTAssertEqual(rejected, [])
+                XCTAssertEqual(retained.map(\.status), [.pending])
+                XCTAssertEqual(snapshot.pendingChangeCount, 1)
+                XCTAssertTrue(title == "odd" || title == "authored")
             }
             await Task.yield()
         }
@@ -445,6 +487,115 @@ final class InspectionTests: XCTestCase {
         try database.close()
         try await client.close()
         removeDatabase(at: config.dbPath)
+    }
+
+    private func assertOneGeneration(_ capture: ClientStateCaptureInspection) throws {
+        XCTAssertFalse(capture.overflowed)
+        XCTAssertEqual(capture.scopeStateCount, capture.scopeStates.count)
+        XCTAssertEqual(capture.scopeRowCount, capture.scopeRows.count)
+        XCTAssertEqual(capture.rebuildAttemptCount, capture.rebuildAttempts.count)
+        if let scope = capture.scopeStates.first {
+            let row = try XCTUnwrap(capture.scopeRows.first)
+            let attempt = try XCTUnwrap(capture.rebuildAttempts.first)
+            XCTAssertEqual(scope.generation, row.generation)
+            XCTAssertEqual(scope.generation, attempt.generation)
+            XCTAssertEqual(scope.cursor, row.recordID.replacingOccurrences(of: "order-", with: "cursor-"))
+            XCTAssertEqual(scope.cursor, attempt.cursor)
+        }
+    }
+
+    private func rejectionFixture(
+        _ client: SynchroClient
+    ) throws -> (mutationID: String, mutationJSON: String, rejectionJSON: String) {
+        let pending = try XCTUnwrap(client.inspectPendingMutations().currentRecords().first)
+        let mutation = Mutation(
+            mutationID: pending.mutationID,
+            table: pending.tableID,
+            op: pending.operation,
+            pk: [pending.primaryKeyFieldID: AnyCodable(pending.recordID)],
+            authoredSchema: pending.authoredSchema,
+            baseVersion: pending.baseVersion,
+            clientVersion: pending.clientVersion,
+            columns: Dictionary(uniqueKeysWithValues: pending.authoredFields.map { ($0.fieldID, $0.value) })
+        )
+        let rejection = RejectedMutation(
+            mutationID: pending.mutationID,
+            table: pending.tableID,
+            pk: mutation.pk,
+            outcomeSchema: pending.authoredSchema,
+            status: .rejectedTerminal,
+            code: .policyRejected,
+            message: "not allowed",
+            retryable: false,
+            serverRow: nil,
+            rowChecksum: nil,
+            serverVersion: nil,
+            authoredSchema: nil,
+            currentSchema: nil,
+            incompatibleFieldIDs: nil
+        )
+        return (
+            pending.mutationID,
+            try XCTUnwrap(String(data: JSONEncoder.synchroEncoder().encode(mutation), encoding: .utf8)),
+            try XCTUnwrap(String(data: JSONEncoder.synchroEncoder().encode(rejection), encoding: .utf8))
+        )
+    }
+
+    func testSnapshotReportsNormalizedLedgerAfterPendingCount() async throws {
+        let config = try prepareClientConfig()
+        let client = try SynchroClient(config: config)
+        let inspection = SynchroInspection(client: client)
+        _ = try client.execute(
+            "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+            params: ["o1", "inserted", "2026-01-01T00:00:00.000000Z"]
+        )
+        _ = try client.execute("UPDATE orders SET title = ? WHERE id = ?", params: ["updated", "o1"])
+
+        XCTAssertEqual(try client.inspectRetainedMutations().map(\.status), [.pending, .pending])
+        XCTAssertEqual(try inspection.captureState(maximumRecords: 8).mutationLedgerCount, 2)
+
+        XCTAssertEqual(try client.pendingChangeCount(), 1)
+        var title: String?
+        let snapshot = try inspection.captureSnapshot(maximumRecords: 8) { _, transaction in
+            title = try transaction.queryOne("SELECT title FROM orders WHERE id = 'o1'")?["title"]
+            XCTAssertThrowsError(try transaction.execute("UPDATE orders SET title = 'snapshot write' WHERE id = 'o1'"))
+        }
+
+        XCTAssertEqual(title, "updated")
+        XCTAssertEqual(snapshot.capture.mutationLedgerCount, 3)
+        let retained = try XCTUnwrap(snapshot.retainedMutations).currentRecords()
+        XCTAssertEqual(retained.map(\.status), [.supersededBeforeSend, .supersededBeforeSend, .pending])
+        XCTAssertEqual(retained.map(\.sourceKind).last, "normalized")
+        XCTAssertEqual(retained.map(\.operation).last, .insert)
+        XCTAssertEqual(
+            retained.last?.authoredFields.first { $0.fieldID == "title" }?.value,
+            AnyCodable("updated")
+        )
+        XCTAssertEqual(retained.dropLast().map(\.normalizedMutationID), [retained[2].mutationID, retained[2].mutationID])
+        XCTAssertEqual(snapshot.pendingChangeCount, 1)
+        XCTAssertEqual(snapshot.rejectedMutations, [])
+        XCTAssertNil(snapshot.blockingFailure)
+
+        let repeated = try inspection.captureSnapshot(maximumRecords: 8) { _, _ in }
+        XCTAssertEqual(repeated, snapshot)
+        XCTAssertEqual(try client.queryOne("SELECT title FROM orders WHERE id = 'o1'")?["title"], "updated")
+
+        let bounded = try inspection.captureSnapshot(maximumRecords: 2) { _, _ in }
+        XCTAssertNil(bounded.retainedMutations)
+        XCTAssertEqual(bounded.rejectedMutations, [])
+
+        try await client.close()
+        removeDatabase(at: config.dbPath)
+    }
+
+    func testCaptureBoundsRebuildReceiptGroupsNotPages() async throws {
+        let fixture = try makeRebuildReceiptFixture()
+        let capture = try SynchroInspection(client: fixture.client).captureState(maximumRecords: 1)
+
+        XCTAssertEqual(capture.rebuildReceiptCount, 2)
+        XCTAssertEqual(capture.rebuildReceipts.map(\.pageCount), [2])
+        XCTAssertFalse(capture.rebuildReceiptsTruncated)
+        try await closeRebuildReceiptFixture(fixture)
     }
 
     func testRebuildReceiptStructuralFactsForValidTwoPageReceipts() async throws {

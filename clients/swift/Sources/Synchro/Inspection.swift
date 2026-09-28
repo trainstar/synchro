@@ -22,6 +22,19 @@ public struct SynchroInspection: Sendable {
         try client.inspectClientStateCapture(maximumRecords: maximumRecords)
     }
 
+    /// Reads counts, retained details, and application rows from one read-only snapshot.
+    /// Direct inspection does not normalize, so call `pendingChangeCount()` first when
+    /// the snapshot must show normalized intent.
+    public func captureSnapshot(
+        maximumRecords: Int,
+        readApplicationRows: (ClientStateCaptureInspection, ApplicationTransaction) throws -> Void
+    ) throws -> ClientStateSnapshotInspection {
+        try client.inspectClientStateSnapshot(
+            maximumRecords: maximumRecords,
+            readApplicationRows: readApplicationRows
+        )
+    }
+
     public func rowMetadata(tableName: String, recordID: String) throws -> RowMetadataInspection? {
         try client.inspectRowMetadata(tableName: tableName, recordID: recordID)
     }

@@ -1,5 +1,6 @@
 package com.trainstar.synchro.inspection
 
+import com.trainstar.synchro.ApplicationReadTransaction
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
 import com.trainstar.synchro.SchemaRef
@@ -22,6 +23,15 @@ class SynchroInspection(private val client: SynchroClient) {
 
     fun captureState(maximumRecords: Int): ClientStateCaptureInspection =
         client.inspectClientStateCapture(maximumRecords)
+
+    /**
+     * Reads counts, retained details, and application rows from one read-only
+     * snapshot. [readApplicationRows] runs inside that snapshot.
+     */
+    fun captureSnapshot(
+        maximumRecords: Int,
+        readApplicationRows: (ClientStateCaptureInspection, ApplicationReadTransaction) -> Unit,
+    ): ClientStateSnapshotInspection = client.inspectClientStateSnapshot(maximumRecords, readApplicationRows)
 
     fun rowMetadata(tableName: String, recordID: String): RowMetadataInspection? =
         client.inspectRowMetadata(tableName, recordID)

@@ -8,6 +8,7 @@ import android.util.Base64
 import android.os.Process
 import com.facebook.react.bridge.*
 import com.trainstar.synchro.*
+import com.trainstar.synchro.inspection.ClientStateCaptureInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import com.trainstar.synchro.inspection.TransportObservationSnapshot
@@ -50,11 +51,12 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         val INT64_PATTERN = Regex("^(?:0|-?[1-9][0-9]*)$")
     }
 
-    private var client: SynchroClient? = null
+    internal var client: SynchroClient? = null
+        private set
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
     private val transactionLock = Any()
-    private val sessions = ConcurrentHashMap<String, TransactionSession>()
+    internal val sessions = ConcurrentHashMap<String, TransactionSession>()
     private var acceptingTransactions = false
     private val observers = ConcurrentHashMap<String, Cancellable>()
     private val pendingAuthContinuations = ConcurrentHashMap<String, CancellableContinuation<String>>()
@@ -404,13 +406,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            val nativeStatements = (0 until statements.size()).map { i ->
-                val item = statements.getMap(i) ?: throw IllegalArgumentException("Invalid SQL statement at index $i")
-                val sql = item.getString("sql") ?: throw IllegalArgumentException("Missing SQL at index $i")
-                val params = if (item.hasKey("params")) item.getArray("params") else null
-                SQLStatement(sql, params?.let { parseParams(it) } ?: emptyArray())
-            }
-            val total = c.executeBatch(nativeStatements)
+            val total = c.executeBatch(parseStatements(statements))
             val map = Arguments.createMap().apply {
                 putInt("totalRowsAffected", total)
             }
@@ -422,11 +418,15 @@ class SynchroModule(reactContext: ReactApplicationContext) :
 
     // MARK: - Transactions
 
-    private class TransactionSession(val isWrite: Boolean) {
+    internal class TransactionSession(
+        val isWrite: Boolean,
+        private var beginSettlement: ((Result<String>) -> Unit)?,
+    ) {
         val operations = Channel<TransactionOp>(Channel.RENDEZVOUS)
         lateinit var job: Job
         private var abortCause: Throwable? = null
         private var terminal = false
+        private var terminalCompletion: CompletableDeferred<Unit>? = null
 
         @Synchronized
         fun abort(cause: Throwable) {
@@ -442,6 +442,55 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             terminal = true
             operations.close()
             return true
+        }
+
+        /**
+         * Settles begin when the transaction callback starts.
+         * A close that aborted the session earlier rejects begin instead.
+         */
+        @Synchronized
+        fun acceptBegin(txID: String) {
+            val settle = beginSettlement
+            beginSettlement = null
+            val cause = abortCause
+            if (cause != null) {
+                settle?.invoke(Result.failure(cause))
+                throw cause
+            }
+            settle?.invoke(Result.success(txID))
+        }
+
+        /** Rejects begin when the transaction fails before its callback starts. */
+        @Synchronized
+        fun rejectBegin(error: Throwable) {
+            val settle = beginSettlement ?: return
+            beginSettlement = null
+            settle(Result.failure(error))
+        }
+
+        /**
+         * Takes ownership of a received commit or rollback completion before the terminal decision.
+         * The job settles the owned completion after the database transaction ends.
+         */
+        @Synchronized
+        fun acceptTerminal(completion: CompletableDeferred<Unit>): Boolean {
+            terminalCompletion = completion
+            if (terminal) return false
+            terminal = true
+            operations.close()
+            return true
+        }
+
+        /** Settles the owned terminal completion after the database transaction ends. */
+        @Synchronized
+        fun finishTerminal(error: Throwable?) {
+            val completion = terminalCompletion ?: return
+            terminalCompletion = null
+            if (error == null) {
+                completion.complete(Unit)
+            } else {
+                completion.completeExceptionally(error)
+            }
         }
 
         @Synchronized
@@ -460,7 +509,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private sealed class TransactionOp {
+    internal sealed class TransactionOp {
         data class Query(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableArray>) : TransactionOp()
         data class QueryOne(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap?>) : TransactionOp()
         data class Execute(val sql: String, val params: Array<Any?>, val deferred: CompletableDeferred<WritableMap>) : TransactionOp()
@@ -468,9 +517,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         class Rollback(val deferred: CompletableDeferred<Unit>) : TransactionOp()
     }
 
-    private class TransactionRollbackException(
-        val completion: CompletableDeferred<Unit>,
-    ) : Exception("rollback")
+    internal class TransactionRollbackException : Exception("rollback")
 
     private class TransactionAbortedException : Exception("Client closed during transaction")
     private class TransactionExpiredException : Exception("Transaction timed out due to inactivity")
@@ -494,17 +541,20 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
 
         val txID = UUID.randomUUID().toString()
-        val session = TransactionSession(isWrite)
+        val session = TransactionSession(isWrite) { result ->
+            result.fold(
+                onSuccess = { promise.resolve(it) },
+                onFailure = { rejectWithError(promise, it) },
+            )
+        }
 
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            var finalDeferred: CompletableDeferred<Unit>? = null
             try {
                 if (isWrite) {
                     c.writeTransaction { transaction ->
-                        finalDeferred = runTransactionLoop(
+                        runTransactionLoop(
                             txID = txID,
                             session = session,
-                            promise = promise,
                             query = transaction::query,
                             queryOne = transaction::queryOne,
                             execute = transaction::execute,
@@ -512,10 +562,9 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                     }
                 } else {
                     c.readTransaction { transaction ->
-                        finalDeferred = runTransactionLoop(
+                        runTransactionLoop(
                             txID = txID,
                             session = session,
-                            promise = promise,
                             query = transaction::query,
                             queryOne = transaction::queryOne,
                             execute = { _, _ ->
@@ -524,15 +573,17 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                         )
                     }
                 }
-                finalDeferred?.complete(Unit)
+                session.finishTerminal(null)
             } catch (e: TimeoutCancellationException) {
                 val timeout = TransactionExpiredException()
                 session.abort(timeout)
-                finalDeferred?.completeExceptionally(timeout)
+                session.finishTerminal(timeout)
             } catch (e: TransactionRollbackException) {
-                e.completion.complete(Unit)
+                session.finishTerminal(null)
             } catch (e: Exception) {
-                finalDeferred?.completeExceptionally(e)
+                // Acquisition can fail before the callback settles begin.
+                session.rejectBegin(e)
+                session.finishTerminal(e)
             } finally {
                 session.completeNormally()
                 sessions.remove(txID, session)
@@ -555,16 +606,14 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         job.start()
     }
 
-    private fun runTransactionLoop(
+    internal fun runTransactionLoop(
         txID: String,
         session: TransactionSession,
-        promise: Promise,
         query: (String, Array<out Any?>?) -> List<Row>,
         queryOne: (String, Array<out Any?>?) -> Row?,
         execute: (String, Array<out Any?>?) -> ExecResult,
-    ): CompletableDeferred<Unit>? {
-        promise.resolve(txID)
-        var finalDeferred: CompletableDeferred<Unit>? = null
+    ) {
+        session.acceptBegin(txID)
         runBlocking {
             transactionLoop@ while (true) {
                 val result = withTimeout(5000) { session.operations.receiveCatching() }
@@ -604,19 +653,16 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                         }
                     }
                     is TransactionOp.Commit -> {
-                        finalDeferred = op.deferred
-                        if (!session.completeNormally()) throw TransactionAbortedException()
+                        if (!session.acceptTerminal(op.deferred)) throw TransactionAbortedException()
                         break@transactionLoop
                     }
                     is TransactionOp.Rollback -> {
-                        finalDeferred = op.deferred
-                        if (!session.completeNormally()) throw TransactionAbortedException()
-                        throw TransactionRollbackException(op.deferred)
+                        if (!session.acceptTerminal(op.deferred)) throw TransactionAbortedException()
+                        throw TransactionRollbackException()
                     }
                 }
             }
         }
-        return finalDeferred
     }
 
     @ReactMethod
@@ -699,13 +745,19 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         scope.launch {
+            val deferred = CompletableDeferred<Unit>()
             try {
-                val deferred = CompletableDeferred<Unit>()
                 session.operations.send(TransactionOp.Rollback(deferred))
+            } catch (e: Exception) {
+                // The session ended before it received this rollback.
+                promise.resolve(null)
+                return@launch
+            }
+            try {
                 deferred.await()
                 promise.resolve(null)
             } catch (e: Exception) {
-                promise.resolve(null) // Best-effort
+                rejectWithError(promise, e)
             }
         }
     }
@@ -953,7 +1005,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectPendingMutations().map(::pendingMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectPendingMutations().map(::retainedMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -966,7 +1018,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::pendingMutationJson)).toString())
+            promise.resolve(JSONArray(c.inspectRetainedMutations().map(::retainedMutationJson)).toString())
         } catch (e: Exception) {
             rejectWithError(promise, e)
         }
@@ -985,74 +1037,39 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Reads client state, retained details, and the requested application rows from one read-only snapshot. */
     @ReactMethod
-    override fun inspectClientState(promise: Promise) {
+    override fun inspectClientStateSnapshot(rowStatements: ReadableArray, promise: Promise) {
         val c = client ?: run {
             promise.reject("NOT_CONNECTED", "Client not initialized")
             return
         }
         try {
-            val inspection = SynchroInspection(c)
-            val capture = inspection.captureState(maximumRecords = 512)
-            val schema: Any = capture.schema?.let {
-                JSONObject().put("version", it.version).put("hash", it.hash)
-            } ?: JSONObject.NULL
-            val scopeStates = JSONArray(capture.scopeStates.map { value ->
-                JSONObject().apply {
-                    put("scope_id", value.scopeID)
-                    put("cursor", value.cursor ?: JSONObject.NULL)
-                    put("checksum", value.checksum ?: JSONObject.NULL)
-                    put("local_checksum", value.localChecksum)
-                    put("generation", value.generation)
+            val statements = parseStatements(rowStatements)
+            val rows = mutableListOf<Row>()
+            val snapshot = SynchroInspection(c).captureSnapshot(maximumRecords = 512) { _, transaction ->
+                for (statement in statements) {
+                    rows += transaction.query(statement.sql, statement.params)
                 }
+            }
+            val inspection = JSONObject().apply {
+                put("client_state", clientStateJson(snapshot.capture))
+                put("retained_mutations", snapshot.retainedMutations?.let { JSONArray(it.map(::retainedMutationJson)) } ?: JSONObject.NULL)
+                put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::rejectedMutationJson)) } ?: JSONObject.NULL)
+            }
+            promise.resolve(Arguments.createMap().apply {
+                putString("inspection", inspection.toString())
+                putArray("applicationRows", rowsToWritableArray(rows))
             })
-            val scopeRows = JSONArray(capture.scopeRows.map { value ->
-                JSONObject().apply {
-                    put("scope_id", value.scopeID)
-                    put("table_name", value.tableName)
-                    put("record_id", value.recordID)
-                    put("checksum", value.checksum)
-                    put("generation", value.generation)
-                }
-            })
-            val attempts = JSONArray(capture.rebuildAttempts.map { value ->
-                JSONObject().apply {
-                    put("scope_id", value.scopeID)
-                    put("rebuild_id", value.rebuildID)
-                    put("client_generation", value.clientGeneration)
-                    put("schema_version", value.schemaVersion)
-                    put("schema_hash", value.schemaHash)
-                    put("generation", value.generation)
-                    put("cursor", value.cursor ?: JSONObject.NULL)
-                    put("page_limit", value.pageLimit)
-                }
-            })
-            promise.resolve(JSONObject().apply {
-                put("schema", schema)
-                put("scope_states", scopeStates)
-                put("scope_rows", scopeRows)
-                put("rebuild_attempts", attempts)
-                put("application_row_count", capture.applicationRowCount)
-                put("mutation_ledger_count", capture.mutationLedgerCount)
-                put("mutation_outcome_count", capture.mutationOutcomeCount)
-                put("sealed_batch_count", capture.sealedBatchCount)
-                put("rejected_mutation_count", capture.rejectedMutationCount)
-                put("scope_state_count", capture.scopeStateCount)
-                put("scope_row_count", capture.scopeRowCount)
-                put("provenance_count", capture.provenanceCount)
-                put("row_metadata_count", capture.rowMetadataCount)
-                put("rebuild_attempt_count", capture.rebuildAttemptCount)
-                put("rebuild_receipt_count", capture.rebuildReceiptCount)
-                put(
-                    "provenance_maintenance_work_cursor",
-                    capture.provenanceMaintenanceWorkCursor.toString(),
-                )
-            }.toString())
         } catch (error: Exception) {
             rejectWithError(promise, error)
         }
     }
 
+    /**
+     * Reads one record's row metadata and every rebuild receipt. The inspection snapshot bounds
+     * row metadata, so a durable proof reads its identity directly.
+     */
     @ReactMethod
     override fun inspectDurableState(tableName: String, recordID: String, promise: Promise) {
         val c = client ?: run {
@@ -1392,7 +1409,89 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         })
     }
 
+    private fun clientStateJson(capture: ClientStateCaptureInspection): JSONObject {
+        val schema: Any = capture.schema?.let {
+            JSONObject().put("version", it.version).put("hash", it.hash)
+        } ?: JSONObject.NULL
+        val scopeStates = JSONArray(capture.scopeStates.map { value ->
+            JSONObject().apply {
+                put("scope_id", value.scopeID)
+                put("cursor", value.cursor ?: JSONObject.NULL)
+                put("checksum", value.checksum ?: JSONObject.NULL)
+                put("local_checksum", value.localChecksum)
+                put("generation", value.generation)
+            }
+        })
+        val scopeRows = JSONArray(capture.scopeRows.map { value ->
+            JSONObject().apply {
+                put("scope_id", value.scopeID)
+                put("table_name", value.tableName)
+                put("record_id", value.recordID)
+                put("checksum", value.checksum)
+                put("generation", value.generation)
+            }
+        })
+        val attempts = JSONArray(capture.rebuildAttempts.map { value ->
+            JSONObject().apply {
+                put("scope_id", value.scopeID)
+                put("rebuild_id", value.rebuildID)
+                put("client_generation", value.clientGeneration)
+                put("schema_version", value.schemaVersion)
+                put("schema_hash", value.schemaHash)
+                put("generation", value.generation)
+                put("cursor", value.cursor ?: JSONObject.NULL)
+                put("page_limit", value.pageLimit)
+            }
+        })
+        return JSONObject().apply {
+            put("schema", schema)
+            put("scope_states", scopeStates)
+            put("scope_rows", scopeRows)
+            put("rebuild_attempts", attempts)
+            put("application_row_count", capture.applicationRowCount)
+            put("mutation_ledger_count", capture.mutationLedgerCount)
+            put("mutation_outcome_count", capture.mutationOutcomeCount)
+            put("sealed_batch_count", capture.sealedBatchCount)
+            put("rejected_mutation_count", capture.rejectedMutationCount)
+            put("scope_state_count", capture.scopeStateCount)
+            put("scope_row_count", capture.scopeRowCount)
+            put("provenance_count", capture.provenanceCount)
+            put("row_metadata_count", capture.rowMetadataCount)
+            put("rebuild_attempt_count", capture.rebuildAttemptCount)
+            put("rebuild_receipt_count", capture.rebuildReceiptCount)
+            put(
+                "provenance_maintenance_work_cursor",
+                capture.provenanceMaintenanceWorkCursor.toString(),
+            )
+        }
+    }
+
+    private fun parseStatements(statements: ReadableArray): List<SQLStatement> =
+        (0 until statements.size()).map { i ->
+            val item = statements.getMap(i) ?: throw IllegalArgumentException("Invalid SQL statement at index $i")
+            val sql = item.getString("sql") ?: throw IllegalArgumentException("Missing SQL at index $i")
+            val params = if (item.hasKey("params")) item.getArray("params") else null
+            SQLStatement(sql, params?.let { parseParams(it) } ?: emptyArray())
+        }
+
+    private fun retainedMutationJson(value: RetainedMutationInspection): JSONObject = when (value) {
+        is RetainedMutationInspection.Current -> pendingMutationJson(value.mutation)
+        is RetainedMutationInspection.Legacy -> JSONObject().apply {
+            put("representation", "legacy")
+            put("mutationID", value.mutation.mutationID)
+            put("localOrder", value.mutation.localOrder)
+            put("tableName", value.mutation.tableName)
+            put("recordID", value.mutation.recordID)
+            put("operation", operationWireValue(value.mutation.operation))
+            put("baseVersion", value.mutation.baseVersion ?: JSONObject.NULL)
+            put("clientVersion", value.mutation.clientVersion)
+            put("status", localMutationStatusWireValue(value.mutation.status))
+            put("sourceKind", value.mutation.sourceKind)
+        }
+    }
+
     private fun pendingMutationJson(mutation: PendingMutationInspection): JSONObject = JSONObject().apply {
+        put("representation", "current")
         put("mutationID", mutation.mutationID)
         put("localOrder", mutation.localOrder)
         put("tableID", mutation.tableID)

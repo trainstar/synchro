@@ -12,7 +12,7 @@ import GRDB
 
 // MARK: - Transaction Session
 
-private class TransactionSession {
+class TransactionSession {
     private let condition = NSCondition()
     private var operations: [TransactionOp] = []
     private var closed = false
@@ -20,10 +20,36 @@ private class TransactionSession {
     private var finalCompletion: ((Result<Void, Error>) -> Void)?
     private var finished = false
     private var finishWaiters: [CheckedContinuation<Void, Never>] = []
+    private var beginCompletion: ((Result<String, Error>) -> Void)?
     let isWrite: Bool
 
-    init(isWrite: Bool) {
+    init(isWrite: Bool, beginCompletion: @escaping (Result<String, Error>) -> Void) {
         self.isWrite = isWrite
+        self.beginCompletion = beginCompletion
+    }
+
+    /// Settles begin when the native transaction callback starts. A close that
+    /// aborted the session before the callback started rejects begin instead.
+    func acceptBegin(_ txID: String) throws {
+        condition.lock()
+        let completion = beginCompletion
+        beginCompletion = nil
+        let error = abortError
+        condition.unlock()
+        if let error {
+            completion?(.failure(error))
+            throw error
+        }
+        completion?(.success(txID))
+    }
+
+    /// Rejects begin when the transaction fails before its callback starts.
+    func rejectBegin(_ error: Error) {
+        condition.lock()
+        let completion = beginCompletion
+        beginCompletion = nil
+        condition.unlock()
+        completion?(.failure(error))
     }
 
     func enqueue(_ op: TransactionOp) -> Bool {
@@ -132,7 +158,7 @@ private class TransactionSession {
     }
 }
 
-private enum TransactionOp {
+enum TransactionOp {
     case query(sql: String, params: [Any], completion: (Result<[[String: Any]], Error>) -> Void)
     case queryOne(sql: String, params: [Any], completion: (Result<[String: Any]?, Error>) -> Void)
     case execute(sql: String, params: [Any], completion: (Result<[String: Any], Error>) -> Void)
@@ -191,10 +217,10 @@ private actor LifecycleMutex {
 public class SynchroModuleImpl: NSObject {
     @objc public weak var eventDelegate: SynchroEventEmitting?
 
-    private var client: SynchroClient?
+    private(set) var client: SynchroClient?
     private let lifecycleMutex = LifecycleMutex()
-    private var sessions: [String: TransactionSession] = [:]
-    private let sessionsLock = NSLock()
+    var sessions: [String: TransactionSession] = [:]
+    let sessionsLock = NSLock()
     private var acceptingTransactions = false
     private var observers: [String: any Synchro.Cancellable] = [:]
     private var statusSubscription: (any Synchro.Cancellable)?
@@ -557,17 +583,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let nativeStatements: [Synchro.SQLStatement] = try statements.map { item in
-                let sql = item["sql"] as! String
-                let params: [(any DatabaseValueConvertible)?]?
-                if let bridgeValues = item["params"] as? [Any] {
-                    params = try bridgeParams(bridgeValues)
-                } else {
-                    params = nil
-                }
-                return Synchro.SQLStatement(sql: sql, params: params)
-            }
-            let total = try client.executeBatch(nativeStatements)
+            let total = try client.executeBatch(try bridgeStatements(statements))
             resolve(["totalRowsAffected": total])
         } catch {
             rejectWithError(reject, error)
@@ -595,12 +611,11 @@ public class SynchroModuleImpl: NSObject {
     private func runTransactionLoop(
         session: TransactionSession,
         txID: String,
-        resolve: @escaping RCTPromiseResolveBlock,
         query: (String, [(any DatabaseValueConvertible)?]) throws -> [Row],
         queryOne: (String, [(any DatabaseValueConvertible)?]) throws -> Row?,
         execute: ((String, [(any DatabaseValueConvertible)?]) throws -> Int)?
     ) throws {
-        resolve(txID)
+        try session.acceptBegin(txID)
 
         while true {
             guard let op = try session.nextOperation(timeout: 5) else {
@@ -680,7 +695,12 @@ public class SynchroModuleImpl: NSObject {
         }
 
         let txID = UUID().uuidString
-        let session = TransactionSession(isWrite: isWrite)
+        let session = TransactionSession(isWrite: isWrite) { result in
+            switch result {
+            case .success(let acceptedID): resolve(acceptedID)
+            case .failure(let error): self.rejectWithError(reject, error)
+            }
+        }
         sessions[txID] = session
         sessionsLock.unlock()
 
@@ -699,7 +719,6 @@ public class SynchroModuleImpl: NSObject {
                         try self.runTransactionLoop(
                             session: session,
                             txID: txID,
-                            resolve: resolve,
                             query: { sql, params in
                                 try transaction.query(sql, params: params)
                             },
@@ -716,7 +735,6 @@ public class SynchroModuleImpl: NSObject {
                         try self.runTransactionLoop(
                             session: session,
                             txID: txID,
-                            resolve: resolve,
                             query: { sql, params in
                                 let statement = try db.makeStatement(sql: sql)
                                 guard statement.isReadonly else {
@@ -748,6 +766,8 @@ public class SynchroModuleImpl: NSObject {
             } catch is TransactionRollbackError {
                 session.completeFinal(.success(()))
             } catch {
+                // Acquisition can fail before the callback settles begin.
+                session.rejectBegin(error)
                 session.completeFinal(.failure(error))
             }
         }
@@ -1501,7 +1521,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let payload = try client.inspectPendingMutations().map(pendingMutationPayload)
+            let payload = try client.inspectPendingMutations().map(retainedMutationPayload)
             resolve(try encodeBridgeJSON(payload))
         } catch {
             rejectWithError(reject, error)
@@ -1518,7 +1538,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let payload = try client.inspectRetainedMutations().map(pendingMutationPayload)
+            let payload = try client.inspectRetainedMutations().map(retainedMutationPayload)
             resolve(try encodeBridgeJSON(payload))
         } catch {
             rejectWithError(reject, error)
@@ -1542,9 +1562,12 @@ public class SynchroModuleImpl: NSObject {
         }
     }
 
+    /// Reads client state, retained details, and the requested application rows
+    /// from one read-only snapshot, as the native conformance runners do.
     @objc
-    public func inspectClientState(
-        _ resolve: @escaping RCTPromiseResolveBlock,
+    public func inspectClientStateSnapshot(
+        _ rowStatements: [[String: Any]],
+        resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
         guard let client else {
@@ -1552,72 +1575,29 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let inspection = SynchroInspection(client: client)
-            let capture = try inspection.captureState(maximumRecords: 512)
-            let schema: Any = capture.schema.map { value in
-                ["version": value.version, "hash": value.hash]
-            } ?? NSNull()
-            let scopeStates = capture.scopeStates.map { value in
-                [
-                    "scope_id": value.scopeID,
-                    "cursor": value.cursor ?? NSNull(),
-                    "checksum": value.checksum ?? NSNull(),
-                    "local_checksum": value.localChecksum,
-                    "generation": value.generation,
-                ] as [String: Any]
+            let statements = try bridgeStatements(rowStatements)
+            var rows: [Row] = []
+            let snapshot = try SynchroInspection(client: client).captureSnapshot(maximumRecords: 512) { _, transaction in
+                for statement in statements {
+                    rows += try transaction.query(statement.sql, params: statement.params)
+                }
             }
-            let scopeRows = capture.scopeRows.map { value in
-                [
-                    "scope_id": value.scopeID,
-                    "table_name": value.tableName,
-                    "record_id": value.recordID,
-                    "checksum": value.checksum,
-                    "generation": value.generation,
-                ] as [String: Any]
-            }
-            let attempts = capture.rebuildAttempts.map { value in
-                [
-                    "scope_id": value.scopeID,
-                    "rebuild_id": value.rebuildID,
-                    "client_generation": value.clientGeneration,
-                    "schema_version": value.schemaVersion,
-                    "schema_hash": value.schemaHash,
-                    "generation": value.generation,
-                    "cursor": value.cursor ?? NSNull(),
-                    "page_limit": value.pageLimit,
-                ] as [String: Any]
-            }
-            resolve(try encodeBridgeJSON([
-                "schema": schema,
-                "scope_states": scopeStates,
-                "scope_rows": scopeRows,
-                "rebuild_attempts": attempts,
-                "application_row_count": capture.applicationRowCount,
-                "mutation_ledger_count": capture.mutationLedgerCount,
-                "mutation_outcome_count": capture.mutationOutcomeCount,
-                "sealed_batch_count": capture.sealedBatchCount,
-                "rejected_mutation_count": capture.rejectedMutationCount,
-                "scope_state_count": capture.scopeStateCount,
-                "scope_row_count": capture.scopeRowCount,
-                "provenance_count": capture.provenanceCount,
-                "row_metadata_count": capture.rowMetadataCount,
-                "rebuild_attempt_count": capture.rebuildAttemptCount,
-                "rebuild_receipt_count": capture.rebuildReceiptCount,
-                "scope_states_truncated": capture.scopeStatesTruncated,
-                "scope_rows_truncated": capture.scopeRowsTruncated,
-                "rebuild_attempts_truncated": capture.rebuildAttemptsTruncated,
-                "rebuild_receipts_truncated": capture.rebuildReceiptsTruncated,
-                "row_metadata_truncated": capture.rowMetadataTruncated,
-                "capture_overflowed": capture.overflowed,
-                "provenance_maintenance_work_cursor": String(
-                    capture.provenanceMaintenanceWorkCursor
-                ),
-            ]))
+            let inspection: [String: Any] = [
+                "client_state": clientStatePayload(snapshot.capture),
+                "retained_mutations": snapshot.retainedMutations.map { $0.map(retainedMutationPayload) } ?? NSNull(),
+                "rejected_mutations": snapshot.rejectedMutations.map { $0.map(rejectedMutationPayload) } ?? NSNull(),
+            ]
+            resolve([
+                "inspection": try encodeBridgeJSON(inspection),
+                "applicationRows": rowsToBridgeRows(rows),
+            ])
         } catch {
             rejectWithError(reject, error)
         }
     }
 
+    /// Reads one record's row metadata and every rebuild receipt. The inspection snapshot bounds
+    /// row metadata, so a durable proof reads its identity directly.
     @objc
     public func inspectDurableState(
         _ tableName: String,
@@ -1773,6 +1753,78 @@ public class SynchroModuleImpl: NSObject {
 
     // MARK: - Helpers
 
+    private func clientStatePayload(_ capture: ClientStateCaptureInspection) -> [String: Any] {
+        let schema: Any = capture.schema.map { value in
+            ["version": value.version, "hash": value.hash]
+        } ?? NSNull()
+        let scopeStates = capture.scopeStates.map { value in
+            [
+                "scope_id": value.scopeID,
+                "cursor": value.cursor ?? NSNull(),
+                "checksum": value.checksum ?? NSNull(),
+                "local_checksum": value.localChecksum,
+                "generation": value.generation,
+            ] as [String: Any]
+        }
+        let scopeRows = capture.scopeRows.map { value in
+            [
+                "scope_id": value.scopeID,
+                "table_name": value.tableName,
+                "record_id": value.recordID,
+                "checksum": value.checksum,
+                "generation": value.generation,
+            ] as [String: Any]
+        }
+        let attempts = capture.rebuildAttempts.map { value in
+            [
+                "scope_id": value.scopeID,
+                "rebuild_id": value.rebuildID,
+                "client_generation": value.clientGeneration,
+                "schema_version": value.schemaVersion,
+                "schema_hash": value.schemaHash,
+                "generation": value.generation,
+                "cursor": value.cursor ?? NSNull(),
+                "page_limit": value.pageLimit,
+            ] as [String: Any]
+        }
+        return [
+            "schema": schema,
+            "scope_states": scopeStates,
+            "scope_rows": scopeRows,
+            "rebuild_attempts": attempts,
+            "application_row_count": capture.applicationRowCount,
+            "mutation_ledger_count": capture.mutationLedgerCount,
+            "mutation_outcome_count": capture.mutationOutcomeCount,
+            "sealed_batch_count": capture.sealedBatchCount,
+            "rejected_mutation_count": capture.rejectedMutationCount,
+            "scope_state_count": capture.scopeStateCount,
+            "scope_row_count": capture.scopeRowCount,
+            "provenance_count": capture.provenanceCount,
+            "row_metadata_count": capture.rowMetadataCount,
+            "rebuild_attempt_count": capture.rebuildAttemptCount,
+            "rebuild_receipt_count": capture.rebuildReceiptCount,
+            "scope_states_truncated": capture.scopeStatesTruncated,
+            "scope_rows_truncated": capture.scopeRowsTruncated,
+            "rebuild_attempts_truncated": capture.rebuildAttemptsTruncated,
+            "rebuild_receipts_truncated": capture.rebuildReceiptsTruncated,
+            "row_metadata_truncated": capture.rowMetadataTruncated,
+            "capture_overflowed": capture.overflowed,
+            "provenance_maintenance_work_cursor": String(
+                capture.provenanceMaintenanceWorkCursor
+            ),
+        ]
+    }
+
+    private func bridgeStatements(_ statements: [[String: Any]]) throws -> [Synchro.SQLStatement] {
+        try statements.enumerated().map { index, item in
+            guard let sql = item["sql"] as? String else {
+                throw SynchroError.invalidResponse(message: "Missing SQL at index \(index)")
+            }
+            let params = try (item["params"] as? [Any]).map(bridgeParams)
+            return Synchro.SQLStatement(sql: sql, params: params)
+        }
+    }
+
     private func encodeBridgeJSON(_ value: Any) throws -> String {
         guard JSONSerialization.isValidJSONObject(value) else {
             throw SynchroError.invalidResponse(message: "bridge JSON value is invalid")
@@ -1784,8 +1836,29 @@ public class SynchroModuleImpl: NSObject {
         return json
     }
 
+    private func retainedMutationPayload(_ value: RetainedMutationInspection) -> [String: Any] {
+        switch value {
+        case .current(let mutation):
+            return pendingMutationPayload(mutation)
+        case .legacy(let mutation):
+            return [
+                "representation": "legacy",
+                "mutationID": mutation.mutationID,
+                "localOrder": mutation.localOrder,
+                "tableName": mutation.tableName,
+                "recordID": mutation.recordID,
+                "operation": mutation.operation.rawValue,
+                "baseVersion": mutation.baseVersion ?? NSNull(),
+                "clientVersion": mutation.clientVersion,
+                "status": mutation.status.rawValue,
+                "sourceKind": mutation.sourceKind
+            ]
+        }
+    }
+
     private func pendingMutationPayload(_ mutation: PendingMutationInspection) -> [String: Any] {
         [
+            "representation": "current",
             "mutationID": mutation.mutationID,
             "localOrder": mutation.localOrder,
             "tableID": mutation.tableID,

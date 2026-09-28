@@ -340,6 +340,54 @@ data class PendingMutationInspection(
     val authoredFields: List<AuthoredMutationField>,
 )
 
+/**
+ * A retained mutation that a pre-ledger queue imported. It has only the stored
+ * fields: no table ID, primary-key binding, authored schema, or authored values.
+ */
+data class LegacyMutationInspection(
+    val mutationID: String,
+    val localOrder: Long,
+    val tableName: String,
+    val recordID: String,
+    val operation: Operation,
+    val baseVersion: String?,
+    val clientVersion: String,
+    val status: LocalMutationStatus,
+    val sourceKind: String,
+)
+
+/**
+ * One retained local mutation in its stored representation. The Kotlin ledger
+ * requires every binding, so Kotlin inspection returns only [Current] records.
+ * [Legacy] keeps one shape with the Swift client for shared consumers.
+ */
+sealed interface RetainedMutationInspection {
+    val mutationID: String
+    val localOrder: Long
+    val tableName: String
+    val recordID: String
+    val operation: Operation
+    val status: LocalMutationStatus
+
+    data class Current(val mutation: PendingMutationInspection) : RetainedMutationInspection {
+        override val mutationID: String get() = mutation.mutationID
+        override val localOrder: Long get() = mutation.localOrder
+        override val tableName: String get() = mutation.tableName
+        override val recordID: String get() = mutation.recordID
+        override val operation: Operation get() = mutation.operation
+        override val status: LocalMutationStatus get() = mutation.status
+    }
+
+    data class Legacy(val mutation: LegacyMutationInspection) : RetainedMutationInspection {
+        override val mutationID: String get() = mutation.mutationID
+        override val localOrder: Long get() = mutation.localOrder
+        override val tableName: String get() = mutation.tableName
+        override val recordID: String get() = mutation.recordID
+        override val operation: Operation get() = mutation.operation
+        override val status: LocalMutationStatus get() = mutation.status
+    }
+}
+
 data class RejectedMutationInspection(
     val mutationID: String,
     val tableName: String,
