@@ -154,6 +154,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealWALSkipsUnpublishedGeneratedColumns":           "regression",
 	"TestRealWALCapturesPublishedStoredGeneratedColumn":     "regression",
 	"TestRealPushAcceptsSourceFilledInsertAndTriggerWrites": "regression",
+	"TestRealPushRowStateRereadYieldsToDirectWriter":        "regression",
 	"TestRealWALRestoresSlotPositionAfterImmediateShutdown": "regression",
 	"TestRealWALRestoresSlotPositionAfterBackendCrash":      "regression",
 	"TestRealWALObservationUsesOneSnapshot":                 "framework",
