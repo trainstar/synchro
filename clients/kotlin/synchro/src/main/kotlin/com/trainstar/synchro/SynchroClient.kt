@@ -167,27 +167,50 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
     /** Returns the exact number of mutations retained for local reconciliation. */
     fun retainedMutationCount(): Int = changeTracker.retainedMutationCount()
 
-    fun inspectRejectedMutations(): List<RejectedMutationInspection> =
+    fun inspectRejectedMutations(): List<RetainedRejectionInspection> =
         database.readTransaction(::inspectRejectedMutations)
 
-    private fun inspectRejectedMutations(db: SQLiteDatabase): List<RejectedMutationInspection> =
+    private fun inspectRejectedMutations(db: SQLiteDatabase): List<RetainedRejectionInspection> =
         SynchroMeta.listRejectedMutations(db).map { rejected ->
-            RejectedMutationInspection(
-                mutationID = rejected.mutationID,
-                tableName = rejected.tableName,
-                recordID = rejected.recordID,
-                status = rejected.status.asRejectedMutationStatus(),
-                code = rejected.code.asMutationRejectionCode(),
-                message = rejected.message,
-                serverRowJSON = rejected.serverRowJson,
-                serverVersion = rejected.serverVersion,
-                mutationJSON = rejected.mutationJSON
-                    ?: throw SynchroError.InvalidResponse("retained rejection lacks its exact mutation JSON"),
-                rejectionJSON = rejected.rejectionJSON
-                    ?: throw SynchroError.InvalidResponse("retained rejection lacks its exact rejection JSON"),
-                createdAt = rejected.createdAt,
-                updatedAt = rejected.updatedAt,
-            )
+            val status = rejected.status.asRejectedMutationStatus()
+            val code = rejected.code.asMutationRejectionCode()
+            val mutationJSON = rejected.mutationJSON
+            val rejectionJSON = rejected.rejectionJSON
+            when {
+                // A rejection stored before the mutation ledger has no exact JSON.
+                mutationJSON == null && rejectionJSON == null -> RetainedRejectionInspection.Legacy(
+                    LegacyRejectionInspection(
+                        mutationID = rejected.mutationID,
+                        tableName = rejected.tableName,
+                        recordID = rejected.recordID,
+                        status = status,
+                        code = code,
+                        message = rejected.message,
+                        serverRowJSON = rejected.serverRowJson,
+                        serverVersion = rejected.serverVersion,
+                        createdAt = rejected.createdAt,
+                        updatedAt = rejected.updatedAt,
+                    ),
+                )
+                mutationJSON == null || rejectionJSON == null ->
+                    throw SynchroError.InvalidResponse("retained rejection lacks its exact mutation or rejection JSON")
+                else -> RetainedRejectionInspection.Current(
+                    RejectedMutationInspection(
+                        mutationID = rejected.mutationID,
+                        tableName = rejected.tableName,
+                        recordID = rejected.recordID,
+                        status = status,
+                        code = code,
+                        message = rejected.message,
+                        serverRowJSON = rejected.serverRowJson,
+                        serverVersion = rejected.serverVersion,
+                        mutationJSON = mutationJSON,
+                        rejectionJSON = rejectionJSON,
+                        createdAt = rejected.createdAt,
+                        updatedAt = rejected.updatedAt,
+                    ),
+                )
+            }
         }
 
     fun clearRejectedMutations() {

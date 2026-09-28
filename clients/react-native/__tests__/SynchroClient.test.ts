@@ -697,6 +697,7 @@ describe('SynchroClient', () => {
       const mutationJSON = '{ "operation": "update", "value": 1 }';
       const rejectionJSON = '{ "code": "version_conflict" }';
       const rejected = {
+        representation: 'current',
         mutationID: 'mutation-2',
         tableName: 'items',
         recordID: 'record-2',
@@ -716,10 +717,59 @@ describe('SynchroClient', () => {
 
       const result = await makeClient().inspectRejectedMutations();
 
-      expect(result).toEqual([rejected]);
-      expect(result[0].mutationJSON).toBe(mutationJSON);
-      expect(result[0].rejectionJSON).toBe(rejectionJSON);
+      expect(result).toStrictEqual([rejected]);
     });
+
+    it('maps a legacy rejected mutation without exact mutation or rejection JSON', async () => {
+      const legacy = {
+        representation: 'legacy',
+        mutationID: 'm1',
+        tableName: 'orders',
+        recordID: 'r0',
+        status: 'rejected_terminal',
+        code: 'policy_rejected',
+        message: 'blocked',
+        serverRowJSON: '{"id":"r0"}',
+        serverVersion: 'server-v7',
+        createdAt: '2026-01-01T00:00:00.000000Z',
+        updatedAt: '2026-01-01T00:00:00.000000Z',
+      };
+      mockNativeModule.inspectRejectedMutations.mockResolvedValueOnce(
+        JSON.stringify([legacy])
+      );
+
+      await expect(makeClient().inspectRejectedMutations()).resolves.toStrictEqual([legacy]);
+    });
+
+    // The payload is otherwise a complete current record, so only the representation rejects it.
+    it.each([undefined, 'placeholder'])(
+      'rejects a rejected mutation with representation %p',
+      async (representation) => {
+        mockNativeModule.inspectRejectedMutations.mockResolvedValueOnce(
+          JSON.stringify([
+            {
+              representation,
+              mutationID: 'mutation-6',
+              tableName: 'orders',
+              recordID: 'r1',
+              status: 'conflict',
+              code: 'version_conflict',
+              message: null,
+              serverRowJSON: null,
+              serverVersion: null,
+              mutationJSON: '{}',
+              rejectionJSON: '{}',
+              createdAt: '2026-01-01T00:00:00.000000Z',
+              updatedAt: '2026-01-01T00:00:00.000000Z',
+            },
+          ])
+        );
+
+        await expect(makeClient().inspectRejectedMutations()).rejects.toMatchObject({
+          code: 'INVALID_RESPONSE',
+        });
+      }
+    );
 
     it('reads client state, retained details, and application rows from one native snapshot', async () => {
       const clientState = {

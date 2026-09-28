@@ -198,7 +198,7 @@ final class InspectionTests: XCTestCase {
         try await firstClient.close()
 
         let restartedClient = try SynchroClient(config: config)
-        let rejected = try XCTUnwrap(restartedClient.inspectRejectedMutations().first)
+        let rejected = try XCTUnwrap(restartedClient.inspectRejectedMutations().currentRecords().first)
         XCTAssertEqual(rejected.status, .rejectedTerminal)
         XCTAssertEqual(rejected.code, .policyRejected)
         XCTAssertEqual(rejected.localOrder, pending.localOrder)
@@ -464,7 +464,7 @@ final class InspectionTests: XCTestCase {
                 title = try transaction.queryOne("SELECT title FROM orders WHERE id = 'o1'")?["title"]
             }
             try assertOneGeneration(snapshot.capture)
-            let rejected = try XCTUnwrap(snapshot.rejectedMutations)
+            let rejected = try XCTUnwrap(snapshot.rejectedMutations).currentRecords()
             let retained = try XCTUnwrap(snapshot.retainedMutations)
             XCTAssertEqual(rejected.count, snapshot.capture.rejectedMutationCount)
             XCTAssertEqual(retained.map(\.mutationID), [rejection.mutationID])

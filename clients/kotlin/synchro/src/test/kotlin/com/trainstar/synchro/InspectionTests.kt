@@ -284,7 +284,7 @@ class InspectionTests {
 
         val restartedClient = SynchroClient(config, context)
         try {
-            val rejected = restartedClient.inspectRejectedMutations().single()
+            val rejected = (restartedClient.inspectRejectedMutations().single() as RetainedRejectionInspection.Current).rejection
             assertEquals(MutationStatus.REJECTED_TERMINAL, rejected.status)
             assertEquals(MutationRejectionCode.POLICY_REJECTED, rejected.code)
             assertEquals("not allowed", rejected.message)
@@ -493,13 +493,13 @@ class InspectionTests {
                 retained.map { mutation -> mutation.authoredFields.single { it.fieldID == "title" }.value },
             )
             assertEquals(2, snapshot.pendingChangeCount)
-            assertEquals(emptyList<RejectedMutationInspection>(), snapshot.rejectedMutations)
+            assertEquals(emptyList<RetainedRejectionInspection>(), snapshot.rejectedMutations)
             assertEquals(null, snapshot.blockingFailure)
             assertEquals(snapshot, proof.captureSnapshot(maximumRecords = 8) { _, _ -> })
 
             val bounded = proof.captureSnapshot(maximumRecords = 1) { _, _ -> }
             assertEquals(null, bounded.retainedMutations)
-            assertEquals(emptyList<RejectedMutationInspection>(), bounded.rejectedMutations)
+            assertEquals(emptyList<RetainedRejectionInspection>(), bounded.rejectedMutations)
         } finally {
             client.close()
             context.deleteDatabase(config.dbPath)

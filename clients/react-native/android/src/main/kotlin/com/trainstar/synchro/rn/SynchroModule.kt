@@ -1521,7 +1521,25 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         }))
     }
 
-    private fun rejectedMutationJson(mutation: RejectedMutationInspection): JSONObject = JSONObject().apply {
+    private fun rejectedMutationJson(value: RetainedRejectionInspection): JSONObject = when (value) {
+        is RetainedRejectionInspection.Current -> currentRejectionJson(value.rejection)
+        is RetainedRejectionInspection.Legacy -> JSONObject().apply {
+            put("representation", "legacy")
+            put("mutationID", value.rejection.mutationID)
+            put("tableName", value.rejection.tableName)
+            put("recordID", value.rejection.recordID)
+            put("status", mutationStatusWireValue(value.rejection.status))
+            put("code", mutationRejectionCodeWireValue(value.rejection.code))
+            put("message", value.rejection.message ?: JSONObject.NULL)
+            put("serverRowJSON", value.rejection.serverRowJSON ?: JSONObject.NULL)
+            put("serverVersion", value.rejection.serverVersion ?: JSONObject.NULL)
+            put("createdAt", value.rejection.createdAt)
+            put("updatedAt", value.rejection.updatedAt)
+        }
+    }
+
+    private fun currentRejectionJson(mutation: RejectedMutationInspection): JSONObject = JSONObject().apply {
+        put("representation", "current")
         put("mutationID", mutation.mutationID)
         put("tableName", mutation.tableName)
         put("recordID", mutation.recordID)

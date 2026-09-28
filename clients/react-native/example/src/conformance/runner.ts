@@ -16,6 +16,7 @@ import type {
   PendingMutationInspection,
   RetainedMutationInspection,
   RejectedMutationInspection,
+  RetainedRejectionInspection,
   Row,
   SQLiteBindValue,
   SyncEvent,
@@ -129,7 +130,7 @@ export type ConformanceActionResult =
 export interface ConformanceCapture {
   application_rows?: Row[];
   pending_mutations?: Omit<PendingMutationInspection, 'representation'>[];
-  rejected_mutations?: RejectedMutationInspection[];
+  rejected_mutations?: Omit<RejectedMutationInspection, 'representation'>[];
   client_state?: ClientStateInspection;
   durable_proof?: RawDurableProof;
   provenance?: ScopeRowInspection[];
@@ -530,10 +531,12 @@ export class PublicConformanceRunner {
         }
         case 'rejected-mutations': {
           const captured = await state();
-          capture.rejected_mutations = capturedDetail(
-            captured.rejectedMutations,
-            captured.clientState.rejectedMutationCount,
-            'rejected-mutations'
+          capture.rejected_mutations = currentRejections(
+            capturedDetail(
+              captured.rejectedMutations,
+              captured.clientState.rejectedMutationCount,
+              'rejected-mutations'
+            )
           );
           break;
         }
@@ -1025,6 +1028,20 @@ function currentMutations(
     const mutation: Partial<PendingMutationInspection> = { ...value };
     delete mutation.representation;
     return mutation as Omit<PendingMutationInspection, 'representation'>;
+  });
+}
+
+// A legacy rejection has no exact mutation or rejection, so it fails the capture.
+function currentRejections(
+  values: RetainedRejectionInspection[]
+): Omit<RejectedMutationInspection, 'representation'>[] {
+  return values.map((value) => {
+    if (value.representation !== 'current') {
+      throw new ConformanceCommandError('capture_inspection_failed');
+    }
+    const rejection: Partial<RejectedMutationInspection> = { ...value };
+    delete rejection.representation;
+    return rejection as Omit<RejectedMutationInspection, 'representation'>;
   });
 }
 

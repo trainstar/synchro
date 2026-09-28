@@ -359,14 +359,14 @@ public struct ClientStateSnapshotInspection: Sendable, Equatable {
     public let capture: ClientStateCaptureInspection
     public let pendingChangeCount: Int
     public let retainedMutations: [RetainedMutationInspection]?
-    public let rejectedMutations: [RejectedMutationInspection]?
+    public let rejectedMutations: [RetainedRejectionInspection]?
     public let blockingFailure: SyncFailure?
 
     public init(
         capture: ClientStateCaptureInspection,
         pendingChangeCount: Int,
         retainedMutations: [RetainedMutationInspection]?,
-        rejectedMutations: [RejectedMutationInspection]?,
+        rejectedMutations: [RetainedRejectionInspection]?,
         blockingFailure: SyncFailure?
     ) {
         self.capture = capture
@@ -671,6 +671,94 @@ public struct RejectedMutationInspection: Sendable, Equatable {
         self.rejection = rejection
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// A retained rejection that a database from before the mutation ledger stored.
+///
+/// The old rejection table did not store the exact mutation or rejection JSON,
+/// and the mutation has no ledger row. This record has only the stored fields.
+public struct LegacyRejectionInspection: Sendable, Equatable {
+    public let mutationID: String
+    public let tableName: String
+    public let recordID: String
+    public let status: MutationStatus
+    public let code: MutationRejectionCode
+    public let message: String?
+    public let serverRowJSON: String?
+    public let serverVersion: String?
+    public let createdAt: String
+    public let updatedAt: String
+
+    public init(
+        mutationID: String,
+        tableName: String,
+        recordID: String,
+        status: MutationStatus,
+        code: MutationRejectionCode,
+        message: String?,
+        serverRowJSON: String?,
+        serverVersion: String?,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.mutationID = mutationID
+        self.tableName = tableName
+        self.recordID = recordID
+        self.status = status
+        self.code = code
+        self.message = message
+        self.serverRowJSON = serverRowJSON
+        self.serverVersion = serverVersion
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+/// One retained rejection in its stored representation.
+public enum RetainedRejectionInspection: Sendable, Equatable {
+    case current(RejectedMutationInspection)
+    case legacy(LegacyRejectionInspection)
+
+    public var mutationID: String {
+        switch self {
+        case .current(let rejection): return rejection.mutationID
+        case .legacy(let rejection): return rejection.mutationID
+        }
+    }
+
+    public var tableName: String {
+        switch self {
+        case .current(let rejection): return rejection.tableName
+        case .legacy(let rejection): return rejection.tableName
+        }
+    }
+
+    public var recordID: String {
+        switch self {
+        case .current(let rejection): return rejection.recordID
+        case .legacy(let rejection): return rejection.recordID
+        }
+    }
+
+    public var status: MutationStatus {
+        switch self {
+        case .current(let rejection): return rejection.status
+        case .legacy(let rejection): return rejection.status
+        }
+    }
+
+    public var code: MutationRejectionCode {
+        switch self {
+        case .current(let rejection): return rejection.code
+        case .legacy(let rejection): return rejection.code
+        }
+    }
+
+    /// The current record, or nil for a legacy rejection.
+    public var current: RejectedMutationInspection? {
+        guard case .current(let rejection) = self else { return nil }
+        return rejection
     }
 }
 

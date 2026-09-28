@@ -1889,8 +1889,30 @@ public class SynchroModuleImpl: NSObject {
         ]
     }
 
-    private func rejectedMutationPayload(_ mutation: RejectedMutationInspection) -> [String: Any] {
+    private func rejectedMutationPayload(_ value: RetainedRejectionInspection) -> [String: Any] {
+        switch value {
+        case .current(let rejection):
+            return currentRejectionPayload(rejection)
+        case .legacy(let rejection):
+            return [
+                "representation": "legacy",
+                "mutationID": rejection.mutationID,
+                "tableName": rejection.tableName,
+                "recordID": rejection.recordID,
+                "status": rejection.status.rawValue,
+                "code": rejection.code.rawValue,
+                "message": rejection.message ?? NSNull(),
+                "serverRowJSON": rejection.serverRowJSON ?? NSNull(),
+                "serverVersion": rejection.serverVersion ?? NSNull(),
+                "createdAt": rejection.createdAt,
+                "updatedAt": rejection.updatedAt
+            ]
+        }
+    }
+
+    private func currentRejectionPayload(_ mutation: RejectedMutationInspection) -> [String: Any] {
         [
+            "representation": "current",
             "mutationID": mutation.mutationID,
             "tableName": mutation.tableName,
             "recordID": mutation.recordID,

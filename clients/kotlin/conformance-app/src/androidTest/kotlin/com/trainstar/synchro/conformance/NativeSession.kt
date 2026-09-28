@@ -10,7 +10,7 @@ import android.util.Base64
 import com.trainstar.synchro.AnyCodable
 import com.trainstar.synchro.Operation
 import com.trainstar.synchro.RetainedMutationInspection
-import com.trainstar.synchro.RejectedMutationInspection
+import com.trainstar.synchro.RetainedRejectionInspection
 import com.trainstar.synchro.SchemaRef
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
@@ -535,7 +535,7 @@ private class ClientSession(private val context: Context) : Closeable {
         captureState: ClientStateCaptureInspection? = null,
         retainedMutations: List<RetainedMutationInspection>? = null,
         retainedMutationCount: Int? = null,
-        rejectedMutations: List<RejectedMutationInspection>? = null,
+        rejectedMutations: List<RetainedRejectionInspection>? = null,
         durableStateFingerprint: String? = null,
     ): JsonObject {
         val client = requireClient()
@@ -732,8 +732,12 @@ private class ClientSession(private val context: Context) : Closeable {
         }
     }
 
-    private fun normalizeRejected(values: List<RejectedMutationInspection>): JsonArray = buildJsonArray {
-        values.sortedBy { it.mutationID }.forEach { value ->
+    // A legacy rejection has no exact mutation or rejection, so it fails the capture.
+    private fun normalizeRejected(values: List<RetainedRejectionInspection>): JsonArray = buildJsonArray {
+        values.map { value ->
+            (value as? RetainedRejectionInspection.Current)?.rejection
+                ?: throw IllegalStateException("legacy rejected mutation is outside the runner wire")
+        }.sortedBy { it.mutationID }.forEach { value ->
             add(buildJsonObject {
                 put("mutation_id", value.mutationID)
                 put("table_name", value.tableName)

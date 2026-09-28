@@ -179,20 +179,38 @@ public final class SynchroClient: @unchecked Sendable {
         try changeTracker.inspectRetainedMutations()
     }
 
-    public func inspectRejectedMutations() throws -> [RejectedMutationInspection] {
+    public func inspectRejectedMutations() throws -> [RetainedRejectionInspection] {
         try database.readTransaction(Self.inspectRejectedMutations)
     }
 
-    private static func inspectRejectedMutations(_ db: GRDB.Database) throws -> [RejectedMutationInspection] {
+    private static func inspectRejectedMutations(_ db: GRDB.Database) throws -> [RetainedRejectionInspection] {
         try SynchroMeta.listRejectedMutations(db).map { rejected in
             guard let status = MutationStatus(rawValue: rejected.status),
                   status == .conflict || status == .rejectedTerminal,
-                  let code = MutationRejectionCode(rawValue: rejected.code),
+                  let code = MutationRejectionCode(rawValue: rejected.code) else {
+                throw SynchroError.invalidResponse(message: "retained rejection is invalid")
+            }
+            // A rejection stored before the mutation ledger has no exact JSON and no ledger row.
+            if rejected.mutationJSON == nil, rejected.rejectedJSON == nil, rejected.localOrder == nil {
+                return .legacy(LegacyRejectionInspection(
+                    mutationID: rejected.mutationID,
+                    tableName: rejected.tableName,
+                    recordID: rejected.recordID,
+                    status: status,
+                    code: code,
+                    message: rejected.message,
+                    serverRowJSON: rejected.serverRowJSON,
+                    serverVersion: rejected.serverVersion,
+                    createdAt: rejected.createdAt,
+                    updatedAt: rejected.updatedAt
+                ))
+            }
+            guard let localOrder = rejected.localOrder,
                   let mutationJSON = rejected.mutationJSON,
                   let rejectionJSON = rejected.rejectedJSON,
                   let mutationData = mutationJSON.data(using: .utf8),
                   let rejectionData = rejectionJSON.data(using: .utf8) else {
-                throw SynchroError.invalidResponse(message: "retained rejection is invalid")
+                throw SynchroError.invalidResponse(message: "retained rejection has no complete durable mutation")
             }
             let decoder = JSONDecoder.synchroDecoder()
             let mutation: Mutation
@@ -211,9 +229,9 @@ public final class SynchroClient: @unchecked Sendable {
                   rejection.code == code else {
                 throw SynchroError.invalidResponse(message: "retained rejection identity is inconsistent")
             }
-            return RejectedMutationInspection(
+            return .current(RejectedMutationInspection(
                 mutationID: rejected.mutationID,
-                localOrder: rejected.localOrder,
+                localOrder: localOrder,
                 tableName: rejected.tableName,
                 recordID: rejected.recordID,
                 status: status,
@@ -227,7 +245,7 @@ public final class SynchroClient: @unchecked Sendable {
                 rejection: rejection,
                 createdAt: rejected.createdAt,
                 updatedAt: rejected.updatedAt
-            )
+            ))
         }
     }
 

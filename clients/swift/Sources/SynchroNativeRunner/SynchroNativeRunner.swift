@@ -1248,9 +1248,7 @@ private final class Runner: @unchecked Sendable {
         let rebuildAttempts = counts.rebuildAttemptsTruncated ? nil : counts.rebuildAttempts
         let rebuildReceipts = counts.rebuildReceiptsTruncated ? nil : counts.rebuildReceipts
         let retainedMutations = try snapshot.retainedMutations.map(retainedMutationRecords)
-        let rejectedMutations = try snapshot.rejectedMutations.map {
-            try bounded($0.map(RetainedRejection.init), subject: "rejected mutations")
-        }
+        let rejectedMutations = try snapshot.rejectedMutations.map(rejectedMutationRecords)
         let metadataRecords = counts.rowMetadataTruncated
             ? nil
             : counts.rowMetadata.map(RowMetadataRecord.init)
@@ -1517,6 +1515,17 @@ private func retainedMutationRecords(
         throw RunnerError.outputLimit("retained mutation authored fields exceed \(maximumBoundedRecords)")
     }
     return try bounded(current.map(RetainedMutation.init), subject: "retained mutations")
+}
+
+private func rejectedMutationRecords(
+    _ values: [RetainedRejectionInspection]
+) throws -> [RetainedRejection] {
+    // A legacy rejection has no exact mutation or rejection, so it fails the capture.
+    let current = try values.map { value in
+        guard let rejection = value.current else { throw RunnerError.captureInspection }
+        return RetainedRejection(rejection)
+    }
+    return try bounded(current, subject: "rejected mutations")
 }
 
 private func isReservedTable(_ value: String) -> Bool {

@@ -11,8 +11,8 @@ import { InvalidResponseError, mapNativeError } from './errors';
 import { assertValidSQLiteBindParams } from './sqliteValues';
 import type {
   ClientStateInspection,
-  RejectedMutationInspection,
   RetainedMutationInspection,
+  RetainedRejectionInspection,
   Row,
   SQLStatement,
   TransportObservationSnapshot,
@@ -60,7 +60,7 @@ export interface DurableStateInspection {
 export interface ClientStateSnapshotInspection {
   clientState: ClientStateInspection;
   retainedMutations: RetainedMutationInspection[] | null;
-  rejectedMutations: RejectedMutationInspection[] | null;
+  rejectedMutations: RetainedRejectionInspection[] | null;
   applicationRows: Row[];
 }
 

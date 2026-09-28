@@ -28,7 +28,7 @@ import type {
   MutationRejectionCode,
   PendingMutationInspection,
   RetainedMutationInspection,
-  RejectedMutationInspection,
+  RetainedRejectionInspection,
   ClientStateInspection,
   ScopeStateInspection,
   ScopeRowInspection,
@@ -460,7 +460,7 @@ export function parseRetainedMutationInspection(
 export function parseRejectedMutationInspection(
   value: unknown,
   index: number
-): RejectedMutationInspection {
+): RetainedRejectionInspection {
   const name = `rejected mutation at index ${index}`;
   if (!isRecord(value)) {
     throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
@@ -469,7 +469,7 @@ export function parseRejectedMutationInspection(
   if (code === null) {
     throw new InvalidResponseError(`Native bridge returned a missing ${name} code`);
   }
-  return {
+  const stored = {
     mutationID: requiredString(value.mutationID, `${name} ID`),
     tableName: requiredString(value.tableName, `${name} table name`),
     recordID: requiredString(value.recordID, `${name} record ID`),
@@ -478,10 +478,22 @@ export function parseRejectedMutationInspection(
     message: nullableString(value.message, `${name} message`),
     serverRowJSON: nullableString(value.serverRowJSON, `${name} server row JSON`),
     serverVersion: nullableString(value.serverVersion, `${name} server version`),
+  };
+  const createdAt = requiredString(value.createdAt, `${name} creation time`);
+  const updatedAt = requiredString(value.updatedAt, `${name} update time`);
+  if (value.representation === 'legacy') {
+    return { representation: 'legacy', ...stored, createdAt, updatedAt };
+  }
+  if (value.representation !== 'current') {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name} representation`);
+  }
+  return {
+    representation: 'current',
+    ...stored,
     mutationJSON: requiredString(value.mutationJSON, `${name} mutation JSON`),
     rejectionJSON: requiredString(value.rejectionJSON, `${name} rejection JSON`),
-    createdAt: requiredString(value.createdAt, `${name} creation time`),
-    updatedAt: requiredString(value.updatedAt, `${name} update time`),
+    createdAt,
+    updatedAt,
   };
 }
 
@@ -1066,7 +1078,7 @@ export class SynchroClient {
     }
   }
 
-  async inspectRejectedMutations(): Promise<RejectedMutationInspection[]> {
+  async inspectRejectedMutations(): Promise<RetainedRejectionInspection[]> {
     try {
       return parseNativeArray(
         await this.native.inspectRejectedMutations(),

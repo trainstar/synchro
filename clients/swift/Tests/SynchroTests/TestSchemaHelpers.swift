@@ -326,3 +326,13 @@ extension Array where Element == RetainedMutationInspection {
         }
     }
 }
+
+extension Array where Element == RetainedRejectionInspection {
+    /// Returns the current records. A legacy rejection fails the calling test.
+    func currentRecords() throws -> [RejectedMutationInspection] {
+        try map { value in
+            guard let current = value.current else { throw UnexpectedLegacyMutation() }
+            return current
+        }
+    }
+}

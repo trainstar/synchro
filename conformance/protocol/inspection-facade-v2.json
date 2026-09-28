@@ -3,8 +3,8 @@
   "facade": "SynchroInspection",
   "references": [
     "ApplicationReadTransaction",
-    "RejectedMutationInspection",
     "RetainedMutationInspection",
+    "RetainedRejectionInspection",
     "SyncFailure"
   ],
   "operations": [
@@ -194,7 +194,7 @@
           "type": {
             "name": "array",
             "nullable": true,
-            "element": { "name": "RejectedMutationInspection", "nullable": false }
+            "element": { "name": "RetainedRejectionInspection", "nullable": false }
           }
         },
         { "name": "blockingFailure", "type": { "name": "SyncFailure", "nullable": true } }

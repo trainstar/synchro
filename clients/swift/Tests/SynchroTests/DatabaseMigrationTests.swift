@@ -20,7 +20,7 @@ final class DatabaseMigrationTests: XCTestCase {
             try db.execute(sql: "CREATE TABLE _synchro_bucket_members (bucket_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL, checksum INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (bucket_id, table_name, record_id))")
             try db.execute(sql: "CREATE TABLE _synchro_bucket_checkpoints (bucket_id TEXT PRIMARY KEY, checkpoint INTEGER NOT NULL DEFAULT 0)")
             try db.execute(sql: "INSERT INTO _synchro_pending_changes VALUES (?, ?, ?, NULL, ?)", arguments: ["r1", "orders", "create", "2026-01-01T00:00:00.000000Z"])
-            try db.execute(sql: "INSERT INTO _synchro_rejected_mutations VALUES ('m1', 'orders', 'r0', 'rejected_terminal', 'policy_rejected', 'blocked', NULL, NULL, '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')")
+            try db.execute(sql: "INSERT INTO _synchro_rejected_mutations VALUES ('m1', 'orders', 'r0', 'rejected_terminal', 'policy_rejected', 'blocked', '{\"id\":\"r0\"}', 'server-v7', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')")
             try db.execute(sql: "INSERT INTO _synchro_scopes VALUES ('orders:user-1', 'old-cursor', 'old-checksum', 4, 7)")
             try db.execute(sql: "INSERT INTO _synchro_scope_rows VALUES ('orders:user-1', 'orders', 'r0', 7, 4)")
         }
@@ -93,12 +93,24 @@ final class DatabaseMigrationTests: XCTestCase {
         ))
         XCTAssertEqual(try client.inspectPendingMutations(), [legacyIntent])
         XCTAssertEqual(try client.inspectRetainedMutations(), [legacyIntent])
-        // The imported legacy rejection has no exact mutation JSON, so rejected
-        // inspection stays strict. Clear it before the whole-state snapshot.
-        XCTAssertThrowsError(try client.inspectRejectedMutations())
-        try client.clearRejectedMutations()
+        // The old rejection table stored no mutation or rejection JSON, so inspection reports none.
+        let legacyRejected = RetainedRejectionInspection.legacy(LegacyRejectionInspection(
+            mutationID: "m1",
+            tableName: "orders",
+            recordID: "r0",
+            status: .rejectedTerminal,
+            code: .policyRejected,
+            message: "blocked",
+            serverRowJSON: #"{"id":"r0"}"#,
+            serverVersion: "server-v7",
+            createdAt: "2026-01-01T00:00:00.000000Z",
+            updatedAt: "2026-01-01T00:00:00.000000Z"
+        ))
+        XCTAssertEqual(try client.inspectRejectedMutations(), [legacyRejected])
         let snapshot = try SynchroInspection(client: client).captureSnapshot(maximumRecords: 8) { _, _ in }
         XCTAssertEqual(snapshot.retainedMutations, [legacyIntent])
+        XCTAssertEqual(snapshot.rejectedMutations, [legacyRejected])
+        XCTAssertEqual(snapshot.capture.rejectedMutationCount, 1)
         XCTAssertEqual(snapshot.pendingChangeCount, 1)
 
         try db.writeTransaction { db in
@@ -108,6 +120,10 @@ final class DatabaseMigrationTests: XCTestCase {
             )
         }
         XCTAssertThrowsError(try client.inspectRetainedMutations())
+        try db.writeTransaction { db in
+            try db.execute(sql: "UPDATE _synchro_rejected_mutations SET mutation_json = '{}' WHERE mutation_id = 'm1'")
+        }
+        XCTAssertThrowsError(try client.inspectRejectedMutations())
         try await client.close()
         try db.close()
     }
