@@ -5328,12 +5328,40 @@ func (executor *OperatorExecutor) ObserveExtensionReinstall(ctx context.Context,
 }
 
 // RunWALReplayRestartControl forces a worker exit after durable materialization and before acknowledgement.
-func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context, recordID string) (observation WALReplayRestartObservation, returnedErr error) {
+func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context, recordID string) (WALReplayRestartObservation, error) {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
 		return WALReplayRestartObservation{}, errors.New("operator executor is unavailable")
 	}
-	if ctx == nil || !diagnosticUUIDPattern.MatchString(recordID) {
+	return executor.RunWALTransactionReplayRestart(ctx, []string{recordID}, func(ctx context.Context) error {
+		return (&SourceExecutor{harness: executor.harness}).ExecContext(
+			ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
+			recordID,
+			"diagnostic-user",
+			"restart-before-acknowledgement",
+		)
+	})
+}
+
+// RunWALTransactionReplayRestart runs commit while the worker cannot record a
+// transaction. It then forces a worker exit after durable materialization and
+// before acknowledgement, so the restarted worker replays that transaction.
+// recordIDs name the cf_items rows that the committed transaction writes.
+func (executor *OperatorExecutor) RunWALTransactionReplayRestart(
+	ctx context.Context,
+	recordIDs []string,
+	commit func(context.Context) error,
+) (observation WALReplayRestartObservation, returnedErr error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return WALReplayRestartObservation{}, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil || commit == nil || len(recordIDs) == 0 || len(recordIDs) > 16 {
 		return WALReplayRestartObservation{}, errors.New("WAL replay restart identity is invalid")
+	}
+	for _, recordID := range recordIDs {
+		if !diagnosticUUIDPattern.MatchString(recordID) {
+			return WALReplayRestartObservation{}, errors.New("WAL replay restart identity is invalid")
+		}
 	}
 	harness := executor.harness
 	database, err := harness.openDatabase(ctx, harness.names.Database, harness.env.Admin, false)
@@ -5375,14 +5403,8 @@ func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context
 	if _, err := lockTransaction.ExecContext(ctx, "LOCK TABLE synchro.sync_wal_transactions IN ACCESS EXCLUSIVE MODE"); err != nil {
 		return WALReplayRestartObservation{}, errors.New("lock WAL replay materialization failed")
 	}
-	if err := (&SourceExecutor{harness: harness}).ExecContext(
-		ctx,
-		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
-		recordID,
-		"diagnostic-user",
-		"restart-before-acknowledgement",
-	); err != nil {
-		return WALReplayRestartObservation{}, errors.New("commit WAL replay restart source row failed")
+	if err := commit(ctx); err != nil {
+		return WALReplayRestartObservation{}, errors.New("commit WAL replay restart source transaction failed")
 	}
 
 	var workerPID int64
@@ -5441,18 +5463,21 @@ func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context
 
 	materializedContext, materializedCancel := context.WithTimeout(ctx, 20*time.Second)
 	err = waitUntil(materializedContext, func(attemptContext context.Context) (bool, error) {
-		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		pipeline, err := executor.ObserveWALRecords(attemptContext, recordIDs)
 		if err != nil {
 			return false, err
 		}
-		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", recordIDs)
 		if err != nil {
 			return false, err
 		}
 		observation.BeforeRestart = pipeline
 		observation.BeforeStages = stages
-		return len(pipeline.Records) == 1 &&
-			pipeline.Records[0].FenceCoverage == "materialized" &&
+		materialized := len(pipeline.Records) > 0
+		for _, record := range pipeline.Records {
+			materialized = materialized && record.FenceCoverage == "materialized"
+		}
+		return materialized &&
 			!pipeline.ContiguousAcknowledged &&
 			pipeline.AcknowledgedEndLSN == observation.PriorProgress.AcknowledgedEndLSN &&
 			pipeline.SlotConfirmedFlushLSN == observation.PriorProgress.SlotConfirmedFlushLSN &&
@@ -5513,17 +5538,17 @@ func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context
 
 	replayedContext, replayedCancel := context.WithTimeout(ctx, 20*time.Second)
 	err = waitUntil(replayedContext, func(attemptContext context.Context) (bool, error) {
-		pipeline, err := executor.ObserveWALRecords(attemptContext, []string{recordID})
+		pipeline, err := executor.ObserveWALRecords(attemptContext, recordIDs)
 		if err != nil {
 			return false, err
 		}
-		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", []string{recordID})
+		stages, err := executor.ObserveWALRecordStages(attemptContext, "cf_items", recordIDs)
 		if err != nil {
 			return false, err
 		}
 		observation.AfterRestart = pipeline
 		observation.AfterStages = stages
-		return len(pipeline.Records) == 1 && pipeline.ContiguousAcknowledged &&
+		return len(pipeline.Records) > 0 && pipeline.ContiguousAcknowledged &&
 			pipeline.AcknowledgementMatchesObservedEnd && pipeline.SlotMatchesObservedEnd, nil
 	})
 	replayedCancel()

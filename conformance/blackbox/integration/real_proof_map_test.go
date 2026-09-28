@@ -88,8 +88,8 @@ var serverProofBindings = []serverProofBinding{
 	// decoder accepts valid Relation refreshes, so no current fault is manufactured.
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-PG-LINUX-X64-001", []string{"TestRealExtensionUpdateRepairsRetainedDecoderPoison"}},
 	{"SCN-WAL-DECODE-FAILURE-001", "OBL-WAL-DECODE-FAULT-LINUX-X64-001", []string{"TestRealExtensionUpdateRepairsRetainedDecoderPoison"}},
-	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary"}},
-	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-FAULT-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary"}},
+	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-PG-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary", "TestRealTransactionMembershipUsesFinalProjectionAcrossActivations"}},
+	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-FAULT-LINUX-X64-001", []string{"TestRealRegistryGenerationReloadAtCommitBoundary", "TestRealTransactionMembershipUsesFinalProjectionAcrossActivations"}},
 	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-WAL-008-PG-LINUX-X64-001", []string{"TestRealIssue49CaptureReadinessRequiresEveryCheck", "TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
 	{"SCN-REGISTRY-RELOAD-001", "OBL-REGISTRY-RELOAD-WAL-008-FAULT-LINUX-X64-001", []string{"TestRealIssue49CaptureReadinessRequiresEveryCheck", "TestRealIssue49HealthUsesFiniteCanonicalObservations", "TestRealIssue49SecurityCaptureHealthFailsClosed", "TestRealIssue49ResetLifecycleAndFenceCoverage"}},
 	{"SCN-PUSH-RESPONSE-LOSS-001", "OBL-PUSH-RESPONSE-LOSS-PG-LINUX-X64-001", []string{"TestRealS11PushResponseLossReplaysExactCanonicalResponse", "TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay", "TestRealIssue49RemainingSemantics"}},
