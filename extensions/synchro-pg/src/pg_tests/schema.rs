@@ -2077,6 +2077,9 @@
 
     #[pg_test]
     fn test_added_nonempty_table_is_class_3_with_bootstrap() {
+        // Class 3 affects every committed scope, so no dblink test may have
+        // committed clients while this test reads them.
+        lock_committed_scope_state(false);
         setup_test_tables();
         register_client("nonempty-table-user", "nonempty-table-client");
         Spi::run(
@@ -3722,7 +3725,23 @@
         .expect("dblink asynchronous query result")
     }
 
+    // The renewal race commits a client through dblink and deletes it before
+    // its test transaction ends. It holds this lock exclusively for that whole
+    // time. A test that asserts on every committed scope holds it shared.
+    const COMMITTED_SCOPE_STATE_LOCK: i64 = 0x5359_4e43_5343_4f50;
+
+    fn lock_committed_scope_state(exclusive: bool) {
+        let statement = if exclusive {
+            "SELECT pg_advisory_xact_lock($1)"
+        } else {
+            "SELECT pg_advisory_xact_lock_shared($1)"
+        };
+        Spi::run_with_args(statement, &[COMMITTED_SCOPE_STATE_LOCK.into()])
+            .expect("lock committed scope state");
+    }
+
     fn run_connect_generation_renewal_race(rebuild: bool) {
+        lock_committed_scope_state(true);
         let user_id = if rebuild {
             "concurrent-rebuild-user"
         } else {
