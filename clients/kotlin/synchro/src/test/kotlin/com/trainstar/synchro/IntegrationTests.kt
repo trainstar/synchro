@@ -186,7 +186,7 @@ class IntegrationTests {
         text: String,
     ) {
         waitForCondition(timeoutMs = 30_000) {
-            client.syncNow()
+            syncAcceptingRetry(client)
             val rows = client.query("SELECT col_text FROM type_zoo WHERE user_id = ?", arrayOf(userID))
             rows.size == ids.size && rows.all { it["col_text"] == text }
         }
@@ -197,6 +197,17 @@ class IntegrationTests {
                 case.second.toDouble().toRawBits(),
                 value.toRawBits(),
             )
+        }
+    }
+
+    /**
+     * A retryable response such as 503 capture_pending keeps the engine running.
+     * The caller polls again, as the contract allows.
+     */
+    private suspend fun syncAcceptingRetry(client: SynchroClient) {
+        try {
+            client.syncNow()
+        } catch (_: RetryableError) {
         }
     }
 
@@ -239,7 +250,7 @@ class IntegrationTests {
                     },
                 )
                 waitForCondition(timeoutMs = 30_000) {
-                    writer.syncNow()
+                    syncAcceptingRetry(writer)
                     writer.pendingChangeCount() == 0
                 }
                 reader.start()
@@ -264,7 +275,7 @@ class IntegrationTests {
                     },
                 )
                 waitForCondition(timeoutMs = 30_000) {
-                    writer.syncNow()
+                    syncAcceptingRetry(writer)
                     writer.pendingChangeCount() == 0
                 }
                 waitForFloatWireRows(reader, userID, ids, cases, "float-wire-later")
@@ -328,13 +339,13 @@ class IntegrationTests {
                 }
                 resumed.retry()
                 waitForCondition(timeoutMs = 30_000) {
-                    resumed.syncNow()
+                    syncAcceptingRetry(resumed)
                     resumed.pendingChangeCount() == 0
                 }
                 assertEquals(connectedGeneration, localMeta(database(resumed), "client_generation"))
                 reader.start()
                 waitForCondition(timeoutMs = 30_000) {
-                    reader.syncNow()
+                    syncAcceptingRetry(reader)
                     reader.query("SELECT id, name FROM customers WHERE user_id = ?", arrayOf(userID))
                         .associate { it["id"] as String to it["name"] as String } == mapOf(customerID to "queued before rejection")
                 }
