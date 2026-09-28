@@ -572,17 +572,38 @@ class PublicationStateTests(unittest.TestCase):
         with self.assertRaisesRegex(release_publish.PublicationError, "npm package bytes differ"):
             release_publish.classify_publication(self.identity, state)
 
-    def test_candidate_npm_state_is_not_recoverable(self) -> None:
+    def test_published_candidate_is_promoted_before_github_latest(self) -> None:
         state = self.state()
-        state["npm"] = {"sha256": self.identity["npm"]["sha256"], "dist_tags": {"candidate": "1.2.3"}, "provenance": True}
-        with self.assertRaisesRegex(release_publish.PublicationError, "candidate dist-tag is obsolete"):
-            release_publish.classify_publication(self.identity, state)
+        state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
+        state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
+        state["maven"]["public_files"] = self.identity["maven_entries"]
+        for dist_tags in ({"candidate": "1.2.3", "latest": "1.2.2"}, {"candidate": "1.2.3"}, {"latest": "0.9.10"}):
+            with self.subTest(dist_tags=dist_tags):
+                state["npm"] = {"sha256": self.identity["npm"]["sha256"], "dist_tags": dist_tags, "provenance": True}
+                result = release_publish.classify_publication(self.identity, state)
+                self.assertEqual(result["npm"], "published-candidate")
+                self.assertEqual(result["next_operation"], "promote-npm")
+                self.assertFalse(result["complete"])
 
-    def test_existing_npm_version_without_latest_fails(self) -> None:
+    def test_competing_npm_latest_needs_explicit_resolution(self) -> None:
         state = self.state()
-        state["npm"] = {"sha256": self.identity["npm"]["sha256"], "dist_tags": {"latest": "1.2.2"}, "provenance": True}
-        with self.assertRaisesRegex(release_publish.PublicationError, "not published under latest"):
-            release_publish.classify_publication(self.identity, state)
+        for latest in ("1.2.4", "1.10.0", "2.0.0-beta.1"):
+            with self.subTest(latest=latest):
+                state["npm"] = {
+                    "sha256": self.identity["npm"]["sha256"],
+                    "dist_tags": {"candidate": "1.2.3", "latest": latest},
+                    "provenance": True,
+                }
+                with self.assertRaisesRegex(release_publish.PublicationError, "competing version"):
+                    release_publish.classify_publication(self.identity, state)
+
+    def test_npm_tag_for_missing_version_fails(self) -> None:
+        state = self.state()
+        for name in ("candidate", "latest", "next"):
+            with self.subTest(name=name):
+                state["npm"] = {"sha256": None, "dist_tags": {name: "1.2.3"}, "provenance": False}
+                with self.assertRaisesRegex(release_publish.PublicationError, "points to a missing package"):
+                    release_publish.classify_publication(self.identity, state)
 
     def test_existing_npm_version_without_provenance_fails(self) -> None:
         state = self.state()
@@ -895,14 +916,17 @@ class PublicationStateTests(unittest.TestCase):
                 raise SystemExit(publisher.main())
                 """), encoding="utf-8")
             proxy.chmod(0o755)
-            for maven, npm, password, oidc, exchange_status, error in (
-                ("absent", "absent", "fixture-password", True, 200, None),
-                ("absent", "absent", "wrong-password", True, 200, "Central request failed with HTTP 401"),
-                ("published", "absent", "", True, 404, "npm trusted publishing token exchange failed with HTTP 404"),
-                ("published", "absent", "", False, 200, "GitHub OIDC token request is unavailable"),
-                ("published", "published-latest", "", True, 200, None),
+            for maven, npm, password, oidc, exchange_status, dist_tag_token, error in (
+                ("absent", "absent", "fixture-password", True, 200, "dist-tag-secret", None),
+                ("absent", "absent", "wrong-password", True, 200, "dist-tag-secret", "Central request failed with HTTP 401"),
+                ("published", "absent", "", True, 404, "dist-tag-secret", "npm trusted publishing token exchange failed with HTTP 404"),
+                ("published", "absent", "", False, 200, "dist-tag-secret", "GitHub OIDC token request is unavailable"),
+                ("published", "absent", "", True, 200, "", "NPM_DIST_TAG_TOKEN is required to move npm latest"),
+                ("published", "published-candidate", "", True, 200, "", "NPM_DIST_TAG_TOKEN is required to move npm latest"),
+                ("published", "published-candidate", "", True, 200, "dist-tag-secret", None),
+                ("published", "published-latest", "", True, 200, "", None),
             ):
-                with self.subTest(maven=maven, npm=npm, password=password, oidc=oidc, exchange_status=exchange_status):
+                with self.subTest(maven=maven, npm=npm, password=password, oidc=oidc, exchange_status=exchange_status, dist_tag_token=bool(dist_tag_token)):
                     requests = []
 
                     class Handler(BaseHTTPRequestHandler):
@@ -941,7 +965,7 @@ class PublicationStateTests(unittest.TestCase):
 
                         assertEqual = self.assertEqual
 
-                    runner = root / f"{maven}-{npm}-{password}-{oidc}-{exchange_status}"
+                    runner = root / f"{maven}-{npm}-{password}-{oidc}-{exchange_status}-{bool(dist_tag_token)}"
                     runner.mkdir()
                     (runner / "public-before-classification.json").write_text(
                         json.dumps({"maven": maven, "npm": npm}), encoding="utf-8",
@@ -956,6 +980,7 @@ class PublicationStateTests(unittest.TestCase):
                             "RUNNER_TEMP": str(runner),
                             "MAVEN_CENTRAL_USERNAME": "fixture-user" if password else "",
                             "MAVEN_CENTRAL_PASSWORD": password,
+                            "NPM_DIST_TAG_TOKEN": dist_tag_token,
                             "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
                             "TEST_SERVER_URL": url,
                         }
@@ -973,7 +998,7 @@ class PublicationStateTests(unittest.TestCase):
                             server.shutdown()
                             thread.join()
                     output = result.stdout + result.stderr
-                    for secret in ("request-token-secret", "id-token-secret", "npm-token-secret", "fixture-password"):
+                    for secret in ("request-token-secret", "id-token-secret", "npm-token-secret", "fixture-password", "dist-tag-secret"):
                         self.assertNotIn(secret, output)
                     if error is None:
                         self.assertEqual(result.returncode, 0, result.stderr)
@@ -986,6 +1011,213 @@ class PublicationStateTests(unittest.TestCase):
                     if npm == "absent" and oidc and password != "wrong-password":
                         expected.extend([("GET", "/oidc"), ("POST", exchange)])
                     self.assertEqual(requests, expected)
+
+    def test_npm_latest_moves_only_after_public_candidate_checks(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        order = [
+            workflow.index(f"      - name: {name}\n")
+            for name in (
+                "Publish or verify exact npm candidate through trusted OIDC",
+                "Verify public React Native iOS and Android consumers",
+                "Promote npm latest only after public checks",
+                "Mark GitHub latest only after public checks",
+            )
+        ]
+        self.assertEqual(order, sorted(order))
+        replacements = {"release_dir_name": "fixture", "version": self.version}
+        commands = {}
+        for name in ("Publish or verify exact npm candidate through trusted OIDC", "Promote npm latest only after public checks"):
+            command = release_step_command(name)
+            for expression, value in replacements.items():
+                command = command.replace("${{ needs.candidate.outputs." + expression + " }}", value)
+            self.assertNotIn("${{", command)
+            commands[name] = command
+        publish = commands["Publish or verify exact npm candidate through trusted OIDC"]
+        promote = commands["Promote npm latest only after public checks"]
+
+        with tempfile.TemporaryDirectory(prefix="synchro-npm-promotion-") as directory:
+            root = Path(directory)
+            release_dir = root / "dist/releases/fixture"
+            self.write_release_fixture(release_dir)
+            (release_dir / "artifacts").mkdir()
+            sealed = b"sealed react-native-npm bytes"
+            (release_dir / f"artifacts/trainstar-synchro-react-native-{self.version}.tgz").write_bytes(sealed)
+            tools = root / "tools"
+            tools.mkdir()
+            proxy = tools / "python3"
+            proxy.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import importlib.util
+                import os
+                import sys
+                assert sys.argv[1] == os.path.join(os.environ["RUNNER_TEMP"], "release-publish.py")
+                spec = importlib.util.spec_from_file_location("publisher", os.environ["TEST_PUBLISHER"])
+                publisher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(publisher)
+                publisher.NPM_REGISTRY = os.environ["TEST_SERVER_URL"]
+                sys.argv = sys.argv[1:]
+                raise SystemExit(publisher.main())
+                """), encoding="utf-8")
+            proxy.chmod(0o755)
+            fake_npm = tools / "npm"
+            fake_npm.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import json
+                import os
+                import sys
+                from pathlib import Path
+                path = Path(os.environ["TEST_NPM_STATE"])
+                state = json.loads(path.read_text())
+                args = sys.argv[1:]
+                package = "@trainstar/synchro-react-native"
+                version = "1.2.3"
+                if args[:2] == ["install", "--global"] or args[:2] == ["init", "--yes"]:
+                    pass
+                elif args[0] == "publish":
+                    assert args[2:5] == ["--access", "public", "--provenance"] and args[5] == "--tag", args
+                    assert version not in state["versions"]
+                    state["versions"][version] = Path(args[1]).read_bytes().hex()
+                    state["dist_tags"][args[6]] = version
+                    state["operations"].append("publish " + args[6])
+                elif args == ["view", f"{package}@{version}", "version"]:
+                    assert version in state["versions"]
+                    print(version)
+                elif args[0] == "install":
+                    assert args[-1] == f"{package}@{version}" and version in state["versions"], args
+                    state["operations"].append("install " + args[-1])
+                elif args[:2] == ["audit", "signatures"]:
+                    state["operations"].append("audit signatures")
+                    print(json.dumps({"invalid": state["invalid_signatures"], "missing": []}))
+                elif args[:2] == ["dist-tag", "add"]:
+                    assert args[2:] == [f"{package}@{version}", "latest", "--userconfig", args[5]], args
+                    config = Path(args[5]).read_text()
+                    assert config == "//registry.npmjs.org/:_authToken=${NPM_DIST_TAG_TOKEN}\\n", config
+                    assert os.environ["NPM_DIST_TAG_TOKEN"] == "dist-tag-secret"
+                    state["dist_tags"]["latest"] = version
+                    state["operations"].append("dist-tag latest")
+                else:
+                    raise AssertionError(args)
+                path.write_text(json.dumps(state))
+                """), encoding="utf-8")
+            fake_npm.chmod(0o755)
+            sleeper = tools / "sleep"
+            sleeper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            sleeper.chmod(0o755)
+
+            class Registry(BaseHTTPRequestHandler):
+                state_path: Path
+
+                def log_message(self, *_args: object) -> None:
+                    return
+
+                def respond(self, status: int, payload: bytes) -> None:
+                    self.send_response(status)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def do_GET(self) -> None:
+                    state = json.loads(Registry.state_path.read_text(encoding="utf-8"))
+                    base = f"http://127.0.0.1:{self.server.server_port}"
+                    if self.path == "/@trainstar%2Fsynchro-react-native":
+                        versions = {
+                            version: {"dist": {
+                                "tarball": f"{base}/tarball/{version}",
+                                "attestations": {
+                                    "url": f"https://registry.npmjs.org/-/npm/v1/attestations/%40trainstar%2Fsynchro-react-native@{version}",
+                                    "provenance": {"predicateType": "https://slsa.dev/provenance/v1"},
+                                },
+                            }}
+                            for version in state["versions"]
+                        }
+                        self.respond(200, json.dumps({"dist-tags": state["dist_tags"], "versions": versions}).encode())
+                    elif self.path.startswith("/tarball/"):
+                        self.respond(200, bytes.fromhex(state["versions"][self.path.rsplit("/", 1)[1]]))
+                    else:
+                        self.respond(404, b"{}")
+
+            def run(name: str, command: str, runner: Path, state: dict[str, object], before: str) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+                state_path = runner / f"{name}-npm-state.json"
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                Registry.state_path = state_path
+                (runner / "public-before-npm-classification.json").write_text(
+                    json.dumps({"npm": before, "github": "public", "maven": "published"}), encoding="utf-8",
+                )
+                with ThreadingHTTPServer(("127.0.0.1", 0), Registry) as server:
+                    thread = threading.Thread(target=server.serve_forever)
+                    thread.start()
+                    try:
+                        result = subprocess.run(
+                            ["bash", "-c", command], cwd=root,
+                            env={
+                                **{key: value for key, value in os.environ.items() if key not in {"NODE_AUTH_TOKEN", "NPM_TOKEN"}},
+                                "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                                "RUNNER_TEMP": str(runner),
+                                "GITHUB_TOKEN": "",
+                                "NPM_DIST_TAG_TOKEN": "dist-tag-secret",
+                                "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
+                                "TEST_SERVER_URL": f"http://127.0.0.1:{server.server_port}",
+                                "TEST_NPM_STATE": str(state_path),
+                            },
+                            capture_output=True, text=True, timeout=60, check=False,
+                        )
+                    finally:
+                        server.shutdown()
+                        thread.join()
+                self.assertNotIn("dist-tag-secret", result.stdout + result.stderr)
+                return result, json.loads(state_path.read_text(encoding="utf-8"))
+
+            def registry(versions: dict[str, bytes], dist_tags: dict[str, str], invalid: list[str] | None = None) -> dict[str, object]:
+                return {
+                    "versions": {version: data.hex() for version, data in versions.items()},
+                    "dist_tags": dist_tags, "operations": [], "invalid_signatures": invalid or [],
+                }
+
+            checks = ["install @trainstar/synchro-react-native@1.2.3", "audit signatures"]
+            with self.subTest(case="fresh publication"):
+                runner = root / "fresh"
+                runner.mkdir()
+                result, state = run("publish", publish, runner, registry({"1.2.2": b"old"}, {"latest": "1.2.2"}), "absent")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["dist_tags"], {"latest": "1.2.2", "candidate": "1.2.3"})
+                self.assertEqual(state["operations"], ["publish candidate", *checks])
+                self.assertEqual(json.loads((runner / "npm-operation.json").read_text())["registry_state"], "published-candidate")
+                result, state = run("promote", promote, runner, state | {"operations": []}, "absent")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["dist_tags"], {"latest": "1.2.3", "candidate": "1.2.3"})
+                self.assertEqual(state["operations"], ["dist-tag latest"])
+
+            with self.subTest(case="failed public check then recovery"):
+                runner = root / "recovery"
+                runner.mkdir()
+                result, state = run("publish", publish, runner, registry({"1.2.2": b"old"}, {"latest": "1.2.2"}, ["bad"]), "absent")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(state["dist_tags"], {"latest": "1.2.2", "candidate": "1.2.3"})
+                self.assertEqual(state["operations"], ["publish candidate", *checks])
+                state = state | {"operations": [], "invalid_signatures": []}
+                result, state = run("resume", publish, runner, state, "published-candidate")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["operations"], checks)
+                result, state = run("promote", promote, runner, state | {"operations": []}, "published-candidate")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["dist_tags"]["latest"], "1.2.3")
+                self.assertEqual(state["operations"], ["dist-tag latest"])
+                result, state = run("complete", promote, runner, state | {"operations": []}, "published-latest")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["operations"], [])
+
+            for case, versions, dist_tags, error in (
+                ("wrong bytes", {"1.2.3": b"other bytes"}, {"latest": "1.2.2", "candidate": "1.2.3"}, "npm package bytes differ"),
+                ("competing latest", {"1.2.3": sealed, "1.2.4": b"newer"}, {"latest": "1.2.4", "candidate": "1.2.3"}, "competing version 1.2.4"),
+            ):
+                with self.subTest(case=case):
+                    runner = root / case.replace(" ", "-")
+                    runner.mkdir()
+                    for name, command in (("publish", publish), ("promote", promote)):
+                        result, state = run(name, command, runner, registry(versions, dist_tags), "published-candidate")
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(state["dist_tags"], dist_tags)
+                        self.assertNotIn("dist-tag latest", state["operations"])
+                        self.assertNotIn("publish candidate", state["operations"])
+                    self.assertIn(error, result.stderr)
 
     def test_registry_polls_do_not_spend_github_api_requests(self) -> None:
         command = release_step_command("Publish and verify Maven deployment")

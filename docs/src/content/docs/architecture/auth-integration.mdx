@@ -100,6 +100,11 @@ The next connect reconciles a grant or revoke. An added scope has a null cursor
 and rebuilds. A removed scope causes local provenance cleanup. A client cannot
 invent, grant, or retain an unassigned scope.
 
+Until that connect, pull and rebuild use the client's prior assignment. A
+revoked scope stays readable to an already connected client until it connects
+again. Registration or removal of a shared scope reaches active clients on
+their next pull.
+
 ## Read next
 
 - [Server setup](/synchro/getting-started/server-setup/)

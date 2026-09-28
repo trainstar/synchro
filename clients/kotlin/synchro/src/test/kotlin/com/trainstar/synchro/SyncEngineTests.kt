@@ -26,6 +26,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -51,6 +52,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.UUID
 import java.lang.reflect.InvocationTargetException
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -229,9 +231,10 @@ class SyncEngineTests {
         var startDuringStoppedPublication: Throwable? = null
         val callback = engine.onStatusChange { status ->
             if (status is SyncStatus.Stopped) {
-                startDuringStoppedPublication = runCatching {
-                    runBlocking { engine.start() }
-                }.exceptionOrNull()
+                // D-03 rejects an inline start, so an independent start observes the stop barrier.
+                startDuringStoppedPublication = CompletableFuture.supplyAsync {
+                    runCatching { runBlocking { engine.start() } }.exceptionOrNull()
+                }.get(5, TimeUnit.SECONDS)
             }
         }
         try {
@@ -3256,38 +3259,7 @@ class SyncEngineTests {
     fun testConflictCallbackFiresDuringSyncCycle() = runTest {
         val receivedConflicts = mutableListOf<ConflictEvent>()
 
-        val (engine, db) = makeIntegrationEnv { request ->
-            val path = request.path ?: ""
-            when {
-                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
-                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
-                path.endsWith("/sync/push") -> {
-                    val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
-                    val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
-                    val rejected = mutations.map { change ->
-                        val c = change as JsonObject
-                        val record = protocolRecord(
-                            id = c.getValue("pk").jsonObject.getValue("field-id").jsonPrimitive.content,
-                            shipAddress = "Server Wins Address",
-                            userID = "u1",
-                            updatedAt = "2026-01-01T15:00:00.000000Z",
-                            serverVersion = "2026-01-01T15:00:00.000000Z",
-                        )
-                        rejectedPushOutcomeJSON(
-                            mutation = c,
-                            status = MutationStatus.CONFLICT,
-                            code = MutationRejectionCode.VERSION_CONFLICT,
-                            message = "server version is newer",
-                            serverRow = requireNotNull(record.change.row),
-                            serverVersion = record.change.serverVersion,
-                        )
-                    }
-                    mockResponse("""{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T15:00:00.000Z","accepted":[],"rejected":[${rejected.joinToString(",")}]}""")
-                }
-                path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
-                else -> mockResponse("""{"error":"unexpected"}""", 500)
-            }
-        }
+        val (engine, db) = makeIntegrationEnv(handler = ::conflictServerResponse)
 
         engine.onConflict { event -> receivedConflicts.add(event) }
 
@@ -3313,6 +3285,112 @@ class SyncEngineTests {
             assertFalse(tracker.hasPendingChanges())
         } finally {
             engine.stop()
+        }
+    }
+
+    /**
+     * D-03. Status, conflict, and event callbacks run synchronously inside sync work. Each inline
+     * lifecycle call must fail with the local programmer error before it changes the engine.
+     * A shutdown that a callback schedules on another thread must still finish.
+     */
+    @Test
+    fun lifecycleCallsInsideCallbacksFailBeforeSideEffects() = runTest(timeout = 90.seconds) {
+        val (engine, db) = makeIntegrationEnv(pushDebounce = 999.0, handler = ::conflictServerResponse)
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"),
+            )
+            val requestsBeforeCycle = server!!.requestCount
+            val delivered = CopyOnWriteArrayList<String>()
+            val reentry = CopyOnWriteArrayList<String>()
+            fun reenterEveryLifecycleCall(callback: String) {
+                val calls: List<Pair<String, suspend () -> Unit>> = listOf(
+                    "start" to { engine.start() },
+                    "retry" to { engine.retry() },
+                    "resetSchema" to { engine.resetSchema() },
+                    "syncNow" to { engine.syncNow() },
+                    "stop" to { engine.stop() },
+                    "shutdown" to { engine.shutdown() },
+                )
+                for ((name, call) in calls) {
+                    // The bound turns a missing guard into a failed assertion instead of a hang.
+                    val outcome = runBlocking {
+                        withTimeoutOrNull(5.seconds) {
+                            runCatching { call() }.fold({ "returned" }, { it::class.simpleName })
+                        } ?: "timed out"
+                    }
+                    reentry += "$callback $name: $outcome"
+                }
+            }
+            val registrations = listOf(
+                engine.onStatusChange { status ->
+                    delivered += "status ${status.state.wireName}"
+                    reenterEveryLifecycleCall("status")
+                },
+                engine.onConflict { conflict ->
+                    delivered += "conflict ${conflict.recordID}"
+                    reenterEveryLifecycleCall("conflict")
+                },
+                engine.onEvent { event ->
+                    delivered += when (event) {
+                        is SyncEvent.StateChanged -> "event ${event.change.from.wireName}>${event.change.to.wireName}"
+                        is SyncEvent.MutationRejected -> "event rejected ${event.mutation.status}"
+                        else -> "event ${event::class.simpleName}"
+                    }
+                    reenterEveryLifecycleCall("event")
+                },
+            )
+
+            val firstCycle = runCatching { engine.syncNow() }
+            registrations.forEach(Cancellable::cancel)
+
+            // Push precedes pull, and each callback runs in the synchronous order of its transition.
+            val expectedDelivery = listOf(
+                "status pushing", "event ready>pushing",
+                "conflict w1", "event rejected CONFLICT",
+                "status ready", "event pushing>ready",
+                "status pulling", "event ready>pulling",
+                "status ready", "event pulling>ready",
+            )
+            assertEquals(expectedDelivery, delivered.toList())
+            val lifecycleCalls = listOf("start", "retry", "resetSchema", "syncNow", "stop", "shutdown")
+            assertEquals(
+                expectedDelivery.flatMap { entry ->
+                    lifecycleCalls.map { "${entry.substringBefore(' ')} $it: IllegalStateException" }
+                },
+                reentry.toList(),
+            )
+            assertTrue("the cycle must finish: ${firstCycle.exceptionOrNull()}", firstCycle.isSuccess)
+            // The rejected calls sent no request, kept the engine ready, and kept the cycle result.
+            val paths = List(server!!.requestCount) { server!!.takeRequest(0, TimeUnit.SECONDS)?.path }
+            assertEquals(listOf("/sync/push", "/sync/pull"), paths.drop(requestsBeforeCycle))
+            assertEquals(SyncStatus.Ready, engine.getSyncStatus())
+            assertEquals(
+                "Server Wins Address",
+                db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf("w1"))?.get("ship_address"),
+            )
+
+            val independentShutdown = CompletableFuture<Unit>()
+            val scheduled = AtomicBoolean(false)
+            val scheduling = engine.onStatusChange { status ->
+                if (status == SyncStatus.Ready && scheduled.compareAndSet(false, true)) {
+                    thread(name = "synchro-test-independent-shutdown") {
+                        runCatching { runBlocking { engine.shutdown() } }
+                            .fold(independentShutdown::complete, independentShutdown::completeExceptionally)
+                    }
+                }
+            }
+            val cycle = runCatching { engine.syncNow() }
+            scheduling.cancel()
+            independentShutdown.get(10, TimeUnit.SECONDS)
+            assertTrue(cycle.isSuccess || cycle.exceptionOrNull() is CancellationException)
+            assertEquals(SyncStatus.Stopped, engine.getSyncStatus())
+            assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is SynchroError.NotStarted)
+        } finally {
+            // Real time bounds cleanup, so a missing guard reports its assertion and not a hang.
+            withContext(Dispatchers.Default) { withTimeoutOrNull(10.seconds) { engine.stop() } }
         }
     }
 
@@ -4275,6 +4353,40 @@ class SyncEngineTests {
             "has_more": $hasMore${if (hasMore) "" else ",\n            \"checksums\": {\"$scopeID\": ${checksumJSON(checksum)}}"}
         }
     """.trimIndent()
+
+    /** The server rejects every pushed mutation as a version conflict with a server-wins row. */
+    private fun conflictServerResponse(request: RecordedRequest): MockResponse {
+        val path = request.path ?: ""
+        return when {
+            path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+            path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+            path.endsWith("/sync/push") -> {
+                val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
+                val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
+                val rejected = mutations.map { change ->
+                    val c = change as JsonObject
+                    val record = protocolRecord(
+                        id = c.getValue("pk").jsonObject.getValue("field-id").jsonPrimitive.content,
+                        shipAddress = "Server Wins Address",
+                        userID = "u1",
+                        updatedAt = "2026-01-01T15:00:00.000000Z",
+                        serverVersion = "2026-01-01T15:00:00.000000Z",
+                    )
+                    rejectedPushOutcomeJSON(
+                        mutation = c,
+                        status = MutationStatus.CONFLICT,
+                        code = MutationRejectionCode.VERSION_CONFLICT,
+                        message = "server version is newer",
+                        serverRow = requireNotNull(record.change.row),
+                        serverVersion = record.change.serverVersion,
+                    )
+                }
+                mockResponse("""{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T15:00:00.000Z","accepted":[],"rejected":[${rejected.joinToString(",")}]}""")
+            }
+            path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+            else -> mockResponse("""{"error":"unexpected"}""", 500)
+        }
+    }
 
     private fun mockResponse(body: String, statusCode: Int = 200): MockResponse =
         MockResponse().setBody(body).setResponseCode(statusCode)

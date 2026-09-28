@@ -21,6 +21,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -627,6 +628,60 @@ class SynchroClientTests {
         runTest(callerDispatcher, timeout = 5.seconds) { caller.join() }
         assertTrue(syncFailure is CancellationException)
         assertEquals(emptyList<Throwable>(), ownedWork.uncaughtFailures.toList())
+    }
+
+    /**
+     * D-03. A status callback runs inside sync work. An inline close must fail with the local
+     * programmer error before it cancels that work or closes SQLite. This includes the stopped
+     * status that an independent close delivers.
+     */
+    @Test
+    fun closeInsideStatusCallbackFailsBeforeItClosesTheClient(): Unit = withCleanup { defer ->
+        val server = MockWebServer()
+        defer(server::shutdown)
+        server.start()
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val config = SynchroConfig(
+            dbPath = "synchro_client_callback_close_${UUID.randomUUID()}.sqlite",
+            serverURL = server.url("/").toString().trimEnd('/'),
+            authProvider = { "test-token" },
+            clientID = "test-device",
+            appVersion = "1.0.0",
+            syncInterval = 999.0,
+        )
+        val ownedClient = OwnedTestClient(context, config.dbPath)
+        defer(ownedClient::release)
+        prepareStartExchange(context, server, config.dbPath)
+        val client = ownedClient.open(config)
+        // SQLiteOpenHelper can reopen a closed database, so retain the original handle.
+        val originalConnection = ownedClient.database.readTransaction { it }
+        val inlineCloses = CopyOnWriteArrayList<String>()
+        val registration = client.onStatusChange { status ->
+            val outcome = runCatching { client.close() }.fold({ "returned" }, { it::class.simpleName })
+            inlineCloses += "${status.state.wireName}: $outcome, open=${originalConnection.isOpen}"
+        }
+        defer(registration::cancel)
+
+        // The bound turns a missing guard into a failed start instead of a hang.
+        runBlocking { withTimeout(30.seconds) { client.start() } }
+
+        assertEquals(
+            listOf(
+                "connecting: IllegalStateException, open=true",
+                "ready: IllegalStateException, open=true",
+                "pulling: IllegalStateException, open=true",
+                "ready: IllegalStateException, open=true",
+            ),
+            inlineCloses.toList(),
+        )
+        assertEquals(SyncStatus.Ready, client.getSyncStatus())
+        assertTrue(originalConnection.isOpen)
+        assertEquals(2, server.requestCount)
+
+        ownedClient.startClose().get(5, TimeUnit.SECONDS)
+        assertEquals("stopped: IllegalStateException, open=true", inlineCloses.last())
+        assertFalse("the independent close must close the original SQLite handle", originalConnection.isOpen)
+        assertEquals(SyncStatus.Stopped, client.getSyncStatus())
     }
 
     private fun prepareStartExchange(context: Context, server: MockWebServer, dbPath: String) {

@@ -211,7 +211,6 @@ type SteadyPullCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -307,9 +306,6 @@ func NewSteadyPullCoordinator(config SteadyPullCoordinatorConfig) (*SteadyPullCo
 	}
 	if config.Platform != "ios" && config.Platform != "android" {
 		return nil, errors.New("React Native steady-pull coordinator platform must be ios or android")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native steady-pull coordinator auth token is required")
@@ -628,7 +624,7 @@ func (c *SteadyPullCoordinator) acceptResultLocked(raw json.RawMessage) error {
 		if err != nil {
 			return err
 		}
-		if err := validateSteadyPullBaselineTrace(trace); err != nil {
+		if err := validateBootstrapTrace(trace); err != nil {
 			return err
 		}
 		if err := validateBootstrapRebuildEvidence(capture.DurableProof, trace); err != nil {
@@ -1457,13 +1453,6 @@ func ioReadAll(request *http.Request) ([]byte, error) {
 func decodeStrictMembers(raw json.RawMessage, destination *map[string]json.RawMessage, expected int, name string) error {
 	if err := jsonstrict.Decode(raw, destination); err != nil || len(*destination) != expected {
 		return fmt.Errorf("%s is invalid", name)
-	}
-	return nil
-}
-
-func validateSteadyPullBaselineTrace(trace traceSnapshot) error {
-	if err := validateBootstrapTrace(trace); err != nil {
-		return err
 	}
 	return nil
 }

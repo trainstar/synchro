@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import copy
 import base64
+import fcntl
 import hashlib
 import hmac
 import json
 import os
+import shutil
+import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -24,6 +28,10 @@ from verification import packaged_smoke
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+REMOTE_NAME = "Server authored fixture \u00e9\u4e16"
+DURABLE = '{"street":"Packaged Durable"}'
+INITIAL_OBSERVED = {"customer_name": "Packaged Consumer", "ship_address": DURABLE}
+RESUME_OBSERVED = {"customer_name": REMOTE_NAME, "ship_address": '{"street": "Packaged Durable"}'}
 
 
 class PackagedSmokeStructureTests(unittest.TestCase):
@@ -45,6 +53,15 @@ class PackagedSmokeStructureTests(unittest.TestCase):
         self.assertEqual(signature, packaged_smoke.base64url(expected_signature))
         with mock.patch.dict(os.environ, {"SYNCHRO_PACKAGED_SMOKE_TOKEN": "supplied-token"}, clear=True):
             self.assertEqual(packaged_smoke.bearer_token("package-user"), "supplied-token")
+
+    def convergence_records(self, directory: Path, server_name: str = REMOTE_NAME) -> tuple[Path, Path]:
+        remote = directory / "remote.json"
+        server = directory / "server.json"
+        packaged_smoke.write_json(remote, {"schema_version": 1, "customer_name": REMOTE_NAME})
+        packaged_smoke.write_json(server, packaged_smoke.server_verification(
+            server_name, {"order_ship_address": {"street": "Packaged Durable"}},
+        ))
+        return remote, server
 
     def start_app_result_collector(
         self,
@@ -236,11 +253,11 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             output = directory / "cell.json"
             packaged_smoke.write_json(initial, {
                 "schema_version": 1, "phase": "initial", "status": "passed",
-                "pid": 101, "pending_change_count": 1,
+                "pid": 101, "pending_change_count": 1, "observed": INITIAL_OBSERVED,
             })
             packaged_smoke.write_json(resume, {
                 "schema_version": 1, "phase": "resume", "status": "passed",
-                "pid": 202, "pending_change_count": 0,
+                "pid": 202, "pending_change_count": 0, "observed": RESUME_OBSERVED,
             })
             artifact.write_bytes(b"packaged artifact")
 
@@ -254,6 +271,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 101,
                 [artifact],
                 [packaged_smoke.hash_files([artifact])[0]],
+                *self.convergence_records(directory),
             )
             cell = packaged_smoke.load_json(output, "completed cell")
             self.assertEqual(cell["status"], "passed")
@@ -269,7 +287,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
 
             packaged_smoke.write_json(resume, {
                 "schema_version": 1, "phase": "resume", "status": "passed",
-                "pid": 101, "pending_change_count": 0,
+                "pid": 101, "pending_change_count": 0, "observed": RESUME_OBSERVED,
             })
             with self.assertRaisesRegex(
                 packaged_smoke.EvidenceError,
@@ -284,6 +302,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     101,
                     [artifact],
                     [packaged_smoke.hash_files([artifact])[0]],
+                    *self.convergence_records(directory),
                 )
 
     def test_app_result_collector_rejects_wrong_identity_and_conflicts(self) -> None:
@@ -295,6 +314,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "phase": "initial",
                 "status": "passed",
                 "pending_change_count": 1,
+                "observed": INITIAL_OBSERVED,
                 "error": None,
             }
             resume = {
@@ -302,6 +322,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "phase": "resume",
                 "status": "passed",
                 "pending_change_count": 0,
+                "observed": RESUME_OBSERVED,
                 "error": None,
             }
             self.assertEqual(self.post_app_result(url, f"wrong-{server.token}", initial), 401)
@@ -319,7 +340,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 self.post_raw_app_result(
                     url,
                     server.token,
-                    b'{"schema_version":1,"schema_version":1,"phase":"initial","status":"passed","pending_change_count":1,"error":null}',
+                    b'{"schema_version":1,"schema_version":1,"phase":"initial","status":"passed","pending_change_count":1,"observed":null,"error":null}',
                 ),
                 400,
             )
@@ -334,7 +355,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 self.post_app_result(
                     url,
                     server.token,
-                    {**initial, "status": "failed", "pending_change_count": 0, "error": "late failure"},
+                    {**initial, "status": "failed", "pending_change_count": 0, "observed": None, "error": "late failure"},
                 ),
                 409,
             )
@@ -352,6 +373,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "phase": "initial",
                 "status": "passed",
                 "pending_change_count": 1,
+                "observed": INITIAL_OBSERVED,
                 "error": None,
             })
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "must be fresh"):
@@ -386,6 +408,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "phase": "initial",
                 "status": "passed",
                 "pending_change_count": 1,
+                "observed": INITIAL_OBSERVED,
                 "error": None,
             }
             failed_resume = {
@@ -393,6 +416,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "phase": "resume",
                 "status": "failed",
                 "pending_change_count": 0,
+                "observed": None,
                 "error": "client close failed",
             }
             self.assertEqual(self.post_app_result(url, server.token, initial), 201)
@@ -440,6 +464,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "phase": "initial",
                 "status": "passed",
                 "pending_change_count": 1,
+                "observed": INITIAL_OBSERVED,
                 "error": None,
             }
             resume = {
@@ -447,6 +472,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "phase": "resume",
                 "status": "passed",
                 "pending_change_count": 0,
+                "observed": RESUME_OBSERVED,
                 "error": None,
             }
             self.assertEqual(self.post_app_result(url, server.token, initial), 201)
@@ -467,6 +493,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     "status": "passed",
                     "pid": 101,
                     "pending_change_count": 1,
+                    "observed": INITIAL_OBSERVED,
                 },
             )
             self.assertEqual(
@@ -477,6 +504,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     "status": "passed",
                     "pid": 202,
                     "pending_change_count": 0,
+                    "observed": RESUME_OBSERVED,
                 },
             )
 
@@ -493,11 +521,11 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             artifact = directory / "artifact.bin"
             packaged_smoke.write_json(initial, {
                 "schema_version": 1, "phase": "initial", "status": "passed",
-                "pid": 101, "pending_change_count": 1,
+                "pid": 101, "pending_change_count": 1, "observed": INITIAL_OBSERVED,
             })
             packaged_smoke.write_json(resume, {
                 "schema_version": 1, "phase": "resume", "status": "passed",
-                "pid": 202, "pending_change_count": 0,
+                "pid": 202, "pending_change_count": 0, "observed": RESUME_OBSERVED,
             })
             artifact.write_bytes(b"packaged artifact")
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "do not match sealed"):
@@ -510,6 +538,106 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     101,
                     [artifact],
                     ["0" * 64],
+                    *self.convergence_records(directory),
+                )
+
+    def test_convergence_requires_remote_value_and_exact_server_state(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-convergence.") as raw_directory:
+            directory = Path(raw_directory)
+            artifact = directory / "artifact.bin"
+            artifact.write_bytes(b"packaged artifact")
+            initial = directory / "initial.json"
+            resume = directory / "resume.json"
+            packaged_smoke.write_json(initial, {
+                "schema_version": 1, "phase": "initial", "status": "passed",
+                "pid": 101, "pending_change_count": 1, "observed": INITIAL_OBSERVED,
+            })
+            cell_id = packaged_smoke.required_cells(REPO_ROOT)[0]
+            for observed, server_name, error in (
+                ({**RESUME_OBSERVED, "customer_name": "Packaged Consumer"}, REMOTE_NAME, "expected customer name"),
+                ({**RESUME_OBSERVED, "ship_address": '{"street":"Packaged Initial"}'}, REMOTE_NAME, "durable ship address"),
+                (RESUME_OBSERVED, "Packaged Consumer", "server verification does not confirm"),
+            ):
+                with self.subTest(error=error):
+                    packaged_smoke.write_json(resume, {
+                        "schema_version": 1, "phase": "resume", "status": "passed",
+                        "pid": 202, "pending_change_count": 0, "observed": observed,
+                    })
+                    with self.assertRaisesRegex(packaged_smoke.EvidenceError, error):
+                        packaged_smoke.complete_cell(
+                            REPO_ROOT, cell_id, directory / "cell.json", initial, resume, 101,
+                            [artifact], packaged_smoke.hash_files([artifact]),
+                            *self.convergence_records(directory, server_name),
+                        )
+                    self.assertFalse((directory / "cell.json").exists())
+
+    def test_independent_server_checks_require_exact_rows(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="packaged-smoke-server-rows.") as raw_directory:
+            directory = Path(raw_directory)
+            config_path = directory / "config.json"
+            config = {
+                "schema_version": 1, "user_id": "user-1",
+                "customer_id": "00000000-0000-4000-8000-000000000001",
+                "order_id": "00000000-0000-4000-8000-000000000002",
+            }
+            packaged_smoke.write_json(config_path, config)
+            state_path = directory / "server-state.json"
+            fake_psql = directory / "psql"
+            fake_psql.write_text(f"#!{sys.executable}\n" + (
+                "import json, sys\n"
+                "from pathlib import Path\n"
+                "args = sys.argv[1:]\n"
+                "assert args[:2] == ['--dbname', 'postgresql://fixture'], args\n"
+                "variables = dict(item.split('=', 1) for item in args[args.index('-v') + 1::2])\n"
+                f"path = Path({str(state_path)!r})\n"
+                "state = json.loads(path.read_text())\n"
+                "sql = sys.stdin.read()\n"
+                "if sql.startswith('SELECT'):\n"
+                "    assert variables['order_id'] == state['order_id'] and variables['customer_id'] == state['customer_id']\n"
+                "    print(json.dumps(state['row']))\n"
+                "elif sql.startswith('UPDATE'):\n"
+                "    if state['row']['customer_name'] == variables['authored_name']:\n"
+                "        state['row']['customer_name'] = variables['remote_name']\n"
+                "        print(variables['remote_name'])\n"
+                "    path.write_text(json.dumps(state))\n"
+            ), encoding="utf-8")
+            fake_psql.chmod(0o755)
+
+            def server_state(name: str, street: str) -> None:
+                packaged_smoke.write_json(state_path, {
+                    "order_id": config["order_id"], "customer_id": config["customer_id"],
+                    "row": {
+                        "customer_name": name, "customer_user_id": "user-1", "order_user_id": "user-1",
+                        "ship_address": {"street": street},
+                    },
+                })
+
+            environment = {"ADAPTER_TEST_URL": "postgresql://fixture", "PACKAGED_SMOKE_PSQL": str(fake_psql)}
+            remote = directory / "remote.json"
+            server = directory / "server.json"
+            with mock.patch.dict(os.environ, environment):
+                server_state("Packaged Consumer", "Packaged Durable")
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "exactly the initial upload"):
+                    packaged_smoke.author_remote_value(config_path, remote)
+                self.assertFalse(remote.exists())
+
+                server_state("Packaged Consumer", "Packaged Initial")
+                packaged_smoke.author_remote_value(config_path, remote)
+                remote_name = packaged_smoke.load_remote_value(remote)
+                self.assertNotEqual(remote_name, "Packaged Consumer")
+                self.assertEqual(packaged_smoke.load_json(state_path, "state")["row"]["customer_name"], remote_name)
+
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value"):
+                    packaged_smoke.verify_server_state(config_path, remote, server)
+                server_state("Packaged Consumer", "Packaged Durable")
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "resumed upload and the remote value"):
+                    packaged_smoke.verify_server_state(config_path, remote, server)
+                self.assertFalse(server.exists())
+
+                server_state(remote_name, "Packaged Durable")
+                packaged_smoke.verify_server_state(config_path, remote, server)
+                packaged_smoke.validate_server_verification(
+                    server, remote_name, {"order_ship_address": {"street": "Packaged Durable"}},
                 )
 
     def test_server_completion_rejects_changed_digest_and_equal_pid(self) -> None:
@@ -519,7 +647,14 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             artifact.write_bytes(b"sealed")
             digest = "a" * 64
             initial = {"schema_version": 1, "phase": "initial", "status": "passed", "adapter_pid": 101, "push_digest": digest}
-            resume = {"schema_version": 1, "phase": "resume", "status": "passed", "adapter_pid": 202, "push_digest": digest, "replay_equal": True}
+            resume = {
+                "schema_version": 1, "phase": "resume", "status": "passed", "adapter_pid": 202,
+                "push_digest": digest, "replay_equal": True, "observed_customer_name": REMOTE_NAME,
+            }
+            remote = directory / "remote.json"
+            server = directory / "server.json"
+            packaged_smoke.write_json(remote, {"schema_version": 1, "customer_name": REMOTE_NAME})
+            packaged_smoke.write_json(server, packaged_smoke.server_verification(REMOTE_NAME, packaged_smoke.SERVER_OFFLINE_WRITE))
             initial_path, resume_path = directory / "initial.json", directory / "resume.json"
             cell_path = directory / "cell.json"
             packaged_smoke.write_json(initial_path, initial)
@@ -533,6 +668,8 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 101,
                 [artifact],
                 packaged_smoke.hash_files([artifact]),
+                remote,
+                server,
             )
             cell = packaged_smoke.load_json(cell_path, "server cell")
             self.assertEqual(cell["process_lifecycle"]["kind"], "server")
@@ -541,13 +678,153 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             resume["push_digest"] = "b" * 64
             packaged_smoke.write_json(resume_path, resume)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "replay digest"):
-                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]))
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
             resume["push_digest"] = digest
             resume["adapter_pid"] = 101
             packaged_smoke.write_json(resume_path, resume)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "process replacement"):
-                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]))
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
+            resume["adapter_pid"] = 202
+            resume["observed_customer_name"] = "Packaged server consumer"
+            packaged_smoke.write_json(resume_path, resume)
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "did not pull the remote value"):
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
+            resume["observed_customer_name"] = REMOTE_NAME
+            packaged_smoke.write_json(resume_path, resume)
+            packaged_smoke.write_json(server, packaged_smoke.server_verification(REMOTE_NAME, {"customer_id": "other", "customer_name": "Packaged server offline"}))
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "server verification does not confirm"):
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
 
+
+
+FAKE_SWIFT = """#!/bin/sh
+case "$1" in
+  package) printf '{}' ;;
+  build)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --scratch-path ]; then scratch=$2; fi
+      shift
+    done
+    mkdir -p "$scratch/debug"
+    cp "$FAKE_CONSUMER" "$scratch/debug/SynchroConsumer"
+    chmod +x "$scratch/debug/SynchroConsumer"
+    ;;
+  *) exit 64 ;;
+esac
+"""
+
+# The fake consumer holds an exclusive lock for its whole life. A free lock
+# after the script returns proves that no consumer survived, without a
+# process ID that the operating system could reuse.
+FAKE_CONSUMER = """#!/usr/bin/env python3
+import fcntl, json, os, time
+lock = open(os.environ["FAKE_CONSUMER_LOCK"] + "." + os.environ["SYNCHRO_PACKAGED_SMOKE_PHASE"], "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+open(lock.name + ".started", "w").close()
+phase = os.environ["SYNCHRO_PACKAGED_SMOKE_PHASE"]
+if os.environ["FAKE_CONSUMER_HANG"] != phase:
+    with open(os.environ["SYNCHRO_PACKAGED_SMOKE_PHASE_RESULT"], "w") as result:
+        json.dump({"phase": phase, "pid": os.getpid()}, result)
+    if phase == "resume":
+        raise SystemExit(0)
+while True:
+    time.sleep(60)
+"""
+
+FAKE_SMOKE_TOOL = """import json, sys
+arguments = sys.argv[2:]
+output = arguments[arguments.index("--output") + 1]
+if sys.argv[1] == "complete-cell":
+    initial = json.load(open(arguments[arguments.index("--initial") + 1]))
+    if int(arguments[arguments.index("--killed-pid") + 1]) != initial["pid"]:
+        raise SystemExit("killed pid differs from the initial consumer")
+with open(output, "w") as target:
+    json.dump({"command": sys.argv[1]}, target)
+"""
+
+
+class SwiftConsumerLifecycleTests(unittest.TestCase):
+    phase_seconds = 2
+    script_bound_seconds = 30
+
+    def run_consumer(self, hang: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+        directory = Path(tempfile.mkdtemp(prefix="swift-consumer-lifecycle."))
+        self.addCleanup(shutil.rmtree, directory, True)
+        root = directory / "repo"
+        (root / "verification").mkdir(parents=True)
+        (root / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+        (root / "verification" / "packaged_smoke.py").write_text(FAKE_SMOKE_TOOL, encoding="utf-8")
+        artifacts = directory / "artifacts"
+        (artifacts / "apple" / "Synchro").mkdir(parents=True)
+        (artifacts / "apple" / "Synchro" / "Package.swift").write_text("", encoding="utf-8")
+        (artifacts / "apple" / "synchro-spm-0.0.0.tar.gz").write_bytes(b"")
+        bin_directory = directory / "bin"
+        bin_directory.mkdir()
+        (bin_directory / "swift").write_text(FAKE_SWIFT, encoding="utf-8")
+        (bin_directory / "swift").chmod(0o755)
+        consumer = directory / "consumer.py"
+        consumer.write_text(FAKE_CONSUMER, encoding="utf-8")
+        environment = {
+            **os.environ,
+            "PATH": f"{bin_directory}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_CONSUMER": str(consumer),
+            "FAKE_CONSUMER_LOCK": str(directory / "consumer.lock"),
+            "FAKE_CONSUMER_HANG": hang,
+            "PACKAGED_SMOKE_TMP_ROOT": str(directory / "tmp"),
+            "PACKAGED_SMOKE_PHASE_SECONDS": str(self.phase_seconds),
+            "PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES": "unused",
+        }
+        command = [
+            "sh",
+            str(REPO_ROOT / "verification" / "consumers" / "swift" / "test-consumer.sh"),
+            str(root),
+            str(artifacts),
+            "cell",
+            str(directory / "cell.json"),
+        ]
+        # The script leads its own process group, and that group stays owned
+        # until communicate reaps the script, so the timeout path can stop it.
+        process = subprocess.Popen(
+            command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=self.script_bound_seconds)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            self.fail("Swift consumer script did not return within its bound")
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), directory
+
+    def assert_no_consumer_survives(self, directory: Path, phases: tuple[str, ...]) -> None:
+        for phase in phases:
+            lock_path = directory / f"consumer.lock.{phase}"
+            self.assertTrue(Path(f"{lock_path}.started").exists(), f"{phase} consumer did not start")
+            with open(lock_path, "w") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    self.fail(f"{phase} consumer survived the script")
+        self.assertEqual(list((directory / "tmp").iterdir()), [])
+
+    def test_killed_initial_phase_and_resume_complete_the_cell(self) -> None:
+        result, directory = self.run_consumer(hang="none")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((directory / "cell.json").read_text(encoding="utf-8")), {"command": "complete-cell"})
+        self.assert_no_consumer_survives(directory, ("initial", "resume"))
+
+    def test_hung_initial_phase_fails_without_a_surviving_consumer(self) -> None:
+        result, directory = self.run_consumer(hang="initial")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("initial phase did not become ready", result.stderr)
+        self.assertFalse((directory / "cell.json").exists())
+        self.assert_no_consumer_survives(directory, ("initial",))
+
+    def test_hung_resume_phase_fails_without_a_surviving_consumer(self) -> None:
+        result, directory = self.run_consumer(hang="resume")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resume phase did not pass", result.stderr)
+        self.assertFalse((directory / "cell.json").exists())
+        self.assert_no_consumer_survives(directory, ("initial", "resume"))
 
 if __name__ == "__main__":
     unittest.main()

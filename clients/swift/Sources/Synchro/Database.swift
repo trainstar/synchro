@@ -917,6 +917,10 @@ final class SynchroDatabase: @unchecked Sendable {
         migrator.registerMigration("synchro_v17_push_limit_capture_dependency") { db in
             try Self.regenerateCaptureTriggers(db)
         }
+        // Earlier INSERT capture aborts a key-only insert. It now captures empty columns. D-01.
+        migrator.registerMigration("synchro_v18_key_only_insert_capture") { db in
+            try Self.regenerateCaptureTriggers(db)
+        }
         try migrator.migrate(dbPool)
     }
 
