@@ -13,10 +13,10 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1--0.3.2.sql b/extensions
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
-@@ -284,8 +284,3 @@ ALTER FUNCTION synchro.synchro_check_push_constraints()
-     SET search_path = pg_catalog, synchro;
- ALTER FUNCTION synchro.synchro_check_push_constraints() OWNER TO synchro_owner;
- REVOKE EXECUTE ON FUNCTION synchro.synchro_check_push_constraints() FROM PUBLIC;
+@@ -313,8 +313,3 @@ BEGIN
+     END LOOP;
+ END
+ $search_path$;
 -
 -UPDATE synchro.sync_extension_build
 -SET installed_fingerprint = synchro.synchro_build_fingerprint(),
