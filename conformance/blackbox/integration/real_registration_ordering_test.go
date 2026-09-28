@@ -291,18 +291,28 @@ func TestRealRegistrationDuringInitialSlotBindingActivatesOnce(t *testing.T) {
 		t.Fatalf("release worker slot binding: %v", err)
 	}
 
+	// Every transaction before the probe, including the binding, is processed
+	// when the worker acknowledges the probe. Poison stops the acknowledgement.
+	var probeLSN string
+	if err := admin.QueryRowContext(ctx,
+		"SELECT pg_catalog.pg_logical_emit_message(true, 'conformance_binding_probe', '')::text",
+	).Scan(&probeLSN); err != nil {
+		t.Fatalf("emit post-binding probe: %v", err)
+	}
+	var acknowledged bool
 	var pending int
 	var poison string
 	deadline = time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := admin.QueryRowContext(ctx, `
-			SELECT (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'),
+			SELECT COALESCE((SELECT acknowledged_end_lsn >= $1::pg_lsn FROM synchro.sync_wal_progress WHERE singleton), false),
+			       (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending'),
 			       COALESCE((SELECT string_agg(failure_class || ': ' || COALESCE(failure_detail, ''), '; ')
-			                 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'), '')`,
-		).Scan(&pending, &poison); err != nil {
+			                 FROM synchro.sync_wal_poison WHERE lifecycle = 'active'), '')`, probeLSN,
+		).Scan(&acknowledged, &pending, &poison); err != nil {
 			t.Fatalf("observe registry activation: %v", err)
 		}
-		if pending == 0 || poison != "" {
+		if acknowledged || poison != "" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -320,9 +330,9 @@ func TestRealRegistrationDuringInitialSlotBindingActivatesOnce(t *testing.T) {
 
 	itemID := "00000000-0000-4000-8243-000000000001"
 	t.Run("assertion", func(t *testing.T) {
-		if poison != "" || pending != 0 || activated != len(registered) || active != registered[len(registered)-1] {
-			t.Fatalf("registration during slot binding: poison %q pending %d activated %d of %v active %d; %s",
-				poison, pending, activated, registered, active, harness.FailureDiagnostics())
+		if !acknowledged || poison != "" || pending != 0 || activated != len(registered) || active != registered[len(registered)-1] {
+			t.Fatalf("registration during slot binding: acknowledged %t poison %q pending %d activated %d of %v active %d; %s",
+				acknowledged, poison, pending, activated, registered, active, harness.FailureDiagnostics())
 		}
 		waitForReinstalledWorker(t, ctx, harness, reinstall, registered[0]-1)
 		if err := harness.Source().ExecContext(ctx,
