@@ -3250,15 +3250,15 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	}
 	defer rows.Close()
 	// A batch that another transaction already bound cannot bind this one.
-	// Two single-row updates of one row otherwise have the same shape.
-	c.mu.Lock()
+	// Two single-row updates of one row otherwise have the same shape. Some
+	// callers hold c.mu, so this reads the bindings as the record update below
+	// does.
 	boundBatches := make(map[string]struct{}, len(c.transactions))
 	for _, other := range c.transactions {
 		if other != transaction && other.RuntimeBatchID != "" {
 			boundBatches[other.RuntimeBatchID] = struct{}{}
 		}
 	}
-	c.mu.Unlock()
 	byBatch := make(map[string][]pushIdentity)
 	for rows.Next() {
 		var value pushIdentity
