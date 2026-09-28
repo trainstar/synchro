@@ -127,7 +127,10 @@ CREATE TABLE IF NOT EXISTS sync_registry_activation_requests (
     registry_generation BIGINT PRIMARY KEY
         REFERENCES sync_registry_generations(generation) ON DELETE CASCADE,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    emitted_at TIMESTAMPTZ
+    emitted_at TIMESTAMPTZ,
+    -- Confirmed flush position of the slot that decodes the registering
+    -- transaction. NULL means that no slot seen at registration decodes it.
+    decoding_slot_lsn PG_LSN
 );
 
 CREATE OR REPLACE FUNCTION synchro_replay_registry_activation_requests()
@@ -138,10 +141,14 @@ SET search_path = pg_catalog, synchro
 AS $$
 DECLARE
     request RECORD;
+    bound_flush_lsn PG_LSN;
 BEGIN
     IF OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL THEN
+        SELECT slot.confirmed_flush_lsn INTO bound_flush_lsn
+        FROM pg_replication_slots slot
+        WHERE slot.slot_name = NEW.active_slot_name;
         FOR request IN
-            SELECT activation.registry_generation
+            SELECT activation.registry_generation, activation.decoding_slot_lsn
             FROM sync_registry_activation_requests activation
             JOIN sync_registry_generations generation
               ON generation.generation = activation.registry_generation
@@ -150,6 +157,9 @@ BEGIN
             ORDER BY activation.registry_generation
             FOR UPDATE OF activation
         LOOP
+            -- The bound slot already decodes the direct activation message of
+            -- a registration that committed after its consistent point.
+            CONTINUE WHEN request.decoding_slot_lsn = bound_flush_lsn;
             PERFORM pg_logical_emit_message(
                 true,
                 'synchro_registry',

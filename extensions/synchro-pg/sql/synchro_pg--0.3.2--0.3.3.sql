@@ -30,3 +30,56 @@ ALTER TABLE synchro.sync_wal_transactions
         CHECK (content_hash_format IN (1, 2));
 ALTER TABLE synchro.sync_wal_transactions
     ALTER COLUMN content_hash_format DROP DEFAULT;
+
+-- The initial slot binding replays only the activation requests whose direct
+-- message the bound slot does not decode. Earlier requests keep NULL, so the
+-- binding replays them as before.
+ALTER TABLE synchro.sync_registry_activation_requests
+    ADD COLUMN decoding_slot_lsn PG_LSN;
+
+CREATE OR REPLACE FUNCTION synchro.synchro_replay_registry_activation_requests()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, synchro
+AS $$
+DECLARE
+    request RECORD;
+    bound_flush_lsn PG_LSN;
+BEGIN
+    IF OLD.active_slot_name IS NULL AND NEW.active_slot_name IS NOT NULL THEN
+        SELECT slot.confirmed_flush_lsn INTO bound_flush_lsn
+        FROM pg_replication_slots slot
+        WHERE slot.slot_name = NEW.active_slot_name;
+        FOR request IN
+            SELECT activation.registry_generation, activation.decoding_slot_lsn
+            FROM sync_registry_activation_requests activation
+            JOIN sync_registry_generations generation
+              ON generation.generation = activation.registry_generation
+             AND generation.state = 'pending'
+             AND generation.validated
+            ORDER BY activation.registry_generation
+            FOR UPDATE OF activation
+        LOOP
+            -- The bound slot already decodes the direct activation message of
+            -- a registration that committed after its consistent point.
+            CONTINUE WHEN request.decoding_slot_lsn = bound_flush_lsn;
+            PERFORM pg_logical_emit_message(
+                true,
+                'synchro_registry',
+                convert_to(
+                    format(
+                        '{"generation":%s,"action":"activate"}',
+                        request.registry_generation
+                    ),
+                    'UTF8'
+                )
+            );
+            UPDATE sync_registry_activation_requests
+            SET emitted_at = now()
+            WHERE registry_generation = request.registry_generation;
+        END LOOP;
+    END IF;
+    RETURN NEW;
+END;
+$$;
