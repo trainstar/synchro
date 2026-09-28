@@ -1,20 +1,20 @@
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
-index 41085ef..5e55284 100644
+index 6ab84a7..acf552a 100644
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -3529,7 +3529,7 @@ fn materialize_transaction(
-         .collect();
+@@ -3538,7 +3538,7 @@ fn materialize_transaction(
      let mut active_generation = generation;
      let mut effect_bases = HashMap::new();
+     let mut existed_before = HashMap::new();
 -    let mut segments = Vec::with_capacity(applicable_segments.len());
 +    let mut effect_count = 0i64;
      let mut membership_transitions = Vec::with_capacity(activations.len());
      for (segment, applicable) in applicable_segments.iter().enumerate() {
          let registry = &registries[segment];
-@@ -3554,15 +3554,6 @@ fn materialize_transaction(
-             registry,
-             applicable,
-         )?;
+@@ -3570,15 +3570,6 @@ fn materialize_transaction(
+                 .entry((registry[*index].relation_id.clone(), record_id.clone()))
+                 .or_insert(*present);
+         }
 -        if segment + 1 < registries.len() {
 -            align_edges_before_activation(
 -                client,
@@ -27,7 +27,7 @@ index 41085ef..5e55284 100644
          // A relation that a later generation removes has no final projection.
          persisted.direct_impacts.retain_mut(|impact| {
              let relation_id = registry[impact.registration_index].relation_id.as_str();
-@@ -3574,23 +3565,22 @@ fn materialize_transaction(
+@@ -3590,23 +3581,22 @@ fn materialize_transaction(
                  None => false,
              }
          });
