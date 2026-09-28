@@ -7,11 +7,11 @@ private struct PackagedSmokeConfig: Decodable {
     let platform: String
     let serverURL: String
     let token: String
-    let userID: String
     let clientID: String
-    let customerID: String
-    let orderID: String
     let phase: String
+    let initialSQL: [String]
+    let durableSQL: [String]
+    let observeSQL: String
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -19,21 +19,25 @@ private struct PackagedSmokeConfig: Decodable {
         case platform
         case serverURL = "server_url"
         case token
-        case userID = "user_id"
         case clientID = "client_id"
-        case customerID = "customer_id"
-        case orderID = "order_id"
         case phase
+        case initialSQL = "initial_sql"
+        case durableSQL = "durable_sql"
+        case observeSQL = "observe_sql"
     }
 }
 
 private struct PackagedSmokeObserved: Encodable {
-    let customerName: String
-    let shipAddress: String
+    let exerciseName: String
+    let programTitle: String
+    let totalVolumeKg: String
+    let sets: String
 
     enum CodingKeys: String, CodingKey {
-        case customerName = "customer_name"
-        case shipAddress = "ship_address"
+        case exerciseName = "exercise_name"
+        case programTitle = "program_title"
+        case totalVolumeKg = "total_volume_kg"
+        case sets
     }
 }
 
@@ -182,40 +186,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             }
             // start() returns after local recovery and runs the first cycle
             // in the background, so the server schema is not applied yet.
-            // The customers insert requires that schema.
+            // The dataset inserts require that schema.
             try await runAndWaitForScheduledRetry(client) {
                 try await client.syncNow()
             }
-            let timestamp = ISO8601DateFormatter().string(from: Date())
-            _ = try client.execute(
-                "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
-                params: [smoke.customerID, smoke.userID, "Packaged Consumer", timestamp, timestamp]
-            )
-            _ = try client.execute(
-                "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-                params: [
-                    smoke.orderID,
-                    smoke.customerID,
-                    smoke.userID,
-                    #"{"street":"Packaged Initial"}"#,
-                    timestamp,
-                    timestamp,
-                ]
-            )
-            try await runAndWaitForScheduledRetry(client) {
-                try await client.syncNow()
+            for statement in smoke.initialSQL {
+                _ = try client.execute(statement)
             }
-            guard try client.pendingChangeCount() == 0 else {
-                throw CocoaError(.fileWriteUnknown)
+            try await awaitConvergence(client, smoke)
+            for statement in smoke.durableSQL {
+                _ = try client.execute(statement)
             }
-            _ = try client.execute(
-                "UPDATE orders SET ship_address = ?, updated_at = ? WHERE id = ?",
-                params: [
-                    #"{"street":"Packaged Durable"}"#,
-                    ISO8601DateFormatter().string(from: Date()),
-                    smoke.orderID,
-                ]
-            )
             let pending = try client.pendingChangeCount()
             guard pending == 1 else {
                 throw CocoaError(.fileWriteUnknown)
@@ -229,35 +210,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             return
         }
 
-        let durable = try client.queryOne(
-            "SELECT ship_address FROM orders WHERE id = ?",
-            params: [smoke.orderID]
-        )?["ship_address"] as? String
-        let pendingBeforeResume = try client.pendingChangeCount()
-        guard durable == #"{"street":"Packaged Durable"}"#, pendingBeforeResume > 0 else {
+        guard try client.pendingChangeCount() > 0 else {
             throw CocoaError(.fileReadCorruptFile)
         }
         try await runAndWaitForScheduledRetry(client) {
             try await client.start()
         }
-        // The harness authors a remote customer name while this process is dead.
-        // Only ordinary synchronization can deliver it to the local query path.
-        let deadline = Date().addingTimeInterval(90)
-        var pendingAfterResume = try client.pendingChangeCount()
-        var observed = try observe(client, smoke)
-        while pendingAfterResume != 0 || observed.customerName == "Packaged Consumer" {
-            guard Date() < deadline else {
-                throw CocoaError(.fileReadCorruptFile)
-            }
-            try await runAndWaitForScheduledRetry(client) {
-                try await client.syncNow()
-            }
-            pendingAfterResume = try client.pendingChangeCount()
-            observed = try observe(client, smoke)
-            if pendingAfterResume != 0 || observed.customerName == "Packaged Consumer" {
-                try await Task.sleep(nanoseconds: 500_000_000)
-            }
-        }
+        // The harness authors remote rows while this process is dead. Only
+        // ordinary synchronization can deliver them to the local query path.
+        try await awaitConvergence(client, smoke)
+        let pendingAfterResume = try client.pendingChangeCount()
+        let observed = try observe(client, smoke)
         await client.stop()
         try await client.close()
         try writePhaseResult(
@@ -268,19 +231,40 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         )
     }
 
+    // Waits until the queue is empty and the pulled server total equals the
+    // sum of the local sets. Only a server rollup and a pull can make them equal.
+    private func awaitConvergence(_ client: SynchroClient, _ smoke: PackagedSmokeConfig) async throws {
+        let deadline = Date().addingTimeInterval(90)
+        while true {
+            try await runAndWaitForScheduledRetry(client) {
+                try await client.syncNow()
+            }
+            if try client.pendingChangeCount() == 0,
+               try client.queryOne(smoke.observeSQL)?["converged"] as? String == "1" {
+                return
+            }
+            guard Date() < deadline else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
     private func observe(_ client: SynchroClient, _ smoke: PackagedSmokeConfig) throws -> PackagedSmokeObserved {
-        guard let customerName = try client.queryOne(
-            "SELECT name FROM customers WHERE id = ?",
-            params: [smoke.customerID]
-        )?["name"] as? String,
-            let shipAddress = try client.queryOne(
-                "SELECT ship_address FROM orders WHERE id = ?",
-                params: [smoke.orderID]
-            )?["ship_address"] as? String
+        guard let row = try client.queryOne(smoke.observeSQL),
+              let exerciseName = row["exercise_name"] as? String,
+              let programTitle = row["program_title"] as? String,
+              let totalVolumeKg = row["total_volume_kg"] as? String,
+              let sets = row["sets"] as? String
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        return PackagedSmokeObserved(customerName: customerName, shipAddress: shipAddress)
+        return PackagedSmokeObserved(
+            exerciseName: exerciseName,
+            programTitle: programTitle,
+            totalVolumeKg: totalVolumeKg,
+            sets: sets
+        )
     }
 
     private func writePhaseResult(

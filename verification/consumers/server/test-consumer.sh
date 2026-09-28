@@ -61,9 +61,18 @@ printf '%s\n' "$adapter_hash" > "$work_dir/adapter/synchrod-pg.sha256"
 
 "$provisioner" start --pg18-bin-dir "$pg18_bindir" --extension-artifact "$extension_dir" --adapter-artifact "$work_dir/adapter/synchrod-pg" --state-dir "$work_dir/state" --temp-parent "$work_dir" --url-file "$work_dir/admin.url" --attach-environment-file "$work_dir/attach.env" >"$work_dir/provisioner.log" 2>&1 &
 provisioner_pid=$!
-for _ in $(seq 1 90); do test -f "$work_dir/attach.env" && break; sleep 1; done
+for _ in $(seq 1 90); do
+  test -f "$work_dir/attach.env" && break
+  kill -0 "$provisioner_pid" 2>/dev/null || break
+  sleep 1
+done
 if [ ! -f "$work_dir/attach.env" ]; then
-  # The work directory is removed on exit, so the provisioner reason must be printed here.
+  # A blocked provisioner, for example one that waits for the installation lock
+  # of another cluster on the same PostgreSQL binaries, names the cause only
+  # when it stops. The work directory is removed on exit, so print it here.
+  kill "$provisioner_pid" 2>/dev/null || true
+  wait "$provisioner_pid" 2>/dev/null || true
+  provisioner_pid=
   cat "$work_dir/provisioner.log" >&2 || true
   echo "PostgreSQL provisioner did not become ready" >&2
   exit 1
@@ -131,7 +140,7 @@ RETURNING name;
 SQL
 )
 test "$authored" = "$remote_name" || { echo "server did not author exactly one remote value" >&2; exit 1; }
-python3 -c 'import json, sys; json.dump({"schema_version": 1, "customer_name": sys.argv[2]}, open(sys.argv[1], "w"))' "$work_dir/remote.json" "$remote_name"
+python3 -c 'import json, sys; json.dump({"schema_version": 1, "remote_value": sys.argv[2]}, open(sys.argv[1], "w"))' "$work_dir/remote.json" "$remote_name"
 start_adapter
 make --no-print-directory -C "$repo_root" server-consumer-smoke-phase \
   SERVER_SMOKE_URL="$listen_url" SERVER_SMOKE_JWT_SECRET_FILE="$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" \
@@ -152,7 +161,7 @@ SELECT EXISTS (
 SQL
 )
 test "$after_resume" = t || { echo "server does not hold exactly the resumed upload and the remote value" >&2; exit 1; }
-python3 -c 'import json, sys; json.dump({"schema_version": 1, "status": "passed", "remote_customer_name": sys.argv[2], "resumed_write": {"customer_id": sys.argv[3], "customer_name": "Packaged server offline"}}, open(sys.argv[1], "w"))' "$work_dir/server.json" "$remote_name" "$offline_id"
+python3 -c 'import json, sys; json.dump({"schema_version": 1, "status": "passed", "remote_value": sys.argv[2], "resumed_write": {"customer_id": sys.argv[3], "customer_name": "Packaged server offline"}}, open(sys.argv[1], "w"))' "$work_dir/server.json" "$remote_name" "$offline_id"
 bootstrap_row_id=00000000-0000-4000-8000-000000009501
 psql_admin -Xq -v ON_ERROR_STOP=1 -v bootstrap_row_id="$bootstrap_row_id" >/dev/null <<'SQL'
 INSERT INTO public.cf_late_registration (id, owner_id, value)

@@ -58,6 +58,7 @@
 	test-release-artifacts \
 	test-release-publish \
 	test-server-consumer-helper \
+	test-consumer-server \
 	test-consumer-go \
 	lint-go \
 	lint-rn \
@@ -378,6 +379,7 @@ help:
 	@echo "  release-consumer-artifacts - Prepare sealed payloads for package consumers"
 	@echo "  test-release-publish  - Test publication identity and recovery state"
 	@echo "  test-server-consumer-helper - Run server packaged-consumer helper unit tests"
+	@echo "  test-consumer-server  - Run the SUP-PG-LINUX-X64-001 lifecycle with locally built server artifacts"
 	@echo "  test-consumer-go      - Resolve and compile the public Go module consumer"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
@@ -1039,6 +1041,24 @@ test-release-publish: test-python-runner
 
 test-server-consumer-helper:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
+
+# The same server lifecycle as release-run-support-cell SUP-PG-LINUX-X64-001, with
+# locally built adapter, seed, and provisioner and the conformance extension artifact.
+test-consumer-server: build-local-postgres
+	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact
+	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in PGRX_PG_BIN_DIR" >&2; exit 1; }
+	@set -eu; \
+		mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)" "$(PACKAGED_SMOKE_CELL_DIR)"; \
+		work="$$(mktemp -d "$(PACKAGED_SMOKE_TMP_ROOT)/synchro-server-artifacts.XXXXXX")"; \
+		trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
+		python3 scripts/release-artifacts.py archive-extension --source "$(CONFORMANCE_EXTENSION_ARTIFACT)" --output "$$work/extension.tar.gz"; \
+		$(MAKE) --no-print-directory build BINARY="$$work/synchrod-pg" build-seed SEED_BINARY="$$work/synchro-seed"; \
+		result="$(PACKAGED_SMOKE_CELL_DIR)/SUP-PG-LINUX-X64-001.json"; \
+		python3 verification/packaged_smoke.py begin-cell --repo-root "$(CURDIR)" --cell SUP-PG-LINUX-X64-001 --output "$$result"; \
+		hashes="$$(shasum -a 256 "$$work/extension.tar.gz" "$$work/synchrod-pg" "$$work/synchro-seed" | cut -d ' ' -f 1 | tr '\n' ' ')"; \
+		sh verification/consumers/server/test-consumer.sh "$(PGRX_PG_BIN_DIR)" "$$work/extension.tar.gz" \
+			"$(abspath $(LOCAL_POSTGRES_BINARY))" "$$work/synchrod-pg" "$$work/synchro-seed" \
+			"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" SUP-PG-LINUX-X64-001 "$$result" "$$hashes"
 
 .PHONY: server-consumer-smoke-phase
 server-consumer-smoke-phase:
@@ -2139,7 +2159,7 @@ test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-
 
 test-client-platforms:
 	@test -n "$(SUPPORT_CELL_ID)" || (echo "SUPPORT_CELL_ID is required" >&2; exit 1)
-	@case "$(SUPPORT_CELL_ID)" in SUP-PG-*) echo "$(SUPPORT_CELL_ID) is a server cell. Run make release-run-support-cell SUPPORT_CELL_ID=$(SUPPORT_CELL_ID)." >&2; exit 1 ;; esac
+	@case "$(SUPPORT_CELL_ID)" in SUP-PG-*) echo "$(SUPPORT_CELL_ID) is a server cell. Run make test-consumer-server or make release-run-support-cell SUPPORT_CELL_ID=$(SUPPORT_CELL_ID)." >&2; exit 1 ;; esac
 	@mkdir -p "$(PACKAGED_SMOKE_CELL_DIR)" "$(PACKAGED_SMOKE_TMP_ROOT)"
 	@python3 verification/packaged_smoke.py begin-cell \
 		--repo-root "$(CURDIR)" \

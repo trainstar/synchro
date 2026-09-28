@@ -68,12 +68,9 @@ async function syncAndWaitForScheduledPullRetry() {
 
 type SmokePhase = 'initial' | 'resume';
 
-const AUTHORED_CUSTOMER_NAME = 'Packaged Consumer';
+const OBSERVED_FIELDS = ['exercise_name', 'program_title', 'total_volume_kg', 'sets'] as const;
 
-interface ObservedRows {
-  customer_name: string;
-  ship_address: string;
-}
+type ObservedRows = Record<(typeof OBSERVED_FIELDS)[number], string>;
 
 interface AppPhaseResult {
   schema_version: 1;
@@ -85,16 +82,39 @@ interface AppPhaseResult {
 }
 
 async function observe(): Promise<ObservedRows> {
-  const customer = await client.queryOne('SELECT name FROM customers WHERE id = ?', [
-    packagedSmokeConfig.customer_id,
-  ]);
-  const order = await client.queryOne('SELECT ship_address FROM orders WHERE id = ?', [
-    packagedSmokeConfig.order_id,
-  ]);
-  if (typeof customer?.name !== 'string' || typeof order?.ship_address !== 'string') {
-    throw new Error('packaged rows are missing from the local query path');
+  const row = await client.queryOne(packagedSmokeConfig.observe_sql);
+  const observed: Partial<ObservedRows> = {};
+  for (const field of OBSERVED_FIELDS) {
+    const value = row?.[field];
+    if (typeof value !== 'string') {
+      throw new Error(`packaged ${field} is missing from the local query path`);
+    }
+    observed[field] = value;
   }
-  return { customer_name: customer.name, ship_address: order.ship_address };
+  return observed as ObservedRows;
+}
+
+async function executeAll(statements: readonly string[]) {
+  for (const statement of statements) {
+    await client.execute(statement);
+  }
+}
+
+// Waits until the queue is empty and the pulled server total equals the sum
+// of the local sets. Only a server rollup and a pull can make them equal.
+async function awaitConvergence() {
+  const deadline = Date.now() + 90000;
+  for (;;) {
+    await syncAndWaitForScheduledPullRetry();
+    const row = await client.queryOne(packagedSmokeConfig.observe_sql);
+    if ((await client.pendingChangeCount()) === 0 && row?.converged === '1') {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('client did not converge within 90 seconds');
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 500));
+  }
 }
 
 async function reportPhaseResult(result: AppPhaseResult) {
@@ -121,80 +141,23 @@ async function runPackagedSmokePhase(): Promise<AppPhaseResult> {
     pendingChangeCount = pendingAtLaunch;
     if (pendingAtLaunch > 0) {
       phase = 'resume';
-      const durable = await client.queryOne(
-        'SELECT ship_address FROM orders WHERE id = ?',
-        [packagedSmokeConfig.order_id]
-      );
-      if (durable?.ship_address !== '{"street":"Packaged Durable"}') {
-        throw new Error('durable packaged row was not restored');
-      }
       await startAndWaitForScheduledPullRetry();
-      // The harness authors a remote customer name while this process is
-      // dead. Only ordinary synchronization can deliver it to the local query path.
-      const deadline = Date.now() + 90000;
+      // The harness authors remote rows while this process is dead. Only
+      // ordinary synchronization can deliver them to the local query path.
+      await awaitConvergence();
       pendingChangeCount = await client.pendingChangeCount();
       observed = await observe();
-      while (pendingChangeCount !== 0 || observed.customer_name === AUTHORED_CUSTOMER_NAME) {
-        if (Date.now() >= deadline) {
-          throw new Error('resumed client did not converge within 90 seconds');
-        }
-        await syncAndWaitForScheduledPullRetry();
-        pendingChangeCount = await client.pendingChangeCount();
-        observed = await observe();
-        if (pendingChangeCount !== 0 || observed.customer_name === AUTHORED_CUSTOMER_NAME) {
-          await new Promise<void>(resolve => setTimeout(resolve, 500));
-        }
-      }
       await client.stop();
       await client.close();
     } else {
       await startAndWaitForScheduledPullRetry();
       // start() returns after local recovery and runs the first cycle in
       // the background, so the server schema is not applied yet. The
-      // customers insert requires that schema.
+      // dataset inserts require that schema.
       await syncAndWaitForScheduledPullRetry();
-      const timestamp = new Date().toISOString();
-      await client.execute(
-        'INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)',
-        [
-          packagedSmokeConfig.customer_id,
-          packagedSmokeConfig.user_id,
-          AUTHORED_CUSTOMER_NAME,
-          timestamp,
-          timestamp,
-        ]
-      );
-      await client.execute(
-        "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-        [
-          packagedSmokeConfig.order_id,
-          packagedSmokeConfig.customer_id,
-          packagedSmokeConfig.user_id,
-          '{"street":"Packaged Initial"}',
-          timestamp,
-          timestamp,
-        ]
-      );
-      await syncAndWaitForScheduledPullRetry();
-      pendingChangeCount = await client.pendingChangeCount();
-      if (pendingChangeCount !== 0) {
-        throw new Error('initial packaged work was not pushed');
-      }
-      await client.execute(
-        'UPDATE orders SET ship_address = ?, updated_at = ? WHERE id = ?',
-        [
-          '{"street":"Packaged Durable"}',
-          new Date().toISOString(),
-          packagedSmokeConfig.order_id,
-        ]
-      );
-      const durable = await client.queryOne(
-        'SELECT ship_address FROM orders WHERE id = ?',
-        [packagedSmokeConfig.order_id]
-      );
-      if (durable?.ship_address !== '{"street":"Packaged Durable"}') {
-        throw new Error('durable packaged row was not queued');
-      }
+      await executeAll(packagedSmokeConfig.initial_sql);
+      await awaitConvergence();
+      await executeAll(packagedSmokeConfig.durable_sql);
       pendingChangeCount = await client.pendingChangeCount();
       if (pendingChangeCount !== 1) {
         throw new Error('durable packaged work was not queued');
