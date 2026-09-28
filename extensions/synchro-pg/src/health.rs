@@ -206,6 +206,36 @@ SELECT
                  AND membership_function.proname::text = registry.membership_function_name::text
                  AND membership_function.prokind = 'f'
            ))
+           OR (registry.registration_kind = 'synced'
+               AND registry.push_policy = 'enabled'
+               AND EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_attribute key_attribute
+                   WHERE key_attribute.attrelid = registry.physical_relation_oid
+                     AND key_attribute.attname::text = registry.pk_column
+                     AND key_attribute.attnum > 0
+                     AND NOT key_attribute.attisdropped
+                     AND (
+                         key_attribute.attidentity = 'a'
+                         OR key_attribute.attgenerated <> ''
+                     )
+               ))
+           OR EXISTS (
+               SELECT 1
+               FROM synchro.sync_registry_fields field
+               JOIN pg_catalog.pg_attribute field_attribute
+                 ON field_attribute.attrelid = registry.physical_relation_oid
+                AND field_attribute.attname = field.physical_column
+                AND field_attribute.attnum > 0
+                AND NOT field_attribute.attisdropped
+               WHERE field.registry_generation = registry.registry_generation
+                 AND field.relation_id = registry.relation_id
+                 AND field.writable
+                 AND (
+                     field_attribute.attidentity = 'a'
+                     OR field_attribute.attgenerated <> ''
+                 )
+           )
     ) AS relation_identity_valid,
     (
         EXISTS (

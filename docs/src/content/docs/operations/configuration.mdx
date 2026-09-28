@@ -39,7 +39,7 @@ Each registered relation must be a member of the configured publication without 
 To repair a member, drop the table from the publication.
 Then add the table to the publication again without a column list and without a row filter.
 
-## Generated columns
+## Generated and identity columns
 
 The worker reads only the columns that pgoutput sends.
 pgoutput never sends a virtual generated column.
@@ -49,6 +49,9 @@ Synchro creates its publication with the PostgreSQL defaults.
 
 Registration applies these rules to each synced field and to each captured column of a capture dependency:
 
+- Clients cannot write an identity `ALWAYS` column.
+- Clients can write a `BY DEFAULT` identity column.
+- A registration with push policy `enabled` rejects a database-generated key.
 - Registration rejects a virtual generated column.
 - Registration rejects a stored generated column when the configured publication does not have `publish_generated_columns = stored`.
 - Registration accepts a stored generated column when the configured publication has `publish_generated_columns = stored`. Clients cannot write this field.

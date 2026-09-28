@@ -107,7 +107,8 @@ exactly one schema-qualified relation fails with `invalid_registration` and
 v0.3 supports exactly one primary-key column. The column must be non-null and
 must be the sole column of the relation's declared primary-key constraint. The
 constraint must not be deferrable. PostgreSQL uses only an immediate key as the
-replica identity. The portable type of the key column must be exactly one of:
+replica identity. A synced registration with push policy `enabled` must not use
+a database-generated key. The portable type of the key column must be exactly one of:
 
 ```text
 string
