@@ -136,6 +136,8 @@ fn synchro_backfill_bucket_edges(
 
         let boundary = load_materialization_boundary(client)
             .unwrap_or_else(|error| pgrx::error!("loading membership backfill boundary: {error}"));
+        drop_staging_table(client)
+            .unwrap_or_else(|error| pgrx::error!("dropping membership backfill stage: {error}"));
 
         pgrx::JsonB(serde_json::json!({
             "tables": table_names,
@@ -367,7 +369,7 @@ pub(crate) fn activate_staged_membership_generation(
     if updated != 1 {
         return Err("membership activation stage changed".to_string());
     }
-    Ok(())
+    drop_staging_table(client)
 }
 
 pub(crate) fn migrate_schema_digests(
@@ -1046,10 +1048,13 @@ fn acquire_backfill_lock(client: &mut SpiClient<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Creates a new edge stage for one staging operation. The operation drops the
+/// stage before it succeeds. A relation that already has the stage name can
+/// belong to the caller, so creation then fails instead of using it.
 fn create_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
         .update(
-            "CREATE TEMP TABLE IF NOT EXISTS synchro_backfill_edges (
+            "CREATE TEMP TABLE synchro_backfill_edges (
                  relation_id UUID NOT NULL,
                  table_name TEXT NOT NULL,
                  record_id TEXT NOT NULL,
@@ -1062,9 +1067,13 @@ fn create_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
             &[],
         )
         .map_err(|error| format!("creating temporary edge table: {error}"))?;
+    Ok(())
+}
+
+fn drop_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
-        .update("TRUNCATE pg_temp.synchro_backfill_edges", None, &[])
-        .map_err(|error| format!("clearing temporary edge table: {error}"))?;
+        .update("DROP TABLE pg_temp.synchro_backfill_edges", None, &[])
+        .map_err(|error| format!("dropping temporary edge table: {error}"))?;
     Ok(())
 }
 

@@ -241,6 +241,111 @@ fn definer_functions_search_temporary_schema_last() {
 }
 
 #[pg_test]
+fn backfill_rejects_caller_staging_table() {
+    setup_test_tables();
+    Spi::run(
+        "CREATE TABLE public.backfill_shadow_runs (role_name TEXT NOT NULL);
+         GRANT INSERT ON public.backfill_shadow_runs TO PUBLIC;
+         CREATE SEQUENCE public.backfill_shadow_calls;
+         GRANT USAGE ON SEQUENCE public.backfill_shadow_calls TO PUBLIC",
+    )
+    .expect("create backfill shadow log");
+
+    Spi::run("SET LOCAL ROLE synchro_operator").expect("select operator role");
+    Spi::run(
+        "CREATE TEMP TABLE synchro_backfill_edges (
+             relation_id UUID NOT NULL,
+             table_name TEXT NOT NULL,
+             record_id TEXT NOT NULL,
+             bucket_id TEXT NOT NULL,
+             checksum BYTEA NOT NULL,
+             row_version UUID NOT NULL,
+             PRIMARY KEY (table_name, record_id, bucket_id)
+         );
+         GRANT ALL ON pg_temp.synchro_backfill_edges TO PUBLIC;
+         CREATE FUNCTION pg_temp.record_backfill_shadow() RETURNS trigger
+         LANGUAGE plpgsql AS $shadow$
+         BEGIN
+             PERFORM pg_catalog.nextval('public.backfill_shadow_calls');
+             INSERT INTO public.backfill_shadow_runs (role_name) VALUES (current_user);
+             RETURN NULL;
+         END
+         $shadow$;
+         CREATE TRIGGER record_backfill_shadow_truncate
+         BEFORE TRUNCATE ON pg_temp.synchro_backfill_edges
+         FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.record_backfill_shadow();
+         CREATE TRIGGER record_backfill_shadow_write
+         BEFORE INSERT OR UPDATE OR DELETE ON pg_temp.synchro_backfill_edges
+         FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.record_backfill_shadow()",
+    )
+    .expect("create caller staging table");
+    // A sequence keeps its value after the rejected call rolls back, so it
+    // records a trigger run that the rollback removes from the log table.
+    Spi::run(
+        "DO $test$
+         DECLARE
+             rejected BOOLEAN := false;
+         BEGIN
+             BEGIN
+                 PERFORM synchro.synchro_backfill_bucket_edges();
+             EXCEPTION WHEN duplicate_table THEN
+                 rejected := true;
+             END;
+             PERFORM pg_catalog.set_config(
+                 'synchro_test.backfill_rejected', rejected::text, true
+             );
+         END
+         $test$",
+    )
+    .expect("call backfill with caller staging table");
+    Spi::run("RESET ROLE").expect("restore test role");
+
+    let shadow_roles = Spi::get_one::<Vec<String>>(
+        "SELECT COALESCE(array_agg(role_name ORDER BY role_name), ARRAY[]::text[])
+         FROM public.backfill_shadow_runs",
+    )
+    .expect("load backfill shadow roles");
+    let shadow_called = Spi::get_one::<bool>("SELECT is_called FROM public.backfill_shadow_calls")
+        .expect("load backfill shadow calls");
+    let rejected =
+        Spi::get_one::<String>("SELECT current_setting('synchro_test.backfill_rejected')")
+            .expect("load backfill rejection");
+    assert_eq!(shadow_roles, Some(Vec::new()));
+    assert_eq!(shadow_called, Some(false));
+    assert_eq!(rejected.as_deref(), Some("true"));
+}
+
+#[pg_test]
+fn backfill_runs_twice_in_one_transaction() {
+    setup_test_tables();
+    Spi::run(
+        "INSERT INTO test_products (id, name, price)
+         VALUES ('26262626-2626-4626-8626-262626262626', 'Repeated Backfill', 7)",
+    )
+    .expect("insert backfill product");
+    insert_changelog(
+        "global",
+        "test_products",
+        "26262626-2626-4626-8626-262626262626",
+        1,
+    );
+
+    for _ in 0..2 {
+        let backfill = Spi::get_one::<pgrx::JsonB>(
+            "SELECT synchro.synchro_backfill_bucket_edges('test_products')",
+        )
+        .expect("run backfill")
+        .expect("backfill response");
+        let stage_exists = Spi::get_one::<bool>(
+            "SELECT pg_catalog.to_regclass('pg_temp.synchro_backfill_edges') IS NOT NULL",
+        )
+        .expect("check backfill stage");
+        assert_eq!(backfill.0["records"], 1);
+        assert_eq!(stage_exists, Some(false));
+    }
+}
+
+#[pg_test]
 fn registration_functions_have_required_security_and_grants() {
     let protected: Option<bool> = Spi::get_one(
         "WITH registration_functions AS (
