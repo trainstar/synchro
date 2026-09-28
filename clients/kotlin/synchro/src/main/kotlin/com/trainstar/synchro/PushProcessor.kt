@@ -141,6 +141,7 @@ internal class PushProcessor(
             syncedTables,
         )?.let { return@writeTransaction it }
 
+        blockDependentsOfBlockedPredecessors(db)
         normalizeUnsealedChains(db)
         val batchID = UUID.randomUUID().toString()
         val leadingRun = selectWithinPushLimits(
@@ -1548,6 +1549,27 @@ internal class PushProcessor(
     private fun blockUnsealedDependents(db: SQLiteDatabase, mutationID: String) {
         blockDescendants(db, mutationID)
         blockGroupsOfBlockedMembers(db)
+    }
+
+    /** A blocked predecessor can never become accepted, so each captured descendant becomes blocked. */
+    private fun blockDependentsOfBlockedPredecessors(db: SQLiteDatabase) {
+        while (true) {
+            val blockers = mutableListOf<String>()
+            db.rawQuery(
+                """
+                SELECT DISTINCT predecessor.mutation_id
+                FROM _synchro_pending_changes child
+                JOIN _synchro_pending_changes predecessor
+                  ON predecessor.mutation_id = child.depends_on_mutation_id
+                WHERE child.lifecycle_state = 'captured'
+                  AND predecessor.lifecycle_state IN ('blocked_by_predecessor', 'legacy_blocked')
+                """.trimIndent(),
+                null,
+            ).use { cursor -> while (cursor.moveToNext()) blockers += cursor.getString(0) }
+            if (blockers.isEmpty()) return
+            blockers.forEach { mutationID -> blockDescendants(db, mutationID) }
+            blockGroupsOfBlockedMembers(db)
+        }
     }
 
     /** The server receives a group only as a whole, so one blocked member blocks each unsent member. */

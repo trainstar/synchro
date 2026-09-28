@@ -3612,7 +3612,172 @@ class SyncEngineTests {
         }
     }
 
+    @Test
+    fun blockedPredecessorBlocksDependentUpdateAndCycleCompletes() = runTest {
+        val (engine, db) = makeIntegrationEnv { request ->
+            if (request.path.orEmpty().endsWith("/sync/connect")) {
+                mockResponse(connectResumeJSON)
+            } else {
+                mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(protocolOrdersSchema()),
+            )
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("blocked-row", "initial", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val predecessor = mutationID(db, "blocked-row", "insert")
+            db.execute(
+                "UPDATE _synchro_pending_changes SET lifecycle_state = 'legacy_blocked' WHERE mutation_id = ?",
+                arrayOf(predecessor),
+            )
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("dependent", "blocked-row"))
+            val dependent = mutationID(db, "blocked-row", "update")
+
+            withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
+
+            assertEquals(1, server!!.requestCount)
+            assertEquals(listOf("legacy_blocked", "blocked_by_predecessor"), mutationStates(db, predecessor, dependent))
+            assertEquals(predecessor, dependsOnMutationID(db, dependent))
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun blockedPredecessorBlocksDependentGroupAndCycleCompletes() = runTest {
+        val (engine, db) = makeIntegrationEnv { request ->
+            if (request.path.orEmpty().endsWith("/sync/connect")) {
+                mockResponse(connectResumeJSON)
+            } else {
+                mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(protocolOrdersSchema()),
+            )
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("group-blocked", "initial", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val predecessor = mutationID(db, "group-blocked", "insert")
+            db.execute(
+                "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor' WHERE mutation_id = ?",
+                arrayOf(predecessor),
+            )
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("dependent", "group-blocked"))
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("group-peer", "peer", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val dependent = mutationID(db, "group-blocked", "update")
+            val peer = mutationID(db, "group-peer", "insert")
+            db.execute(
+                """
+                UPDATE _synchro_pending_changes
+                SET atomic_group_id = 'cycle-group'
+                WHERE mutation_id IN (?, ?)
+                """.trimIndent(),
+                arrayOf(dependent, peer),
+            )
+
+            withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
+
+            assertEquals(1, server!!.requestCount)
+            assertEquals(
+                listOf("blocked_by_predecessor", "blocked_by_predecessor", "blocked_by_predecessor"),
+                mutationStates(db, predecessor, dependent, peer),
+            )
+            assertEquals(predecessor, dependsOnMutationID(db, dependent))
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun pushWithoutProgressEndsThePushLoopAndTheCyclePulls() = runTest {
+        val pulls = AtomicInteger()
+        val (engine, db) = makeIntegrationEnv { request ->
+            val path = request.path.orEmpty()
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
+                path.endsWith("/sync/pull") -> {
+                    pulls.incrementAndGet()
+                    mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(protocolOrdersSchema()),
+            )
+            db.writeTransaction { connection ->
+                SynchroMeta.upsertScope(
+                    connection,
+                    scopeId = scopeID,
+                    cursor = "scope_cursor_1",
+                    checksum = emptyScopeChecksumJSON(),
+                )
+            }
+            db.writeSyncLockedTransaction { connection ->
+                connection.execSQL(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                    arrayOf("unversioned", "server", "u1", "2026-01-01T00:00:00.000000Z"),
+                )
+            }
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("local", "unversioned"))
+            val waiting = mutationID(db, "unversioned", "update")
+
+            withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
+
+            assertEquals(1, pulls.get())
+            assertEquals(listOf("captured"), mutationStates(db, waiting))
+            assertTrue(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+        } finally {
+            engine.stop()
+        }
+    }
+
     // MARK: - Helpers
+
+    private fun mutationID(db: SynchroDatabase, recordID: String, operation: String): String =
+        db.queryOne(
+            "SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = ? AND operation = ?",
+            arrayOf(recordID, operation),
+        )!!.getValue("mutation_id") as String
+
+    private fun mutationStates(db: SynchroDatabase, vararg mutationIDs: String): List<String> =
+        mutationIDs.map { mutationID ->
+            db.queryOne(
+                "SELECT lifecycle_state FROM _synchro_pending_changes WHERE mutation_id = ?",
+                arrayOf(mutationID),
+            )!!.getValue("lifecycle_state") as String
+        }
+
+    private fun dependsOnMutationID(db: SynchroDatabase, mutationID: String): String? =
+        db.queryOne(
+            "SELECT depends_on_mutation_id FROM _synchro_pending_changes WHERE mutation_id = ?",
+            arrayOf(mutationID),
+        )?.get("depends_on_mutation_id") as String?
 
     private fun makeSyncEngine(syncInterval: Double = 30.0): Pair<SyncEngine, SynchroDatabase> {
         val context = ApplicationProvider.getApplicationContext<Context>()
