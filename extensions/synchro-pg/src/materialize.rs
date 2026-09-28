@@ -232,17 +232,154 @@ pub(crate) fn resolve_membership_batch(
     })
 }
 
-pub(crate) fn activate_staged_membership_generation(
+/// One pending membership stage of a registry transition.
+struct MembershipStage {
+    generation: i64,
+    target_relation_ids: Vec<String>,
+    declared_affected_scopes: Option<Vec<String>>,
+}
+
+/// Activate the membership stages of `transitions`, each a pair of source and
+/// target generation in activation order. One source transaction can carry
+/// several transitions. Their membership is evaluated once, with the registry
+/// of `evaluation_generation`, against the projection that the caller has
+/// already brought to its final state. The affected scopes are the union of the
+/// declared scopes. A transition without a declaration adds the changed scopes.
+pub(crate) fn activate_staged_membership_generations(
     client: &mut SpiClient<'_>,
-    source_generation: i64,
-    target_generation: i64,
+    transitions: &[(i64, i64)],
+    evaluation_generation: i64,
     stream_generation: &str,
     activation_commit_lsn: &str,
     activation_end_lsn: &str,
 ) -> Result<(), String> {
+    let mut stages = Vec::new();
+    for (source_generation, target_generation) in transitions {
+        if let Some(stage) =
+            load_pending_membership_stage(client, *source_generation, *target_generation)?
+        {
+            stages.push(stage);
+        }
+    }
+    let Some(last_stage) = stages.last().map(|stage| stage.generation) else {
+        return Ok(());
+    };
+
+    acquire_backfill_lock(client)?;
+    let registry = load_registry_generation_from_client(client, evaluation_generation)
+        .map_err(|error| format!("loading membership evaluation registry: {error}"))?;
+    // A later transition in the transaction can remove a staged relation. That
+    // relation has no final projection and no final membership.
+    let tables: Vec<&TableRegistration> = registry
+        .iter()
+        .filter(|registration| {
+            registration.is_synced()
+                && stages.iter().any(|stage| {
+                    stage
+                        .target_relation_ids
+                        .contains(&registration.relation_id)
+                })
+        })
+        .collect();
+    if stages.iter().any(|stage| {
+        stage.generation == evaluation_generation
+            && stage
+                .target_relation_ids
+                .iter()
+                .any(|relation_id| !tables.iter().any(|table| &table.relation_id == relation_id))
+    }) {
+        return Err("membership activation targets are incomplete".to_string());
+    }
+    let table_names: Vec<String> = tables
+        .iter()
+        .map(|table| table.table_name.clone())
+        .collect();
+
+    validate_existing_edges(client, &tables)?;
+    create_staging_table(client)?;
+    let mut counts = std::collections::HashMap::with_capacity(tables.len());
+    for table in &tables {
+        let (records, edges, _) = stage_table_edges(client, table, DEFAULT_BACKFILL_BATCH_SIZE)?;
+        counts.insert(table.relation_id.clone(), (records, edges));
+    }
+    verify_staging(client, &tables)?;
+    let changed_scopes = changed_scopes(client, &table_names)?;
+    let mut affected_scopes = Vec::new();
+    let mut undeclared = false;
+    for stage in &stages {
+        match &stage.declared_affected_scopes {
+            Some(declared) => affected_scopes.extend(declared.iter().cloned()),
+            None => undeclared = true,
+        }
+    }
+    if undeclared {
+        affected_scopes.extend(changed_scopes.iter().cloned());
+    }
+    affected_scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    affected_scopes.dedup();
+    if affected_scopes.is_empty() {
+        return Err("membership activation requires exact affected scopes".to_string());
+    }
+    if changed_scopes
+        .iter()
+        .any(|scope| !affected_scopes.contains(scope))
+    {
+        return Err("declared affected scopes omit a changed scope".to_string());
+    }
+    install_staged_edges(client, &table_names)?;
+    advance_affected_generations(client, &affected_scopes, Some(last_stage))?;
+
+    for stage in &stages {
+        let (mut record_count, mut edge_count) = (0i64, 0i64);
+        for relation_id in &stage.target_relation_ids {
+            let (records, edges) = counts.get(relation_id).copied().unwrap_or((0, 0));
+            record_count = record_count
+                .checked_add(records)
+                .ok_or_else(|| "membership activation record count overflowed".to_string())?;
+            edge_count = edge_count
+                .checked_add(edges)
+                .ok_or_else(|| "membership activation edge count overflowed".to_string())?;
+        }
+        let updated = client
+            .update(
+                "UPDATE synchro.sync_registry_membership_stages
+                 SET state = 'activated', stream_generation = $2,
+                     activation_commit_lsn = $3::pg_lsn,
+                     activation_end_lsn = $4::pg_lsn,
+                     staged_record_count = $5, staged_edge_count = $6,
+                     affected_scopes = $7::text[], verified = true,
+                     activated_at = now()
+                 WHERE registry_generation = $1 AND state = 'pending'",
+                None,
+                &[
+                    stage.generation.into(),
+                    stream_generation.into(),
+                    activation_commit_lsn.into(),
+                    activation_end_lsn.into(),
+                    record_count.into(),
+                    edge_count.into(),
+                    affected_scopes.clone().into(),
+                ],
+            )
+            .map_err(|error| format!("recording membership activation: {error}"))?
+            .len();
+        if updated != 1 {
+            return Err("membership activation stage changed".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn load_pending_membership_stage(
+    client: &SpiClient<'_>,
+    source_generation: i64,
+    target_generation: i64,
+) -> Result<Option<MembershipStage>, String> {
     let rows = client
         .select(
-            "SELECT source_registry_generation, state, affected_scopes
+            "SELECT source_registry_generation, state, affected_scopes,
+                    ARRAY(SELECT target::text FROM unnest(target_relation_ids) target
+                          ORDER BY target) AS target_relation_ids
              FROM synchro.sync_registry_membership_stages
              WHERE registry_generation = $1",
             None,
@@ -250,7 +387,7 @@ pub(crate) fn activate_staged_membership_generation(
         )
         .map_err(|error| format!("loading membership activation stage: {error}"))?;
     let Some(stage) = rows.into_iter().next() else {
-        return Ok(());
+        return Ok(None);
     };
     let staged_source = stage
         .get_by_name::<i64, &str>("source_registry_generation")
@@ -263,106 +400,25 @@ pub(crate) fn activate_staged_membership_generation(
     if staged_source != source_generation || state != "pending" {
         return Err("membership activation stage binding is invalid".to_string());
     }
-
-    acquire_backfill_lock(client)?;
-    let registry = load_registry_generation_from_client(client, target_generation)
-        .map_err(|error| format!("loading pending membership registry: {error}"))?;
-    let target_rows = client
-        .select(
-            "SELECT target_relation_id::text AS relation_id
-             FROM synchro.sync_registry_membership_stages stage
-             CROSS JOIN LATERAL unnest(stage.target_relation_ids) target(target_relation_id)
-             WHERE stage.registry_generation = $1
-             ORDER BY target_relation_id",
-            None,
-            &[target_generation.into()],
-        )
-        .map_err(|error| format!("loading membership activation targets: {error}"))?;
-    let mut target_relation_ids = Vec::with_capacity(target_rows.len());
-    for row in target_rows {
-        target_relation_ids.push(required_text(&row, "relation_id", "")?);
-    }
-    let tables: Vec<&TableRegistration> = registry
-        .iter()
-        .filter(|registration| {
-            registration.is_synced() && target_relation_ids.contains(&registration.relation_id)
-        })
-        .collect();
-    if tables.len() != target_relation_ids.len() || tables.is_empty() {
-        return Err("membership activation targets are incomplete".to_string());
-    }
-    let table_names: Vec<String> = tables
-        .iter()
-        .map(|table| table.table_name.clone())
-        .collect();
-
-    validate_existing_edges(client, &tables)?;
-    create_staging_table(client)?;
-    let mut record_count = 0i64;
-    let mut edge_count = 0i64;
-    for table in &tables {
-        let (records, edges, _) = stage_table_edges(client, table, DEFAULT_BACKFILL_BATCH_SIZE)?;
-        record_count = record_count
-            .checked_add(records)
-            .ok_or_else(|| "membership activation record count overflowed".to_string())?;
-        edge_count = edge_count
-            .checked_add(edges)
-            .ok_or_else(|| "membership activation edge count overflowed".to_string())?;
-    }
-    verify_staging(client, &tables)?;
-    let changed_scopes = changed_scopes(client, &table_names)?;
-    let affected_scopes = match declared_affected_scopes {
-        Some(declared) => {
-            if declared.is_empty()
-                || declared
-                    .windows(2)
-                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
-            {
-                return Err("declared affected scopes are invalid".to_string());
-            }
-            if changed_scopes
-                .iter()
-                .any(|scope| declared.binary_search(scope).is_err())
-            {
-                return Err("declared affected scopes omit a changed scope".to_string());
-            }
-            declared
+    if let Some(declared) = &declared_affected_scopes {
+        if declared.is_empty()
+            || declared
+                .windows(2)
+                .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+        {
+            return Err("declared affected scopes are invalid".to_string());
         }
-        None if changed_scopes.is_empty() => {
-            return Err("membership activation requires exact affected scopes".to_string());
-        }
-        None => changed_scopes,
-    };
-    install_staged_edges(client, &table_names)?;
-    advance_affected_generations(client, &affected_scopes, Some(target_generation))?;
-
-    let updated = client
-        .update(
-            "UPDATE synchro.sync_registry_membership_stages
-             SET state = 'activated', stream_generation = $2,
-                 activation_commit_lsn = $3::pg_lsn,
-                 activation_end_lsn = $4::pg_lsn,
-                 staged_record_count = $5, staged_edge_count = $6,
-                 affected_scopes = $7::text[], verified = true,
-                 activated_at = now()
-             WHERE registry_generation = $1 AND state = 'pending'",
-            None,
-            &[
-                target_generation.into(),
-                stream_generation.into(),
-                activation_commit_lsn.into(),
-                activation_end_lsn.into(),
-                record_count.into(),
-                edge_count.into(),
-                affected_scopes.clone().into(),
-            ],
-        )
-        .map_err(|error| format!("recording membership activation: {error}"))?
-        .len();
-    if updated != 1 {
-        return Err("membership activation stage changed".to_string());
     }
-    Ok(())
+    let target_relation_ids = stage
+        .get_by_name::<Vec<String>, &str>("target_relation_ids")
+        .map_err(|error| format!("reading membership activation targets: {error}"))?
+        .filter(|targets| !targets.is_empty())
+        .ok_or_else(|| "membership activation targets are incomplete".to_string())?;
+    Ok(Some(MembershipStage {
+        generation: target_generation,
+        target_relation_ids,
+        declared_affected_scopes,
+    }))
 }
 
 pub(crate) fn migrate_schema_digests(
