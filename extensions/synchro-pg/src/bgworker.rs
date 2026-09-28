@@ -1007,6 +1007,7 @@ fn initialize_worker(
     let configured_slot = configured_replication_slot();
     let publication = publication_name();
     Spi::connect_mut(|client| {
+        lock_worker_gate_for_startup(client)?;
         activate_worker_role_in_transaction(client, worker_role_oid)?;
         let (database_oid, connected_database) = connected_database(client, database)?;
         let publication = ensure_publication(client, &publication)?;
@@ -1684,6 +1685,21 @@ fn ensure_publication(
     Err("configured publication is unavailable".to_string())
 }
 
+/// Startup reads the registry outside the poll gate. An extension update takes
+/// the gate exclusively before it alters those tables, so a startup
+/// transaction waits for the update, or the update waits for it, before either
+/// one holds a table lock that the other needs.
+fn lock_worker_gate_for_startup(client: &SpiClient<'_>) -> Result<(), String> {
+    client
+        .select(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared($1::bigint)",
+            None,
+            &[crate::WAL_WORKER_GATE_LOCK_KEY.into()],
+        )
+        .map_err(|_| "locking WAL worker startup failed".to_string())?;
+    Ok(())
+}
+
 fn fresh_decoder(worker_role_oid: pg_sys::Oid) -> Result<DecoderState, String> {
     let identity = validated_runtime_capture_identity(worker_role_oid)?;
     fresh_decoder_for(identity, worker_role_oid)
@@ -1695,6 +1711,7 @@ fn fresh_decoder_for(
 ) -> Result<DecoderState, String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            lock_worker_gate_for_startup(client)?;
             activate_worker_role_in_transaction(client, worker_role_oid)?;
             validate_runtime_capture_identity(client, &identity)?;
             let registry =
