@@ -29,6 +29,7 @@ export const mockNativeModule: Record<string, jest.Mock> = {
   executeAuthoredWrite: jest.fn().mockResolvedValue({ rowsAffected: 0 }),
   executeBatch: jest.fn().mockResolvedValue({ totalRowsAffected: 0 }),
   beginWriteTransaction: jest.fn().mockResolvedValue('tx-1'),
+  beginAtomicWriteTransaction: jest.fn().mockResolvedValue('tx-atomic-1'),
   beginReadTransaction: jest.fn().mockResolvedValue('tx-1'),
   txQuery: jest.fn().mockResolvedValue([]),
   txQueryOne: jest.fn().mockResolvedValue(null),

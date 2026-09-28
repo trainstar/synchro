@@ -277,6 +277,8 @@ public class SynchroModuleImpl: NSObject {
             return ("ALREADY_STARTED", [:])
         case .notStarted:
             return ("NOT_STARTED", [:])
+        case .atomicGroupInvalid(let reason):
+            return ("atomic_group_invalid", ["reason": reason.rawValue])
         }
     }
 
@@ -585,6 +587,14 @@ public class SynchroModuleImpl: NSObject {
     }
 
     @objc
+    public func beginAtomicWriteTransaction(
+        _ resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock
+    ) {
+        beginTransaction(isWrite: true, isAtomic: true, resolve: resolve, reject: reject)
+    }
+
+    @objc
     public func beginReadTransaction(
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
@@ -669,6 +679,7 @@ public class SynchroModuleImpl: NSObject {
 
     private func beginTransaction(
         isWrite: Bool,
+        isAtomic: Bool = false,
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
@@ -695,7 +706,7 @@ public class SynchroModuleImpl: NSObject {
             do {
                 let finalResult: Result<Void, Error>
                 if isWrite {
-                    try client.writeTransaction { transaction in
+                    let body: (ApplicationTransaction) throws -> Void = { transaction in
                         try self.runTransactionLoop(
                             session: session,
                             txID: txID,
@@ -710,6 +721,11 @@ public class SynchroModuleImpl: NSObject {
                                 try transaction.execute(sql, params: params).rowsAffected
                             }
                         )
+                    }
+                    if isAtomic {
+                        try client.atomicWriteTransaction(body)
+                    } else {
+                        try client.writeTransaction(body)
                     }
                 } else {
                     try client.readTransaction { db in
@@ -842,6 +858,7 @@ public class SynchroModuleImpl: NSObject {
         let op = TransactionOp.commit { result in
             switch result {
             case .success: resolve(nil)
+            case .failure(let error as SynchroError): self.rejectWithError(reject, error)
             case .failure(let error): reject("DATABASE_ERROR", error.localizedDescription, error)
             }
         }

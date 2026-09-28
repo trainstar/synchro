@@ -33,6 +33,7 @@ export const NATIVE_ERROR_CODES = [
   'TRANSACTION_TIMEOUT',
   'INVALID_CONFIG',
   'CLIENT_ALREADY_ACTIVE',
+  'atomic_group_invalid',
   'UNKNOWN',
 ] as const;
 
@@ -230,6 +231,25 @@ export class TransactionTimeoutError extends SynchroError {
   constructor() {
     super('TRANSACTION_TIMEOUT', 'Transaction timed out due to inactivity');
     this.name = 'TransactionTimeoutError';
+  }
+}
+
+export const ATOMIC_GROUP_INVALID_REASONS = [
+  'deleteFollowedByWrite',
+  'tooManyMutations',
+  'mutationTooLarge',
+  'requestTooLarge',
+] as const;
+
+export type AtomicGroupInvalidReason = (typeof ATOMIC_GROUP_INVALID_REASONS)[number];
+
+export class AtomicGroupInvalidError extends SynchroError {
+  readonly reason: AtomicGroupInvalidReason;
+
+  constructor(reason: AtomicGroupInvalidReason) {
+    super('atomic_group_invalid', `Atomic write group is invalid: ${reason}`);
+    this.name = 'AtomicGroupInvalidError';
+    this.reason = reason;
   }
 }
 
@@ -439,6 +459,16 @@ export function mapNativeError(error: unknown): SynchroError {
       return new TransactionTimeoutError();
     case 'INVALID_CONFIG':
       return new SynchroError('INVALID_CONFIG', message);
+    case 'atomic_group_invalid':
+      try {
+        return new AtomicGroupInvalidError(
+          requiredEnum(userInfo.reason, ATOMIC_GROUP_INVALID_REASONS, 'atomic group invalid reason')
+        );
+      } catch (parseError) {
+        return parseError instanceof SynchroError
+          ? parseError
+          : new InvalidResponseError('Native bridge returned invalid atomic group details');
+      }
     default:
       return new SynchroError('UNKNOWN', message);
   }
