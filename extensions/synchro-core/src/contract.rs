@@ -2946,8 +2946,10 @@ mod tests {
         struct LineageCases {
             cases: Vec<LineageCase>,
         }
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../conformance/schema/manifest-lineage-v1.json");
+        let path = std::env::var_os("SYNCHRO_REPO_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .join("conformance/schema/manifest-lineage-v1.json");
         let cases: LineageCases =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert!(!cases.cases.is_empty());
