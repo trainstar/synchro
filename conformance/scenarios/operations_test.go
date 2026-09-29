@@ -1,6 +1,7 @@
 package scenarios
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -177,5 +178,19 @@ func TestSealedRetryPushWireFaultIsClosedAndTargeted(t *testing.T) {
 	}
 	if _, enabled, err := TemporaryUnavailablePushTarget(operation); err != nil || enabled {
 		t.Fatalf("sealed retry enabled temporary unavailable target: %t, %v", enabled, err)
+	}
+}
+
+func TestAcknowledgementOfNamesTheMaterializedStream(t *testing.T) {
+	materialize := Operation{ContractOperation: "process", Name: "materialize-source-transaction", Payload: json.RawMessage(`{"stream_generation":"stream-1","commit_lsn":"10"}`)}
+	acknowledgement, err := AcknowledgementOf(materialize)
+	if err != nil {
+		t.Fatalf("acknowledgement of materialize: %v", err)
+	}
+	if OperationKey(acknowledgement) != "process/acknowledge-contiguous-prefix" || string(acknowledgement.Payload) != `{"stream_generation":"stream-1"}` || ValidateOperation(acknowledgement) != nil {
+		t.Fatalf("acknowledgement = %s %s", OperationKey(acknowledgement), acknowledgement.Payload)
+	}
+	if _, err := AcknowledgementOf(Operation{ContractOperation: "push", Name: "submit", Payload: materialize.Payload}); err == nil {
+		t.Fatal("acknowledgement of a non-materialize operation was accepted")
 	}
 }

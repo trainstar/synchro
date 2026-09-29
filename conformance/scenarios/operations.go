@@ -148,6 +148,25 @@ var forbiddenSetupMembers = map[string]struct{}{
 }
 
 // OperationKey returns the stable closed key for one operation.
+// AcknowledgementOf returns the acknowledgement of the stream prefix that one
+// materialize operation completes. The WAL worker acknowledges after it
+// materializes, so a check that compares server state across a later window
+// waits for this acknowledgement first. Otherwise the asynchronous
+// acknowledgement lands inside the window.
+func AcknowledgementOf(materialize Operation) (Operation, error) {
+	var payload struct {
+		StreamGeneration string `json:"stream_generation"`
+	}
+	if OperationKey(materialize) != "process/materialize-source-transaction" || json.Unmarshal(materialize.Payload, &payload) != nil || payload.StreamGeneration == "" {
+		return Operation{}, errors.New("materialize operation has no stream generation")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return Operation{}, errors.New("encode acknowledgement stream generation failed")
+	}
+	return Operation{ContractOperation: "process", Name: "acknowledge-contiguous-prefix", Payload: encoded}, nil
+}
+
 func OperationKey(operation Operation) string {
 	return operation.ContractOperation + "/" + operation.Name
 }

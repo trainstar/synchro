@@ -1324,6 +1324,13 @@ func (c *ForgedCursorCoordinator) bindAndMaterializePush(ctx context.Context) er
 	if err != nil || result.Disposition != materialize.ExpectedOutcome.Disposition {
 		return fmt.Errorf("materialize React Native forged-cursor step %s: disposition=%q want=%q error=%v", materialize.ID, result.Disposition, materialize.ExpectedOutcome.Disposition, err)
 	}
+	acknowledgement, err := scenarios.AcknowledgementOf(materialize.Operation)
+	if err != nil {
+		return err
+	}
+	if result, err := c.config.Controller.ProcessStep(ctx, nil, acknowledgement); err != nil || result.Disposition != "success" {
+		return fmt.Errorf("await React Native forged-cursor push acknowledgement: disposition=%q error=%v", result.Disposition, err)
+	}
 	return nil
 }
 
