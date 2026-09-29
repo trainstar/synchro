@@ -2623,6 +2623,14 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 			return ExtensionReinstallResult{}, fmt.Errorf("drop run-time source setup tables failed: %w", err)
 		}
 	}
+	// Dropping the extension removes every registration without unregistering
+	// it, so the publication keeps members that no registry holds. Readiness
+	// requires publication members to equal the active registry. Another
+	// fixture in the same database can register tables, so the reinstall
+	// removes every remaining member, and restored registrations add theirs.
+	if err := dropPublicationMembers(ctx, tx, h.names.Publication); err != nil {
+		return ExtensionReinstallResult{}, err
+	}
 	if _, err := tx.ExecContext(ctx, "CREATE EXTENSION synchro_pg"); err != nil {
 		return ExtensionReinstallResult{}, fmt.Errorf("create synchro_pg extension failed: %w", err)
 	}
@@ -2656,6 +2664,37 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 		}
 	}
 	return result, nil
+}
+
+func dropPublicationMembers(ctx context.Context, tx *sql.Tx, publication string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT member.prrelid::regclass::text
+		FROM pg_catalog.pg_publication_rel member
+		JOIN pg_catalog.pg_publication publication ON publication.oid = member.prpubid
+		WHERE publication.pubname = $1
+		ORDER BY 1`, publication)
+	if err != nil {
+		return errors.New("read isolated publication members failed")
+	}
+	var members []string
+	for rows.Next() {
+		var member string
+		if err := rows.Scan(&member); err != nil {
+			_ = rows.Close()
+			return errors.New("read isolated publication member failed")
+		}
+		members = append(members, member)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return errors.New("read isolated publication members failed")
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "ALTER PUBLICATION "+quoteIdentifier(publication)+" DROP TABLE "+strings.Join(members, ", ")); err != nil {
+		return fmt.Errorf("drop isolated publication members failed: %w", err)
+	}
+	return nil
 }
 
 // ResetScenarioServer returns the server to the authored fixture state before a
@@ -2717,6 +2756,11 @@ func (h *Harness) ResetScenarioServer(ctx context.Context) error {
 				return fmt.Errorf("restore diagnostic registrations: %w", err)
 			}
 		}
+	}
+	// The next scenario attach checks readiness before any reset, so a reset
+	// that leaves the server unready fails every later scenario instead.
+	if err := h.verifyCaptureReadiness(ctx); err != nil {
+		return fmt.Errorf("verify capture readiness after reset: %w", err)
 	}
 	return nil
 }

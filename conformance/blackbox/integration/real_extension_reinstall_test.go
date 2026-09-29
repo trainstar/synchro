@@ -503,3 +503,90 @@ func TestRealWorkerStartupRetainsUnownedConfiguredSlot(t *testing.T) {
 		t.Fatalf("worker did not activate registrations after operator recovery: %#v", recovered)
 	}
 }
+
+// A fixture in the same database, such as the client integration schema, can
+// register tables that the diagnostic registry does not restore. Readiness
+// requires publication members to equal the active registry, so the scenario
+// reset must remove them.
+func TestRealScenarioResetLeavesPublicationEqualToRestoredRegistry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	database, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open administrator connection: %v", err)
+	}
+	defer database.Close()
+	publication := pgx.Identifier{harness.Names().Publication}.Sanitize()
+	if _, err := database.ExecContext(ctx, "CREATE TABLE public.reset_foreign_fixture (id text PRIMARY KEY)"); err != nil {
+		t.Fatalf("create foreign fixture table: %v", err)
+	}
+	defer func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if _, err := database.ExecContext(cleanupContext, "DROP TABLE IF EXISTS public.reset_foreign_fixture"); err != nil {
+			t.Errorf("drop foreign fixture table: %v", err)
+		}
+	}()
+	if _, err := database.ExecContext(ctx, "ALTER PUBLICATION "+publication+" ADD TABLE public.reset_foreign_fixture"); err != nil {
+		t.Fatalf("publish foreign fixture table: %v", err)
+	}
+
+	if err := harness.ResetScenarioServer(ctx); err != nil {
+		t.Fatalf("reset scenario server: %v", err)
+	}
+	var unregistered, unpublished []string
+	for _, check := range []struct {
+		target *[]string
+		query  string
+	}{
+		{&unregistered, `
+			SELECT member.prrelid::regclass::text
+			FROM pg_catalog.pg_publication_rel member
+			JOIN pg_catalog.pg_publication publication ON publication.oid = member.prpubid
+			WHERE publication.pubname = $1
+			EXCEPT
+			SELECT registry.physical_relation_oid::regclass::text
+			FROM synchro.sync_registry registry
+			JOIN synchro.sync_registry_generations generation ON generation.generation = registry.registry_generation
+			JOIN synchro.sync_runtime_state runtime ON runtime.singleton AND runtime.stream_generation = generation.stream_generation
+			WHERE generation.state = 'active' AND generation.validated`},
+		{&unpublished, `
+			SELECT registry.physical_relation_oid::regclass::text
+			FROM synchro.sync_registry registry
+			JOIN synchro.sync_registry_generations generation ON generation.generation = registry.registry_generation
+			JOIN synchro.sync_runtime_state runtime ON runtime.singleton AND runtime.stream_generation = generation.stream_generation
+			WHERE generation.state = 'active' AND generation.validated
+			EXCEPT
+			SELECT member.prrelid::regclass::text
+			FROM pg_catalog.pg_publication_rel member
+			JOIN pg_catalog.pg_publication publication ON publication.oid = member.prpubid
+			WHERE publication.pubname = $1`},
+	} {
+		rows, err := database.QueryContext(ctx, check.query, harness.Names().Publication)
+		if err != nil {
+			t.Fatalf("compare publication with registry: %v", err)
+		}
+		for rows.Next() {
+			var relation string
+			if err := rows.Scan(&relation); err != nil {
+				t.Fatalf("read publication comparison: %v", err)
+			}
+			*check.target = append(*check.target, relation)
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			t.Fatalf("read publication comparison: %v", err)
+		}
+	}
+	var published int
+	if err := database.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM pg_catalog.pg_publication_rel member
+		JOIN pg_catalog.pg_publication publication ON publication.oid = member.prpubid
+		WHERE publication.pubname = $1`, harness.Names().Publication).Scan(&published); err != nil || published == 0 {
+		t.Fatalf("restored publication has %d members: %v", published, err)
+	}
+	if len(unregistered) != 0 || len(unpublished) != 0 {
+		t.Fatalf("publication differs from the restored registry: published without registration %v, registered without publication %v", unregistered, unpublished)
+	}
+}
