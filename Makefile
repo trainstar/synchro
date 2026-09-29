@@ -1145,17 +1145,21 @@ ci-candidate-kotlin:
 	$(MAKE) test-kotlin-upgrade
 	$(MAKE) test-consumer-kotlin
 
+# The scenario corpus resets the server state, so it runs last.
 ci-candidate-rn-ios:
-	$(MAKE) test-rn-e2e-ios
+	$(MAKE) test-rn-e2e-ios-build
+	$(MAKE) test-rn-e2e-ios-smoke
 	$(MAKE) test-rn-bridge-transactions-ios
 	$(MAKE) test-consumer-rn-ios
 	$(MAKE) test-rn-upgrade-ios
+	$(MAKE) test-rn-scenarios-ios
 
 ci-candidate-rn-android:
-	$(MAKE) test-rn-e2e-android-run
+	$(MAKE) test-rn-e2e-android-smoke
 	$(MAKE) test-rn-bridge-transactions-android
 	$(MAKE) test-consumer-rn-android
 	$(MAKE) test-rn-upgrade-android
+	$(MAKE) test-rn-scenarios-android
 
 build-swift-native-runner:
 	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --product synchro-native-runner
