@@ -709,6 +709,8 @@ A write policy denial by the source relation has `rejected_terminal` with `polic
 
 A source write that changes zero rows has no durable effect. The server rolls back each write that a trigger makes during that source write.
 
+These outcomes let a writer learn whether a row that row security hides exists at a given key. PostgreSQL checks unique and primary key constraints without row security, so an insert shows this fact on every server. The outcomes show no row content, checksum, or version. A synced table should use random UUID primary keys, so that a caller cannot guess the keys of rows that it cannot see.
+
 No per-mutation retryable status or code exists. Operational uncertainty is always a whole-request 429 or 503 response with no `accepted` or `rejected` arrays.
 
 ### Atomic batches
