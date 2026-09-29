@@ -282,7 +282,7 @@ The manifest records candidate environment resolution in `release-manifest.json`
 4. Wait for the protected `release` environment approval.
 5. Recheck the approved candidate and sealed identity.
 6. Attest the sealed files with the exact sealed release manifest.
-7. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry.
+7. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry. A release candidate does not need `NPM_DIST_TAG_TOKEN`.
 8. Create immutable `v<version>` and `api/go/v<version>` tags.
 9. Publish GitHub assets without marking them latest. Mark a release candidate as a GitHub prerelease.
 10. Verify source and asset access.

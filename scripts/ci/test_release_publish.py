@@ -872,6 +872,7 @@ class PublicationStateTests(unittest.TestCase):
         )
         command = release_step_command("Verify registry publication credentials")
         command = command.replace("${{ needs.candidate.outputs.release_dir_name }}", "fixture")
+        command = command.replace("${{ needs.candidate.outputs.version }}", "$FIXTURE_VERSION")
         self.assertNotIn("${{", command)
         central = "Bearer " + base64.b64encode(b"fixture-user:fixture-password").decode("ascii")
         exchange = "/-/npm/v1/oidc/token/exchange/package/@trainstar%2fsynchro-react-native"
@@ -895,17 +896,19 @@ class PublicationStateTests(unittest.TestCase):
                 raise SystemExit(publisher.main())
                 """), encoding="utf-8")
             proxy.chmod(0o755)
-            for maven, npm, password, oidc, exchange_status, dist_tag_token, error in (
-                ("absent", "absent", "fixture-password", True, 200, "dist-tag-secret", None),
-                ("absent", "absent", "wrong-password", True, 200, "dist-tag-secret", "Central request failed with HTTP 401"),
-                ("published", "absent", "", True, 404, "dist-tag-secret", "npm trusted publishing token exchange failed with HTTP 404"),
-                ("published", "absent", "", False, 200, "dist-tag-secret", "GitHub OIDC token request is unavailable"),
-                ("published", "absent", "", True, 200, "", "NPM_DIST_TAG_TOKEN is required to move npm latest"),
-                ("published", "published-candidate", "", True, 200, "", "NPM_DIST_TAG_TOKEN is required to move npm latest"),
-                ("published", "published-candidate", "", True, 200, "dist-tag-secret", None),
-                ("published", "published-latest", "", True, 200, "", None),
+            for version, maven, npm, password, oidc, exchange_status, dist_tag_token, error in (
+                ("1.2.3", "absent", "absent", "fixture-password", True, 200, "dist-tag-secret", None),
+                ("1.2.3", "absent", "absent", "wrong-password", True, 200, "dist-tag-secret", "Central request failed with HTTP 401"),
+                ("1.2.3", "published", "absent", "", True, 404, "dist-tag-secret", "npm trusted publishing token exchange failed with HTTP 404"),
+                ("1.2.3", "published", "absent", "", False, 200, "dist-tag-secret", "GitHub OIDC token request is unavailable"),
+                ("1.2.3", "published", "absent", "", True, 200, "", "NPM_DIST_TAG_TOKEN is required to move npm latest"),
+                ("1.2.3", "published", "published-candidate", "", True, 200, "", "NPM_DIST_TAG_TOKEN is required to move npm latest"),
+                ("1.2.3", "published", "published-candidate", "", True, 200, "dist-tag-secret", None),
+                ("1.2.3", "published", "published-latest", "", True, 200, "", None),
+                ("1.2.3-rc.1", "absent", "absent", "fixture-password", True, 200, "", None),
+                ("1.2.3-rc.1", "published", "published-prerelease", "", True, 200, "", None),
             ):
-                with self.subTest(maven=maven, npm=npm, password=password, oidc=oidc, exchange_status=exchange_status, dist_tag_token=bool(dist_tag_token)):
+                with self.subTest(version=version, maven=maven, npm=npm, password=password, oidc=oidc, exchange_status=exchange_status, dist_tag_token=bool(dist_tag_token)):
                     requests = []
 
                     class Handler(BaseHTTPRequestHandler):
@@ -944,7 +947,7 @@ class PublicationStateTests(unittest.TestCase):
 
                         assertEqual = self.assertEqual
 
-                    runner = root / f"{maven}-{npm}-{password}-{oidc}-{exchange_status}-{bool(dist_tag_token)}"
+                    runner = root / f"{version}-{maven}-{npm}-{password}-{oidc}-{exchange_status}-{bool(dist_tag_token)}"
                     runner.mkdir()
                     (runner / "public-before-classification.json").write_text(
                         json.dumps({"maven": maven, "npm": npm}), encoding="utf-8",
@@ -960,6 +963,7 @@ class PublicationStateTests(unittest.TestCase):
                             "MAVEN_CENTRAL_USERNAME": "fixture-user" if password else "",
                             "MAVEN_CENTRAL_PASSWORD": password,
                             "NPM_DIST_TAG_TOKEN": dist_tag_token,
+                            "FIXTURE_VERSION": version,
                             "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
                             "TEST_SERVER_URL": url,
                         }
