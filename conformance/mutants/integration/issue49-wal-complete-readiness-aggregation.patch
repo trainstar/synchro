@@ -1,21 +1,21 @@
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -2059,7 +2059,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
+@@ -2130,7 +2130,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1135
-+-- synchro-pg/src/health.rs:1136
+--- synchro-pg/src/health.rs:1141
++-- synchro-pg/src/health.rs:1142
  -- synchro_pg::health::synchro_health_detail
  CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
-@@ -2271,7 +2271,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
+@@ -2342,7 +2342,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1128
-+-- synchro-pg/src/health.rs:1129
+--- synchro-pg/src/health.rs:1134
++-- synchro-pg/src/health.rs:1135
  -- synchro_pg::health::synchro_readiness
  CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT

@@ -330,6 +330,44 @@ BEGIN
 END
 $search_path$;
 
+-- The processed boundary records WAL that the worker processed without a source transaction.
+ALTER TABLE synchro.sync_wal_progress ADD COLUMN processed_end_lsn PG_LSN;
+UPDATE synchro.sync_wal_progress
+SET processed_end_lsn = COALESCE(materialized_end_lsn, generation_start_lsn)
+WHERE singleton;
+DO $progress_acknowledgement_check$
+DECLARE
+    constraint_name name;
+BEGIN
+    SELECT constraint_row.conname
+    INTO STRICT constraint_name
+    FROM pg_catalog.pg_constraint constraint_row
+    WHERE constraint_row.conrelid = 'synchro.sync_wal_progress'::pg_catalog.regclass
+      AND constraint_row.contype = 'c'
+      AND pg_catalog.pg_get_constraintdef(constraint_row.oid) LIKE '%acknowledged_end_lsn%'
+      AND pg_catalog.pg_get_constraintdef(constraint_row.oid) LIKE '%materialized_end_lsn%';
+    EXECUTE pg_catalog.format(
+        'ALTER TABLE synchro.sync_wal_progress DROP CONSTRAINT %I',
+        constraint_name
+    );
+END
+$progress_acknowledgement_check$;
+ALTER TABLE synchro.sync_wal_progress
+    ADD CONSTRAINT sync_wal_progress_processed_present
+        CHECK ((generation_start_lsn IS NULL) = (processed_end_lsn IS NULL)),
+    ADD CONSTRAINT sync_wal_progress_processed_after_start
+        CHECK (processed_end_lsn IS NULL OR processed_end_lsn >= generation_start_lsn),
+    ADD CONSTRAINT sync_wal_progress_materialized_processed
+        CHECK (materialized_end_lsn IS NULL
+               OR (processed_end_lsn IS NOT NULL AND materialized_end_lsn <= processed_end_lsn)),
+    ADD CONSTRAINT sync_wal_progress_acknowledged_processed
+        CHECK (acknowledged_end_lsn IS NULL
+               OR (processed_end_lsn IS NOT NULL
+                   AND acknowledged_end_lsn >= generation_start_lsn
+                   AND acknowledged_end_lsn <= processed_end_lsn));
+
+GRANT SELECT ON synchro.sync_extension_build TO synchro_worker;
+
 UPDATE synchro.sync_extension_build
 SET installed_fingerprint = synchro.synchro_build_fingerprint(),
     installed_at = pg_catalog.now()

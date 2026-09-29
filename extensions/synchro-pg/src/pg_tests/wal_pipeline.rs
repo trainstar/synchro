@@ -707,6 +707,7 @@
                  materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,
+                 processed_end_lsn = NULL,
                  updated_at = now()
              WHERE singleton",
         )
@@ -996,6 +997,12 @@
             })
         })
         .expect("load orders WAL counting registration");
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET generation_start_lsn = '0/1', processed_end_lsn = '0/1'
+             WHERE singleton",
+        )
+        .expect("bind WAL counting progress");
         let mut measurements = HashMap::new();
         for (start, count, commit_lsn) in [(1, 10, 0x100u64), (100, 100, 0x200), (1_000, 501, 0x300)] {
             let transaction = wal_counting_transaction(&registration, commit_lsn, start, count);

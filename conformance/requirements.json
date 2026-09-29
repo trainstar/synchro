@@ -412,7 +412,7 @@
       "id": "SYNC-WAL-005",
       "title": "Contiguous WAL acknowledgement",
       "category": "change-capture",
-      "statement": "The logical slot advances only after materialization commits and only to the end LSN of the largest contiguous prefix of completely durable source transactions, never past an incomplete or noncontiguous transaction.",
+      "statement": "The logical slot advances only after materialization commits and only to a durable processed boundary before which every source transaction is completely durable, never past an incomplete, noncontiguous, or unprocessed source transaction.",
       "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#contiguous-wal-acknowledgement" }]

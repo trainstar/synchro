@@ -190,7 +190,7 @@ One committed source transaction MUST be one atomic replay unit with stable tran
 
 ### Contiguous WAL Acknowledgement
 
-The logical slot MUST advance only after materialization commits and only to the `end_lsn` of the largest contiguous prefix of completely durable source transactions. Acknowledging an event, batch maximum, later noncontiguous transaction, or incomplete transaction is a violation of Slot acknowledgement in [ADR 001].
+The logical slot MUST advance only after materialization commits and only to a durable processed boundary before which every source transaction is completely durable. Acknowledging an event, batch maximum, later noncontiguous transaction, incomplete transaction, or a position after an unprocessed source transaction is a violation of Slot acknowledgement in [ADR 001].
 
 ### Blocking Poison Quarantine
 

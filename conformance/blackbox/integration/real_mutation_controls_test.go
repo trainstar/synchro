@@ -114,14 +114,15 @@ func TestRealMutationControlWALAcknowledgement(t *testing.T) {
 	}
 
 	t.Run("assertion", func(t *testing.T) {
-		if !observation.AcknowledgementMatchesObservedEnd || observation.AcknowledgedEndLSN != record.EndLSN ||
-			!observation.SlotMatchesObservedEnd || observation.SlotConfirmedFlushLSN != record.EndLSN {
+		if !observation.ContiguousAcknowledged || !observation.SlotMatchesAcknowledgement ||
+			!realWALLSNAtOrAfter(observation.AcknowledgedEndLSN, record.EndLSN) ||
+			observation.ProcessedEndLSN != observation.AcknowledgedEndLSN {
 			t.Fatalf(
-				"predicate wal_acknowledgement_exact failed: durable=%t durable_value=%t slot=%t slot_value=%t",
-				observation.AcknowledgementMatchesObservedEnd,
-				observation.AcknowledgedEndLSN == record.EndLSN,
-				observation.SlotMatchesObservedEnd,
-				observation.SlotConfirmedFlushLSN == record.EndLSN,
+				"predicate wal_acknowledgement_covers_end failed: contiguous=%t slot=%t covers_end=%t processed=%t",
+				observation.ContiguousAcknowledged,
+				observation.SlotMatchesAcknowledgement,
+				realWALLSNAtOrAfter(observation.AcknowledgedEndLSN, record.EndLSN),
+				observation.ProcessedEndLSN == observation.AcknowledgedEndLSN,
 			)
 		}
 	})

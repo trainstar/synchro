@@ -1375,9 +1375,21 @@ CREATE TABLE IF NOT EXISTS sync_wal_progress (
     acknowledged_end_lsn PG_LSN,
     registry_generation BIGINT NOT NULL REFERENCES sync_registry_generations(generation),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_end_lsn PG_LSN,
     CHECK ((materialized_commit_lsn IS NULL) = (materialized_end_lsn IS NULL)),
     CHECK (materialized_commit_lsn IS NULL OR materialized_end_lsn >= materialized_commit_lsn),
-    CHECK (acknowledged_end_lsn IS NULL OR materialized_end_lsn IS NOT NULL AND acknowledged_end_lsn <= materialized_end_lsn)
+    CONSTRAINT sync_wal_progress_processed_present
+        CHECK ((generation_start_lsn IS NULL) = (processed_end_lsn IS NULL)),
+    CONSTRAINT sync_wal_progress_processed_after_start
+        CHECK (processed_end_lsn IS NULL OR processed_end_lsn >= generation_start_lsn),
+    CONSTRAINT sync_wal_progress_materialized_processed
+        CHECK (materialized_end_lsn IS NULL
+               OR (processed_end_lsn IS NOT NULL AND materialized_end_lsn <= processed_end_lsn)),
+    CONSTRAINT sync_wal_progress_acknowledged_processed
+        CHECK (acknowledged_end_lsn IS NULL
+               OR (processed_end_lsn IS NOT NULL
+                   AND acknowledged_end_lsn >= generation_start_lsn
+                   AND acknowledged_end_lsn <= processed_end_lsn))
 );
 INSERT INTO sync_wal_progress (singleton, stream_generation, registry_generation)
 SELECT true, rs.stream_generation, rg.generation
@@ -2199,6 +2211,7 @@ END
 $function_grants$;
 
 GRANT SELECT, UPDATE ON synchro.sync_runtime_state TO synchro_worker;
+GRANT SELECT ON synchro.sync_extension_build TO synchro_worker;
 GRANT SELECT, UPDATE ON synchro.sync_registry_generations TO synchro_worker;
 GRANT SELECT ON synchro.sync_logical_ids, synchro.sync_registry,
     synchro.sync_registry_fields, synchro.sync_capture_dependency_fields,
@@ -2402,6 +2415,7 @@ mod tests {
     include!("pg_tests/order_cursor.rs");
     include!("pg_tests/integrity.rs");
     include!("pg_tests/wal_pipeline.rs");
+    include!("pg_tests/wal_progress.rs");
     include!("pg_tests/pull.rs");
     include!("pg_tests/rebuild.rs");
     include!("pg_tests/push_idempotency.rs");
@@ -3545,8 +3559,10 @@ mod tests {
             client.update(
                 "UPDATE sync_wal_progress
                  SET stream_generation = $1,
+                     generation_start_lsn = COALESCE(generation_start_lsn, '0/1'::pg_lsn),
                      materialized_commit_lsn = $2::pg_lsn,
                      materialized_end_lsn = $2::pg_lsn,
+                     processed_end_lsn = $2::pg_lsn,
                      updated_at = now()
                  WHERE singleton = true",
                 None,
