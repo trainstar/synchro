@@ -362,15 +362,19 @@ func pushNativeCaptureMutation(t *testing.T, ctx context.Context, harness *black
 // materialization wait observes the WAL transaction of its own source commit.
 // Rebuild workload steps 2 and 3 update the same row with the same operation,
 // so an identity match on the row alone binds the step 2 WAL transaction. The
-// wait must also use its whole budget, so a worker that resumes late within
-// the budget still materializes the step. Two accepted application pushes
+// wait must also poll through its whole budget: it must return promptly after
+// the worker materializes, not on a coarse retry schedule. Two accepted
+// application pushes
 // that write the same value to one row have no source transaction ID, so the
 // second must bind its own write fence, not the first push's WAL event.
 func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	harness, _ := provisionRealProofHarness(t, ctx)
-	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+	// The barriers below hold the worker for a fixed time. A 90 second wait
+	// leaves most of the budget for materialization after the resume, so a
+	// slow worker under host load does not decide the result.
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness, WaitTimeout: 90 * time.Second})
 	if err != nil {
 		t.Fatalf("create native materialization controller: %v", err)
 	}
@@ -406,10 +410,16 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 		}
 	}
 
-	// pausedBarrier commits one transaction while the WAL worker is paused and
-	// requires its materialization wait to complete only after the worker
-	// resumes. The controller waits 30 seconds, and the worker resumes after
-	// 22 seconds, inside that budget.
+	database, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open materialization database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	// pausedBarrier commits one transaction while the WAL worker is paused. The
+	// materialization wait must still be pending when the worker resumes 22
+	// seconds later. After the resume it must succeed, and it must return
+	// within 4 seconds after the worker materializes the transaction. A wait
+	// that retried only every 10 seconds would return about 8 seconds late.
 	pausedBarrier := func(name string, commit func() scenarios.Operation) {
 		t.Helper()
 		resumeWAL, err := controller.PauseWALMaterialization(ctx)
@@ -447,6 +457,16 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 		if late.err != nil || late.observation.Disposition != "success" {
 			t.Fatalf("materialize %s after the worker resumed within the wait budget: observation=%#v err=%v", name, late.observation, late.err)
 		}
+		var lateSeconds float64
+		if err := database.QueryRowContext(ctx, `
+			SELECT extract(epoch FROM clock_timestamp() - max(materialized_at))::float8
+			FROM synchro.sync_wal_transactions`).Scan(&lateSeconds); err != nil {
+			t.Fatalf("read the materialization time of %s: %v", name, err)
+		}
+		t.Logf("%s: the materialization wait returned %.2f seconds after the worker materialized it", name, lateSeconds)
+		if lateSeconds > 4 {
+			t.Fatalf("materialization wait of %s returned %.1f seconds after the worker materialized it", name, lateSeconds)
+		}
 	}
 	pausedBarrier("step 3", func() scenarios.Operation { commit(2); return inputs[2].Operations[1] })
 
@@ -476,11 +496,6 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 	if err := json.Unmarshal(identities[1].RuntimeValue, &runtimeRecordID); err != nil || runtimeRecordID == "" {
 		t.Fatalf("decode the runtime row identity: %v", err)
 	}
-	database, err := sql.Open("pgx", harness.DatabaseURL())
-	if err != nil {
-		t.Fatalf("open application push database: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
 	const pushedValue = "application-push-same-value"
 	var materializedStep struct {
 		StreamGeneration string `json:"stream_generation"`
