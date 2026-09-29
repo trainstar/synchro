@@ -457,7 +457,7 @@ jobs:
           echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Build React Native Android app
-        run: make ci-candidate-rn-android-build
+        run: make test-rn-e2e-android-build
 
       - name: Enable KVM permissions
         run: |

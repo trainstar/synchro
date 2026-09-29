@@ -71,7 +71,6 @@
 	ci-candidate-swift \
 	ci-candidate-kotlin \
 	ci-candidate-rn-ios \
-	ci-candidate-rn-android-build \
 	ci-candidate-rn-android \
 	test-rust-core \
 	test-rust-mutants \
@@ -402,7 +401,6 @@ help:
 	@echo "  ci-candidate-swift    - Run the tests of the CI candidate-swift job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
 	@echo "  ci-candidate-kotlin   - Run the tests of the CI candidate-kotlin job on KOTLIN_ANDROID_SERIAL (ADAPTER_TEST_URL)"
 	@echo "  ci-candidate-rn-ios   - Run the tests of the CI candidate-rn-ios job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
-	@echo "  ci-candidate-rn-android-build - Build the app of the CI candidate-rn-android job (ADAPTER_TEST_URL)"
 	@echo "  ci-candidate-rn-android - Run the device tests of the CI candidate-rn-android job on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-rust-core        - Run synchro-core unit tests"
 	@echo "  test-rust-mutants     - Run targeted synchro-core mutation tests"
@@ -1129,6 +1127,7 @@ ci-candidate-server:
 	$(MAKE) test-rust-pg
 	$(MAKE) test-rust-mutants
 	$(MAKE) test-adapter
+	rm -rf "$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)" "$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"
 	$(MAKE) conformance-update-baseline-extension-artifact
 	$(MAKE) test-blackbox
 	$(MAKE) test-integration-mutants
@@ -1151,10 +1150,6 @@ ci-candidate-rn-ios:
 	$(MAKE) test-rn-bridge-transactions-ios
 	$(MAKE) test-consumer-rn-ios
 	$(MAKE) test-rn-upgrade-ios
-
-# The job builds the app before it boots the emulator.
-ci-candidate-rn-android-build:
-	$(MAKE) test-rn-e2e-android-build
 
 ci-candidate-rn-android:
 	$(MAKE) test-rn-e2e-android-run

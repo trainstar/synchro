@@ -141,7 +141,7 @@ make ci-candidate-server
 make ci-candidate-swift
 make ci-candidate-kotlin
 make ci-candidate-rn-ios
-make ci-candidate-rn-android-build
+make test-rn-e2e-android-build
 make ci-candidate-rn-android
 ```
 
@@ -162,8 +162,7 @@ For a database on another machine, set `ADAPTER_TEST_URL` to its URL.
 Set `WARM_CONNECT_ENV_FILE` to a local copy of its `attach.env` file.
 After the run, stop the fixture with `make synchrod-pg-test-stop` and `make local-postgres-stop`.
 
-`make ci-candidate-server` fetches the update baseline bundles itself.
-Remove old `dist/conformance/synchro-pg-pg18-update-*` directories before you run it again.
+`make ci-candidate-server` fetches the pinned update baseline bundles again on each run.
 
 ## Stop and clean up
 
