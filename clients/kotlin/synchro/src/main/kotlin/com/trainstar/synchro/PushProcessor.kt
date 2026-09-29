@@ -1056,7 +1056,7 @@ internal class PushProcessor(
             } else {
                 null
             }
-            val hasAuthoritativeAbsence = row == null && source.operation == "delete"
+            val hasAuthoritativeAbsence = row == null
             val canApply = current != null &&
                 (row == null || projection != null) &&
                 patches != null &&

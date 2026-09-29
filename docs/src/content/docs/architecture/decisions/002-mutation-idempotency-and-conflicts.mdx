@@ -311,7 +311,8 @@ The server applies these rules in the first-execution transaction:
    end. In an atomic request, the server reads each accepted row again after
    the check. A later mutation of the group or a deferred trigger can change
    the row after its own mutation writes it. The outcome therefore shows the
-   version that the unit commits.
+   version that the unit commits. If a later write of the unit removes the
+   row, the outcome has the version of that write and no row or checksum.
 
 Thus, every constraint holds at the end of each unit. A
 `DEFERRABLE INITIALLY IMMEDIATE` constraint is also checked at the unit end,
@@ -407,8 +408,7 @@ Canonical field rules are:
 
 | Outcome | Status and code | Authoritative fields |
 | --- | --- | --- |
-| Accepted insert or update | `applied`, no rejection code | full canonical `server_row`, matching `row_checksum`, and new `server_version` are required |
-| Accepted delete | `applied`, no rejection code | new `server_version` is required; `server_row` and matching `row_checksum` are required for a source tombstone and both are absent for a fence-only delete |
+| Accepted insert, update, or delete | `applied`, no rejection code | new `server_version` is required; the outcome reports the row state after the push unit; full canonical `server_row` and matching `row_checksum` are required for a live row or source tombstone, and both are absent when the row does not exist after the unit |
 | State or version conflict | `conflict` with `version_conflict`, `row_already_exists`, `row_deleted`, or `row_not_found` | live row or source tombstone, matching `row_checksum`, and current version are required; a fence-only delete returns the current version without a row or checksum; true absence returns neither |
 | Terminal semantic rejection | `rejected_terminal` and one terminal code | no server row or server version is returned |
 

@@ -150,7 +150,7 @@ final class ContractTests: XCTestCase {
         XCTAssertThrowsError(try response.validate(for: request))
     }
 
-    func testPushOutcomeShapeUsesRequestedOperation() throws {
+    func testPushOutcomeRowPresenceStatesRowStateAfterPushUnit() throws {
         let checksum = validChecksum
         let row = ["field-id": AnyCodable("r1"), "field-title": AnyCodable("Title")]
 
@@ -173,14 +173,23 @@ final class ContractTests: XCTestCase {
                 rejected: []
             ).validate(for: request)
 
-            var missingRow = valid
-            missingRow.serverRow = nil
-            missingRow.rowChecksum = nil
+            var absentAfterUnit = valid
+            absentAfterUnit.serverRow = nil
+            absentAfterUnit.rowChecksum = nil
+            try PushResponse(
+                batchID: request.batchID,
+                serverTime: "2026-01-01T00:00:00.000000Z",
+                accepted: [absentAfterUnit],
+                rejected: []
+            ).validate(for: request)
+
+            var unpaired = valid
+            unpaired.rowChecksum = nil
             XCTAssertThrowsError(
                 try PushResponse(
                     batchID: request.batchID,
                     serverTime: "2026-01-01T00:00:00.000000Z",
-                    accepted: [missingRow],
+                    accepted: [unpaired],
                     rejected: []
                 ).validate(for: request)
             )

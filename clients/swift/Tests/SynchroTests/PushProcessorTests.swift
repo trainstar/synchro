@@ -971,6 +971,48 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(hydrated.first?.baseUpdatedAt, "sv-accepted")
     }
 
+    func testAcceptedUpdateWithoutRowAppliesAbsenceAfterPushUnit() throws {
+        let (db, tracker, processor) = try makeTestEnv()
+        try db.writeSyncLockedTransaction { connection in
+            try connection.execute(
+                sql: "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arguments: ["w1", "server", "u1", "2026-01-01T10:00:00.000000Z"]
+            )
+            try SynchroMeta.upsertRowVersion(
+                connection,
+                tableName: "orders",
+                recordID: "w1",
+                serverVersion: "sv-start",
+                rowChecksum: nil
+            )
+        }
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["local edit", "w1"])
+        let sent = try XCTUnwrap(try tracker.pendingChanges().first)
+
+        let accepted = AcceptedMutation(
+            mutationID: sent.mutationID,
+            table: testTable.tableID,
+            pk: ["id": AnyCodable("w1")],
+            outcomeSchema: SchemaRef(version: 1, hash: protocolTestSchemaHash),
+            status: .applied,
+            serverRow: nil,
+            rowChecksum: nil,
+            serverVersion: "removed-in-unit"
+        )
+        _ = try processor.applyAccepted(
+            accepted: [accepted],
+            syncedTables: [testTable],
+            sentPending: [sent.mutationID: sent]
+        )
+
+        XCTAssertNil(try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"]))
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getRowVersion($0, tableName: "orders", recordID: "w1") },
+            "removed-in-unit"
+        )
+        XCTAssertFalse(try tracker.hasPendingChanges())
+    }
+
     func testAcceptedDeleteFencePreservesLaterProjectionAndStoresReturnedVersion() throws {
         let (db, tracker, processor) = try makeTestEnv()
         try db.writeSyncLockedTransaction { connection in

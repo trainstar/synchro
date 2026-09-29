@@ -632,6 +632,7 @@ data class PushResponse(
         }
         outcome.outcomeSchema.validate()
         outcome.rowChecksum?.validate()
+        // An accepted outcome without a row states that the row is absent after its push unit.
         if ((outcome.serverRow == null) != (outcome.rowChecksum == null)) {
             throw ContractException("accepted row and checksum must be paired")
         }
@@ -641,16 +642,8 @@ data class PushResponse(
         if (outcome.table != request.table || outcome.pk != request.pk) {
             throw ContractException("accepted outcome does not match request")
         }
-        val hasRow = outcome.serverRow != null
-        val hasChecksum = outcome.rowChecksum != null
-        when (request.op) {
-            Operation.INSERT, Operation.UPDATE -> if (!hasRow || !hasChecksum) {
-                throw ContractException("accepted insert or update lacks its row or checksum")
-            }
-            Operation.DELETE -> if (hasRow != hasChecksum) {
-                throw ContractException("accepted delete row and checksum must be paired")
-            }
-            Operation.UPSERT -> throw ContractException("accepted outcome targets an unsupported push operation")
+        if (request.op == Operation.UPSERT) {
+            throw ContractException("accepted outcome targets an unsupported push operation")
         }
     }
 
