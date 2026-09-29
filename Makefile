@@ -1646,6 +1646,7 @@ test-rn-e2e-android-run: test-rn-e2e-android-smoke
 .PHONY: test-rn-scenarios-ios test-rn-scenarios-android
 test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
 	@set -eu; \
+		$(WARM_CONNECT_ENV) \
 		case "$@" in \
 			test-rn-scenarios-ios) platform=IOS; configuration=ios.sim.debug ;; \
 			test-rn-scenarios-android) platform=Android; configuration="$(RN_ANDROID_DETOX_CONFIG)"; \
