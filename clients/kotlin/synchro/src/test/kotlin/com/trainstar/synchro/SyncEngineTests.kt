@@ -2196,9 +2196,7 @@ class SyncEngineTests {
 
             timing.releaseAt(61_000L)
             assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
-            // Connect, the replayed pull, and the pull of the normal cycle that
-            // follows the replay.
-            assertEquals(3, server!!.requestCount)
+            assertEquals(2, server!!.requestCount)
             assertEquals(exactPullRequestJSON, resumedPullJSON)
             assertNull(DurableBackoffStore.load(db))
         } finally {
@@ -3164,9 +3162,7 @@ class SyncEngineTests {
 
             assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
 
-            // The failed pull, its replay, and the pull of the normal cycle that
-            // follows the replay.
-            assertEquals(3, pullCallCount)
+            assertEquals(2, pullCallCount)
             assertTrue(statuses.contains("backoff"))
             assertEquals("ready", statuses.last())
 

@@ -2295,9 +2295,7 @@ final class SyncEngineTests: XCTestCase {
 
         await fulfillment(of: [initialSyncCompleted], timeout: 3.0)
 
-        // The failed pull, its replay, and the pull of the normal cycle that
-        // follows the replay.
-        XCTAssertEqual(pullCallCount, 3)
+        XCTAssertEqual(pullCallCount, 2)
         XCTAssertTrue(statuses.contains("backoff"))
         XCTAssertEqual(statuses.last, "ready")
 

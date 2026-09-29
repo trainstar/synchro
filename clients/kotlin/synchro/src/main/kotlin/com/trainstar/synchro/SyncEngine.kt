@@ -749,7 +749,11 @@ internal class SyncEngine(
                 val rebuilds = runPullLoop(replayRequestJSON = backoff.workIdentity)
                 completeRequestedRebuilds(rebuilds)
                 transitionTo(SyncStatus.Ready)
-                runSyncCycle()
+                // The replayed pull completed the incremental step. The cycle
+                // continues only for work that must precede another pull.
+                if (changeTracker.hasPendingChanges() || scopeIDsNeedingRebuild().isNotEmpty()) {
+                    runSyncCycle()
+                }
             }
             RetryOperation.REBUILDING -> {
                 val request = decodeBackoffRequest<RebuildRequest>(backoff.workIdentity)
