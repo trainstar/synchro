@@ -122,7 +122,7 @@ func RunNativeFlow(ctx context.Context, source *sql.DB, platform NativePlatform,
 			return err
 		}
 	}
-	if err := requireNativeCheckpoint(ctx, source, platform, incremental, selectors, AuthoredInitial, logf); err != nil {
+	if err := requireNativeCheckpoint(ctx, source, platform, incremental, selectors, AuthoredInitial, nil, logf); err != nil {
 		return fmt.Errorf("initial checkpoint: %w", err)
 	}
 
@@ -138,7 +138,7 @@ func RunNativeFlow(ctx context.Context, source *sql.DB, platform NativePlatform,
 		}
 		logf("dataset final sync %s: %s", user, time.Since(started))
 	}
-	if err := requireNativeCheckpoint(ctx, source, platform, incremental, selectors, AuthoredFinal, logf); err != nil {
+	if err := requireNativeCheckpoint(ctx, source, platform, incremental, selectors, AuthoredFinal, &AuthoredInitial, logf); err != nil {
 		return fmt.Errorf("incremental final checkpoint: %w", err)
 	}
 
@@ -149,7 +149,7 @@ func RunNativeFlow(ctx context.Context, source *sql.DB, platform NativePlatform,
 			return err
 		}
 	}
-	if err := requireNativeCheckpoint(ctx, source, platform, rebuilt, selectors, AuthoredFinal, logf); err != nil {
+	if err := requireNativeCheckpoint(ctx, source, platform, rebuilt, selectors, AuthoredFinal, nil, logf); err != nil {
 		return fmt.Errorf("rebuild final checkpoint: %w", err)
 	}
 	return nil
@@ -283,11 +283,10 @@ func waitNativeMaterialized(ctx context.Context, source *sql.DB) error {
 }
 
 // requireNativeCheckpoint compares every local row and value of each client
-// with the hand-written checkpoint and the canonical source values. A live
-// local row must be one of the hand-written rows. A local row whose deleted_at
-// is set is a source tombstone that a pull delivered. It must match a deleted
-// source row exactly, and it never stands in for a live row.
-func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform NativePlatform, clients map[string]string, selectors []RowRef, checkpoint Checkpoint, logf func(string, ...any)) error {
+// with the hand-written checkpoint and the canonical source values. previous
+// is the checkpoint that the clients held before AuthoredHistory, or nil for
+// fresh clients.
+func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform NativePlatform, clients map[string]string, selectors []RowRef, checkpoint Checkpoint, previous *Checkpoint, logf func(string, ...any)) error {
 	sourceRows, err := readNativeSourceRows(ctx, source)
 	if err != nil {
 		return err
@@ -299,67 +298,16 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 	var problems []string
 	delivered := make(map[string]bool, len(checkpoint.Values))
 	for _, user := range AuthoredUsers {
-		expected := map[string]bool{}
-		for _, scope := range checkpoint.Assigned[user] {
-			for _, ids := range checkpoint.Rows[scope] {
-				for _, id := range ids {
-					expected[id] = true
-				}
-			}
-		}
 		rows, total, err := platform.Capture(ctx, clients[user], selectors)
 		if err != nil {
 			return fmt.Errorf("capture %s: %w", user, err)
 		}
-		local := make(map[string]map[string]json.RawMessage, len(rows))
-		storage := make(map[string]map[string]string, len(rows))
-		for _, row := range rows {
-			var id string
-			if err := json.Unmarshal(row.Values["id"], &id); err != nil || tables[id] == "" || local[id] != nil {
-				return fmt.Errorf("%w: %s holds an unexpected local row %s", ErrNativeMismatch, user, row.Values["id"])
-			}
-			local[id], storage[id] = row.Values, row.StorageClasses
+		expected := checkpointIDs(checkpoint, user)
+		local, userProblems, tombstones, err := compareNativeRows(user, rows, total, tables, sourceRows, expected, permittedTombstones(previous, user))
+		if err != nil {
+			return err
 		}
-		if total != len(local) {
-			problems = append(problems, fmt.Sprintf("%s holds %d local rows, %d of them authored", user, total, len(local)))
-		}
-		tombstones := 0
-		for id, row := range local {
-			table, _ := LookupTable(tables[id])
-			tombstone := string(bytes.TrimSpace(row["deleted_at"])) != "null"
-			switch {
-			case tombstone && sourceRows[id]["deleted_at"] == nil:
-				problems = append(problems, fmt.Sprintf("%s holds a tombstone of live source row %s/%s", user, table.Name, id))
-			case tombstone:
-				tombstones++
-			case !expected[id]:
-				problems = append(problems, fmt.Sprintf("%s holds live row %s/%s outside its scopes", user, table.Name, id))
-			}
-			if len(row) != len(table.Columns) || len(storage[id]) != len(table.Columns) {
-				problems = append(problems, fmt.Sprintf("%s %s/%s has %d local columns and %d storage classes, want %d", user, table.Name, id, len(row), len(storage[id]), len(table.Columns)))
-			}
-			for _, column := range table.Columns {
-				wire, err := localWire(column.Type, row[column.Name])
-				if err == nil {
-					err = CompareWire(column.Type, wire, sourceRows[id][column.Name])
-				}
-				if err != nil {
-					problems = append(problems, fmt.Sprintf("%s %s/%s.%s: %v", user, table.Name, id, column.Name, err))
-				}
-				want := "null"
-				if sourceRows[id][column.Name] != nil {
-					want = storageClass(column.Type)
-				}
-				if got := storage[id][column.Name]; got != want {
-					problems = append(problems, fmt.Sprintf("%s %s/%s.%s is stored as %q, want %q", user, table.Name, id, column.Name, got, want))
-				}
-			}
-		}
-		for id := range expected {
-			if row := local[id]; row == nil || string(bytes.TrimSpace(row["deleted_at"])) != "null" {
-				problems = append(problems, fmt.Sprintf("%s lacks live row %s/%s", user, tables[id], id))
-			}
-		}
+		problems = append(problems, userProblems...)
 		logf("dataset local rows %s (%s): %d, %d of them tombstones", user, clients[user], total, tombstones)
 		for _, value := range checkpoint.Values {
 			row := local[value.ID]
@@ -384,6 +332,96 @@ func requireNativeCheckpoint(ctx context.Context, source *sql.DB, platform Nativ
 		return fmt.Errorf("%w:\n%s", ErrNativeMismatch, strings.Join(problems, "\n"))
 	}
 	return nil
+}
+
+// checkpointIDs returns every row identity of the scopes assigned to user.
+func checkpointIDs(checkpoint Checkpoint, user string) map[string]bool {
+	ids := map[string]bool{}
+	for _, scope := range checkpoint.Assigned[user] {
+		for _, tableIDs := range checkpoint.Rows[scope] {
+			for _, id := range tableIDs {
+				ids[id] = true
+			}
+		}
+	}
+	return ids
+}
+
+// permittedTombstones returns the tombstones that a client of user may hold.
+// A pull delete carries the source tombstone of a soft-deleted row that the
+// client held (spec 01-wire-protocol, pull operations). A rebuild stages
+// only current scope membership, and a deleted row has none, so a fresh
+// client may hold no tombstone.
+func permittedTombstones(previous *Checkpoint, user string) map[string]bool {
+	permitted := map[string]bool{}
+	if previous == nil {
+		return permitted
+	}
+	held := checkpointIDs(*previous, user)
+	for _, step := range AuthoredHistory {
+		for _, id := range step.SoftDeletes {
+			if held[id] {
+				permitted[id] = true
+			}
+		}
+	}
+	return permitted
+}
+
+// compareNativeRows compares one client's captured rows with its expected
+// live rows, its permitted tombstones, and the canonical source values.
+func compareNativeRows(user string, rows []LocalRow, total int, tables map[string]string, sourceRows map[string]map[string]*string, expected, permitted map[string]bool) (map[string]map[string]json.RawMessage, []string, int, error) {
+	local := make(map[string]map[string]json.RawMessage, len(rows))
+	storage := make(map[string]map[string]string, len(rows))
+	for _, row := range rows {
+		var id string
+		if err := json.Unmarshal(row.Values["id"], &id); err != nil || tables[id] == "" || local[id] != nil {
+			return nil, nil, 0, fmt.Errorf("%w: %s holds an unexpected local row %s", ErrNativeMismatch, user, row.Values["id"])
+		}
+		local[id], storage[id] = row.Values, row.StorageClasses
+	}
+	var problems []string
+	if total != len(local) {
+		problems = append(problems, fmt.Sprintf("%s holds %d local rows, %d of them authored", user, total, len(local)))
+	}
+	tombstones := 0
+	for id, row := range local {
+		table, _ := LookupTable(tables[id])
+		tombstone := string(bytes.TrimSpace(row["deleted_at"])) != "null"
+		switch {
+		case tombstone && !permitted[id]:
+			problems = append(problems, fmt.Sprintf("%s holds tombstone %s/%s that its authored deliveries do not permit", user, table.Name, id))
+		case tombstone:
+			tombstones++
+		case !expected[id]:
+			problems = append(problems, fmt.Sprintf("%s holds live row %s/%s outside its scopes", user, table.Name, id))
+		}
+		if len(row) != len(table.Columns) || len(storage[id]) != len(table.Columns) {
+			problems = append(problems, fmt.Sprintf("%s %s/%s has %d local columns and %d storage classes, want %d", user, table.Name, id, len(row), len(storage[id]), len(table.Columns)))
+		}
+		for _, column := range table.Columns {
+			wire, err := localWire(column.Type, row[column.Name])
+			if err == nil {
+				err = CompareWire(column.Type, wire, sourceRows[id][column.Name])
+			}
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s %s/%s.%s: %v", user, table.Name, id, column.Name, err))
+			}
+			want := "null"
+			if sourceRows[id][column.Name] != nil {
+				want = storageClass(column.Type)
+			}
+			if got := storage[id][column.Name]; got != want {
+				problems = append(problems, fmt.Sprintf("%s %s/%s.%s is stored as %q, want %q", user, table.Name, id, column.Name, got, want))
+			}
+		}
+	}
+	for id := range expected {
+		if row := local[id]; row == nil || string(bytes.TrimSpace(row["deleted_at"])) != "null" {
+			problems = append(problems, fmt.Sprintf("%s lacks live row %s/%s", user, tables[id], id))
+		}
+	}
+	return local, problems, tombstones, nil
 }
 
 func lookupColumn(tableName, columnName string) (Column, bool) {
