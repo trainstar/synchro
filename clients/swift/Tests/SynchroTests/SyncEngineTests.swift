@@ -1609,6 +1609,9 @@ final class SyncEngineTests: XCTestCase {
     func testRecoveredRebuildBackoffReplaysThenPushesPendingIntent() async throws {
         let dbPath = tempDBPath()
         let clientID = "recovered-rebuild-device"
+        // A second scope also needs a rebuild. The replayed rebuild is one step,
+        // so the pending write must be pushed before this scope is rebuilt.
+        let otherScopeID = "orders:other"
         let database = try SynchroDatabase(path: dbPath)
         let schemaManager = SchemaManager(database: database)
         try schemaManager.reconcileLocalSchema(
@@ -1623,6 +1626,7 @@ final class SyncEngineTests: XCTestCase {
                 cursor: nil,
                 checksum: nil
             )
+            try SynchroMeta.upsertScope(db, scopeID: otherScopeID, cursor: nil, checksum: nil)
             try SynchroMeta.setInt64(db, key: .scopeSetVersion, value: 1)
             try SynchroMeta.setInt64(db, key: .clientGeneration, value: 1)
         }
@@ -1687,12 +1691,35 @@ final class SyncEngineTests: XCTestCase {
                     "rejected": [] as [Any],
                 ])
             } else if path.hasSuffix("/sync/rebuild") {
+                let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+                if body["scope"] as? String == otherScopeID {
+                    callLog.append("rebuild other")
+                    return try self.mockResponse(json: [
+                        "scope": otherScopeID,
+                        "records": [] as [Any],
+                        "cursor": NSNull(),
+                        "has_more": false,
+                        "final_scope_cursor": "other_scope_cursor_1",
+                        "checksum": try self.checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
+                    ])
+                }
                 callLog.append("rebuild")
                 replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
                 return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_2"))
             } else if path.hasSuffix("/sync/pull") {
                 callLog.append("pull")
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_3"))
+                return try self.mockResponse(json: [
+                    "changes": [] as [Any],
+                    "scope_set_version": 1,
+                    "scope_cursors": [self.scopeID: "scope_cursor_3", otherScopeID: "other_scope_cursor_2"],
+                    "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+                    "rebuild": [] as [Any],
+                    "has_more": false,
+                    "checksums": [
+                        self.scopeID: try self.checksumJSONObject(self.emptyScopeChecksum),
+                        otherScopeID: try self.checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
+                    ],
+                ])
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
@@ -1704,7 +1731,7 @@ final class SyncEngineTests: XCTestCase {
         }
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "rebuild", "push", "pull"])
+        XCTAssertEqual(callLog, ["connect", "rebuild", "push", "rebuild other", "pull"])
         XCTAssertEqual(replayedRequestJSON, requestJSON)
         XCTAssertFalse(try ChangeTracker(database: recoveredDatabase).hasPendingChanges())
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
