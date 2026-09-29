@@ -2142,7 +2142,10 @@ class SyncEngineTests {
             when {
                 request.path!!.endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
                 request.path!!.endsWith("/sync/pull") -> {
-                    resumedPullJSON = request.body.readUtf8()
+                    val body = request.body.readUtf8()
+                    if (resumedPullJSON == null) {
+                        resumedPullJSON = body
+                    }
                     mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 }
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
@@ -2193,7 +2196,9 @@ class SyncEngineTests {
 
             timing.releaseAt(61_000L)
             assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
-            assertEquals(2, server!!.requestCount)
+            // Connect, the replayed pull, and the pull of the normal cycle that
+            // follows the replay.
+            assertEquals(3, server!!.requestCount)
             assertEquals(exactPullRequestJSON, resumedPullJSON)
             assertNull(DurableBackoffStore.load(db))
         } finally {
@@ -3159,7 +3164,9 @@ class SyncEngineTests {
 
             assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
 
-            assertEquals(2, pullCallCount)
+            // The failed pull, its replay, and the pull of the normal cycle that
+            // follows the replay.
+            assertEquals(3, pullCallCount)
             assertTrue(statuses.contains("backoff"))
             assertEquals("ready", statuses.last())
 
