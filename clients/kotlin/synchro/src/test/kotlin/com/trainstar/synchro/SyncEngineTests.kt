@@ -2305,6 +2305,99 @@ class SyncEngineTests {
     }
 
     @Test
+    fun testReplayedRebuildContinuesWithRemainingScopesAndPull() = runTest {
+        val otherScopeID = "orders_user:other"
+        val timing = BlockingRetryTiming(5_000L)
+        val failNextRebuild = AtomicBoolean(false)
+        val bothScopesAssigned = AtomicBoolean(false)
+        val rebuiltScopes = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val pullCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val (engine, db) = makeIntegrationEnv(retryTiming = timing) { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> {
+                    val scope = Json.decodeFromString<RebuildRequest>(request.body.readUtf8()).scope
+                    if (failNextRebuild.compareAndSet(true, false)) {
+                        MockResponse().setResponseCode(503).setHeader("Retry-After", "30")
+                            .setBody(RETRYABLE_503_ERROR_JSON)
+                    } else {
+                        rebuiltScopes += scope
+                        if (scope == scopeID) {
+                            mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                        } else {
+                            mockResponse(
+                                """
+                                {
+                                    "scope": "$otherScopeID",
+                                    "records": [],
+                                    "cursor": null,
+                                    "has_more": false,
+                                    "final_scope_cursor": "other_scope_cursor_1",
+                                    "checksum": ${checksumJSON(protocolEmptyScopeChecksum(otherScopeID))}
+                                }
+                                """.trimIndent(),
+                            )
+                        }
+                    }
+                }
+                path.endsWith("/sync/pull") -> {
+                    pullCount.incrementAndGet()
+                    if (!bothScopesAssigned.get()) {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                    } else {
+                        mockResponse(
+                            """
+                            {
+                                "changes": [],
+                                "scope_set_version": 1,
+                                "scope_cursors": {"$scopeID": "scope_cursor_2", "$otherScopeID": "other_scope_cursor_2"},
+                                "scope_updates": {"add": [], "remove": []},
+                                "rebuild": [],
+                                "has_more": false,
+                                "checksums": {
+                                    "$scopeID": ${emptyScopeChecksumJSON()},
+                                    "$otherScopeID": ${checksumJSON(protocolEmptyScopeChecksum(otherScopeID))}
+                                }
+                            }
+                            """.trimIndent(),
+                        )
+                    }
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            db.writeTransaction { connection ->
+                SynchroMeta.upsertScope(connection, otherScopeID, cursor = null, checksum = null)
+                connection.execSQL("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL WHERE scope_id = ?", arrayOf(scopeID))
+            }
+            bothScopesAssigned.set(true)
+            rebuiltScopes.clear()
+            val pullsBefore = pullCount.get()
+            failNextRebuild.set(true)
+
+            val syncJob = CoroutineScope(Dispatchers.Default).launch { engine.syncNow() }
+            timing.awaitNextSleep(10, TimeUnit.SECONDS)
+            val backoff = requireNotNull(DurableBackoffStore.load(db))
+            assertEquals(RetryOperation.REBUILDING, backoff.resumeState)
+            timing.releaseAt(backoff.nextRetryAtMs)
+            syncJob.join()
+
+            // The replayed rebuild is only the first scope of the cycle. The
+            // cycle must still rebuild the other scope and pull before it ends.
+            assertEquals(setOf(scopeID, otherScopeID), synchronized(rebuiltScopes) { rebuiltScopes.toSet() })
+            assertTrue(pullCount.get() > pullsBefore)
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+            assertEquals(0, db.query("SELECT scope_id FROM _synchro_scopes WHERE cursor IS NULL").size)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testRebuildRestartRequiredReplacesOnlyThatAttempt() = runTest {
         val otherScopeID = "orders_user:other"
         var pullCallCount = 0
