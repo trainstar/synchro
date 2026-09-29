@@ -231,7 +231,7 @@ func validateForgedCursorServerFreeze(before, after scenarios.StateFacts) error 
 		return fmt.Errorf("normalize Swift forged-cursor post-rejection state: %w", err)
 	}
 	if !reflect.DeepEqual(normalizedBefore, normalizedAfter) {
-		return errors.New("Swift forged continuation changed authoritative server state")
+		return fmt.Errorf("Swift forged continuation changed authoritative server state: %s", scenarios.StateFactsDifferences(normalizedBefore, normalizedAfter))
 	}
 	return nil
 }

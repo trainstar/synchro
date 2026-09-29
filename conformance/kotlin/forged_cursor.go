@@ -243,7 +243,7 @@ func validateKotlinForgedCursorServerFreeze(before, after scenarios.StateFacts) 
 		return fmt.Errorf("normalize Kotlin Android forged-cursor post-rejection state: %w", err)
 	}
 	if !reflect.DeepEqual(normalizedBefore, normalizedAfter) {
-		return errors.New("Kotlin Android forged continuation changed authoritative server state")
+		return fmt.Errorf("Kotlin Android forged continuation changed authoritative server state: %s", scenarios.StateFactsDifferences(normalizedBefore, normalizedAfter))
 	}
 	return nil
 }
