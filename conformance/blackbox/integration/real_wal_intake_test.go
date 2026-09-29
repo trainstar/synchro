@@ -55,17 +55,15 @@ func TestRealIssue50ActiveWALIntakeBounds(t *testing.T) {
 			for time.Now().Before(prefixDeadline) {
 				prefix, prefixErr = harness.Operator().ObserveWALRecords(ctx, []string{prefixID})
 				if prefixErr == nil && len(prefix.Records) == 1 && prefix.WorkerRunning &&
-					!prefix.BlockingPoison && prefix.ContiguousAcknowledged &&
-					prefix.AcknowledgementMatchesObservedEnd && prefix.SlotMatchesObservedEnd {
+					!prefix.BlockingPoison && prefix.ContiguousAcknowledged && prefix.SlotMatchesAcknowledgement {
 					break
 				}
 				time.Sleep(50 * time.Millisecond)
 			}
 			if prefixErr != nil || len(prefix.Records) != 1 || !prefix.WorkerRunning || prefix.BlockingPoison ||
-				!prefix.ContiguousAcknowledged || !prefix.AcknowledgementMatchesObservedEnd || !prefix.SlotMatchesObservedEnd {
+				!prefix.ContiguousAcknowledged || !prefix.SlotMatchesAcknowledgement {
 				t.Fatalf("establish Issue 50 acknowledged WAL prefix: observation=%#v err=%v", prefix, prefixErr)
 			}
-			prefixEndLSN := prefix.Records[0].EndLSN
 			pullUntilRealRecords(t, ctx, harness, token, client, []realRecordExpectation{{
 				scopeID: "user:diagnostic-user", table: table, recordID: prefixID, value: "issue50-valid-prefix",
 			}})
@@ -164,6 +162,7 @@ func TestRealIssue50ActiveWALIntakeBounds(t *testing.T) {
 			if err != nil {
 				t.Fatalf("observe Issue 50 blocked WAL worker: %v", err)
 			}
+			laterBlockedAcknowledgement := observeIssue49BlockedAcknowledgement(t, ctx, admin, poison.CommitLSN)
 			payloadBytes := int64(workload.rows * issue50TextValueBytes)
 			t.Logf("Issue 50 source_payload_bytes=%d worker_rss_baseline_bytes=%d worker_rss_peak_bytes=%d", payloadBytes, baselineRSS, peakRSS)
 			// Detect retaining even one full raw transaction before the existing decoder limit.
@@ -182,10 +181,10 @@ func TestRealIssue50ActiveWALIntakeBounds(t *testing.T) {
 			if transactions != 0 || events != 0 || capturedRows != 0 || changes != 0 {
 				t.Fatalf("Issue 50 oversized transaction partially materialized: transactions=%d events=%d captured_rows=%d changes=%d", transactions, events, capturedRows, changes)
 			}
-			if !blockedAcknowledgement.SlotMatchesProgress || !blockedAcknowledgement.ProgressBeforePoison ||
-				!blockedAcknowledgement.SlotBeforePoison || blockedAcknowledgement.ProgressEndLSN != prefixEndLSN ||
-				blockedAcknowledgement.SlotFlushLSN != prefixEndLSN {
-				t.Fatalf("Issue 50 acknowledgement moved beyond the valid prefix: prefix=%s acknowledgement=%#v", prefixEndLSN, blockedAcknowledgement)
+			if !blockedAcknowledgement.SlotMatchesProgress || !blockedAcknowledgement.ProgressAtOrBeforePoison ||
+				!blockedAcknowledgement.SlotAtOrBeforePoison || blockedAcknowledgement.ProgressEndLSN == "" ||
+				laterBlockedAcknowledgement != blockedAcknowledgement {
+				t.Fatalf("Issue 50 acknowledgement moved beyond the blocked source transaction: acknowledgement=%#v later=%#v", blockedAcknowledgement, laterBlockedAcknowledgement)
 			}
 			if readyStatus != http.StatusServiceUnavailable || !bytes.Equal(readyBody, []byte(`{"ready":false}`)) {
 				t.Fatalf("Issue 50 readiness did not block: status=%d body=%q", readyStatus, readyBody)
@@ -282,8 +281,9 @@ func TestRealIssue50ValidTransactionsCrossSoftBatchTarget(t *testing.T) {
 	for time.Now().Before(deadline) {
 		observation, observationErr = harness.Operator().ObserveWALRecords(ctx, witnessIDs)
 		if observationErr == nil && len(observation.Records) == len(witnessIDs) && observation.WorkerRunning &&
-			!observation.BlockingPoison && observation.ContiguousAcknowledged &&
-			observation.AcknowledgementMatchesObservedEnd && observation.SlotMatchesObservedEnd {
+			!observation.BlockingPoison && observation.ContiguousAcknowledged && observation.SlotMatchesAcknowledgement &&
+			realWALLSNAtOrAfter(observation.AcknowledgedEndLSN, observation.Records[len(observation.Records)-1].EndLSN) &&
+			observation.ProcessedEndLSN == observation.AcknowledgedEndLSN {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -294,8 +294,7 @@ func TestRealIssue50ValidTransactionsCrossSoftBatchTarget(t *testing.T) {
 	}
 
 	if observationErr != nil || len(observation.Records) != len(witnessIDs) || !observation.WorkerRunning ||
-		observation.BlockingPoison || !observation.ContiguousAcknowledged ||
-		!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd {
+		observation.BlockingPoison || !observation.ContiguousAcknowledged || !observation.SlotMatchesAcknowledgement {
 		t.Fatalf("Issue 50 valid source batch did not complete and acknowledge: observation=%#v err=%v", observation, observationErr)
 	}
 	seenCommitLSNs := make(map[string]struct{}, len(witnessIDs))
@@ -309,7 +308,8 @@ func TestRealIssue50ValidTransactionsCrossSoftBatchTarget(t *testing.T) {
 		seenCommitLSNs[record.CommitLSN] = struct{}{}
 	}
 	last := observation.Records[len(observation.Records)-1]
-	if observation.AcknowledgedEndLSN != last.EndLSN || observation.SlotConfirmedFlushLSN != last.EndLSN {
+	if !realWALLSNAtOrAfter(observation.AcknowledgedEndLSN, last.EndLSN) ||
+		observation.ProcessedEndLSN != observation.AcknowledgedEndLSN {
 		t.Fatalf("Issue 50 acknowledgement did not reach the last valid source transaction: observation=%#v", observation)
 	}
 	if currentPID != workerPID {

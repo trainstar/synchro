@@ -1370,8 +1370,7 @@ func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) er
 		len(observation.BeforeRestart.Records) != 1 || len(observation.AfterRestart.Records) != 1 ||
 		observation.BeforeRestart.ContiguousAcknowledged || observation.BeforeRestart.BlockingPoison ||
 		!observation.AfterRestart.WorkerRunning || observation.AfterRestart.BlockingPoison ||
-		!observation.AfterRestart.ContiguousAcknowledged ||
-		!observation.AfterRestart.AcknowledgementMatchesObservedEnd || !observation.AfterRestart.SlotMatchesObservedEnd {
+		!observation.AfterRestart.ContiguousAcknowledged || !observation.AfterRestart.SlotMatchesAcknowledgement {
 		return errors.New("soak WAL restart lacks an observed replay boundary")
 	}
 	before := observation.BeforeRestart.Records[0]
@@ -1381,7 +1380,8 @@ func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) er
 		before.ReplayCount != 0 || after.ReplayCount != 1 ||
 		observation.BeforeRestart.AcknowledgedEndLSN != observation.PriorProgress.AcknowledgedEndLSN ||
 		observation.BeforeRestart.SlotConfirmedFlushLSN != observation.PriorProgress.SlotConfirmedFlushLSN ||
-		observation.AfterRestart.AcknowledgedEndLSN != before.EndLSN {
+		!realWALLSNAtOrAfter(observation.AfterRestart.AcknowledgedEndLSN, before.EndLSN) ||
+		observation.AfterRestart.ProcessedEndLSN != observation.AfterRestart.AcknowledgedEndLSN {
 		return errors.New("soak WAL restart acknowledgement is invalid")
 	}
 	after.ReplayCount = before.ReplayCount

@@ -73,13 +73,15 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			t.Fatalf("update extension from baseline: %v", err)
 		}
 		if update.VersionBeforeUpdate != baselineVersion || update.ReadyBeforeUpdate ||
-			update.ExtensionObjectsStateBeforeUpdate == "ok" || update.VersionAfterUpdate != release.Version {
+			update.ExtensionObjectsStateBeforeUpdate == "ok" || update.VersionAfterUpdate != release.Version ||
+			!update.WorkerStableBeforeUpdate {
 			t.Fatalf(
-				"extension update observation is invalid: before=%q ready=%t objects=%q after=%q",
+				"extension update observation is invalid: before=%q ready=%t objects=%q after=%q worker_stable=%t",
 				update.VersionBeforeUpdate,
 				update.ReadyBeforeUpdate,
 				update.ExtensionObjectsStateBeforeUpdate,
 				update.VersionAfterUpdate,
+				update.WorkerStableBeforeUpdate,
 			)
 		}
 

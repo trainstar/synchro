@@ -833,8 +833,7 @@ func waitForR1WALAcknowledgement(t *testing.T, ctx context.Context, harness *bla
 	for time.Now().Before(deadline) {
 		observation, err := harness.Operator().ObserveWALRecords(ctx, []string{recordID})
 		if err == nil && len(observation.Records) == 1 && observation.WorkerRunning &&
-			!observation.BlockingPoison && observation.ContiguousAcknowledged &&
-			observation.AcknowledgementMatchesObservedEnd && observation.SlotMatchesObservedEnd {
+			!observation.BlockingPoison && observation.ContiguousAcknowledged && observation.SlotMatchesAcknowledgement {
 			return
 		}
 		if err == nil && observation.BlockingPoison {
@@ -869,8 +868,7 @@ func waitForR1WALRecordAdvance(t *testing.T, ctx context.Context, harness *black
 	for time.Now().Before(deadline) {
 		observation, err := harness.Operator().ObserveWALRecords(ctx, []string{recordID})
 		if err == nil && len(observation.Records) == priorCount+1 && observation.WorkerRunning &&
-			!observation.BlockingPoison && observation.ContiguousAcknowledged &&
-			observation.AcknowledgementMatchesObservedEnd && observation.SlotMatchesObservedEnd {
+			!observation.BlockingPoison && observation.ContiguousAcknowledged && observation.SlotMatchesAcknowledgement {
 			return
 		}
 		if err == nil && len(observation.Records) > priorCount+1 {
@@ -909,8 +907,7 @@ func requireR1WALUpdateTransaction(
 			t.Fatalf("observe R1 WAL transaction: %v", err)
 		}
 		if len(observation.Records) != len(recordIDs)*expectedHistory || !observation.WorkerRunning ||
-			observation.BlockingPoison || !observation.ContiguousAcknowledged ||
-			!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd {
+			observation.BlockingPoison || !observation.ContiguousAcknowledged || !observation.SlotMatchesAcknowledgement {
 			t.Fatal("R1 WAL transaction observation is incomplete")
 		}
 		latestCommitLSN := observation.Records[len(observation.Records)-1].CommitLSN
@@ -978,8 +975,7 @@ func requireR1OneRowTransactions(
 			observation.BlockingPoison || !observation.ContiguousAcknowledged {
 			t.Fatal("R1 one-row transaction observation is incomplete")
 		}
-		if end == r1BenchmarkAckRows+1 &&
-			(!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd) {
+		if end == r1BenchmarkAckRows+1 && !observation.SlotMatchesAcknowledgement {
 			t.Fatal("R1 final one-row transaction is not durably acknowledged")
 		}
 		latestByRecord := make(map[string]string, len(recordIDs))

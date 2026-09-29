@@ -158,6 +158,10 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealWALRestoresSlotPositionAfterImmediateShutdown": "regression",
 	"TestRealWALRestoresSlotPositionAfterBackendCrash":      "regression",
 	"TestRealWALObservationUsesOneSnapshot":                 "framework",
+	"TestRealWALIdleAcknowledgementFollowsFlush":            "regression",
+	"TestRealWALIdleAcknowledgementDoesNotSkipTransactions": "regression",
+	"TestRealWALIdleAcknowledgementCrashRecovery":           "regression",
+	"TestRealWorkerStartupIdentityFailureRestarts":          "regression",
 }
 
 func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {

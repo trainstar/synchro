@@ -195,7 +195,9 @@ sudo pg_ctlcluster 18 synchro_tutorial restart
 ```
 
 Between the restart and the update, readiness fails closed and the adapter
-refuses to start. This occurs because the installed extension objects still
+refuses to start. The WAL worker waits for the update. It does not read the
+extension objects before the update, and it continues after the update without
+a restart. This occurs because the installed extension objects still
 have the old version and the old build fingerprint.
 
 ## 3. Update the extension

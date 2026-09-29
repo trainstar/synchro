@@ -46,6 +46,7 @@
              )
              UPDATE synchro.sync_wal_progress progress
              SET generation_start_lsn = slot.confirmed_flush_lsn,
+                 processed_end_lsn = slot.confirmed_flush_lsn,
                  materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,
@@ -251,6 +252,10 @@
         )
         .expect("restore default health test slot");
 
+        let original_generation_start: Option<String> = Spi::get_one(
+            "SELECT generation_start_lsn::text FROM synchro.sync_wal_progress WHERE singleton",
+        )
+        .expect("load health test generation start");
         Spi::run(
             "INSERT INTO synchro.sync_wal_transactions (
                  stream_generation, commit_lsn, end_lsn, source_xid,
@@ -264,8 +269,10 @@
              CROSS JOIN synchro.sync_wal_progress progress
              WHERE runtime.singleton AND progress.singleton;
              UPDATE synchro.sync_wal_progress
-             SET materialized_commit_lsn = '0/A',
+             SET generation_start_lsn = '0/1',
+                 materialized_commit_lsn = '0/A',
                  materialized_end_lsn = '0/B',
+                 processed_end_lsn = '0/B',
                  acknowledged_end_lsn = NULL,
                  updated_at = now()
              WHERE singleton;
@@ -285,10 +292,12 @@
             !progress_detail["ready"].as_bool().unwrap_or(true)
                 && progress_detail["checks"]["materialization_progress"]["state"].as_str()
                     == Some("failed");
-        Spi::run(
+        Spi::run_with_args(
             "DELETE FROM synchro.sync_wal_transactions WHERE commit_lsn = '0/A';
              UPDATE synchro.sync_wal_progress
-             SET materialized_commit_lsn = NULL,
+             SET generation_start_lsn = $1::pg_lsn,
+                 processed_end_lsn = $1::pg_lsn,
+                 materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,
                  updated_at = now()
@@ -299,6 +308,7 @@
                  heartbeat_at = now(),
                  updated_at = now()
              WHERE worker_id = 'synchro_wal_consumer'",
+            &[original_generation_start.as_deref().into()],
         )
         .expect("restore health test progress");
 

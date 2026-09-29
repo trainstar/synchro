@@ -449,37 +449,40 @@ SELECT
         JOIN progress
           ON progress.stream_generation = runtime.stream_generation
          AND progress.registry_generation = active_registry.generation
-        WHERE (
-            progress.generation_start_lsn IS NOT NULL
-            AND progress.materialized_commit_lsn IS NULL
-            AND progress.materialized_end_lsn IS NULL
-            AND progress.acknowledged_end_lsn IS NULL
-            AND NOT EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-            )
-        ) OR (
-             progress.generation_start_lsn IS NOT NULL
-             AND progress.materialized_commit_lsn IS NOT NULL
-            AND progress.materialized_end_lsn IS NOT NULL
-            AND progress.acknowledged_end_lsn = progress.materialized_end_lsn
-            AND EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-                  AND transaction.commit_lsn = progress.materialized_commit_lsn
-                  AND transaction.end_lsn = progress.materialized_end_lsn
-                  AND transaction.registry_generation <= progress.registry_generation
-            )
-            AND NOT EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-                  AND (
-                      transaction.commit_lsn > progress.materialized_commit_lsn
-                      OR transaction.end_lsn > progress.materialized_end_lsn
-                  )
+        WHERE progress.generation_start_lsn IS NOT NULL
+        AND progress.processed_end_lsn IS NOT NULL
+        AND COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+            = progress.processed_end_lsn
+        AND (
+            (
+                progress.materialized_commit_lsn IS NULL
+                AND progress.materialized_end_lsn IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                )
+            ) OR (
+                progress.materialized_commit_lsn IS NOT NULL
+                AND progress.materialized_end_lsn IS NOT NULL
+                AND progress.materialized_end_lsn <= progress.processed_end_lsn
+                AND EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                      AND transaction.commit_lsn = progress.materialized_commit_lsn
+                      AND transaction.end_lsn = progress.materialized_end_lsn
+                      AND transaction.registry_generation <= progress.registry_generation
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                      AND (
+                          transaction.commit_lsn > progress.materialized_commit_lsn
+                          OR transaction.end_lsn > progress.materialized_end_lsn
+                      )
+                )
             )
         )
     ) AS progress_valid,
@@ -958,6 +961,9 @@ pub(crate) fn load_readiness_status_with_configuration(
     }
     if configuration.max_wal_lag_seconds <= 0 {
         status.set("wal_time_lag", HealthCheck::failed("invalid_limit"));
+    }
+    if installed_fingerprint.as_deref() != Some(library_fingerprint) {
+        return status;
     }
 
     let Some(worker_login) = configuration.worker_login.as_deref() else {

@@ -483,9 +483,9 @@ func TestRealWALPipeline(t *testing.T) {
 	if replayedRecord != restartRecord || restart.AfterRestart.Records[0].ReplayCount != 1 ||
 		restart.AfterStages != restart.BeforeStages || !restart.AfterRestart.WorkerRunning ||
 		restart.AfterRestart.BlockingPoison || !restart.AfterRestart.ContiguousAcknowledged ||
-		!restart.AfterRestart.AcknowledgementMatchesObservedEnd || !restart.AfterRestart.SlotMatchesObservedEnd ||
-		restart.AfterRestart.AcknowledgedEndLSN != restartRecord.EndLSN ||
-		restart.AfterRestart.SlotConfirmedFlushLSN != restartRecord.EndLSN {
+		!restart.AfterRestart.SlotMatchesAcknowledgement ||
+		!realWALLSNAtOrAfter(restart.AfterRestart.AcknowledgedEndLSN, restartRecord.EndLSN) ||
+		restart.AfterRestart.ProcessedEndLSN != restart.AfterRestart.AcknowledgedEndLSN {
 		t.Fatalf("WAL replay after worker restart is not idempotent: %#v", restart)
 	}
 
@@ -934,14 +934,13 @@ func TestRealWALDecodeFailureRepairsSameIdentity(t *testing.T) {
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		recovered, err = harness.Operator().ObserveWALRecords(ctx, []string{poisonRecordID, laterRecordID})
-		if err == nil && len(recovered.Records) == 2 && recovered.ContiguousAcknowledged {
+		if err == nil && len(recovered.Records) == 2 && recovered.ContiguousAcknowledged && recovered.SlotMatchesAcknowledgement {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	if err != nil || len(recovered.Records) != 2 || recovered.BlockingPoison ||
-		!recovered.WorkerRunning || !recovered.ContiguousAcknowledged ||
-		!recovered.AcknowledgementMatchesObservedEnd || !recovered.SlotMatchesObservedEnd {
+		!recovered.WorkerRunning || !recovered.ContiguousAcknowledged || !recovered.SlotMatchesAcknowledgement {
 		t.Fatalf("decoder poison recovery did not resume the contiguous stream: %#v, %v; %s", recovered, err, harness.FailureDiagnostics())
 	}
 	if recovered.Records[0].RecordID != poisonRecordID || recovered.Records[1].RecordID != laterRecordID {

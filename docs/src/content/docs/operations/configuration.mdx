@@ -125,6 +125,16 @@ Thus, the heartbeat check can fail when one worker poll takes more than about ha
 A long storage flush is one example.
 Set a limit that is more than two times the longest poll time on your server.
 
+The WAL worker acknowledges WAL without a registered change.
+It does this when the progress age reaches half of `synchro.max_worker_heartbeat_age_seconds`.
+It also does this when the WAL byte lag reaches half of `synchro.max_wal_lag_bytes`.
+It does this at once when more decoded WAL waits.
+A consumer can use `confirmed_flush_lsn >= L` as a materialization barrier for each registered write that ends at or before `L`.
+On an idle server, this barrier completes within about half of the heartbeat limit.
+PostgreSQL moves `restart_lsn` from a running transactions record.
+Thus, retained WAL can stay about 15 s to 30 s behind the acknowledgement.
+During a projection bootstrap catch-up, the worker does not acknowledge after the activation barrier.
+
 Each readiness limit must be a positive integer. A zero value makes its readiness check fail with `invalid_limit`.
 
 Use stricter positive limits when your service-level objectives require faster failure detection.
