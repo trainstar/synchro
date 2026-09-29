@@ -232,7 +232,7 @@
         table_name: &str,
         record_id: &str,
         mutation: &synchro_core::contract::Mutation,
-    ) -> Option<String> {
+    ) -> Option<crate::push::UnitEndFence> {
         Spi::connect(|client| {
             let registration = crate::registry::load_registry_from_client(client)?
                 .into_iter()
@@ -564,8 +564,9 @@
         );
     }
 
+    /// A later write in the same push unit can remove the row. The last fence then reports absence.
     #[pg_test]
-    fn push_fence_lookup_fails_closed_for_later_non_update() {
+    fn push_fence_lookup_reports_absence_after_later_delete() {
         setup_source_filled_items();
         let user_id = "fence-user";
         let client_id = "fence-client";
@@ -589,10 +590,23 @@
             "DELETE FROM public.test_source_filled_items WHERE id = $1::uuid",
             &[record_id.into()],
         )
-        .expect("write invalid later fence");
+        .expect("write later delete fence");
+        let delete_version = Spi::get_one_with_args::<String>(
+            "SELECT row_version::text FROM synchro.sync_write_fences
+             WHERE transaction_xid = pg_current_xact_id()
+               AND operation = 'delete'
+               AND old_record_id = $1
+               AND new_record_id IS NULL",
+            &[record_id.into()],
+        )
+        .expect("read later delete fence")
+        .expect("later delete fence");
 
         assert_eq!(
             current_fence_version("test_source_filled_items", record_id, &mutation),
-            None
+            Some(crate::push::UnitEndFence {
+                version: delete_version,
+                row_present: false,
+            })
         );
     }

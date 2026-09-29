@@ -1538,7 +1538,6 @@ fn evaluate_mutation(
                     table_reg,
                     &record_id,
                     row_identity,
-                    false,
                 ),
             }
         }
@@ -1627,7 +1626,6 @@ fn evaluate_mutation(
                     table_reg,
                     &record_id,
                     row_identity,
-                    mutation.op == Operation::Delete && !table_reg.has_deleted_at,
                 ),
             }
         }
@@ -1893,9 +1891,8 @@ fn accepted_evaluation(
     table_reg: &TableRegistration,
     record_id: &str,
     row_identity: Option<Vec<u8>>,
-    fence_only_delete: bool,
 ) -> EvaluatedMutation {
-    let fence_version = load_current_fence_version(client, mutation, table_reg, record_id)
+    let fence = load_current_fence_version(client, mutation, table_reg, record_id)
         .unwrap_or_else(|| pgrx::error!("accepted push source write has no version fence"));
     accepted_outcome(
         client,
@@ -1904,12 +1901,18 @@ fn accepted_evaluation(
         table_reg,
         record_id,
         row_identity,
-        fence_only_delete,
-        fence_version,
+        fence,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The last write fence of a row in a push unit. It gives the row version and whether the row
+/// exists after the unit.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UnitEndFence {
+    pub(crate) version: String,
+    pub(crate) row_present: bool,
+}
+
 fn accepted_outcome(
     client: &SpiClient<'_>,
     mutation: &Mutation,
@@ -1917,8 +1920,7 @@ fn accepted_outcome(
     table_reg: &TableRegistration,
     record_id: &str,
     row_identity: Option<Vec<u8>>,
-    fence_only_delete: bool,
-    fence_version: String,
+    fence: UnitEndFence,
 ) -> EvaluatedMutation {
     let mut object = base_outcome(
         mutation,
@@ -1932,8 +1934,8 @@ fn accepted_outcome(
             .unwrap_or(&serde_json::Value::Null),
     );
     object["status"] = serde_json::Value::String("applied".into());
-    object["server_version"] = serde_json::Value::String(fence_version.clone());
-    if !fence_only_delete {
+    object["server_version"] = serde_json::Value::String(fence.version.clone());
+    if fence.row_present {
         let row = load_current_server_row_json(client, record_id, table_reg)
             .unwrap_or_else(|| pgrx::error!("accepted row is missing from the source relation"));
         object["server_row"] = row.clone();
@@ -1942,7 +1944,7 @@ fn accepted_outcome(
             table_reg,
             &row,
             record_id,
-            &fence_version,
+            &fence.version,
             &outcome_schema,
         );
         object["row_checksum"] = serde_json::to_value(checksum).unwrap();
@@ -2082,9 +2084,7 @@ fn group_end_evaluation(
     context: &EvaluationContext<'_>,
 ) -> EvaluatedMutation {
     let (table_reg, record_id) = group_evaluation_record(client, evaluation, context);
-    let fence_only_delete =
-        evaluation.mutation.op == Operation::Delete && !table_reg.has_deleted_at;
-    let fence_version = load_group_end_version(client, table_reg, &record_id, fence_only_delete);
+    let fence = load_group_end_fence(client, table_reg, &record_id);
     accepted_outcome(
         client,
         &evaluation.mutation,
@@ -2092,8 +2092,7 @@ fn group_end_evaluation(
         table_reg,
         &record_id,
         evaluation.row_identity.clone(),
-        fence_only_delete,
-        fence_version,
+        fence,
     )
 }
 
@@ -2113,16 +2112,16 @@ fn group_evaluation_record<'a>(
     (table_reg, record_id)
 }
 
-/// Reads the version of the last write to a row in the current transaction.
-fn load_group_end_version(
+/// Reads the last write fence of a row in the current transaction. An atomic request writes each
+/// row in one group, so every fence of the row in this transaction belongs to the group.
+fn load_group_end_fence(
     client: &SpiClient<'_>,
     table_reg: &TableRegistration,
     record_id: &str,
-    fence_only_delete: bool,
-) -> String {
+) -> UnitEndFence {
     let rows = client
         .select(
-            "SELECT operation, new_record_id, row_version::text AS row_version, coverage
+            "SELECT new_record_id, row_version::text AS row_version, coverage
              FROM sync_write_fences
              WHERE transaction_xid = pg_current_xact_id()
                AND relation_id = $1::uuid
@@ -2136,16 +2135,13 @@ fn load_group_end_version(
     rows.into_iter()
         .next()
         .and_then(|fence| {
-            let operation = fence.get_by_name::<String, &str>("operation").ok()??;
             let new_record_id = fence.get_by_name::<String, &str>("new_record_id").ok()?;
             let coverage = fence.get_by_name::<String, &str>("coverage").ok()??;
             let version = fence.get_by_name::<String, &str>("row_version").ok()??;
-            let final_state = if fence_only_delete {
-                operation == "delete" && new_record_id.is_none()
-            } else {
-                new_record_id.as_deref() == Some(record_id)
-            };
-            (final_state && coverage == "pending").then_some(version)
+            (coverage == "pending").then(|| UnitEndFence {
+                version,
+                row_present: new_record_id.as_deref() == Some(record_id),
+            })
         })
         .unwrap_or_else(|| pgrx::error!("accepted atomic group row has no final version fence"))
 }
@@ -2548,12 +2544,14 @@ fn load_current_server_row_json(
         })
 }
 
+/// Reads the fences of one mutation for its row. The first fence must be the write of the mutation.
+/// Later fences come from triggers in the same push unit, and the last fence gives the final state.
 pub(crate) fn load_current_fence_version(
     client: &SpiClient<'_>,
     mutation: &Mutation,
     table_reg: &TableRegistration,
     record_id: &str,
-) -> Option<String> {
+) -> Option<UnitEndFence> {
     let rows = client
         .select(
             "SELECT operation, old_record_id, new_record_id,
@@ -2584,7 +2582,7 @@ pub(crate) fn load_current_fence_version(
         Operation::Delete => ("delete", Some(record_id), None),
         Operation::Upsert => pgrx::error!("push upsert passed contract validation"),
     };
-    let mut version = None;
+    let mut fence = None;
     for (index, row) in rows.into_iter().enumerate() {
         let operation = row
             .get_by_name::<String, &str>("operation")
@@ -2598,23 +2596,22 @@ pub(crate) fn load_current_fence_version(
         let coverage = row
             .get_by_name::<String, &str>("coverage")
             .unwrap_or_else(|_| pgrx::error!("reading push write fence coverage failed"))?;
-        let identities_match = if index == 0 {
-            operation == expected.0
+        let identities_match = index > 0
+            || (operation == expected.0
                 && old_record_id.as_deref() == expected.1
-                && new_record_id.as_deref() == expected.2
-        } else {
-            operation == "update"
-                && old_record_id.as_deref() == Some(record_id)
-                && new_record_id.as_deref() == Some(record_id)
-        };
+                && new_record_id.as_deref() == expected.2);
         if !identities_match || coverage != "pending" {
             return None;
         }
-        version = row
+        let version = row
             .get_by_name::<String, &str>("row_version")
-            .unwrap_or_else(|_| pgrx::error!("reading push write fence failed"));
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence failed"))?;
+        fence = Some(UnitEndFence {
+            version,
+            row_present: new_record_id.as_deref() == Some(record_id),
+        });
     }
-    version
+    fence
 }
 
 fn build_dml_data(
