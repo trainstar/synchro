@@ -13,10 +13,10 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1--0.3.2.sql b/extensions
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
-@@ -313,8 +313,3 @@ BEGIN
-     END LOOP;
- END
- $search_path$;
+@@ -367,8 +367,3 @@ ALTER TABLE synchro.sync_wal_progress
+                    AND acknowledged_end_lsn <= processed_end_lsn));
+ 
+ GRANT SELECT ON synchro.sync_extension_build TO synchro_worker;
 -
 -UPDATE synchro.sync_extension_build
 -SET installed_fingerprint = synchro.synchro_build_fingerprint(),

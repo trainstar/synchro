@@ -1,28 +1,28 @@
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -2059,7 +2059,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
+@@ -2130,7 +2130,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1135
-+-- synchro-pg/src/health.rs:1138
+--- synchro-pg/src/health.rs:1141
++-- synchro-pg/src/health.rs:1144
  -- synchro_pg::health::synchro_health_detail
  CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
-@@ -2271,7 +2271,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
+@@ -2342,7 +2342,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1128
-+-- synchro-pg/src/health.rs:1131
+--- synchro-pg/src/health.rs:1134
++-- synchro-pg/src/health.rs:1137
  -- synchro_pg::health::synchro_readiness
  CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -921,13 +921,16 @@ pub(crate) fn load_readiness_status_with_configuration(
+@@ -954,13 +954,16 @@ pub(crate) fn load_readiness_status_with_configuration(
          status.set("worker", HealthCheck::failed("worker_not_configured"));
      }
      if configuration.max_heartbeat_age_seconds <= 0 {
@@ -40,5 +40,5 @@ diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/hea
 +        // Mutant: invalid finite limits are accepted as healthy.
 +        status.set("wal_time_lag", HealthCheck::ok());
      }
- 
-     let Some(worker_login) = configuration.worker_login.as_deref() else {
+     if installed_fingerprint.as_deref() != Some(library_fingerprint) {
+         return status;

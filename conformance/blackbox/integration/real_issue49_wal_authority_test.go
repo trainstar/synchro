@@ -103,8 +103,8 @@ func TestRealIssue49WALIsTheOnlyAtomicPublicationPath(t *testing.T) {
 		}
 		if !replay.WorkerExitedBeforeAcknowledgement || !replay.WorkerRestarted || len(replay.BeforeRestart.Records) != 1 ||
 			len(replay.AfterRestart.Records) != 1 || replay.BeforeRestart.ContiguousAcknowledged ||
-			!replay.AfterRestart.ContiguousAcknowledged || !replay.AfterRestart.AcknowledgementMatchesObservedEnd ||
-			!replay.AfterRestart.SlotMatchesObservedEnd || replay.AfterRestart.Records[0].ReplayCount != 1 ||
+			!replay.AfterRestart.ContiguousAcknowledged || !replay.AfterRestart.SlotMatchesAcknowledgement ||
+			replay.AfterRestart.Records[0].ReplayCount != 1 ||
 			replay.BeforeStages != replay.AfterStages {
 			t.Fatalf("interrupted WAL replay was not atomic and idempotent: %#v", replay)
 		}
@@ -129,11 +129,10 @@ func TestRealIssue49WALPoisonBlocksContiguousProgress(t *testing.T) {
 	}
 	waitForRealWALRecords(t, ctx, harness, "cf_items", prefixID)
 	prefixPipeline, err := harness.Operator().ObserveWALRecords(ctx, []string{prefixID})
-	if err != nil || len(prefixPipeline.Records) != 1 || !prefixPipeline.AcknowledgementMatchesObservedEnd ||
-		!prefixPipeline.SlotMatchesObservedEnd {
-		t.Fatalf("establish exact contiguous WAL prefix: observation=%#v err=%v", prefixPipeline, err)
+	if err != nil || len(prefixPipeline.Records) != 1 || !prefixPipeline.ContiguousAcknowledged ||
+		!prefixPipeline.SlotMatchesAcknowledgement {
+		t.Fatalf("establish contiguous WAL prefix: observation=%#v err=%v", prefixPipeline, err)
 	}
-	prefixEndLSN := prefixPipeline.Records[0].EndLSN
 
 	poisonID := "00000000-0000-4000-8d02-000000000001"
 	if err := harness.Operator().InjectDecoderMetadataChange(ctx, poisonID); err != nil {
@@ -178,10 +177,9 @@ func TestRealIssue49WALPoisonBlocksContiguousProgress(t *testing.T) {
 		if before.FailureClass != "decode_failed" || before.CommitLSN == "" {
 			t.Fatalf("decoder poison was not persisted: %#v", before)
 		}
-		if !beforeAcknowledgement.SlotMatchesProgress || !beforeAcknowledgement.ProgressBeforePoison ||
-			!beforeAcknowledgement.SlotBeforePoison || beforeAcknowledgement.ProgressEndLSN == "" ||
-			beforeAcknowledgement.ProgressEndLSN != prefixEndLSN || beforeAcknowledgement.SlotFlushLSN != prefixEndLSN {
-			t.Fatalf("logical slot advanced past the poisoned contiguous prefix: poison=%s prefix=%s acknowledgement=%#v", before.CommitLSN, prefixEndLSN, beforeAcknowledgement)
+		if !beforeAcknowledgement.SlotMatchesProgress || !beforeAcknowledgement.ProgressAtOrBeforePoison ||
+			!beforeAcknowledgement.SlotAtOrBeforePoison || beforeAcknowledgement.ProgressEndLSN == "" {
+			t.Fatalf("logical slot advanced past the poisoned source transaction: poison=%s acknowledgement=%#v", before.CommitLSN, beforeAcknowledgement)
 		}
 		if err := harness.RestartPostgres(ctx); err != nil {
 			t.Fatalf("restart PostgreSQL with active poison: %v", err)
@@ -229,10 +227,9 @@ func TestRealIssue49WALPoisonBlocksContiguousProgress(t *testing.T) {
 			t.Fatalf("poison recovery did not repair the same WAL identity: %#v", recovery)
 		}
 		if len(recoveredPipeline.Records) != 2 || !recoveredPipeline.ContiguousAcknowledged ||
-			!recoveredPipeline.AcknowledgementMatchesObservedEnd || !recoveredPipeline.SlotMatchesObservedEnd ||
-			recoveredPipeline.AcknowledgedEndLSN == "" ||
-			recoveredPipeline.AcknowledgedEndLSN != recoveredPipeline.SlotConfirmedFlushLSN {
-			t.Fatalf("logical slot did not acknowledge the exact recovered contiguous end LSN: %#v", recoveredPipeline)
+			!recoveredPipeline.SlotMatchesAcknowledgement || recoveredPipeline.AcknowledgedEndLSN == "" ||
+			recoveredPipeline.ProcessedEndLSN != recoveredPipeline.AcknowledgedEndLSN {
+			t.Fatalf("logical slot did not acknowledge the recovered contiguous end LSN: %#v", recoveredPipeline)
 		}
 		if retried, retryErr := harness.Operator().RetryWALPoison(ctx); retryErr != nil || retried {
 			t.Fatalf("completed poison entered ordinary retry: requested=%t err=%v", retried, retryErr)
@@ -1362,14 +1359,13 @@ func TestRealWALFoldPreservesOrderedImages(t *testing.T) {
 				t.Fatalf("expanded history blocked: class=%s raw_bytes=%d", poison.FailureClass, rawBytes)
 			}
 			if err == nil && len(observation.Records) == 3 &&
-				observation.ContiguousAcknowledged && observation.AcknowledgementMatchesObservedEnd &&
-				observation.SlotMatchesObservedEnd {
+				observation.ContiguousAcknowledged && observation.SlotMatchesAcknowledgement {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
 		if err != nil || len(observation.Records) != 3 || !observation.ContiguousAcknowledged ||
-			!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd {
+			!observation.SlotMatchesAcknowledgement {
 			t.Fatalf("expanded history did not materialize and acknowledge: observation=%#v error=%v; %s",
 				observation, err, harness.FailureDiagnostics())
 		}
@@ -1554,12 +1550,12 @@ type issue49FenceCorrelation struct {
 }
 
 type issue49BlockedAcknowledgement struct {
-	PoisonCommitLSN      string
-	ProgressEndLSN       string
-	SlotFlushLSN         string
-	SlotMatchesProgress  bool
-	ProgressBeforePoison bool
-	SlotBeforePoison     bool
+	PoisonCommitLSN          string
+	ProgressEndLSN           string
+	SlotFlushLSN             string
+	SlotMatchesProgress      bool
+	ProgressAtOrBeforePoison bool
+	SlotAtOrBeforePoison     bool
 }
 
 type issue49ResetFenceCoverage struct {
@@ -1676,8 +1672,8 @@ func observeIssue49BlockedAcknowledgement(
 		       COALESCE(progress.acknowledged_end_lsn::text, ''),
 		       COALESCE(slot.confirmed_flush_lsn::text, ''),
 		       COALESCE(progress.acknowledged_end_lsn = slot.confirmed_flush_lsn, false),
-		       COALESCE(progress.acknowledged_end_lsn < $1::pg_lsn, false),
-		       COALESCE(slot.confirmed_flush_lsn < $1::pg_lsn, false)
+		       COALESCE(progress.acknowledged_end_lsn <= $1::pg_lsn, false),
+		       COALESCE(slot.confirmed_flush_lsn <= $1::pg_lsn, false)
 		FROM synchro.sync_wal_progress progress
 		JOIN synchro.sync_runtime_state runtime ON runtime.singleton
 		JOIN pg_catalog.pg_replication_slots slot ON slot.slot_name = runtime.active_slot_name
@@ -1686,8 +1682,8 @@ func observeIssue49BlockedAcknowledgement(
 		&result.ProgressEndLSN,
 		&result.SlotFlushLSN,
 		&result.SlotMatchesProgress,
-		&result.ProgressBeforePoison,
-		&result.SlotBeforePoison,
+		&result.ProgressAtOrBeforePoison,
+		&result.SlotAtOrBeforePoison,
 	); err != nil {
 		t.Fatalf("observe exact blocked logical-slot acknowledgement: %v", err)
 	}

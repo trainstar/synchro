@@ -28,8 +28,8 @@ diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/b
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -2398,3 +2398,3 @@
+@@ -2449,3 +2449,3 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
  /* <begin connected objects> */
---- synchro-pg/src/bgworker.rs:776
-+-- synchro-pg/src/bgworker.rs:793
+--- synchro-pg/src/bgworker.rs:850
++-- synchro-pg/src/bgworker.rs:867
  -- synchro_pg::bgworker::synchro_retry_wal_poison

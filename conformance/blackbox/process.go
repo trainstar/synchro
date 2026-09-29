@@ -297,19 +297,20 @@ type WALRecordObservation struct {
 
 // WALPipelineObservation is bounded operational evidence for the WAL pipeline.
 type WALPipelineObservation struct {
-	Records                           []WALRecordObservation
-	WorkerRunning                     bool
-	BlockingPoison                    bool
-	ContiguousAcknowledged            bool
-	AcknowledgedEndLSN                string
-	AcknowledgementMatchesObservedEnd bool
-	SlotConfirmedFlushLSN             string
-	SlotMatchesObservedEnd            bool
+	Records                    []WALRecordObservation
+	WorkerRunning              bool
+	BlockingPoison             bool
+	ContiguousAcknowledged     bool
+	AcknowledgedEndLSN         string
+	ProcessedEndLSN            string
+	SlotConfirmedFlushLSN      string
+	SlotMatchesAcknowledgement bool
 }
 
 // WALProgressObservation is bounded durable acknowledgement state.
 type WALProgressObservation struct {
 	AcknowledgedEndLSN    string
+	ProcessedEndLSN       string
 	SlotConfirmedFlushLSN string
 	SlotMatchesProgress   bool
 }
@@ -1563,6 +1564,23 @@ func (h *Harness) grantExtensionRolesOnDatabase(ctx context.Context, database *s
 	return nil
 }
 
+// SetWorkerGroupMembership grants or revokes the synchro_worker group for the isolated worker login.
+func (h *Harness) SetWorkerGroupMembership(ctx context.Context, member bool) error {
+	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
+	if err != nil {
+		return errors.New("connect attached PostgreSQL database failed")
+	}
+	defer database.Close()
+	statement := "REVOKE synchro_worker FROM "
+	if member {
+		statement = "GRANT synchro_worker TO "
+	}
+	if _, err := database.ExecContext(ctx, statement+quoteIdentifier(h.worker.Username)); err != nil {
+		return errors.New("change isolated worker group membership failed")
+	}
+	return nil
+}
+
 func (h *Harness) restartPostgres(ctx context.Context) error {
 	if h.attached {
 		return h.restartAttachedPostgres(ctx)
@@ -2348,6 +2366,14 @@ func (h *Harness) RestartCount() int {
 		return 0
 	}
 	return h.restartCount
+}
+
+// StartupTimeout returns the bounded wait for process and worker startup.
+func (h *Harness) StartupTimeout() time.Duration {
+	if h == nil {
+		return 0
+	}
+	return h.config.StartupTimeout
 }
 
 // RestartPostgres restarts the isolated postmaster for a process-fault test.
@@ -4958,6 +4984,7 @@ func (executor *OperatorExecutor) CreateWALProgressOrderViolation(ctx context.Co
 		UPDATE synchro.sync_wal_progress
 		SET materialized_commit_lsn = 'FFFFFFFF/FFFFFFFF'::pg_lsn,
 		    materialized_end_lsn = 'FFFFFFFF/FFFFFFFF'::pg_lsn,
+		    processed_end_lsn = 'FFFFFFFF/FFFFFFFF'::pg_lsn,
 		    updated_at = now()
 		WHERE singleton`); err != nil {
 		return errors.New("persist WAL progress order violation failed")
@@ -5051,6 +5078,7 @@ func (executor *OperatorExecutor) ObserveWALProgress(ctx context.Context) (WALPr
 	var observation WALProgressObservation
 	if err := database.QueryRowContext(ctx, `
 		SELECT COALESCE(progress.acknowledged_end_lsn::text, ''),
+		       COALESCE(progress.processed_end_lsn::text, ''),
 		       COALESCE(slot.confirmed_flush_lsn::text, ''),
 		       COALESCE(progress.acknowledged_end_lsn = slot.confirmed_flush_lsn, false)
 		FROM synchro.sync_wal_progress progress
@@ -5059,6 +5087,7 @@ func (executor *OperatorExecutor) ObserveWALProgress(ctx context.Context) (WALPr
 		  ON slot.slot_name = runtime.active_slot_name
 		WHERE progress.singleton`).Scan(
 		&observation.AcknowledgedEndLSN,
+		&observation.ProcessedEndLSN,
 		&observation.SlotConfirmedFlushLSN,
 		&observation.SlotMatchesProgress,
 	); err != nil {
@@ -5098,6 +5127,22 @@ func (executor *OperatorExecutor) CurrentWALWorkerPID(ctx context.Context) (int,
 		return 0, errors.New("unique WAL worker process is unavailable")
 	}
 	return pid, nil
+}
+
+// HoldWALWorkerGate blocks each later WAL worker poll until release returns.
+// It returns after the worker waits on the gate.
+func (executor *OperatorExecutor) HoldWALWorkerGate(ctx context.Context) (func(context.Context) error, error) {
+	if executor == nil || executor.harness == nil || !executor.harness.sourceReady {
+		return nil, errors.New("operator executor is unavailable")
+	}
+	if ctx == nil {
+		return nil, errors.New("WAL worker gate context is required")
+	}
+	gate, err := executor.harness.acquireWALWorkerGate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("hold WAL worker gate: %w", err)
+	}
+	return gate.release, nil
 }
 
 // ObserveExtensionReinstall returns worker and registry state after an extension reinstall.
@@ -5363,8 +5408,8 @@ func (executor *OperatorExecutor) RunWALReplayRestartControl(ctx context.Context
 		}
 		observation.AfterRestart = pipeline
 		observation.AfterStages = stages
-		return len(pipeline.Records) == 1 && pipeline.ContiguousAcknowledged &&
-			pipeline.AcknowledgementMatchesObservedEnd && pipeline.SlotMatchesObservedEnd, nil
+		return len(pipeline.Records) == 1 &&
+			pipeline.ContiguousAcknowledged && pipeline.SlotMatchesAcknowledgement, nil
 	})
 	replayedCancel()
 	if err != nil {
@@ -5469,10 +5514,10 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 				''
 		       ),
 		       COALESCE(
-				(SELECT progress.acknowledged_end_lsn = observed.maximum_end_lsn
-				 FROM synchro.sync_wal_progress progress, observed
-				 WHERE progress.singleton AND observed.maximum_end_lsn IS NOT NULL),
-				false
+				(SELECT progress.processed_end_lsn::text
+				 FROM synchro.sync_wal_progress progress
+				 WHERE progress.singleton),
+				''
 		       ),
 		       COALESCE(
 				(SELECT slot.confirmed_flush_lsn::text
@@ -5483,22 +5528,22 @@ func (executor *OperatorExecutor) ObserveWALRecords(ctx context.Context, recordI
 				''
 		       ),
 		       COALESCE(
-				(SELECT slot.confirmed_flush_lsn = observed.maximum_end_lsn
+				(SELECT slot.confirmed_flush_lsn = progress.acknowledged_end_lsn
 				 FROM pg_catalog.pg_replication_slots slot
 				 JOIN synchro.sync_runtime_state runtime
 				   ON runtime.singleton AND runtime.active_slot_name = slot.slot_name
-				 CROSS JOIN observed
+				 CROSS JOIN synchro.sync_wal_progress progress
 				 WHERE slot.database = current_database()
-				   AND observed.maximum_end_lsn IS NOT NULL),
+				   AND progress.singleton),
 				false
 		       )`, recordIDs).Scan(
 		&observation.WorkerRunning,
 		&observation.BlockingPoison,
 		&observation.ContiguousAcknowledged,
 		&observation.AcknowledgedEndLSN,
-		&observation.AcknowledgementMatchesObservedEnd,
+		&observation.ProcessedEndLSN,
 		&observation.SlotConfirmedFlushLSN,
-		&observation.SlotMatchesObservedEnd,
+		&observation.SlotMatchesAcknowledgement,
 	)
 	if err != nil {
 		return WALPipelineObservation{}, errors.New("read WAL pipeline observation failed")
@@ -5545,7 +5590,7 @@ func (executor *OperatorExecutor) ObserveBlockingPoison(ctx context.Context, lat
 			         AND registry.relation_id = poison.relation_id
 		       ),
 		       poison.commit_lsn::text,
-		       COALESCE(progress.acknowledged_end_lsn < poison.commit_lsn, true),
+		       COALESCE(progress.acknowledged_end_lsn <= poison.commit_lsn, true),
 		       EXISTS (
 			       SELECT 1 FROM synchro.sync_changelog
 			       WHERE table_name = 'cf_items' AND record_id = $1

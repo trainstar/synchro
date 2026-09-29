@@ -1346,9 +1346,21 @@ CREATE TABLE IF NOT EXISTS sync_wal_progress (
     acknowledged_end_lsn PG_LSN,
     registry_generation BIGINT NOT NULL REFERENCES sync_registry_generations(generation),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_end_lsn PG_LSN,
     CHECK ((materialized_commit_lsn IS NULL) = (materialized_end_lsn IS NULL)),
     CHECK (materialized_commit_lsn IS NULL OR materialized_end_lsn >= materialized_commit_lsn),
-    CHECK (acknowledged_end_lsn IS NULL OR materialized_end_lsn IS NOT NULL AND acknowledged_end_lsn <= materialized_end_lsn)
+    CONSTRAINT sync_wal_progress_processed_present
+        CHECK ((generation_start_lsn IS NULL) = (processed_end_lsn IS NULL)),
+    CONSTRAINT sync_wal_progress_processed_after_start
+        CHECK (processed_end_lsn IS NULL OR processed_end_lsn >= generation_start_lsn),
+    CONSTRAINT sync_wal_progress_materialized_processed
+        CHECK (materialized_end_lsn IS NULL
+               OR (processed_end_lsn IS NOT NULL AND materialized_end_lsn <= processed_end_lsn)),
+    CONSTRAINT sync_wal_progress_acknowledged_processed
+        CHECK (acknowledged_end_lsn IS NULL
+               OR (processed_end_lsn IS NOT NULL
+                   AND acknowledged_end_lsn >= generation_start_lsn
+                   AND acknowledged_end_lsn <= processed_end_lsn))
 );
 INSERT INTO sync_wal_progress (singleton, stream_generation, registry_generation)
 SELECT true, rs.stream_generation, rg.generation
@@ -2118,7 +2130,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1135
+-- synchro-pg/src/health.rs:1141
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2330,7 +2342,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1128
+-- synchro-pg/src/health.rs:1134
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2435,7 +2447,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:776
+-- synchro-pg/src/bgworker.rs:850
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2550,7 +2562,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1999
+-- synchro-pg/src/lib.rs:2011
 -- finalize
 
 DO $roles$
@@ -2754,6 +2766,7 @@ END
 $function_grants$;
 
 GRANT SELECT, UPDATE ON synchro.sync_runtime_state TO synchro_worker;
+GRANT SELECT ON synchro.sync_extension_build TO synchro_worker;
 GRANT SELECT, UPDATE ON synchro.sync_registry_generations TO synchro_worker;
 GRANT SELECT ON synchro.sync_logical_ids, synchro.sync_registry,
     synchro.sync_registry_fields, synchro.sync_capture_dependency_fields,
