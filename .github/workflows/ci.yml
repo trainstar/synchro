@@ -23,6 +23,8 @@ jobs:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       GOWORK: 'off'
+      # rust-cache keeps extensions/target between runs.
+      PGRX_TARGET_DIR: ${{ github.workspace }}/extensions/target
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -57,23 +59,6 @@ jobs:
         with:
           runtime-source: download
 
-      - name: Validate contract, documentation, and metadata
-        run: |
-          make docs-build
-          make test-version-contract version-check release-npm-dry-run
-
-      - name: Build portable sources
-        run: make build-check build-seed build-conformance
-
-      - name: Run conformance checks
-        run: make lint-conformance test-conformance test-integration-mutant-manifest test-local-postgres
-
-      - name: Run release and recovery controls
-        run: make test-release-artifacts test-release-publish test-server-consumer-helper test-packaged-smoke-structure test-ci-process-lifecycle
-
-      - name: Run source lint checks
-        run: make lint-go lint-rust-core lint-rust-pg check-pg-sql check-released-update-scripts lint-rn PGRX_TARGET_DIR="$GITHUB_WORKSPACE/extensions/target"
-
       - name: Install Android build components
         run: |
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
@@ -82,8 +67,8 @@ jobs:
           "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
-      - name: Run unit and client build checks
-        run: make test-rust-core test-rn-unit test-kotlin-unit
+      - name: Run source-quality tests
+        run: make ci-source-quality
 
   pull-request-swift:
     name: pull-request Swift unit
@@ -148,7 +133,6 @@ jobs:
       POSTGRESQL_VERSION: '18.3'
       RUST_TOOLCHAIN: '1.92.0'
       PGRX_TARGET_DIR: ${{ github.workspace }}/.pgrx-target
-      SOAK_SEED: '20260914'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -177,30 +161,16 @@ jobs:
         with:
           expected-postgresql-version: ${{ env.POSTGRESQL_VERSION }}
 
-      - name: Run extension checks
-        run: make test-rust-pg
+      - name: Install cargo-mutants
+        run: cargo install --locked --force cargo-mutants --version 27.1.0
 
-      - name: Run curated core mutants
-        run: |
-          cargo install --locked --force cargo-mutants --version 27.1.0
-          make test-rust-mutants
-
-      - name: Run adapter integration
+      - name: Start local PostgreSQL
         run: |
           make local-postgres-start
-          ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
-          export ADAPTER_TEST_URL
-          make test-adapter
-          make local-postgres-stop
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
-      - name: Fetch extension update baseline
-        run: |
-          make conformance-update-baseline-extension-artifact
-          echo "SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-baseline" >> "$GITHUB_ENV"
-          echo "SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-origins" >> "$GITHUB_ENV"
-
-      - name: Run real server black box with deterministic stateful seed
-        run: make test-blackbox SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
+      - name: Run candidate-server tests
+        run: make ci-candidate-server SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
 
       - name: Retain seeded stress replay evidence
         if: always()
@@ -208,11 +178,12 @@ jobs:
         with:
           name: candidate-soak-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/soak-evidence
-          # A setup failure before the stress test leaves no journal. The test step keeps that failure.
+          # A failure before the stress test leaves no journal. The test step keeps that failure.
           if-no-files-found: ignore
 
-      - name: Run curated integration mutants
-        run: make test-integration-mutants
+      - name: Stop local PostgreSQL
+        if: always()
+        run: make local-postgres-stop
 
   candidate-swift:
     name: candidate Swift
@@ -267,8 +238,8 @@ jobs:
             echo "WARM_CONNECT_ENV_FILE=$attach"
           } >> "$GITHUB_ENV"
 
-      - name: Run Swift checks against local PostgreSQL
-        run: make test-swift test-client-schema-identity test-consumer-swift test-swift-upgrade
+      - name: Run candidate-swift tests
+        run: make ci-candidate-swift
 
       - name: Stop local fixture
         if: always()
@@ -348,10 +319,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make test-kotlin-instrumentation test-kotlin test-consumer-kotlin-device test-kotlin-upgrade
-
-      - name: Build Kotlin source consumer
-        run: make test-consumer-kotlin
+          script: make ci-candidate-kotlin
 
   candidate-rn-ios:
     name: candidate React Native iOS
@@ -408,8 +376,8 @@ jobs:
             echo "WARM_CONNECT_ENV_FILE=$attach"
           } >> "$GITHUB_ENV"
 
-      - name: Run React Native iOS checks against local PostgreSQL
-        run: make test-rn-e2e-ios test-rn-bridge-transactions-ios test-consumer-rn-ios test-rn-upgrade-ios
+      - name: Run candidate-rn-ios tests
+        run: make ci-candidate-rn-ios
 
       - name: Stop local fixture
         if: always()
@@ -489,7 +457,7 @@ jobs:
           echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
       - name: Build React Native Android app
-        run: make test-rn-e2e-android-build
+        run: make ci-candidate-rn-android-build
 
       - name: Enable KVM permissions
         run: |
@@ -510,11 +478,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -memory 6144 -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            make test-rn-e2e-android-run
-            make test-rn-bridge-transactions-android
-            make test-consumer-rn-android
-            make test-rn-upgrade-android
+          script: make ci-candidate-rn-android
 
   pull-request:
     name: pull-request

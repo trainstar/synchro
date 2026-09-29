@@ -130,6 +130,41 @@ That dataset registers the shared `catalog` scope, so every user in that databas
 Do not run another adapter owner on that port.
 The helper rejects an occupied port rather than terminating its owner.
 
+## Run a CI job locally
+
+Each test job in `.github/workflows/ci.yml` calls one `make ci-<job>` target.
+Run the same target to run the same test commands as CI:
+
+```sh
+make ci-source-quality
+make ci-candidate-server
+make ci-candidate-swift
+make ci-candidate-kotlin
+make ci-candidate-rn-ios
+make ci-candidate-rn-android-build
+make ci-candidate-rn-android
+```
+
+The workflow file keeps only tool setup, device setup, database start and stop, and artifact upload.
+Install the tools and boot the device that the job sets up before you run its target.
+The candidate targets need a disposable database.
+They read its URL from `ADAPTER_TEST_URL` and its `attach.env` file from `WARM_CONNECT_ENV_FILE`.
+
+For a database on this machine, start it as CI does:
+
+```sh
+make local-postgres-start
+export ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+export WARM_CONNECT_ENV_FILE="$PWD/.ignore/r2/tmp/local-postgres/attach.env"
+```
+
+For a database on another machine, set `ADAPTER_TEST_URL` to its URL.
+Set `WARM_CONNECT_ENV_FILE` to a local copy of its `attach.env` file.
+After the run, stop the fixture with `make synchrod-pg-test-stop` and `make local-postgres-stop`.
+
+`make ci-candidate-server` fetches the update baseline bundles itself.
+Remove old `dist/conformance/synchro-pg-pg18-update-*` directories before you run it again.
+
 ## Stop and clean up
 
 Stop the adapter before the database:
