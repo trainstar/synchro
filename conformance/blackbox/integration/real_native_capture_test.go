@@ -458,16 +458,29 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 		t.Fatalf("sign application push token: %v", err)
 	}
 	client := connectRealProtocolClient(t, ctx, harness, token, "client-a", "user:user-a")
-	table := requireRealTable(t, client, "items")
+	var tableAlias scenarios.NativeIdentityAlias
+	for _, alias := range scenario.NativeIdentityAliases {
+		if alias.Alias == "items-table" {
+			tableAlias = alias
+		}
+	}
+	identities, err := controller.IdentityValues([]scenarios.NativeIdentityAlias{
+		tableAlias,
+		{Kind: "primary-key", Alias: "pushed-row", Value: json.RawMessage(`"cardinality-000001"`)},
+	})
+	if err != nil || len(identities) != 2 {
+		t.Fatalf("resolve the runtime table and row: %#v, %v", identities, err)
+	}
+	table := requireRealTable(t, client, identities[0].ApplicationIdentifier)
+	var runtimeRecordID string
+	if err := json.Unmarshal(identities[1].RuntimeValue, &runtimeRecordID); err != nil || runtimeRecordID == "" {
+		t.Fatalf("decode the runtime row identity: %v", err)
+	}
 	database, err := sql.Open("pgx", harness.DatabaseURL())
 	if err != nil {
 		t.Fatalf("open application push database: %v", err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
-	var runtimeRecordID string
-	if err := database.QueryRowContext(ctx, "SELECT id::text FROM public.items").Scan(&runtimeRecordID); err != nil {
-		t.Fatalf("read the runtime row identity: %v", err)
-	}
 	const pushedValue = "application-push-same-value"
 	var materializedStep struct {
 		StreamGeneration string `json:"stream_generation"`
