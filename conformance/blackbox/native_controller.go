@@ -3200,8 +3200,9 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	c.mu.Lock()
 	transaction.Materialized = true
 	if transaction.ApplicationPush {
-		for _, event := range transaction.Events {
-			if event.Dependency != nil {
+		// A rejected mutation left its row unchanged, so its binding stays.
+		for index, event := range transaction.Events {
+			if !transaction.RuntimeAcceptedEvents[index] || event.Dependency != nil {
 				continue
 			}
 			recordKey := nativeRecordKey(event.Table.AuthoredID, nativeCanonicalRecordKeyValue(event))
@@ -3373,8 +3374,11 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 // resolveMaterializedApplicationPush binds an accepted application push to
 // the WAL events of its own write fences. Two pushes can write the same row
 // with the same values, so a row identity and its captured values cannot
-// tell them apart. Each accepted mutation must have a materialized fence, and
-// the captured row must carry the version that fence wrote.
+// tell them apart. Each accepted mutation has a fence chain on its row: the
+// first fence is the authored operation, and a same-row trigger can add later
+// update fences. The accepted outcome carries the version of the last fence.
+// A later write can replace the captured row, so the chain is compared with
+// the sealed outcome, not with the current row.
 func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Context, transaction *nativeTransactionBinding) error {
 	if err := c.resolveApplicationPushRecords(ctx, transaction); err != nil {
 		return err
@@ -3389,59 +3393,86 @@ func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Contex
 		commit   string
 		end      string
 		registry int64
-		ordinal  int64
-		version  string
 	}
-	identities := make([]runtimeIdentity, len(transaction.Events))
 	var first *runtimeIdentity
 	var previous int64 = -1
+	ordinals := make([]uint64, 0, len(transaction.Events))
 	for index, event := range transaction.Events {
 		if !transaction.RuntimeAcceptedEvents[index] {
 			continue
 		}
-		identity := &identities[index]
-		if err := database.QueryRowContext(ctx, `
+		rows, err := database.QueryContext(ctx, `
 			SELECT event.stream_generation, event.commit_lsn::text, wal.end_lsn::text,
-			       wal.registry_generation, event.event_ordinal, fence.row_version::text
+			       wal.registry_generation, event.event_ordinal, fence.operation, fence.row_version::text,
+			       COALESCE(convert_from(mutation.sealed_canonical_response, 'UTF8')::jsonb ->> 'server_version', '')
 			FROM synchro.sync_write_fences fence
+			JOIN synchro.sync_push_mutations mutation
+			  ON mutation.user_id = fence.user_id
+			 AND mutation.client_id = fence.client_id
+			 AND mutation.mutation_id::text = fence.mutation_id
 			JOIN synchro.sync_wal_events event ON event.fence_id = fence.fence_id
 			JOIN synchro.sync_wal_transactions wal
 			  ON wal.stream_generation = event.stream_generation
 			 AND wal.commit_lsn = event.commit_lsn
 			WHERE fence.mutation_id = $1 AND fence.user_id = $2 AND fence.client_id = $3
 			  AND fence.registration_kind = 'synced' AND fence.coverage = 'materialized'
-			  AND event.physical_relation = $4 AND event.operation = $5
-			  AND COALESCE(fence.new_record_id, fence.old_record_id) = $6`,
+			  AND event.physical_relation = $4
+			  AND (fence.old_record_id = $5 OR fence.new_record_id = $5)
+			ORDER BY fence.dml_ordinal`,
 			transaction.RuntimeMutationIDs[index], transaction.AuthoredUserID, transaction.AuthoredClientID,
-			event.Table.RuntimeName, event.PhysicalOperation, event.RuntimeRecordID,
-		).Scan(&identity.stream, &identity.commit, &identity.end, &identity.registry, &identity.ordinal, &identity.version); err != nil {
+			event.Table.RuntimeName, event.RuntimeRecordID,
+		)
+		if err != nil {
+			return fmt.Errorf("read native application push fences: %w", err)
+		}
+		var chainVersion, outcomeVersion string
+		chainLength := 0
+		for rows.Next() {
+			var identity runtimeIdentity
+			var ordinal int64
+			var operation, version string
+			if err := rows.Scan(&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal, &operation, &version, &outcomeVersion); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan native application push fence: %w", err)
+			}
+			// The server accepts the authored operation first, then only
+			// same-row updates from triggers (push.rs load_current_fence_version).
+			if (chainLength == 0 && operation != event.PhysicalOperation) || (chainLength > 0 && operation != "update") {
+				rows.Close()
+				return fmt.Errorf("native application push fence chain of mutation %s does not start with its %s", transaction.RuntimeMutationIDs[index], event.PhysicalOperation)
+			}
+			if first == nil {
+				first = &identity
+			} else if identity != *first {
+				rows.Close()
+				return errors.New("native accepted application push spans more than one runtime WAL transaction")
+			}
+			if ordinal <= previous {
+				rows.Close()
+				return errors.New("native accepted application push order does not match runtime WAL order")
+			}
+			previous = ordinal
+			ordinals = append(ordinals, uint64(ordinal))
+			chainVersion = version
+			chainLength++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("read native application push fences: %w", err)
+		}
+		rows.Close()
+		if chainLength == 0 {
 			return &nativeWALBindingError{
 				detail:   fmt.Sprintf("native application push fence is not materialized: mutation %s relation %s operation %s identity %s", transaction.RuntimeMutationIDs[index], event.Relation, event.PhysicalOperation, event.RuntimeRecordID),
 				relation: event.Table.RuntimeName,
 			}
 		}
-		if first == nil {
-			first = identity
-		} else if identity.stream != first.stream || identity.commit != first.commit || identity.end != first.end || identity.registry != first.registry {
-			return errors.New("native accepted application push spans more than one runtime WAL transaction")
+		if chainVersion != outcomeVersion {
+			return fmt.Errorf("native application push fence chain of mutation %s ends at version %s, not the accepted version %q", transaction.RuntimeMutationIDs[index], chainVersion, outcomeVersion)
 		}
-		if identity.ordinal <= previous {
-			return errors.New("native accepted application push order does not match runtime WAL order")
-		}
-		previous = identity.ordinal
 	}
 	if first == nil {
 		return errors.New("native application push has no accepted mutation to materialize")
-	}
-	ordinals := make([]uint64, 0, len(transaction.Events))
-	for index, event := range transaction.Events {
-		if !transaction.RuntimeAcceptedEvents[index] {
-			continue
-		}
-		if event.After != nil && event.After.Version != identities[index].version {
-			return fmt.Errorf("native application push row version %s is not the version %s of its fence", event.After.Version, identities[index].version)
-		}
-		ordinals = append(ordinals, uint64(identities[index].ordinal))
 	}
 	transaction.RuntimeStream = first.stream
 	transaction.RuntimeCommitLSN = first.commit
@@ -3809,11 +3840,13 @@ func captureNativeTransactions(ctx context.Context, tx *sql.Tx, installation *na
 		if !binding.Materialized {
 			continue
 		}
+		// A push binds only its accepted fence chains, and a same-row trigger
+		// adds events, so the resolved runtime events are the count to keep.
 		var eventCount int64
 		if err := tx.QueryRowContext(ctx, `
 			SELECT event_count FROM synchro.sync_wal_transactions
 			WHERE stream_generation = $1 AND commit_lsn = $2::pg_lsn AND end_lsn = $3::pg_lsn
-			  AND registry_generation = $4`, binding.RuntimeStream, binding.RuntimeCommitLSN, binding.RuntimeEndLSN, binding.RuntimeRegistry).Scan(&eventCount); err != nil || eventCount != int64(len(binding.Events)) {
+			  AND registry_generation = $4`, binding.RuntimeStream, binding.RuntimeCommitLSN, binding.RuntimeEndLSN, binding.RuntimeRegistry).Scan(&eventCount); err != nil || eventCount != int64(len(binding.RuntimeEventOrdinals)) {
 			return errors.New("native runtime WAL transaction no longer matches its authored binding")
 		}
 		ordinals := make([]uint64, len(binding.Events))
