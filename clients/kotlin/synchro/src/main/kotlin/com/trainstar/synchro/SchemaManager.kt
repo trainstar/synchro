@@ -471,7 +471,9 @@ internal class SchemaManager(private val database: SynchroDatabase) {
      * The target values of the application rows that hold unresolved local
      * intent. A reset rebuild must not overwrite or remove those rows (spec
      * schema evolution, client migration step 8), so the reset keeps each field
-     * that the target declares with the same field ID and type.
+     * that the target declares with the same field ID and type. The restore
+     * skips a row that the target shape cannot hold, and the rebuild then
+     * installs the server row for it.
      */
     private class ProtectedRows(val columns: List<String>, val rows: List<Array<Any?>>)
 
@@ -480,15 +482,8 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         val kept = target.columns.mapNotNull { column ->
             sourceColumns[column.fieldID]?.takeIf { it.logicalType == column.logicalType }?.let { it.name to column.name }
         }
-        val keptTargets = kept.map { it.second }.toSet()
-        // A required target field without a kept value has no local value to
-        // hold, so such a row cannot exist in the target shape.
-        val representable = target.columns.none { column ->
-            !column.nullable && !column.isPrimaryKey && column.sqliteDefaultSQL.isNullOrEmpty() &&
-                column.name !in keptTargets
-        }
         val primaryKey = sourceColumns[source.primaryKeyFieldID]
-        if (!representable || source.primaryKeyFieldID != target.primaryKeyFieldID || primaryKey == null ||
+        if (source.primaryKeyFieldID != target.primaryKeyFieldID || primaryKey == null ||
             kept.none { it.first == primaryKey.name }
         ) {
             return ProtectedRows(emptyList(), emptyList())
@@ -519,7 +514,9 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         if (protectedRows.rows.isEmpty()) return
         val columns = protectedRows.columns.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it) }
         val placeholders = protectedRows.columns.joinToString(", ") { "?" }
-        val sql = "INSERT INTO ${SQLiteHelpers.quoteIdentifier(target.tableName)} ($columns) VALUES ($placeholders)"
+        // OR IGNORE skips only a row that violates a target NOT NULL, CHECK,
+        // UNIQUE, or PRIMARY KEY constraint. Other errors still fail the reset.
+        val sql = "INSERT OR IGNORE INTO ${SQLiteHelpers.quoteIdentifier(target.tableName)} ($columns) VALUES ($placeholders)"
         protectedRows.rows.forEach { values -> db.execSQL(sql, values) }
     }
 

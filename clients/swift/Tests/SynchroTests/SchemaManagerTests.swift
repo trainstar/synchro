@@ -1356,6 +1356,63 @@ final class SchemaManagerTests: XCTestCase {
         XCTAssertNil(try recoveredManager.activeMigration())
     }
 
+    func testSchemaResetKeepsOnlyProtectedRowsThatTheTightenedTargetCanHold() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("synchro_reset_tightened_\(UUID().uuidString).sqlite")
+        var sourceManifest = protocolOrdersSchemaManifest(includeNotes: true)
+        sourceManifest.schemaHash = try Integrity.schemaManifestHash(sourceManifest)
+        var targetManifest = protocolOrdersSchemaManifest(
+            includeNotes: true,
+            schemaVersion: 2,
+            parentSchema: SchemaRef(version: 1, hash: sourceManifest.schemaHash),
+            transitionClass: "class_4",
+            compatibilityFloor: 2
+        )
+        let notes = try XCTUnwrap(targetManifest.tables[0].fields.firstIndex { $0.fieldID == "field-notes" })
+        targetManifest.tables[0].fields[notes].nullable = false
+        targetManifest.schemaHash = try Integrity.schemaManifestHash(targetManifest)
+
+        let database = try SynchroDatabase(path: path)
+        defer { try? database.close() }
+        let manager = SchemaManager(database: database)
+        try manager.createSyncedTables(schema: SchemaResponse(
+            schemaVersion: sourceManifest.schemaVersion,
+            schemaHash: sourceManifest.schemaHash,
+            serverTime: Date(),
+            manifest: sourceManifest
+        ))
+        _ = try database.execute(
+            """
+            INSERT INTO orders (id, ship_address, user_id, updated_at, notes) VALUES
+                ('fits', 'kept address', 'u1', '2026-01-01T00:00:00.000000Z', 'kept note'),
+                ('null-note', 'local address', 'u1', '2026-01-01T00:00:00.000000Z', NULL)
+            """,
+            params: nil
+        )
+        let pendingBefore = try ChangeTracker(database: database).inspectPendingMutations()
+        XCTAssertEqual(Set(pendingBefore.map(\.recordID)), ["fits", "null-note"])
+
+        _ = try manager.prepareMigration(
+            targetManifest: targetManifest,
+            action: .replace,
+            affectedScopes: [],
+            scopeCursorUpdates: [:],
+            schemaReset: true
+        )
+        let applied = try database.writeSyncLockedTransaction { connection in
+            try manager.applyPreparedMigrationInTransaction(connection)
+        }
+
+        XCTAssertEqual(applied.phase, .applied)
+        let rows = try database.query("SELECT id, ship_address, notes FROM orders ORDER BY id", params: nil)
+        XCTAssertEqual(rows.map { $0["id"] as String? }, ["fits"])
+        XCTAssertEqual(rows.first?["ship_address"] as String?, "kept address")
+        XCTAssertEqual(rows.first?["notes"] as String?, "kept note")
+        // The NULL note cannot exist in the target shape. Its row waits for the
+        // rebuild to install the server row, and its intent stays inspectable.
+        XCTAssertEqual(try ChangeTracker(database: database).inspectPendingMutations(), pendingBefore)
+    }
+
     func testAppliedMigrationAbruptReopenDoesNotRepeatDDLOrScopeInvalidation() throws {
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("synchro_applied_migration_\(UUID().uuidString).sqlite")

@@ -591,12 +591,15 @@ func (c *SchemaQueuedMutationCoordinator) acceptResultLocked(raw json.RawMessage
 	case schemaQueuedMutationStageReset:
 		return c.validateSynchronized(envelope.Result, "idle", true)
 	case schemaQueuedMutationStagePreRestartCapture:
-		trace, err := c.validateTraceCapture(envelope.Result, true)
+		trace, rows, err := c.validateTraceCapture(envelope.Result, true)
 		if err != nil {
 			return err
 		}
 		if err := validateSchemaQueuedMutationTrace(c.config.Scenario, trace); err != nil {
 			return err
+		}
+		if err := c.requireKeptRow(rows); err != nil {
+			return fmt.Errorf("React Native schema-queued-mutation row after reset: %w", err)
 		}
 		c.preRestart = &trace
 	case schemaQueuedMutationStageRestarted:
@@ -699,8 +702,13 @@ func (c *SchemaQueuedMutationCoordinator) advanceLocked(ctx context.Context, seq
 		if err := c.config.Controller.BindApplicationPush(push); err != nil {
 			return exchangeResponse{}, fmt.Errorf("bind React Native schema-queued-mutation push: %w", err)
 		}
+		selectors, err := c.compatibleRowSelectors()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
 		response.Command = c.command(schemaQueuedMutationInitialClientKey, "observer", "capture", map[string]any{
-			"client_keys": []string{schemaQueuedMutationInitialClientKey}, "sources": []string{"request-trace"},
+			"client_keys": []string{schemaQueuedMutationInitialClientKey}, "sources": []string{"request-trace", "application-rows"},
+			"row_selectors": selectors,
 		}, nil)
 	case schemaQueuedMutationStagePreRestartCapture:
 		response.Command = c.command(schemaQueuedMutationRestartClientKey, "client", "open", map[string]any{
@@ -788,25 +796,30 @@ func (c *SchemaQueuedMutationCoordinator) validateLocal(raw json.RawMessage) err
 	return nil
 }
 
-func (c *SchemaQueuedMutationCoordinator) validateTraceCapture(raw json.RawMessage, requireInitialProcess bool) (traceSnapshot, error) {
-	capture, err := decodeCapture(raw, []string{"request_trace"})
+func (c *SchemaQueuedMutationCoordinator) validateTraceCapture(raw json.RawMessage, requireInitialProcess bool) (traceSnapshot, []map[string]json.RawMessage, error) {
+	capture, err := decodeCapture(raw, []string{"request_trace", "application_rows"})
 	if err != nil {
-		return traceSnapshot{}, err
+		return traceSnapshot{}, nil, err
 	}
 	var members map[string]json.RawMessage
 	if err := decodeStrictMembers(raw, &members, 3, "schema-queued-mutation trace capture"); err != nil {
-		return traceSnapshot{}, err
+		return traceSnapshot{}, nil, err
 	}
 	if requireInitialProcess {
 		if c.process == nil {
-			return traceSnapshot{}, errors.New("React Native schema-queued-mutation trace process is unavailable")
+			return traceSnapshot{}, nil, errors.New("React Native schema-queued-mutation trace process is unavailable")
 		}
 		process, err := decodeActionProcessIdentity(members["process"])
 		if err != nil || process != *c.process {
-			return traceSnapshot{}, fmt.Errorf("React Native schema-queued-mutation trace process=%+v want=%+v decode_error=%v", process, *c.process, err)
+			return traceSnapshot{}, nil, fmt.Errorf("React Native schema-queued-mutation trace process=%+v want=%+v decode_error=%v", process, *c.process, err)
 		}
 	}
-	return captureTraceFromRaw(capture.Trace)
+	rows, err := decodeRows(capture.Rows)
+	if err != nil {
+		return traceSnapshot{}, nil, err
+	}
+	trace, err := captureTraceFromRaw(capture.Trace)
+	return trace, rows, err
 }
 
 func (c *SchemaQueuedMutationCoordinator) validateFinalCapture(raw json.RawMessage) (finalCapture, error) {
@@ -1112,16 +1125,82 @@ func (c *SchemaQueuedMutationCoordinator) validateDurableResult() error {
 	if err := c.validateRejectedMutation(expected.Outcomes[0]); err != nil {
 		return err
 	}
-	// The reset rebuild must keep the row of the blocked mutation visible with
-	// the value that the compatible push applied (#267).
 	rows, err := decodeRows(c.finalResult.Rows)
 	if err != nil {
 		return err
 	}
-	if err := scenarios.RequireLocalWriteRow(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"].Operation, rows); err != nil {
-		return fmt.Errorf("React Native schema-queued-mutation row after reset: %w", err)
+	if err := c.requireKeptRow(rows); err != nil {
+		return fmt.Errorf("React Native schema-queued-mutation row after restart: %w", err)
 	}
 	return nil
+}
+
+// requireKeptRow requires the kept field of the unresolved S2 write in the
+// local row. The step map holds the bound write, so the authored write comes
+// from the scenario.
+func (c *SchemaQueuedMutationCoordinator) requireKeptRow(rows []map[string]json.RawMessage) error {
+	var write scenarios.Operation
+	for _, step := range c.config.Scenario.Steps {
+		if step.ID == "STEP-SCHEMA-QUEUED-MUTATION-005" {
+			write = step.Operation
+		}
+	}
+	kept, err := schemaQueuedMutationKeptWrite(write, c.steps["STEP-SCHEMA-QUEUED-MUTATION-006"].Operation)
+	if err != nil {
+		return err
+	}
+	if kept, err = c.config.Controller.ApplicationWrite(kept); err != nil {
+		return err
+	}
+	return scenarios.RequireLocalWriteRow(kept, rows)
+}
+
+// schemaQueuedMutationKeptWrite keeps the columns of an authored local write
+// that the authored target schema still declares. The unresolved S2 write
+// changes one field that S3 removes and one field that S3 keeps with a value
+// the server does not hold. Only a kept local row passes a check of the kept
+// field. A server replacement of the row fails it (#267).
+func schemaQueuedMutationKeptWrite(write, publish scenarios.Operation) (scenarios.Operation, error) {
+	var target struct {
+		Tables []struct {
+			TableID string `json:"table_id"`
+			Fields  []struct {
+				FieldID string `json:"field_id"`
+			} `json:"fields"`
+		} `json:"tables"`
+	}
+	var payload map[string]json.RawMessage
+	var columns []map[string]json.RawMessage
+	var tableID string
+	if json.Unmarshal(publish.Payload, &target) != nil || json.Unmarshal(write.Payload, &payload) != nil ||
+		json.Unmarshal(payload["table_id"], &tableID) != nil || json.Unmarshal(payload["columns"], &columns) != nil {
+		return scenarios.Operation{}, errors.New("schema-queued-mutation kept write is invalid")
+	}
+	declared := make(map[string]bool)
+	for _, table := range target.Tables {
+		if table.TableID == tableID {
+			for _, field := range table.Fields {
+				declared[field.FieldID] = true
+			}
+		}
+	}
+	kept := make([]map[string]json.RawMessage, 0, len(columns))
+	for _, column := range columns {
+		var fieldID string
+		if json.Unmarshal(column["field_id"], &fieldID) == nil && declared[fieldID] {
+			kept = append(kept, column)
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(columns) {
+		return scenarios.Operation{}, fmt.Errorf("schema-queued-mutation write keeps %d of %d fields, want some but not all", len(kept), len(columns))
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return scenarios.Operation{}, err
+	}
+	payload["columns"] = encoded
+	write.Payload, err = json.Marshal(payload)
+	return write, err
 }
 
 type schemaQueuedMutationPending struct {
@@ -1178,10 +1257,6 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 	if err != nil {
 		return fmt.Errorf("resolve React Native schema-queued-mutation primary field: %w", err)
 	}
-	fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, expected.AuthoredColumns[0].FieldID)
-	if err != nil {
-		return fmt.Errorf("resolve React Native schema-queued-mutation retained field: %w", err)
-	}
 	observed := pending[0]
 	if observed.MutationID != mutationID || observed.TableID != tableID || observed.TableName != c.tableName || observed.RecordID != recordID ||
 		observed.PrimaryKeyFieldID != primaryField || observed.Operation != expected.Operation || observed.AuthoredSchema != authoredSchema ||
@@ -1190,9 +1265,26 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 		observed.LocalOrder != expected.LocalOrder || len(observed.AuthoredFields) != len(expected.AuthoredColumns) {
 		return fmt.Errorf("React Native schema-queued-mutation pending observed=%+v expected mutation=%q table=%q table_name=%q record=%q primary=%q schema=%+v base=%q batch=%q order=%d", observed, mutationID, tableID, c.tableName, recordID, primaryField, authoredSchema, baseVersion, batchID, expected.LocalOrder)
 	}
-	field := observed.AuthoredFields[0]
-	if field.FieldID != fieldID || field.LogicalType != expected.AuthoredColumns[0].Type || !semanticRawJSONEqual(field.Value, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
-		return fmt.Errorf("React Native schema-queued-mutation retained field id=%q want=%q type=%q want=%q value=%s want=%s", field.FieldID, fieldID, field.LogicalType, expected.AuthoredColumns[0].Type, field.Value, expected.AuthoredColumns[0].WireJSON)
+	// The authored fields form a set keyed by field ID. The runtime field IDs
+	// do not keep the authored order, so match each field by its field ID.
+	for _, column := range expected.AuthoredColumns {
+		fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, column.FieldID)
+		if err != nil {
+			return fmt.Errorf("resolve React Native schema-queued-mutation retained field: %w", err)
+		}
+		matches := 0
+		for _, field := range observed.AuthoredFields {
+			if field.FieldID != fieldID {
+				continue
+			}
+			matches++
+			if field.LogicalType != column.Type || !semanticRawJSONEqual(field.Value, json.RawMessage(column.WireJSON)) {
+				return fmt.Errorf("React Native schema-queued-mutation retained field id=%q type=%q want=%q value=%s want=%s", fieldID, field.LogicalType, column.Type, field.Value, column.WireJSON)
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("React Native schema-queued-mutation retained field id=%q occurs %d times, want 1", fieldID, matches)
+		}
 	}
 	// The local trigger generates clientVersion. Kotlin and Swift accept that runtime timestamp because the scenario declares no timestamp alias.
 	c.retainedClientVersion = observed.ClientVersion
@@ -1283,17 +1375,21 @@ func (c *SchemaQueuedMutationCoordinator) validateStoredMutation(raw string) err
 	if err != nil {
 		return err
 	}
-	fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, expected.AuthoredColumns[0].FieldID)
-	if err != nil {
-		return err
-	}
 	primary := mutation.PK[primaryField]
-	column := mutation.Columns[fieldID]
 	if mutation.MutationID != mutationID || mutation.Table != tableID || !semanticRawJSONEqual(primary, c.runtimeIDs["queued-row-primary-key"]) ||
 		mutation.AuthoredSchema != authoredSchema || mutation.Operation != expected.Operation || mutation.BaseVersion == nil || *mutation.BaseVersion != baseVersion ||
 		mutation.ClientVersion == "" || c.retainedClientVersion == "" || mutation.ClientVersion != c.retainedClientVersion ||
-		len(mutation.Columns) != 1 || !semanticRawJSONEqual(column, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
-		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q field=%q", raw, mutationID, tableID, primaryField, recordID, authoredSchema, baseVersion, fieldID)
+		len(mutation.Columns) != len(expected.AuthoredColumns) {
+		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q columns=%d", raw, mutationID, tableID, primaryField, recordID, authoredSchema, baseVersion, len(expected.AuthoredColumns))
+	}
+	for _, column := range expected.AuthoredColumns {
+		fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, column.FieldID)
+		if err != nil {
+			return err
+		}
+		if value, found := mutation.Columns[fieldID]; !found || !semanticRawJSONEqual(value, json.RawMessage(column.WireJSON)) {
+			return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s field=%q want=%s", raw, fieldID, column.WireJSON)
+		}
 	}
 	return nil
 }
