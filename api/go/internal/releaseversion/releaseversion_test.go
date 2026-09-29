@@ -11,14 +11,14 @@ import (
 func TestValidate(t *testing.T) {
 	t.Parallel()
 
-	valid := []string{"0.1.0", "1.2.3", "10.20.30"}
+	valid := []string{"0.1.0", "1.2.3", "10.20.30", "0.4.0-rc.1", "1.2.3-rc.10"}
 	for _, version := range valid {
 		if err := Validate(version); err != nil {
 			t.Fatalf("Validate(%q) returned error: %v", version, err)
 		}
 	}
 
-	invalid := []string{"v1.2.3", "1.2", "1.2.x", "1.2.3-beta", "01.2.3", "1.02.3", "1.2.03", "00.0.0"}
+	invalid := []string{"v1.2.3", "1.2", "1.2.x", "1.2.3-beta", "01.2.3", "1.02.3", "1.2.03", "00.0.0", "1.2.3-rc.0", "1.2.3-rc.01", "1.2.3-rc1", "1.2.3-RC.1", "1.2.3-beta.1", "1.2.3-rc.1.1", "1.2.3-rc.1+build"}
 	for _, version := range invalid {
 		if err := Validate(version); err == nil {
 			t.Fatalf("Validate(%q) unexpectedly succeeded", version)
@@ -306,12 +306,22 @@ func TestCheckAcceptsUpdateChain(t *testing.T) {
 	if err := Set(root, "1.0.0"); err != nil {
 		t.Fatal(err)
 	}
-	writeUpdateScript(t, root, "1.0.0", "1.4.5")
-	if err := Set(root, "1.4.5"); err != nil {
-		t.Fatal(err)
-	}
-	if err := Check(root, "v1.4.5"); err != nil {
-		t.Fatalf("Check rejected a chain of two update scripts: %v", err)
+	// Release candidates precede their release, and candidate numbers compare numerically.
+	for _, step := range [][2]string{{"1.0.0", "1.4.5-rc.9"}, {"1.4.5-rc.9", "1.4.5-rc.10"}, {"1.4.5-rc.10", "1.4.5"}} {
+		writeUpdateScript(t, root, step[0], step[1])
+		if err := Set(root, step[1]); err != nil {
+			t.Fatal(err)
+		}
+		if err := Check(root, "v"+step[1]); err != nil {
+			t.Fatalf("Check rejected the update chain to %s: %v", step[1], err)
+		}
+		readme, err := os.ReadFile(filepath.Join(root, "README.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := strings.ReplaceAll(publishedReferenceFixture, "0.1.0", step[1]); string(readme) != want {
+			t.Fatalf("README.md release references were not synced exactly to %s:\n%s", step[1], readme)
+		}
 	}
 }
 
@@ -354,6 +364,11 @@ func TestCheckRejectsInvalidPostgresSQLState(t *testing.T) {
 			name:   "update script to lower version",
 			mutate: func(t *testing.T, root string) { writeUpdateScript(t, root, "1.4.5", "1.0.0") },
 			names:  "synchro_pg--1.4.5--1.0.0.sql",
+		},
+		{
+			name:   "update script from release to its release candidate",
+			mutate: func(t *testing.T, root string) { writeUpdateScript(t, root, "1.4.5", "1.4.5-rc.1") },
+			names:  "synchro_pg--1.4.5--1.4.5-rc.1.sql does not go from a lower version to a higher version",
 		},
 		{
 			name:   "two update scripts from one version",
