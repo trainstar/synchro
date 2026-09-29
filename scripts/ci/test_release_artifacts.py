@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -701,6 +702,35 @@ class ReleaseArtifactsTests(unittest.TestCase):
                 release_artifacts.validate_candidate(root / f"release-1.2.3-rc.1-{COMMIT}", "1.2.3-rc.1", COMMIT),
                 f"release-1.2.3-rc.1-{COMMIT}",
             )
+
+    def test_update_origins_order_release_candidates_before_their_release(self) -> None:
+        digest = "0" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "update-baseline.json"
+            baseline.write_text(json.dumps({"version": "1.2.2"}), encoding="utf-8")
+            origins = root / "update-origins.json"
+            for versions, accepted in (
+                (["1.2.3-rc.1", "1.2.3-rc.10", "1.2.3", "1.2.4-rc.1"], True),
+                (["1.2.3", "1.2.3-rc.1"], False),
+                (["1.2.3-rc.10", "1.2.3-rc.9"], False),
+                (["1.2.3-beta.1"], False),
+            ):
+                with self.subTest(versions=versions):
+                    origins.write_text(json.dumps({"origins": [{"version": version, "artifact_sha256": digest} for version in versions]}), encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, str(REPO_ROOT / "scripts/update-origins.py"), str(origins), str(baseline)],
+                        capture_output=True, text=True, check=False,
+                    )
+                    if not accepted:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("must be X.Y.Z or X.Y.Z-rc.N and ascend", result.stderr)
+                        continue
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), [
+                        f"{version} https://github.com/trainstar/synchro/releases/download/v{version}/synchro-pg-pg18-ubuntu24.04-linux-x64-{version}.tar.gz {digest}"
+                        for version in versions
+                    ])
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import json
 import re
 import sys
 
-VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-rc\.([1-9][0-9]*))?$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -24,7 +24,9 @@ def load(path):
 
 
 def version_key(version):
-    return tuple(int(part) for part in version.split("."))
+    # A release follows each of its release candidates.
+    major, minor, patch, candidate = VERSION.match(version).groups()
+    return (int(major), int(minor), int(patch), 0 if candidate else 1, int(candidate or 0))
 
 
 def main():
@@ -42,7 +44,7 @@ def main():
             raise SystemExit("each update origin must contain only version and artifact_sha256")
         version, digest = origin["version"], origin["artifact_sha256"]
         if not isinstance(version, str) or not VERSION.match(version) or version_key(version) <= version_key(previous):
-            raise SystemExit("update origin versions must be X.Y.Z and ascend after the baseline")
+            raise SystemExit("update origin versions must be X.Y.Z or X.Y.Z-rc.N and ascend after the baseline")
         if not isinstance(digest, str) or not DIGEST.match(digest):
             raise SystemExit("update origin artifact_sha256 must be 64 lowercase hexadecimal digits")
         url = f"https://github.com/trainstar/synchro/releases/download/v{version}/synchro-pg-pg18-ubuntu24.04-linux-x64-{version}.tar.gz"
