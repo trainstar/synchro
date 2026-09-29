@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -362,7 +363,9 @@ func pushNativeCaptureMutation(t *testing.T, ctx context.Context, harness *black
 // Rebuild workload steps 2 and 3 update the same row with the same operation,
 // so an identity match on the row alone binds the step 2 WAL transaction. The
 // wait must also use its whole budget, so a worker that resumes late within
-// the budget still materializes the step.
+// the budget still materializes the step. Two accepted application pushes
+// that write the same value to one row have no source transaction ID, so the
+// second must bind its own write fence, not the first push's WAL event.
 func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -403,41 +406,126 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 		}
 	}
 
-	resumeWAL, err := controller.PauseWALMaterialization(ctx)
-	if err != nil {
-		t.Fatalf("pause WAL materialization: %v", err)
-	}
-	walPaused := true
-	defer func() {
-		if walPaused {
-			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cleanupCancel()
-			_ = resumeWAL(cleanupContext)
+	// pausedBarrier commits one transaction while the WAL worker is paused and
+	// requires its materialization wait to complete only after the worker
+	// resumes. The controller waits 30 seconds, and the worker resumes after
+	// 22 seconds, inside that budget.
+	pausedBarrier := func(name string, commit func() scenarios.Operation) {
+		t.Helper()
+		resumeWAL, err := controller.PauseWALMaterialization(ctx)
+		if err != nil {
+			t.Fatalf("pause WAL materialization before %s: %v", name, err)
 		}
-	}()
-	commit(2)
-	type result struct {
-		observation blackbox.NativeStepObservation
-		err         error
+		walPaused := true
+		defer func() {
+			if walPaused {
+				cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cleanupCancel()
+				_ = resumeWAL(cleanupContext)
+			}
+		}()
+		materialize := commit()
+		type result struct {
+			observation blackbox.NativeStepObservation
+			err         error
+		}
+		materialized := make(chan result, 1)
+		go func() {
+			observation, err := controller.ProcessStep(ctx, nil, materialize)
+			materialized <- result{observation, err}
+		}()
+		select {
+		case early := <-materialized:
+			t.Fatalf("%s materialized while the WAL worker was paused: observation=%#v err=%v", name, early.observation, early.err)
+		case <-time.After(22 * time.Second):
+		}
+		if err := resumeWAL(ctx); err != nil {
+			t.Fatalf("resume WAL materialization after %s: %v", name, err)
+		}
+		walPaused = false
+		late := <-materialized
+		if late.err != nil || late.observation.Disposition != "success" {
+			t.Fatalf("materialize %s after the worker resumed within the wait budget: observation=%#v err=%v", name, late.observation, late.err)
+		}
 	}
-	materialized := make(chan result, 1)
-	go func() {
-		observation, err := controller.ProcessStep(ctx, nil, inputs[2].Operations[1])
-		materialized <- result{observation, err}
-	}()
-	// The controller waits 30 seconds. Resume after 22 seconds, which is
-	// inside that budget.
-	select {
-	case early := <-materialized:
-		t.Fatalf("step 3 materialized while the WAL worker was paused: observation=%#v err=%v", early.observation, early.err)
-	case <-time.After(22 * time.Second):
+	pausedBarrier("step 3", func() scenarios.Operation { commit(2); return inputs[2].Operations[1] })
+
+	// Two accepted application pushes write the same value to the same row.
+	// The second push has no source transaction ID, and its row values equal
+	// the first push, so only its own write fence can bind it.
+	token, err := harness.NativeBearerToken(ctx, "user-a", time.Now())
+	if err != nil {
+		t.Fatalf("sign application push token: %v", err)
 	}
-	if err := resumeWAL(ctx); err != nil {
-		t.Fatalf("resume WAL materialization: %v", err)
+	client := connectRealProtocolClient(t, ctx, harness, token, "client-a")
+	table := requireRealTable(t, client, "items")
+	database, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open application push database: %v", err)
 	}
-	walPaused = false
-	late := <-materialized
-	if late.err != nil || late.observation.Disposition != "success" {
-		t.Fatalf("materialize step 3 after the worker resumed within the wait budget: observation=%#v err=%v", late.observation, late.err)
+	t.Cleanup(func() { _ = database.Close() })
+	var runtimeRecordID string
+	if err := database.QueryRowContext(ctx, "SELECT id::text FROM public.items").Scan(&runtimeRecordID); err != nil {
+		t.Fatalf("read the runtime row identity: %v", err)
 	}
+	const pushedValue = "application-push-same-value"
+	var materializedStep struct {
+		StreamGeneration string `json:"stream_generation"`
+	}
+	if err := json.Unmarshal(inputs[2].Operations[1].Payload, &materializedStep); err != nil || materializedStep.StreamGeneration == "" {
+		t.Fatalf("read the authored stream generation: %v", err)
+	}
+	stream := materializedStep.StreamGeneration
+	push := func(index int, commitLSN, endLSN string) scenarios.Operation {
+		t.Helper()
+		var baseVersion string
+		if err := database.QueryRowContext(ctx, `
+			SELECT row_version::text FROM synchro.sync_captured_rows WHERE record_id = $1`, runtimeRecordID).Scan(&baseVersion); err != nil {
+			t.Fatalf("read the base version of push %d: %v", index, err)
+		}
+		batchID := fmt.Sprintf("00000000-0000-4000-8e00-%012d", index*10)
+		mutationID := fmt.Sprintf("00000000-0000-4000-8e00-%012d", index*10+1)
+		status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", phase4PushPayload(client, batchID, []map[string]any{{
+			"mutation_id":     mutationID,
+			"table":           table.ID,
+			"pk":              map[string]any{table.PrimaryKeyField: runtimeRecordID},
+			"authored_schema": client.Schema,
+			"op":              "update",
+			"base_version":    baseVersion,
+			"client_version":  phase4ClientVersion,
+			"columns":         map[string]any{table.ValueField: pushedValue},
+		}}))
+		if status != http.StatusOK || len(requireOutcomeList(t, response, "accepted")) != 1 {
+			t.Fatalf("application push %d status = %d, response = %#v", index, status, response)
+		}
+		authored, err := json.Marshal(map[string]any{
+			"authenticated_user_id": "user-a",
+			"request": map[string]any{
+				"client_id": "client-a", "client_generation": 1, "batch_id": batchID, "schema": scenario.Steps[0].NativeBinding.Workload.AuthoredSchema,
+				"mutations": []any{map[string]any{
+					"mutation_id": mutationID, "table": "items", "pk": map[string]any{"id": "cardinality-000001"},
+					"authored_schema": scenario.Steps[0].NativeBinding.Workload.AuthoredSchema, "op": "update",
+					"base_version": "authored-base-version", "client_version": phase4ClientVersion,
+					"columns": map[string]any{"value": pushedValue},
+				}},
+			},
+			"delivery": "apply", "commit_lsn": commitLSN, "end_lsn": endLSN,
+		})
+		if err != nil {
+			t.Fatalf("encode authored application push %d: %v", index, err)
+		}
+		operation := scenarios.Operation{ContractOperation: "push", Name: "submit", Payload: authored}
+		if err := controller.BindApplicationPush(operation); err != nil {
+			t.Fatalf("bind authored application push %d: %v", index, err)
+		}
+		return scenarios.Operation{
+			ContractOperation: "process", Name: "materialize-source-transaction",
+			Payload: json.RawMessage(fmt.Sprintf(`{"stream_generation":%q,"commit_lsn":%q}`, stream, commitLSN)),
+		}
+	}
+	first := push(1, "40", "41")
+	if observation, err := controller.ProcessStep(ctx, nil, first); err != nil || observation.Disposition != "success" {
+		t.Fatalf("materialize the first application push: observation=%#v err=%v", observation, err)
+	}
+	pausedBarrier("the second same-value application push", func() scenarios.Operation { return push(2, "50", "51") })
 }

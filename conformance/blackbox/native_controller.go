@@ -167,24 +167,26 @@ type nativeCaptureDependencyBinding struct {
 }
 
 type nativeTransactionBinding struct {
-	AuthoredStream       string
-	AuthoredCommitLSN    string
-	AuthoredEndLSN       string
-	AuthoredUserID       string
-	AuthoredClientID     string
-	AuthoredBatchID      string
-	AuthoredMutationIDs  []string
-	Events               []nativeEventBinding
-	RuntimeStream        string
-	RuntimeCommitLSN     string
-	RuntimeEndLSN        string
-	RuntimeRegistry      int64
-	RuntimeBatchID       string
-	RuntimeMutationIDs   []string
-	RuntimeEventOrdinals []uint64
-	SourceXID            uint64
-	Materialized         bool
-	ApplicationPush      bool
+	AuthoredStream      string
+	AuthoredCommitLSN   string
+	AuthoredEndLSN      string
+	AuthoredUserID      string
+	AuthoredClientID    string
+	AuthoredBatchID     string
+	AuthoredMutationIDs []string
+	Events              []nativeEventBinding
+	RuntimeStream       string
+	RuntimeCommitLSN    string
+	RuntimeEndLSN       string
+	RuntimeRegistry     int64
+	RuntimeBatchID      string
+	RuntimeMutationIDs  []string
+	// RuntimeAcceptedEvents records which authored events the server accepted.
+	RuntimeAcceptedEvents []bool
+	RuntimeEventOrdinals  []uint64
+	SourceXID             uint64
+	Materialized          bool
+	ApplicationPush       bool
 	// AuthoredMutationsDigest identifies the authored content of the accepted
 	// push. A replay carrying the same content must reproduce the sealed
 	// request byte for byte, so it replays the stored canonical request.
@@ -3172,10 +3174,17 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	}
 	c.mu.Unlock()
 
+	// An accepted application push commits in the adapter. Its durable write
+	// fences name its mutations, so it binds through them. A controller
+	// source commit binds through its source transaction ID.
+	resolve := c.resolveRuntimeTransaction
+	if transaction.ApplicationPush {
+		resolve = c.resolveMaterializedApplicationPush
+	}
 	walDeadline, cancelWAL := context.WithTimeout(ctx, c.waitTimeout)
 	var resolveErr error
 	for {
-		resolveErr = c.resolveRuntimeTransaction(walDeadline, transaction)
+		resolveErr = resolve(walDeadline, transaction)
 		if resolveErr == nil {
 			break
 		}
@@ -3185,19 +3194,6 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 		}
 	}
 	cancelWAL()
-	if transaction.ApplicationPush {
-		applicationDeadline, cancelApplication := context.WithTimeout(ctx, c.waitTimeout)
-		defer cancelApplication()
-		for {
-			resolveErr = c.resolveApplicationPushRecords(applicationDeadline, transaction)
-			if resolveErr == nil {
-				break
-			}
-			if err := waitNativePoll(applicationDeadline); err != nil {
-				return NativeStepObservation{}, fmt.Errorf("native application push records did not resolve: %w", resolveErr)
-			}
-		}
-	}
 	if err := c.validateRuntimeTransactionOrder(ctx, transaction); err != nil {
 		return NativeStepObservation{}, err
 	}
@@ -3311,6 +3307,7 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	}
 	transaction.RuntimeBatchID = runtimeBatchID
 	transaction.RuntimeMutationIDs = runtimeMutationIDs
+	transaction.RuntimeAcceptedEvents = acceptedEvents
 	for index := range transaction.Events {
 		if index >= len(acceptedEvents) || !acceptedEvents[index] {
 			continue
@@ -3373,6 +3370,87 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	return nil
 }
 
+// resolveMaterializedApplicationPush binds an accepted application push to
+// the WAL events of its own write fences. Two pushes can write the same row
+// with the same values, so a row identity and its captured values cannot
+// tell them apart. Each accepted mutation must have a materialized fence, and
+// the captured row must carry the version that fence wrote.
+func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Context, transaction *nativeTransactionBinding) error {
+	if err := c.resolveApplicationPushRecords(ctx, transaction); err != nil {
+		return err
+	}
+	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	type runtimeIdentity struct {
+		stream   string
+		commit   string
+		end      string
+		registry int64
+		ordinal  int64
+		version  string
+	}
+	identities := make([]runtimeIdentity, len(transaction.Events))
+	var first *runtimeIdentity
+	var previous int64 = -1
+	for index, event := range transaction.Events {
+		if !transaction.RuntimeAcceptedEvents[index] {
+			continue
+		}
+		identity := &identities[index]
+		if err := database.QueryRowContext(ctx, `
+			SELECT event.stream_generation, event.commit_lsn::text, wal.end_lsn::text,
+			       wal.registry_generation, event.event_ordinal, fence.row_version::text
+			FROM synchro.sync_write_fences fence
+			JOIN synchro.sync_wal_events event ON event.fence_id = fence.fence_id
+			JOIN synchro.sync_wal_transactions wal
+			  ON wal.stream_generation = event.stream_generation
+			 AND wal.commit_lsn = event.commit_lsn
+			WHERE fence.mutation_id = $1 AND fence.user_id = $2 AND fence.client_id = $3
+			  AND fence.registration_kind = 'synced' AND fence.coverage = 'materialized'
+			  AND event.physical_relation = $4 AND event.operation = $5
+			  AND COALESCE(fence.new_record_id, fence.old_record_id) = $6`,
+			transaction.RuntimeMutationIDs[index], transaction.AuthoredUserID, transaction.AuthoredClientID,
+			event.Table.RuntimeName, event.PhysicalOperation, event.RuntimeRecordID,
+		).Scan(&identity.stream, &identity.commit, &identity.end, &identity.registry, &identity.ordinal, &identity.version); err != nil {
+			return &nativeWALBindingError{
+				detail:   fmt.Sprintf("native application push fence is not materialized: mutation %s relation %s operation %s identity %s", transaction.RuntimeMutationIDs[index], event.Relation, event.PhysicalOperation, event.RuntimeRecordID),
+				relation: event.Table.RuntimeName,
+			}
+		}
+		if first == nil {
+			first = identity
+		} else if identity.stream != first.stream || identity.commit != first.commit || identity.end != first.end || identity.registry != first.registry {
+			return errors.New("native accepted application push spans more than one runtime WAL transaction")
+		}
+		if identity.ordinal <= previous {
+			return errors.New("native accepted application push order does not match runtime WAL order")
+		}
+		previous = identity.ordinal
+	}
+	if first == nil {
+		return errors.New("native application push has no accepted mutation to materialize")
+	}
+	ordinals := make([]uint64, 0, len(transaction.Events))
+	for index, event := range transaction.Events {
+		if !transaction.RuntimeAcceptedEvents[index] {
+			continue
+		}
+		if event.After != nil && event.After.Version != identities[index].version {
+			return fmt.Errorf("native application push row version %s is not the version %s of its fence", event.After.Version, identities[index].version)
+		}
+		ordinals = append(ordinals, uint64(identities[index].ordinal))
+	}
+	transaction.RuntimeStream = first.stream
+	transaction.RuntimeCommitLSN = first.commit
+	transaction.RuntimeEndLSN = first.end
+	transaction.RuntimeRegistry = first.registry
+	transaction.RuntimeEventOrdinals = ordinals
+	return nil
+}
+
 func nativeProcessTransactionIdentity(raw json.RawMessage) (string, string, error) {
 	var payload struct {
 		StreamGeneration string `json:"stream_generation"`
@@ -3393,15 +3471,10 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 	if len(binding.Events) == 0 {
 		return resolveNativeEmptyRuntimeTransaction(ctx, database, binding)
 	}
-	// A controller source commit records its transaction ID. An accepted
-	// application push commits in the adapter, so it has none, and its
-	// identity binds through the push records instead.
-	var sourceXID any
-	if binding.SourceXID != 0 {
-		sourceXID = fmt.Sprintf("%d", binding.SourceXID)
-	} else if !binding.ApplicationPush {
+	if binding.SourceXID == 0 {
 		return errors.New("native source transaction has no source transaction ID")
 	}
+	sourceXID := fmt.Sprintf("%d", binding.SourceXID)
 	type runtimeIdentity struct {
 		stream   string
 		commit   string
@@ -3431,7 +3504,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND event.operation = $2
 				  AND (fence.new_capture_key = $3::jsonb OR fence.old_capture_key = $3::jsonb)
-				  AND ($4::xid IS NULL OR transaction.source_xid = $4::xid)
+				  AND transaction.source_xid = $4::xid
 				ORDER BY event.commit_lsn DESC
 				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
@@ -3448,7 +3521,7 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
 				  AND event.operation = $3
-				  AND ($4::xid IS NULL OR transaction.source_xid = $4::xid)
+				  AND transaction.source_xid = $4::xid
 				ORDER BY event.commit_lsn DESC
 				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
@@ -3532,7 +3605,8 @@ func (c *NativeController) validateRuntimeTransactionOrder(ctx context.Context, 
 		if !authoredValid || !runtimeValid {
 			return errors.New("native WAL commit position is invalid")
 		}
-		if authoredOrder != 0 && runtimeOrder != 0 && authoredOrder != runtimeOrder {
+		// Distinct authored transactions are distinct runtime transactions.
+		if authoredOrder != runtimeOrder || runtimeOrder == 0 {
 			return errors.New("authored WAL commit order does not match runtime commit order")
 		}
 	}
