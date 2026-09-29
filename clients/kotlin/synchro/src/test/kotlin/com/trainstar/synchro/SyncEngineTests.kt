@@ -2142,7 +2142,10 @@ class SyncEngineTests {
             when {
                 request.path!!.endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
                 request.path!!.endsWith("/sync/pull") -> {
-                    resumedPullJSON = request.body.readUtf8()
+                    val body = request.body.readUtf8()
+                    if (resumedPullJSON == null) {
+                        resumedPullJSON = body
+                    }
                     mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 }
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
@@ -2392,6 +2395,60 @@ class SyncEngineTests {
             assertTrue(pullCount.get() > pullsBefore)
             assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
             assertEquals(0, db.query("SELECT scope_id FROM _synchro_scopes WHERE cursor IS NULL").size)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun testReplayedPullPushesIntentCapturedDuringBackoff() = runTest {
+        val timing = BlockingRetryTiming(5_000L)
+        val failNextPull = AtomicBoolean(false)
+        val pushedIDs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        // A long debounce keeps the write from starting its own cycle, so only
+        // the replayed cycle can push it.
+        val (engine, db) = makeIntegrationEnv(retryTiming = timing, pushDebounce = 600.0) { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                path.endsWith("/sync/pull") -> if (failNextPull.compareAndSet(true, false)) {
+                    MockResponse().setResponseCode(503).setHeader("Retry-After", "30").setBody(RETRYABLE_503_ERROR_JSON)
+                } else {
+                    mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                }
+                path.endsWith("/sync/push") -> {
+                    val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
+                    val accepted = body.getValue("mutations").jsonArray.map { mutation ->
+                        pushedIDs += mutation.jsonObject.getValue("pk").toString()
+                        acceptedPushOutcomeJSON(mutation = mutation.jsonObject, serverVersion = "2026-01-01T14:00:00.000000Z")
+                    }
+                    mockResponse("""{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""")
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            failNextPull.set(true)
+            val syncJob = CoroutineScope(Dispatchers.Default).launch { engine.syncNow() }
+            timing.awaitNextSleep(10, TimeUnit.SECONDS)
+            val backoff = requireNotNull(DurableBackoffStore.load(db))
+            assertEquals(RetryOperation.PULLING, backoff.resumeState)
+            db.applicationExecute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("backoff-write", "captured during backoff", "u1", "2026-01-01T10:00:00.000Z"),
+            )
+            timing.releaseAt(backoff.nextRetryAtMs)
+            syncJob.join()
+
+            // The replayed pull is one step. The same run continues the normal
+            // cycle, so the intent captured during backoff is pushed.
+            assertEquals(1, pushedIDs.size)
+            assertTrue(pushedIDs.single().contains("backoff-write"))
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
         } finally {
             engine.stop()
         }

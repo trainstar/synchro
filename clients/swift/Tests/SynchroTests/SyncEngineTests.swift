@@ -1506,7 +1506,7 @@ final class SyncEngineTests: XCTestCase {
         })
     }
 
-    func testRecoveredPullBackoffReplaysBeforePendingPush() async throws {
+    func testRecoveredPullBackoffReplaysThenPushesPendingIntent() async throws {
         let dbPath = tempDBPath()
         let clientID = "recovered-pull-device"
         let database = try SynchroDatabase(path: dbPath)
@@ -1562,13 +1562,28 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.connectResumeJSON)
             } else if path.hasSuffix("/sync/push") {
                 callLog.append("push")
-                return try self.mockResponse(statusCode: 500, json: ["error": "push ran before pull replay"])
+                let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+                let accepted = try (body["mutations"] as! [[String: Any]]).map {
+                    try self.acceptedPushOutcome(
+                        mutation: $0,
+                        updatedAt: "2026-01-01T14:00:00.000000Z",
+                        serverVersion: "2026-01-01T14:00:00.000000Z"
+                    )
+                }
+                return try self.mockResponse(json: [
+                    "batch_id": body["batch_id"]!,
+                    "server_time": "2026-01-01T14:00:00.000Z",
+                    "accepted": accepted,
+                    "rejected": [] as [Any],
+                ])
             } else if path.hasSuffix("/sync/rebuild") {
                 callLog.append("rebuild")
                 return try self.mockResponse(statusCode: 500, json: ["error": "unexpected rebuild"])
             } else if path.hasSuffix("/sync/pull") {
                 callLog.append("pull")
-                replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
+                if replayedRequestJSON == nil {
+                    replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
+                }
                 return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
@@ -1581,14 +1596,17 @@ final class SyncEngineTests: XCTestCase {
         }
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "pull"])
+        // The replayed pull is one step. The same run then continues the normal
+        // scheduler order and pushes the pending intent.
+        XCTAssertEqual(callLog, ["connect", "pull", "push", "pull"])
         XCTAssertEqual(replayedRequestJSON, requestJSON)
+        XCTAssertFalse(try ChangeTracker(database: recoveredDatabase).hasPendingChanges())
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         })
     }
 
-    func testRecoveredRebuildBackoffReplaysBeforePendingPush() async throws {
+    func testRecoveredRebuildBackoffReplaysThenPushesPendingIntent() async throws {
         let dbPath = tempDBPath()
         let clientID = "recovered-rebuild-device"
         let database = try SynchroDatabase(path: dbPath)
@@ -1654,7 +1672,20 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(json: self.connectResumeJSON)
             } else if path.hasSuffix("/sync/push") {
                 callLog.append("push")
-                return try self.mockResponse(statusCode: 500, json: ["error": "push ran before rebuild replay"])
+                let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+                let accepted = try (body["mutations"] as! [[String: Any]]).map {
+                    try self.acceptedPushOutcome(
+                        mutation: $0,
+                        updatedAt: "2026-01-01T14:00:00.000000Z",
+                        serverVersion: "2026-01-01T14:00:00.000000Z"
+                    )
+                }
+                return try self.mockResponse(json: [
+                    "batch_id": body["batch_id"]!,
+                    "server_time": "2026-01-01T14:00:00.000Z",
+                    "accepted": accepted,
+                    "rejected": [] as [Any],
+                ])
             } else if path.hasSuffix("/sync/rebuild") {
                 callLog.append("rebuild")
                 replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
@@ -1673,8 +1704,9 @@ final class SyncEngineTests: XCTestCase {
         }
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "rebuild", "pull"])
+        XCTAssertEqual(callLog, ["connect", "rebuild", "push", "pull"])
         XCTAssertEqual(replayedRequestJSON, requestJSON)
+        XCTAssertFalse(try ChangeTracker(database: recoveredDatabase).hasPendingChanges())
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         })

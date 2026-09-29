@@ -549,7 +549,11 @@ func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox
 	observation, err := swiftScenarioWire(call, "push")
 	if err != nil {
 		if err := waitForTransportObservation(ctx, state, checkpoint, "push"); err != nil {
-			return runnerResult{}, fmt.Errorf("wait for Swift pending-cycle %s push: %w", name, err)
+			classes := make([]string, 0, len(call.transportObservations))
+			for _, observed := range call.transportObservations {
+				classes = append(classes, fmt.Sprintf("%s:%d", observed.OperationClass, observed.StatusCode))
+			}
+			return runnerResult{}, fmt.Errorf("wait for Swift pending-cycle %s push after call completion %q with transport %v: %w", name, call.Completion, classes, err)
 		}
 		observations, err := state.session.ObservationsAfter(checkpoint)
 		if err != nil {

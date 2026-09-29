@@ -170,6 +170,8 @@ From `ready`, the scheduler uses this order:
 
 Normal cycles and schema migrations push eligible pending intent before rebuild or incremental pull. Schema DDL and affected-scope marking commit first under the target manifest; pull stays paused while target-schema successor batches reconcile, then rebuild begins. This makes offline writes authoritative before a rebuild snapshot can replace local materialization. A rebuild then establishes scope state that includes every successfully pushed write whose WAL fence is materialized at its snapshot boundary.
 
+A resumed interrupted operation is one step, not a complete cycle. After it completes, the client continues from `ready` in this scheduler order in the same run. A completed incremental pull ends the run only when no pending intent and no rebuild-required scope remain.
+
 ## Mutation Reconciliation Flow
 
 ### Immutable Sealed Push Batches And Response-Loss Replay

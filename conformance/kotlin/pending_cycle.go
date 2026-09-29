@@ -591,11 +591,36 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 	if result, processErr := controller.ProcessStep(ctx, nil, step.Materialize); processErr != nil || result.Disposition != "success" {
 		return Result{}, fmt.Errorf("materialize Kotlin Android pending-cycle %s: %w", name, kotlinResultError(processErr, result.Disposition))
 	}
-	snapshot, err := platform.scenarioSnapshot(ctx, client)
-	if err != nil {
-		return Result{}, fmt.Errorf("capture Kotlin Android pending-cycle synchronized %s: %w", name, err)
+	// The start call returns while the managed loop can still finish its run.
+	// A rebuild after the push can receive capture_pending until the push is
+	// materialized, and it retries after its backoff. Inspect the client when
+	// the run has settled: ready, with every scope cursor installed.
+	for {
+		snapshot, err := platform.scenarioSnapshot(ctx, client)
+		if err != nil {
+			return Result{}, fmt.Errorf("capture Kotlin Android pending-cycle synchronized %s: %w", name, err)
+		}
+		scopes, err := androidCursorScopeStates(snapshot.ScopeStates)
+		if err != nil {
+			return Result{}, err
+		}
+		settled := snapshot.Status != nil && *snapshot.Status == "ready" && len(scopes) != 0
+		for _, scope := range scopes {
+			settled = settled && scope.Cursor != nil
+		}
+		if settled {
+			return snapshot, nil
+		}
+		select {
+		case <-ctx.Done():
+			status := ""
+			if snapshot.Status != nil {
+				status = *snapshot.Status
+			}
+			return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s run did not settle: status %q, scopes %d: %w", name, status, len(scopes), ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
-	return snapshot, nil
 }
 
 func kotlinPendingCycleServerVersion(target scenarios.PendingCycleNativeTarget, snapshot Result) (string, error) {

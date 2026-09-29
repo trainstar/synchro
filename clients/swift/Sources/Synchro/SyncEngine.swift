@@ -985,6 +985,11 @@ final class SyncEngine: @unchecked Sendable {
                 try schemaManager.finishAppliedMigrationIfPossible()
             }
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            // The replayed pull completed the incremental step. The cycle
+            // continues only for work that must precede another pull.
+            if try changeTracker.hasPendingChanges() || !(try scopeIDsNeedingRebuild()).isEmpty {
+                try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
+            }
 
         case .rebuilding:
             let requestBody = Data(backoff.workIdentity.utf8)
@@ -993,12 +998,7 @@ final class SyncEngine: @unchecked Sendable {
             try await rebuildAssignedScopesNeedingCursor()
             try schemaManager.finishAppliedMigrationIfPossible()
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            try transition(to: .pulling, lifecycleGeneration: lifecycleGeneration)
-            try await runPullLoop(lifecycleGeneration: lifecycleGeneration)
-            if getSyncStatus() == .rebuilding {
-                try schemaManager.finishAppliedMigrationIfPossible()
-            }
-            try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
         }
     }
 
