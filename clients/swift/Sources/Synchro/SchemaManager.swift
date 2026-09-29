@@ -491,7 +491,9 @@ final class SchemaManager: @unchecked Sendable {
     /// The target values of the application rows that hold unresolved local
     /// intent. A reset rebuild must not overwrite or remove those rows (spec
     /// schema evolution, client migration step 8), so the reset keeps each
-    /// field that the target declares with the same field ID and type.
+    /// field that the target declares with the same field ID and type. The
+    /// restore skips a row that the target shape cannot hold, and the rebuild
+    /// then installs the server row for it.
     private struct ProtectedRows {
         let columns: [String]
         let rows: [[DatabaseValue]]
@@ -509,15 +511,7 @@ final class SchemaManager: @unchecked Sendable {
             }
             return (match.name, column.name)
         }
-        let keptTargets = Set(kept.map(\.target))
-        // A required target field without a kept value has no local value to
-        // hold, so such a row cannot exist in the target shape.
-        let representable = !target.columns.contains { column in
-            !column.nullable && !column.isPrimaryKey && (column.sqliteDefaultSQL ?? "").isEmpty
-                && !keptTargets.contains(column.name)
-        }
-        guard representable,
-              source.primaryKeyFieldID == target.primaryKeyFieldID,
+        guard source.primaryKeyFieldID == target.primaryKeyFieldID,
               let primaryKey = sourceColumns[source.primaryKeyFieldID],
               kept.contains(where: { $0.source == primaryKey.name }) else {
             return ProtectedRows(columns: [], rows: [])
@@ -542,7 +536,9 @@ final class SchemaManager: @unchecked Sendable {
         let columns = rows.columns.map(SQLiteHelpers.quoteIdentifier).joined(separator: ", ")
         let placeholders = Array(repeating: "?", count: rows.columns.count).joined(separator: ", ")
         let statement = try db.makeStatement(
-            sql: "INSERT INTO \(SQLiteHelpers.quoteIdentifier(target.tableName)) (\(columns)) VALUES (\(placeholders))"
+            // OR IGNORE skips only a row that violates a target NOT NULL, CHECK,
+            // UNIQUE, or PRIMARY KEY constraint. Other errors still fail the reset.
+            sql: "INSERT OR IGNORE INTO \(SQLiteHelpers.quoteIdentifier(target.tableName)) (\(columns)) VALUES (\(placeholders))"
         )
         for values in rows.rows {
             try statement.execute(arguments: StatementArguments(values))
