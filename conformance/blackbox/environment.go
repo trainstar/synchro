@@ -667,7 +667,7 @@ func verifyExtensionBundleForPostgreSQLVersion(path, requiredVersion, extensionV
 	}, nil
 }
 
-var extensionUpdateDestinationPattern = regexp.MustCompile(`^sharedir/extension/synchro_pg--\d+\.\d+\.\d+--\d+\.\d+\.\d+\.sql$`)
+var extensionUpdateDestinationPattern = regexp.MustCompile(`^sharedir/extension/synchro_pg--\d+\.\d+\.\d+(?:-rc\.\d+)?--\d+\.\d+\.\d+(?:-rc\.\d+)?\.sql$`)
 
 func extensionBundleDestinations(extensionVersion string) map[string]struct{} {
 	librarySuffix := "so"

@@ -446,9 +446,25 @@ func TestVerifyExtensionBundleRejectsTamperingAndWrongDestinations(t *testing.T)
 		}
 	})
 
+	t.Run("update scripts through a release candidate", func(t *testing.T) {
+		candidate := release.Version + "-rc.1"
+		root := writeExtensionBundleFixture(t)
+		manifest := appendExtensionBundleFileFixture(t, root, readExtensionManifestFixture(t, root), "candidate.sql", "sharedir/extension/synchro_pg--0.3.0--"+candidate+".sql")
+		manifest = appendExtensionBundleFileFixture(t, root, manifest, "release.sql", "sharedir/extension/synchro_pg--"+candidate+"--"+release.Version+".sql")
+		writeExtensionManifestFixture(t, root, manifest)
+		bundle, err := verifyExtensionBundle(root)
+		if err != nil {
+			t.Fatalf("extension bundle with release candidate update scripts rejected: %v", err)
+		}
+		if len(bundle.files) != 5 {
+			t.Fatalf("extension bundle has %d files, want 5", len(bundle.files))
+		}
+	})
+
 	t.Run("unexpected SQL destination", func(t *testing.T) {
 		for _, destination := range []string{
 			"sharedir/extension/synchro_pg--0.3.0.sql",
+			"sharedir/extension/synchro_pg--0.3.0--" + release.Version + "-beta.1.sql",
 			updateDestination + ".bak",
 			"sharedir/extension/synchro_pg--0.3--" + release.Version + ".sql",
 			"sharedir/extension/other--0.3.0--" + release.Version + ".sql",
