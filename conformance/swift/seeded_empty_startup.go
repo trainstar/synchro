@@ -269,34 +269,35 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 	if err != nil {
 		return SynchronizationResult{}, fmt.Errorf("run Swift floor client: %w", err)
 	}
+	// The below-floor receipt must not continue, so the shared scope rebuilds
+	// together with the identity scope. A continued receipt rebuilds one scope.
+	rebuilt := make(map[string]struct{}, 2)
+	pushes := 0
+	for _, observation := range call.transportObservations {
+		switch {
+		case observation.OperationClass == "rebuild" && observation.StatusCode == 200 && observation.RebuildResponseFacts != nil &&
+			!observation.RebuildResponseFacts.HasMore && observation.RebuildResponseFacts.HasFinalScopeCursor:
+			rebuilt[observation.RebuildResponseFacts.ScopeFingerprint] = struct{}{}
+		case observation.OperationClass == "push":
+			pushes++
+			if observation.RequestFacts == nil || observation.RequestFacts.MutationCount == nil || *observation.RequestFacts.MutationCount != 1 {
+				return SynchronizationResult{}, errors.New("Swift floor push does not carry the one offline mutation")
+			}
+		}
+		// A read after the accepted push can wait for its capture. The client
+		// retries that request, as the contract permits.
+		if observation.StatusCode != 200 && !(observation.StatusCode == 503 && observation.Retryable && observation.ErrorCode != nil && *observation.ErrorCode == "capture_pending") {
+			return SynchronizationResult{}, fmt.Errorf("Swift floor %s request returned %d", observation.OperationClass, observation.StatusCode)
+		}
+	}
+	if len(rebuilt) != 2 || pushes != 1 {
+		return SynchronizationResult{}, fmt.Errorf("Swift floor startup rebuilt %d scopes and pushed %d times, want 2 and 1", len(rebuilt), pushes)
+	}
 	if err := validateSwiftWireExpectation(scenario, seededFloorStep+"013", "connect", call); err != nil {
 		return SynchronizationResult{}, err
 	}
 	if err := validateSwiftWireExpectation(scenario, seededFloorStep+"014", "push", call); err != nil {
 		return SynchronizationResult{}, err
-	}
-	withoutPush := call
-	withoutPush.transportObservations = nil
-	pushes := 0
-	for _, observation := range call.transportObservations {
-		// The rebuild after the accepted push can wait for its capture. The
-		// client retries that request, as the contract permits.
-		if observation.StatusCode == 503 && observation.Retryable && observation.ErrorCode != nil && *observation.ErrorCode == "capture_pending" {
-			continue
-		}
-		if observation.OperationClass != "push" {
-			withoutPush.transportObservations = append(withoutPush.transportObservations, observation)
-			continue
-		}
-		pushes++
-		if observation.RequestFacts == nil || observation.RequestFacts.MutationCount == nil || *observation.RequestFacts.MutationCount != 1 {
-			return SynchronizationResult{}, errors.New("Swift floor push does not carry the one offline mutation")
-		}
-	}
-	// The below-floor receipt must not continue, so the shared scope rebuilds
-	// together with the identity scope.
-	if err := validateSwiftSeededStartupTrace(withoutPush, 1, 2, 2); pushes != 1 || err != nil {
-		return SynchronizationResult{}, fmt.Errorf("Swift floor startup pushes=%d want 1: %v", pushes, err)
 	}
 	// The server capture compares the server row of the bound push with the
 	// authored write, field by field.

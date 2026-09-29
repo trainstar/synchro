@@ -705,42 +705,45 @@ func (c *SeededEmptyStartupCoordinator) validateFloorCapture(raw json.RawMessage
 	if err != nil {
 		return err
 	}
-	withoutPush := trace
-	withoutPush.Observations = nil
+	// The below-floor receipt must not continue, so the shared scope rebuilds
+	// together with the identity scope. A continued receipt rebuilds one scope.
+	rebuilt := make(map[string]struct{}, 2)
 	pushes := 0
 	for _, observation := range trace.Observations {
-		// The rebuild after the accepted push can wait for its capture. The
-		// client retries that request, as the contract permits. The bridge trace
-		// has no error code, so a 503 read request stands for that wait.
-		if observation.StatusCode == 503 && (observation.OperationClass == "rebuild" || observation.OperationClass == "pull") {
-			continue
+		switch observation.OperationClass {
+		case "rebuild":
+			if observation.StatusCode != 200 {
+				break
+			}
+			rebuild, factsErr := decodeRebuildResponseFacts(observation.RebuildResponseFacts)
+			if factsErr != nil {
+				return fmt.Errorf("React Native floor rebuild facts are invalid: %w", factsErr)
+			}
+			if !*rebuild.HasMore && *rebuild.HasFinalScopeCursor {
+				rebuilt[*rebuild.ScopeFingerprint] = struct{}{}
+			}
+		case "push":
+			pushes++
+			mutations, countErr := requestInteger(observation, "mutation_count")
+			if countErr != nil || mutations != 1 {
+				return errors.New("React Native floor push does not carry the one offline mutation")
+			}
+			if err := validateSeededFloorWire(c.config.Scenario, c.floorSteps["014"].ID, observation); err != nil {
+				return err
+			}
 		}
-		if observation.OperationClass != "push" {
-			withoutPush.Observations = append(withoutPush.Observations, observation)
-			continue
-		}
-		pushes++
-		mutations, countErr := requestInteger(observation, "mutation_count")
-		if countErr != nil || mutations != 1 {
-			return errors.New("React Native floor push does not carry the one offline mutation")
-		}
-		if err := validateSeededFloorWire(c.config.Scenario, c.floorSteps["014"].ID, observation); err != nil {
-			return err
+		// A read after the accepted push can wait for its capture. The client
+		// retries that request, as the contract permits. The bridge trace has no
+		// error code, so a 503 read stands for that wait.
+		if observation.StatusCode != 200 && !(observation.StatusCode == 503 && (observation.OperationClass == "rebuild" || observation.OperationClass == "pull")) {
+			return fmt.Errorf("React Native floor %s request returned %d", observation.OperationClass, observation.StatusCode)
 		}
 	}
-	if pushes != 1 {
-		return fmt.Errorf("React Native floor startup pushes=%d want 1", pushes)
+	if len(rebuilt) != 2 || pushes != 1 {
+		return fmt.Errorf("React Native floor startup rebuilt %d scopes and pushed %d times, want 2 and 1", len(rebuilt), pushes)
 	}
-	// Renumber the remaining observations so the bootstrap validator sees one
-	// contiguous sequence without the push.
-	for index := range withoutPush.Observations {
-		withoutPush.Observations[index].Sequence = uint64(index + 1)
-	}
-	withoutPush.SequenceCheckpoint = uint64(len(withoutPush.Observations))
-	// The below-floor receipt must not continue, so the shared scope rebuilds
-	// together with the identity scope.
-	if err := validateSeededEmptyStartupBootstrapTrace(withoutPush, 1, 2, 2); err != nil {
-		return fmt.Errorf("React Native floor startup trace is invalid: %w", err)
+	if len(trace.Observations) == 0 || trace.Observations[0].OperationClass != "connect" {
+		return errors.New("React Native floor startup does not begin with connect")
 	}
 	if err := validateSeededFloorWire(c.config.Scenario, c.floorSteps["013"].ID, trace.Observations[0]); err != nil {
 		return err
@@ -803,7 +806,7 @@ func (c *SeededEmptyStartupCoordinator) validateCapture(client seededEmptyStartu
 	if err != nil {
 		return err
 	}
-	if err := validateSeededEmptyStartupBootstrapTrace(trace, client.connectScopeProjectionLen, client.pullScopeProjectionLen, client.pullScopeProjectionLen-client.connectScopeProjectionLen); err != nil {
+	if err := validateSeededEmptyStartupBootstrapTrace(trace, client.connectScopeProjectionLen, client.pullScopeProjectionLen); err != nil {
 		return fmt.Errorf("React Native seeded-empty-startup %s trace is invalid: %w", client.clientID, err)
 	}
 	if err := validateSeededEmptyStartupPullContinuation(trace, client.pullScopeProjectionLen); err != nil {
@@ -855,10 +858,11 @@ func (c *SeededEmptyStartupCoordinator) validateResumedCapture(client seededEmpt
 	return nil
 }
 
-func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConnectScopeCount, expectedPullScopeCount, expectedRebuildScopeCount uint64) error {
-	if expectedConnectScopeCount > expectedPullScopeCount || expectedRebuildScopeCount > expectedPullScopeCount {
+func validateSeededEmptyStartupBootstrapTrace(trace traceSnapshot, expectedConnectScopeCount, expectedPullScopeCount uint64) error {
+	if expectedConnectScopeCount > expectedPullScopeCount {
 		return errors.New("React Native seeded-empty-startup bootstrap scope projections are invalid")
 	}
+	expectedRebuildScopeCount := expectedPullScopeCount - expectedConnectScopeCount
 	minimumObservationCount := expectedRebuildScopeCount + 2
 	if trace.Overflowed || uint64(len(trace.Observations)) < minimumObservationCount || trace.SequenceCheckpoint != uint64(len(trace.Observations)) {
 		operations := make([]string, len(trace.Observations))
