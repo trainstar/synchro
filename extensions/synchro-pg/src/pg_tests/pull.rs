@@ -463,6 +463,9 @@
 
     #[pg_test]
     fn test_scope_digest_cache_fill_uses_writable_spi() {
+        // A digest needs the current manifest. Publish it in this transaction,
+        // so the test does not depend on a manifest that another test commits.
+        Spi::run("SELECT synchro_schema_manifest()").expect("publish current schema manifest");
         let checksums = Spi::connect_mut(|client| {
             crate::pull::compute_bucket_checksums(client, &["debug:cold".to_string()])
         })
