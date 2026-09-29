@@ -115,6 +115,13 @@ func RunForgedCursorScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if observed, processErr := controller.ProcessStep(ctx, nil, materialize); processErr != nil || observed.Disposition != "success" {
 		return ForgedCursorResult{}, fmt.Errorf("materialize Kotlin Android forged-cursor push: %w", kotlinResultError(processErr, observed.Disposition))
 	}
+	acknowledgement, err := scenarios.AcknowledgementOf(materialize)
+	if err != nil {
+		return ForgedCursorResult{}, err
+	}
+	if observed, processErr := controller.ProcessStep(ctx, nil, acknowledgement); processErr != nil || observed.Disposition != "success" {
+		return ForgedCursorResult{}, fmt.Errorf("await Kotlin Android forged-cursor push acknowledgement: %w", kotlinResultError(processErr, observed.Disposition))
+	}
 
 	first, err := platform.AwaitStep(ctx, AwaitRequest{Client: client, CallID: callID, Operation: firstPage})
 	if err != nil {
@@ -243,7 +250,7 @@ func validateKotlinForgedCursorServerFreeze(before, after scenarios.StateFacts) 
 		return fmt.Errorf("normalize Kotlin Android forged-cursor post-rejection state: %w", err)
 	}
 	if !reflect.DeepEqual(normalizedBefore, normalizedAfter) {
-		return errors.New("Kotlin Android forged continuation changed authoritative server state")
+		return fmt.Errorf("Kotlin Android forged continuation changed authoritative server state: %s", scenarios.StateFactsDifferences(normalizedBefore, normalizedAfter))
 	}
 	return nil
 }

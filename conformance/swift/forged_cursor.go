@@ -101,6 +101,13 @@ func RunForgedCursorScenario(ctx context.Context, scenario scenarios.Scenario, c
 	if err != nil || materialized.Disposition != "success" {
 		return ForgedCursorResult{}, fmt.Errorf("materialize Swift forged-cursor push: %w", resultError(err, materialized.Disposition))
 	}
+	acknowledgement, err := scenarios.AcknowledgementOf(materialize)
+	if err != nil {
+		return ForgedCursorResult{}, err
+	}
+	if acknowledged, err := controller.ProcessStep(ctx, nil, acknowledgement); err != nil || acknowledged.Disposition != "success" {
+		return ForgedCursorResult{}, fmt.Errorf("await Swift forged-cursor push acknowledgement: %w", resultError(err, acknowledged.Disposition))
+	}
 
 	if err := platform.armRebuildCursorOverride(client.ClientID, forgedRebuildCursor); err != nil {
 		return ForgedCursorResult{}, fmt.Errorf("arm Swift forged rebuild continuation: %w", err)
@@ -231,7 +238,7 @@ func validateForgedCursorServerFreeze(before, after scenarios.StateFacts) error 
 		return fmt.Errorf("normalize Swift forged-cursor post-rejection state: %w", err)
 	}
 	if !reflect.DeepEqual(normalizedBefore, normalizedAfter) {
-		return errors.New("Swift forged continuation changed authoritative server state")
+		return fmt.Errorf("Swift forged continuation changed authoritative server state: %s", scenarios.StateFactsDifferences(normalizedBefore, normalizedAfter))
 	}
 	return nil
 }

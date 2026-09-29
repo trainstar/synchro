@@ -174,3 +174,18 @@ func TestStateFactsProjectionEqualIgnoresOmittedServerObservationFamilies(t *tes
 		t.Fatal("explicit empty row scope edges accepted an observation")
 	}
 }
+
+func TestStateFactsDifferencesNameOnlyChangedFamilies(t *testing.T) {
+	one, two := uint64(1), uint64(2)
+	before := StateFacts{RowCount: &one, Rows: []RowFact{{TableID: "items", CanonicalWireJSON: `"a"`, Version: "v1"}}}
+	after := CloneStateFacts(before)
+	if got := StateFactsDifferences(before, after); got != "" {
+		t.Fatalf("equal facts reported differences: %s", got)
+	}
+	after.RowCount = &two
+	after.Rows[0].Version = "v2"
+	want := `row_count: before=1 after=2; rows: before=[{"table_id":"items","canonical_wire_json":"\"a\"","version":"v1","checksum":""}] after=[{"table_id":"items","canonical_wire_json":"\"a\"","version":"v2","checksum":""}]`
+	if got := StateFactsDifferences(before, after); got != want {
+		t.Fatalf("differences = %s, want %s", got, want)
+	}
+}
