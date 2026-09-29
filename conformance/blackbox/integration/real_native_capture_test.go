@@ -457,7 +457,7 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign application push token: %v", err)
 	}
-	client := connectRealProtocolClient(t, ctx, harness, token, "client-a")
+	client := connectRealProtocolClient(t, ctx, harness, token, "client-a", "user:user-a")
 	table := requireRealTable(t, client, "items")
 	database, err := sql.Open("pgx", harness.DatabaseURL())
 	if err != nil {
