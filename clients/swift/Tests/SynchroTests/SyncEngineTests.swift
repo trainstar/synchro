@@ -1581,7 +1581,9 @@ final class SyncEngineTests: XCTestCase {
                 return try self.mockResponse(statusCode: 500, json: ["error": "unexpected rebuild"])
             } else if path.hasSuffix("/sync/pull") {
                 callLog.append("pull")
-                replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
+                if replayedRequestJSON == nil {
+                    replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
+                }
                 return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
             }
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
@@ -2293,7 +2295,9 @@ final class SyncEngineTests: XCTestCase {
 
         await fulfillment(of: [initialSyncCompleted], timeout: 3.0)
 
-        XCTAssertEqual(pullCallCount, 2)
+        // The failed pull, its replay, and the pull of the normal cycle that
+        // follows the replay.
+        XCTAssertEqual(pullCallCount, 3)
         XCTAssertTrue(statuses.contains("backoff"))
         XCTAssertEqual(statuses.last, "ready")
 
