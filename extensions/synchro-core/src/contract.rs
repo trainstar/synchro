@@ -1093,11 +1093,6 @@ impl PushResponse {
                     if outcome.table != mutation.table || outcome.pk != mutation.pk {
                         return Err(ContractViolation::InvalidPushOutcomePartition);
                     }
-                    if matches!(mutation.op, Operation::Insert | Operation::Update)
-                        && outcome.server_row.is_none()
-                    {
-                        return Err(ContractViolation::InvalidPushOutcomePartition);
-                    }
                     expected_accepted.push(mutation.mutation_id.as_str());
                 }
                 (None, Some(outcome)) => {
@@ -3448,6 +3443,11 @@ mod tests {
             }
             assert!(value.validate_for_request(&request).is_err(), "{kind}");
         }
+
+        let mut absent_after_unit = response.clone();
+        absent_after_unit.accepted[0].server_row = None;
+        absent_after_unit.accepted[0].row_checksum = None;
+        assert_eq!(absent_after_unit.validate_for_request(&request), Ok(()));
 
         let mut rejected_request = push_request();
         rejected_request.mutations[0].op = Operation::Delete;

@@ -820,7 +820,7 @@ final class PushProcessor: @unchecked Sendable {
                     later: later
                 )
             }
-            let hasAuthoritativeAbsence = outcome.serverRow == nil && source?.operation == "delete"
+            let hasAuthoritativeAbsence = outcome.serverRow == nil
             let canApply = currentTable != nil
                 && (outcome.serverRow == nil || projection != nil)
                 && patches != nil

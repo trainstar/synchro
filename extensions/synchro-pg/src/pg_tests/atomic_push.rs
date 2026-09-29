@@ -584,3 +584,229 @@
         assert_eq!(response.json["accepted"][0]["status"], "applied");
         assert_eq!(source_order_count(&[first]), 1);
     }
+
+    fn deferred_write_applied(record_id: &str) -> bool {
+        Spi::get_one_with_args(
+            "SELECT amount = 42 FROM test_orders WHERE id = $1::uuid",
+            &[record_id.into()],
+        )
+        .unwrap()
+        .expect("deferred write source row")
+    }
+
+    fn write_fence_mutations(record_id: &str) -> Vec<Option<String>> {
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT mutation_id FROM sync_write_fences
+                     WHERE transaction_xid = pg_current_xact_id()
+                       AND operation = 'update'
+                       AND new_record_id = $1
+                     ORDER BY dml_ordinal",
+                    None,
+                    &[record_id.into()],
+                )
+                .unwrap()
+                .map(|row| row.get_by_name::<String, &str>("mutation_id").unwrap())
+                .collect()
+        })
+    }
+
+    /// A push unit ends at its constraint check. Each accepted outcome reports the row state after
+    /// that check, and the last mutation of the unit owns each write that the check causes.
+    #[pg_test]
+    fn test_push_unit_outcomes_include_deferred_trigger_writes() {
+        setup_test_tables();
+        let user_id = "u1";
+        let client_id = "c1";
+        register_client(user_id, client_id);
+        let atomic_other = "a9000000-0000-4000-8000-000000000001";
+        let single_other = "a9000000-0000-4000-8000-000000000002";
+        insert_live_order(atomic_other, user_id, "atomic-other");
+        insert_live_order(single_other, user_id, "single-other");
+        Spi::run(
+            "CREATE FUNCTION public.test_orders_deferred_write() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 UPDATE public.test_orders SET amount = 42 WHERE id = NEW.id;
+                 UPDATE public.test_orders SET title = 'deferred-written'
+                 WHERE id = split_part(NEW.title, ':', 2)::uuid;
+                 RETURN NULL;
+             END;
+             $$;
+             CREATE CONSTRAINT TRIGGER test_orders_deferred_write
+             AFTER INSERT ON public.test_orders
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW WHEN (NEW.title LIKE 'deferred:%')
+             EXECUTE FUNCTION public.test_orders_deferred_write()",
+        )
+        .unwrap();
+
+        let atomic_first = "a9000000-0000-4000-8000-000000000011";
+        let atomic_last = "a9000000-0000-4000-8000-000000000012";
+        let atomic_mutations = vec![
+            order_insert(user_id, &format!("deferred:{atomic_other}"), atomic_first),
+            order_insert(user_id, "atomic-last", atomic_last),
+        ];
+        let atomic_request = atomic_push_request(
+            user_id,
+            client_id,
+            "atomic-deferred-write",
+            atomic_mutations.clone(),
+        );
+        let atomic = execute_push(user_id, &atomic_request);
+
+        assert_eq!(atomic.json["rejected"], json!([]));
+        let accepted = atomic.json["accepted"].as_array().expect("atomic accepted");
+        assert!(deferred_write_applied(atomic_first));
+        for (outcome, record_id) in accepted.iter().zip([atomic_first, atomic_last]) {
+            assert_row_outcome_matches_source(outcome, "test_orders", record_id);
+        }
+        let atomic_last_id = atomic_mutations[1]["mutation_id"].as_str().unwrap();
+        for record_id in [atomic_first, atomic_other] {
+            assert_eq!(
+                write_fence_mutations(record_id),
+                vec![Some(atomic_last_id.to_string())]
+            );
+        }
+        let replay = execute_push(user_id, &atomic_request);
+        assert_eq!(replay.raw, atomic.raw);
+
+        let single_record = "a9000000-0000-4000-8000-000000000021";
+        let single_mutation = order_insert(user_id, &format!("deferred:{single_other}"), single_record);
+        let single = execute_push(
+            user_id,
+            &push_request(
+                user_id,
+                client_id,
+                "single-deferred-write",
+                vec![single_mutation.clone()],
+            ),
+        );
+
+        let outcome = &single.json["accepted"][0];
+        assert!(deferred_write_applied(single_record));
+        assert_row_outcome_matches_source(outcome, "test_orders", single_record);
+        let single_id = single_mutation["mutation_id"].as_str().unwrap();
+        for record_id in [single_record, single_other] {
+            assert_eq!(
+                write_fence_mutations(record_id),
+                vec![Some(single_id.to_string())]
+            );
+        }
+    }
+
+    fn delete_fence_version(record_id: &str) -> String {
+        Spi::get_one_with_args(
+            "SELECT row_version::text FROM sync_write_fences
+             WHERE transaction_xid = pg_current_xact_id()
+               AND operation = 'delete'
+               AND old_record_id = $1
+               AND new_record_id IS NULL",
+            &[record_id.into()],
+        )
+        .unwrap()
+        .expect("delete fence version")
+    }
+
+    fn assert_absent_row_outcome(outcome: &Value, record_id: &str) {
+        assert_eq!(outcome["status"], "applied");
+        assert!(outcome.get("server_row").is_none());
+        assert!(outcome.get("row_checksum").is_none());
+        assert_eq!(
+            outcome["server_version"].as_str(),
+            Some(delete_fence_version(record_id).as_str())
+        );
+        assert_eq!(source_order_count(&[record_id]), 0);
+    }
+
+    fn order_title_update(
+        user_id: &str,
+        label: &str,
+        record_id: &str,
+        base_version: &str,
+        title: &str,
+    ) -> Value {
+        push_mutation(
+            (user_id, "c1"),
+            label,
+            "test_orders",
+            "update",
+            record_id,
+            Some(base_version),
+            Some(&[("title", json!(title))]),
+        )
+    }
+
+    /// An accepted outcome reports absence when a later write of its push unit removes the row.
+    #[pg_test]
+    fn test_push_unit_outcome_reports_row_removed_in_unit() {
+        setup_test_tables();
+        let user_id = "u1";
+        let client_id = "c1";
+        register_client(user_id, client_id);
+        Spi::run(
+            // A foreign key cascade runs as the table owner, so this model of it does too.
+            "CREATE FUNCTION public.test_orders_remove_named() RETURNS trigger
+             LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+             BEGIN
+                 DELETE FROM public.test_orders
+                 WHERE id = split_part(NEW.title, ':', 2)::uuid;
+                 RETURN NULL;
+             END;
+             $$;
+             CREATE TRIGGER test_orders_remove_named
+             AFTER UPDATE ON public.test_orders
+             FOR EACH ROW WHEN (NEW.title LIKE 'remove:%')
+             EXECUTE FUNCTION public.test_orders_remove_named()",
+        )
+        .unwrap();
+
+        let child = "a9100000-0000-4000-8000-000000000001";
+        let parent = "a9100000-0000-4000-8000-000000000002";
+        let child_base = insert_live_order(child, user_id, "child");
+        let parent_base = insert_live_order(parent, user_id, "parent");
+        let atomic_request = atomic_push_request(
+            user_id,
+            client_id,
+            "atomic-remove-earlier",
+            vec![
+                order_title_update(user_id, "atomic-child-edit", child, &child_base, "child-edited"),
+                order_title_update(
+                    user_id,
+                    "atomic-parent-remove",
+                    parent,
+                    &parent_base,
+                    &format!("remove:{child}"),
+                ),
+            ],
+        );
+        let atomic = execute_push(user_id, &atomic_request);
+
+        assert_eq!(atomic.json["rejected"], json!([]));
+        assert_absent_row_outcome(&atomic.json["accepted"][0], child);
+        assert_row_outcome_matches_source(&atomic.json["accepted"][1], "test_orders", parent);
+        let replay = execute_push(user_id, &atomic_request);
+        assert_eq!(replay.raw, atomic.raw);
+
+        let single = "a9100000-0000-4000-8000-000000000003";
+        let single_base = insert_live_order(single, user_id, "single");
+        let response = execute_push(
+            user_id,
+            &push_request(
+                user_id,
+                client_id,
+                "single-remove-self",
+                vec![order_title_update(
+                    user_id,
+                    "single-remove-self",
+                    single,
+                    &single_base,
+                    &format!("remove:{single}"),
+                )],
+            ),
+        );
+
+        assert_eq!(response.json["rejected"], json!([]));
+        assert_absent_row_outcome(&response.json["accepted"][0], single);
+    }

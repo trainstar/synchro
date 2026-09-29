@@ -935,19 +935,12 @@ public struct PushResponse: Codable, Sendable, Equatable {
         guard !outcome.serverVersion.isEmpty else {
             throw ContractViolation.pushOutcomeMismatch("accepted outcome has an empty server version")
         }
-        let hasRow = outcome.serverRow != nil
-        let hasChecksum = outcome.rowChecksum != nil
-        switch request.op {
-        case .insert, .update:
-            guard hasRow, hasChecksum else {
-                throw ContractViolation.pushOutcomeMismatch("accepted insert or update lacks its row or checksum")
-            }
-        case .delete:
-            guard hasRow == hasChecksum else {
-                throw ContractViolation.pushOutcomeMismatch("accepted delete row and checksum must be paired")
-            }
-        case .upsert:
+        guard request.op != .upsert else {
             throw ContractViolation.pushOutcomeMismatch("accepted outcome targets an unsupported push operation")
+        }
+        // An accepted outcome without a row states that the row is absent after its push unit.
+        guard (outcome.serverRow != nil) == (outcome.rowChecksum != nil) else {
+            throw ContractViolation.pushOutcomeMismatch("accepted row and checksum must be paired")
         }
     }
 

@@ -1646,6 +1646,7 @@ test-rn-e2e-android-run: test-rn-e2e-android-smoke
 .PHONY: test-rn-scenarios-ios test-rn-scenarios-android
 test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
 	@set -eu; \
+		$(WARM_CONNECT_ENV) \
 		case "$@" in \
 			test-rn-scenarios-ios) platform=IOS; configuration=ios.sim.debug ;; \
 			test-rn-scenarios-android) platform=Android; configuration="$(RN_ANDROID_DETOX_CONFIG)"; \
@@ -2082,17 +2083,17 @@ local-postgres-start: build-local-postgres
 		rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
 		exit 1
 
+# Each provisioner cleanup stage has its own deadline, so the stop waits for
+# exit. A forced kill would skip cluster removal and extension restoration.
+# The start time distinguishes the provisioner from a process that reuses its PID.
 local-postgres-stop:
 	@set -eu; \
 		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ]; then \
 			pid="$$(cat "$(LOCAL_POSTGRES_PID_FILE)")"; \
 			if kill -0 "$$pid" 2>/dev/null; then \
+				started="$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)"; \
 				kill "$$pid"; \
-				for attempt in $$(seq 1 30); do \
-					if ! kill -0 "$$pid" 2>/dev/null; then break; fi; \
-					sleep 1; \
-				 done; \
-				if kill -0 "$$pid" 2>/dev/null; then kill -9 "$$pid" 2>/dev/null || true; fi; \
+				while [ -n "$$started" ] && [ "$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)" = "$$started" ]; do sleep 1; done; \
 				 echo "local PostgreSQL provisioner stopped"; \
 			else \
 				echo "local PostgreSQL provisioner is not running"; \

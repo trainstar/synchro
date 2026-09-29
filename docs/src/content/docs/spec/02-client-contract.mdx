@@ -435,14 +435,15 @@ affected assigned scope for current-schema rebuild.
 
 ### Accepted outcomes
 
-For an accepted insert or update, the outcome contains the complete canonical
-`server_row`, matching `row_checksum`, and new opaque `server_version`. For an
-accepted delete, the outcome contains the new opaque version and either the
-authoritative source tombstone with its matching checksum or no row and no
-checksum for a fence-only delete.
+An accepted outcome contains the new opaque `server_version` and reports the
+row state after its push unit. If the row exists after the unit, the outcome
+contains the complete canonical `server_row` or source tombstone and the
+matching `row_checksum`. If the row does not exist after the unit, the outcome
+contains no row and no checksum. This absence applies to every operation. A
+fence-only delete is one example. A later write in the same unit, such as a
+cascade delete in an atomic group, can also remove an inserted or updated row.
 
-The client verifies any row checksum, applies the canonical row or deletion
-state, stores the returned opaque server version, records the accepted outcome,
+The client verifies any row checksum, applies the canonical row or absence, stores the returned opaque server version, records the accepted outcome,
 and removes the mutation from the sendable queue in one local transaction. A
 completed mutation is not applied again when its exact replay response is
 received.

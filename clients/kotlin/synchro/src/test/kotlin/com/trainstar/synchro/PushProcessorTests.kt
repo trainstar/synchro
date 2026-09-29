@@ -824,6 +824,33 @@ class PushProcessorTests {
     }
 
     @Test
+    fun acceptedUpdateWithoutRowAppliesAbsenceAfterPushUnit() {
+        val (database, tracker, processor) = environment()
+        installServerRow(database, "server", "sv-start")
+        database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("local edit", "o1"))
+        val sent = tracker.pendingChanges().single()
+
+        processor.applyAccepted(
+            listOf(
+                AcceptedMutation(
+                    mutationID = sent.mutationID,
+                    table = localTable.tableID,
+                    pk = JsonObject(mapOf("id" to JsonPrimitive("o1"))),
+                    outcomeSchema = SchemaRef(1, PROTOCOL_TEST_SCHEMA_HASH),
+                    status = MutationStatus.APPLIED,
+                    serverVersion = "removed-in-unit",
+                ),
+            ),
+            listOf(localTable),
+            mapOf(sent.mutationID to sent),
+        )
+
+        assertNull(database.queryOne("SELECT title FROM orders WHERE id = 'o1'"))
+        assertEquals("removed-in-unit", database.readTransaction { SynchroMeta.getRowVersion(it, "orders", "o1") })
+        assertTrue(tracker.pendingChanges().isEmpty())
+    }
+
+    @Test
     fun acceptedDeleteFencePreservesLaterProjectionAndStoresReturnedVersion() {
         val (database, tracker, processor) = environment()
         installServerRow(database, "server", "sv-start")

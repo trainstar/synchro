@@ -666,7 +666,7 @@ HTTP 200 push success has only these per-mutation statuses:
 
 | Status | Array | Codes | Required authoritative data |
 | --- | --- | --- | --- |
-| `applied` | `accepted` | No `code` | Insert and update require full `server_row`, matching `row_checksum`, and new `server_version`. Delete requires new `server_version`; it includes a full tombstone row and matching checksum for a source tombstone and omits both for a fence-only delete. |
+| `applied` | `accepted` | No `code` | New `server_version` is required. The outcome reports the row state after its push unit, for every operation. A row that exists after the unit, which includes a source tombstone, requires full `server_row` and matching `row_checksum`. A row that does not exist after the unit, such as after a fence-only delete, omits both. |
 | `conflict` | `rejected` | `version_conflict`, `row_already_exists`, `row_deleted`, `row_not_found` | `message` plus current authoritative state. A live row or source tombstone includes row, matching checksum, and version. A fence-only delete includes version without row or checksum. True absence includes neither. |
 | `rejected_terminal` | `rejected` | `schema_incompatible`, `table_not_synced`, `policy_rejected`, `validation_failed`, `atomic_batch_rejected` | `message`; no `server_row` or `server_version`. `schema_incompatible` also requires `retryable: false`, authored and current schema references, and sorted `incompatible_field_ids`. |
 
@@ -720,7 +720,7 @@ A request with `atomic: true` applies all of its mutations or none of them. The 
 - Two mutations have the same `table` and the same canonical `pk`.
 - A `mutation_id` already has a ledger row from a different batch.
 
-The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the server checks every deferrable constraint of the group. If every mutation applies and the check passes, the response is an ordinary all-applied response. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
+The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the server checks every deferrable constraint of the group. If every mutation applies and the check passes, the response is an ordinary all-applied response. Each of its outcomes reports the row state after the check. The last mutation owns each write that a deferred trigger makes during the check. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
 
 - The failing mutation keeps its evaluated status and code, unless the conflict rule below changes it.
 - If the constraint check at the end of the group fails, the last mutation is the failing mutation. It has `rejected_terminal` with `validation_failed`.

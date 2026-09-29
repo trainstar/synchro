@@ -164,7 +164,7 @@ class ContractTests {
     }
 
     @Test
-    fun testPushOutcomeShapeUsesRequestedOperation() {
+    fun testPushOutcomeRowPresenceStatesRowStateAfterPushUnit() {
         val row = JsonObject(
             mapOf("field-id" to JsonPrimitive("r1"), "field-title" to JsonPrimitive("Title"))
         )
@@ -186,12 +186,18 @@ class ContractTests {
                 listOf(valid),
                 emptyList(),
             ).validate(request)
+            PushResponse(
+                request.batchID,
+                "2026-01-01T00:00:00.000000Z",
+                listOf(valid.copy(serverRow = null, rowChecksum = null)),
+                emptyList(),
+            ).validate(request)
             assertTrue(
                 runCatching {
                     PushResponse(
                         request.batchID,
                         "2026-01-01T00:00:00.000000Z",
-                        listOf(valid.copy(serverRow = null, rowChecksum = null)),
+                        listOf(valid.copy(rowChecksum = null)),
                         emptyList(),
                     ).validate(request)
                 }.isFailure
