@@ -631,13 +631,22 @@ func schemaQueuedMutationEntryMatches(controller *blackbox.NativeController, aut
 		return fmt.Errorf("Swift schema-queued-mutation queue columns authored %s observed %s",
 			schemaQueuedMutationColumnSummary(want.AuthoredColumns), schemaQueuedMutationColumnSummary(got.AuthoredColumns))
 	}
-	for index, column := range want.AuthoredColumns {
+	// The authored columns form a set keyed by field ID. The runtime field IDs
+	// do not keep the authored order, so match each column by its field ID.
+	observedColumns := make(map[string]scenarios.FieldFact, len(got.AuthoredColumns))
+	for _, column := range got.AuthoredColumns {
+		observedColumns[column.FieldID] = column
+	}
+	if len(observedColumns) != len(got.AuthoredColumns) {
+		return fmt.Errorf("Swift schema-queued-mutation queue columns repeat a field: %s", schemaQueuedMutationColumnSummary(got.AuthoredColumns))
+	}
+	for _, column := range want.AuthoredColumns {
 		runtimeField, err := controller.RuntimeFieldID(authoredTable, column.FieldID)
 		if err != nil {
 			return fmt.Errorf("resolve Swift schema-queued-mutation queue column %q: %w", column.FieldID, err)
 		}
-		observedColumn := got.AuthoredColumns[index]
-		if observedColumn.FieldID != runtimeField || observedColumn.Type != column.Type || observedColumn.WireJSON != column.WireJSON {
+		observedColumn, found := observedColumns[runtimeField]
+		if !found || observedColumn.Type != column.Type || observedColumn.WireJSON != column.WireJSON {
 			return fmt.Errorf("Swift schema-queued-mutation queue column %q wants runtime %q; authored %s observed %s",
 				column.FieldID, runtimeField,
 				schemaQueuedMutationColumnSummary(want.AuthoredColumns), schemaQueuedMutationColumnSummary(got.AuthoredColumns))

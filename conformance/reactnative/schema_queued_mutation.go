@@ -1257,10 +1257,6 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 	if err != nil {
 		return fmt.Errorf("resolve React Native schema-queued-mutation primary field: %w", err)
 	}
-	fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, expected.AuthoredColumns[0].FieldID)
-	if err != nil {
-		return fmt.Errorf("resolve React Native schema-queued-mutation retained field: %w", err)
-	}
 	observed := pending[0]
 	if observed.MutationID != mutationID || observed.TableID != tableID || observed.TableName != c.tableName || observed.RecordID != recordID ||
 		observed.PrimaryKeyFieldID != primaryField || observed.Operation != expected.Operation || observed.AuthoredSchema != authoredSchema ||
@@ -1269,9 +1265,26 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 		observed.LocalOrder != expected.LocalOrder || len(observed.AuthoredFields) != len(expected.AuthoredColumns) {
 		return fmt.Errorf("React Native schema-queued-mutation pending observed=%+v expected mutation=%q table=%q table_name=%q record=%q primary=%q schema=%+v base=%q batch=%q order=%d", observed, mutationID, tableID, c.tableName, recordID, primaryField, authoredSchema, baseVersion, batchID, expected.LocalOrder)
 	}
-	field := observed.AuthoredFields[0]
-	if field.FieldID != fieldID || field.LogicalType != expected.AuthoredColumns[0].Type || !semanticRawJSONEqual(field.Value, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
-		return fmt.Errorf("React Native schema-queued-mutation retained field id=%q want=%q type=%q want=%q value=%s want=%s", field.FieldID, fieldID, field.LogicalType, expected.AuthoredColumns[0].Type, field.Value, expected.AuthoredColumns[0].WireJSON)
+	// The authored fields form a set keyed by field ID. The runtime field IDs
+	// do not keep the authored order, so match each field by its field ID.
+	for _, column := range expected.AuthoredColumns {
+		fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, column.FieldID)
+		if err != nil {
+			return fmt.Errorf("resolve React Native schema-queued-mutation retained field: %w", err)
+		}
+		matches := 0
+		for _, field := range observed.AuthoredFields {
+			if field.FieldID != fieldID {
+				continue
+			}
+			matches++
+			if field.LogicalType != column.Type || !semanticRawJSONEqual(field.Value, json.RawMessage(column.WireJSON)) {
+				return fmt.Errorf("React Native schema-queued-mutation retained field id=%q type=%q want=%q value=%s want=%s", fieldID, field.LogicalType, column.Type, field.Value, column.WireJSON)
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("React Native schema-queued-mutation retained field id=%q occurs %d times, want 1", fieldID, matches)
+		}
 	}
 	// The local trigger generates clientVersion. Kotlin and Swift accept that runtime timestamp because the scenario declares no timestamp alias.
 	c.retainedClientVersion = observed.ClientVersion
@@ -1362,17 +1375,21 @@ func (c *SchemaQueuedMutationCoordinator) validateStoredMutation(raw string) err
 	if err != nil {
 		return err
 	}
-	fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, expected.AuthoredColumns[0].FieldID)
-	if err != nil {
-		return err
-	}
 	primary := mutation.PK[primaryField]
-	column := mutation.Columns[fieldID]
 	if mutation.MutationID != mutationID || mutation.Table != tableID || !semanticRawJSONEqual(primary, c.runtimeIDs["queued-row-primary-key"]) ||
 		mutation.AuthoredSchema != authoredSchema || mutation.Operation != expected.Operation || mutation.BaseVersion == nil || *mutation.BaseVersion != baseVersion ||
 		mutation.ClientVersion == "" || c.retainedClientVersion == "" || mutation.ClientVersion != c.retainedClientVersion ||
-		len(mutation.Columns) != 1 || !semanticRawJSONEqual(column, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
-		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q field=%q", raw, mutationID, tableID, primaryField, recordID, authoredSchema, baseVersion, fieldID)
+		len(mutation.Columns) != len(expected.AuthoredColumns) {
+		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q columns=%d", raw, mutationID, tableID, primaryField, recordID, authoredSchema, baseVersion, len(expected.AuthoredColumns))
+	}
+	for _, column := range expected.AuthoredColumns {
+		fieldID, err := c.config.Controller.RuntimeFieldID(expected.TableID, column.FieldID)
+		if err != nil {
+			return err
+		}
+		if value, found := mutation.Columns[fieldID]; !found || !semanticRawJSONEqual(value, json.RawMessage(column.WireJSON)) {
+			return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s field=%q want=%s", raw, fieldID, column.WireJSON)
+		}
 	}
 	return nil
 }
