@@ -1,8 +1,8 @@
 diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
 --- a/extensions/synchro-pg/src/push.rs
 +++ b/extensions/synchro-pg/src/push.rs
-@@ -1950,7 +1950,7 @@ fn evaluate_atomic_group(
-         }
+@@ -2027,7 +2027,7 @@ fn evaluate_atomic_group(
+         set_push_mutation_id(client, &last_mutation.mutation_id);
          let constraints_valid = client
              .select(
 -                "SELECT synchro_check_push_constraints() AS valid",
