@@ -325,3 +325,38 @@ func cloneNativeCRUDState(state NativeCRUDState, processID string) NativeCRUDSta
 	state.Rows = append([]NativeCRUDRowState(nil), state.Rows...)
 	return state
 }
+
+func TestLocalWriteKeptBySchemaRequiresSomeButNotAllColumns(t *testing.T) {
+	publish := Operation{ContractOperation: "model", Name: "publish-schema", Payload: json.RawMessage(
+		`{"tables":[{"table_id":"other","fields":[{"field_id":"note"}]},{"table_id":"items","fields":[{"field_id":"id"},{"field_id":"kept"}]}]}`,
+	)}
+	write := func(columns string) Operation {
+		return Operation{ContractOperation: "local", Name: "write", Payload: json.RawMessage(
+			`{"table_id":"items","pk":{"field_id":"id","value":"row"},"columns":` + columns + `}`,
+		)}
+	}
+
+	kept, err := LocalWriteKeptBySchema(write(`[{"field_id":"kept","value":"local"},{"field_id":"note","value":"removed"}]`), publish)
+	if err != nil {
+		t.Fatalf("keep declared column: %v", err)
+	}
+	var payload struct {
+		Columns []struct {
+			FieldID string `json:"field_id"`
+			Value   string `json:"value"`
+		} `json:"columns"`
+	}
+	if err := json.Unmarshal(kept.Payload, &payload); err != nil || len(payload.Columns) != 1 ||
+		payload.Columns[0].FieldID != "kept" || payload.Columns[0].Value != "local" {
+		t.Fatalf("kept write = %s, want only the declared column", kept.Payload)
+	}
+	// Another table that declares the removed field must not keep it.
+	for name, columns := range map[string]string{
+		"none": `[{"field_id":"note","value":"removed"}]`,
+		"all":  `[{"field_id":"kept","value":"local"}]`,
+	} {
+		if _, err := LocalWriteKeptBySchema(write(columns), publish); err == nil {
+			t.Fatalf("write that keeps %s of its columns was accepted", name)
+		}
+	}
+}

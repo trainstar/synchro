@@ -880,6 +880,55 @@ func RequireLocalWriteRow(write Operation, rows []map[string]json.RawMessage) er
 	return nil
 }
 
+// LocalWriteKeptBySchema keeps the columns of an authored local write that an
+// authored publish-schema operation still declares for the write table. It
+// fails unless the write keeps some but not all of its columns. A row check of
+// the result then compares a kept field, and the write still changes a removed
+// field. A kept local row passes that check. A server replacement row with a
+// different kept value fails it.
+func LocalWriteKeptBySchema(write, publish Operation) (Operation, error) {
+	var target struct {
+		Tables []struct {
+			TableID string `json:"table_id"`
+			Fields  []struct {
+				FieldID string `json:"field_id"`
+			} `json:"fields"`
+		} `json:"tables"`
+	}
+	var payload map[string]json.RawMessage
+	var columns []map[string]json.RawMessage
+	var tableID string
+	if json.Unmarshal(publish.Payload, &target) != nil || json.Unmarshal(write.Payload, &payload) != nil ||
+		json.Unmarshal(payload["table_id"], &tableID) != nil || json.Unmarshal(payload["columns"], &columns) != nil {
+		return Operation{}, errors.New("local write kept by schema is invalid")
+	}
+	declared := make(map[string]bool)
+	for _, table := range target.Tables {
+		if table.TableID == tableID {
+			for _, field := range table.Fields {
+				declared[field.FieldID] = true
+			}
+		}
+	}
+	kept := make([]map[string]json.RawMessage, 0, len(columns))
+	for _, column := range columns {
+		var fieldID string
+		if json.Unmarshal(column["field_id"], &fieldID) == nil && declared[fieldID] {
+			kept = append(kept, column)
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(columns) {
+		return Operation{}, fmt.Errorf("local write keeps %d of %d fields, want some but not all", len(kept), len(columns))
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return Operation{}, err
+	}
+	payload["columns"] = encoded
+	write.Payload, err = json.Marshal(payload)
+	return write, err
+}
+
 func jsonValuesEqual(left, right json.RawMessage) bool {
 	var leftValue, rightValue any
 	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)

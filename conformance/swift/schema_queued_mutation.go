@@ -160,7 +160,7 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err := validateSchemaQueuedMutationPushCall(scenario, "STEP-SCHEMA-QUEUED-MUTATION-007", "STEP-SCHEMA-QUEUED-MUTATION-008", reset); err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-	keptWrite, err := schemaQueuedMutationKeptWrite(steps["STEP-SCHEMA-QUEUED-MUTATION-005"].Operation, publish)
+	keptWrite, err := scenarios.LocalWriteKeptBySchema(steps["STEP-SCHEMA-QUEUED-MUTATION-005"].Operation, publish)
 	if err == nil {
 		keptWrite, err = controller.ApplicationWrite(keptWrite)
 	}
@@ -368,54 +368,6 @@ func applySwiftSchemaQueuedMutationWrite(ctx context.Context, controller *blackb
 		return scenarios.Operation{}, fmt.Errorf("apply Swift schema-queued-mutation local write %s: %w", stepID, resultError(applyErr, observation.Disposition))
 	}
 	return write, nil
-}
-
-// schemaQueuedMutationKeptWrite keeps the columns of an authored local write
-// that the authored target schema still declares. The unresolved S2 write
-// changes one field that S3 removes and one field that S3 keeps with a value
-// the server does not hold. Only a kept local row passes a check of the kept
-// field. A server replacement of the row fails it (#267).
-func schemaQueuedMutationKeptWrite(write, publish scenarios.Operation) (scenarios.Operation, error) {
-	var target struct {
-		Tables []struct {
-			TableID string `json:"table_id"`
-			Fields  []struct {
-				FieldID string `json:"field_id"`
-			} `json:"fields"`
-		} `json:"tables"`
-	}
-	var payload map[string]json.RawMessage
-	var columns []map[string]json.RawMessage
-	var tableID string
-	if json.Unmarshal(publish.Payload, &target) != nil || json.Unmarshal(write.Payload, &payload) != nil ||
-		json.Unmarshal(payload["table_id"], &tableID) != nil || json.Unmarshal(payload["columns"], &columns) != nil {
-		return scenarios.Operation{}, errors.New("schema-queued-mutation kept write is invalid")
-	}
-	declared := make(map[string]bool)
-	for _, table := range target.Tables {
-		if table.TableID == tableID {
-			for _, field := range table.Fields {
-				declared[field.FieldID] = true
-			}
-		}
-	}
-	kept := make([]map[string]json.RawMessage, 0, len(columns))
-	for _, column := range columns {
-		var fieldID string
-		if json.Unmarshal(column["field_id"], &fieldID) == nil && declared[fieldID] {
-			kept = append(kept, column)
-		}
-	}
-	if len(kept) == 0 || len(kept) == len(columns) {
-		return scenarios.Operation{}, fmt.Errorf("schema-queued-mutation write keeps %d of %d fields, want some but not all", len(kept), len(columns))
-	}
-	encoded, err := json.Marshal(kept)
-	if err != nil {
-		return scenarios.Operation{}, err
-	}
-	payload["columns"] = encoded
-	write.Payload, err = json.Marshal(payload)
-	return write, err
 }
 
 func requireSwiftSchemaQueuedMutationRow(ctx context.Context, platform *Platform, client Client, write scenarios.Operation) error {
