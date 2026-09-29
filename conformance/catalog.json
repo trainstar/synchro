@@ -109,7 +109,7 @@
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
-      "sha256": "bf316a8ebea11c0e58be9bd2551bf3f4bff8f2e893b88a2a6fe865963d4b0a42"
+      "sha256": "3904fd64ec12599f5b3c0cf57d9b0830825650c6d80b25b6177218ad2eed5cf4"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",

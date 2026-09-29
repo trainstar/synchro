@@ -650,6 +650,11 @@
                   "client_version": "2026-08-11T01:02:03.000000Z",
                   "authored_columns": [
                     {
+                      "field_id": "legacy_value",
+                      "type": "string",
+                      "wire_json": "\"retain-this-s2-legacy-value\""
+                    },
+                    {
                       "field_id": "note",
                       "type": "string",
                       "wire_json": "\"retain-this-s2-value\""
@@ -1190,7 +1195,7 @@
       "id": "STEP-SCHEMA-QUEUED-MUTATION-005",
       "phase": "exercise",
       "transport": "local",
-      "description": "Create the exact S2 update of the added field with a base version and stable local order.",
+      "description": "Create the exact S2 update of the added field and of a field that S3 keeps, with a base version and stable local order.",
       "native_binding": {
         "kind": "local-write",
         "user_id": "user-a",
@@ -1216,6 +1221,10 @@
           "base_version": "compatible-write-version",
           "client_version": "2026-08-11T01:02:03.000000Z",
           "columns": [
+            {
+              "field_id": "legacy_value",
+              "value": "retain-this-s2-legacy-value"
+            },
             {
               "field_id": "note",
               "value": "retain-this-s2-value"
@@ -1421,6 +1430,7 @@
                 "base_version": "compatible-write-version",
                 "client_version": "2026-08-11T01:02:03.000000Z",
                 "columns": {
+                  "legacy_value": "retain-this-s2-legacy-value",
                   "note": "retain-this-s2-value"
                 }
               }
