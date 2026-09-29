@@ -695,11 +695,14 @@ func TestRealWorkerStartupRetainsUnownedConfiguredSlot(t *testing.T) {
 // A fixture in the same database, such as the client integration schema, can
 // register tables that the diagnostic registry does not restore. Readiness
 // requires publication members to equal the active registry, so the scenario
-// reset must remove them.
+// reset must remove them. Every native scenario runner starts from this reset
+// on an attached database, so the reset must also leave no connected client,
+// no source row, and no captured row of an earlier scenario, and the worker
+// must capture a new write.
 func TestRealScenarioResetLeavesPublicationEqualToRestoredRegistry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	harness, _ := provisionRealProofHarness(t, ctx)
+	harness, token := provisionRealProofHarness(t, ctx)
 	database, err := sql.Open("pgx", harness.DatabaseURL())
 	if err != nil {
 		t.Fatalf("open administrator connection: %v", err)
@@ -719,10 +722,35 @@ func TestRealScenarioResetLeavesPublicationEqualToRestoredRegistry(t *testing.T)
 	if _, err := database.ExecContext(ctx, "ALTER PUBLICATION "+publication+" ADD TABLE public.reset_foreign_fixture"); err != nil {
 		t.Fatalf("publish foreign fixture table: %v", err)
 	}
+	const retainedClientID = "reset-retained-client"
+	retainedID := "00000000-0000-4000-8c08-000000000001"
+	connectRealProtocolClient(t, ctx, harness, token, retainedClientID)
+	if err := harness.Source().ExecContext(ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'before-scenario-reset')", retainedID); err != nil {
+		t.Fatalf("insert source row before the reset: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", retainedID)
 
 	if err := harness.ResetScenarioServer(ctx); err != nil {
 		t.Fatalf("reset scenario server: %v", err)
 	}
+	var clients, sourceRows, capturedRows int
+	if err := database.QueryRowContext(ctx, `
+		SELECT (SELECT count(*) FROM synchro.sync_clients WHERE client_id = $1),
+		       (SELECT count(*) FROM public.cf_items WHERE id::text = $2::text),
+		       (SELECT count(*) FROM synchro.sync_captured_rows WHERE record_id = $2::text)`,
+		retainedClientID, retainedID).Scan(&clients, &sourceRows, &capturedRows); err != nil {
+		t.Fatalf("read state retained across the reset: %v", err)
+	}
+	if clients != 0 || sourceRows != 0 || capturedRows != 0 {
+		t.Fatalf("scenario reset retained earlier state: clients=%d source rows=%d captured rows=%d", clients, sourceRows, capturedRows)
+	}
+	freshID := "00000000-0000-4000-8c08-000000000002"
+	if err := harness.Source().ExecContext(ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-scenario-reset')", freshID); err != nil {
+		t.Fatalf("insert source row after the reset: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", freshID)
 	var unregistered, unpublished []string
 	for _, check := range []struct {
 		target *[]string
