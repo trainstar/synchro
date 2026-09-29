@@ -286,7 +286,7 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 		}
 		// A read after the accepted push can wait for its capture. The client
 		// retries that request, as the contract permits.
-		if observation.StatusCode != 200 && !(observation.StatusCode == 503 && observation.Retryable && observation.ErrorCode != nil && *observation.ErrorCode == "capture_pending") {
+		if observation.StatusCode != 200 && !(observation.StatusCode == 503 && observation.Retryable != nil && *observation.Retryable && observation.ErrorCode != nil && *observation.ErrorCode == "capture_pending") {
 			return SynchronizationResult{}, fmt.Errorf("Swift floor %s request returned %d", observation.OperationClass, observation.StatusCode)
 		}
 	}
