@@ -303,6 +303,15 @@ The server applies these rules in the first-execution transaction:
 4. In an atomic request, a failed check at the unit end gives
    `validation_failed` to the last mutation of the group. Every other
    mutation gets `atomic_batch_rejected`.
+5. A deferred trigger can write synced rows during the check at the unit
+   end. The last mutation of the unit owns each of these writes, as it owns
+   the check. Each write fence of the check carries its `mutation_id`, so a
+   pull of that client waits for these writes as for other push writes.
+6. Each accepted outcome reports the row state after the check at the unit
+   end. In an atomic request, the server reads each accepted row again after
+   the check. A later mutation of the group or a deferred trigger can change
+   the row after its own mutation writes it. The outcome therefore shows the
+   version that the unit commits.
 
 Thus, every constraint holds at the end of each unit. A
 `DEFERRABLE INITIALLY IMMEDIATE` constraint is also checked at the unit end,

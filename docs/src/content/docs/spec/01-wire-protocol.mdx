@@ -720,7 +720,7 @@ A request with `atomic: true` applies all of its mutations or none of them. The 
 - Two mutations have the same `table` and the same canonical `pk`.
 - A `mutation_id` already has a ledger row from a different batch.
 
-The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the server checks every deferrable constraint of the group. If every mutation applies and the check passes, the response is an ordinary all-applied response. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
+The batch fingerprint of an atomic request uses a separate preimage tag, as ADR 002 defines. The server evaluates mutations in request order and stops at the first outcome that is not `applied`. If every mutation applies, the server checks every deferrable constraint of the group. If every mutation applies and the check passes, the response is an ordinary all-applied response. Each of its outcomes reports the row state after the check. The last mutation owns each write that a deferred trigger makes during the check. Otherwise, the server rolls back every source write, version transition, and write fence of the group, and returns this response:
 
 - The failing mutation keeps its evaluated status and code, unless the conflict rule below changes it.
 - If the constraint check at the end of the group fails, the last mutation is the failing mutation. It has `rejected_terminal` with `validation_failed`.
