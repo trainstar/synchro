@@ -490,7 +490,7 @@ func realUpdateOrigins(t *testing.T) []realUpdateOrigin {
 	}
 	for _, pin := range pins.Origins {
 		if !extensionVersionPattern.MatchString(pin.Version) {
-			t.Fatal("extension update origin version is not in X.Y.Z form")
+			t.Fatal("extension update origin version is not in X.Y.Z or X.Y.Z-rc.N form")
 		}
 		origins = append(origins, realUpdateOrigin{version: pin.Version, artifact: filepath.Join(originArtifacts, pin.Version)})
 	}
@@ -556,7 +556,7 @@ func firstLines(lines []string, limit int) []string {
 	return lines
 }
 
-var extensionVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+var extensionVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-rc\.([1-9][0-9]*))?$`)
 
 func readUpdateBaselineVersion(t *testing.T) string {
 	t.Helper()
@@ -586,7 +586,7 @@ func readUpdateBaselineVersion(t *testing.T) string {
 	}
 	var version string
 	if err := json.Unmarshal(fields["version"], &version); err != nil || !extensionVersionPattern.MatchString(version) {
-		t.Fatal("extension update baseline version is not in X.Y.Z form")
+		t.Fatal("extension update baseline version is not in X.Y.Z or X.Y.Z-rc.N form")
 	}
 	return version
 }
@@ -626,7 +626,7 @@ func extensionUpdatePathViolation(paths []extensionUpdatePath, baseline, current
 	baselineNumber, baselineValid := parseExtensionVersion(baseline)
 	currentNumber, currentValid := parseExtensionVersion(current)
 	if !baselineValid || !currentValid {
-		return fmt.Sprintf("baseline %q or current version %q is not in X.Y.Z form", baseline, current)
+		return fmt.Sprintf("baseline %q or current version %q is not in X.Y.Z or X.Y.Z-rc.N form", baseline, current)
 	}
 	known := make(map[string]struct{})
 	reachesCurrent := make(map[string]bool)
@@ -657,7 +657,7 @@ func extensionUpdatePathViolation(paths []extensionUpdatePath, baseline, current
 	for _, version := range versions {
 		number, valid := parseExtensionVersion(version)
 		if !valid {
-			return fmt.Sprintf("known version %q is not in X.Y.Z form", version)
+			return fmt.Sprintf("known version %q is not in X.Y.Z or X.Y.Z-rc.N form", version)
 		}
 		if compareExtensionVersions(number, baselineNumber) < 0 {
 			return fmt.Sprintf("known version %s is below baseline %s", version, baseline)
@@ -672,22 +672,29 @@ func extensionUpdatePathViolation(paths []extensionUpdatePath, baseline, current
 	return ""
 }
 
-func parseExtensionVersion(version string) ([3]int, bool) {
-	var number [3]int
-	if !extensionVersionPattern.MatchString(version) {
+// parseExtensionVersion returns major, minor, patch, release rank, and release
+// candidate number. The rank orders a release after each of its candidates.
+func parseExtensionVersion(version string) ([5]int, bool) {
+	var number [5]int
+	match := extensionVersionPattern.FindStringSubmatch(version)
+	if match == nil {
 		return number, false
 	}
-	for index, part := range strings.Split(version, ".") {
-		value, err := strconv.Atoi(part)
+	if match[4] == "" {
+		number[3] = 1
+		match[4] = "0"
+	}
+	for index, slot := range []int{0, 1, 2, 4} {
+		value, err := strconv.Atoi(match[index+1])
 		if err != nil {
 			return number, false
 		}
-		number[index] = value
+		number[slot] = value
 	}
 	return number, true
 }
 
-func compareExtensionVersions(left, right [3]int) int {
+func compareExtensionVersions(left, right [5]int) int {
 	for index := range left {
 		if left[index] != right[index] {
 			if left[index] < right[index] {
@@ -715,6 +722,31 @@ func TestExtensionUpdatePathViolation(t *testing.T) {
 			},
 			baseline: "0.3.1",
 			current:  "0.3.2",
+		},
+		{
+			name: "valid chain through release candidates",
+			paths: []extensionUpdatePath{
+				{source: "0.3.1", target: "0.3.2-rc.9", hasPath: true},
+				{source: "0.3.1", target: "0.3.2-rc.10", hasPath: true},
+				{source: "0.3.1", target: "0.3.2", hasPath: true},
+				{source: "0.3.2-rc.9", target: "0.3.2-rc.10", hasPath: true},
+				{source: "0.3.2-rc.9", target: "0.3.2", hasPath: true},
+				{source: "0.3.2-rc.10", target: "0.3.2", hasPath: true},
+			},
+			baseline: "0.3.1",
+			current:  "0.3.2",
+		},
+		{
+			name: "release candidate above current release candidate",
+			paths: []extensionUpdatePath{
+				{source: "0.3.1", target: "0.3.2-rc.9", hasPath: true},
+				{source: "0.3.1", target: "0.3.2-rc.10", hasPath: true},
+				{source: "0.3.2-rc.9", target: "0.3.2-rc.10", hasPath: false},
+				{source: "0.3.2-rc.10", target: "0.3.2-rc.9", hasPath: true},
+			},
+			baseline:  "0.3.1",
+			current:   "0.3.2-rc.9",
+			violation: true,
 		},
 		{
 			name: "known version below baseline",

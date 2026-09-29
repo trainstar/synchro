@@ -136,7 +136,8 @@ jobs:
           candidate_ci_run_attempt="$(jq -r '.run_attempt' "$RUNNER_TEMP/candidate-ci-run.json")"
 
           milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"
-          milestone_count="$(jq --arg title "v$version" '[.[] | select(.title == $title)] | length' <<<"$milestones")"
+          # Release candidates X.Y.Z-rc.N share the vX.Y.Z milestone of their release.
+          milestone_count="$(jq --arg title "v${version%%-rc.*}" '[.[] | select(.title == $title)] | length' <<<"$milestones")"
           test "$milestone_count" = 1 || { echo "one matching release milestone is required" >&2; exit 1; }
 
           release_dir_name="release-$version-$source_commit"
@@ -940,7 +941,7 @@ jobs:
           jq -e --arg sha "$commit" --argjson attempt '${{ needs.candidate.outputs.candidate_ci_run_attempt }}' \
             '.head_sha == $sha and .run_attempt == $attempt and .event == "push" and .head_branch == "master" and .path == ".github/workflows/ci.yml" and .status == "completed" and .conclusion == "success"' <<<"$ci_run" >/dev/null
           milestones="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" | jq 'add')"
-          jq -e --arg title "v$version" '([.[] | select(.title == $title)] | length) == 1 and ([.[] | select(.title == $title)][0].open_issues == 0)' <<<"$milestones" >/dev/null
+          jq -e --arg title "v${version%%-rc.*}" '([.[] | select(.title == $title)] | length) == 1 and ([.[] | select(.title == $title)][0].open_issues == 0)' <<<"$milestones" >/dev/null
           GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public --include-drafts --release-dir "$release" --output "$RUNNER_TEMP/public-before.json"
 
       - name: Check sealed file attestations
@@ -1045,6 +1046,7 @@ jobs:
           tag="v${{ needs.candidate.outputs.version }}"
           commit="${{ needs.candidate.outputs.source_commit }}"
           github_state="$(jq -r '.github' "$RUNNER_TEMP/public-before-classification.json")"
+          case "$tag" in *-rc.*) prerelease=true ;; *) prerelease=false ;; esac
           case "$github_state" in
             absent|draft-partial|draft-complete) operation=publish-draft ;;
             public|public-latest) operation=verify-public ;;
@@ -1054,7 +1056,7 @@ jobs:
             test "$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)" = "$commit" || { echo "release tag is not at the candidate commit" >&2; exit 1; }
             # The release list can omit a new draft, so later calls use the ID from this response.
             gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-              -f tag_name="$tag" -F draft=true -F generate_release_notes=true -f make_latest=false \
+              -f tag_name="$tag" -F draft=true -F prerelease="$prerelease" -F generate_release_notes=true -f make_latest=false \
               > "$RUNNER_TEMP/github-release.json"
           else
             GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" github-release \
@@ -1318,17 +1320,18 @@ jobs:
             test "$(jq -r '.maven' "$RUNNER_TEMP/public-before-npm-classification.json")" = published
             test -z "${NODE_AUTH_TOKEN:-}"
             test -z "${NPM_TOKEN:-}"
-            # The candidate tag keeps the default install on the previous version until public checks pass.
-            env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$tarball" --access public --provenance --tag candidate
+            # Neither tag moves the default install. A release waits on candidate until public checks pass.
+            case "$version" in *-rc.*) dist_tag=next ;; *) dist_tag=candidate ;; esac
+            env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$tarball" --access public --provenance --tag "$dist_tag"
           else
-            test "$npm_state" = published-candidate || test "$npm_state" = published-latest
+            case "$npm_state" in published-candidate|published-prerelease|published-latest) ;; *) exit 1 ;; esac
           fi
           for _ in $(seq 1 40); do
             npm_state="$(python3 "$RUNNER_TEMP/release-publish.py" registry-status --registry npm --release-dir "$release" || true)"
-            case "$npm_state" in published-candidate|published-latest) break ;; esac
+            case "$npm_state" in published-candidate|published-prerelease|published-latest) break ;; esac
             sleep 15
           done
-          case "$npm_state" in published-candidate|published-latest) ;; *) echo "npm candidate did not become publicly verifiable" >&2; exit 1 ;; esac
+          case "$npm_state" in published-candidate|published-prerelease|published-latest) ;; *) echo "npm candidate did not become publicly verifiable" >&2; exit 1 ;; esac
           test "$(npm view "$package@$version" version)" = "$version"
           mkdir -p "$RUNNER_TEMP/npm-provenance"
           consumer_cache="$RUNNER_TEMP/public-npm-consumer-cache"
@@ -1399,7 +1402,8 @@ jobs:
               sleep 15
             done
           fi
-          test "$npm_state" = published-latest
+          # A release candidate never moves npm latest.
+          test "$npm_state" = published-latest || test "$npm_state" = published-prerelease
 
       - name: Mark GitHub latest only after public checks
         env:
@@ -1409,12 +1413,12 @@ jobs:
           release="dist/releases/${{ needs.candidate.outputs.release_dir_name }}"
           GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public \
             --release-dir "$release" --output "$RUNNER_TEMP/public-npm.json"
-          jq -e '.maven == "published" and .npm == "published-latest"' "$RUNNER_TEMP/public-npm-classification.json" >/dev/null
-          github_state="$(jq -r '.github' "$RUNNER_TEMP/public-npm-classification.json")"
-          if [ "$github_state" = public ]; then
+          # The classifier never selects promote-github for a release candidate.
+          next_operation="$(jq -r '.next_operation' "$RUNNER_TEMP/public-npm-classification.json")"
+          if [ "$next_operation" = promote-github ]; then
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/${{ steps.github_release.outputs.release_id }}" -f make_latest=true >/dev/null
           else
-            test "$github_state" = public-latest
+            test "$next_operation" = complete
           fi
           GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" observe-public \
             --release-dir "$release" --output "$RUNNER_TEMP/public-final.json"

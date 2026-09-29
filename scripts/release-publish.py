@@ -23,7 +23,8 @@ from typing import Any
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
-VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# A release candidate X.Y.Z-rc.N publishes without becoming the default install.
+VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?$")
 SLSA_PROVENANCE = re.compile(r"^https://slsa[.]dev/provenance/v[0-9]+(?:[.][0-9]+)?$")
 MAVEN_STATES = {"PENDING", "VALIDATING", "VALIDATED", "PUBLISHING", "PUBLISHED", "FAILED"}
 NPM_PACKAGE = "@trainstar/synchro-react-native"
@@ -285,6 +286,7 @@ def has_npm_provenance(distribution: Any) -> bool:
 
 
 def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]:
+    prerelease = is_prerelease(identity["version"])
     if not isinstance(state, dict) or set(state) != {"tags", "github", "maven", "npm"}:
         raise PublicationError("publication state has invalid members")
     tags = state["tags"]
@@ -302,21 +304,27 @@ def classify_publication(identity: dict[str, Any], state: Any) -> dict[str, Any]
     if github is None:
         github_status = "absent"
     else:
-        if not isinstance(github, dict) or set(github) != {"draft", "latest", "assets"}:
+        if not isinstance(github, dict) or set(github) != {"draft", "prerelease", "latest", "assets"}:
             raise PublicationError("GitHub release state is invalid")
         complete = require_hash_map(github["assets"], identity["github_assets"], "GitHub release", partial=True)
-        if github["draft"] not in {True, False} or github["latest"] not in {True, False}:
+        if any(github[flag] not in {True, False} for flag in ("draft", "prerelease", "latest")):
             raise PublicationError("GitHub release flags are invalid")
         if not github["draft"] and not complete:
             raise PublicationError("published GitHub release has incomplete assets")
         if github["latest"] and github["draft"]:
             raise PublicationError("draft GitHub release cannot be latest")
+        if github["prerelease"] != prerelease:
+            raise PublicationError("GitHub release prerelease flag does not match the release version")
+        if github["latest"] and prerelease:
+            raise PublicationError("GitHub release candidate cannot be latest")
         github_status = ("draft-complete" if complete else "draft-partial") if github["draft"] else ("public-latest" if github["latest"] else "public")
 
     maven_status = classify_maven(identity, state["maven"])
     npm_status = classify_npm(identity, state["npm"])
 
-    complete = tag_status == "complete" and github_status == "public-latest" and maven_status == "published" and npm_status == "published-latest"
+    # A release candidate is complete without the latest markers, so it never reaches a promotion.
+    final_github, final_npm = ("public", "published-prerelease") if prerelease else ("public-latest", "published-latest")
+    complete = tag_status == "complete" and github_status == final_github and maven_status == "published" and npm_status == final_npm
     if complete:
         next_operation = "complete"
     elif tag_status != "complete":
@@ -369,6 +377,10 @@ def classify_npm(identity: dict[str, Any], npm: Any) -> str:
     if not npm["provenance"]:
         raise PublicationError("npm package provenance is missing")
     latest = npm["dist_tags"].get("latest")
+    if is_prerelease(version):
+        if latest == version:
+            raise PublicationError("npm latest points to a release candidate")
+        return "published-prerelease"
     if latest == version:
         return "published-latest"
     # Promotion must never move the default tag backward or over a version this release did not observe.
@@ -377,8 +389,14 @@ def classify_npm(identity: dict[str, Any], npm: Any) -> str:
     return "published-candidate"
 
 
+def is_prerelease(version: str) -> bool:
+    return "-rc." in version
+
+
 def version_key(value: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in value.split("."))
+    # A release follows each of its release candidates.
+    core, _, candidate = value.partition("-rc.")
+    return (*(int(part) for part in core.split(".")), 0 if candidate else 1, int(candidate or 0))
 
 
 def rate_limit_wait(headers: Any, now: float) -> float | None:
@@ -618,7 +636,7 @@ def successful_ci_run(repository: str, sha: str, token: str | None) -> dict[str,
 def github_release(repository: str, tag: str, token: str | None, include_drafts: bool = False) -> dict[str, Any] | None:
     if repository != "trainstar/synchro":
         raise PublicationError("publication repository is invalid")
-    if not re.fullmatch(r"v[0-9]+[.][0-9]+[.][0-9]+", tag):
+    if not tag.startswith("v") or not VERSION.fullmatch(tag[1:]):
         raise PublicationError("GitHub release tag is invalid")
     api = f"https://api.github.com/repos/{repository}"
     if not include_drafts:
@@ -693,7 +711,7 @@ def observe_github(
                 raise PublicationError("GitHub release asset is unavailable or duplicated")
             assets[asset["name"]] = digest
         latest = isinstance(latest_value, dict) and latest_value.get("id") == release_value.get("id")
-        github = {"draft": release_value.get("draft"), "latest": latest, "assets": assets}
+        github = {"draft": release_value.get("draft"), "prerelease": release_value.get("prerelease"), "latest": latest, "assets": assets}
     return tags, github
 
 

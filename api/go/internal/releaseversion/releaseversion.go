@@ -14,7 +14,9 @@ import (
 	"strings"
 )
 
-var semverRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+// A release version is X.Y.Z or the release candidate X.Y.Z-rc.N. SemVer
+// orders each release candidate before its release.
+var semverRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$`)
 
 var sha256HexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -41,17 +43,17 @@ var (
 	cargoLockCoreVersionRE          = regexp.MustCompile(`(?m)^name = "synchro-core"\nversion = ".*"$`)
 	cargoLockPGVersionRE            = regexp.MustCompile(`(?m)^name = "synchro-pg"\nversion = ".*"$`)
 	goConsumerRequireRE             = regexp.MustCompile(`(?m)^require github\.com/trainstar/synchro/api/go v.*$`)
-	baseSQLFileRE                   = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+)\.sql$`)
-	updateSQLFileRE                 = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+)--(\d+\.\d+\.\d+)\.sql$`)
+	baseSQLFileRE                   = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+(?:-rc\.\d+)?)\.sql$`)
+	updateSQLFileRE                 = regexp.MustCompile(`^synchro_pg--(\d+\.\d+\.\d+(?:-rc\.\d+)?)--(\d+\.\d+\.\d+(?:-rc\.\d+)?)\.sql$`)
 )
 
 // Token patterns find release references inside content that the version tool
 // does not otherwise own. Group 1 holds the release version.
 var (
-	publishedReferenceRE   = regexp.MustCompile("(?:Synchro\\s+`v?|Git tag `v|@trainstar/synchro-react-native@|trainstar-synchro-react-native-|fit\\.trainstar:synchro:|trainstar/synchro\\.git', :tag => 'v|trainstar/synchro\\.git\",\\s+exact: \")(\\d+\\.\\d+\\.\\d+)")
-	installSQLReferenceRE  = regexp.MustCompile(`synchro_pg--(\d+\.\d+\.\d+)\.sql`)
-	extensionVersionRE     = regexp.MustCompile(`"extension_version":\s*"(\d+\.\d+\.\d+)"`)
-	podfileLockReferenceRE = regexp.MustCompile(`(?m)^(?:  - Synchro \(|  - SynchroReactNative \(|    - Synchro \(= )(\d+\.\d+\.\d+)\)`)
+	publishedReferenceRE   = regexp.MustCompile("(?:Synchro\\s+`v?|Git tag `v|@trainstar/synchro-react-native@|trainstar-synchro-react-native-|fit\\.trainstar:synchro:|trainstar/synchro\\.git', :tag => 'v|trainstar/synchro\\.git\",\\s+exact: \")(\\d+\\.\\d+\\.\\d+(?:-rc\\.\\d+)?)")
+	installSQLReferenceRE  = regexp.MustCompile(`synchro_pg--(\d+\.\d+\.\d+(?:-rc\.\d+)?)\.sql`)
+	extensionVersionRE     = regexp.MustCompile(`"extension_version":\s*"(\d+\.\d+\.\d+(?:-rc\.\d+)?)"`)
+	podfileLockReferenceRE = regexp.MustCompile(`(?m)^(?:  - Synchro \(|  - SynchroReactNative \(|    - Synchro \(= )(\d+\.\d+\.\d+(?:-rc\.\d+)?)\)`)
 )
 
 type fileExpectation struct {
@@ -103,7 +105,7 @@ func FindRepoRoot(start string) (string, error) {
 
 func Validate(version string) error {
 	if !semverRE.MatchString(version) {
-		return fmt.Errorf("version %q must match X.Y.Z", version)
+		return fmt.Errorf("version %q must match X.Y.Z or X.Y.Z-rc.N", version)
 	}
 	return nil
 }
@@ -724,17 +726,32 @@ func decodeObjectFields(data []byte) (map[string]json.RawMessage, error) {
 }
 
 // compareVersions compares two versions that semverRE accepts by numeric
-// major, then minor, then patch. semverRE rejects leading zeros, so a longer
-// component is a larger number.
+// major, then minor, then patch, then release candidate number. A release
+// follows each of its release candidates. semverRE rejects leading zeros, so a
+// longer number is a larger number.
 func compareVersions(left string, right string) int {
-	leftParts := strings.Split(left, ".")
-	rightParts := strings.Split(right, ".")
+	leftCore, leftCandidate, _ := strings.Cut(left, "-rc.")
+	rightCore, rightCandidate, _ := strings.Cut(right, "-rc.")
+	leftParts := strings.Split(leftCore, ".")
+	rightParts := strings.Split(rightCore, ".")
 	for index := range leftParts {
-		if order := cmp.Or(cmp.Compare(len(leftParts[index]), len(rightParts[index])), strings.Compare(leftParts[index], rightParts[index])); order != 0 {
+		if order := compareNumbers(leftParts[index], rightParts[index]); order != 0 {
 			return order
 		}
 	}
-	return 0
+	switch {
+	case leftCandidate == rightCandidate:
+		return 0
+	case leftCandidate == "":
+		return 1
+	case rightCandidate == "":
+		return -1
+	}
+	return compareNumbers(leftCandidate, rightCandidate)
+}
+
+func compareNumbers(left string, right string) int {
+	return cmp.Or(cmp.Compare(len(left), len(right)), strings.Compare(left, right))
 }
 
 func (update updateScript) name() string {

@@ -317,7 +317,7 @@ class PublicationStateTests(unittest.TestCase):
             if "/releases?" in url:
                 self.assertEqual(token, "fixture-token")
                 return [{
-                    "id": 1, "tag_name": self.identity["root_tag"], "draft": True,
+                    "id": 1, "tag_name": self.identity["root_tag"], "draft": True, "prerelease": False,
                     "assets": [{
                         "name": "server", "digest": "sha256:" + self.identity["github_assets"]["server"],
                         "browser_download_url": "https://github.com/trainstar/synchro/releases/download/v1.2.3/server",
@@ -381,6 +381,9 @@ class PublicationStateTests(unittest.TestCase):
             ("A" * 40, self.version),
             (self.commit, "v1.2.3"),
             (self.commit, "1.2"),
+            (self.commit, "1.2.3-beta.1"),
+            (self.commit, "1.2.3-rc.0"),
+            (self.commit, "1.2.3-rc1"),
         )
         for commit, version in invalid:
             with self.subTest(commit=commit, version=version):
@@ -402,7 +405,7 @@ class PublicationStateTests(unittest.TestCase):
     def test_partial_draft_resumes_assets(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": True, "latest": False, "assets": {"server": "1" * 64}}
+        state["github"] = {"draft": True, "prerelease": False, "latest": False, "assets": {"server": "1" * 64}}
         result = release_publish.classify_publication(self.identity, state)
         self.assertEqual(result["github"], "draft-partial")
         self.assertEqual(result["next_operation"], "publish-github")
@@ -410,7 +413,7 @@ class PublicationStateTests(unittest.TestCase):
     def test_absent_public_maven_requires_publication(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
+        state["github"] = {"draft": False, "prerelease": False, "latest": False, "assets": self.identity["github_assets"]}
         result = release_publish.classify_publication(self.identity, state)
         self.assertEqual(result["maven"], "absent")
         self.assertEqual(result["next_operation"], "publish-maven")
@@ -460,7 +463,7 @@ class PublicationStateTests(unittest.TestCase):
     def test_matching_publication_promotes_latest(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
+        state["github"] = {"draft": False, "prerelease": False, "latest": False, "assets": self.identity["github_assets"]}
         state["maven"]["public_files"] = self.identity["maven_entries"]
         state["npm"] = {"sha256": self.identity["npm"]["sha256"], "dist_tags": {"latest": "1.2.3"}, "provenance": True}
         result = release_publish.classify_publication(self.identity, state)
@@ -469,7 +472,7 @@ class PublicationStateTests(unittest.TestCase):
     def test_public_maven_publishes_npm_last(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
+        state["github"] = {"draft": False, "prerelease": False, "latest": False, "assets": self.identity["github_assets"]}
         state["maven"]["public_files"] = self.identity["maven_entries"]
         result = release_publish.classify_publication(self.identity, state)
         self.assertEqual(result["next_operation"], "publish-npm")
@@ -477,7 +480,7 @@ class PublicationStateTests(unittest.TestCase):
     def test_complete_state_is_terminal(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": False, "latest": True, "assets": self.identity["github_assets"]}
+        state["github"] = {"draft": False, "prerelease": False, "latest": True, "assets": self.identity["github_assets"]}
         state["maven"]["public_files"] = self.identity["maven_entries"]
         state["npm"] = {"sha256": self.identity["npm"]["sha256"], "dist_tags": {"latest": "1.2.3"}, "provenance": True}
         result = release_publish.classify_publication(self.identity, state)
@@ -487,7 +490,7 @@ class PublicationStateTests(unittest.TestCase):
     def test_missing_source_tag_is_not_terminal(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": None}
-        state["github"] = {"draft": False, "latest": True, "assets": self.identity["github_assets"]}
+        state["github"] = {"draft": False, "prerelease": False, "latest": True, "assets": self.identity["github_assets"]}
         state["maven"]["public_files"] = self.identity["maven_entries"]
         state["npm"] = {
             "sha256": self.identity["npm"]["sha256"],
@@ -513,7 +516,7 @@ class PublicationStateTests(unittest.TestCase):
     def test_published_candidate_is_promoted_before_github_latest(self) -> None:
         state = self.state()
         state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
-        state["github"] = {"draft": False, "latest": False, "assets": self.identity["github_assets"]}
+        state["github"] = {"draft": False, "prerelease": False, "latest": False, "assets": self.identity["github_assets"]}
         state["maven"]["public_files"] = self.identity["maven_entries"]
         for dist_tags in ({"candidate": "1.2.3", "latest": "1.2.2"}, {"candidate": "1.2.3"}, {"latest": "0.9.10"}):
             with self.subTest(dist_tags=dist_tags):
@@ -522,6 +525,35 @@ class PublicationStateTests(unittest.TestCase):
                 self.assertEqual(result["npm"], "published-candidate")
                 self.assertEqual(result["next_operation"], "promote-npm")
                 self.assertFalse(result["complete"])
+
+    def test_release_candidate_completes_without_latest_markers(self) -> None:
+        version = "1.2.3-rc.1"
+        release_publish.validate_candidate_identity(self.commit, version)
+        identity = {**self.identity, "version": version, "root_tag": f"v{version}", "go_tag": f"api/go/v{version}"}
+        state = {
+            "tags": {f"v{version}": self.commit, f"api/go/v{version}": self.commit},
+            "github": {"draft": False, "prerelease": True, "latest": False, "assets": identity["github_assets"]},
+            "maven": {"public_files": identity["maven_entries"]},
+            "npm": {"sha256": None, "dist_tags": {"latest": "1.2.2"}, "provenance": False},
+        }
+        self.assertEqual(release_publish.classify_publication(identity, state)["next_operation"], "publish-npm")
+        state["npm"] = {"sha256": identity["npm"]["sha256"], "dist_tags": {"latest": "1.2.2", "next": version}, "provenance": True}
+        self.assertEqual(release_publish.classify_publication(identity, state), {
+            "source_tags": "complete", "github": "public", "maven": "published", "npm": "published-prerelease",
+            "next_operation": "complete", "complete": True,
+        })
+        for member, value, error in (
+            ("github", {**state["github"], "latest": True}, "GitHub release candidate cannot be latest"),
+            ("github", {**state["github"], "prerelease": False}, "prerelease flag does not match"),
+            ("npm", {**state["npm"], "dist_tags": {"latest": version}}, "npm latest points to a release candidate"),
+        ):
+            with self.subTest(member=member, value=value):
+                with self.assertRaisesRegex(release_publish.PublicationError, error):
+                    release_publish.classify_publication(identity, {**state, member: value})
+        release = self.state()
+        release["github"] = {"draft": True, "prerelease": True, "latest": False, "assets": {}}
+        with self.assertRaisesRegex(release_publish.PublicationError, "prerelease flag does not match"):
+            release_publish.classify_publication(self.identity, release)
 
     def test_competing_npm_latest_needs_explicit_resolution(self) -> None:
         state = self.state()
@@ -571,7 +603,7 @@ class PublicationStateTests(unittest.TestCase):
 
     def test_published_partial_github_release_fails(self) -> None:
         state = self.state()
-        state["github"] = {"draft": False, "latest": False, "assets": {"server": "1" * 64}}
+        state["github"] = {"draft": False, "prerelease": False, "latest": False, "assets": {"server": "1" * 64}}
         with self.assertRaisesRegex(release_publish.PublicationError, "incomplete assets"):
             release_publish.classify_publication(self.identity, state)
 
@@ -582,6 +614,7 @@ class PublicationStateTests(unittest.TestCase):
                 state["tags"] = {"v1.2.3": self.commit, "api/go/v1.2.3": self.commit}
                 state["github"] = {
                     "draft": False,
+                    "prerelease": False,
                     "latest": latest,
                     "assets": self.identity["github_assets"],
                 }
@@ -647,12 +680,9 @@ class PublicationStateTests(unittest.TestCase):
             release_publish.list_central_deployments("wanted")
 
     def test_release_workflow_creates_and_recovers_github_drafts(self) -> None:
-        command = release_step_command("Create or recover draft and publish GitHub assets")
-        for expression, value in (
-            ("release_dir_name", "fixture"), ("version", self.version), ("source_commit", self.commit),
-        ):
-            command = command.replace("${{ needs.candidate.outputs." + expression + " }}", value)
-        self.assertNotIn("${{", command)
+        template = release_step_command("Create or recover draft and publish GitHub assets")
+        for expression, value in (("release_dir_name", "fixture"), ("source_commit", self.commit)):
+            template = template.replace("${{ needs.candidate.outputs." + expression + " }}", value)
         with tempfile.TemporaryDirectory(prefix="synchro-github-draft-") as directory:
             root = Path(directory)
             release = root / "dist/releases/fixture"
@@ -691,8 +721,8 @@ class PublicationStateTests(unittest.TestCase):
             git = tools / "git"
             git.write_text(
                 '#!/bin/sh\n'
-                'test "$*" = "ls-remote --tags origin refs/tags/v1.2.3" || exit 1\n'
-                'printf "%s\\trefs/tags/v1.2.3\\n" "$TEST_TAG_COMMIT"\n',
+                'test "$*" = "ls-remote --tags origin refs/tags/$TEST_TAG" || exit 1\n'
+                'printf "%s\\trefs/tags/%s\\n" "$TEST_TAG_COMMIT" "$TEST_TAG"\n',
                 encoding="utf-8",
             )
             git.chmod(0o755)
@@ -707,12 +737,17 @@ class PublicationStateTests(unittest.TestCase):
                 args = sys.argv[1:]
                 assert args[0] == "api", args
                 release = state["release"]
+                tag = os.environ["TEST_TAG"]
                 upload = "https://uploads.github.com/repos/trainstar/synchro/releases/17/assets"
                 if args[1:4] == ["--method", "POST", "repos/trainstar/synchro/releases"]:
                     assert release is None
-                    assert args[4:] == ["-f", "tag_name=v1.2.3", "-F", "draft=true", "-F", "generate_release_notes=true", "-f", "make_latest=false"], args
+                    prerelease = "true" if "-rc." in tag else "false"
+                    assert args[4:] == [
+                        "-f", f"tag_name={tag}", "-F", "draft=true", "-F", f"prerelease={prerelease}",
+                        "-F", "generate_release_notes=true", "-f", "make_latest=false",
+                    ], args
                     release = state["release"] = {
-                        "id": 17, "tag_name": "v1.2.3", "draft": True, "assets": [], "listed": False,
+                        "id": 17, "tag_name": tag, "draft": True, "prerelease": prerelease == "true", "assets": [], "listed": False,
                         "upload_url": upload + "{?name,label}",
                     }
                     state["operations"].append("create")
@@ -738,13 +773,16 @@ class PublicationStateTests(unittest.TestCase):
                 path.write_text(json.dumps(state))
                 """), encoding="utf-8")
             gh.chmod(0o755)
-            for initial, tag_commit, accepted in (
-                ("absent", self.commit, True),
-                ("draft-partial", self.commit, True),
-                ("absent", "b" * 40, False),
+            for initial, tag_commit, accepted, version in (
+                ("absent", self.commit, True, self.version),
+                ("draft-partial", self.commit, True, self.version),
+                ("absent", "b" * 40, False, self.version),
+                ("absent", self.commit, True, "1.2.3-rc.1"),
             ):
-                with self.subTest(initial=initial, tag_commit=tag_commit):
-                    runner = root / f"{initial}-{tag_commit[0]}"
+                with self.subTest(initial=initial, tag_commit=tag_commit, version=version):
+                    command = template.replace("${{ needs.candidate.outputs.version }}", version)
+                    self.assertNotIn("${{", command)
+                    runner = root / f"{initial}-{tag_commit[0]}-{version}"
                     runner.mkdir()
                     existing = initial == "draft-partial"
                     state_path = runner / "github-state.json"
@@ -768,7 +806,7 @@ class PublicationStateTests(unittest.TestCase):
                             "RUNNER_TEMP": str(runner), "GITHUB_OUTPUT": str(runner / "outputs"),
                             "GITHUB_REPOSITORY": "trainstar/synchro", "GH_TOKEN": "fixture-token",
                             "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
-                            "TEST_GITHUB_STATE": str(state_path), "TEST_TAG_COMMIT": tag_commit,
+                            "TEST_GITHUB_STATE": str(state_path), "TEST_TAG_COMMIT": tag_commit, "TEST_TAG": f"v{version}",
                         },
                         capture_output=True, text=True, timeout=20, check=False,
                     )
@@ -781,6 +819,8 @@ class PublicationStateTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(state["files"], {name: data.hex() for name, data in payloads.items()})
                     self.assertFalse(state["release"]["draft"])
+                    if not existing:
+                        self.assertEqual(state["release"]["prerelease"], version != self.version)
                     self.assertEqual(
                         state["operations"],
                         ["download", "upload", "upload", "upload", "publish"] if existing
@@ -788,10 +828,11 @@ class PublicationStateTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         json.loads((runner / "github-operation.json").read_text(encoding="utf-8")),
-                        {"release_id": "17", "tag": "v1.2.3", "source_commit": self.commit, "operation": "publish-draft"},
+                        {"release_id": "17", "tag": f"v{version}", "source_commit": self.commit, "operation": "publish-draft"},
                     )
 
-    def write_release_fixture(self, release_dir: Path) -> dict[str, Any]:
+    def write_release_fixture(self, release_dir: Path, version: str | None = None) -> dict[str, Any]:
+        version = version or self.version
         release_dir.mkdir(parents=True)
         distributions = []
         for role, name in (
@@ -813,8 +854,8 @@ class PublicationStateTests(unittest.TestCase):
             })
         (release_dir / "release-manifest.json").write_text(json.dumps({
             "schema_version": 1,
-            "release_version": self.version,
-            "source": {"commit": self.commit, "source_tags": [f"api/go/v{self.version}", f"v{self.version}"]},
+            "release_version": version,
+            "source": {"commit": self.commit, "source_tags": [f"api/go/v{version}", f"v{version}"]},
             "distributions": distributions,
         }), encoding="utf-8")
         (release_dir / "SHA256SUMS").write_text(
@@ -962,16 +1003,16 @@ class PublicationStateTests(unittest.TestCase):
             )
         ]
         self.assertEqual(order, sorted(order))
-        replacements = {"release_dir_name": "fixture", "version": self.version}
-        commands = {}
-        for name in ("Publish or verify exact npm candidate through trusted OIDC", "Promote npm latest only after public checks"):
-            command = release_step_command(name)
-            for expression, value in replacements.items():
-                command = command.replace("${{ needs.candidate.outputs." + expression + " }}", value)
-            self.assertNotIn("${{", command)
-            commands[name] = command
-        publish = commands["Publish or verify exact npm candidate through trusted OIDC"]
-        promote = commands["Promote npm latest only after public checks"]
+        def commands(version: str) -> tuple[str, str]:
+            steps = []
+            for name in ("Publish or verify exact npm candidate through trusted OIDC", "Promote npm latest only after public checks"):
+                command = release_step_command(name)
+                for expression, value in {"release_dir_name": "fixture", "version": version}.items():
+                    command = command.replace("${{ needs.candidate.outputs." + expression + " }}", value)
+                self.assertNotIn("${{", command)
+                steps.append(command)
+            return steps[0], steps[1]
+        publish, promote = commands(self.version)
 
         with tempfile.TemporaryDirectory(prefix="synchro-npm-promotion-") as directory:
             root = Path(directory)
@@ -1006,7 +1047,7 @@ class PublicationStateTests(unittest.TestCase):
                 state = json.loads(path.read_text())
                 args = sys.argv[1:]
                 package = "@trainstar/synchro-react-native"
-                version = "1.2.3"
+                version = os.environ["TEST_VERSION"]
                 if args[:2] == ["install", "--global"] or args[:2] == ["init", "--yes"]:
                     pass
                 elif args[0] == "publish":
@@ -1072,7 +1113,10 @@ class PublicationStateTests(unittest.TestCase):
                     else:
                         self.respond(404, b"{}")
 
-            def run(name: str, command: str, runner: Path, state: dict[str, object], before: str) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+            def run(
+                name: str, command: str, runner: Path, state: dict[str, object], before: str,
+                cwd: Path = root, version: str = self.version,
+            ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
                 state_path = runner / f"{name}-npm-state.json"
                 state_path.write_text(json.dumps(state), encoding="utf-8")
                 Registry.state_path = state_path
@@ -1084,9 +1128,10 @@ class PublicationStateTests(unittest.TestCase):
                     thread.start()
                     try:
                         result = subprocess.run(
-                            ["bash", "-c", command], cwd=root,
+                            ["bash", "-c", command], cwd=cwd,
                             env={
                                 **{key: value for key, value in os.environ.items() if key not in {"NODE_AUTH_TOKEN", "NPM_TOKEN"}},
+                                "TEST_VERSION": version,
                                 "PATH": str(tools) + os.pathsep + os.environ["PATH"],
                                 "RUNNER_TEMP": str(runner),
                                 "GITHUB_TOKEN": "",
@@ -1140,6 +1185,35 @@ class PublicationStateTests(unittest.TestCase):
                 self.assertEqual(state["operations"], ["dist-tag latest"])
                 result, state = run("complete", promote, runner, state | {"operations": []}, "published-latest")
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["operations"], [])
+
+            with self.subTest(case="release candidate never moves latest"):
+                version = "1.2.3-rc.1"
+                candidate_root = root / "release-candidate"
+                self.write_release_fixture(candidate_root / "dist/releases/fixture", version)
+                (candidate_root / "dist/releases/fixture/artifacts").mkdir()
+                (candidate_root / f"dist/releases/fixture/artifacts/trainstar-synchro-react-native-{version}.tgz").write_bytes(sealed)
+                runner = candidate_root / "runner"
+                runner.mkdir()
+                candidate_publish, candidate_promote = commands(version)
+                result, state = run(
+                    "publish", candidate_publish, runner, registry({"1.2.2": b"old"}, {"latest": "1.2.2"}), "absent",
+                    candidate_root, version,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["dist_tags"], {"latest": "1.2.2", "next": version})
+                self.assertEqual(state["operations"], ["publish next", f"install @trainstar/synchro-react-native@{version}", "audit signatures"])
+                self.assertEqual(json.loads((runner / "npm-operation.json").read_text())["registry_state"], "published-prerelease")
+                result, state = run(
+                    "resume", candidate_publish, runner, state | {"operations": []}, "published-prerelease", candidate_root, version,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["operations"], [f"install @trainstar/synchro-react-native@{version}", "audit signatures"])
+                result, state = run(
+                    "promote", candidate_promote, runner, state | {"operations": []}, "published-prerelease", candidate_root, version,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["dist_tags"], {"latest": "1.2.2", "next": version})
                 self.assertEqual(state["operations"], [])
 
             for case, versions, dist_tags, error in (

@@ -63,8 +63,8 @@ Do not continue when a required control, credential, or runtime is unavailable.
 
 ## Prepare A Release
 
-1. Select the release version as `X.Y.Z`.
-2. Create or select exactly one GitHub milestone named `vX.Y.Z`.
+1. Select the release version as `X.Y.Z`, or as `X.Y.Z-rc.N` for a release candidate.
+2. Create or select exactly one GitHub milestone named `vX.Y.Z`. A release candidate uses the milestone of its release.
 3. Assign every release issue to that milestone.
 4. Create `extensions/synchro-pg/sql/synchro_pg--<current>--X.Y.Z.sql`, where `<current>` is the version in `VERSION`.
 5. Run `make set-version VERSION=X.Y.Z`.
@@ -134,6 +134,38 @@ Set `ORIGINAL_RUN_ID` to the decimal ID of the original Release run that owns th
 `resume_run_id` must identify that run.
 It does not authorize a different candidate, version, source SHA, or artifact set.
 Recovery requires the original candidate's successful `master` CI evidence.
+
+## Release Candidate
+
+Use a release candidate when a consumer application must validate a release before other consumers receive it.
+The consumer application installs the candidate and runs its real flows.
+Only an accepted candidate becomes a release.
+A candidate goes through the same `dev` to `master` promotion and gates as a release.
+
+A release candidate has the version `X.Y.Z-rc.N`, where `N` starts at 1.
+The Release workflow publishes it to the same registries as a release, with these differences:
+
+- npm receives the candidate under the `next` dist-tag. The workflow never moves `latest` to a candidate.
+- GitHub marks the candidate release as a prerelease. GitHub never selects a prerelease as the latest release.
+- npm, SwiftPM, CocoaPods, and Go order `X.Y.Z-rc.N` before `X.Y.Z`. Their version ranges skip a prerelease.
+- Go `@latest` selects the newest release when one exists.
+- Maven Central has no prerelease channel. A dynamic Gradle version can resolve a candidate, so consumers use exact Maven versions.
+- The extension version is `X.Y.Z-rc.N`. The extension update chain goes through each published candidate to `X.Y.Z`.
+
+Use this procedure:
+
+1. Prepare `X.Y.Z-rc.1` with the procedure in "Prepare A Release".
+2. If `VERSION` is the unpublished `X.Y.Z`, rename its install SQL and its update script to `X.Y.Z-rc.1` instead of step 4.
+3. Release the candidate with the routine actions. The workflow completes without npm `latest` or GitHub latest.
+4. Install the exact candidate version in the consumer application.
+5. Run the real consumer flows against the candidate server artifacts.
+6. If the consumer finds a defect, correct it and release `X.Y.Z-rc.<N+1>`. Never reuse a published candidate version.
+7. When the consumer accepts `X.Y.Z-rc.N`, prepare `X.Y.Z` from the accepted source.
+8. Release `X.Y.Z` with the routine actions. The workflow moves npm `latest` and marks GitHub latest.
+
+A published candidate is a released update origin. Add it to `update-origins.json` before the next update script.
+The update script from the accepted candidate to `X.Y.Z` contains only the build fingerprint statement when the source has no other change.
+The release builds new distributions with the release version. Every Package and Public gate runs again for those distributions.
 
 ## Support And Compatibility
 
@@ -252,13 +284,13 @@ The manifest records candidate environment resolution in `release-manifest.json`
 6. Attest the sealed files with the exact sealed release manifest.
 7. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry.
 8. Create immutable `v<version>` and `api/go/v<version>` tags.
-9. Publish GitHub assets without marking them latest.
+9. Publish GitHub assets without marking them latest. Mark a release candidate as a GitHub prerelease.
 10. Verify source and asset access.
 11. Publish Maven and verify public consumption.
-12. Publish npm under the `candidate` dist-tag through trusted OIDC.
+12. Publish npm through trusted OIDC under the `candidate` dist-tag, or under `next` for a release candidate.
 13. Verify the explicit npm version, exact public bytes, provenance, and clean React Native builds.
-14. Move npm `latest` to the verified version with `NPM_DIST_TAG_TOKEN`.
-15. Mark GitHub latest after all public checks pass.
+14. Move npm `latest` to the verified version with `NPM_DIST_TAG_TOKEN`. A release candidate skips this step.
+15. Mark GitHub latest after all public checks pass. A release candidate skips this step.
 
 ## Success Evidence
 
@@ -284,6 +316,8 @@ The R1 definition now derives its Linux host identity from `/etc/machine-id`. Th
 | GitHub published and a registry is missing | Keep non-latest status and publish the original payload. |
 | Registry outcome is unknown | Query the recorded operation before retry. |
 | npm is `published-candidate` | Resume. Verify the published bytes and provenance, then move `latest`. Do not publish again. |
+| npm is `published-prerelease` | Resume. Verify the published candidate bytes and provenance. Do not move `latest`. |
+| Release candidate has a defect | Correct it and release the next candidate `X.Y.Z-rc.<N+1>`. |
 | Published bytes match | Skip upload and repeat incomplete public checks only. |
 | Bytes, tag, source, or version differ | Stop and record the conflict. |
 | Original artifacts or the sealed candidate receipt expired | Stop. Never rebuild an existing release version. |
