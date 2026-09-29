@@ -66,6 +66,13 @@
 	lint-rust-pg \
 	lint-rust \
 	test \
+	ci-source-quality \
+	ci-candidate-server \
+	ci-candidate-swift \
+	ci-candidate-kotlin \
+	ci-candidate-rn-ios \
+	ci-candidate-rn-android-build \
+	ci-candidate-rn-android \
 	test-rust-core \
 	test-rust-mutants \
 	test-rust-mutants-broad \
@@ -390,6 +397,13 @@ help:
 	@echo "  lint-rust-pg          - Run Rust fmt and clippy for the PostgreSQL extension"
 	@echo "  lint-rust             - Run all Rust fmt and clippy checks"
 	@echo "  test                  - Run the default local validation set"
+	@echo "  ci-source-quality     - Run the tests of the CI source-quality job"
+	@echo "  ci-candidate-server   - Run the tests of the CI candidate-server job (ADAPTER_TEST_URL, SOAK_ARTIFACT_DIR)"
+	@echo "  ci-candidate-swift    - Run the tests of the CI candidate-swift job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
+	@echo "  ci-candidate-kotlin   - Run the tests of the CI candidate-kotlin job on KOTLIN_ANDROID_SERIAL (ADAPTER_TEST_URL)"
+	@echo "  ci-candidate-rn-ios   - Run the tests of the CI candidate-rn-ios job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
+	@echo "  ci-candidate-rn-android-build - Build the app of the CI candidate-rn-android job (ADAPTER_TEST_URL)"
+	@echo "  ci-candidate-rn-android - Run the device tests of the CI candidate-rn-android job on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-rust-core        - Run synchro-core unit tests"
 	@echo "  test-rust-mutants     - Run targeted synchro-core mutation tests"
 	@echo "  test-rust-mutants-broad - Run broad synchro-core mutation search"
@@ -1077,6 +1091,76 @@ lint-rn:
 	cd clients/react-native && yarn lint
 
 test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit verify-contract docs-build
+
+# Each ci-* target is the test phase of one job in .github/workflows/ci.yml.
+# CI and a local run call the same target. One $(MAKE) call per target keeps the job order under -j.
+ci-source-quality:
+	$(MAKE) docs-build
+	$(MAKE) test-version-contract
+	$(MAKE) version-check
+	$(MAKE) release-npm-dry-run
+	$(MAKE) build-check
+	$(MAKE) build-seed
+	$(MAKE) build-conformance
+	$(MAKE) lint-conformance
+	$(MAKE) test-conformance
+	$(MAKE) test-integration-mutant-manifest
+	$(MAKE) test-local-postgres
+	$(MAKE) test-release-artifacts
+	$(MAKE) test-release-publish
+	$(MAKE) test-server-consumer-helper
+	$(MAKE) test-packaged-smoke-structure
+	$(MAKE) test-ci-process-lifecycle
+	$(MAKE) lint-go
+	$(MAKE) lint-rust-core
+	$(MAKE) lint-rust-pg
+	$(MAKE) check-pg-sql
+	$(MAKE) check-released-update-scripts
+	$(MAKE) lint-rn
+	$(MAKE) test-rust-core
+	$(MAKE) test-rn-unit
+	$(MAKE) test-kotlin-unit
+
+# The black-box suites read the stress seed and the update bundles from the environment.
+ci-candidate-server: export SOAK_SEED = 20260914
+ci-candidate-server: export SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT = $(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)
+ci-candidate-server: export SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS = $(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)
+ci-candidate-server:
+	$(MAKE) test-rust-pg
+	$(MAKE) test-rust-mutants
+	$(MAKE) test-adapter
+	$(MAKE) conformance-update-baseline-extension-artifact
+	$(MAKE) test-blackbox
+	$(MAKE) test-integration-mutants
+
+ci-candidate-swift:
+	$(MAKE) test-swift
+	$(MAKE) test-client-schema-identity
+	$(MAKE) test-consumer-swift
+	$(MAKE) test-swift-upgrade
+
+ci-candidate-kotlin:
+	$(MAKE) test-kotlin-instrumentation
+	$(MAKE) test-kotlin
+	$(MAKE) test-consumer-kotlin-device
+	$(MAKE) test-kotlin-upgrade
+	$(MAKE) test-consumer-kotlin
+
+ci-candidate-rn-ios:
+	$(MAKE) test-rn-e2e-ios
+	$(MAKE) test-rn-bridge-transactions-ios
+	$(MAKE) test-consumer-rn-ios
+	$(MAKE) test-rn-upgrade-ios
+
+# The job builds the app before it boots the emulator.
+ci-candidate-rn-android-build:
+	$(MAKE) test-rn-e2e-android-build
+
+ci-candidate-rn-android:
+	$(MAKE) test-rn-e2e-android-run
+	$(MAKE) test-rn-bridge-transactions-android
+	$(MAKE) test-consumer-rn-android
+	$(MAKE) test-rn-upgrade-android
 
 build-swift-native-runner:
 	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --product synchro-native-runner
