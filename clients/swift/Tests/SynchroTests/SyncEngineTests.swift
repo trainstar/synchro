@@ -3105,6 +3105,18 @@ final class SyncEngineTests: XCTestCase {
         }
         let connectObservedTarget = OSAllocatedUnfairLock(initialState: false)
         MockURLProtocol.requestHandler = { request in
+            if request.url!.path.hasSuffix("/sync/pull") {
+                // The connect assigns no scope, and a normal cycle still pulls to reconcile assignment.
+                return try self.mockResponse(json: [
+                    "changes": [] as [Any],
+                    "scope_set_version": 0,
+                    "scope_cursors": [:] as [String: Any],
+                    "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+                    "rebuild": [] as [Any],
+                    "has_more": false,
+                    "checksums": [:] as [String: Any],
+                ])
+            }
             guard request.url!.path.hasSuffix("/sync/connect") else {
                 return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
             }

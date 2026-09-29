@@ -27,11 +27,11 @@ func TestLoadRealAuthoredCatalogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load authored catalogs: %v", err)
 	}
-	if got := len(bundle.Requirements.Requirements); got != 116 {
-		t.Fatalf("requirement count = %d, want 116", got)
+	if got := len(bundle.Requirements.Requirements); got != 117 {
+		t.Fatalf("requirement count = %d, want 117", got)
 	}
-	if got := len(bundle.Faults.Controls); got != 116 {
-		t.Fatalf("control count = %d, want 116", got)
+	if got := len(bundle.Faults.Controls); got != 117 {
+		t.Fatalf("control count = %d, want 117", got)
 	}
 }
 
@@ -110,7 +110,7 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 
 		bundle = newBundle(t)
 		bundle.Requirements.Requirements = bundle.Requirements.Requirements[1:]
-		requireErrorContains(t, bundle.Validate(), "exactly 116 records")
+		requireErrorContains(t, bundle.Validate(), "exactly 117 records")
 
 		bundle = newBundle(t)
 		bundle.Faults.Controls = append(bundle.Faults.Controls, bundle.Faults.Controls[0])
@@ -118,7 +118,7 @@ func TestBundleSemanticMutantsFailClosed(t *testing.T) {
 
 		bundle = newBundle(t)
 		bundle.Faults.Controls = bundle.Faults.Controls[1:]
-		requireErrorContains(t, bundle.Validate(), "controls must contain exactly 116")
+		requireErrorContains(t, bundle.Validate(), "controls must contain exactly 117")
 	})
 
 	t.Run("invariant references require canonical H3 anchors", func(t *testing.T) {
@@ -741,6 +741,7 @@ func completeSnapshotFixture(t *testing.T) string {
 		"conformance/scenarios/server/schema-queued-mutation-001.json",
 		"conformance/scenarios/server/scope-assignment-bound-001.json",
 		"conformance/scenarios/server/scope-assignment-pull-001.json",
+		"conformance/scenarios/server/scope-empty-pull-001.json",
 		"conformance/scenarios/server/wal-decode-failure-001.json",
 		"conformance/scenarios/server/wal-order-001.json",
 		"conformance/scenarios/performance/configured-bounds-001.json",

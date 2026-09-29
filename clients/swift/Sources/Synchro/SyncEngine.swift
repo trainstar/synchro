@@ -1094,9 +1094,6 @@ final class SyncEngine: @unchecked Sendable {
 
         while hasMore {
             let scopes = try loadKnownScopes()
-            if scopes.isEmpty {
-                return
-            }
 
             let request: PullRequest
             if let replayRequestBody {

@@ -2136,6 +2136,36 @@ class PushProcessorTests {
     }
 
     @Test
+    fun insertAndDeleteBeforeAGroupOfTheSameRowCancelAndBlockTheGroup() = runTest {
+        val (database, _, processor) = environment()
+        val client = clientFor(database)
+        insertOrder(database, "a", "local")
+        database.execute(
+            "UPDATE orders SET deleted_at = ? WHERE id = ?",
+            arrayOf("2026-01-01T00:30:00.000000Z", "a"),
+        )
+        client.atomicWriteTransaction { transaction ->
+            transaction.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("after delete", "a"))
+            transaction.insertOrder("b", "grouped")
+        }
+        val cancelledIDs = listOf(ledgerID(database, "a"), ledgerID(database, "a", "delete"))
+        val groupIDs = listOf(ledgerID(database, "a", "update"), ledgerID(database, "b"))
+        val server = MockWebServer()
+        server.start()
+        try {
+            assertNull(processor.processPush(http(server), "device-1", 1, 1, PROTOCOL_TEST_SCHEMA_HASH, listOf(localTable)))
+
+            assertEquals(0, server.requestCount)
+            assertEquals(
+                listOf("cancelled_before_send", "cancelled_before_send", "blocked_by_predecessor", "blocked_by_predecessor"),
+                (cancelledIDs + groupIDs).map { lifecycleState(database, it) },
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun groupWaitsWhileOneMemberHasNoBaseVersion() = runTest {
         val (database, _, processor) = environment()
         val client = clientFor(database)

@@ -301,7 +301,7 @@ fn synchro_register_assignment_function(p_function: &str, p_max_scopes: default!
         let (function, fingerprint) = resolve_assignment_function(client, actor, p_function)?;
         let definition_sha256 = lower_hex(&fingerprint);
         client.update(
-            "INSERT INTO sync_assignment_function (
+            "INSERT INTO synchro.sync_assignment_function (
                  singleton, function_oid, function_schema, function_name,
                  max_scopes, definition_sha256
              ) VALUES (true, $1::oid, $2, $3, $4, $5)
@@ -328,7 +328,7 @@ fn synchro_register_assignment_function(p_function: &str, p_max_scopes: default!
 
 #[pg_extern]
 fn synchro_unregister_assignment_function() {
-    Spi::run("DELETE FROM sync_assignment_function WHERE singleton")
+    Spi::run("DELETE FROM synchro.sync_assignment_function WHERE singleton")
         .unwrap_or_else(|error| pgrx::error!("unregistering assignment function: {}", error));
 }
 
@@ -344,7 +344,7 @@ fn load_assignment_registration(
     let rows = client.select(
         "SELECT function_oid::bigint AS function_oid, function_schema, function_name,
                 max_scopes, definition_sha256
-         FROM sync_assignment_function
+         FROM synchro.sync_assignment_function
          WHERE singleton",
         None,
         &[],

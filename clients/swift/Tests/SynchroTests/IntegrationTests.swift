@@ -686,6 +686,45 @@ final class IntegrationTests: XCTestCase {
         }
     }
 
+    /// The fixture trigger gives the customer insert an order with the same ID. Thus the grouped
+    /// order insert conflicts, and after the group rollback no row exists for the order.
+    func testAtomicGroupConflictWithoutServerRowRemovesTheLocalRowAgainstExtension() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await self.stopAndClose(writer)
+        }
+        let rowID = UUID().uuidString.lowercased()
+        let updatedAt = "2026-01-11T00:00:00.000Z"
+        try await writer.start()
+        await writer.enterBackground()
+        try writer.atomicWriteTransaction { transaction in
+            try transaction.execute(
+                "INSERT INTO customers (id, user_id, name, balance, is_active, market_segment, created_at, updated_at) VALUES (?, ?, 'shadow parent', 0, 1, 'test-shadow-order', ?, ?)",
+                params: [rowID, userID, updatedAt, updatedAt]
+            )
+            try transaction.execute(
+                "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
+                params: [rowID, rowID, userID, #"{"street":"Shadow Way"}"#, updatedAt, updatedAt]
+            )
+        }
+        try await writer.enterForeground()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try writer.pendingChangeCount() == 0
+        }
+
+        let rejected = Dictionary(uniqueKeysWithValues: try writer.inspectRejectedMutations().map { ($0.tableName, $0) })
+        XCTAssertEqual(rejected.count, 2)
+        XCTAssertEqual(rejected["customers"]?.code, .atomicBatchRejected)
+        let order = try XCTUnwrap(rejected["orders"])
+        XCTAssertEqual(order.status, .conflict)
+        XCTAssertEqual(order.code, .rowAlreadyExists)
+        XCTAssertNil(order.serverRowJSON)
+        XCTAssertNil(order.serverVersion)
+        XCTAssertTrue(try writer.query("SELECT id FROM orders WHERE id = ?", params: [rowID]).isEmpty)
+        XCTAssertEqual(try customerNames(writer, userID: userID), [rowID: "shadow parent"])
+    }
+
     /// A pull after an accepted push can end in a scheduled retry until WAL
     /// capture completes, and capture can lag for tens of seconds. The engine
     /// owns that retry and the reconnect after it, and it refuses a caller

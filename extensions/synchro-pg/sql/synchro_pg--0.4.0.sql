@@ -100,7 +100,7 @@ CREATE OR REPLACE FUNCTION synchro_replay_registry_activation_requests()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 DECLARE
     request RECORD;
@@ -597,25 +597,36 @@ CREATE TRIGGER synchro_push_mutations_immutable
 BEFORE UPDATE OR DELETE ON sync_push_mutations
 FOR EACH ROW EXECUTE FUNCTION synchro_reject_push_mutation_ledger_mutation();
 
+-- Row security raises insufficient_privilege when a new row fails a WITH CHECK
+-- expression, so that error is a write policy denial of one mutation.
 CREATE OR REPLACE FUNCTION synchro_execute_push_dml(
     p_sql TEXT,
     p_data JSONB,
     p_record_id TEXT,
     p_push_unit BOOLEAN
 )
-RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN)
+RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN, policy_rejected BOOLEAN)
 LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
+DECLARE
+    v_rollback_unapplied BOOLEAN := false;
 BEGIN
     applied := false;
     validation_failed := false;
+    policy_rejected := false;
     BEGIN
         IF p_push_unit THEN
             SET CONSTRAINTS ALL DEFERRED;
         END IF;
         EXECUTE p_sql INTO applied USING p_data, p_record_id;
         applied := COALESCE(applied, false);
+        IF NOT applied THEN
+            -- A trigger can write other rows and then skip the target row. The raise rolls
+            -- back those writes, because push rejects a mutation that applies no row.
+            v_rollback_unapplied := true;
+            RAISE EXCEPTION 'push source DML applied no row';
+        END IF;
         IF p_push_unit THEN
             SET CONSTRAINTS ALL IMMEDIATE;
         END IF;
@@ -623,6 +634,13 @@ BEGIN
         WHEN data_exception OR integrity_constraint_violation THEN
             applied := false;
             validation_failed := true;
+        WHEN insufficient_privilege THEN
+            applied := false;
+            policy_rejected := true;
+        WHEN raise_exception THEN
+            IF NOT v_rollback_unapplied THEN
+                RAISE;
+            END IF;
     END;
     RETURN NEXT;
 END;
@@ -712,7 +730,7 @@ CREATE OR REPLACE FUNCTION sync_lock_scope_digest_boundary()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     LOCK TABLE synchro.sync_wal_progress IN ROW EXCLUSIVE MODE;
@@ -724,7 +742,7 @@ CREATE OR REPLACE FUNCTION sync_invalidate_scope_digest()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF TG_OP IN ('UPDATE', 'DELETE') THEN
@@ -1421,7 +1439,7 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 STABLE
 SECURITY INVOKER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF pg_catalog.has_table_privilege(p_relation, 'SELECT') IS NOT TRUE THEN
@@ -1713,7 +1731,7 @@ CREATE OR REPLACE FUNCTION synchro_primary_key_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
@@ -1728,7 +1746,7 @@ CREATE OR REPLACE FUNCTION synchro_capture_fence_record()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 DECLARE
     v_fence_id UUID := gen_random_uuid();
@@ -1934,7 +1952,7 @@ CREATE OR REPLACE FUNCTION synchro_capture_truncate_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock_shared(1936876389::bigint);
@@ -2300,7 +2318,7 @@ AS 'MODULE_PATHNAME', 'synchro_pull_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/push.rs:161
+-- synchro-pg/src/push.rs:171
 -- synchro_pg::push::synchro_push
 CREATE  FUNCTION "synchro_push"(
 	"p_user_id" TEXT, /* &str */
@@ -2345,7 +2363,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:790
+-- synchro-pg/src/registry.rs:793
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2358,7 +2376,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1067
+-- synchro-pg/src/registry.rs:1070
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2385,7 +2403,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:472
+-- synchro-pg/src/registry.rs:475
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2512,7 +2530,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1024
+-- synchro-pg/src/registry.rs:1027
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */
@@ -2532,7 +2550,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:1981
+-- synchro-pg/src/lib.rs:1999
 -- finalize
 
 DO $roles$
@@ -2619,7 +2637,7 @@ BEGIN
             EXECUTE pg_catalog.format('ALTER FUNCTION %s SECURITY DEFINER', object_identity);
         END IF;
         EXECUTE pg_catalog.format(
-            'ALTER FUNCTION %s SET search_path = pg_catalog, synchro', object_identity
+            'ALTER FUNCTION %s SET search_path = pg_catalog, synchro, pg_temp', object_identity
         );
     END LOOP;
 END

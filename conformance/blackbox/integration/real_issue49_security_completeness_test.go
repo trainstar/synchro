@@ -660,7 +660,7 @@ func TestRealIssue49SecurityDatabaseAuthority(t *testing.T) {
 		  AND (owner.rolname <> 'synchro_owner'
 		       OR (NOT procedure.prosecdef
 		           AND procedure.proname <> 'synchro_assert_projection_reader')
-		       OR NOT COALESCE(procedure.proconfig, '{}'::text[]) @> ARRAY['search_path=pg_catalog, synchro'])`).Scan(&unsafeFunctions); err != nil {
+		       OR NOT COALESCE(procedure.proconfig, '{}'::text[]) @> ARRAY['search_path=pg_catalog, synchro, pg_temp'])`).Scan(&unsafeFunctions); err != nil {
 		t.Fatalf("inspect privileged function definitions: %v", err)
 	}
 

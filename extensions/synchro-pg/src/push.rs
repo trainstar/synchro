@@ -94,6 +94,15 @@ struct RowState {
     deleted: bool,
 }
 
+impl RowState {
+    /// The capture fence trigger updates `sync_row_versions` in the transaction of each
+    /// source write. Thus, a live version without a visible source row identifies a
+    /// present row that the row security of the source relation hides from the caller.
+    fn hidden_by_row_security(&self) -> bool {
+        self.data.is_none() && !self.deleted
+    }
+}
+
 #[derive(Debug, Clone)]
 struct EvaluatedMutation {
     mutation: Mutation,
@@ -127,6 +136,7 @@ enum DmlOutcome {
     Applied,
     NotApplied,
     ValidationFailed,
+    PolicyRejected,
 }
 
 fn require_no_pending_deferred_trigger_events(client: &SpiClient<'_>) {
@@ -1310,13 +1320,10 @@ fn evaluate_mutation(
         pgrx::error!("active registry and schema manifest are inconsistent")
     }
     if table_reg.push_policy == PushPolicy::ReadOnly {
-        return terminal_evaluation(
+        return policy_evaluation(
             mutation,
             outcome_schema,
-            "policy_rejected",
-            "authenticated write policy rejected the mutation",
             registered_target(table_reg, &pk_field_id, &pk_value, None),
-            None,
         );
     }
 
@@ -1334,13 +1341,10 @@ fn evaluate_mutation(
             operation_name(mutation.op),
             &serde_json::Value::Object(authored_columns.clone()),
         ) else {
-            return terminal_evaluation(
+            return policy_evaluation(
                 mutation,
                 outcome_schema,
-                "policy_rejected",
-                "authenticated write policy rejected the mutation",
                 registered_target(table_reg, &pk_field_id, &pk_value, None),
-                None,
             );
         };
         value
@@ -1446,6 +1450,16 @@ fn evaluate_mutation(
             },
         );
     }
+    if existing
+        .as_ref()
+        .is_some_and(RowState::hidden_by_row_security)
+    {
+        return policy_evaluation(
+            mutation,
+            outcome_schema,
+            registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+        );
+    }
 
     match mutation.op {
         Operation::Insert => {
@@ -1481,11 +1495,23 @@ fn evaluate_mutation(
                     row_identity,
                     "mutation failed physical validation",
                 ),
+                DmlOutcome::PolicyRejected => policy_evaluation(
+                    mutation,
+                    outcome_schema,
+                    registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                ),
                 DmlOutcome::NotApplied => {
+                    // The insert found no conflicting row that the caller can see, so a BEFORE
+                    // trigger or row security denied the write.
                     let current = load_existing_record(client, &record_id, table_reg)
-                        .unwrap_or_else(|| {
-                            pgrx::error!("conflicting push insert has no row state")
-                        });
+                        .filter(|current| !current.hidden_by_row_security());
+                    let Some(current) = current else {
+                        return policy_evaluation(
+                            mutation,
+                            outcome_schema,
+                            registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                        );
+                    };
                     let code = if current.deleted {
                         "row_deleted"
                     } else {
@@ -1587,9 +1613,13 @@ fn evaluate_mutation(
                     row_identity,
                     "mutation failed physical validation",
                 ),
-                DmlOutcome::NotApplied => {
-                    pgrx::error!("locked authoritative row disappeared during push")
-                }
+                // Push holds the lock on the source row, so a zero-row write to that row is a
+                // write policy denial.
+                DmlOutcome::NotApplied | DmlOutcome::PolicyRejected => policy_evaluation(
+                    mutation,
+                    outcome_schema,
+                    registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                ),
                 DmlOutcome::Applied => accepted_evaluation(
                     client,
                     mutation,
@@ -1720,6 +1750,21 @@ fn registered_target(
         primary_key_value: primary_key_value.clone(),
         row_identity,
     }
+}
+
+fn policy_evaluation(
+    mutation: &Mutation,
+    outcome_schema: SchemaRef,
+    target: EvaluationTarget,
+) -> EvaluatedMutation {
+    terminal_evaluation(
+        mutation,
+        outcome_schema,
+        "policy_rejected",
+        "authenticated write policy rejected the mutation",
+        target,
+        None,
+    )
 }
 
 fn terminal_evaluation(
@@ -2061,6 +2106,21 @@ fn reread_group_conflict(
     let record_id = canonicalize_record_id(client, &wire_record_id, table_reg)
         .unwrap_or_else(|| pgrx::error!("atomic group conflict primary key is not canonical"));
     let existing = load_existing_record(client, &record_id, table_reg);
+    if existing
+        .as_ref()
+        .is_some_and(RowState::hidden_by_row_security)
+    {
+        return policy_evaluation(
+            &failure.mutation,
+            failure.outcome_schema.clone(),
+            registered_target(
+                table_reg,
+                &failure.primary_key_field_id,
+                &failure.primary_key_value,
+                failure.row_identity.clone(),
+            ),
+        );
+    }
     let outcome_text = |member: &str| {
         failure.outcome[member]
             .as_str()
@@ -2286,28 +2346,34 @@ fn load_existing_record(
         pk = pg_quote_ident(&table_reg.pk_column),
         pk_type = table_reg.pk_type,
     );
-    let source = client
-        .select(&sql, None, &[record_id.into()])
-        .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
-        .next()
-        .map(|row| {
-            let deleted = row
-                .get_by_name::<String, &str>("deleted_at")
-                .unwrap_or(None)
-                .is_some();
-            let data = row
-                .get_by_name::<String, &str>("data")
-                .unwrap_or(None)
-                .map(|data| {
-                    let mut data: serde_json::Value = serde_json::from_str(&data)
-                        .unwrap_or_else(|_| pgrx::error!("authoritative source row is not JSON"));
-                    crate::pull::canonicalize_synced_row_data(table_reg, &mut data).unwrap_or_else(
-                        |_| pgrx::error!("authoritative source row is not canonical"),
-                    );
-                    data
-                });
-            (deleted, data)
-        });
+    let load_source = |sql: &str| {
+        client
+            .select(sql, None, &[record_id.into()])
+            .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
+            .next()
+            .map(|row| {
+                let deleted = row
+                    .get_by_name::<String, &str>("deleted_at")
+                    .unwrap_or(None)
+                    .is_some();
+                let data = row
+                    .get_by_name::<String, &str>("data")
+                    .unwrap_or(None)
+                    .map(|data| {
+                        let mut data: serde_json::Value = serde_json::from_str(&data)
+                            .unwrap_or_else(|_| {
+                                pgrx::error!("authoritative source row is not JSON")
+                            });
+                        crate::pull::canonicalize_synced_row_data(table_reg, &mut data)
+                            .unwrap_or_else(|_| {
+                                pgrx::error!("authoritative source row is not canonical")
+                            });
+                        data
+                    });
+                (deleted, data)
+            })
+    };
+    let mut source = load_source(&sql);
     let versions = client
         .select(
             "SELECT row_version::text AS row_version, deleted
@@ -2327,6 +2393,13 @@ fn load_existing_record(
                 .unwrap_or(false),
         )
     });
+    if source.is_none() && version.as_ref().is_some_and(|(_, deleted)| !deleted) {
+        // A writer can commit a new row between the two reads. Each writer changes the version
+        // row in its own transaction, so the locked version fixes the committed source state.
+        // A writer locks the source row before the version row. NOWAIT fails this push with a
+        // retryable lock error instead of a deadlock that can abort that writer.
+        source = load_source(&format!("{sql} NOWAIT"));
+    }
     match (source, version) {
         (None, None) => None,
         (source, version) => {
@@ -2641,7 +2714,7 @@ fn execute_push_dml(
     set_push_mutation_id(client, mutation_id);
     let outcome = client
         .update(
-            "SELECT applied, validation_failed
+            "SELECT applied, validation_failed, policy_rejected
              FROM synchro_execute_push_dml($1, $2::jsonb, $3, $4)",
             None,
             &[
@@ -2661,12 +2734,17 @@ fn execute_push_dml(
         .get_by_name::<bool, &str>("validation_failed")
         .unwrap_or_else(|_| pgrx::error!("reading push source DML validation result failed"))
         .unwrap_or_else(|| pgrx::error!("push source DML validation result is missing"));
+    let policy_rejected = outcome
+        .get_by_name::<bool, &str>("policy_rejected")
+        .unwrap_or_else(|_| pgrx::error!("reading push source DML policy result failed"))
+        .unwrap_or_else(|| pgrx::error!("push source DML policy result is missing"));
     clear_push_mutation_id(client);
-    match (applied, validation_failed) {
-        (true, false) => DmlOutcome::Applied,
-        (false, false) => DmlOutcome::NotApplied,
-        (false, true) => DmlOutcome::ValidationFailed,
-        (true, true) => pgrx::error!("push source DML returned an invalid disposition"),
+    match (applied, validation_failed, policy_rejected) {
+        (true, false, false) => DmlOutcome::Applied,
+        (false, false, false) => DmlOutcome::NotApplied,
+        (false, true, false) => DmlOutcome::ValidationFailed,
+        (false, false, true) => DmlOutcome::PolicyRejected,
+        _ => pgrx::error!("push source DML returned an invalid disposition"),
     }
 }
 

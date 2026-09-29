@@ -52,6 +52,10 @@ Only the server MUST determine the authoritative scope set for an authenticated 
 
 Connect and pull MUST compute the authoritative scope set with the same rule. Pull MUST reconcile that set after every request validation passes and before it builds `scope_updates`. A changed set MUST advance `scope_set_version` by exactly one and MUST appear in `scope_updates` of that response. An unchanged set and a failed pull MUST write no assignment state. Rebuild MUST NOT reconcile assignment. A stale set in a successful pull, any other version step, or an assignment write from a failed pull is a violation of Scope assignment in [ADR 004].
 
+### Empty Scope Set Pull
+
+A native client MUST send pull in each normal sync cycle, also when it knows no scope. That pull carries an empty `scopes` map. The client MUST apply each scope that the response adds, rebuild it, and materialize its rows in the same cycle. A cycle that skips pull because the local scope set is empty is a violation of Sync ordering in the [Client Contract].
+
 ### Registered Scope Assignment Function
 
 At most one registered assignment function MUST contribute scopes, and registration MUST reject a function that breaks a rule in Scope assignment in [ADR 004]. Each evaluation MUST confirm the registered definition hash. It MUST reject a null result, an empty result, a `user:` result, and more distinct results than `max_scopes`. A rejected evaluation MUST fail the complete connect or pull with `500 sync_integrity_failure` and no assignment change. Treating a failure as an empty set, truncating results, or evaluating a changed definition is a violation.

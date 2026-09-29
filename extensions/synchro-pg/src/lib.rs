@@ -129,7 +129,7 @@ CREATE OR REPLACE FUNCTION synchro_replay_registry_activation_requests()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 DECLARE
     request RECORD;
@@ -626,25 +626,36 @@ CREATE TRIGGER synchro_push_mutations_immutable
 BEFORE UPDATE OR DELETE ON sync_push_mutations
 FOR EACH ROW EXECUTE FUNCTION synchro_reject_push_mutation_ledger_mutation();
 
+-- Row security raises insufficient_privilege when a new row fails a WITH CHECK
+-- expression, so that error is a write policy denial of one mutation.
 CREATE OR REPLACE FUNCTION synchro_execute_push_dml(
     p_sql TEXT,
     p_data JSONB,
     p_record_id TEXT,
     p_push_unit BOOLEAN
 )
-RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN)
+RETURNS TABLE (applied BOOLEAN, validation_failed BOOLEAN, policy_rejected BOOLEAN)
 LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
+DECLARE
+    v_rollback_unapplied BOOLEAN := false;
 BEGIN
     applied := false;
     validation_failed := false;
+    policy_rejected := false;
     BEGIN
         IF p_push_unit THEN
             SET CONSTRAINTS ALL DEFERRED;
         END IF;
         EXECUTE p_sql INTO applied USING p_data, p_record_id;
         applied := COALESCE(applied, false);
+        IF NOT applied THEN
+            -- A trigger can write other rows and then skip the target row. The raise rolls
+            -- back those writes, because push rejects a mutation that applies no row.
+            v_rollback_unapplied := true;
+            RAISE EXCEPTION 'push source DML applied no row';
+        END IF;
         IF p_push_unit THEN
             SET CONSTRAINTS ALL IMMEDIATE;
         END IF;
@@ -652,6 +663,13 @@ BEGIN
         WHEN data_exception OR integrity_constraint_violation THEN
             applied := false;
             validation_failed := true;
+        WHEN insufficient_privilege THEN
+            applied := false;
+            policy_rejected := true;
+        WHEN raise_exception THEN
+            IF NOT v_rollback_unapplied THEN
+                RAISE;
+            END IF;
     END;
     RETURN NEXT;
 END;
@@ -741,7 +759,7 @@ CREATE OR REPLACE FUNCTION sync_lock_scope_digest_boundary()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     LOCK TABLE synchro.sync_wal_progress IN ROW EXCLUSIVE MODE;
@@ -753,7 +771,7 @@ CREATE OR REPLACE FUNCTION sync_invalidate_scope_digest()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF TG_OP IN ('UPDATE', 'DELETE') THEN
@@ -1450,7 +1468,7 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 STABLE
 SECURITY INVOKER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF pg_catalog.has_table_privilege(p_relation, 'SELECT') IS NOT TRUE THEN
@@ -1742,7 +1760,7 @@ CREATE OR REPLACE FUNCTION synchro_primary_key_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
@@ -1757,7 +1775,7 @@ CREATE OR REPLACE FUNCTION synchro_capture_fence_record()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 DECLARE
     v_fence_id UUID := gen_random_uuid();
@@ -1963,7 +1981,7 @@ CREATE OR REPLACE FUNCTION synchro_capture_truncate_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, synchro
+SET search_path = pg_catalog, synchro, pg_temp
 AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock_shared(1936876389::bigint);
@@ -2064,7 +2082,7 @@ BEGIN
             EXECUTE pg_catalog.format('ALTER FUNCTION %s SECURITY DEFINER', object_identity);
         END IF;
         EXECUTE pg_catalog.format(
-            'ALTER FUNCTION %s SET search_path = pg_catalog, synchro', object_identity
+            'ALTER FUNCTION %s SET search_path = pg_catalog, synchro, pg_temp', object_identity
         );
     END LOOP;
 END
@@ -2372,6 +2390,14 @@ mod tests {
     use serde_json::Value;
     use sha2::{Digest, Sha256};
 
+    // Tests run in parallel transactions. A schema grant in a test locks the
+    // shared pg_namespace row until rollback, which can invert the registry
+    // lock order. The public schema has PUBLIC usage by default.
+    pgrx::extension_sql!(
+        "GRANT USAGE ON SCHEMA tests TO PUBLIC;",
+        name = "grant_test_schema_usage"
+    );
+
     include!("pg_tests/query_counts.rs");
     include!("pg_tests/order_cursor.rs");
     include!("pg_tests/integrity.rs");
@@ -2501,11 +2527,6 @@ mod tests {
                 .get_by_name::<String, &str>("ddl")?
                 .expect("test membership grant DDL");
             client.update(&grant_function, None, &[])?;
-            client.update(
-                "GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker",
-                None,
-                &[],
-            )?;
             let revoke = client
                 .select(
                     "SELECT pg_catalog.format(

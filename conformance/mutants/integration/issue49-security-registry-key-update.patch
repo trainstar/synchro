@@ -1,8 +1,8 @@
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -1695,10 +1695,7 @@ SECURITY DEFINER
- SET search_path = pg_catalog, synchro
+@@ -1722,10 +1722,7 @@ SECURITY DEFINER
+ SET search_path = pg_catalog, synchro, pg_temp
  AS $$
  BEGIN
 -    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
@@ -13,20 +13,20 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
      RETURN NEW;
  END;
  $$;
-@@ -2535,7 +2532,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2538,7 +2535,7 @@ CREATE FUNCTION "synchro_capture_fence"()
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1981
-+-- synchro-pg/src/lib.rs:1978
+--- synchro-pg/src/lib.rs:1999
++-- synchro-pg/src/lib.rs:1996
  -- finalize
  
  DO $roles$
 diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
 --- a/extensions/synchro-pg/src/lib.rs
 +++ b/extensions/synchro-pg/src/lib.rs
-@@ -1706,10 +1706,7 @@ SECURITY DEFINER
- SET search_path = pg_catalog, synchro
+@@ -1751,10 +1751,7 @@ SECURITY DEFINER
+ SET search_path = pg_catalog, synchro, pg_temp
  AS $$
  BEGIN
 -    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN

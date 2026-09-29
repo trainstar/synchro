@@ -12,6 +12,8 @@ fn create_assignment_members() {
 
 /// Creates a non-superuser role that owns and registers an assignment
 /// function, so a test can observe the privileges of the function owner.
+/// Call it before registry setup. Parallel tests grant `synchro_operator`
+/// before they take the registry write lock, so a later grant can deadlock.
 fn create_assignment_owner(role: &str) {
     Spi::run(&format!(
         "CREATE ROLE {role} NOLOGIN NOSUPERUSER;
@@ -100,7 +102,7 @@ fn assignment_registration() -> Option<Value> {
     let search_path: String = Spi::get_one("SELECT current_setting('search_path')")
         .expect("load test search path")
         .expect("test search path");
-    Spi::run("SELECT set_config('search_path', 'pg_catalog, synchro', true)")
+    Spi::run("SELECT set_config('search_path', 'pg_catalog, synchro, pg_temp', true)")
         .expect("set evaluation search path");
     let registration = Spi::get_one::<pgrx::JsonB>(
         "SELECT (
@@ -534,8 +536,8 @@ fn assignment_registration_rejects_schema_without_owner_usage() {
 #[pg_test]
 fn assignment_evaluation_runs_as_function_owner() {
     let owner = "synchro_assignment_evaluation_owner";
-    setup_test_tables();
     create_assignment_owner(owner);
+    setup_test_tables();
     create_assignment_function(
         "assigned_scopes",
         ASSIGNMENT_SIGNATURE,
@@ -560,8 +562,8 @@ fn assignment_evaluation_runs_as_function_owner() {
 #[pg_test]
 fn assignment_evaluation_query_to_xml_cannot_read_synchro() {
     let owner = "synchro_assignment_query_owner";
-    setup_test_tables();
     create_assignment_owner(owner);
+    setup_test_tables();
     create_assignment_function(
         "assigned_scopes",
         ASSIGNMENT_SIGNATURE,
@@ -721,6 +723,49 @@ fn unregistered_assignment_function_assigns_nothing() {
     assert!(response.get("error").is_none(), "{response}");
     assert_eq!(assignment_registration(), None);
     assert_eq!(client_scope_ids("u1", "c1"), vec!["user:u1"]);
+}
+
+#[pg_test]
+fn assignment_unregistration_ignores_temporary_shadow_table() {
+    create_assignment_members();
+    create_valid_assignment_function("assigned_scopes");
+    register_assignment_function("assigned_scopes", 1000);
+    Spi::run(
+        "CREATE TABLE public.assignment_shadow_runs (role_name TEXT NOT NULL);
+         GRANT INSERT ON public.assignment_shadow_runs TO PUBLIC",
+    )
+    .expect("create shadow trigger log");
+
+    Spi::run("SET LOCAL ROLE synchro_operator").expect("select operator role");
+    Spi::run(
+        "CREATE TEMP TABLE sync_assignment_function (singleton BOOLEAN);
+         GRANT ALL ON pg_temp.sync_assignment_function TO PUBLIC;
+         CREATE FUNCTION pg_temp.record_assignment_shadow() RETURNS trigger
+         LANGUAGE plpgsql AS $shadow$
+         BEGIN
+             INSERT INTO public.assignment_shadow_runs (role_name) VALUES (current_user);
+             RETURN NULL;
+         END
+         $shadow$;
+         CREATE TRIGGER record_assignment_shadow
+         BEFORE DELETE ON pg_temp.sync_assignment_function
+         FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.record_assignment_shadow()",
+    )
+    .expect("create temporary shadow table");
+    Spi::run("SELECT synchro.synchro_unregister_assignment_function()")
+        .expect("unregister assignment function");
+    Spi::run("RESET ROLE").expect("restore test role");
+
+    let shadow_roles = Spi::get_one::<Vec<String>>(
+        "SELECT COALESCE(array_agg(role_name ORDER BY role_name), ARRAY[]::text[])
+         FROM public.assignment_shadow_runs",
+    )
+    .expect("load shadow trigger roles");
+    let registrations =
+        Spi::get_one::<i64>("SELECT count(*) FROM synchro.sync_assignment_function")
+            .expect("count assignment registrations");
+    assert_eq!(shadow_roles, Some(Vec::new()));
+    assert_eq!(registrations, Some(0));
 }
 
 #[pg_test]

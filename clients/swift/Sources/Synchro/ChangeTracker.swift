@@ -637,7 +637,7 @@ final class ChangeTracker: @unchecked Sendable {
                 deletedRows.insert(identity)
             }
         }
-        try normalizeTrailingRuns(db, entries: group, anyPredecessor: true)
+        try normalizeRuns(db, entries: group, anyPredecessor: true)
         return try loadUnsealedEntries(db, atomicGroupID: groupID)
     }
 
@@ -739,7 +739,7 @@ final class ChangeTracker: @unchecked Sendable {
     // MARK: - Immutable capture normalization
 
     private func normalizeUnsealedChains(_ db: GRDB.Database) throws {
-        try normalizeTrailingRuns(
+        try normalizeRuns(
             db,
             entries: loadUnsealedEntries(db).filter { $0.sealedBatchID == nil },
             anyPredecessor: false
@@ -783,48 +783,56 @@ final class ChangeTracker: @unchecked Sendable {
         } while db.changesCount > 0
     }
 
-    /// Normalizes the trailing run of each same-row chain.
+    /// Normalizes the runs of each same-row chain.
     ///
     /// A run is a maximal sequence of chain entries with an equal atomic group, and a
     /// NULL group equals a NULL group. Only the trailing run merges, because a merged
     /// entry gets the next local order. An earlier run that merged would follow a later
-    /// group member that depends on it, and that group could never be sent.
+    /// group member that depends on it, and that group could never be sent. A
+    /// cancellation creates no entry, so an insert and delete cancel in every run.
     ///
-    /// A run merges only when its first entry depends on the entry before the run.
+    /// A run normalizes only when its first entry depends on the entry before the run.
     /// `anyPredecessor` removes that condition for a new atomic group, because an
     /// unmerged group puts two mutations for one row in one atomic request.
-    private func normalizeTrailingRuns(
+    private func normalizeRuns(
         _ db: GRDB.Database,
         entries: [PendingChange],
         anyPredecessor: Bool
     ) throws {
         for (identity, rowEntries) in Dictionary(grouping: entries, by: rowIdentity) where identity != nil {
             let chain = rowEntries.sorted { $0.localOrder < $1.localOrder }
-            guard let last = chain.last else { continue }
-            let start = chain.lastIndex { $0.atomicGroupID != last.atomicGroupID }.map { $0 + 1 } ?? 0
-            let run = Array(chain[start...])
-            guard run.count > 1,
-                  anyPredecessor || run[0].dependencyMutationID == (start > 0 ? chain[start - 1].mutationID : nil),
-                  zip(run, run.dropFirst()).allSatisfy({ $1.dependencyMutationID == $0.mutationID }) else {
-                continue
-            }
-
-            // A normalized payload must never combine two schema bindings. Keep
-            // the predecessor sendable and retain every successor dependency.
-            let schemaRefs = Set(run.map { "\($0.authoredSchemaVersion ?? 0):\($0.authoredSchemaHash ?? "")" })
-            if schemaRefs.count != 1 {
-                if let deleteIndex = run.firstIndex(where: { $0.operation == "delete" }), deleteIndex < run.count - 1 {
-                    for successor in run[(deleteIndex + 1)...] {
-                        try db.execute(
-                            sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
-                            arguments: [SynchroDateCoding.now(), successor.mutationID]
-                        )
-                    }
+            var runStart = 0
+            for index in chain.indices where index == chain.count - 1 || chain[index + 1].atomicGroupID != chain[index].atomicGroupID {
+                let start = runStart
+                runStart = index + 1
+                let run = Array(chain[start...index])
+                guard run.count > 1,
+                      anyPredecessor || run[0].dependencyMutationID == (start > 0 ? chain[start - 1].mutationID : nil),
+                      zip(run, run.dropFirst()).allSatisfy({ $1.dependencyMutationID == $0.mutationID }) else {
+                    continue
                 }
-                continue
-            }
 
-            try normalize(run, db: db)
+                // A normalized payload must never combine two schema bindings. Keep
+                // the predecessor sendable and retain every successor dependency.
+                let schemaRefs = Set(run.map { "\($0.authoredSchemaVersion ?? 0):\($0.authoredSchemaHash ?? "")" })
+                if schemaRefs.count != 1 {
+                    if let deleteIndex = run.firstIndex(where: { $0.operation == "delete" }), deleteIndex < run.count - 1 {
+                        for successor in run[(deleteIndex + 1)...] {
+                            try db.execute(
+                                sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE mutation_id = ? AND lifecycle_state = 'unsealed'",
+                                arguments: [SynchroDateCoding.now(), successor.mutationID]
+                            )
+                        }
+                    }
+                    continue
+                }
+
+                if index == chain.count - 1 {
+                    try normalize(run, db: db)
+                } else {
+                    try cancelInsertThroughDelete(run, db: db)
+                }
+            }
         }
     }
 
@@ -890,14 +898,10 @@ final class ChangeTracker: @unchecked Sendable {
 
     private func normalize(_ chain: [PendingChange], db: GRDB.Database) throws {
         guard let first = chain.first, let last = chain.last else { return }
-        let deleteIndex = chain.firstIndex(where: { $0.operation == "delete" })
-        if first.operation == "insert", let deleteIndex, deleteIndex == chain.count - 1 {
-            let cancellationID = UUID().uuidString.lowercased()
-            for entry in chain {
-                try markSource(db, entry: entry, state: "cancelled_before_send", normalizedID: cancellationID)
-            }
+        if try cancelInsertThroughDelete(chain, db: db) {
             return
         }
+        let deleteIndex = chain.firstIndex(where: { $0.operation == "delete" })
         if let deleteIndex, deleteIndex != chain.count - 1 {
             // The later blocker pass handles the suffix.  The delete itself must
             // retain its original base and identity.
@@ -939,6 +943,23 @@ final class ChangeTracker: @unchecked Sendable {
         for entry in chain {
             try markSource(db, entry: entry, state: "superseded_before_send", normalizedID: normalizedID)
         }
+    }
+
+    /// Cancels an insert through the first later delete, because the row never reaches the server.
+    /// A delete has no resurrection, so each entry that depends on the delete becomes blocked.
+    @discardableResult
+    private func cancelInsertThroughDelete(_ chain: [PendingChange], db: GRDB.Database) throws -> Bool {
+        guard chain.first?.operation == "insert",
+              let deleteIndex = chain.firstIndex(where: { $0.operation == "delete" }) else { return false }
+        let cancellationID = UUID().uuidString.lowercased()
+        for entry in chain[...deleteIndex] {
+            try markSource(db, entry: entry, state: "cancelled_before_send", normalizedID: cancellationID)
+        }
+        try db.execute(
+            sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor', updated_at = ? WHERE dependency_mutation_id = ? AND lifecycle_state = 'unsealed'",
+            arguments: [SynchroDateCoding.now(), chain[deleteIndex].mutationID]
+        )
+        return true
     }
 
     private func markSource(_ db: GRDB.Database, entry: PendingChange, state: String, normalizedID: String?) throws {
