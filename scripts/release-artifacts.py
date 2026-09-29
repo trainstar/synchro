@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RUN_ID = re.compile(r"^[1-9][0-9]*$")
@@ -110,7 +110,7 @@ def render(template: str, version: str) -> str:
 
 def validate_candidate(release_dir: Path, version: str, source_commit: str) -> str:
     if not VERSION.fullmatch(version):
-        raise ReleaseError("release version must match X.Y.Z")
+        raise ReleaseError("release version must match X.Y.Z or X.Y.Z-rc.N")
     if not COMMIT.fullmatch(source_commit):
         raise ReleaseError("source commit must be a full Git SHA-1")
     candidate_id = f"release-{version}-{source_commit}"
@@ -286,7 +286,7 @@ def validate_extension_archive(path: Path, version: str) -> None:
         "sharedir/extension/synchro_pg.control",
         f"sharedir/extension/synchro_pg--{version}.sql",
     }
-    update_destination = re.compile(r"^sharedir/extension/synchro_pg--\d+\.\d+\.\d+--\d+\.\d+\.\d+\.sql$", re.ASCII)
+    update_destination = re.compile(r"^sharedir/extension/synchro_pg--\d+\.\d+\.\d+(?:-rc\.\d+)?--\d+\.\d+\.\d+(?:-rc\.\d+)?\.sql$", re.ASCII)
     if (
         not wanted_destinations <= destinations
         or any(not update_destination.fullmatch(destination) for destination in destinations - wanted_destinations)

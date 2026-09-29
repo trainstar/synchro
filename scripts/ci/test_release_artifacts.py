@@ -484,8 +484,14 @@ class ReleaseArtifactsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archive = root / "extension.tar.gz"
-            self.make_extension(root / "source", archive, update_scripts=(
-                (f"share/extension/synchro_pg--1.2.2--{VERSION}.sql", f"sharedir/extension/synchro_pg--1.2.2--{VERSION}.sql"),
+            # The release after a release candidate updates through the candidate.
+            self.make_extension(root / "source", archive, update_scripts=tuple(
+                (f"share/extension/{name}", f"sharedir/extension/{name}")
+                for name in (
+                    "synchro_pg--1.2.2--1.2.3-rc.1.sql",
+                    "synchro_pg--1.2.3-rc.1--1.2.3-rc.10.sql",
+                    f"synchro_pg--1.2.3-rc.10--{VERSION}.sql",
+                )
             ))
             release_artifacts.validate_extension_archive(archive, VERSION)
 
@@ -494,6 +500,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
             f"sharedir/extension/synchro_pg--1.2.2--{VERSION}.sql.bak",
             f"sharedir/extension/synchro_pg--1.2--{VERSION}.sql",
             f"sharedir/extension/synchro_pg--1.2.x--{VERSION}.sql",
+            f"sharedir/extension/synchro_pg--1.2.3-beta.1--{VERSION}.sql",
             "sharedir/extension/synchro_pg--1.2.2.sql",
             f"pkglibdir/synchro_pg--1.2.2--{VERSION}.sql",
         ):
@@ -687,8 +694,13 @@ class ReleaseArtifactsTests(unittest.TestCase):
             root = Path(directory)
             with self.assertRaisesRegex(release_artifacts.ReleaseError, "directory name"):
                 release_artifacts.validate_candidate(root / f"release-{VERSION}-{'a' * 7}", VERSION, COMMIT)
-            with self.assertRaisesRegex(release_artifacts.ReleaseError, "release version"):
-                release_artifacts.validate_candidate(root / f"release-{VERSION}-{COMMIT}", "1.2", COMMIT)
+            for version in ("1.2", "1.2.3-beta.1", "1.2.3-rc.0", "1.2.3-rc1"):
+                with self.subTest(version=version), self.assertRaisesRegex(release_artifacts.ReleaseError, "release version"):
+                    release_artifacts.validate_candidate(root / f"release-{version}-{COMMIT}", version, COMMIT)
+            self.assertEqual(
+                release_artifacts.validate_candidate(root / f"release-1.2.3-rc.1-{COMMIT}", "1.2.3-rc.1", COMMIT),
+                f"release-1.2.3-rc.1-{COMMIT}",
+            )
 
 
 if __name__ == "__main__":
