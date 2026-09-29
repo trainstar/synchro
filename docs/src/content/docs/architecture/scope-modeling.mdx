@@ -147,7 +147,7 @@ When the set changes:
 - A removed scope causes local provenance cleanup.
 
 An unchanged set writes no assignment state. A failed pull writes no assignment state.
-Rebuild does not reconcile assignment. A rebuild of a scope that is no longer assigned returns `409 rebuild_restart_required`.
+Rebuild does not reconcile assignment. For a scope that is no longer assigned, a request of an existing rebuild session or continuation returns `409 rebuild_restart_required`. A new rebuild request for that scope returns `400 invalid_request`.
 
 ## Shared scope grouping
 

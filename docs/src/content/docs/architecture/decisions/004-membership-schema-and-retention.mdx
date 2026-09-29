@@ -277,9 +277,10 @@ cannot invent a scope ID or grant itself a scope.
 Pull reconciles the set after every request validation passes and before it
 builds `scope_updates`. The same response reports the change through
 `scope_updates` and `scope_set_version`. A pull that fails validation writes no
-assignment state. Rebuild does not reconcile. It keeps its stored-scope check
-and returns `409 rebuild_restart_required` for a scope that is no longer
-assigned.
+assignment state. Rebuild does not reconcile. It keeps its stored-scope check.
+For a scope that is no longer assigned, a request of an existing rebuild
+session or continuation returns `409 rebuild_restart_required`, and a new
+rebuild request returns `400 invalid_request`.
 
 An operator registers one assignment function with
 `synchro_register_assignment_function(p_function text, p_max_scopes integer
