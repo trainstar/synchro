@@ -102,6 +102,7 @@ Use `make server-consumer-smoke-phase` with its `SERVER_SMOKE_*` inputs to diagn
 `dataset/` defines one synthetic training-application dataset. Its schema follows a real consumer: tenants, members, a shared catalog, private and shared programs, parent and child rows, many-to-many rows, stored generated columns, triggers that write other registered tables, soft deletes, and portable value boundaries.
 
 - `TestRealDatasetAuthoredFlow` runs the authored flow through the real server. It compares each user's rows with hand-written expectations and with the authored business rule over live source rows.
+- `dataset.RunNativeFlow` runs the same authored flow through native clients. The Swift, Kotlin, and React Native scenario suites each run it as their `dataset` subtest. Each native client must hold exactly the hand-written live rows, the canonical source values, and the hand-written values. A delivered source tombstone must match its deleted source row.
 - `make characterize-dataset DATASET_SEED=<n> DATASET_SIZE=s|m|l DATASET_CHARACTERIZATION_RESULT=<file>` records complete-work samples for one seeded workload. It has no numerical pass or fail rule. The file must be outside the repository.
 - `make synchrod-pg-test-serve CLIENT_DATASET=1` also prepares the dataset and its authored seed for client flows.
 - `TestRealSourceAdmissionRecovery` characterizes the source transaction record limit and stream-reset recovery.

@@ -485,42 +485,42 @@ private class ClientSession(private val context: Context) : Closeable {
             ?.map { it.tableName }
             ?.toSet()
             ?: emptySet()
-        val rows = buildJsonArray {
-            if (capture.applicationRowCount <= MAXIMUM_ROWS) {
-                selectors.forEach { value ->
-                    val selector = value.requireObject("row selector")
-                    selector.requireOnly("table_name", "primary_key_field", "primary_key")
-                    val table = selector.requiredIdentifier("table_name")
-                    val field = selector.requiredIdentifier("primary_key_field")
-                    require(!isReservedTable(table)) { "reserved table is unavailable" }
-                    if (table in scopedTables) return@forEach
-                    val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
-                    require(primaryKey != null) { "primary key is null" }
-                    val selected = try {
-                        client.query(
-                            "SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(field)} = ?",
-                            arrayOf(primaryKey),
-                        )
-                    } catch (_: Throwable) {
-                        throw CaptureQueryException()
-                    }
-                    if (selected.size > 1) throw CaptureCardinalityException()
-                    selected.firstOrNull()?.let { add(normalizeRow(it)) }
+        val capturedRows = mutableListOf<Map<String, Any?>>()
+        if (capture.applicationRowCount <= MAXIMUM_ROWS) {
+            selectors.forEach { value ->
+                val selector = value.requireObject("row selector")
+                selector.requireOnly("table_name", "primary_key_field", "primary_key")
+                val table = selector.requiredIdentifier("table_name")
+                val field = selector.requiredIdentifier("primary_key_field")
+                require(!isReservedTable(table)) { "reserved table is unavailable" }
+                if (table in scopedTables) return@forEach
+                val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
+                require(primaryKey != null) { "primary key is null" }
+                val selected = try {
+                    client.query(
+                        "SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(field)} = ?",
+                        arrayOf(primaryKey),
+                    )
+                } catch (_: Throwable) {
+                    throw CaptureQueryException()
                 }
-                scopedTables.sorted().forEach { table ->
-                    require(!isReservedTable(table)) { "reserved table is unavailable" }
-                    val selected = try {
-                        client.query("SELECT * FROM ${quoteIdentifier(table)}")
-                    } catch (_: Throwable) {
-                        throw CaptureQueryException()
-                    }
-                    selected.forEach { add(normalizeRow(it)) }
+                if (selected.size > 1) throw CaptureCardinalityException()
+                selected.firstOrNull()?.let { capturedRows.add(it) }
+            }
+            scopedTables.sorted().forEach { table ->
+                require(!isReservedTable(table)) { "reserved table is unavailable" }
+                val selected = try {
+                    client.query("SELECT * FROM ${quoteIdentifier(table)}")
+                } catch (_: Throwable) {
+                    throw CaptureQueryException()
                 }
+                capturedRows.addAll(selected)
             }
         }
-        require(rows.size <= MAXIMUM_ROWS) { "too many captured rows" }
+        require(capturedRows.size <= MAXIMUM_ROWS) { "too many captured rows" }
         return stateResult(
-            applicationRows = rows,
+            applicationRows = buildJsonArray { capturedRows.forEach { add(normalizeRow(it)) } },
+            applicationRowStorageClasses = buildJsonArray { capturedRows.forEach { add(storageClasses(it)) } },
             captureState = capture,
             retainedMutations = retainedMutations,
             retainedMutationCount = retainedMutationCount,
@@ -532,6 +532,7 @@ private class ClientSession(private val context: Context) : Closeable {
     private fun stateResult(
         rowsAffected: Int? = null,
         applicationRows: JsonArray? = null,
+        applicationRowStorageClasses: JsonArray? = null,
         captureState: ClientStateCaptureInspection? = null,
         retainedMutations: List<RetainedMutationInspection>? = null,
         retainedMutationCount: Int? = null,
@@ -583,6 +584,7 @@ private class ClientSession(private val context: Context) : Closeable {
             put("rebuild_receipt_count", capture.rebuildReceiptCount)
             put("durable_state_fingerprint", stateFingerprint)
             if (capture.applicationRowCount <= MAXIMUM_ROWS) applicationRows?.let { put("application_rows", it) }
+            if (capture.applicationRowCount <= MAXIMUM_ROWS) applicationRowStorageClasses?.let { put("application_row_storage_classes", it) }
             pending?.let { put("retained_mutations", normalizePending(it)) }
             rejected?.let { put("rejected_mutations", normalizeRejected(it)) }
             capture.schema?.let { put("schema", normalizeSchema(it)) }
@@ -922,6 +924,22 @@ private class ClientSession(private val context: Context) : Closeable {
     private fun normalizeSchema(value: SchemaRef): JsonObject = buildJsonObject {
         put("version", value.version)
         put("hash", value.hash)
+    }
+
+    // The JSON value of a blob is base64url text, and a real with an integral
+    // value can read as an integer, so the SQLite storage class is reported
+    // apart. The query maps each cursor storage class to one Kotlin type.
+    private fun storageClasses(row: Map<String, Any?>): JsonObject = buildJsonObject {
+        row.toSortedMap().forEach { (key, value) ->
+            put(key, when (value) {
+                null -> "null"
+                is Long -> "integer"
+                is Double -> "real"
+                is String -> "text"
+                is ByteArray -> "blob"
+                else -> throw IllegalArgumentException("captured value has no SQLite storage class")
+            })
+        }
     }
 
     private fun normalizeRow(row: Map<String, Any?>): JsonObject {

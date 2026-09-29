@@ -19,7 +19,7 @@ SELECT synchro.synchro_prepare_projection_view('public.workout_exercises', 'work
 SELECT synchro.synchro_prepare_projection_view('public.exercise_sets', 'exercise_sets', ARRAY['program_id']);
 SELECT synchro.synchro_prepare_projection_view('public.workout_media', 'workout_media', ARRAY['owner_id']);
 
-CREATE FUNCTION public.organizations_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.organizations_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -28,7 +28,7 @@ BEGIN ATOMIC
     WHERE o.record_id = p_id::text AND NOT o.deleted;
 END;
 
-CREATE FUNCTION public.organization_members_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.organization_members_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -41,7 +41,7 @@ BEGIN ATOMIC
     WHERE m.record_id = p_id::text AND NOT m.deleted;
 END;
 
-CREATE FUNCTION public.equipment_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.equipment_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -50,7 +50,7 @@ BEGIN ATOMIC
     WHERE e.record_id = p_id::text AND NOT e.deleted;
 END;
 
-CREATE FUNCTION public.exercises_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.exercises_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -59,7 +59,7 @@ BEGIN ATOMIC
     WHERE e.record_id = p_id::text AND NOT e.deleted;
 END;
 
-CREATE FUNCTION public.exercise_equipment_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.exercise_equipment_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -70,7 +70,7 @@ BEGIN ATOMIC
     WHERE link.record_id = p_id::text AND NOT link.deleted;
 END;
 
-CREATE FUNCTION public.programs_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.programs_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -83,7 +83,7 @@ BEGIN ATOMIC
     WHERE p.record_id = p_id::text AND NOT p.deleted AND scope.bucket IS NOT NULL;
 END;
 
-CREATE FUNCTION public.workouts_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.workouts_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -98,7 +98,7 @@ BEGIN ATOMIC
     WHERE child.record_id = p_id::text AND NOT child.deleted AND scope.bucket IS NOT NULL;
 END;
 
-CREATE FUNCTION public.workout_exercises_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.workout_exercises_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -113,7 +113,7 @@ BEGIN ATOMIC
     WHERE child.record_id = p_id::text AND NOT child.deleted AND scope.bucket IS NOT NULL;
 END;
 
-CREATE FUNCTION public.exercise_sets_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.exercise_sets_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -128,7 +128,7 @@ BEGIN ATOMIC
     WHERE child.record_id = p_id::text AND NOT child.deleted AND scope.bucket IS NOT NULL;
 END;
 
-CREATE FUNCTION public.workout_media_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.workout_media_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC
@@ -139,7 +139,7 @@ END;
 
 -- Registration of a joined membership function needs its dependency first.
 -- Each joined relation starts with this empty membership function.
-CREATE FUNCTION public.dataset_bootstrap_membership(p_id uuid)
+CREATE OR REPLACE FUNCTION public.dataset_bootstrap_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 BEGIN ATOMIC

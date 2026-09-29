@@ -2843,6 +2843,8 @@ func captureClientState(ctx context.Context, client *platformClient) (Result, er
 		return Result{}, errors.New("encode Kotlin Android captured application rows failed")
 	}
 	baseline.ApplicationRows = encoded
+	// The merge does not align storage classes with the added rows.
+	baseline.ApplicationRowStorageClasses = nil
 	return baseline, nil
 }
 
@@ -2951,8 +2953,8 @@ func androidApplicationRows(raw json.RawMessage) ([]map[string]json.RawMessage, 
 }
 
 func equalAndroidCaptureState(left, right Result) bool {
-	left.ApplicationRows = nil
-	right.ApplicationRows = nil
+	left.ApplicationRows, left.ApplicationRowStorageClasses = nil, nil
+	right.ApplicationRows, right.ApplicationRowStorageClasses = nil, nil
 	return reflect.DeepEqual(left, right)
 }
 

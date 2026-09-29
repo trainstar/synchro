@@ -352,6 +352,7 @@ private struct RunnerResult: Encodable {
     var rebuildReceiptCount: Int? = nil
     var schema: SchemaRef? = nil
     var applicationRows: [[String: AnyCodable]]? = nil
+    var applicationRowStorageClasses: [[String: String]]? = nil
     var retainedMutations: [RetainedMutation]? = nil
     var rejectedMutations: [RetainedRejection]? = nil
     var scopeStates: [ScopeStateRecord]? = nil
@@ -395,6 +396,7 @@ private struct RunnerResult: Encodable {
         case rebuildReceiptCount = "rebuild_receipt_count"
         case schema
         case applicationRows = "application_rows"
+        case applicationRowStorageClasses = "application_row_storage_classes"
         case retainedMutations = "retained_mutations"
         case rejectedMutations = "rejected_mutations"
         case scopeStates = "scope_states"
@@ -1158,6 +1160,7 @@ private final class Runner: @unchecked Sendable {
         // snapshot below reports normalized counts and details together.
         _ = try client.pendingChangeCount()
         var capturedApplicationRows: [[String: AnyCodable]] = []
+        var capturedStorageClasses: [[String: String]] = []
         var captureValueBytes = 0
         let snapshot = try inspection.captureSnapshot(maximumRecords: maximumBoundedRecords) { capture, transaction in
             guard capture.applicationRowCount <= Self.maximumRows else { return }
@@ -1185,6 +1188,7 @@ private final class Runner: @unchecked Sendable {
                 }
                 if let row = rows.first {
                     capturedApplicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
+                    capturedStorageClasses.append(storageClasses(row))
                 }
             }
             for tableName in scopedTables {
@@ -1198,6 +1202,7 @@ private final class Runner: @unchecked Sendable {
                 }
                 for row in rows {
                     capturedApplicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
+                    capturedStorageClasses.append(storageClasses(row))
                 }
             }
         }
@@ -1235,6 +1240,7 @@ private final class Runner: @unchecked Sendable {
                 rebuildReceiptCount: counts.rebuildReceiptCount,
                 schema: counts.schema,
                 applicationRows: counts.applicationRowCount <= Self.maximumRows ? capturedApplicationRows : nil,
+                applicationRowStorageClasses: counts.applicationRowCount <= Self.maximumRows ? capturedStorageClasses : nil,
                 retainedMutations: retainedMutations,
                 rejectedMutations: rejectedMutations,
                 scopeStates: scopeStateRecords,
@@ -1697,6 +1703,23 @@ private extension RunnerJSONValue {
             return value.base64URLEncodedString
         }
     }
+}
+
+/// The JSON value of a blob is base64url text, and a real with an integral
+/// value encodes as an integer, so the SQLite storage class is reported apart.
+private func storageClasses(_ row: Row) -> [String: String] {
+    var result: [String: String] = [:]
+    for column in row.columnNames {
+        let value: DatabaseValue = row[column]
+        switch value.storage {
+        case .null: result[column] = "null"
+        case .int64: result[column] = "integer"
+        case .double: result[column] = "real"
+        case .string: result[column] = "text"
+        case .blob: result[column] = "blob"
+        }
+    }
+    return result
 }
 
 private func rowObject(_ row: Row, valueBytes: inout Int) throws -> [String: AnyCodable] {

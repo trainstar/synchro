@@ -50,16 +50,15 @@ module.exports = {
         type: 'iPhone SE (3rd generation)',
       },
     },
+    // A run uses only the booted device that ANDROID_SERIAL names. Two gates on
+    // one host can then never share, boot, or stop each other's emulator.
     emulator: {
-      type: 'android.emulator',
+      type: 'android.attached',
       device: {
-        avdName: 'Pixel_7_API_34',
+        adbName: process.env.ANDROID_SERIAL
+          ? `^${process.env.ANDROID_SERIAL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`
+          : undefined,
       },
-      bootArgs: '-no-snapshot-load -no-snapshot-save',
-      // The emulator's Qt GUI layer crashes under host GPU rendering in
-      // unattended runs. Headless software rendering is stable.
-      headless: true,
-      gpuMode: 'swiftshader_indirect',
     },
   },
   configurations: {

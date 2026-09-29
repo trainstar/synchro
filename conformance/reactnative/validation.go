@@ -457,6 +457,7 @@ func decodeCapture(result json.RawMessage, keys []string) (finalCapture, error) 
 		Trace:        copyRaw(captureMembers["request_trace"]),
 		DurableProof: copyRaw(captureMembers["durable_proof"]),
 		Rows:         copyRaw(captureMembers["application_rows"]),
+		Storage:      copyRaw(captureMembers["application_row_storage_classes"]),
 	}, nil
 }
 
@@ -756,6 +757,22 @@ func requestString(observation transportObservation, name string) (string, error
 	var value string
 	if json.Unmarshal(raw, &value) != nil || value == "" {
 		return "", fmt.Errorf("React Native request fact %q is invalid", name)
+	}
+	return value, nil
+}
+
+func requestStringOptional(observation transportObservation, name string) (string, error) {
+	var facts map[string]json.RawMessage
+	if json.Unmarshal(observation.RequestFacts, &facts) != nil {
+		return "", errors.New("React Native request facts are invalid")
+	}
+	raw, found := facts[name]
+	if !found || isJSONNull(raw) {
+		return "", nil
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil || value == "" {
+		return "", errors.New("React Native request fact is invalid")
 	}
 	return value, nil
 }
@@ -1150,11 +1167,26 @@ func rebuildAttemptFactCount(attempts []rebuildAttempt, receipts []rebuildReceip
 func validateFreshRebuildCompletion(proof durableProof, state inspectedClientState, events json.RawMessage, wantPages, wantRecords uint64) error {
 	var pages, records uint64
 	receipts := make(map[string]struct{}, len(proof.RebuildReceiptProofs))
-	for _, receipt := range proof.RebuildReceiptProofs {
-		if receipt.PageCount == 0 || receipt.PageCount > state.RebuildReceiptCount-pages ||
-			!receipt.RequestChainValid || !receipt.RecordsInCanonicalOrder || !receipt.RowChecksumsValid ||
-			!receipt.ScopeChecksumValid || !receipt.FinalChecksumMatches {
-			return errors.New("rebuild receipt proof detail is invalid")
+	for index, receipt := range proof.RebuildReceiptProofs {
+		var failed []string
+		for _, predicate := range []struct {
+			name  string
+			valid bool
+		}{
+			{"page_count", receipt.PageCount != 0 && receipt.PageCount <= state.RebuildReceiptCount-pages},
+			{"request_chain_valid", receipt.RequestChainValid},
+			{"records_in_canonical_order", receipt.RecordsInCanonicalOrder},
+			{"row_checksums_valid", receipt.RowChecksumsValid},
+			{"scope_checksum_valid", receipt.ScopeChecksumValid},
+			{"final_checksum_matches_local", receipt.FinalChecksumMatches},
+		} {
+			if !predicate.valid {
+				failed = append(failed, predicate.name)
+			}
+		}
+		if len(failed) != 0 {
+			return fmt.Errorf("rebuild receipt proof %d of %d detail is invalid: false=%v page_count=%d returned_records=%d prior_pages=%d state_pages=%d want_pages=%d",
+				index+1, len(proof.RebuildReceiptProofs), failed, receipt.PageCount, receipt.ReturnedRecordCount, pages, state.RebuildReceiptCount, wantPages)
 		}
 		pages += receipt.PageCount
 		records += receipt.ReturnedRecordCount

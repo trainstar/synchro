@@ -356,3 +356,88 @@ func pushNativeCaptureMutation(t *testing.T, ctx context.Context, harness *black
 		t.Fatalf("native capture mutation push status = %d, response = %#v", status, response)
 	}
 }
+
+// TestRealNativeMaterializationBindsEachSourceTransaction proves that a
+// materialization wait observes the WAL transaction of its own source commit.
+// Rebuild workload steps 2 and 3 update the same row with the same operation,
+// so an identity match on the row alone binds the step 2 WAL transaction. The
+// wait must also use its whole budget, so a worker that resumes late within
+// the budget still materializes the step.
+func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+	if err != nil {
+		t.Fatalf("create native materialization controller: %v", err)
+	}
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := controller.Close(closeContext); err != nil {
+			t.Errorf("close native materialization controller: %v", err)
+		}
+	})
+	scenario, err := scenarios.LoadFile(ctx, "../../..", "conformance/scenarios/performance/rebuild-cardinality-001.json")
+	if err != nil {
+		t.Fatalf("load rebuild workload: %v", err)
+	}
+	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
+		t.Fatalf("install rebuild workload contract: %v", err)
+	}
+	inputs, err := scenarios.BuildRebuildWorkloadInputs(scenario)
+	if err != nil || len(inputs) < 3 {
+		t.Fatalf("build rebuild workload inputs: %d, %v", len(inputs), err)
+	}
+	// Each step input starts with its source commit and its materialization.
+	commit := func(step int) {
+		t.Helper()
+		if observation, err := controller.ApplyStep(ctx, inputs[step].Operations[0]); err != nil || observation.Disposition != "success" {
+			t.Fatalf("commit step %d source transaction: observation=%#v err=%v", step+1, observation, err)
+		}
+	}
+	for step := 0; step < 2; step++ {
+		commit(step)
+		if observation, err := controller.ProcessStep(ctx, nil, inputs[step].Operations[1]); err != nil || observation.Disposition != "success" {
+			t.Fatalf("materialize step %d: observation=%#v err=%v", step+1, observation, err)
+		}
+	}
+
+	resumeWAL, err := controller.PauseWALMaterialization(ctx)
+	if err != nil {
+		t.Fatalf("pause WAL materialization: %v", err)
+	}
+	walPaused := true
+	defer func() {
+		if walPaused {
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+			_ = resumeWAL(cleanupContext)
+		}
+	}()
+	commit(2)
+	type result struct {
+		observation blackbox.NativeStepObservation
+		err         error
+	}
+	materialized := make(chan result, 1)
+	go func() {
+		observation, err := controller.ProcessStep(ctx, nil, inputs[2].Operations[1])
+		materialized <- result{observation, err}
+	}()
+	// The controller waits 30 seconds. Resume after 22 seconds, which is
+	// inside that budget.
+	select {
+	case early := <-materialized:
+		t.Fatalf("step 3 materialized while the WAL worker was paused: observation=%#v err=%v", early.observation, early.err)
+	case <-time.After(22 * time.Second):
+	}
+	if err := resumeWAL(ctx); err != nil {
+		t.Fatalf("resume WAL materialization: %v", err)
+	}
+	walPaused = false
+	late := <-materialized
+	if late.err != nil || late.observation.Disposition != "success" {
+		t.Fatalf("materialize step 3 after the worker resumed within the wait budget: observation=%#v err=%v", late.observation, late.err)
+	}
+}

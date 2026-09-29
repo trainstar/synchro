@@ -2034,6 +2034,8 @@ func captureRunner(ctx context.Context, state *platformClient) (runnerResult, er
 		return runnerResult{}, errors.New("Swift runner selector batches did not cover application rows")
 	}
 	baseline.ApplicationRows = rows
+	// The merge does not align storage classes with the added rows.
+	baseline.ApplicationRowStorageClasses = nil
 	return baseline, nil
 }
 
@@ -2051,8 +2053,8 @@ func captureRunnerBatch(ctx context.Context, state *platformClient, selectors []
 }
 
 func equalRunnerCaptureState(left, right runnerResult) bool {
-	left.ApplicationRows = nil
-	right.ApplicationRows = nil
+	left.ApplicationRows, left.ApplicationRowStorageClasses = nil, nil
+	right.ApplicationRows, right.ApplicationRowStorageClasses = nil, nil
 	return reflect.DeepEqual(left, right)
 }
 
