@@ -122,7 +122,11 @@ final class SchemaIntegrationTests: XCTestCase {
     private func syncAndWaitForScheduledRetry(_ client: SynchroClient) async throws {
         do {
             try await client.syncNow()
-        } catch is RetryableError {
+        } catch let error as RetryableError where error.classification == .http503 {
+            // A real server answers with retryable 503 capture_pending until WAL
+            // capture reaches accepted writes. The error names no protocol code,
+            // and a retryable 503 admits only capture_pending and
+            // temporary_unavailable, so every other failure propagates.
             let deadline = DispatchTime.now().uptimeNanoseconds + 15_000_000_000
             while client.getSyncStatus() != .ready {
                 guard DispatchTime.now().uptimeNanoseconds < deadline else {
@@ -140,9 +144,9 @@ final class SchemaIntegrationTests: XCTestCase {
         return try await http.fetchSchema()
     }
 
-    // MARK: - 1. testAdditiveSchemaChangePreservesData
+    // MARK: - 1. testSameSchemaReconnectPreservesPushedData
 
-    func testAdditiveSchemaChangePreservesData() async throws {
+    func testSameSchemaReconnectPreservesPushedData() async throws {
         let serverSchema = try await fetchServerSchema()
         let userID = UUID().uuidString.lowercased()
         let clientID = UUID().uuidString.lowercased()
@@ -344,7 +348,7 @@ final class SchemaIntegrationTests: XCTestCase {
             config: makeConfigWithClientID(userID: userID, clientID: clientID, dbPath: dbPath)
         )
         try await onlineClient.start()
-        try await onlineClient.syncNow()
+        try await syncAndWaitForScheduledRetry(onlineClient)
 
         let pendingAfterConnect = try onlineClient.query(
             "SELECT record_id FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'superseded_before_send', 'cancelled_before_send')",

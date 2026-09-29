@@ -436,6 +436,10 @@ internal class SchemaManager(private val database: SynchroDatabase) {
     /** Explicit reset replaces only materialized synced tables and state. */
     private fun resetSyncedMaterialization(db: SQLiteDatabase, targetTables: List<LocalSchemaTable>) {
         val currentTables = loadStoredLocalSchemaInTransaction(db).orEmpty()
+        val targetsByID = targetTables.associateBy { it.tableID }
+        val protectedRows = currentTables.mapNotNull { table ->
+            targetsByID[table.tableID]?.let { target -> table.tableID to loadProtectedRows(db, table, target) }
+        }.toMap()
         currentTables.reversed().forEach { table ->
             val quotedTable = SQLiteHelpers.quoteIdentifier(table.tableName)
             listOf(
@@ -454,11 +458,69 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         SynchroMeta.invalidateAllScopes(db)
         targetTables.forEach { table ->
             db.execSQL(SQLiteSchema.generateCreateTableSQL(table))
+            // The restore runs before capture triggers exist, so it creates no intent.
+            protectedRows[table.tableID]?.let { restoreProtectedRows(db, it, table) }
             SQLiteSchema.generateCDCTriggers(table).forEach(db::execSQL)
             table.indexes.forEach { index ->
                 db.execSQL(SQLiteSchema.generateCreateIndexSQL(table, index))
             }
         }
+    }
+
+    /**
+     * The target values of the application rows that hold unresolved local
+     * intent. A reset rebuild must not overwrite or remove those rows (spec
+     * schema evolution, client migration step 8), so the reset keeps each field
+     * that the target declares with the same field ID and type.
+     */
+    private class ProtectedRows(val columns: List<String>, val rows: List<Array<Any?>>)
+
+    private fun loadProtectedRows(db: SQLiteDatabase, source: LocalSchemaTable, target: LocalSchemaTable): ProtectedRows {
+        val sourceColumns = source.columns.associateBy { it.fieldID }
+        val kept = target.columns.mapNotNull { column ->
+            sourceColumns[column.fieldID]?.takeIf { it.logicalType == column.logicalType }?.let { it.name to column.name }
+        }
+        val keptTargets = kept.map { it.second }.toSet()
+        // A required target field without a kept value has no local value to
+        // hold, so such a row cannot exist in the target shape.
+        val representable = target.columns.none { column ->
+            !column.nullable && !column.isPrimaryKey && column.sqliteDefaultSQL.isNullOrEmpty() &&
+                column.name !in keptTargets
+        }
+        val primaryKey = sourceColumns[source.primaryKeyFieldID]
+        if (!representable || source.primaryKeyFieldID != target.primaryKeyFieldID || primaryKey == null ||
+            kept.none { it.first == primaryKey.name }
+        ) {
+            return ProtectedRows(emptyList(), emptyList())
+        }
+        val selected = kept.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it.first) }
+        val rows = mutableListOf<Array<Any?>>()
+        db.rawQuery(
+            "SELECT $selected FROM ${SQLiteHelpers.quoteIdentifier(source.tableName)} " +
+                "WHERE ${SQLiteHelpers.quoteIdentifier(primaryKey.name)} IN ($PROTECTED_RECORD_IDS_SQL)",
+            arrayOf(source.tableName),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                rows += Array(kept.size) { index ->
+                    when (cursor.getType(index)) {
+                        android.database.Cursor.FIELD_TYPE_NULL -> null
+                        android.database.Cursor.FIELD_TYPE_INTEGER -> cursor.getLong(index)
+                        android.database.Cursor.FIELD_TYPE_FLOAT -> cursor.getDouble(index)
+                        android.database.Cursor.FIELD_TYPE_BLOB -> cursor.getBlob(index)
+                        else -> cursor.getString(index)
+                    }
+                }
+            }
+        }
+        return ProtectedRows(kept.map { it.second }, rows)
+    }
+
+    private fun restoreProtectedRows(db: SQLiteDatabase, protectedRows: ProtectedRows, target: LocalSchemaTable) {
+        if (protectedRows.rows.isEmpty()) return
+        val columns = protectedRows.columns.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it) }
+        val placeholders = protectedRows.columns.joinToString(", ") { "?" }
+        val sql = "INSERT INTO ${SQLiteHelpers.quoteIdentifier(target.tableName)} ($columns) VALUES ($placeholders)"
+        protectedRows.rows.forEach { values -> db.execSQL(sql, values) }
     }
 
     private fun addSyncedColumn(db: SQLiteDatabase, table: LocalSchemaTable, column: LocalSchemaColumn) {

@@ -145,7 +145,11 @@ final class IntegrationTests: XCTestCase {
     private func syncAndWaitForScheduledRetry(_ client: SynchroClient) async throws {
         do {
             try await client.syncNow()
-        } catch is RetryableError {
+        } catch let error as RetryableError where error.classification == .http503 {
+            // A real server answers with retryable 503 capture_pending until WAL
+            // capture reaches accepted writes. The error names no protocol code,
+            // and a retryable 503 admits only capture_pending and
+            // temporary_unavailable, so every other failure propagates.
             try await waitForCondition(timeoutNanoseconds: 15_000_000_000) {
                 client.getSyncStatus() == .ready
             }

@@ -41,7 +41,7 @@ type schemaQueuedMutationPushPayload struct {
 
 // RunSchemaQueuedMutationScenario executes the authored durable blocked-mutation flow through Kotlin Android.
 func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (SchemaQueuedMutationResult, error) {
-	steps, err := kotlinScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 12)
+	steps, err := kotlinScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 16)
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
@@ -86,17 +86,63 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err := validateSchemaQueuedMutationBaseline(scenario, steps, baseline); err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-
-	write, err := kotlinScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-005", "local/write")
+	// The compatible write replaces the S1 row version and checksum, so bind
+	// the S1 aliases from this capture.
+	baselineFacts, err := platform.Capture(ctx, []Client{client}, []string{"checkpoints", "provenance"})
+	if err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Kotlin Android schema-queued-mutation baseline state: %w", err)
+	}
+	baselineState, err := mergeKotlinCaptureFacts(baselineFacts)
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-	write, err = controller.ApplicationWrite(write)
+
+	compatibleWrite, err := applyKotlinSchemaQueuedMutationWrite(ctx, controller, platform, client, steps, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001")
 	if err != nil {
-		return SchemaQueuedMutationResult{}, fmt.Errorf("bind Kotlin Android schema-queued-mutation local write: %w", err)
+		return SchemaQueuedMutationResult{}, err
 	}
-	if observation, applyErr := platform.ApplyStep(ctx, client, write); applyErr != nil || observation.Disposition != "success" {
-		return SchemaQueuedMutationResult{}, fmt.Errorf("apply Kotlin Android schema-queued-mutation local write: %w", kotlinResultError(applyErr, observation.Disposition))
+	compatiblePublish, err := kotlinScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001", "model/publish-schema")
+	if err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	if observation, applyErr := controller.ApplyStep(ctx, compatiblePublish); applyErr != nil || observation.Disposition != "success" {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("publish Kotlin Android schema-queued-mutation compatible schema: %w", kotlinResultError(applyErr, observation.Disposition))
+	}
+	compatiblePush, err := kotlinScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001", "push/submit")
+	if err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	if err := controller.BindApplicationPush(compatiblePush); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("bind Kotlin Android schema-queued-mutation compatible push: %w", err)
+	}
+	// The baseline call leaves the engine started, and the compatible call must connect again.
+	if _, err := platform.Lifecycle(ctx, LifecycleRequest{Client: client, Operation: "stop"}); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("stop Kotlin Android schema-queued-mutation client before its compatible start: %w", err)
+	}
+	compatible, err := kotlinScenarioCall(ctx, platform, client, steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001"].NativeBinding.Method)
+	if err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("run Kotlin Android schema-queued-mutation compatible start: %w", err)
+	}
+	if err := validateSchemaQueuedMutationPushCall(scenario, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001", "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001", compatible); err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	// The server capture binds the accepted push and checks the exact server
+	// row it wrote. The local row keeps that value through the migration.
+	if _, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"}); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Kotlin Android schema-queued-mutation compatible server state: %w", err)
+	}
+	if err := requireKotlinSchemaQueuedMutationRow(ctx, platform, client, compatibleWrite); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Kotlin Android schema-queued-mutation compatible row: %w", err)
+	}
+
+	// The S2 write names the field the compatible schema added. The local row
+	// must hold it before S3 removes that field.
+	write, err := applyKotlinSchemaQueuedMutationWrite(ctx, controller, platform, client, steps, "STEP-SCHEMA-QUEUED-MUTATION-005")
+	if err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	if err := requireKotlinSchemaQueuedMutationRow(ctx, platform, client, write); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Kotlin Android schema-queued-mutation compatible field: %w", err)
 	}
 
 	publish, err := kotlinScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-006", "model/publish-schema")
@@ -107,7 +153,7 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 		return SchemaQueuedMutationResult{}, fmt.Errorf("publish Kotlin Android schema-queued-mutation schema: %w", kotlinResultError(applyErr, observation.Disposition))
 	}
 
-	// The baseline call leaves the engine started, and the authored unsupported call must connect again.
+	// The compatible call leaves the engine started, and the authored unsupported call must connect again.
 	if _, err := platform.Lifecycle(ctx, LifecycleRequest{Client: client, Operation: "stop"}); err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("stop Kotlin Android schema-queued-mutation client before its unsupported start: %w", err)
 	}
@@ -123,7 +169,7 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("run Kotlin Android schema-queued-mutation reset: %w", err)
 	}
-	if err := validateSchemaQueuedMutationReset(scenario, reset); err != nil {
+	if err := validateSchemaQueuedMutationPushCall(scenario, "STEP-SCHEMA-QUEUED-MUTATION-007", "STEP-SCHEMA-QUEUED-MUTATION-008", reset); err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
 	push, err := kotlinScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-008", "push/submit")
@@ -150,6 +196,11 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
+	// The reset rebuild must keep the row of the blocked mutation visible with
+	// the value that the compatible push applied (#267).
+	if err := requireKotlinSchemaQueuedMutationRow(ctx, platform, client, compatibleWrite); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Kotlin Android schema-queued-mutation row after reset: %w", err)
+	}
 	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
 	if err != nil || len(serverCaptures) != 1 {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Kotlin Android schema-queued-mutation server state: %w", kotlinResultError(err, ""))
@@ -164,7 +215,7 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err := validateKotlinSchemaQueuedMutationQueue(controller, scenario.NativeIdentityAliases, expected, clientState); err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-	identities, err := resolveKotlinSchemaQueuedMutationIdentities(controller, scenario.NativeIdentityAliases, baseline, reset, clientState, serverCaptures[0].StateFacts)
+	identities, err := resolveKotlinSchemaQueuedMutationIdentities(controller, scenario.NativeIdentityAliases, baseline, reset, baselineState, clientState, serverCaptures[0].StateFacts)
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
@@ -179,6 +230,10 @@ func validateSchemaQueuedMutationBindings(scenario scenarios.Scenario, steps map
 		{"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001", "local/begin-rebuild", "public-call", "start"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-004", "local/apply-rebuild-page", "public-call", "start"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001", "local/finalize-rebuild", "public-call", "start"},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001", "local/write", "local-write", ""},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001", "model/publish-schema", "controller", ""},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001", "connect/send", "public-call", "start"},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001", "push/submit", "public-call", "start"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-005", "local/write", "local-write", ""},
 		{"STEP-SCHEMA-QUEUED-MUTATION-006", "model/publish-schema", "controller", ""},
 		{"STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001", "connect/send", "public-call", "start"},
@@ -210,6 +265,8 @@ func validateSchemaQueuedMutationBindings(scenario scenarios.Scenario, steps map
 		group := "baseline"
 		if expected.id == "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001" {
 			group = "unsupported"
+		} else if expected.id == "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001" || expected.id == "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001" {
+			group = "compatible"
 		} else if expected.id == "STEP-SCHEMA-QUEUED-MUTATION-007" || expected.id == "STEP-SCHEMA-QUEUED-MUTATION-008" {
 			group = "reset"
 		}
@@ -222,7 +279,11 @@ func validateSchemaQueuedMutationBindings(scenario scenarios.Scenario, steps map
 			return fmt.Errorf("Kotlin Android schema-queued-mutation completion %s is not derived from its authored outcome", expected.id)
 		}
 	}
-	if len(callIDs) != 3 || callIDs["baseline"] == callIDs["unsupported"] || callIDs["baseline"] == callIDs["reset"] || callIDs["unsupported"] == callIDs["reset"] {
+	distinct := make(map[string]struct{}, len(callIDs))
+	for _, callID := range callIDs {
+		distinct[callID] = struct{}{}
+	}
+	if len(callIDs) != 4 || len(distinct) != 4 {
 		return fmt.Errorf("Kotlin Android schema-queued-mutation public call identities are invalid: %v", callIDs)
 	}
 	return nil
@@ -267,28 +328,26 @@ func validateSchemaQueuedMutationCall(scenario scenarios.Scenario, stepID, opera
 	return validateKotlinWireExpectation(scenario, stepID, operationClass, result)
 }
 
-func validateSchemaQueuedMutationReset(scenario scenarios.Scenario, result SynchronizationResult) error {
-	terminal, found := schemaQueuedMutationStep(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008")
+// validateSchemaQueuedMutationPushCall checks one start call that connects and
+// then pushes the retained queue in one authored batch.
+func validateSchemaQueuedMutationPushCall(scenario scenarios.Scenario, connectStepID, pushStepID string, result SynchronizationResult) error {
+	step, found := schemaQueuedMutationStep(scenario, pushStepID)
 	if !found {
-		return errors.New("Kotlin Android schema-queued-mutation reset terminal step is absent")
+		return fmt.Errorf("Kotlin Android schema-queued-mutation push step %s is absent", pushStepID)
 	}
-	completion, err := schemaQueuedMutationCompletion(scenario, terminal)
+	completion, err := schemaQueuedMutationCompletion(scenario, step)
 	if err != nil || result.Completion != completion {
-		return fmt.Errorf("Kotlin Android schema-queued-mutation reset completion observed %q, expected %q", result.Completion, completion)
+		return fmt.Errorf("Kotlin Android schema-queued-mutation call %s completion observed %q, expected %q", pushStepID, result.Completion, completion)
 	}
-	if err := validateKotlinWireExpectation(scenario, "STEP-SCHEMA-QUEUED-MUTATION-007", "connect", result); err != nil {
+	if err := validateKotlinWireExpectation(scenario, connectStepID, "connect", result); err != nil {
 		return err
 	}
-	if err := validateKotlinWireExpectation(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008", "push", result); err != nil {
+	if err := validateKotlinWireExpectation(scenario, pushStepID, "push", result); err != nil {
 		return err
 	}
 	push, err := kotlinScenarioWire(result, "push")
 	if err != nil || push.RequestFacts == nil || push.RequestFacts.MutationCount == nil {
 		return errors.New("Kotlin Android schema-queued-mutation push facts are incomplete")
-	}
-	step, found := schemaQueuedMutationStep(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008")
-	if !found {
-		return errors.New("Kotlin Android schema-queued-mutation push step is absent")
 	}
 	var payload schemaQueuedMutationPushPayload
 	if json.Unmarshal(step.Operation.Payload, &payload) != nil || payload.AuthenticatedUserID != step.NativeBinding.UserID || payload.Request.ClientID != step.NativeBinding.ClientID || payload.Request.BatchID == "" || len(payload.Request.Mutations) == 0 || int64(len(payload.Request.Mutations)) != int64(*push.RequestFacts.MutationCount) {
@@ -300,6 +359,35 @@ func validateSchemaQueuedMutationReset(scenario scenarios.Scenario, result Synch
 		}
 	}
 	return nil
+}
+
+// applyKotlinSchemaQueuedMutationWrite binds one authored local write to the
+// runtime table and applies it through the client.
+func applyKotlinSchemaQueuedMutationWrite(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, steps map[scenarios.StepID]scenarios.Step, stepID string) (scenarios.Operation, error) {
+	write, err := kotlinScenarioOperation(steps, stepID, "local/write")
+	if err != nil {
+		return scenarios.Operation{}, err
+	}
+	write, err = controller.ApplicationWrite(write)
+	if err != nil {
+		return scenarios.Operation{}, fmt.Errorf("bind Kotlin Android schema-queued-mutation local write %s: %w", stepID, err)
+	}
+	if observation, applyErr := platform.ApplyStep(ctx, client, write); applyErr != nil || observation.Disposition != "success" {
+		return scenarios.Operation{}, fmt.Errorf("apply Kotlin Android schema-queued-mutation local write %s: %w", stepID, kotlinResultError(applyErr, observation.Disposition))
+	}
+	return write, nil
+}
+
+func requireKotlinSchemaQueuedMutationRow(ctx context.Context, platform *Platform, client Client, write scenarios.Operation) error {
+	snapshot, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	rows, err := androidApplicationRows(snapshot.ApplicationRows)
+	if err != nil {
+		return err
+	}
+	return scenarios.RequireLocalWriteRow(write, rows)
 }
 
 func schemaQueuedMutationCompletion(scenario scenarios.Scenario, step scenarios.Step) (string, error) {
@@ -586,7 +674,10 @@ func schemaQueuedMutationRuntimeRebuildID(baseline SynchronizationResult, server
 	return "", fmt.Errorf("Kotlin Android schema-queued-mutation rebuild identity has no server session, requested %v, observed server sessions %v", fingerprints, sessions)
 }
 
-func resolveKotlinSchemaQueuedMutationIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, reset SynchronizationResult, client, server scenarios.StateFacts) ([]blackbox.NativeIdentityResolution, error) {
+// An alias that the final expectation declares resolves from the final client
+// state. The other row-version and checksum aliases name the S1 source row,
+// which the compatible push replaced, so they resolve from the baseline state.
+func resolveKotlinSchemaQueuedMutationIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, reset SynchronizationResult, baselineState, client, server scenarios.StateFacts) ([]blackbox.NativeIdentityResolution, error) {
 	values, err := controller.IdentityValues(aliases)
 	if err != nil {
 		return nil, err
@@ -626,19 +717,23 @@ func resolveKotlinSchemaQueuedMutationIdentities(controller *blackbox.NativeCont
 			}
 			runtime[alias.Alias] = encoded
 		case "row-version":
-			if len(client.Clients) != 1 || len(client.Clients[0].Provenance) != 1 {
+			state := baselineState
+			if len(alias.ExpectationIDs) != 0 {
+				state = client
+			}
+			if len(state.Clients) != 1 || len(state.Clients[0].Provenance) != 1 {
 				return nil, errors.New("Kotlin Android schema-queued-mutation provenance evidence is absent")
 			}
-			encoded, encodeErr := json.Marshal(client.Clients[0].Provenance[0].Version)
+			encoded, encodeErr := json.Marshal(state.Clients[0].Provenance[0].Version)
 			if encodeErr != nil {
 				return nil, fmt.Errorf("encode Kotlin Android schema-queued-mutation row version: %w", encodeErr)
 			}
 			runtime[alias.Alias] = encoded
 		case "checksum":
-			if len(client.Clients) != 1 || len(client.Clients[0].Checkpoints) != 1 || client.Clients[0].Checkpoints[0].Checksum == nil {
+			if len(baselineState.Clients) != 1 || len(baselineState.Clients[0].Checkpoints) != 1 || baselineState.Clients[0].Checkpoints[0].Checksum == nil {
 				return nil, errors.New("Kotlin Android schema-queued-mutation checkpoint evidence is absent")
 			}
-			encoded, encodeErr := json.Marshal(*client.Clients[0].Checkpoints[0].Checksum)
+			encoded, encodeErr := json.Marshal(*baselineState.Clients[0].Checkpoints[0].Checksum)
 			if encodeErr != nil {
 				return nil, fmt.Errorf("encode Kotlin Android schema-queued-mutation checkpoint checksum: %w", encodeErr)
 			}

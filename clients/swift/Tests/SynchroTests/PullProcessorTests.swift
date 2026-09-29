@@ -1413,6 +1413,12 @@ final class PullProcessorTests: XCTestCase {
         try insertOrder(db, id: "protected", shipAddress: "local", updatedAt: "2026-01-01T00:00:00.000000Z")
         try insertOrder(db, id: "stale", shipAddress: "local", updatedAt: "2026-01-01T00:00:00.000000Z")
         try addPendingIntent(db, table: testTable, recordID: "protected", state: "sealed")
+        // A reset can leave a protected record without a local row (#267).
+        try addPendingIntent(db, table: testTable, recordID: "missing", state: "blocked_by_predecessor")
+        let ledgerBefore = try db.query(
+            "SELECT mutation_id, record_id, lifecycle_state FROM _synchro_pending_changes ORDER BY local_order",
+            params: nil
+        )
 
         let attempt = try processor.beginScopeRebuild(
             scopeID: scopeID,
@@ -1423,26 +1429,31 @@ final class PullProcessorTests: XCTestCase {
             syncedTables: [testTable.localSchema]
         )
         let serverVersion = "2026-01-02T00:00:00.000000Z"
-        let serverRow: [String: AnyCodable] = [
-            "id": AnyCodable("protected"),
-            "ship_address": AnyCodable("server"),
-            "updated_at": AnyCodable(serverVersion),
-            "deleted_at": AnyCodable(NSNull()),
-        ]
-        let rowDigest = try Integrity.rowDigest(
-            schemaHash: protocolTestSchemaHash,
-            table: testTable,
-            pk: ["id": AnyCodable("protected")],
-            row: serverRow,
-            serverVersion: serverVersion
-        )
-        let record = RebuildRecord(
-            table: testTable.tableID,
-            pk: ["id": AnyCodable("protected")],
-            row: serverRow,
-            rowChecksum: rowDigest.checksum,
-            serverVersion: serverVersion
-        )
+        var records: [RebuildRecord] = []
+        var entries: [(identity: Data, digest: ChecksumObject)] = []
+        for id in ["missing", "protected"] {
+            let serverRow: [String: AnyCodable] = [
+                "id": AnyCodable(id),
+                "ship_address": AnyCodable("server"),
+                "updated_at": AnyCodable(serverVersion),
+                "deleted_at": AnyCodable(NSNull()),
+            ]
+            let rowDigest = try Integrity.rowDigest(
+                schemaHash: protocolTestSchemaHash,
+                table: testTable,
+                pk: ["id": AnyCodable(id)],
+                row: serverRow,
+                serverVersion: serverVersion
+            )
+            records.append(RebuildRecord(
+                table: testTable.tableID,
+                pk: ["id": AnyCodable(id)],
+                row: serverRow,
+                rowChecksum: rowDigest.checksum,
+                serverVersion: serverVersion
+            ))
+            entries.append((identity: rowDigest.identity, digest: rowDigest.checksum))
+        }
         let firstRequest = RebuildRequest(
             clientID: "test-client",
             clientGeneration: attempt.clientGeneration,
@@ -1454,7 +1465,7 @@ final class PullProcessorTests: XCTestCase {
         )
         let firstResponse = RebuildResponse(
             scope: scopeID,
-            records: [record],
+            records: records,
             cursor: "page-2",
             hasMore: true,
             finalScopeCursor: nil,
@@ -1471,7 +1482,7 @@ final class PullProcessorTests: XCTestCase {
         let checksum = try Integrity.scopeDigest(
             schemaHash: protocolTestSchemaHash,
             scopeID: scopeID,
-            entries: [(identity: rowDigest.identity, digest: rowDigest.checksum)]
+            entries: entries
         )
         let finalRequest = RebuildRequest(
             clientID: "test-client",
@@ -1501,10 +1512,19 @@ final class PullProcessorTests: XCTestCase {
 
         let protected = try db.queryOne("SELECT ship_address FROM orders WHERE id = 'protected'", params: nil)
         XCTAssertEqual(protected?["ship_address"] as String?, "local")
+        let missing = try db.queryOne("SELECT ship_address FROM orders WHERE id = 'missing'", params: nil)
+        XCTAssertEqual(missing?["ship_address"] as String?, "server")
+        XCTAssertEqual(
+            try db.query(
+                "SELECT mutation_id, record_id, lifecycle_state FROM _synchro_pending_changes ORDER BY local_order",
+                params: nil
+            ),
+            ledgerBefore
+        )
         XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = 'stale'", params: nil))
         XCTAssertEqual(
             try db.query("SELECT record_id FROM _synchro_scope_rows WHERE scope_id = ?", params: [scopeID]).map { $0["record_id"] as String? },
-            ["protected"]
+            ["missing", "protected"]
         )
     }
 

@@ -31,6 +31,7 @@ type SeededEmptyStartupResult struct {
 	RejectedSeedControls []string
 	RestartStep          StepObservation
 	ResumeCall           SynchronizationResult
+	FloorCall            SynchronizationResult
 }
 
 type kotlinSeedStartupControl struct {
@@ -41,7 +42,7 @@ type kotlinSeedStartupControl struct {
 
 // RunSeededEmptyStartupScenario executes the authored seeded and empty startup flows through Kotlin Android.
 func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, artifact *blackbox.NativeArtifact, platform *Platform) (SeededEmptyStartupResult, error) {
-	steps, err := kotlinScenarioStepMap(scenario, seededEmptyStartupScenarioID, 15)
+	steps, err := kotlinScenarioStepMap(scenario, seededEmptyStartupScenarioID, 29)
 	if err != nil {
 		return SeededEmptyStartupResult{}, err
 	}
@@ -171,7 +172,141 @@ func RunSeededEmptyStartupScenario(ctx context.Context, scenario scenarios.Scena
 	if err := validateKotlinSeededStartupResume(clients[0].StartupCall, resumed, 2); err != nil {
 		return SeededEmptyStartupResult{}, err
 	}
-	return SeededEmptyStartupResult{Clients: clients, RejectedSeedControls: rejectedControls, RestartStep: restart, ResumeCall: resumed}, nil
+	floorCall, err := runKotlinSeededFloorClient(ctx, scenario, steps, controller, artifact, platform)
+	if err != nil {
+		return SeededEmptyStartupResult{}, err
+	}
+	return SeededEmptyStartupResult{Clients: clients, RejectedSeedControls: rejectedControls, RestartStep: restart, ResumeCall: resumed, FloorCall: floorCall}, nil
+}
+
+const seededFloorStep = "STEP-PERF-SEEDED-EMPTY-STARTUP-FLOOR-"
+
+// runKotlinSeededFloorClient starts a client from an authentic seed whose
+// receipt is below the compacted shared-scope floor, with one offline write.
+// The receipt must fall back to a rebuild of both scopes, and the write must
+// stay durable until the startup pushes it and the server holds it (#207).
+func runKotlinSeededFloorClient(ctx context.Context, scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, controller *blackbox.NativeController, artifact *blackbox.NativeArtifact, platform *Platform) (SynchronizationResult, error) {
+	stage, err := kotlinScenarioOperation(steps, seededFloorStep+"001", "artifact/install-portable-seed")
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	if _, err := artifact.StageStep(ctx, stage); err != nil {
+		return SynchronizationResult{}, fmt.Errorf("stage Kotlin Android floor seed: %w", err)
+	}
+	// The earlier clients hold the shared scope, so they expire before the
+	// compaction can move its floor past the seed position.
+	for _, step := range []struct{ id, key string }{
+		{"002", "model/commit-source-transaction"},
+		{"003", "process/materialize-source-transaction"},
+		{"004", "model/expire-client-generation"},
+		{"005", "model/expire-client-generation"},
+		{"006", "model/expire-client-generation"},
+		{"007", "model/expire-client-generation"},
+		{"008", "model/expire-client-generation"},
+		{"009", "model/expire-client-generation"},
+		{"010", "model/compact-scope"},
+		{"011", "model/set-client-assignments"},
+	} {
+		operation, err := kotlinScenarioOperation(steps, seededFloorStep+step.id, step.key)
+		if err != nil {
+			return SynchronizationResult{}, err
+		}
+		var observation blackbox.NativeStepObservation
+		if operation.ContractOperation == "process" {
+			observation, err = controller.ProcessStep(ctx, nil, operation)
+		} else {
+			observation, err = controller.ApplyStep(ctx, operation)
+		}
+		if err != nil || observation.Disposition != "success" {
+			return SynchronizationResult{}, fmt.Errorf("apply Kotlin Android floor step %s: %w", step.id, kotlinResultError(err, observation.Disposition))
+		}
+	}
+	binding := steps[scenarios.StepID(seededFloorStep+"013")].NativeBinding
+	if binding == nil || binding.Method != "start" || binding.Completion != "idle" {
+		return SynchronizationResult{}, errors.New("Kotlin Android floor startup binding is invalid")
+	}
+	client := Client{Key: binding.ClientID, UserID: binding.UserID, ClientID: binding.ClientID, DatabaseKey: "seeded-empty-startup-" + binding.ClientID}
+	seedPath, err := artifact.SeedDatabasePath(ctx, client.UserID, client.ClientID, scenarios.StepID(seededFloorStep+"001"))
+	if err != nil {
+		return SynchronizationResult{}, fmt.Errorf("resolve Kotlin Android floor seed: %w", err)
+	}
+	if err := platform.Install(ctx, InstallRequest{Client: client, Initialization: "seed", SeedPath: seedPath}); err != nil {
+		return SynchronizationResult{}, fmt.Errorf("install Kotlin Android floor client: %w", err)
+	}
+	write, err := kotlinScenarioOperation(steps, seededFloorStep+"012", "local/write")
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	write, err = controller.ApplicationWrite(write)
+	if err != nil {
+		return SynchronizationResult{}, fmt.Errorf("bind Kotlin Android floor offline write: %w", err)
+	}
+	if observation, err := platform.ApplyStep(ctx, client, write); err != nil || observation.Disposition != "success" {
+		return SynchronizationResult{}, fmt.Errorf("apply Kotlin Android floor offline write: %w", kotlinResultError(err, observation.Disposition))
+	}
+	// The offline intent is durable before the first start.
+	before, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	if before.PendingChangeCount == nil || *before.PendingChangeCount != 1 {
+		return SynchronizationResult{}, errors.New("Kotlin Android floor client does not hold its offline intent before startup")
+	}
+	push, err := kotlinScenarioOperation(steps, seededFloorStep+"014", "push/submit")
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	if err := controller.BindApplicationPush(push); err != nil {
+		return SynchronizationResult{}, fmt.Errorf("bind Kotlin Android floor push: %w", err)
+	}
+	call, err := kotlinScenarioCall(ctx, platform, client, "start")
+	if err != nil {
+		return SynchronizationResult{}, fmt.Errorf("run Kotlin Android floor client: %w", err)
+	}
+	// The below-floor receipt must not continue, so the shared scope rebuilds
+	// together with the identity scope. A continued receipt rebuilds one scope.
+	rebuilt := make(map[string]struct{}, 2)
+	pushes := 0
+	for _, observation := range call.transportObservations {
+		switch {
+		case observation.OperationClass == "rebuild" && observation.StatusCode == 200 && observation.RebuildResponseFacts != nil &&
+			!observation.RebuildResponseFacts.HasMore && observation.RebuildResponseFacts.HasFinalScopeCursor:
+			rebuilt[observation.RebuildResponseFacts.ScopeFingerprint] = struct{}{}
+		case observation.OperationClass == "push":
+			pushes++
+			if observation.RequestFacts == nil || observation.RequestFacts.MutationCount == nil || *observation.RequestFacts.MutationCount != 1 {
+				return SynchronizationResult{}, errors.New("Kotlin Android floor push does not carry the one offline mutation")
+			}
+		}
+		// A read after the accepted push can wait for its capture. The client
+		// retries that request, as the contract permits.
+		if observation.StatusCode != 200 && !(observation.StatusCode == 503 && observation.Retryable != nil && *observation.Retryable && observation.ErrorCode != nil && *observation.ErrorCode == "capture_pending") {
+			return SynchronizationResult{}, fmt.Errorf("Kotlin Android floor %s request returned %d", observation.OperationClass, observation.StatusCode)
+		}
+	}
+	if len(rebuilt) != 2 || pushes != 1 {
+		return SynchronizationResult{}, fmt.Errorf("Kotlin Android floor startup rebuilt %d scopes and pushed %d times, want 2 and 1", len(rebuilt), pushes)
+	}
+	if err := validateKotlinWireExpectation(scenario, seededFloorStep+"013", "connect", call); err != nil {
+		return SynchronizationResult{}, err
+	}
+	if err := validateKotlinWireExpectation(scenario, seededFloorStep+"014", "push", call); err != nil {
+		return SynchronizationResult{}, err
+	}
+	// The server capture compares the server row of the bound push with the
+	// authored write, field by field.
+	if _, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"}); err != nil {
+		return SynchronizationResult{}, fmt.Errorf("capture Kotlin Android floor server state: %w", err)
+	}
+	snapshot, err := platform.scenarioSnapshot(ctx, client)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	if snapshot.PendingChangeCount == nil || *snapshot.PendingChangeCount != 0 || snapshot.RejectedMutationCount == nil || *snapshot.RejectedMutationCount != 0 ||
+		snapshot.MutationOutcomeCount == nil || *snapshot.MutationOutcomeCount != 1 {
+		return SynchronizationResult{}, errors.New("Kotlin Android floor client did not reach one accepted outcome for its offline intent")
+	}
+	return call, nil
 }
 
 func kotlinBoolCount(value bool) int {

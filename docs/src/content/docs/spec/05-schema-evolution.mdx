@@ -921,7 +921,9 @@ The client performs these transitions in order:
    accepted write whose fence is satisfied by exact WAL materialization or
    activated verified reset-baseline coverage and cannot overwrite unresolved
    local intent. Rebuild pruning preserves the application-visible local row for
-   such intent outside the rebuilt server-provenance layer.
+   such intent outside the rebuilt server-provenance layer. When the target
+   shape cannot hold that local row, the rebuild installs the server row, and
+   the intent stays unchanged and inspectable.
 9. Clear the migration journal only after the required local DDL, metadata, and
    any required rebuild state, provenance, checksums, and final cursors are
    durable.

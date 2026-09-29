@@ -26,6 +26,10 @@ var schemaQueuedMutationStepOrder = []scenarios.StepID{
 	"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
 	"STEP-SCHEMA-QUEUED-MUTATION-004",
 	"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001",
+	"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001",
+	"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001",
+	"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001",
+	"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001",
 	"STEP-SCHEMA-QUEUED-MUTATION-005",
 	"STEP-SCHEMA-QUEUED-MUTATION-006",
 	"STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
@@ -38,6 +42,7 @@ var schemaQueuedMutationAliasNames = []string{
 	"client-generation-one",
 	"schema-one",
 	"schema-two",
+	"schema-three",
 	"scope-a",
 	"schema-baseline-rebuild",
 	"scope-set-version-one",
@@ -46,6 +51,7 @@ var schemaQueuedMutationAliasNames = []string{
 	"items-table",
 	"queued-row-primary-key",
 	"schema-one-base-version",
+	"compatible-write-version",
 	"schema-one-base-checksum",
 }
 
@@ -94,6 +100,7 @@ type SchemaQueuedMutationCoordinator struct {
 	nextSeq               uint64
 	process               *actionProcessIdentity
 	preRestart            *traceSnapshot
+	baselineRow           *durableMetadata
 	finalResult           *finalCapture
 	retainedClientVersion string
 	result                SchemaQueuedMutationCoordinatorResult
@@ -105,6 +112,11 @@ const (
 	schemaQueuedMutationStageOpen schemaQueuedMutationStage = iota
 	schemaQueuedMutationStageOpened
 	schemaQueuedMutationStageBaseline
+	schemaQueuedMutationStageBaselineCapture
+	schemaQueuedMutationStageCompatibleWrite
+	schemaQueuedMutationStageCompatibleStopped
+	schemaQueuedMutationStageCompatible
+	schemaQueuedMutationStageCompatibleRows
 	schemaQueuedMutationStageLocalWrite
 	schemaQueuedMutationStageStopped
 	schemaQueuedMutationStageUnsupported
@@ -145,6 +157,10 @@ func ValidateSchemaQueuedMutationScenario(scenario scenarios.Scenario) error {
 		{"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001", "local/begin-rebuild", "public-call", "start", "idle"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-004", "local/apply-rebuild-page", "public-call", "start", "idle"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001", "local/finalize-rebuild", "public-call", "start", "idle"},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001", "local/write", "local-write", "", ""},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001", "model/publish-schema", "controller", "", ""},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001", "connect/send", "public-call", "start", "idle"},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001", "push/submit", "public-call", "start", "idle"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-005", "local/write", "local-write", "", ""},
 		{"STEP-SCHEMA-QUEUED-MUTATION-006", "model/publish-schema", "controller", "", ""},
 		{"STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001", "connect/send", "public-call", "start", "error"},
@@ -345,13 +361,9 @@ func (c *SchemaQueuedMutationCoordinator) Prepare(ctx context.Context) error {
 	if result, err := c.config.Controller.ProcessStep(ctx, nil, materialize); err != nil || result.Disposition != "success" {
 		return fmt.Errorf("materialize React Native schema-queued-mutation baseline disposition=%q error=%w", result.Disposition, nativeResultError(err, result.Disposition))
 	}
-	write, err := c.config.Controller.ApplicationWrite(c.steps["STEP-SCHEMA-QUEUED-MUTATION-005"].Operation)
-	if err != nil {
-		return fmt.Errorf("bind React Native schema-queued-mutation local write: %w", err)
+	if err := c.bindLocalWrite("STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"); err != nil {
+		return err
 	}
-	step := c.steps["STEP-SCHEMA-QUEUED-MUTATION-005"]
-	step.Operation = write
-	c.steps[step.ID] = step
 	c.mu.Lock()
 	c.prepared = true
 	c.mu.Unlock()
@@ -401,7 +413,7 @@ func (c *SchemaQueuedMutationCoordinator) Token() string {
 }
 
 // ExchangeCount returns the fixed count, including the complete exchange.
-func (c *SchemaQueuedMutationCoordinator) ExchangeCount() int { return 10 }
+func (c *SchemaQueuedMutationCoordinator) ExchangeCount() int { return 15 }
 
 func (c *SchemaQueuedMutationCoordinator) Completed() bool {
 	if c == nil {
@@ -533,6 +545,40 @@ func (c *SchemaQueuedMutationCoordinator) acceptResultLocked(raw json.RawMessage
 		c.process = &process
 	case schemaQueuedMutationStageBaseline:
 		return c.validateSynchronized(envelope.Result, "idle", true)
+	case schemaQueuedMutationStageBaselineCapture:
+		// The compatible write replaces the S1 row version and checksum, so the
+		// S1 aliases bind to this capture.
+		capture, err := decodeCapture(envelope.Result, []string{"durable_proof"})
+		if err != nil {
+			return err
+		}
+		metadata, err := durableRowMetadata(capture.DurableProof)
+		if err != nil {
+			return err
+		}
+		c.baselineRow = &metadata
+	case schemaQueuedMutationStageCompatibleWrite:
+		return c.validateLocal(envelope.Result)
+	case schemaQueuedMutationStageCompatibleStopped:
+		if c.process == nil {
+			return errors.New("React Native schema-queued-mutation process is unavailable")
+		}
+		return validateStoppedLifecycleResult(envelope.Result, *c.process)
+	case schemaQueuedMutationStageCompatible:
+		return c.validateSynchronized(envelope.Result, "idle", true)
+	case schemaQueuedMutationStageCompatibleRows:
+		raw, err := captureRows(envelope.Result)
+		if err != nil {
+			return err
+		}
+		rows, err := decodeRows(raw)
+		if err != nil {
+			return err
+		}
+		// The compatible migration keeps the local row and its pushed value.
+		if err := scenarios.RequireLocalWriteRow(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"].Operation, rows); err != nil {
+			return fmt.Errorf("React Native schema-queued-mutation compatible row: %w", err)
+		}
 	case schemaQueuedMutationStageLocalWrite:
 		return c.validateLocal(envelope.Result)
 	case schemaQueuedMutationStageStopped:
@@ -588,6 +634,47 @@ func (c *SchemaQueuedMutationCoordinator) advanceLocked(ctx context.Context, seq
 			"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001",
 		})
 	case schemaQueuedMutationStageBaseline:
+		response.Command = c.command(schemaQueuedMutationInitialClientKey, "observer", "capture", map[string]any{
+			"client_keys": []string{schemaQueuedMutationInitialClientKey}, "sources": []string{"durable-proof"},
+		}, nil)
+	case schemaQueuedMutationStageBaselineCapture:
+		response.Command = c.command(schemaQueuedMutationInitialClientKey, "client", "execute-step", map[string]any{
+			"client_key": schemaQueuedMutationInitialClientKey,
+		}, []scenarios.StepID{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"})
+	case schemaQueuedMutationStageCompatibleWrite:
+		publish := c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001"].Operation
+		if result, err := c.config.Controller.ApplyStep(ctx, publish); err != nil || result.Disposition != "success" {
+			return exchangeResponse{}, fmt.Errorf("publish React Native schema-queued-mutation compatible schema disposition=%q error=%w", result.Disposition, nativeResultError(err, result.Disposition))
+		}
+		if err := c.config.Controller.BindApplicationPush(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"].Operation); err != nil {
+			return exchangeResponse{}, fmt.Errorf("bind React Native schema-queued-mutation compatible push: %w", err)
+		}
+		response.Command = c.command(schemaQueuedMutationInitialClientKey, "client", "lifecycle", map[string]any{
+			"client_key": schemaQueuedMutationInitialClientKey, "operation": "stop",
+		}, nil)
+	case schemaQueuedMutationStageCompatibleStopped:
+		response.Command = c.command(schemaQueuedMutationInitialClientKey, "client", "synchronize-step", map[string]any{
+			"client_key": schemaQueuedMutationInitialClientKey, "method": "start", "completion": "idle",
+		}, []scenarios.StepID{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001", "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"})
+	case schemaQueuedMutationStageCompatible:
+		// The server capture binds the accepted push and checks the exact server
+		// row it wrote.
+		if _, err := c.config.Controller.Capture(ctx, []string{schemaQueuedMutationInitialClientKey}, []string{"server-state"}); err != nil {
+			return exchangeResponse{}, fmt.Errorf("capture React Native schema-queued-mutation compatible server state: %w", err)
+		}
+		selectors, err := c.compatibleRowSelectors()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
+		response.Command = c.command(schemaQueuedMutationInitialClientKey, "observer", "capture", map[string]any{
+			"client_keys": []string{schemaQueuedMutationInitialClientKey}, "sources": []string{"application-rows"},
+			"row_selectors": selectors,
+		}, nil)
+	case schemaQueuedMutationStageCompatibleRows:
+		// The S2 write names the field that the compatible publication added.
+		if err := c.bindLocalWrite("STEP-SCHEMA-QUEUED-MUTATION-005"); err != nil {
+			return exchangeResponse{}, err
+		}
 		response.Command = c.command(schemaQueuedMutationInitialClientKey, "client", "execute-step", map[string]any{
 			"client_key": schemaQueuedMutationInitialClientKey,
 		}, []scenarios.StepID{"STEP-SCHEMA-QUEUED-MUTATION-005"})
@@ -620,9 +707,14 @@ func (c *SchemaQueuedMutationCoordinator) advanceLocked(ctx context.Context, seq
 			"client_key": schemaQueuedMutationRestartClientKey, "database_mode": "reuse", "initialization": "empty", "seed_step_id": nil,
 		}, nil)
 	case schemaQueuedMutationStageRestarted:
+		selectors, err := c.compatibleRowSelectors()
+		if err != nil {
+			return exchangeResponse{}, err
+		}
 		response.Command = c.command(schemaQueuedMutationRestartClientKey, "observer", "capture", map[string]any{
-			"client_keys": []string{schemaQueuedMutationRestartClientKey},
-			"sources":     []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof"},
+			"client_keys":   []string{schemaQueuedMutationRestartClientKey},
+			"sources":       []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof", "application-rows"},
+			"row_selectors": selectors,
 		}, nil)
 	case schemaQueuedMutationStageFinalCapture:
 		if err := c.completeLocked(ctx); err != nil {
@@ -718,7 +810,7 @@ func (c *SchemaQueuedMutationCoordinator) validateTraceCapture(raw json.RawMessa
 }
 
 func (c *SchemaQueuedMutationCoordinator) validateFinalCapture(raw json.RawMessage) (finalCapture, error) {
-	capture, err := decodeCapture(raw, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "request_trace", "durable_proof"})
+	capture, err := decodeCapture(raw, []string{"client_state", "pending_mutations", "rejected_mutations", "sync_status", "sync_events", "request_trace", "durable_proof", "application_rows"})
 	if err != nil {
 		return finalCapture{}, fmt.Errorf("React Native schema-queued-mutation final capture observed=invalid want=valid capture error=%v", err)
 	}
@@ -753,14 +845,18 @@ func (c *SchemaQueuedMutationCoordinator) validateRestarted(raw json.RawMessage)
 	return process, nil
 }
 
+// validateSchemaQueuedMutationTrace checks the pre-restart request order: the
+// baseline connect, rebuild, and pull, then the compatible connect and its one
+// push, then the unsupported and reset connects, and then one reset push. The
+// compatible call can repeat its pull while capture is pending.
 func validateSchemaQueuedMutationTrace(scenario scenarios.Scenario, trace traceSnapshot) error {
-	if trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || len(trace.Observations) < 6 {
+	if trace.Overflowed || trace.SequenceCheckpoint != uint64(len(trace.Observations)) || len(trace.Observations) < 8 {
 		return fmt.Errorf("React Native schema-queued-mutation trace observations=%d checkpoint=%d overflowed=%t", len(trace.Observations), trace.SequenceCheckpoint, trace.Overflowed)
 	}
 	if err := validateTraceSequence(trace.Observations); err != nil {
 		return err
 	}
-	for index, operation := range []string{"connect", "rebuild", "pull", "connect", "connect"} {
+	for index, operation := range []string{"connect", "rebuild", "pull", "connect"} {
 		if err := validateTraceOperation(trace.Observations[index], operation); err != nil {
 			return fmt.Errorf("React Native schema-queued-mutation trace operation index=%d operation=%q: %w", index+1, operation, err)
 		}
@@ -769,25 +865,57 @@ func validateSchemaQueuedMutationTrace(scenario scenarios.Scenario, trace traceS
 	if err != nil || limit != schemaQueuedMutationRebuildLimit(scenario) {
 		return fmt.Errorf("React Native schema-queued-mutation rebuild limit=%d want=%d error=%v", limit, schemaQueuedMutationRebuildLimit(scenario), err)
 	}
-	pushes := make([]transportObservation, 0, 1)
-	for _, observation := range trace.Observations[5:] {
-		if observation.OperationClass == "push" {
-			pushes = append(pushes, observation)
+	unsupported, reset, err := schemaQueuedMutationLastConnects(trace)
+	if err != nil {
+		return err
+	}
+	if reset != unsupported+1 || unsupported <= 3 {
+		return fmt.Errorf("React Native schema-queued-mutation unsupported connect index=%d reset connect index=%d want adjacent connects after the compatible call", unsupported+1, reset+1)
+	}
+	for _, segment := range []struct {
+		name       string
+		start, end int
+		pushStepID scenarios.StepID
+	}{
+		{"compatible", 4, unsupported, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"},
+		{"reset", reset + 1, len(trace.Observations), "STEP-SCHEMA-QUEUED-MUTATION-008"},
+	} {
+		pushes := make([]transportObservation, 0, 1)
+		for _, observation := range trace.Observations[segment.start:segment.end] {
+			if observation.OperationClass == "push" {
+				pushes = append(pushes, observation)
+			}
+		}
+		if len(pushes) != 1 {
+			return fmt.Errorf("React Native schema-queued-mutation %s push observations=%d want=1", segment.name, len(pushes))
+		}
+		status := schemaQueuedMutationWireStatus(scenario, segment.pushStepID)
+		if pushes[0].StatusCode != status ||
+			pushes[0].CursorFingerprints != nil || pushes[0].CursorFingerprintsComplete != nil ||
+			hasJSONValue(pushes[0].RebuildResponseFacts) || hasJSONValue(pushes[0].PullResponseFacts) {
+			return fmt.Errorf("React Native schema-queued-mutation %s push status=%d want=%d", segment.name, pushes[0].StatusCode, status)
+		}
+		mutations, err := requestInteger(pushes[0], "mutation_count")
+		if err != nil || mutations != 1 {
+			return fmt.Errorf("React Native schema-queued-mutation %s push mutation_count=%d want=1 error=%v", segment.name, mutations, err)
 		}
 	}
-	if len(pushes) != 1 {
-		return fmt.Errorf("React Native schema-queued-mutation push observations=%d want=1", len(pushes))
-	}
-	if pushes[0].StatusCode != schemaQueuedMutationWireStatus(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008") ||
-		pushes[0].CursorFingerprints != nil || pushes[0].CursorFingerprintsComplete != nil ||
-		hasJSONValue(pushes[0].RebuildResponseFacts) || hasJSONValue(pushes[0].PullResponseFacts) {
-		return fmt.Errorf("React Native schema-queued-mutation push status=%d want=%d", pushes[0].StatusCode, schemaQueuedMutationWireStatus(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008"))
-	}
-	mutations, err := requestInteger(pushes[0], "mutation_count")
-	if err != nil || mutations != 1 {
-		return fmt.Errorf("React Native schema-queued-mutation push mutation_count=%d want=1 error=%v", mutations, err)
-	}
 	return nil
+}
+
+// schemaQueuedMutationLastConnects returns the indexes of the unsupported and
+// reset connects, which are the last two connects before restart.
+func schemaQueuedMutationLastConnects(trace traceSnapshot) (int, int, error) {
+	connects := make([]int, 0, 4)
+	for index, observation := range trace.Observations {
+		if observation.OperationClass == "connect" {
+			connects = append(connects, index)
+		}
+	}
+	if len(connects) < 4 {
+		return 0, 0, fmt.Errorf("React Native schema-queued-mutation connect observations=%d want at least 4", len(connects))
+	}
+	return connects[len(connects)-2], connects[len(connects)-1], nil
 }
 
 func schemaQueuedMutationRebuildLimit(scenario scenarios.Scenario) uint64 {
@@ -854,8 +982,9 @@ func (c *SchemaQueuedMutationCoordinator) resolveServerIdentities(ctx context.Co
 		"client-generation-one":    evidence.clientGeneration,
 		"scope-set-version-one":    evidence.scopeSetVersion,
 		"schema-baseline-rebuild":  evidence.rebuildID,
-		"schema-one-base-version":  evidence.rowVersion,
-		"schema-one-base-checksum": evidence.rowChecksum,
+		"schema-one-base-version":  evidence.baselineVersion,
+		"schema-one-base-checksum": evidence.baselineChecksum,
+		"compatible-write-version": evidence.rowVersion,
 	} {
 		encoded, err := json.Marshal(value)
 		if err != nil {
@@ -889,8 +1018,9 @@ type schemaQueuedMutationServerEvidence struct {
 	clientGeneration uint64
 	scopeSetVersion  uint64
 	rebuildID        string
+	baselineVersion  string
+	baselineChecksum string
 	rowVersion       string
-	rowChecksum      string
 }
 
 func (c *SchemaQueuedMutationCoordinator) serverEvidence(server scenarios.StateFacts) (schemaQueuedMutationServerEvidence, error) {
@@ -898,10 +1028,14 @@ func (c *SchemaQueuedMutationCoordinator) serverEvidence(server scenarios.StateF
 	if c.preRestart != nil {
 		observationCount = len(c.preRestart.Observations)
 	}
-	if observationCount < 5 {
-		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation pre-restart observations=%d want=at least 5", observationCount)
+	if observationCount < 8 {
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation pre-restart observations=%d want=at least 8", observationCount)
 	}
-	resetConnect := c.preRestart.Observations[4]
+	_, resetIndex, err := schemaQueuedMutationLastConnects(*c.preRestart)
+	if err != nil {
+		return schemaQueuedMutationServerEvidence{}, err
+	}
+	resetConnect := c.preRestart.Observations[resetIndex]
 	generation, generationErr := requestInteger(resetConnect, "client_generation")
 	scopeSet, scopeSetErr := requestInteger(resetConnect, "scope_set_version")
 	if resetConnect.OperationClass != "connect" || generationErr != nil || scopeSetErr != nil || generation == 0 || scopeSet == 0 {
@@ -937,9 +1071,17 @@ func (c *SchemaQueuedMutationCoordinator) serverEvidence(server scenarios.StateF
 	if metadata.TableName != c.tableName || metadata.RecordID != recordID || metadata.ServerVersion == "" || checksumErr != nil || rowChecksum == nil {
 		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation durable row observed table=%q record=%q version=%q checksum=%v want table=%q record=%q nonempty version and checksum error=%v", metadata.TableName, metadata.RecordID, metadata.ServerVersion, rowChecksum, c.tableName, recordID, checksumErr)
 	}
+	if c.baselineRow == nil {
+		return schemaQueuedMutationServerEvidence{}, errors.New("React Native schema-queued-mutation baseline row metadata observed=absent want=present")
+	}
+	baselineChecksum, err := checksumDigest(c.baselineRow.RowChecksum)
+	if c.baselineRow.TableName != c.tableName || c.baselineRow.RecordID != recordID || err != nil || baselineChecksum == nil {
+		return schemaQueuedMutationServerEvidence{}, fmt.Errorf("React Native schema-queued-mutation baseline row observed table=%q record=%q want table=%q record=%q error=%v", c.baselineRow.TableName, c.baselineRow.RecordID, c.tableName, recordID, err)
+	}
 	return schemaQueuedMutationServerEvidence{
 		clientGeneration: generation, scopeSetVersion: scopeSet, rebuildID: rebuildID,
-		rowVersion: metadata.ServerVersion, rowChecksum: *rowChecksum,
+		baselineVersion: c.baselineRow.ServerVersion, baselineChecksum: *baselineChecksum,
+		rowVersion: metadata.ServerVersion,
 	}, nil
 }
 
@@ -951,7 +1093,7 @@ func (c *SchemaQueuedMutationCoordinator) validateDurableResult() error {
 	if err != nil {
 		return err
 	}
-	schemaTwo, err := c.runtimeSchema("schema-two")
+	schemaThree, err := c.runtimeSchema("schema-three")
 	if err != nil {
 		return err
 	}
@@ -960,14 +1102,26 @@ func (c *SchemaQueuedMutationCoordinator) validateDurableResult() error {
 		return err
 	}
 	expected := c.expected.Clients[0]
-	if state.Schema == nil || *state.Schema != schemaTwo || len(state.ScopeStates) != 1 || state.ScopeStates[0].ScopeID != scope ||
+	if state.Schema == nil || *state.Schema != schemaThree || len(state.ScopeStates) != 1 || state.ScopeStates[0].ScopeID != scope ||
 		expected.QueueCount == nil || expected.OutcomeCount == nil || state.MutationLedgerCount != *expected.QueueCount || state.MutationOutcomeCount != *expected.OutcomeCount {
-		return fmt.Errorf("React Native schema-queued-mutation client schema=%+v want=%+v scopes=%+v want_scope=%q ledger=%d want=%v outcomes=%d want=%v", state.Schema, schemaTwo, state.ScopeStates, scope, state.MutationLedgerCount, expected.QueueCount, state.MutationOutcomeCount, expected.OutcomeCount)
+		return fmt.Errorf("React Native schema-queued-mutation client schema=%+v want=%+v scopes=%+v want_scope=%q ledger=%d want=%v outcomes=%d want=%v", state.Schema, schemaThree, state.ScopeStates, scope, state.MutationLedgerCount, expected.QueueCount, state.MutationOutcomeCount, expected.OutcomeCount)
 	}
 	if err := c.validatePendingMutation(expected.Queue[0]); err != nil {
 		return err
 	}
-	return c.validateRejectedMutation(expected.Outcomes[0])
+	if err := c.validateRejectedMutation(expected.Outcomes[0]); err != nil {
+		return err
+	}
+	// The reset rebuild must keep the row of the blocked mutation visible with
+	// the value that the compatible push applied (#267).
+	rows, err := decodeRows(c.finalResult.Rows)
+	if err != nil {
+		return err
+	}
+	if err := scenarios.RequireLocalWriteRow(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"].Operation, rows); err != nil {
+		return fmt.Errorf("React Native schema-queued-mutation row after reset: %w", err)
+	}
+	return nil
 }
 
 type schemaQueuedMutationPending struct {
@@ -1012,11 +1166,11 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 	if err != nil {
 		return err
 	}
-	baseVersion, err := c.runtimeString("schema-one-base-version")
+	baseVersion, err := c.runtimeString("compatible-write-version")
 	if err != nil {
 		return err
 	}
-	schemaOne, err := c.runtimeSchema("schema-one")
+	authoredSchema, err := c.runtimeSchema("schema-two")
 	if err != nil {
 		return err
 	}
@@ -1030,11 +1184,11 @@ func (c *SchemaQueuedMutationCoordinator) validatePendingMutation(expected scena
 	}
 	observed := pending[0]
 	if observed.MutationID != mutationID || observed.TableID != tableID || observed.TableName != c.tableName || observed.RecordID != recordID ||
-		observed.PrimaryKeyFieldID != primaryField || observed.Operation != expected.Operation || observed.AuthoredSchema != schemaOne ||
+		observed.PrimaryKeyFieldID != primaryField || observed.Operation != expected.Operation || observed.AuthoredSchema != authoredSchema ||
 		observed.BaseVersion == nil || *observed.BaseVersion != baseVersion || observed.ClientVersion == "" ||
 		observed.Status != expected.Status || observed.SealedBatchID == nil || *observed.SealedBatchID != batchID || observed.SealedOrdinal == nil || *observed.SealedOrdinal != 0 ||
 		observed.LocalOrder != expected.LocalOrder || len(observed.AuthoredFields) != len(expected.AuthoredColumns) {
-		return fmt.Errorf("React Native schema-queued-mutation pending observed=%+v expected mutation=%q table=%q table_name=%q record=%q primary=%q schema=%+v base=%q batch=%q order=%d", observed, mutationID, tableID, c.tableName, recordID, primaryField, schemaOne, baseVersion, batchID, expected.LocalOrder)
+		return fmt.Errorf("React Native schema-queued-mutation pending observed=%+v expected mutation=%q table=%q table_name=%q record=%q primary=%q schema=%+v base=%q batch=%q order=%d", observed, mutationID, tableID, c.tableName, recordID, primaryField, authoredSchema, baseVersion, batchID, expected.LocalOrder)
 	}
 	field := observed.AuthoredFields[0]
 	if field.FieldID != fieldID || field.LogicalType != expected.AuthoredColumns[0].Type || !semanticRawJSONEqual(field.Value, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
@@ -1117,11 +1271,11 @@ func (c *SchemaQueuedMutationCoordinator) validateStoredMutation(raw string) err
 	if err != nil {
 		return err
 	}
-	baseVersion, err := c.runtimeString("schema-one-base-version")
+	baseVersion, err := c.runtimeString("compatible-write-version")
 	if err != nil {
 		return err
 	}
-	schemaOne, err := c.runtimeSchema("schema-one")
+	authoredSchema, err := c.runtimeSchema("schema-two")
 	if err != nil {
 		return err
 	}
@@ -1136,11 +1290,39 @@ func (c *SchemaQueuedMutationCoordinator) validateStoredMutation(raw string) err
 	primary := mutation.PK[primaryField]
 	column := mutation.Columns[fieldID]
 	if mutation.MutationID != mutationID || mutation.Table != tableID || !semanticRawJSONEqual(primary, c.runtimeIDs["queued-row-primary-key"]) ||
-		mutation.AuthoredSchema != schemaOne || mutation.Operation != expected.Operation || mutation.BaseVersion == nil || *mutation.BaseVersion != baseVersion ||
+		mutation.AuthoredSchema != authoredSchema || mutation.Operation != expected.Operation || mutation.BaseVersion == nil || *mutation.BaseVersion != baseVersion ||
 		mutation.ClientVersion == "" || c.retainedClientVersion == "" || mutation.ClientVersion != c.retainedClientVersion ||
 		len(mutation.Columns) != 1 || !semanticRawJSONEqual(column, json.RawMessage(expected.AuthoredColumns[0].WireJSON)) {
-		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q field=%q", raw, mutationID, tableID, primaryField, recordID, schemaOne, baseVersion, fieldID)
+		return fmt.Errorf("React Native schema-queued-mutation stored mutation=%s expected mutation=%q table=%q primary_field=%q record=%q schema=%+v base=%q field=%q", raw, mutationID, tableID, primaryField, recordID, authoredSchema, baseVersion, fieldID)
 	}
+	return nil
+}
+
+// compatibleRowSelectors selects the application row of the compatible write.
+func (c *SchemaQueuedMutationCoordinator) compatibleRowSelectors() ([]map[string]any, error) {
+	var write struct {
+		Table string            `json:"table_id"`
+		PK    map[string]string `json:"pk"`
+	}
+	if err := json.Unmarshal(c.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"].Operation.Payload, &write); err != nil || len(write.PK) != 1 {
+		return nil, errors.New("React Native schema-queued-mutation compatible write binding is invalid")
+	}
+	selectors := make([]map[string]any, 0, 1)
+	for field, recordID := range write.PK {
+		selectors = append(selectors, map[string]any{"table_name": write.Table, "primary_key_field": field, "primary_key": recordID})
+	}
+	return selectors, nil
+}
+
+// bindLocalWrite replaces one authored local write with its runtime binding.
+func (c *SchemaQueuedMutationCoordinator) bindLocalWrite(stepID scenarios.StepID) error {
+	step := c.steps[stepID]
+	write, err := c.config.Controller.ApplicationWrite(step.Operation)
+	if err != nil {
+		return fmt.Errorf("bind React Native schema-queued-mutation local write %s: %w", stepID, err)
+	}
+	step.Operation = write
+	c.steps[stepID] = step
 	return nil
 }
 

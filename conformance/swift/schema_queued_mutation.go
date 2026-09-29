@@ -41,7 +41,7 @@ type schemaQueuedMutationPushPayload struct {
 
 // RunSchemaQueuedMutationScenario executes the authored durable blocked-mutation flow through Swift.
 func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform, client Client) (SchemaQueuedMutationResult, error) {
-	steps, err := swiftScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 12)
+	steps, err := swiftScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 16)
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
@@ -81,14 +81,57 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err := validateSchemaQueuedMutationBaseline(scenario, steps, baseline); err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-
-	write, _ := swiftScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-005", "local/write")
-	write, err = controller.ApplicationWrite(write)
+	// The compatible write replaces the S1 row version and checksum, so bind
+	// the S1 aliases from this capture.
+	baselineFacts, err := platform.Capture(ctx, []Client{client}, []string{"checkpoints", "provenance"})
 	if err != nil {
-		return SchemaQueuedMutationResult{}, fmt.Errorf("bind Swift schema-queued-mutation local write: %w", err)
+		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Swift schema-queued-mutation baseline state: %w", err)
 	}
-	if observation, applyErr := platform.ApplyStep(ctx, client, write); applyErr != nil || observation.Disposition != "success" {
-		return SchemaQueuedMutationResult{}, fmt.Errorf("apply Swift schema-queued-mutation local write: %w", resultError(applyErr, observation.Disposition))
+	baselineState, err := mergeSwiftCaptureFacts(baselineFacts)
+	if err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+
+	compatibleWrite, err := applySwiftSchemaQueuedMutationWrite(ctx, controller, platform, client, steps, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001")
+	if err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	compatiblePublish, _ := swiftScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001", "model/publish-schema")
+	if observation, applyErr := controller.ApplyStep(ctx, compatiblePublish); applyErr != nil || observation.Disposition != "success" {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("publish Swift schema-queued-mutation compatible schema: %w", resultError(applyErr, observation.Disposition))
+	}
+	compatiblePush, _ := swiftScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001", "push/submit")
+	if err := controller.BindApplicationPush(compatiblePush); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("bind Swift schema-queued-mutation compatible push: %w", err)
+	}
+	// The baseline call left the engine started, and it rejects a second start.
+	if _, err := platform.Lifecycle(ctx, client, "stop"); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("stop Swift schema-queued-mutation client before its compatible start: %w", err)
+	}
+	compatible, err := swiftScenarioCall(ctx, platform, client, steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001"].NativeBinding.Method)
+	if err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("run Swift schema-queued-mutation compatible start: %w", err)
+	}
+	if err := validateSchemaQueuedMutationPushCall(scenario, "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001", "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001", compatible); err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	// The server capture binds the accepted push and checks the exact server
+	// row it wrote. The local row keeps that value through the migration.
+	if _, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"}); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("capture Swift schema-queued-mutation compatible server state: %w", err)
+	}
+	if err := requireSwiftSchemaQueuedMutationRow(ctx, platform, client, compatibleWrite); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Swift schema-queued-mutation compatible row: %w", err)
+	}
+
+	// The S2 write names the field the compatible schema added. The local row
+	// must hold it before S3 removes that field.
+	write, err := applySwiftSchemaQueuedMutationWrite(ctx, controller, platform, client, steps, "STEP-SCHEMA-QUEUED-MUTATION-005")
+	if err != nil {
+		return SchemaQueuedMutationResult{}, err
+	}
+	if err := requireSwiftSchemaQueuedMutationRow(ctx, platform, client, write); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Swift schema-queued-mutation compatible field: %w", err)
 	}
 
 	publish, _ := swiftScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-006", "model/publish-schema")
@@ -96,9 +139,9 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 		return SchemaQueuedMutationResult{}, fmt.Errorf("publish Swift schema-queued-mutation schema: %w", resultError(applyErr, observation.Disposition))
 	}
 
-	// The baseline call left the engine started, and it rejects a second start.
-	// The authored step expects a real connect that the server answers with an
-	// unsupported action, so the client stops before it starts again.
+	// The compatible call left the engine started, and it rejects a second
+	// start. The authored step expects a real connect that the server answers
+	// with an unsupported action, so the client stops before it starts again.
 	if _, err := platform.Lifecycle(ctx, client, "stop"); err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("stop Swift schema-queued-mutation client before its unsupported start: %w", err)
 	}
@@ -114,7 +157,7 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err != nil {
 		return SchemaQueuedMutationResult{}, fmt.Errorf("run Swift schema-queued-mutation reset: %w", err)
 	}
-	if err := validateSchemaQueuedMutationReset(scenario, reset); err != nil {
+	if err := validateSchemaQueuedMutationPushCall(scenario, "STEP-SCHEMA-QUEUED-MUTATION-007", "STEP-SCHEMA-QUEUED-MUTATION-008", reset); err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
 	push, _ := swiftScenarioOperation(steps, "STEP-SCHEMA-QUEUED-MUTATION-008", "push/submit")
@@ -134,6 +177,11 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	clientState, err := mergeSwiftCaptureFacts(clientFacts)
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
+	}
+	// The reset rebuild must keep the row of the blocked mutation visible with
+	// the value that the compatible push applied (#267).
+	if err := requireSwiftSchemaQueuedMutationRow(ctx, platform, client, compatibleWrite); err != nil {
+		return SchemaQueuedMutationResult{}, fmt.Errorf("Swift schema-queued-mutation row after reset: %w", err)
 	}
 	serverCaptures, err := controller.Capture(ctx, []string{client.Key}, []string{"server-state"})
 	if err != nil || len(serverCaptures) != 1 {
@@ -155,7 +203,7 @@ func RunSchemaQueuedMutationScenario(ctx context.Context, scenario scenarios.Sce
 	if err := validateSchemaQueuedMutationQueue(controller, scenario.NativeIdentityAliases, expected, clientState); err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
-	identities, err := resolveSchemaQueuedMutationIdentities(controller, scenario.NativeIdentityAliases, baseline, reset, clientState, serverCaptures[0].StateFacts)
+	identities, err := resolveSchemaQueuedMutationIdentities(controller, scenario.NativeIdentityAliases, baseline, reset, baselineState, clientState, serverCaptures[0].StateFacts)
 	if err != nil {
 		return SchemaQueuedMutationResult{}, err
 	}
@@ -179,6 +227,10 @@ func validateSchemaQueuedMutationBindings(scenario scenarios.Scenario, steps map
 		{"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001", "local/begin-rebuild", "public-call", "start"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-004", "local/apply-rebuild-page", "public-call", "start"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001", "local/finalize-rebuild", "public-call", "start"},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001", "local/write", "local-write", ""},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001", "model/publish-schema", "controller", ""},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001", "connect/send", "public-call", "start"},
+		{"STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001", "push/submit", "public-call", "start"},
 		{"STEP-SCHEMA-QUEUED-MUTATION-005", "local/write", "local-write", ""},
 		{"STEP-SCHEMA-QUEUED-MUTATION-006", "model/publish-schema", "controller", ""},
 		{"STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001", "connect/send", "public-call", "start"},
@@ -207,6 +259,8 @@ func validateSchemaQueuedMutationBindings(scenario scenarios.Scenario, steps map
 			group := "baseline"
 			if expected.id == "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001" {
 				group = "unsupported"
+			} else if expected.id == "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001" || expected.id == "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001" {
+				group = "compatible"
 			} else if expected.id == "STEP-SCHEMA-QUEUED-MUTATION-007" || expected.id == "STEP-SCHEMA-QUEUED-MUTATION-008" {
 				group = "reset"
 			}
@@ -220,7 +274,11 @@ func validateSchemaQueuedMutationBindings(scenario scenarios.Scenario, steps map
 			}
 		}
 	}
-	if len(callIDs) != 3 || callIDs["baseline"] == callIDs["unsupported"] || callIDs["baseline"] == callIDs["reset"] || callIDs["unsupported"] == callIDs["reset"] {
+	distinct := make(map[string]struct{}, len(callIDs))
+	for _, callID := range callIDs {
+		distinct[callID] = struct{}{}
+	}
+	if len(callIDs) != 4 || len(distinct) != 4 {
 		return errors.New("Swift schema-queued-mutation public call identities are invalid")
 	}
 	return nil
@@ -257,28 +315,26 @@ func validateSchemaQueuedMutationCall(scenario scenarios.Scenario, stepID, opera
 	return validateSwiftWireExpectation(scenario, stepID, operationClass, result)
 }
 
-func validateSchemaQueuedMutationReset(scenario scenarios.Scenario, result SynchronizationResult) error {
-	terminal, found := schemaQueuedMutationStep(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008")
+// validateSchemaQueuedMutationPushCall checks one start call that connects and
+// then pushes the retained queue in one authored batch.
+func validateSchemaQueuedMutationPushCall(scenario scenarios.Scenario, connectStepID, pushStepID string, result SynchronizationResult) error {
+	step, found := schemaQueuedMutationStep(scenario, pushStepID)
 	if !found {
-		return errors.New("Swift schema-queued-mutation reset terminal step is absent")
+		return fmt.Errorf("Swift schema-queued-mutation push step %s is absent", pushStepID)
 	}
-	completion, err := schemaQueuedMutationCompletion(scenario, terminal)
+	completion, err := schemaQueuedMutationCompletion(scenario, step)
 	if err != nil || result.Completion != completion {
-		return errors.New("Swift schema-queued-mutation reset completion differs from its authored terminal outcome")
+		return fmt.Errorf("Swift schema-queued-mutation call %s completion differs from its authored terminal outcome", pushStepID)
 	}
-	if err := validateSwiftWireExpectation(scenario, "STEP-SCHEMA-QUEUED-MUTATION-007", "connect", result); err != nil {
+	if err := validateSwiftWireExpectation(scenario, connectStepID, "connect", result); err != nil {
 		return err
 	}
-	if err := validateSwiftWireExpectation(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008", "push", result); err != nil {
+	if err := validateSwiftWireExpectation(scenario, pushStepID, "push", result); err != nil {
 		return err
 	}
 	push, err := swiftScenarioWire(result, "push")
 	if err != nil || push.RequestFacts == nil || push.RequestFacts.MutationCount == nil {
 		return errors.New("Swift schema-queued-mutation push facts are incomplete")
-	}
-	step, found := schemaQueuedMutationStep(scenario, "STEP-SCHEMA-QUEUED-MUTATION-008")
-	if !found {
-		return errors.New("Swift schema-queued-mutation push step is absent")
 	}
 	var payload schemaQueuedMutationPushPayload
 	if json.Unmarshal(step.Operation.Payload, &payload) != nil || payload.AuthenticatedUserID != step.NativeBinding.UserID || payload.Request.ClientID != step.NativeBinding.ClientID || payload.Request.BatchID == "" || len(payload.Request.Mutations) == 0 || int64(len(payload.Request.Mutations)) != int64(*push.RequestFacts.MutationCount) {
@@ -290,6 +346,28 @@ func validateSchemaQueuedMutationReset(scenario scenarios.Scenario, result Synch
 		}
 	}
 	return nil
+}
+
+// applySwiftSchemaQueuedMutationWrite binds one authored local write to the
+// runtime table and applies it through the client.
+func applySwiftSchemaQueuedMutationWrite(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, steps map[scenarios.StepID]scenarios.Step, stepID string) (scenarios.Operation, error) {
+	write, _ := swiftScenarioOperation(steps, stepID, "local/write")
+	write, err := controller.ApplicationWrite(write)
+	if err != nil {
+		return scenarios.Operation{}, fmt.Errorf("bind Swift schema-queued-mutation local write %s: %w", stepID, err)
+	}
+	if observation, applyErr := platform.ApplyStep(ctx, client, write); applyErr != nil || observation.Disposition != "success" {
+		return scenarios.Operation{}, fmt.Errorf("apply Swift schema-queued-mutation local write %s: %w", stepID, resultError(applyErr, observation.Disposition))
+	}
+	return write, nil
+}
+
+func requireSwiftSchemaQueuedMutationRow(ctx context.Context, platform *Platform, client Client, write scenarios.Operation) error {
+	snapshot, err := platform.captureSnapshot(ctx, client)
+	if err != nil {
+		return err
+	}
+	return scenarios.RequireLocalWriteRow(write, snapshot.ApplicationRows)
 }
 
 func schemaQueuedMutationCompletion(scenario scenarios.Scenario, step scenarios.Step) (string, error) {
@@ -614,7 +692,10 @@ func schemaQueuedMutationRuntimeRebuildID(baseline SynchronizationResult, server
 	return "", fmt.Errorf("Swift schema-queued-mutation rebuild identity has no server session; requested %v server sessions %v", fingerprints, sessions)
 }
 
-func resolveSchemaQueuedMutationIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, reset SynchronizationResult, client, server scenarios.StateFacts) ([]blackbox.NativeIdentityResolution, error) {
+// An alias that the final expectation declares resolves from the final client
+// state. The other row-version and checksum aliases name the S1 source row,
+// which the compatible push replaced, so they resolve from the baseline state.
+func resolveSchemaQueuedMutationIdentities(controller *blackbox.NativeController, aliases []scenarios.NativeIdentityAlias, baseline, reset SynchronizationResult, baselineState, client, server scenarios.StateFacts) ([]blackbox.NativeIdentityResolution, error) {
 	values, err := controller.IdentityValues(aliases)
 	if err != nil {
 		return nil, err
@@ -657,19 +738,23 @@ func resolveSchemaQueuedMutationIdentities(controller *blackbox.NativeController
 			}
 			runtime[alias.Alias] = encoded
 		case "row-version":
-			if len(client.Clients) != 1 || len(client.Clients[0].Provenance) != 1 {
+			state := baselineState
+			if len(alias.ExpectationIDs) != 0 {
+				state = client
+			}
+			if len(state.Clients) != 1 || len(state.Clients[0].Provenance) != 1 {
 				return nil, errors.New("Swift schema-queued-mutation provenance evidence is absent")
 			}
-			encoded, encodeErr := json.Marshal(client.Clients[0].Provenance[0].Version)
+			encoded, encodeErr := json.Marshal(state.Clients[0].Provenance[0].Version)
 			if encodeErr != nil {
 				return nil, fmt.Errorf("encode Swift schema-queued-mutation row version: %w", encodeErr)
 			}
 			runtime[alias.Alias] = encoded
 		case "checksum":
-			if len(client.Clients) != 1 || len(client.Clients[0].Checkpoints) != 1 || client.Clients[0].Checkpoints[0].Checksum == nil {
+			if len(baselineState.Clients) != 1 || len(baselineState.Clients[0].Checkpoints) != 1 || baselineState.Clients[0].Checkpoints[0].Checksum == nil {
 				return nil, errors.New("Swift schema-queued-mutation checkpoint evidence is absent")
 			}
-			encoded, encodeErr := json.Marshal(*client.Clients[0].Checkpoints[0].Checksum)
+			encoded, encodeErr := json.Marshal(*baselineState.Clients[0].Checkpoints[0].Checksum)
 			if encodeErr != nil {
 				return nil, fmt.Errorf("encode Swift schema-queued-mutation checkpoint checksum: %w", encodeErr)
 			}

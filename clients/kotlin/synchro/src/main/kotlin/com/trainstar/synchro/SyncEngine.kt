@@ -756,6 +756,7 @@ internal class SyncEngine(
                 rebuildScope(request.scope, replayRequestJSON = backoff.workIdentity)
                 schemaManager.completeMigrationIfReady()
                 transitionTo(SyncStatus.Ready)
+                runSyncCycle()
             }
             else -> throw SynchroError.InvalidResponse("durable backoff resume state is invalid")
         }

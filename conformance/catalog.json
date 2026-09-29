@@ -59,7 +59,7 @@
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "path": "conformance/scenarios/performance/seeded-empty-startup-001.json",
-      "sha256": "ba71c68be99fde001b3418a759bb98bf4fab8c32e4ec975ebd2e64d76eb95920"
+      "sha256": "dd11ba816dd7eae8b1f30175d7f906451f22375efc0c4fdc0bc5a526a7849ffd"
     },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
@@ -109,7 +109,7 @@
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
-      "sha256": "0f138e45bbb115f31fcfabccc368adc20e35e64341611743b508284438cd1ac3"
+      "sha256": "bf316a8ebea11c0e58be9bd2551bf3f4bff8f2e893b88a2a6fe865963d4b0a42"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",

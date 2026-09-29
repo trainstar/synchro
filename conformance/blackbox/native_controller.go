@@ -1897,8 +1897,19 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 	installation := c.installation
 	queueTransition := false
 	if installation != nil && len(payload.Tables) == 1 {
-		if table, found := installation.tables[payload.Tables[0].TableID]; found {
-			queueTransition = table.RuntimeName == "cf_schema_queue"
+		if table, found := installation.tables[payload.Tables[0].TableID]; found && table.RuntimeName == "cf_schema_queue" {
+			// The queue fixture path replaces or drops a field. An add-only
+			// compatible transition uses the synced-table path, which adds a
+			// nullable column as a Class 2 change requires.
+			retained := make(map[string]struct{}, len(payload.Tables[0].Fields))
+			for _, field := range payload.Tables[0].Fields {
+				retained[field.FieldID] = struct{}{}
+			}
+			for authoredField := range table.FieldNames {
+				if _, kept := retained[authoredField]; !kept {
+					queueTransition = true
+				}
+			}
 		}
 	}
 	c.mu.Unlock()
@@ -3244,6 +3255,16 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		return errors.New("read native application push identities failed")
 	}
 	defer rows.Close()
+	// A batch that another transaction already bound cannot bind this one.
+	// Two single-row updates of one row otherwise have the same shape. Some
+	// callers hold c.mu, so this reads the bindings as the record update below
+	// does.
+	boundBatches := make(map[string]struct{}, len(c.transactions))
+	for _, other := range c.transactions {
+		if other != transaction && other.RuntimeBatchID != "" {
+			boundBatches[other.RuntimeBatchID] = struct{}{}
+		}
+	}
 	byBatch := make(map[string][]pushIdentity)
 	for rows.Next() {
 		var value pushIdentity
@@ -3259,7 +3280,7 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	var runtimeMutationIDs []string
 	var acceptedEvents []bool
 	for batchID, values := range byBatch {
-		if len(values) != len(transaction.Events) {
+		if _, bound := boundBatches[batchID]; bound || len(values) != len(transaction.Events) {
 			continue
 		}
 		matches := true
@@ -3333,7 +3354,12 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 			continue
 		}
 		recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
-		if _, bound := c.records[recordKey]; bound {
+		if record, bound := c.records[recordKey]; bound {
+			// The accepted write replaced the source row that the image models,
+			// unless a later source change already replaced that image.
+			if event.Before != nil && reflect.DeepEqual(record.Image, *event.Before) {
+				record.Image = *event.After
+			}
 			continue
 		}
 		c.records[recordKey] = &nativeRecordBinding{

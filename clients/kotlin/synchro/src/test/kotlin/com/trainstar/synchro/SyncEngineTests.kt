@@ -100,35 +100,43 @@ class SyncEngineTests {
     }
 
     @Test
-    fun testCallbackRegistrationAndCancellation() = runBlocking {
-        val (engine, _) = makeSyncEngine()
+    fun testCanceledListenersReceiveNoLaterStimulus() = runTest {
+        val (engine, db) = makeIntegrationEnv(handler = ::conflictServerResponse)
 
-        val statusUpdates = mutableListOf<String>()
-        val cancellable1 = engine.onStatusChange { status ->
-            when (status) {
-                is SyncStatus.Error -> statusUpdates.add("error")
-                is SyncStatus.Stopped -> statusUpdates.add("stopped")
-                else -> Unit
-            }
+        val canceledStatuses = mutableListOf<String>()
+        val canceledConflicts = mutableListOf<String>()
+        val liveStatuses = mutableListOf<String>()
+        val liveConflicts = mutableListOf<String>()
+        val statusListener = engine.onStatusChange { canceledStatuses.add(it.state.wireName) }
+        val conflictListener = engine.onConflict { canceledConflicts.add(it.recordID) }
+        engine.onStatusChange { liveStatuses.add(it.state.wireName) }
+        engine.onConflict { liveConflicts.add(it.recordID) }
+
+        engine.stop()
+        assertEquals(listOf("stopped"), canceledStatuses)
+
+        statusListener.cancel()
+        conflictListener.cancel()
+        canceledStatuses.clear()
+        liveStatuses.clear()
+
+        // Each live listener proves that the post-cancel stimulus occurred.
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z")
+            )
+            engine.syncNow()
+        } finally {
+            engine.stop()
         }
 
-        val conflictEvents = mutableListOf<String>()
-        val cancellable2 = engine.onConflict { event ->
-            conflictEvents.add(event.recordID)
-        }
-
-        // Stop triggers a status update
-        engine.stop()
-        assertEquals(listOf("stopped"), statusUpdates)
-
-        // Cancel callbacks
-        cancellable1.cancel()
-        cancellable2.cancel()
-
-        // After cancel, no more updates
-        statusUpdates.clear()
-        engine.stop()
-        assertTrue(statusUpdates.isEmpty())
+        assertEquals(listOf("w1"), liveConflicts)
+        assertTrue(liveStatuses.contains("ready"))
+        assertEquals("stopped", liveStatuses.last())
+        assertEquals(emptyList<String>(), canceledStatuses)
+        assertEquals(emptyList<String>(), canceledConflicts)
     }
 
     @Test
@@ -1064,10 +1072,13 @@ class SyncEngineTests {
             )
             SynchroMeta.setInt64(connection, MetaKey.SCOPE_SET_VERSION, 1)
             SynchroMeta.setInt64(connection, MetaKey.CLIENT_GENERATION, 1)
+            // A persistent extra trigger fails the exact trigger-set check before
+            // the assignment. A temporary trigger is outside the main schema, so
+            // valid DDL completes and the fault occurs at binding installation.
             connection.execSQL(
                 """
-                CREATE TRIGGER fail_connect_binding_install
-                BEFORE INSERT ON _synchro_scopes
+                CREATE TEMP TRIGGER fail_connect_binding_install
+                BEFORE INSERT ON main._synchro_scopes
                 WHEN NEW.scope_id = 'orders:added'
                 BEGIN
                     SELECT RAISE(ABORT, 'forced connect binding failure');
@@ -1085,11 +1096,11 @@ class SyncEngineTests {
                 )
             )
 
-        try {
-            engine.installConnectResponse(response)
-            fail("expected connect installation to fail")
-        } catch (_: Exception) {
-        }
+        val failure = runCatching { engine.installConnectResponse(response) }.exceptionOrNull()
+        assertTrue(
+            "connect installation must fail at the forced binding fault, got $failure",
+            failure?.message?.contains("forced connect binding failure") == true,
+        )
 
         val columnNames = db.readTransaction { connection ->
             buildSet {
@@ -2288,6 +2299,99 @@ class SyncEngineTests {
             assertTrue(afterManagedRetry.all { it == requestJSON })
             assertTrue(laterDeadline > timing.currentTimeMillis())
             engine.stop()
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun testReplayedRebuildContinuesWithRemainingScopesAndPull() = runTest {
+        val otherScopeID = "orders_user:other"
+        val timing = BlockingRetryTiming(5_000L)
+        val failNextRebuild = AtomicBoolean(false)
+        val bothScopesAssigned = AtomicBoolean(false)
+        val rebuiltScopes = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val pullCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val (engine, db) = makeIntegrationEnv(retryTiming = timing) { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> {
+                    val scope = Json.decodeFromString<RebuildRequest>(request.body.readUtf8()).scope
+                    if (failNextRebuild.compareAndSet(true, false)) {
+                        MockResponse().setResponseCode(503).setHeader("Retry-After", "30")
+                            .setBody(RETRYABLE_503_ERROR_JSON)
+                    } else {
+                        rebuiltScopes += scope
+                        if (scope == scopeID) {
+                            mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                        } else {
+                            mockResponse(
+                                """
+                                {
+                                    "scope": "$otherScopeID",
+                                    "records": [],
+                                    "cursor": null,
+                                    "has_more": false,
+                                    "final_scope_cursor": "other_scope_cursor_1",
+                                    "checksum": ${checksumJSON(protocolEmptyScopeChecksum(otherScopeID))}
+                                }
+                                """.trimIndent(),
+                            )
+                        }
+                    }
+                }
+                path.endsWith("/sync/pull") -> {
+                    pullCount.incrementAndGet()
+                    if (!bothScopesAssigned.get()) {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                    } else {
+                        mockResponse(
+                            """
+                            {
+                                "changes": [],
+                                "scope_set_version": 1,
+                                "scope_cursors": {"$scopeID": "scope_cursor_2", "$otherScopeID": "other_scope_cursor_2"},
+                                "scope_updates": {"add": [], "remove": []},
+                                "rebuild": [],
+                                "has_more": false,
+                                "checksums": {
+                                    "$scopeID": ${emptyScopeChecksumJSON()},
+                                    "$otherScopeID": ${checksumJSON(protocolEmptyScopeChecksum(otherScopeID))}
+                                }
+                            }
+                            """.trimIndent(),
+                        )
+                    }
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            db.writeTransaction { connection ->
+                SynchroMeta.upsertScope(connection, otherScopeID, cursor = null, checksum = null)
+                connection.execSQL("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL WHERE scope_id = ?", arrayOf(scopeID))
+            }
+            bothScopesAssigned.set(true)
+            rebuiltScopes.clear()
+            val pullsBefore = pullCount.get()
+            failNextRebuild.set(true)
+
+            val syncJob = CoroutineScope(Dispatchers.Default).launch { engine.syncNow() }
+            timing.awaitNextSleep(10, TimeUnit.SECONDS)
+            val backoff = requireNotNull(DurableBackoffStore.load(db))
+            assertEquals(RetryOperation.REBUILDING, backoff.resumeState)
+            timing.releaseAt(backoff.nextRetryAtMs)
+            syncJob.join()
+
+            // The replayed rebuild is only the first scope of the cycle. The
+            // cycle must still rebuild the other scope and pull before it ends.
+            assertEquals(setOf(scopeID, otherScopeID), synchronized(rebuiltScopes) { rebuiltScopes.toSet() })
+            assertTrue(pullCount.get() > pullsBefore)
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+            assertEquals(0, db.query("SELECT scope_id FROM _synchro_scopes WHERE cursor IS NULL").size)
         } finally {
             engine.stop()
         }
@@ -3583,8 +3687,11 @@ class SyncEngineTests {
                 rejectedID,
                 db.readTransaction { connection -> SynchroMeta.listRejectedMutations(connection).single().mutationID },
             )
-            assertTrue(db.query("SELECT id FROM orders").isEmpty())
-            assertTrue(db.query("PRAGMA table_info(orders)").map { it.getValue("name") }.contains("notes"))
+            // The blocked intent keeps its row visible across the reset (#267).
+            assertEquals(
+                listOf(mapOf("id" to "queued", "ship_address" to "Queue Street", "notes" to null)),
+                db.query("SELECT id, ship_address, notes FROM orders"),
+            )
             assertTrue(db.readTransaction { connection -> SynchroMeta.getClientState(connection).failure == null })
             assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
         } finally {

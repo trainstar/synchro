@@ -186,7 +186,7 @@ class IntegrationTests {
         text: String,
     ) {
         waitForCondition(timeoutMs = 30_000) {
-            syncAcceptingRetry(client)
+            syncNowRetryingCapturePending(client)
             val rows = client.query("SELECT col_text FROM type_zoo WHERE user_id = ?", arrayOf(userID))
             rows.size == ids.size && rows.all { it["col_text"] == text }
         }
@@ -197,17 +197,6 @@ class IntegrationTests {
                 case.second.toDouble().toRawBits(),
                 value.toRawBits(),
             )
-        }
-    }
-
-    /**
-     * A retryable response such as 503 capture_pending keeps the engine running.
-     * The caller polls again, as the contract allows.
-     */
-    private suspend fun syncAcceptingRetry(client: SynchroClient) {
-        try {
-            client.syncNow()
-        } catch (_: RetryableError) {
         }
     }
 
@@ -250,7 +239,7 @@ class IntegrationTests {
                     },
                 )
                 waitForCondition(timeoutMs = 30_000) {
-                    syncAcceptingRetry(writer)
+                    syncNowRetryingCapturePending(writer)
                     writer.pendingChangeCount() == 0
                 }
                 reader.start()
@@ -275,7 +264,7 @@ class IntegrationTests {
                     },
                 )
                 waitForCondition(timeoutMs = 30_000) {
-                    syncAcceptingRetry(writer)
+                    syncNowRetryingCapturePending(writer)
                     writer.pendingChangeCount() == 0
                 }
                 waitForFloatWireRows(reader, userID, ids, cases, "float-wire-later")
@@ -339,13 +328,13 @@ class IntegrationTests {
                 }
                 resumed.retry()
                 waitForCondition(timeoutMs = 30_000) {
-                    syncAcceptingRetry(resumed)
+                    syncNowRetryingCapturePending(resumed)
                     resumed.pendingChangeCount() == 0
                 }
                 assertEquals(connectedGeneration, localMeta(database(resumed), "client_generation"))
                 reader.start()
                 waitForCondition(timeoutMs = 30_000) {
-                    syncAcceptingRetry(reader)
+                    syncNowRetryingCapturePending(reader)
                     reader.query("SELECT id, name FROM customers WHERE user_id = ?", arrayOf(userID))
                         .associate { it["id"] as String to it["name"] as String } == mapOf(customerID to "queued before rejection")
                 }
@@ -391,11 +380,11 @@ class IntegrationTests {
         try {
             clientA.start()
             seedOrder(clientA, userID, customerID, orderID, """{"street":"123 Main St"}""", "2026-01-01T00:00:00.000Z")
-            clientA.syncNow()
+            syncNowRetryingCapturePending(clientA)
 
             clientB.start()
-            waitForCondition {
-                clientB.syncNow()
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(clientB)
                 val row = clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("ship_address") == """{"street":"123 Main St"}"""
             }
@@ -418,13 +407,13 @@ class IntegrationTests {
         try {
             writer.start()
             seedOrder(writer, userID, customerID, orderID, """{"street":"Bootstrap Ave"}""", "2026-01-02T00:00:00.000Z")
-            writer.syncNow()
+            syncNowRetryingCapturePending(writer)
             writer.stop()
             writer.close()
 
             reader.start()
-            waitForCondition {
-                reader.syncNow()
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(reader)
                 val row = reader.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("ship_address") == """{"street":"Bootstrap Ave"}"""
             }
@@ -445,10 +434,10 @@ class IntegrationTests {
         try {
             clientA.start()
             seedOrder(clientA, userID, customerID, orderID, """{"street":"Delete Me"}""", "2026-01-03T00:00:00.000Z")
-            clientA.syncNow()
+            syncNowRetryingCapturePending(clientA)
 
             clientB.start()
-            waitForCondition {
+            waitForCondition(timeoutMs = 30_000) {
                 val row = clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("ship_address") == """{"street":"Delete Me"}"""
             }
@@ -457,14 +446,14 @@ class IntegrationTests {
                 "UPDATE orders SET deleted_at = ?, updated_at = ? WHERE id = ?",
                 arrayOf("2026-01-04T00:00:00.000Z", "2026-01-04T00:00:00.000Z", orderID)
             )
-            clientA.syncNow()
+            syncNowRetryingCapturePending(clientA)
             val expectedDeletedAt = clientA.queryOne(
                 "SELECT deleted_at FROM orders WHERE id = ?",
                 arrayOf(orderID)
             )?.get("deleted_at") as? String
             assertNotNull(expectedDeletedAt)
-            waitForCondition {
-                clientB.syncNow()
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(clientB)
                 val row = clientB.queryOne("SELECT deleted_at FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("deleted_at") == expectedDeletedAt
             }
@@ -488,7 +477,7 @@ class IntegrationTests {
             clientA.executeBatch(names.map { (id, name) -> insertCustomer(userID, id, name) })
             val database = database(clientA)
             waitForCondition(timeoutMs = 30_000) {
-                clientA.syncNow()
+                syncNowRetryingCapturePending(clientA)
                 names.keys.all { ledgerState(database, it) == "accepted" }
             }
 
@@ -515,7 +504,7 @@ class IntegrationTests {
 
             clientB.start()
             waitForCondition(timeoutMs = 30_000) {
-                clientB.syncNow()
+                syncNowRetryingCapturePending(clientB)
                 clientB.query("SELECT id, name FROM customers")
                     .associate { it["id"] as String to it["name"] as String } == names
             }
@@ -542,7 +531,7 @@ class IntegrationTests {
             val database = database(clientA)
             clientA.executeBatch(listOf(insertCustomer(userID, probeID, "")))
             waitForCondition(timeoutMs = 30_000) {
-                clientA.syncNow()
+                syncNowRetryingCapturePending(clientA)
                 ledgerState(database, probeID) == "accepted"
             }
             val probe = sentRequests(database).single().second.mutations.single()
@@ -557,7 +546,7 @@ class IntegrationTests {
                 ),
             )
             waitForCondition(timeoutMs = 30_000) {
-                clientA.syncNow()
+                syncNowRetryingCapturePending(clientA)
                 ledgerState(database, exactID) == "accepted" && ledgerState(database, laterID) == "accepted"
             }
 
@@ -573,7 +562,7 @@ class IntegrationTests {
 
             clientB.start()
             waitForCondition(timeoutMs = 30_000) {
-                clientB.syncNow()
+                syncNowRetryingCapturePending(clientB)
                 val later = clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(laterID))
                 val exactRow = clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(exactID))
                 later?.get("name") == "later" && exactRow?.get("name") == exactName
