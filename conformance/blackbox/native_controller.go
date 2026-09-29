@@ -3232,12 +3232,61 @@ func (c *NativeController) awaitApplicationPushRecords(ctx context.Context, tran
 	}
 }
 
+// resolveApplicationPushRecords binds an application push to the current
+// captured rows. Capture and push replay read the live server state, so they
+// need the current rows. A historical materialization binds through
+// resolveMaterializedApplicationPush.
 func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
 	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
 	if err != nil {
 		return err
 	}
 	defer database.Close()
+	if err := c.resolveApplicationPushIdentities(ctx, database, transaction); err != nil {
+		return err
+	}
+	for index := range transaction.Events {
+		if !transaction.RuntimeAcceptedEvents[index] {
+			continue
+		}
+		event := &transaction.Events[index]
+		var rowData []byte
+		var version, checksum string
+		var deleted bool
+		err := database.QueryRowContext(ctx, `
+			SELECT captured.row_data, captured.row_version::text, encode(captured.checksum, 'hex'), captured.deleted
+			FROM synchro.sync_captured_rows captured
+			JOIN synchro.sync_registry registry
+			  ON registry.registry_generation = captured.registry_generation
+			 AND registry.relation_id = captured.relation_id
+			WHERE registry.table_name = $1 AND captured.record_id = $2`, event.Table.RuntimeName, event.RuntimeRecordID).Scan(&rowData, &version, &checksum, &deleted)
+		if err != nil || deleted != (event.Operation == "delete") || !diagnosticUUIDPattern.MatchString(version) || len(checksum) != 64 {
+			return errors.New("native application push row is not materialized")
+		}
+		if event.Operation == "delete" {
+			if event.Before == nil || event.After != nil {
+				return errors.New("native application push delete binding is invalid")
+			}
+			record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.Before}
+			if err := validateNativeRuntimeRow(record, rowData); err != nil {
+				return err
+			}
+			continue
+		}
+		record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.After}
+		if err := validateNativeRuntimeRow(record, rowData); err != nil {
+			return err
+		}
+		event.After.Version = version
+		event.After.Checksum = checksum
+	}
+	c.bindApplicationPushRecords(transaction)
+	return nil
+}
+
+// resolveApplicationPushIdentities binds an application push to its runtime
+// batch and mutation identities in the push ledger.
+func (c *NativeController) resolveApplicationPushIdentities(ctx context.Context, database *sql.DB, transaction *nativeTransactionBinding) error {
 	type pushIdentity struct {
 		mutationID string
 		batchID    string
@@ -3318,46 +3367,16 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 	transaction.RuntimeBatchID = runtimeBatchID
 	transaction.RuntimeMutationIDs = runtimeMutationIDs
 	transaction.RuntimeAcceptedEvents = acceptedEvents
-	for index := range transaction.Events {
-		if index >= len(acceptedEvents) || !acceptedEvents[index] {
-			continue
-		}
-		event := &transaction.Events[index]
-		var rowData []byte
-		var version, checksum string
-		var deleted bool
-		err := database.QueryRowContext(ctx, `
-			SELECT captured.row_data, captured.row_version::text, encode(captured.checksum, 'hex'), captured.deleted
-			FROM synchro.sync_captured_rows captured
-			JOIN synchro.sync_registry registry
-			  ON registry.registry_generation = captured.registry_generation
-			 AND registry.relation_id = captured.relation_id
-			WHERE registry.table_name = $1 AND captured.record_id = $2`, event.Table.RuntimeName, event.RuntimeRecordID).Scan(&rowData, &version, &checksum, &deleted)
-		if err != nil || deleted != (event.Operation == "delete") || !diagnosticUUIDPattern.MatchString(version) || len(checksum) != 64 {
-			return errors.New("native application push row is not materialized")
-		}
-		if event.Operation == "delete" {
-			if event.Before == nil || event.After != nil {
-				return errors.New("native application push delete binding is invalid")
-			}
-			record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.Before}
-			if err := validateNativeRuntimeRow(record, rowData); err != nil {
-				return err
-			}
-			continue
-		}
-		record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *event.After}
-		if err := validateNativeRuntimeRow(record, rowData); err != nil {
-			return err
-		}
-		event.After.Version = version
-		event.After.Checksum = checksum
-	}
-	// Record bindings are registered when a source transaction materializes. A
-	// scenario that accepts a push without materializing still needs them, or a
-	// primary-key alias for the pushed row has no runtime binding.
+	return nil
+}
+
+// bindApplicationPushRecords registers the rows of the accepted mutations.
+// Record bindings are registered when a source transaction materializes. A
+// scenario that accepts a push without materializing still needs them, or a
+// primary-key alias for the pushed row has no runtime binding.
+func (c *NativeController) bindApplicationPushRecords(transaction *nativeTransactionBinding) {
 	for index, event := range transaction.Events {
-		if index >= len(acceptedEvents) || !acceptedEvents[index] || event.Dependency != nil || event.After == nil {
+		if !transaction.RuntimeAcceptedEvents[index] || event.Dependency != nil || event.After == nil {
 			continue
 		}
 		recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
@@ -3377,7 +3396,6 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 			AuthoredScopes:  append([]string(nil), event.AuthoredScopes...),
 		}
 	}
-	return nil
 }
 
 // resolveMaterializedApplicationPush binds an accepted application push to
@@ -3386,17 +3404,17 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 // tell them apart. Each accepted mutation has a fence chain on its row: the
 // first fence is the authored operation, and a same-row trigger can add later
 // update fences. The accepted outcome carries the version of the last fence.
-// A later write can replace the captured row, so the chain is compared with
-// the sealed outcome, not with the current row.
+// A later write can replace the captured row, so the push binds only through
+// its sealed outcome and its fence chain, never through the current row.
 func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Context, transaction *nativeTransactionBinding) error {
-	if err := c.resolveApplicationPushRecords(ctx, transaction); err != nil {
-		return err
-	}
 	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
 	if err != nil {
 		return err
 	}
 	defer database.Close()
+	if err := c.resolveApplicationPushIdentities(ctx, database, transaction); err != nil {
+		return err
+	}
 	type runtimeIdentity struct {
 		stream   string
 		commit   string
@@ -3413,12 +3431,17 @@ func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Contex
 		rows, err := database.QueryContext(ctx, `
 			SELECT event.stream_generation, event.commit_lsn::text, wal.end_lsn::text,
 			       wal.registry_generation, event.event_ordinal, fence.operation, fence.row_version::text,
-			       COALESCE(convert_from(mutation.sealed_canonical_response, 'UTF8')::jsonb ->> 'server_version', '')
+			       COALESCE(outcome.body ->> 'server_version', ''),
+			       COALESCE(outcome.body #>> '{row_checksum,digest}', ''),
+			       outcome.body -> 'server_row'
 			FROM synchro.sync_write_fences fence
 			JOIN synchro.sync_push_mutations mutation
 			  ON mutation.user_id = fence.user_id
 			 AND mutation.client_id = fence.client_id
 			 AND mutation.mutation_id::text = fence.mutation_id
+			CROSS JOIN LATERAL (
+				SELECT convert_from(mutation.sealed_canonical_response, 'UTF8')::jsonb AS body
+			) outcome
 			JOIN synchro.sync_wal_events event ON event.fence_id = fence.fence_id
 			JOIN synchro.sync_wal_transactions wal
 			  ON wal.stream_generation = event.stream_generation
@@ -3434,13 +3457,14 @@ func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Contex
 		if err != nil {
 			return fmt.Errorf("read native application push fences: %w", err)
 		}
-		var chainVersion, outcomeVersion string
+		var chainVersion, outcomeVersion, outcomeChecksum string
+		var outcomeRow []byte
 		chainLength := 0
 		for rows.Next() {
 			var identity runtimeIdentity
 			var ordinal int64
 			var operation, version string
-			if err := rows.Scan(&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal, &operation, &version, &outcomeVersion); err != nil {
+			if err := rows.Scan(&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal, &operation, &version, &outcomeVersion, &outcomeChecksum, &outcomeRow); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan native application push fence: %w", err)
 			}
@@ -3479,10 +3503,34 @@ func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Contex
 		if chainVersion != outcomeVersion {
 			return fmt.Errorf("native application push fence chain of mutation %s ends at version %s, not the accepted version %q", transaction.RuntimeMutationIDs[index], chainVersion, outcomeVersion)
 		}
+		// The sealed outcome row is the row that this push wrote.
+		image := event.After
+		if event.Operation == "delete" {
+			if event.Before == nil || event.After != nil {
+				return errors.New("native application push delete binding is invalid")
+			}
+			image = event.Before
+		}
+		if len(outcomeRow) != 0 && string(outcomeRow) != "null" {
+			record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *image}
+			if err := validateNativeRuntimeRow(record, outcomeRow); err != nil {
+				return err
+			}
+		} else if event.Operation != "delete" {
+			return fmt.Errorf("native application push outcome of mutation %s has no row", transaction.RuntimeMutationIDs[index])
+		}
+		if event.After != nil {
+			if len(outcomeChecksum) != 64 {
+				return fmt.Errorf("native application push outcome of mutation %s has no row checksum", transaction.RuntimeMutationIDs[index])
+			}
+			event.After.Version = chainVersion
+			event.After.Checksum = outcomeChecksum
+		}
 	}
 	if first == nil {
 		return errors.New("native application push has no accepted mutation to materialize")
 	}
+	c.bindApplicationPushRecords(transaction)
 	transaction.RuntimeStream = first.stream
 	transaction.RuntimeCommitLSN = first.commit
 	transaction.RuntimeEndLSN = first.end

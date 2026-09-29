@@ -681,4 +681,47 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 	if !conflictingRowBound {
 		t.Fatal("the rejected delete removed the binding of a row that the server kept")
 	}
+
+	// awaitFence waits until the worker materializes the fence of the last
+	// push, so the next push reads that push's row as its base version.
+	awaitFence := func(name string) {
+		t.Helper()
+		mutationID := fmt.Sprintf("00000000-0000-4000-8e00-%012d", pushes*10+1)
+		for {
+			var materialized bool
+			if err := database.QueryRowContext(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM synchro.sync_write_fences
+					WHERE mutation_id = $1 AND coverage = 'materialized'
+				)`, mutationID).Scan(&materialized); err != nil {
+				t.Fatalf("read the materialization of the %s push: %v", name, err)
+			}
+			if materialized {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("the %s push did not materialize: %v", name, ctx.Err())
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	// A later write replaces the captured row of an earlier accepted push
+	// before the earlier push is materialized. The earlier push binds through
+	// its sealed outcome and fence chain, so it still materializes.
+	earlier := push("80", "81", 1, 0, pushedMutation{op: "update", authoredKey: "cardinality-000001", runtimeKey: runtimeRecordID, baseVersion: currentVersion(runtimeRecordID), value: "application-push-earlier"})
+	awaitFence("earlier")
+	// The later push also writes the inserted row, so its batch shape differs
+	// and each authored push binds one runtime batch.
+	later := push("90", "91", 2, 0,
+		pushedMutation{op: "update", authoredKey: "cardinality-000001", runtimeKey: runtimeRecordID, baseVersion: currentVersion(runtimeRecordID), value: "application-push-later"},
+		pushedMutation{op: "update", authoredKey: "cardinality-trigger", runtimeKey: insertedKey, baseVersion: currentVersion(insertedKey), value: "application-push-later"},
+	)
+	awaitFence("later")
+	if observation, err := controller.ProcessStep(ctx, nil, earlier); err != nil || observation.Disposition != "success" {
+		t.Fatalf("materialize the earlier push after a later write replaced its row: observation=%#v err=%v", observation, err)
+	}
+	if observation, err := controller.ProcessStep(ctx, nil, later); err != nil || observation.Disposition != "success" {
+		t.Fatalf("materialize the later push: observation=%#v err=%v", observation, err)
+	}
 }
