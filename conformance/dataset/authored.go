@@ -77,11 +77,14 @@ var (
 
 // AuthoredStep is one server-side action of the authored flow. SQL is one
 // source transaction. Grants and Revokes are [user, scope] operator actions.
+// SoftDeletes names the rows that SQL soft-deletes. The source keeps each one
+// as a tombstone.
 type AuthoredStep struct {
-	Name    string
-	SQL     string
-	Grants  [][2]string
-	Revokes [][2]string
+	Name        string
+	SQL         string
+	Grants      [][2]string
+	Revokes     [][2]string
+	SoftDeletes []string
 }
 
 // AuthoredPush is one client-authored mutation. Columns hold wire values.
@@ -230,9 +233,10 @@ VALUES ('%s', '%s', 'dana', '2026-03-05T09:00:00Z')`, MemberDanaB, OrgB),
 		Grants: [][2]string{{Dana, "org:" + OrgB}},
 	},
 	{
-		Name:    "bob-leaves-org-a",
-		SQL:     fmt.Sprintf(`UPDATE organization_members SET deleted_at = '2026-03-06T09:00:00Z', updated_at = clock_timestamp() WHERE id = '%s'`, MemberBobA),
-		Revokes: [][2]string{{Bob, "org:" + OrgA}},
+		Name:        "bob-leaves-org-a",
+		SQL:         fmt.Sprintf(`UPDATE organization_members SET deleted_at = '2026-03-06T09:00:00Z', updated_at = clock_timestamp() WHERE id = '%s'`, MemberBobA),
+		Revokes:     [][2]string{{Bob, "org:" + OrgA}},
+		SoftDeletes: []string{MemberBobA},
 	},
 	{
 		Name: "hard-delete-set",
@@ -253,8 +257,9 @@ WHERE workout_exercise_id = '%s'`, EntryA1Squat),
 		SQL:  fmt.Sprintf(`UPDATE exercises SET name = 'Back Squat (High Bar)', updated_at = clock_timestamp() WHERE id = '%s'`, BackSquat),
 	},
 	{
-		Name: "delete-bob-program",
-		SQL:  fmt.Sprintf(`UPDATE programs SET deleted_at = '2026-03-07T10:00:00Z', updated_at = clock_timestamp() WHERE id = '%s'`, ProgramBob),
+		Name:        "delete-bob-program",
+		SQL:         fmt.Sprintf(`UPDATE programs SET deleted_at = '2026-03-07T10:00:00Z', updated_at = clock_timestamp() WHERE id = '%s'`, ProgramBob),
+		SoftDeletes: []string{ProgramBob},
 	},
 }
 
