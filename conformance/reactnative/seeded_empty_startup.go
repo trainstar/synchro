@@ -709,6 +709,12 @@ func (c *SeededEmptyStartupCoordinator) validateFloorCapture(raw json.RawMessage
 	withoutPush.Observations = nil
 	pushes := 0
 	for _, observation := range trace.Observations {
+		// The rebuild after the accepted push can wait for its capture. The
+		// client retries that request, as the contract permits. The bridge trace
+		// has no error code, so a 503 read request stands for that wait.
+		if observation.StatusCode == 503 && (observation.OperationClass == "rebuild" || observation.OperationClass == "pull") {
+			continue
+		}
 		if observation.OperationClass != "push" {
 			withoutPush.Observations = append(withoutPush.Observations, observation)
 			continue

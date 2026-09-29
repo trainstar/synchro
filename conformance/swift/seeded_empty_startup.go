@@ -279,6 +279,11 @@ func runSwiftSeededFloorClient(ctx context.Context, scenario scenarios.Scenario,
 	withoutPush.transportObservations = nil
 	pushes := 0
 	for _, observation := range call.transportObservations {
+		// The rebuild after the accepted push can wait for its capture. The
+		// client retries that request, as the contract permits.
+		if observation.StatusCode == 503 && observation.Retryable && observation.ErrorCode != nil && *observation.ErrorCode == "capture_pending" {
+			continue
+		}
 		if observation.OperationClass != "push" {
 			withoutPush.transportObservations = append(withoutPush.transportObservations, observation)
 			continue
