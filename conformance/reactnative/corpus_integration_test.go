@@ -73,9 +73,7 @@ func newReactNativeScenarioHarness(t *testing.T, ctx context.Context) (*blackbox
 		disarm := harness.CloseBeforeDeadline(deadline)
 		t.Cleanup(func() { disarm() })
 	}
-	// Under a desktop load average of 40 to 60, the WAL worker materialized a
-	// pushed transaction later than the 30 s default wait.
-	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness, WaitTimeout: 90 * time.Second})
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
 	if err != nil {
 		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer closeCancel()

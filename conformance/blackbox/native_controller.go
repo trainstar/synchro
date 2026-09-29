@@ -25,8 +25,10 @@ import (
 )
 
 const (
-	nativeControllerRequestTimeout       = 30 * time.Second
-	nativeControllerWaitTimeout          = 30 * time.Second
+	nativeControllerRequestTimeout = 30 * time.Second
+	// Under a host load average of 40 to 60 on 24 CPUs, the WAL worker kept
+	// running without error but materialized a push more than 30 s late.
+	nativeControllerWaitTimeout          = 90 * time.Second
 	nativeControllerPollInterval         = 25 * time.Millisecond
 	nativeStagedSharedAuthoredScope      = "scope-b"
 	nativeStagedSharedRuntimeScope       = "cf:dedup"
@@ -37,10 +39,9 @@ const (
 
 // NativeControllerConfig configures one generic native server controller.
 type NativeControllerConfig struct {
-	Harness     *Harness
-	HTTPClient  *http.Client
-	Now         func() time.Time
-	WaitTimeout time.Duration
+	Harness    *Harness
+	HTTPClient *http.Client
+	Now        func() time.Time
 }
 
 // NativeController applies authored server operations to one real black-box harness.
@@ -380,12 +381,6 @@ func NewNativeController(config NativeControllerConfig) (*NativeController, erro
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	if config.WaitTimeout == 0 {
-		config.WaitTimeout = nativeControllerWaitTimeout
-	}
-	if config.WaitTimeout <= 0 {
-		return nil, errors.New("native controller wait timeout is invalid")
-	}
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: nativeControllerRequestTimeout}
@@ -394,7 +389,7 @@ func NewNativeController(config NativeControllerConfig) (*NativeController, erro
 		harness:        config.Harness,
 		httpClient:     client,
 		now:            config.Now,
-		waitTimeout:    config.WaitTimeout,
+		waitTimeout:    nativeControllerWaitTimeout,
 		transactions:   make(map[string]*nativeTransactionBinding),
 		records:        make(map[string]*nativeRecordBinding),
 		rebuildCursors: make(map[string]string),

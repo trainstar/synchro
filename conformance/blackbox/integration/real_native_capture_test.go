@@ -372,10 +372,7 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	harness, _ := provisionRealProofHarness(t, ctx)
-	// The barriers below hold the worker for a fixed time. A 90 second wait
-	// leaves most of the budget for materialization after the resume, so a
-	// slow worker under host load does not decide the result.
-	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness, WaitTimeout: 90 * time.Second})
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
 	if err != nil {
 		t.Fatalf("create native materialization controller: %v", err)
 	}
